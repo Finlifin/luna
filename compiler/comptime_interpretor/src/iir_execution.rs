@@ -2,6 +2,79 @@
 use super::*;
 
 impl<'a> Interpreter<'a> {
+    pub(super) fn eval_template_equal(
+        &mut self,
+        expr: &Expr,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let K::TemplateEqual(left, right) = &expr.kind else {
+            unreachable!()
+        };
+        if self.graph.is_none()
+            || self.comptime_only
+            || left.ty != right.ty
+            || expr.ty != nir::Term::Primitive(nir::Primitive::Bool)
+        {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        let a = match self.eval(left, environment)? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+        let b = match self.eval(right, environment)? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+        if !self.has_type(&a, &left.ty) || !self.has_type(&b, &right.ty) {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        if [&a, &b].iter().any(|value| {
+            !matches!(
+                value,
+                Value::RuntimeFunction { .. } | Value::RuntimeTraitMethod(_)
+            )
+        }) {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        self.charge_copy_work(Some(expr.source), |fuel| {
+            for value in [&a, &b] {
+                match value {
+                    Value::RuntimeFunction { arguments, .. } => {
+                        for term in arguments {
+                            nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+                        }
+                    }
+                    Value::RuntimeTraitMethod(identity) => {
+                        for term in std::iter::once(&identity.subject)
+                            .chain(&identity.interface.arguments)
+                            .chain(&identity.method_arguments)
+                        {
+                            nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Ok(())
+        })?;
+        let equal = match (&a, &b) {
+            (
+                Value::RuntimeFunction {
+                    declaration: ad,
+                    arguments: aa,
+                },
+                Value::RuntimeFunction {
+                    declaration: bd,
+                    arguments: ba,
+                },
+            ) => ad == bd && aa == ba,
+            (Value::RuntimeTraitMethod(a), Value::RuntimeTraitMethod(b)) => a == b,
+            (Value::RuntimeFunction { .. }, Value::RuntimeTraitMethod(_))
+            | (Value::RuntimeTraitMethod(_), Value::RuntimeFunction { .. }) => false,
+            _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
+        };
+        Ok(Flow::Value(Value::Bool(equal)))
+    }
     /// Execute concrete staged instances without granting runtime functions
     /// permission to run during comptime invocation.
     pub fn from_iir_for_comptime(
@@ -44,7 +117,10 @@ impl<'a> Interpreter<'a> {
             effect_values: None,
             runtime_function_identities: BTreeMap::new(),
             graph: Some(graph),
+            target: graph.target,
             cleanup_schedule: None,
+            cleanup_scopes: HashMap::new(),
+            cleanup_sites: HashMap::new(),
             cleanup_effect_context: HashMap::new(),
             cleanup_frame: None,
             cleanup_failed: false,
@@ -117,8 +193,19 @@ impl<'a> Interpreter<'a> {
         key: &iir::InstanceKey,
         arguments: Vec<Value>,
     ) -> Result<Value, Error> {
-        let callable = self.iir_callable(key)?;
-        self.invoke_value(callable, arguments)
+        let result = self
+            .iir_callable(key)
+            .and_then(|callable| self.invoke_value(callable, arguments));
+        // Generated ranges identify cleanup sites during execution. Resolve
+        // them only after invocation has finished unwinding, for diagnostics.
+        result.map_err(|mut error| {
+            if let Some(graph) = self.graph {
+                error.source = error
+                    .source
+                    .and_then(|source| source.original(&graph.expansion_sources));
+            }
+            error
+        })
     }
 
     pub(super) fn invocation_definition(
@@ -190,16 +277,37 @@ impl<'a> Interpreter<'a> {
             environment: Environment::new(),
             capture_order: vec![],
             body: Arc::new(definition.body.clone()),
-            ty: definition
-                .signature
-                .clone()
-                .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime),
+            ty: definition.callable_type(),
         });
         self.instances.insert(cache_key, callable.clone());
         Ok(Value::Closure(callable))
     }
 
     pub(super) fn eval_iir_callable(&mut self, expr: &Expr) -> Result<Flow, Error> {
+        self.charge_copy_work(Some(expr.source), |fuel| {
+            match &expr.kind {
+                K::FunctionInstance { arguments, .. } => {
+                    for term in arguments {
+                        nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+                    }
+                }
+                K::TraitMethod {
+                    subject,
+                    interface_arguments,
+                    method_arguments,
+                    ..
+                } => {
+                    for term in std::iter::once(subject)
+                        .chain(interface_arguments)
+                        .chain(method_arguments)
+                    {
+                        nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
         let key = match &expr.kind {
             K::Function(declaration) => iir::InstanceKey {
                 declaration: *declaration,
@@ -237,6 +345,12 @@ impl<'a> Interpreter<'a> {
                     .ok_or_else(|| {
                         self.failure(ErrorKind::UnmaterializedDispatch, Some(expr.source))
                     })?;
+                self.charge_copy_work(Some(expr.source), |fuel| {
+                    for term in &method.arguments {
+                        nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+                    }
+                    Ok(())
+                })?;
                 iir::InstanceKey {
                     declaration: method.body,
                     arguments: method.arguments.clone(),
@@ -244,7 +358,31 @@ impl<'a> Interpreter<'a> {
             }
             _ => return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source))),
         };
-        let value = self.iir_callable(&key)?;
+        let value = if self.graph.unwrap().template_type(&key).is_some() {
+            match &expr.kind {
+                K::TraitMethod {
+                    interface,
+                    interface_arguments,
+                    subject,
+                    member,
+                    method_arguments,
+                } => Value::RuntimeTraitMethod(Box::new(TraitMethodIdentity {
+                    interface: InterfaceInstance {
+                        declaration: *interface,
+                        arguments: interface_arguments.clone(),
+                    },
+                    subject: subject.clone(),
+                    member: *member,
+                    method_arguments: method_arguments.clone(),
+                })),
+                _ => Value::RuntimeFunction {
+                    declaration: key.declaration,
+                    arguments: key.arguments,
+                },
+            }
+        } else {
+            self.iir_callable(&key)?
+        };
         if !self.has_type(&value, &expr.ty) {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }

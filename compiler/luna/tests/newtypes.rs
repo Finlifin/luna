@@ -211,6 +211,9 @@ fn compile_selected(source: &str, emit: Emit, tuple: bool) -> Result<Artifact, S
         tuple_type: tuple.then(|| "input::Tuple".into()),
         optional_type: None,
         index_protocol: None,
+        ord_protocol: None,
+        eq_protocol: None,
+        list_pattern_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
     });
@@ -2133,7 +2136,7 @@ fn copied_pointee_structs_support_patterns_and_guard_retry() {
 
 #[test]
 fn canonical_tuple_data_pointer_delivery_keeps_normal_form_head() {
-    let source = "typealias Type=.Type'builtin;pure comptime fn List<T>->Type {T}pure comptime fn Tuple<...Es:List<Type>>->Type {bool}trait Duplicate {}trait Retire {fn drop(*self);}impl Duplicate for Tuple<bool,bool> {}fn read(p:*(bool,bool))->(bool,bool) {p.*}fn set(p:*(bool,bool)) {p.* = (true,false);}fn run()->bool {let pair=(false,true);set(pair.ref);let (first,second)=read(pair.ref);first and not second}";
+    let source = "typealias Type=.Type'builtin;pure comptime fn List<T>->Type {T}pure comptime fn Tuple<...Es:List<Type>>->Type {bool}trait Duplicate {}trait Retire {fn drop(*self);}impl Duplicate for Tuple<bool,bool> {}fn read(p:*Tuple<bool,bool>)->Tuple<bool,bool> {p.*}fn set(p:*Tuple<bool,bool>) {p.* = (true,false);}fn run()->bool {let pair=(false,true);set(pair.ref);let (first,second)=read(pair.ref);first and not second}";
     let Artifact::Nir(package) = compile_selected(source, Emit::Nir, true).unwrap() else {
         panic!("wrong stage")
     };
@@ -2156,7 +2159,7 @@ fn canonical_tuple_data_pointer_delivery_keeps_normal_form_head() {
 #[test]
 fn tuple_pointer_delivery_does_not_unfold_other_heads_or_hide_aliases() {
     let prefix = "typealias Type=.Type'builtin;pure comptime fn List<T>->Type {T}pure comptime fn Tuple<...Es:List<Type>>->Type {bool}pure comptime fn Identity<T>->Type {T}";
-    for ty in ["Identity<(bool,bool)>"] {
+    for ty in ["Identity<Tuple<bool,bool>>"] {
         let source = format!("{prefix}fn read(p:*{ty})->{ty} {{p.*}}");
         let error = compile_selected(&source, Emit::Nir, true)
             .err()
@@ -2169,10 +2172,10 @@ fn tuple_pointer_delivery_does_not_unfold_other_heads_or_hide_aliases() {
     // Pointer fields are supported through declared Tuple layout and tracked
     // result provenance; copying the container must not extend their lifetime.
     let source = format!("{prefix}trait Duplicate {{}}trait Retire {{fn drop(*self);}}
-        impl Duplicate for (*bool,bool) {{}}
-        fn read(p:*(*bool,bool))->(*bool,bool) {{p.*}}
+        impl Duplicate for Tuple<*bool,bool> {{}}
+        fn read(p:*Tuple<*bool,bool>)->Tuple<*bool,bool> {{p.*}}
         fn run()->bool {{let flag=true;let pair=(flag.ref,false);let (pointer,tag)=read(pair.ref);pointer.* and not tag}}
-        fn escape()->(*bool,bool) {{let flag=true;let pair=(flag.ref,false);read(pair.ref)}}");
+        fn escape()->Tuple<*bool,bool> {{let flag=true;let pair=(flag.ref,false);read(pair.ref)}}");
     let Artifact::Nir(package) = compile_selected(&source, Emit::Nir, true).unwrap() else {
         panic!("NIR")
     };
@@ -3295,15 +3298,16 @@ fn computed_pointer_result_patterns_keep_guards_and_nested_computations() {
         .iter()
         .find(|function| function.name == "select")
         .unwrap();
+    let summary = elaboration::verification::memory::infer_in_package(
+        &package,
+        select.declaration,
+        &[],
+        &mut 100_000,
+    )
+    .unwrap();
     assert!(
-        elaboration::verification::memory::infer_in_package(
-            &package,
-            select.declaration,
-            &[],
-            &mut 100_000
-        )
-        .is_err(),
-        "memory summary must inspect the computed-result guard"
+        summary.accesses.iter().any(|access| access.write),
+        "memory summary must retain the computed-result guard's write footprint"
     );
     let error =
         luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 100_000)
@@ -5203,12 +5207,18 @@ fn dependent_normal_integer_inputs_check_only_selected_branch_effects() {
 
 #[test]
 fn normal_tuple_inputs_preserve_element_effects_and_default_fields() {
-    let source = "typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;pure comptime fn Tagged<P:(Integer,bool),.Q:(Integer,bool)=P>->Type {bool}comptime fn checked(flag:bool)->bool where requires flag {true}comptime fn Build()->Type {var seen=false;let output=Tagged<(do {seen=true;7},true)>;checked(seen);output}comptime fn Run()->Type {Build()}";
-    let Artifact::Nir(mut package) = compile(source, Emit::Nir).unwrap() else {
+    let source = "typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;pure comptime fn List<T>->Type {T}pure comptime fn Tuple<...Es:List<Type>>->Type {bool}pure comptime fn Tagged<P:Tuple<Integer,bool>,.Q:Tuple<Integer,bool> = P>->Type {bool}comptime fn checked(flag:bool)->bool where requires flag {true}comptime fn Build()->Type {var seen=false;let output=Tagged<(do {seen=true;7},true)>;checked(seen);output}comptime fn Run()->Type {Build()}";
+    let Artifact::Nir(mut package) = compile_selected(source, Emit::Nir, true).unwrap() else {
         panic!("NIR")
     };
     // Retain the contextual tuple tree explicitly, independently of how early
     // source elaboration discovers this concrete tuple domain.
+    let tuple = package
+        .functions
+        .iter()
+        .find(|f| f.name == "Tuple")
+        .unwrap()
+        .declaration;
     let build = package
         .functions
         .iter_mut()
@@ -5221,7 +5231,7 @@ fn normal_tuple_inputs_preserve_element_effects_and_default_fields() {
                 if let nir::program::ExprKind::Tuple(items) = &value.kind {
                     arguments[0] = nir::program::NormalFormArgument::Tuple {
                         source: value.source,
-                        type_head: None,
+                        type_head: Some(tuple),
                         items: items
                             .iter()
                             .cloned()
@@ -5253,65 +5263,56 @@ fn normal_tuple_inputs_preserve_element_effects_and_default_fields() {
         nir::Term::Bool(true),
     ]);
     assert_eq!(arguments, vec![expected.clone(), expected]);
-    assert!(compile(&source.replace("seen=true", "seen=false"), Emit::Nir).is_err());
+    assert!(compile_selected(&source.replace("seen=true", "seen=false"), Emit::Nir, true).is_err());
 }
 
 #[test]
-fn contextual_tuple_type_inputs_keep_type_construction_and_early_return() {
-    let source = "typealias Type=.Type'builtin;pure comptime fn Tagged<T:Type>->Type {T}comptime fn checked(flag:bool)->bool where requires flag {true}comptime fn Build(value:Type)->Type {var seen=false;let output=Tagged<(do {seen=true;value},bool)>;checked(seen);output}comptime fn Run()->Type {Build(.char'builtin)}";
-    let Artifact::Nir(mut package) = compile(source, Emit::Nir).unwrap() else {
+fn explicit_tuple_type_inputs_keep_type_construction_and_early_return() {
+    let source = "typealias Type=.Type'builtin;
+        pure comptime fn List<T>->Type {T}
+        pure comptime fn Tuple<...Es:List<Type>>->Type {bool}
+        pure comptime fn Tagged<T:Type>->Type {T}
+        comptime fn checked(flag:bool)->bool where requires flag {true}
+        comptime fn Build(value:Type)->Type {
+            var seen=false;
+            let output=Tagged<Tuple<do {seen=true;value},bool>>;
+            checked(seen);output
+        }
+        comptime fn Run()->Type {Build(.char'builtin)}";
+    let Artifact::Nir(package) = compile_selected(source, Emit::Nir, true).unwrap() else {
         panic!("NIR")
     };
-    let build = package
-        .functions
-        .iter_mut()
-        .find(|f| f.name == "Build")
-        .unwrap();
-    let mut changed = false;
-    nir::visit::expression_mut(&mut build.body, &mut 100_000, |expr, _| {
-        if let nir::program::ExprKind::NormalFormType { arguments, .. } = &mut expr.kind {
-            if let nir::program::NormalFormArgument::Value(value) = &arguments[0] {
-                if let nir::program::ExprKind::TupleType(items) = &value.kind {
-                    arguments[0] = nir::program::NormalFormArgument::Tuple {
-                        source: value.source,
-                        type_head: None,
-                        items: items
-                            .iter()
-                            .cloned()
-                            .map(nir::program::NormalFormArgument::Value)
-                            .collect(),
-                    };
-                    changed = true;
-                }
-            }
-        }
-        Ok(())
-    })
-    .unwrap();
-    assert!(changed);
-    let build = package
+    let tuple = package
         .functions
         .iter()
-        .find(|f| f.name == "Build")
-        .unwrap();
-    elaboration::verification::flow::analyze_in_package(&package, build, &mut Default::default())
-        .unwrap();
-    let comptime_interpretor::Value::Type(nir::Term::NormalForm { arguments, .. }) =
-        luna::invocation::invoke(&package, "Run", 100_000).unwrap()
-    else {
-        panic!("opaque head")
-    };
+        .find(|f| f.name == "Tuple")
+        .unwrap()
+        .declaration;
+    let tagged = package
+        .functions
+        .iter()
+        .find(|f| f.name == "Tagged")
+        .unwrap()
+        .declaration;
     assert_eq!(
-        arguments,
-        vec![nir::Term::Tuple(vec![
-            nir::Term::Primitive(nir::Primitive::Char),
-            nir::Term::Primitive(nir::Primitive::Bool)
-        ])]
+        luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
+        comptime_interpretor::Value::Type(nir::Term::NormalForm {
+            head: tagged,
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::NormalForm {
+                head: tuple,
+                sort: nir::Sort::Type,
+                arguments: vec![nir::Term::TypeListValue(vec![
+                    nir::Term::Primitive(nir::Primitive::Char),
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                ])],
+            }],
+        })
     );
     let early = source
         .replace("seen=true;value", "return bool;value")
         .replace("checked(seen)", "checked(false)");
-    let Artifact::Nir(package) = compile(&early, Emit::Nir).unwrap() else {
+    let Artifact::Nir(package) = compile_selected(&early, Emit::Nir, true).unwrap() else {
         panic!("NIR")
     };
     assert_eq!(
@@ -6251,11 +6252,7 @@ fn late_trait_domains_contextually_type_intrinsic_numeric_literals() {
 #[test]
 fn mixed_trait_arguments_expand_literal_and_computed_packets() {
     for bound_tuple in [false, true] {
-        let tuple_declarations = if bound_tuple {
-            "pure comptime fn List<T>->Type {T}pure comptime fn Tuple<...Es:List<Type>>->Type {bool}"
-        } else {
-            ""
-        };
+        let tuple_declarations = "pure comptime fn List<T>->Type {T}pure comptime fn Tuple<...Es:List<Type>>->Type {bool}";
         for arguments in [
             "...(bool,true)",
             "...packet()",
@@ -6266,12 +6263,22 @@ fn mixed_trait_arguments_expand_literal_and_computed_packets() {
                 "typealias Type=.Type'builtin;
             {tuple_declarations}
             comptime fn empty(...items:T)->T where T {{items}}
-            comptime fn wrong()->(Type,.char'builtin) {{(bool,'x')}}
+            comptime fn wrong()->Tuple<Type,.char'builtin> {{(bool,'x')}}
             trait Selected where T,value:T,.copy:T=value {{comptime fn selected(self)->bool;}}
-            comptime fn packet()->(Type,bool) {{(bool,true)}}
+            comptime fn packet()->Tuple<Type,bool> {{(bool,true)}}
             impl Selected<bool,true> for bool {{comptime fn selected(self)->bool {{true}}}}
             comptime fn Good()->bool {{true.as(Selected<{arguments}>).selected()}}"
             );
+            if !bound_tuple {
+                let error = compile_selected(&source, Emit::Nir, false)
+                    .err()
+                    .expect("unbound constructors must not supply packet layout");
+                assert!(
+                    error.contains("requires a bound meta.List<Type>"),
+                    "{error}"
+                );
+                continue;
+            }
             let Artifact::Nir(package) = compile_selected(&source, Emit::Nir, bound_tuple)
                 .unwrap_or_else(|e| panic!("{arguments}: {e}"))
             else {
@@ -6303,13 +6310,13 @@ fn mixed_trait_arguments_expand_literal_and_computed_packets() {
 #[test]
 fn mixed_trait_packet_contexts_flow_into_blocks_branches_and_generic_calls() {
     for packet in ["do {(255,)}", "if true {(255,)} else {(0,)}", "packet(255)"] {
-        let source = format!("typealias Byte=.u8'builtin;
+        let source = format!("pure comptime fn List<T>->.Type'builtin {{T}} pure comptime fn Tuple<...Es:List<.Type'builtin>>->.Type'builtin {{bool}} typealias Byte=.u8'builtin;
             trait Selected where T,value:T,flag:bool,.copy:T=value {{comptime fn selected(self)->bool;}}
-            comptime fn packet(value:T)->(T,) where T {{(value,)}}
+            comptime fn packet(value:T)->Tuple<T> where T {{(value,)}}
             impl Selected<Byte,255,true> for bool {{comptime fn selected(self)->bool {{true}}}}
             comptime fn Good()->bool {{true.as(Selected<Byte,...{packet},true>).selected()}}");
         let Artifact::Nir(package) =
-            compile(&source, Emit::Nir).unwrap_or_else(|e| panic!("{packet}: {e}"))
+            compile_selected(&source, Emit::Nir, true).unwrap_or_else(|e| panic!("{packet}: {e}"))
         else {
             panic!("NIR")
         };
@@ -6321,7 +6328,13 @@ fn mixed_trait_packet_contexts_flow_into_blocks_branches_and_generic_calls() {
             &format!("Selected<Byte,...{packet},true>"),
             &format!("Selected<Byte,...{},true>", packet.replace("255", "256")),
         );
-        assert!(compile(&invalid, Emit::Nir).is_err(), "{packet}: overflow");
+        let error = compile_selected(&invalid, Emit::Nir, true)
+            .err()
+            .expect("overflow");
+        assert!(
+            error.contains("range") || error.contains("fit"),
+            "{packet}: {error}"
+        );
     }
 }
 
@@ -6376,6 +6389,243 @@ fn guard_temporary_rewrapping_does_not_grant_copy_to_external_values() {
             assert_eq!(result.unwrap(), comptime_interpretor::Value::Bool(true));
         } else {
             assert!(result.unwrap_err().contains("failure-path"));
+        }
+    }
+}
+
+#[test]
+fn associated_newtype_constants_keep_generic_representation_and_error_payloads() {
+    for generic in [false, true] {
+        let (definition, subject) = if generic {
+            (
+                "struct Holder where T {}impl Source for Holder<T> where T {assoc flag:Flag=true.as(Flag);assoc result:!bool Flag=true.as(Flag);}",
+                "Holder<bool>",
+            )
+        } else {
+            (
+                "impl Source for bool {assoc flag:Flag=true.as(Flag);assoc result:!bool Flag=true.as(Flag);}",
+                "bool",
+            )
+        };
+        let source = format!(
+            "newtype Flag=bool;trait Source {{assoc flag:Flag;assoc result:!bool Flag;}}{definition}fn run()->bool {{let first={subject}.as(Source).flag;let second={subject}.as(Source).result match {{value! => value.as(bool),error failure=>failure}};first.as(bool) and second}}"
+        );
+        let Artifact::Nir(package) = compile(&source, Emit::Nir).unwrap() else {
+            panic!("NIR")
+        };
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn interpreter_admission_rechecks_completed_newtype_dispatch_values() {
+    let source = "newtype Flag=bool;trait Source {assoc flag:Flag;fn read()->bool;}impl Source for bool {assoc flag:Flag=true.as(Flag);fn read()->bool {Self.as(Source).flag.as(bool)}}fn run()->bool {bool.as(Source).read()}";
+    let Artifact::Nir(mut package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("NIR")
+    };
+    // Supply the completed form explicitly: source acquisition may retain an
+    // initializer, which exercises a different admission path.
+    let implementation = package
+        .implementations
+        .iter_mut()
+        .find(|implementation| {
+            !implementation.associated.is_empty()
+                || !implementation.associated_initializers.is_empty()
+        })
+        .unwrap();
+    let (member, completed) = if let Some(value) = implementation.associated.first() {
+        value.clone()
+    } else {
+        let (member, initializer) = implementation.associated_initializers.remove(0);
+        (member, initializer.into_expression())
+    };
+    nir::completed_values::validate_with_newtypes(&completed, package.newtypes.iter(), &mut 10000)
+        .unwrap();
+    implementation.associated = vec![(member, completed.clone())];
+    let interface = implementation.interface_instance().unwrap();
+    package.dispatch_instances.clear();
+    package
+        .dispatch_instances
+        .push(nir::program::DispatchInstance {
+            interface: interface.declaration,
+            interface_arguments: interface.arguments,
+            subject: implementation.subject.clone(),
+            implementation: implementation.declaration,
+            arguments: vec![],
+            methods: vec![],
+            associated: vec![(member, completed)],
+            associated_initializers: vec![],
+        });
+    comptime_interpretor::Interpreter::new(&package, Default::default()).unwrap();
+    let mut forged = package.clone();
+    for (_, value) in forged
+        .implementations
+        .iter_mut()
+        .flat_map(|implementation| &mut implementation.associated)
+        .chain(
+            forged
+                .dispatch_instances
+                .iter_mut()
+                .flat_map(|instance| &mut instance.associated),
+        )
+    {
+        let nir::program::ExprKind::NewtypeConvert(payload) = &mut value.kind else {
+            panic!("expected frozen wrapper")
+        };
+        assert!(matches!(
+            payload.kind,
+            nir::program::ExprKind::Literal(nir::program::Literal::Bool(_))
+        ));
+        // Keep both copies and their Bool annotation equal, but forge data of
+        // another intrinsic domain. Instance equality alone cannot reject it.
+        payload.kind = nir::program::ExprKind::Literal(nir::program::Literal::Char('x'));
+    }
+    assert!(comptime_interpretor::Interpreter::new(&forged, Default::default()).is_err());
+    let mut invalid = package.clone();
+    invalid.newtypes[0].representation = nir::Term::Primitive(nir::Primitive::Char);
+    assert!(comptime_interpretor::Interpreter::new(&invalid, Default::default()).is_err());
+}
+
+#[test]
+fn associated_nominal_constants_preserve_nested_generic_layouts() {
+    for generic in [false, true] {
+        let (implementation, subject) = if generic {
+            (
+                "impl Source for Holder<T> where T {assoc packet:Packet<bool> = (Packet<bool> {value:true});assoc choice:Choice<bool> = .some(true);}",
+                "Holder<bool>",
+            )
+        } else {
+            (
+                "impl Source for bool {assoc packet:Packet<bool> = (Packet<bool> {value:true});assoc choice:Choice<bool> = .some(true);}",
+                "bool",
+            )
+        };
+        let source = format!(
+            "struct Holder where T {{}}
+            struct Packet where T {{value:T}}
+            enum Choice where T {{none,some(T)}}
+            trait Source {{assoc packet:Packet<bool>;assoc choice:Choice<bool>;}}
+            {implementation}
+            fn run()->bool {{let packet={subject}.as(Source).packet;
+                let choice={subject}.as(Source).choice;
+                packet.value and (choice match {{.some(value)=>value,.none=>false}})}}"
+        );
+        let Artifact::Nir(package) = compile(&source, Emit::Nir).unwrap() else {
+            panic!("NIR")
+        };
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn interpreter_admission_rejects_forged_nominal_completed_dispatch_payloads() {
+    use nir::program::{DispatchInstance, ExprKind as K, Literal};
+    for (definition, initializer) in [
+        ("struct Payload {flag:bool}", "(Payload {flag:true})"),
+        ("enum Payload {some(bool),none}", ".some(true)"),
+    ] {
+        let source = format!(
+            "{definition}trait Source {{assoc value:Payload;}}
+            impl Source for bool {{assoc value:Payload={initializer};}}"
+        );
+        let Artifact::Nir(mut package) = compile(&source, Emit::Nir).unwrap() else {
+            panic!("NIR")
+        };
+        let implementation = package
+            .implementations
+            .iter_mut()
+            .find(|i| !i.associated.is_empty() || !i.associated_initializers.is_empty())
+            .unwrap();
+        let (member, completed) = if let Some(value) = implementation.associated.first() {
+            value.clone()
+        } else {
+            let (member, initializer) = implementation.associated_initializers.remove(0);
+            (member, initializer.into_expression())
+        };
+        implementation.associated = vec![(member, completed.clone())];
+        let interface = implementation.interface_instance().unwrap();
+        package.dispatch_instances = vec![DispatchInstance {
+            interface: interface.declaration,
+            interface_arguments: interface.arguments,
+            subject: implementation.subject.clone(),
+            implementation: implementation.declaration,
+            arguments: vec![],
+            methods: vec![],
+            associated: vec![(member, completed)],
+            associated_initializers: vec![],
+        }];
+        comptime_interpretor::Interpreter::new(&package, Default::default()).unwrap();
+        for mutation in 0..4 {
+            let mut forged = package.clone();
+            // Forge both copies consistently: equality between template and
+            // dispatch is necessary but cannot establish declaration layout.
+            for (_, value) in forged
+                .implementations
+                .iter_mut()
+                .flat_map(|i| &mut i.associated)
+                .chain(
+                    forged
+                        .dispatch_instances
+                        .iter_mut()
+                        .flat_map(|i| &mut i.associated),
+                )
+            {
+                let (declaration, fields) = match &mut value.kind {
+                    K::Record {
+                        declaration,
+                        fields,
+                    }
+                    | K::Variant {
+                        declaration,
+                        fields,
+                        ..
+                    } => (declaration, fields),
+                    _ => panic!("nominal constructor"),
+                };
+                match mutation {
+                    0 => fields.clear(),
+                    1 => {
+                        fields[0] = nir::program::Expr {
+                            ty: nir::Term::Primitive(nir::Primitive::Char),
+                            kind: K::Literal(Literal::Char('x')),
+                            source: fields[0].source,
+                        }
+                    }
+                    2 => declaration.local = declaration.local.wrapping_add(10000),
+                    _ => {
+                        value.kind = match &value.kind {
+                            K::Record {
+                                declaration,
+                                fields,
+                            } => K::Variant {
+                                declaration: *declaration,
+                                index: 0,
+                                fields: fields.clone(),
+                            },
+                            K::Variant {
+                                declaration,
+                                fields,
+                                ..
+                            } => K::Variant {
+                                declaration: *declaration,
+                                index: usize::MAX,
+                                fields: fields.clone(),
+                            },
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+            }
+            assert!(
+                comptime_interpretor::Interpreter::new(&forged, Default::default()).is_err(),
+                "accepted mutation {mutation} of {definition}"
+            );
         }
     }
 }

@@ -160,3 +160,92 @@ fn closure_environment_budget_failure_does_not_visit_unadmitted_nodes() {
     .unwrap();
     assert_eq!(count, 11);
 }
+
+#[test]
+fn mutable_closure_environment_preserves_bodies_and_rewrites_formation() {
+    let original = tree();
+    let mut changed = original.clone();
+    let mut seen = BTreeSet::new();
+    nir::visit::expression_mut_in_closure_environment(&mut changed, &mut 100, |expr, _| {
+        seen.insert(expr.source.start);
+        expr.source.end += 100;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen, (0..12).filter(|id| *id != 2).collect());
+    fn body(tree: &Expr) -> &Arc<Expr> {
+        let K::Block { statements, .. } = &tree.kind else {
+            panic!()
+        };
+        let K::Closure { body, .. } = &statements[0].kind else {
+            panic!()
+        };
+        body
+    }
+    assert!(Arc::ptr_eq(body(&original), body(&changed)));
+    assert_eq!(body(&changed).source.end, 3);
+    nir::visit::expression(&changed, &mut 100, |expr, _| {
+        assert_eq!(
+            expr.source.end,
+            expr.source.start + if expr.source.start == 2 { 1 } else { 101 }
+        );
+        Ok(())
+    })
+    .unwrap();
+    nir::visit::expression_mut(&mut changed, &mut 100, |expr, _| {
+        expr.source.end += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert!(!Arc::ptr_eq(body(&original), body(&changed)));
+    assert_eq!(body(&original).source.end, 3);
+    assert_eq!(body(&changed).source.end, 4);
+}
+
+#[test]
+fn mutable_closure_environment_budget_failure_recovers_on_fresh_input() {
+    let mut tree = tree();
+    let original = tree.clone();
+    let mut count = 0;
+    assert!(
+        nir::visit::expression_mut_in_closure_environment(&mut tree, &mut 0, |_, _| {
+            count += 1;
+            Ok(())
+        })
+        .is_err()
+    );
+    assert_eq!(count, 0);
+    assert_eq!(tree, original);
+    nir::visit::expression_mut_in_closure_environment(&mut tree, &mut 100, |_, _| {
+        count += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(count, 11);
+}
+
+#[test]
+fn mutable_handler_scope_keeps_nested_arm_and_closure_control_separate() {
+    let mut tree = tree();
+    let mut seen = BTreeSet::new();
+    nir::visit::expression_mut_in_handler_scope(&mut tree, &mut 100, |expr, _| {
+        seen.insert(expr.source.start);
+        expr.source.end += 100;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen, BTreeSet::from([0, 1, 3, 4, 5, 6, 7, 8]));
+    nir::visit::expression(&tree, &mut 100, |expr, _| {
+        assert_eq!(
+            expr.source.end,
+            expr.source.start
+                + if seen.contains(&expr.source.start) {
+                    101
+                } else {
+                    1
+                }
+        );
+        Ok(())
+    })
+    .unwrap();
+}

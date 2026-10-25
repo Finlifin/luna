@@ -656,6 +656,15 @@ impl ModuleTree {
             scope.id.raw()
         )
         .unwrap();
+        if let Some(site) = scope.block_site {
+            writeln!(
+                out,
+                "{pad} (source-block (file {}) (node {}))",
+                site.file.raw(),
+                site.node
+            )
+            .unwrap();
+        }
         let mut declarations: Vec<_> = scope.items.declarations().iter().collect();
         declarations.sort_by_key(|(name, _)| name.to_string());
         for (name, binding) in declarations {
@@ -734,6 +743,76 @@ pub struct PackageSetTree {
     pub package_scopes: HashMap<u32, ScopeId>,
 }
 
+/// Validate explicit graph inputs without reading source files or creating scopes.
+/// Package ids here are resolution ids, not stable semantic identities.
+pub fn validate_package_dependencies(
+    packages: impl IntoIterator<Item = u32>,
+    dependencies: &[DependencyEdge],
+    builtin: Option<u32>,
+) -> ResolveResult<()> {
+    let invalid = ResolveError::InvalidPackageGraph;
+    let mut ids = std::collections::HashSet::new();
+    for id in packages {
+        if !ids.insert(id) {
+            return Err(invalid(format!(
+                "duplicate source package resolution id {id}"
+            )));
+        }
+    }
+    if let Some(builtin) = builtin {
+        if !ids.contains(&builtin) {
+            return Err(invalid(format!("builtin package {builtin} is absent")));
+        }
+    }
+    let mut aliases = std::collections::HashMap::new();
+    for edge in dependencies {
+        let context = || {
+            format!(
+                "dependency from package {} via alias {:?} to package {}",
+                edge.requester, edge.alias, edge.provider
+            )
+        };
+        if !ids.contains(&edge.requester) {
+            return Err(invalid(format!(
+                "{}: requester package {} is absent",
+                context(),
+                edge.requester
+            )));
+        }
+        if !ids.contains(&edge.provider) {
+            return Err(invalid(format!(
+                "{}: provider package {} is absent",
+                context(),
+                edge.provider
+            )));
+        }
+        if edge.alias.is_empty() {
+            return Err(invalid(format!("{}: dependency alias is empty", context())));
+        }
+        if let Some(previous) = aliases.insert((edge.requester, &edge.alias), edge.provider) {
+            return Err(invalid(format!(
+                "{}: duplicate dependency alias, already bound to package {previous}",
+                context()
+            )));
+        }
+        if edge.requester == edge.provider {
+            return Err(invalid(format!(
+                "{}: a package cannot declare itself as a dependency",
+                context()
+            )));
+        }
+        if let Some(builtin) = builtin {
+            if edge.requester != builtin && edge.alias == "builtin" && edge.provider != builtin {
+                return Err(invalid(format!(
+                    "{}: builtin dependency alias must refer to package {builtin}",
+                    context()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn build_package_set(
     source_map: &SourceMap,
     diag_ctx: &DiagnosticContext<'_>,
@@ -754,31 +833,15 @@ pub fn build_package_set_with_builtin(
 ) -> ResolveResult<PackageSetTree> {
     use crate::binding::Visibility;
     let invalid = |message: &str| ResolveError::InternalError(message.into());
-    let mut ids = std::collections::HashSet::new();
-    for (id, _) in packages.iter() {
-        if !ids.insert(*id) {
-            return Err(invalid("duplicate source package identity"));
-        }
-    }
+    validate_package_dependencies(packages.iter().map(|(id, _)| *id), dependencies, builtin)?;
     let mut effective_dependencies = dependencies.to_vec();
     if let Some(builtin) = builtin {
-        if !ids.contains(&builtin) {
-            return Err(invalid("builtin package is absent"));
-        }
         for (requester, _) in packages.iter() {
-            if *requester == builtin {
-                continue;
-            }
-            if let Some(edge) = dependencies
-                .iter()
-                .find(|d| d.requester == *requester && d.alias == "builtin")
+            if *requester != builtin
+                && !dependencies
+                    .iter()
+                    .any(|edge| edge.requester == *requester && edge.alias == "builtin")
             {
-                if edge.provider != builtin {
-                    return Err(invalid(
-                        "builtin dependency alias refers to another package",
-                    ));
-                }
-            } else {
                 effective_dependencies.push(DependencyEdge {
                     requester: *requester,
                     alias: "builtin".into(),
@@ -788,19 +851,6 @@ pub fn build_package_set_with_builtin(
         }
     }
     let dependencies = &effective_dependencies;
-    let mut aliases = std::collections::HashSet::new();
-    for dependency in dependencies {
-        if !ids.contains(&dependency.requester) || !ids.contains(&dependency.provider) {
-            return Err(invalid("dependency refers to an absent package"));
-        }
-        if dependency.alias.is_empty() || !aliases.insert((dependency.requester, &dependency.alias))
-        {
-            return Err(invalid("empty or duplicate dependency alias"));
-        }
-        if dependency.requester == dependency.provider {
-            return Err(invalid("a package cannot declare itself as a dependency"));
-        }
-    }
     let mut builder = ModuleBuilder::new(source_map, diag_ctx);
     let mut roots = HashMap::new();
     let mut package_scopes = HashMap::new();
@@ -871,7 +921,7 @@ pub fn build_package_set_with_builtin(
             .unwrap()
             .items
             .define(Symbol::intern(&dependency.alias), binding)
-            .map_err(|_| invalid("dependency alias conflicts with a package name"))?;
+            .map_err(|_| ResolveError::InvalidPackageGraph(format!("dependency from package {} via alias {:?} to package {} conflicts with a package name", dependency.requester, dependency.alias, dependency.provider)))?;
     }
     if let Some(builtin) = builtin {
         for (identity, _) in packages.iter() {
@@ -934,4 +984,106 @@ fn dump_string(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod package_graph_tests {
+    use super::*;
+    use diagnostic::FlurryError;
+
+    fn edge(requester: u32, alias: &str, provider: u32) -> DependencyEdge {
+        DependencyEdge {
+            requester,
+            alias: alias.into(),
+            provider,
+        }
+    }
+
+    #[test]
+    fn invalid_graphs_have_input_diagnostics_with_edge_context() {
+        for (edges, builtin, fragments) in [
+            (
+                vec![edge(9, "helper", 2)],
+                None,
+                vec![
+                    "requester package 9 is absent",
+                    "alias \"helper\"",
+                    "to package 2",
+                ],
+            ),
+            (
+                vec![edge(1, "helper", 9)],
+                None,
+                vec![
+                    "provider package 9 is absent",
+                    "from package 1",
+                    "alias \"helper\"",
+                ],
+            ),
+            (
+                vec![edge(1, "", 2)],
+                None,
+                vec!["alias is empty", "from package 1"],
+            ),
+            (
+                vec![edge(1, "helper", 2), edge(1, "helper", 3)],
+                None,
+                vec![
+                    "duplicate dependency alias",
+                    "already bound to package 2",
+                    "to package 3",
+                ],
+            ),
+            (
+                vec![edge(1, "self", 1)],
+                None,
+                vec!["cannot declare itself", "alias \"self\""],
+            ),
+            (
+                vec![edge(1, "builtin", 3)],
+                Some(2),
+                vec![
+                    "builtin dependency alias must refer to package 2",
+                    "to package 3",
+                ],
+            ),
+            (vec![], Some(9), vec!["builtin package 9 is absent"]),
+        ] {
+            let error = validate_package_dependencies([1, 2, 3], &edges, builtin).unwrap_err();
+            assert!(matches!(error, ResolveError::InvalidPackageGraph(_)));
+            assert_eq!(error.error_code(), 4010);
+            assert_eq!(error.error_name(), "invalid_package_graph");
+            for fragment in fragments {
+                assert!(error.message().contains(fragment), "{}", error.message());
+            }
+        }
+        assert!(
+            validate_package_dependencies([1, 1], &[], None)
+                .unwrap_err()
+                .message()
+                .contains("resolution id 1")
+        );
+    }
+
+    #[test]
+    fn aliases_are_requester_local_and_validation_recovers_after_failure() {
+        assert!(validate_package_dependencies([1, 2, 3], &[edge(1, "shared", 9)], None).is_err());
+        validate_package_dependencies(
+            [1, 2, 3],
+            &[
+                edge(1, "shared", 3),
+                edge(2, "shared", 3),
+                edge(1, "builtin", 3),
+            ],
+            Some(3),
+        )
+        .unwrap();
+        // Invalid names in diagnostics are escaped; graph validation does not
+        // manufacture terminal control sequences from a user-provided alias.
+        let error = validate_package_dependencies([1], &[edge(1, "bad\n\x1b", 9)], None)
+            .unwrap_err()
+            .message();
+        assert!(!error.contains('\n') && !error.contains('\x1b'));
+        assert!(error.contains("bad\\n\\u{1b}"));
+    }
 }

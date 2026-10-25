@@ -111,6 +111,9 @@ impl FunctionInputBinding {
                 Term::ComptimeFunction(inner) => {
                     Term::ComptimeFunction(Box::new(wrap(inner, specialized)))
                 }
+                Term::UnsafeFunction(inner) => {
+                    Term::UnsafeFunction(Box::new(wrap(inner, specialized)))
+                }
                 _ => specialized,
             }
         }

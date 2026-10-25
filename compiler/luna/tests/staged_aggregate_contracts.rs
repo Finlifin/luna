@@ -389,7 +389,7 @@ fn enum_owned_payload_contracts_preserve_nested_field_relations() {
         ),
         (
             "",
-            "(Byte,Byte)",
+            "Tuple<Byte,Byte>",
             "(7,19)",
             "p match {(low,high)=>low <= high}",
             "do {let (low,high)=p;checked(low,high)}",
@@ -408,14 +408,14 @@ fn enum_owned_payload_contracts_preserve_nested_field_relations() {
                   }}
                 fn run()->bool {{bounded(CONFIG)}}"
             );
-            let package = compile_with_protocols(&source, &Default::default())
+            let package = support::compile_with_tuple_protocols(&source, &Default::default())
                 .unwrap_or_else(|error| panic!("{source}: {error}"));
             assert_eq!(
                 luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
                 comptime_interpretor::Value::Bool(true)
             );
             let invalid = source.replace(call, reversed);
-            let error = compile_with_protocols(&invalid, &Default::default())
+            let error = support::compile_with_tuple_protocols(&invalid, &Default::default())
                 .err()
                 .unwrap();
             assert!(error.contains("precondition"), "{error}");
@@ -426,13 +426,13 @@ fn enum_owned_payload_contracts_preserve_nested_field_relations() {
 #[test]
 fn mutable_match_scrutinee_keeps_the_selected_value_snapshot() {
     let source = "typealias Byte=.u8'builtin;
-        fn bounded(pair:(Byte,Byte))->result:bool
+        fn bounded(pair:Tuple<Byte,Byte>)->result:bool
           where requires pair match {(low,high)=>low <= high}, ensures result {
             var current=pair;
             current match {(low,high)=>do {current=(255,0);low <= high}}
           }
         fn run()->bool {bounded((7,19))}";
-    let package = compile_with_protocols(source, &Default::default()).unwrap();
+    let package = support::compile_with_tuple_protocols(source, &Default::default()).unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
         comptime_interpretor::Value::Bool(true)
@@ -441,7 +441,7 @@ fn mutable_match_scrutinee_keeps_the_selected_value_snapshot() {
         "current=(255,0);low <= high",
         "current=(255,0);current match {(a,b)=>a <= b}",
     );
-    let error = compile_with_protocols(&invalid, &Default::default())
+    let error = support::compile_with_tuple_protocols(&invalid, &Default::default())
         .err()
         .unwrap();
     assert!(error.contains("postcondition"), "{error}");
@@ -591,7 +591,7 @@ fn nested_payload_patterns_preserve_selection_and_field_relations() {
     for (declarations, ty, initial, zero, reversed, first, second, body) in [
         (
             "",
-            "(Byte,Byte)",
+            "Tuple<Byte,Byte>",
             "(7,19)",
             "(0,19)",
             "(23,19)",
@@ -628,7 +628,7 @@ fn nested_payload_patterns_preserve_selection_and_field_relations() {
                 config match {{.some(p)=>{body},_=>true}}
               }}
             fn run()->bool {{bounded(CONFIG)}}");
-        let package = compile_with_protocols(&source, &Default::default())
+        let package = support::compile_with_tuple_protocols(&source, &Default::default())
             .unwrap_or_else(|error| panic!("{source}: {error}"));
         assert_eq!(
             luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
@@ -636,7 +636,7 @@ fn nested_payload_patterns_preserve_selection_and_field_relations() {
         );
         if ty == "Inner" {
             let invalid = source.replace(initial, "Inner.none");
-            let error = compile_with_protocols(&invalid, &Default::default())
+            let error = support::compile_with_tuple_protocols(&invalid, &Default::default())
                 .err()
                 .unwrap();
             assert!(error.contains("precondition"), "{invalid}: {error}");
@@ -649,7 +649,7 @@ fn nested_payload_patterns_preserve_selection_and_field_relations() {
                 .replace("checked(a,b)", "checked(b,a)")
                 .replace("checked(p.low,p.high)", "checked(p.high,p.low)"),
         ] {
-            let error = compile_with_protocols(&invalid, &Default::default())
+            let error = support::compile_with_tuple_protocols(&invalid, &Default::default())
                 .err()
                 .expect("nested pattern constraints must be enforced");
             assert!(error.contains("precondition"), "{invalid}: {error}");
@@ -662,7 +662,7 @@ fn structural_match_contracts_compose_ordered_patterns_without_enum_wrappers() {
     for (declarations, ty, initial, first, second, body) in [
         (
             "",
-            "(Byte,Byte)",
+            "Tuple<Byte,Byte>",
             "(7,19)",
             "(0,_)",
             "(a,b)",
@@ -679,13 +679,13 @@ fn structural_match_contracts_compose_ordered_patterns_without_enum_wrappers() {
     ] {
         let source = format!(
             "typealias Byte=.u8'builtin;{declarations}
-            const CONFIG:{ty}={initial};
+            const CONFIG:{ty} = {initial};
             fn checked(a:Byte,b:Byte)->bool where requires a <= b {{a <= b}}
             fn bounded(comptime config:{ty})->bool
               where requires config match {{{first}=>false,{second}=>a <= b}} {{{body}}}
             fn run()->bool {{bounded(CONFIG)}}"
         );
-        let package = compile_with_protocols(&source, &Default::default())
+        let package = support::compile_with_tuple_protocols(&source, &Default::default())
             .unwrap_or_else(|error| panic!("{source}: {error}"));
         assert_eq!(
             luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
@@ -699,7 +699,7 @@ fn structural_match_contracts_compose_ordered_patterns_without_enum_wrappers() {
                 "checked(config.high,config.low)",
             ),
         ] {
-            let error = compile_with_protocols(&invalid, &Default::default())
+            let error = support::compile_with_tuple_protocols(&invalid, &Default::default())
                 .err()
                 .unwrap();
             assert!(error.contains("precondition"), "{invalid}: {error}");
@@ -789,14 +789,15 @@ fn nested_alternative_patterns_preserve_payload_constraints() {
 fn alternative_pattern_binders_keep_common_field_identity() {
     let source = "typealias Byte=.u8'builtin;
         fn checked(value:Byte)->bool where requires value <= 19 {value <= 19}
-        fn bounded(pair:(Byte,Byte))->bool
+        fn bounded(pair:Tuple<Byte,Byte>)->bool
           where requires pair match {(0,x) or (1,x)=>x <= 19,_=>false} {
             let (_,value)=pair;checked(value)
           }
         fn run()->bool {bounded((1,7))}";
     for initial in ["(0,7)", "(1,7)", "(1,19)"] {
         let accepted = source.replace("(1,7)", initial);
-        let package = compile_with_protocols(&accepted, &Default::default()).unwrap();
+        let package =
+            support::compile_with_tuple_protocols(&accepted, &Default::default()).unwrap();
         assert_eq!(
             luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
             comptime_interpretor::Value::Bool(true)
@@ -804,7 +805,7 @@ fn alternative_pattern_binders_keep_common_field_identity() {
     }
     for rejected in ["(2,7)", "(0,23)", "(1,23)"] {
         let invalid = source.replace("(1,7)", rejected);
-        let error = compile_with_protocols(&invalid, &Default::default())
+        let error = support::compile_with_tuple_protocols(&invalid, &Default::default())
             .err()
             .unwrap();
         assert!(error.contains("precondition"), "{error}");
@@ -815,7 +816,7 @@ fn alternative_pattern_binders_keep_common_field_identity() {
 fn alternative_bindings_from_different_fields_keep_selected_relations() {
     let source = "typealias Byte=.u8'builtin;
         fn checked(value:Byte)->bool where requires value <= 19 {value <= 19}
-        fn bounded(input:(bool,Byte,Byte))->bool
+        fn bounded(input:Tuple<bool,Byte,Byte>)->bool
           where requires input match {(true,x,_) or (false,_,x)=>x <= 19} {
             let (flag,left,right)=input;
             if flag {checked(left)} else {checked(right)}
@@ -823,7 +824,8 @@ fn alternative_bindings_from_different_fields_keep_selected_relations() {
         fn run()->bool {bounded((true,7,255))}";
     for initial in ["(true,7,255)", "(false,255,7)"] {
         let accepted = source.replace("(true,7,255)", initial);
-        let package = compile_with_protocols(&accepted, &Default::default()).unwrap();
+        let package =
+            support::compile_with_tuple_protocols(&accepted, &Default::default()).unwrap();
         assert_eq!(
             luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
             comptime_interpretor::Value::Bool(true)
@@ -837,7 +839,7 @@ fn alternative_bindings_from_different_fields_keep_selected_relations() {
             "if flag {checked(right)} else {checked(left)}",
         ),
     ] {
-        let error = compile_with_protocols(&invalid, &Default::default())
+        let error = support::compile_with_tuple_protocols(&invalid, &Default::default())
             .err()
             .unwrap();
         assert!(error.contains("precondition"), "{error}");
@@ -847,16 +849,16 @@ fn alternative_bindings_from_different_fields_keep_selected_relations() {
 #[test]
 fn outer_guard_failure_does_not_retry_an_alternative_binding() {
     let source = "typealias Byte=.u8'builtin;
-        fn bounded(input:(Byte,Byte))->bool
+        fn bounded(input:Tuple<Byte,Byte>)->bool
           where requires input match {(x,_) or (_,x) if x <= 19=>true,_=>false} {true}
         fn run()->bool {bounded((7,23))}";
-    let package = compile_with_protocols(source, &Default::default()).unwrap();
+    let package = support::compile_with_tuple_protocols(source, &Default::default()).unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
     let invalid = source.replace("(7,23)", "(23,7)");
-    let error = compile_with_protocols(&invalid, &Default::default())
+    let error = support::compile_with_tuple_protocols(&invalid, &Default::default())
         .err()
         .unwrap();
     assert!(error.contains("precondition"), "{error}");
@@ -866,7 +868,7 @@ fn outer_guard_failure_does_not_retry_an_alternative_binding() {
 fn guarded_alternatives_keep_selected_field_bounds() {
     let source = "typealias Byte=.u8'builtin;
         fn checked(value:Byte)->bool where requires value <= 19 {value <= 19}
-        fn bounded(input:(bool,Byte,Byte))->bool
+        fn bounded(input:Tuple<bool,Byte,Byte>)->bool
           where requires input match {(true,x,_) or (false,_,x) if x <= 19=>true,_=>false} {
             let (flag,left,right)=input;
             if flag {checked(left)} else {checked(right)}
@@ -874,7 +876,8 @@ fn guarded_alternatives_keep_selected_field_bounds() {
         fn run()->bool {bounded((true,7,255))}";
     for initial in ["(true,7,255)", "(false,255,7)"] {
         let accepted = source.replace("(true,7,255)", initial);
-        let package = compile_with_protocols(&accepted, &Default::default()).unwrap();
+        let package =
+            support::compile_with_tuple_protocols(&accepted, &Default::default()).unwrap();
         assert_eq!(
             luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
             comptime_interpretor::Value::Bool(true)
@@ -888,7 +891,7 @@ fn guarded_alternatives_keep_selected_field_bounds() {
             "if flag {checked(right)} else {checked(left)}",
         ),
     ] {
-        let error = compile_with_protocols(&invalid, &Default::default())
+        let error = support::compile_with_tuple_protocols(&invalid, &Default::default())
             .err()
             .unwrap();
         assert!(error.contains("precondition"), "{error}");
@@ -902,11 +905,11 @@ fn alternative_guard_calls_reach_fallback_exactly_once() {
             "typealias Byte=.u8'builtin;
             fn gate(value:Byte)->bool {{value <= 19}}
             fn run()->bool {{
-                let input:(Byte,Byte)={value};
+                let input:Tuple<Byte,Byte> = {value};
                 input match {{({pattern}) if gate(x)=>true,_=>false}}
             }}"
         );
-        let package = compile_with_protocols(&source, &Default::default())
+        let package = support::compile_with_tuple_protocols(&source, &Default::default())
             .unwrap_or_else(|error| panic!("{source}: {error}"));
         let mut vm = comptime_interpretor::Interpreter::new(&package, Default::default()).unwrap();
         assert_eq!(
@@ -931,7 +934,7 @@ fn alternative_guard_mutations_reach_fallback_without_retry() {
             fn once(count:Byte)->bool where requires count==1 {{true}}
             fn run()->bool {{
                 var count:Byte=0;
-                let input:(Byte,Byte)={value};
+                let input:Tuple<Byte,Byte> = {value};
                 let accepted=input match {{
                     ({pattern}) if do {{count=count + 1;x <= 19}}=>true,
                     _=>false
@@ -939,14 +942,14 @@ fn alternative_guard_mutations_reach_fallback_without_retry() {
                 once(count) and not accepted
             }}"
         );
-        let package = compile_with_protocols(&source, &Default::default())
+        let package = support::compile_with_tuple_protocols(&source, &Default::default())
             .unwrap_or_else(|error| panic!("{source}: {error}"));
         assert_eq!(
             luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
             comptime_interpretor::Value::Bool(true)
         );
         let invalid = source.replace("requires count==1", "requires count==2");
-        let error = compile_with_protocols(&invalid, &Default::default())
+        let error = support::compile_with_tuple_protocols(&invalid, &Default::default())
             .err()
             .unwrap();
         assert!(error.contains("precondition"), "{error}");
@@ -959,7 +962,7 @@ fn guard_failure_uses_original_subject_and_updated_outer_state() {
         fn once(count:Byte)->bool where requires count==1 {true}
         fn run()->bool {
             var count:Byte=0;
-            var input:(Byte,Byte)=(23,7);
+            var input:Tuple<Byte,Byte> = (23,7);
             let accepted=input match {
                 ((x,_) or (_,x)) if do {count=count + 1;input=(0,0);x <= 19}=>true,
                 (0,_)=>true,
@@ -968,13 +971,13 @@ fn guard_failure_uses_original_subject_and_updated_outer_state() {
             let (left,right)=input;
             once(count) and not accepted and left==0 and right==0
         }";
-    let package = compile_with_protocols(source, &Default::default()).unwrap();
+    let package = support::compile_with_tuple_protocols(source, &Default::default()).unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
     let invalid = source.replace("requires count==1", "requires count==2");
-    let error = compile_with_protocols(&invalid, &Default::default())
+    let error = support::compile_with_tuple_protocols(&invalid, &Default::default())
         .err()
         .unwrap();
     assert!(error.contains("precondition"), "{error}");

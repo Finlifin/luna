@@ -7,6 +7,202 @@ mod bounded_exclusion_tests {
     use super::*;
 
     #[test]
+    fn rearranged_polynomial_predicates_keep_kind_versions_and_budget() {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let x = facts
+            .assign(
+                PlaceId { owner: 1, local: 0 },
+                Interval::machine(8, true, &mut limits).unwrap(),
+            )
+            .unwrap();
+        let r = facts
+            .assign(
+                PlaceId { owner: 1, local: 1 },
+                Interval::machine(8, true, &mut limits).unwrap(),
+            )
+            .unwrap();
+        let x_poly = Polynomial::variable(x, &mut limits).unwrap();
+        let r_poly = Polynomial::variable(r, &mut limits).unwrap();
+        let zero = Polynomial::constant(Integer::zero(), &mut limits).unwrap();
+        let negative = zero.subtract(&x_poly, &mut limits).unwrap();
+        let sum = r_poly.add(&x_poly, &mut limits).unwrap();
+        for relation in [Comparison::Equal, Comparison::NotEqual] {
+            let original = Condition::PolynomialCompare {
+                left: r_poly.clone(),
+                relation,
+                right: negative.clone(),
+            };
+            let rearranged = Condition::PolynomialCompare {
+                left: sum.clone(),
+                relation,
+                right: zero.clone(),
+            };
+            let reversed = Condition::PolynomialCompare {
+                left: zero.clone(),
+                relation,
+                right: sum.clone(),
+            };
+            let other_kind = Condition::PolynomialCompare {
+                left: sum.clone(),
+                relation: relation.negated(),
+                right: zero.clone(),
+            };
+            let wrong = Condition::PolynomialCompare {
+                left: sum.clone(),
+                relation,
+                right: Polynomial::constant(Integer::from_i128(1), &mut limits).unwrap(),
+            };
+            assert!(original.equivalent(&rearranged, &mut limits, 0).unwrap());
+            assert!(original.equivalent(&reversed, &mut limits, 0).unwrap());
+            assert!(!original.equivalent(&other_kind, &mut limits, 0).unwrap());
+            assert!(!original.equivalent(&wrong, &mut limits, 0).unwrap());
+            let mut exhausted = Limits::default();
+            exhausted.arithmetic.steps = 0;
+            assert!(original.equivalent(&rearranged, &mut exhausted, 0).is_err());
+            assert!(original.equivalent(&rearranged, &mut limits, 0).unwrap());
+            let mut current = facts.fork(&mut limits).unwrap();
+            // Bounded equalities live in inequality rows; retained conditions
+            // deliberately store unresolved choices rather than duplicate them.
+            let alternative = Condition::Compare {
+                value: r,
+                relation: Comparison::Equal,
+                constant: Integer::from_i128(7),
+            };
+            let original = Condition::Or(Box::new(original), Box::new(alternative.clone()));
+            let rearranged = Condition::Or(Box::new(rearranged), Box::new(alternative));
+            current
+                .remember_condition(&original, true, &mut limits)
+                .unwrap();
+            current
+                .prove_condition(&rearranged, true, &mut limits)
+                .unwrap();
+            current.invalidate(x.place).unwrap();
+            assert!(
+                current
+                    .prove_condition(&rearranged, true, &mut limits)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn equal_copy_keeps_its_predicate_after_the_source_retires() {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let a = facts.invalidate(PlaceId { owner: 1, local: 0 }).unwrap();
+        let b = facts.invalidate(PlaceId { owner: 1, local: 1 }).unwrap();
+        let equality = Condition::PolynomialCompare {
+            left: Polynomial::variable(a, &mut limits).unwrap(),
+            relation: Comparison::Equal,
+            right: Polynomial::variable(b, &mut limits).unwrap(),
+        };
+        facts.assume(&equality, true, &mut limits).unwrap();
+        let predicate = |value| Condition::Compare {
+            value,
+            relation: Comparison::Greater,
+            constant: Integer::from_u128(10),
+        };
+        facts.assume(&predicate(a), true, &mut limits).unwrap();
+        facts.assume(&predicate(b), true, &mut limits).unwrap();
+        facts.invalidate(a.place).unwrap();
+        facts
+            .prove_condition(&predicate(b), true, &mut limits)
+            .unwrap();
+    }
+
+    #[test]
+    fn retained_choice_eliminates_a_refuted_equal_input() {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let ids = (0..3)
+            .map(|local| {
+                facts
+                    .assign(
+                        PlaceId { owner: 1, local },
+                        Interval::machine(8, true, &mut limits).unwrap(),
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut equal = |a, b| Condition::PolynomialCompare {
+            left: Polynomial::variable(a, &mut limits).unwrap(),
+            relation: Comparison::Equal,
+            right: Polynomial::variable(b, &mut limits).unwrap(),
+        };
+        let first = equal(ids[0], ids[1]);
+        let second = equal(ids[0], ids[2]);
+        facts
+            .assume(
+                &Condition::Or(Box::new(first.clone()), Box::new(second.clone())),
+                true,
+                &mut limits,
+            )
+            .unwrap();
+        facts.assume(&first, false, &mut limits).unwrap();
+        facts.prove_condition(&second, true, &mut limits).unwrap();
+    }
+
+    #[test]
+    fn retained_disjunction_uses_only_current_exact_aliases() {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let mut ids = Vec::new();
+        for local in 0..4 {
+            ids.push(
+                facts
+                    .assign(
+                        PlaceId { owner: 1, local },
+                        Interval::machine(8, false, &mut limits).unwrap(),
+                    )
+                    .unwrap(),
+            );
+        }
+        let choice = |a, b| {
+            Condition::Or(
+                Box::new(Condition::Compare {
+                    value: a,
+                    relation: Comparison::Equal,
+                    constant: Integer::zero(),
+                }),
+                Box::new(Condition::Compare {
+                    value: b,
+                    relation: Comparison::Equal,
+                    constant: Integer::zero(),
+                }),
+            )
+        };
+        let relation = |a, b, relation, limits: &mut Limits| Condition::PolynomialCompare {
+            left: Polynomial::variable(a, limits).unwrap(),
+            relation,
+            right: Polynomial::variable(b, limits).unwrap(),
+        };
+        facts
+            .assume(&choice(ids[0], ids[1]), true, &mut limits)
+            .unwrap();
+        let query = choice(ids[2], ids[3]);
+        // Identical ranges do not establish identity.
+        assert!(facts.prove_condition(&query, true, &mut limits).is_err());
+        for (a, b) in [(ids[0], ids[2]), (ids[1], ids[3])] {
+            let condition = relation(a, b, Comparison::LessEqual, &mut limits);
+            facts.assume(&condition, true, &mut limits).unwrap();
+        }
+        assert!(facts.prove_condition(&query, true, &mut limits).is_err());
+        for (a, b) in [(ids[0], ids[2]), (ids[1], ids[3])] {
+            let condition = relation(a, b, Comparison::GreaterEqual, &mut limits);
+            facts.assume(&condition, true, &mut limits).unwrap();
+        }
+        facts.prove_condition(&query, true, &mut limits).unwrap();
+        facts
+            .assign(
+                ids[0].place,
+                Interval::machine(8, false, &mut limits).unwrap(),
+            )
+            .unwrap();
+        assert!(facts.prove_condition(&query, true, &mut limits).is_err());
+    }
+
+    #[test]
     fn bounded_holes_survive_copy_and_common_join_but_not_write_or_unproved_branch() {
         let mut limits = Limits::default();
         let mut initial = Facts::default();
@@ -145,7 +341,17 @@ impl Condition {
                     right: d,
                 },
             ) if ar == br && matches!(ar, Comparison::Equal | Comparison::NotEqual) => {
-                (a == c && b == d) || (a == d && b == c)
+                if (a == c && b == d) || (a == d && b == c) {
+                    true
+                } else {
+                    // Mathematical predicates may move terms across equality:
+                    // r == -x and r + x == 0 carry the same current evidence.
+                    // Normalize only by bounded polynomial subtraction, not
+                    // by dividing coefficients or altering comparison kinds.
+                    let left = a.subtract(b, limits)?;
+                    let right = c.subtract(d, limits)?;
+                    left == right || left == d.subtract(c, limits)?
+                }
             }
             _ => self == other,
         })
@@ -218,13 +424,30 @@ impl Facts {
         // Bypass the "already known" shortcut while deriving new arithmetic
         // consequences. Every saved premise is current and already established.
         self.conditions.clear();
+        // A disequality has no convex row representation. Keep those atomic
+        // premises available while replaying choices, so a refuted disjunct
+        // cannot become reachable merely because replay cleared its hole.
+        for (premise, truth) in &retained {
+            if let Condition::Compare { relation, .. }
+            | Condition::PolynomialCompare { relation, .. } = premise
+            {
+                if (if *truth {
+                    *relation
+                } else {
+                    relation.negated()
+                }) == Comparison::NotEqual
+                {
+                    self.remember_condition(premise, *truth, limits)?;
+                }
+            }
+        }
         // A bounded number of sweeps handles implication chains without
         // requiring nonlinear bounds to converge. Every derived fact remains
         // valid when this incomplete propagation stops before a fixed point.
         for _ in 0..retained.len().saturating_add(1) {
             let before = self.fork(limits)?;
             for (premise, truth) in &retained {
-                self.assume_inner(premise, *truth, 0, limits)?;
+                self.assume_inner_mode(premise, *truth, 0, limits, true)?;
                 if !self.is_reachable() {
                     break;
                 }
@@ -248,6 +471,22 @@ impl Facts {
         condition: &Condition,
         limits: &mut Limits,
     ) -> Result<Option<bool>, Unknown> {
+        // Validate the complete predicate before a Boolean shortcut can omit
+        // a stale operand. Current interval evidence needs no alias search.
+        if !condition.is_current(self, limits, 0)? {
+            return Ok(None);
+        }
+        if let Some(truth) = condition.truth_by_interval(self, limits, 0)? {
+            return Ok(Some(truth));
+        }
+        self.known_condition_mode(condition, limits, true)
+    }
+    fn known_condition_mode(
+        &self,
+        condition: &Condition,
+        limits: &mut Limits,
+        use_aliases: bool,
+    ) -> Result<Option<bool>, Unknown> {
         if !condition.is_current(self, limits, 0)? {
             return Ok(None);
         }
@@ -260,6 +499,11 @@ impl Facts {
             }
             if known.equivalent(&query, limits, 0)? {
                 return Ok(Some(*truth));
+            }
+            if let Some(answer) =
+                factors::nonzero_factor_entailment(&known, *truth, &query, limits)?
+            {
+                return Ok(Some(answer));
             }
             if let (
                 Condition::Compare {
@@ -281,6 +525,77 @@ impl Facts {
                     }
                     if comparison_entails(ar, ac, br.negated(), bc, limits)? {
                         return Ok(Some(false));
+                    }
+                }
+            }
+        }
+        // Equal value copies can give the same predicate different names.
+        // Normalize only from exact, current equality evidence, never from
+        // coincident intervals or a one-sided inequality.
+        let compatible = |known: &Condition| match (known, condition) {
+            (Condition::And(..), Condition::And(..))
+            | (Condition::Or(..), Condition::Or(..))
+            | (Condition::Not(..), Condition::Not(..)) => true,
+            (
+                Condition::Compare { relation: a, .. }
+                | Condition::PolynomialCompare { relation: a, .. },
+                Condition::Compare { relation: b, .. }
+                | Condition::PolynomialCompare { relation: b, .. },
+            ) => {
+                matches!(b, Comparison::Equal | Comparison::NotEqual)
+                    || matches!(
+                        (a, b),
+                        (
+                            Comparison::Less | Comparison::Greater,
+                            Comparison::Less | Comparison::Greater
+                        ) | (
+                            Comparison::LessEqual | Comparison::GreaterEqual,
+                            Comparison::LessEqual | Comparison::GreaterEqual
+                        )
+                    )
+            }
+            _ => false,
+        };
+        if use_aliases && self.conditions.iter().any(|(known, _)| compatible(known)) {
+            fn root(
+                map: &BTreeMap<ValueId, ValueId>,
+                mut id: ValueId,
+                limits: &mut Limits,
+            ) -> Result<ValueId, Unknown> {
+                while let Some(parent) = map.get(&id) {
+                    limits.step(1)?;
+                    id = *parent;
+                }
+                Ok(id)
+            }
+            let mut aliases = BTreeMap::new();
+            for (a, b) in relations::exact_equal_values(self, limits)? {
+                let a = root(&aliases, a, limits)?;
+                let b = root(&aliases, b, limits)?;
+                if a != b {
+                    aliases.insert(a.max(b), a.min(b));
+                }
+            }
+            let mapping = aliases
+                .keys()
+                .map(|id| Ok((*id, root(&aliases, *id, limits)?)))
+                .collect::<Result<BTreeMap<_, _>, Unknown>>()?;
+            if !mapping.is_empty() {
+                if let Some(query) = condition.renamed(&mapping, self, true, limits, 0)? {
+                    for (known, truth) in &self.conditions {
+                        if !compatible(known) {
+                            continue;
+                        }
+                        if let Some(known) = known.renamed(&mapping, self, true, limits, 0)? {
+                            if known.equivalent(&query, limits, 0)? {
+                                return Ok(Some(*truth));
+                            }
+                            if let Some(answer) =
+                                factors::nonzero_factor_entailment(&known, *truth, &query, limits)?
+                            {
+                                return Ok(Some(answer));
+                            }
+                        }
                     }
                 }
             }
@@ -358,7 +673,13 @@ impl Facts {
         if matches!(condition, Condition::Bool(_)) {
             return Ok(());
         }
-        if !self.reachable || self.known_condition(condition, limits)?.is_some() {
+        // Keep a copy's own predicate even if another equal value currently
+        // proves it: that other identity may later leave scope or be written.
+        if !self.reachable
+            || self
+                .known_condition_mode(condition, limits, false)?
+                .is_some()
+        {
             return Ok(());
         }
         if !condition.is_current(self, limits, 0)? {

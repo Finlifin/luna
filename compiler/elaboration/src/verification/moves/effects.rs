@@ -66,6 +66,31 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         source: SourceRange,
         depth: usize,
     ) -> Result<(), Error> {
+        // A callable signature is not a data alias. Captured environments must
+        // remain data-only here: code/pointer environment transitions require
+        // a separate request-time writeback contract.
+        if matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_)) {
+            return Ok(());
+        }
+        if let Term::Closure { environment, .. } = ty {
+            super::super::memory::bound_type(ty, &mut self.fuel)
+                .map_err(|reason| error(source, reason))?;
+            let mut data_only = true;
+            for field in environment {
+                // The environment is borrowed in place. Non-Copy data may be
+                // observed or updated; every exit must preserve its ownership.
+                data_only &= super::super::memory::effect_data_layout(
+                    self.package,
+                    field,
+                    &mut self.fuel,
+                    depth + 1,
+                )
+                .map_err(|reason| error(source, reason))?;
+            }
+            if data_only {
+                return Ok(());
+            }
+        }
         if !super::super::memory::effect_data_layout(self.package, ty, &mut self.fuel, depth)
             .map_err(|reason| error(source, reason))?
         {
@@ -328,6 +353,98 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         Ok(())
     }
 
+    fn handler_completion_transfer(
+        &mut self,
+        handler: &nir::program::EffectHandler,
+        source: SourceRange,
+    ) -> Result<Option<BTreeSet<usize>>, Error> {
+        self.fuel = self
+            .fuel
+            .checked_sub(self.effect_result_inputs.len())
+            .ok_or_else(|| error(source, "handler fallback lookup budget exhausted"))?;
+        let outer = handler
+            .fallback
+            .and_then(|slot| {
+                self.effect_result_inputs.iter().find(|input| {
+                    input.slot == slot
+                        && input.operation == handler.operation
+                        && input.abi == handler.abi
+                        && input.signature == handler.signature
+                })
+            })
+            .and_then(|input| input.forwarded_parameters.as_ref());
+        super::super::effect_transfer::with_handler_fallback(handler, outer, &mut self.fuel)
+            .map_err(|reason| error(source, reason))
+    }
+
+    pub(super) fn check_handler_return_layout(
+        &mut self,
+        ty: &Term,
+        flow: &Flow,
+        origins: &ValueOrigins,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let leaves = super::super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
+            .map_err(|reason| error(source, reason))?;
+        for leaf in leaves {
+            let mut absent = false;
+            for (path, tag) in &leaf.guards {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(path.len().saturating_add(1))
+                    .ok_or_else(|| error(source, "handler return layout budget exhausted"))?;
+                absent |= flow
+                    .value_variants
+                    .get(path)
+                    .is_some_and(|tags| !tags.contains(tag));
+            }
+            if !absent
+                && origins
+                    .get(&leaf.storage_fields)
+                    .is_none_or(BTreeSet::is_empty)
+            {
+                return Err(error(
+                    source,
+                    "handler pointer return lacks request-side provenance evidence",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_handler_return_origins(
+        &mut self,
+        flow: &Flow,
+        origins: &ValueOrigins,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        for (path, targets) in origins {
+            self.fuel = self
+                .fuel
+                .checked_sub(path.len() + 1)
+                .ok_or_else(|| error(source, "handler return origin budget exhausted"))?;
+            self.pointer_work(targets, source)?;
+            for target in targets {
+                // Captures retain installer targets. Operation parameters use
+                // a private borrowed-root namespace and still need request-side
+                // substitution before crossing this installation boundary.
+                if !flow.effect_borrows.contains(&target.root)
+                    || !flow.types.contains_key(&target.root)
+                    || self.report.borrowed_roots.contains_key(&target.root)
+                {
+                    return Err(error(
+                        source,
+                        "handler lexical return requires cross-scope pointer result evidence",
+                    ));
+                }
+                flow.state
+                    .require_present(target)
+                    .map_err(|_| error(source, "handler return pointer target is unavailable"))?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn effect_return_checkpoint(
         &mut self,
         flow: &Flow,
@@ -341,6 +458,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         // Restore each handler result independently, then join candidates and
         // guarded aggregate leaves just as for ordinary function return paths.
         let mut first = true;
+        let mut origins = ValueOrigins::new();
+        // Suspended-expression guards describe its pending value, not a
+        // handler's returned value. Keep the target union conservative.
+        returned.value_pointer_guards.clear();
         returned.value_callable = None;
         returned.value_callables.clear();
         returned.value_variants.clear();
@@ -348,7 +469,66 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .fuel
             .checked_sub(self.effect_return_values.len())
             .ok_or_else(|| error(source, "handler return checkpoint budget exhausted"))?;
-        for value in &self.effect_return_values {
+        let result_type = self.exit_contract.and_then(|function| {
+            let Term::Function { result, .. } = function.signature.callable_signature() else {
+                return None;
+            };
+            Some(match result.as_ref() {
+                Term::Computation { result, .. } => result.as_ref(),
+                result => result,
+            })
+        });
+        let values = self.effect_return_values.clone();
+        for value in &values {
+            let domains = result_type.map(|ty| (ty, &returned.value_variants, &value.variants));
+            let pointer_guards = if first {
+                self.copy_value_pointer_guards(&value.pointer_guards, source)?
+            } else {
+                self.join_result_pointer_guards(
+                    &returned.value_pointer_guards,
+                    &origins,
+                    &value.pointer_guards,
+                    &value.origins,
+                    source,
+                    domains,
+                )?
+            };
+            if !first && let Some(ty) = result_type {
+                self.join_value_origins(
+                    ty,
+                    &mut origins,
+                    &returned.value_variants,
+                    &value.origins,
+                    &value.variants,
+                    source,
+                )?;
+            } else {
+                // Missing branch evidence must not become a known origin merely
+                // because another handler return supplies that physical slot.
+                self.fuel = self
+                    .fuel
+                    .checked_sub(origins.len() + value.origins.len())
+                    .ok_or_else(|| error(source, "handler return origins budget exhausted"))?;
+                for (path, targets) in &mut origins {
+                    if !value.origins.contains_key(path) {
+                        targets.insert(unknown_pointer_target());
+                    }
+                }
+                for (path, targets) in &value.origins {
+                    self.fuel = self
+                        .fuel
+                        .checked_sub(path.len() + 1)
+                        .ok_or_else(|| error(source, "handler return path budget exhausted"))?;
+                    self.pointer_work(targets, source)?;
+                    let known = origins.contains_key(path);
+                    let joined = origins.entry(path.clone()).or_default();
+                    if !first && !known {
+                        joined.insert(unknown_pointer_target());
+                    }
+                    joined.extend(targets.iter().cloned());
+                }
+            }
+            returned.value_pointer_guards = pointer_guards;
             let callable = value
                 .callable
                 .as_ref()
@@ -397,7 +577,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let callable = returned.value_callable.clone();
         let fields = returned.value_callables.clone();
         let variants = returned.value_variants.clone();
-        self.check_function_result(&mut returned, BTreeMap::new(), source, depth + 1)?;
+        self.check_return_origins(&returned, &origins, source)?;
+        self.check_function_result(&mut returned, origins, source, depth + 1)?;
         returned.value_callable = callable;
         returned.value_callables = fields;
         returned.value_variants = variants;
@@ -464,6 +645,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         else {
             unreachable!()
         };
+        let mut established_input = false;
         let mut forwarded = None;
         let mut copy_parameters = BTreeSet::new();
         let mut parameter_accesses = BTreeSet::new();
@@ -474,6 +656,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 && input.abi == abi
                 && &input.signature == signature
             {
+                established_input = true;
                 forwarded = input.forwarded_parameters.clone();
                 copy_parameters = input.copy_parameters.clone();
                 parameter_accesses = input.parameter_accesses.clone();
@@ -503,7 +686,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         &mut this.fuel,
                     )
                     .map_err(|reason| error(expr.source, reason))?;
+                // Construction checks a hypothetical closure invocation before
+                // an installer exists. Retain the missing effect premise as a
+                // deferred obligation, without inventing result provenance.
+                // Actual invocation and known installed inputs must prove the
+                // transfer normally, even inside a hypothetical outer body.
                 if !origins.is_empty()
+                    && !(this.defer_unknown_calls && !established_input)
                     && !discarded_copy
                     && (!forwarded
                         .as_ref()
@@ -764,7 +953,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let mut completions = vec![];
             if handler.abi != nir::effects::Abi::Direct
                 && !(handler.abi == nir::effects::Abi::DirectPassing
-                    && nir::effects::scalar_passing_signature(&handler.signature))
+                    && super::super::memory::data_passing_signature(
+                        self.package,
+                        &handler.signature,
+                        &mut self.fuel,
+                    )
+                    .map_err(|reason| error(installation, reason))?)
             {
                 return Err(error(
                     installation,
@@ -774,7 +968,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let Term::Function { parameters, result } = &handler.signature else {
                 return Err(error(installation, "handler lacks an operation signature"));
             };
-            // Void carries no owned slot payload; all represented scalar
+            // Void carries no owned slot payload; all represented pointer-free
             // results need an actual Copy proof before repeated delivery.
             if handler.abi == nir::effects::Abi::DirectPassing
                 && **result != Term::Primitive(nir::Primitive::Void)
@@ -783,7 +977,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             {
                 return Err(error(
                     installation,
-                    "scalar effect slot requires checked Copy permission",
+                    "effect slot requires checked Copy permission",
                 ));
             }
             // This tuple is the internal operation argument vector, not a
@@ -796,6 +990,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .map_err(|reason| error(installation, reason))?;
             let input = Term::Tuple(parameters.iter().map(|p| p.ty.clone()).collect());
             let mut local_accesses = BTreeSet::new();
+            let mut borrowed_result_delivery = None;
             for (arm_index, arm) in handler.arms.iter().enumerate() {
                 if self.fuel == 0 || depth > 128 {
                     return Err(error(installation, "handler resource budget exhausted"));
@@ -808,6 +1003,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 let mut captures = Vec::new();
                 let mut pointer_captures = BTreeMap::new();
                 let mut capture_domains = BTreeMap::new();
+                let mut capture_callables = BTreeMap::new();
+                let mut borrowed_code_roots = BTreeSet::new();
+                let mut borrowed_owner_roots = BTreeSet::new();
+                let mut capture_memory_code = BTreeMap::new();
+                let mut capture_memory_named = BTreeMap::new();
                 for binding in &free {
                     let place = Place {
                         root: root(*binding),
@@ -825,6 +1025,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             "handler lexical capture has no checked storage type",
                         )
                     })?;
+                    let code_paths =
+                        callable_value_paths(self.package, ty, &mut self.fuel, installation, 0)?;
                     let layout = super::super::memory::pointer_input_layout(
                         self.package,
                         ty,
@@ -832,17 +1034,32 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     )
                     .map_err(|reason| error(installation, reason))?;
                     if !layout.is_empty() {
-                        if !super::super::memory::effect_data_layout(
-                            self.package,
-                            result,
-                            &mut self.fuel,
-                            0,
-                        )
-                        .map_err(|reason| error(installation, reason))?
-                        {
+                        let allowed = if let Some(allowed) = borrowed_result_delivery {
+                            allowed
+                        } else {
+                            let allowed = super::super::memory::effect_data_layout(
+                                self.package,
+                                result,
+                                &mut self.fuel,
+                                0,
+                            )
+                            .map_err(|reason| error(installation, reason))?
+                                || (super::super::memory::effect_transfer_layout(
+                                    self.package,
+                                    result,
+                                    &mut self.fuel,
+                                )
+                                .map_err(|reason| error(installation, reason))?
+                                    && self
+                                        .handler_completion_transfer(handler, installation)?
+                                        .is_some());
+                            borrowed_result_delivery = Some(allowed);
+                            allowed
+                        };
+                        if !allowed {
                             return Err(error(
                                 installation,
-                                "handler borrowed capture result requires a data-only contract",
+                                "handler borrowed capture result requires data-only delivery or a proven operand transfer",
                             ));
                         }
                         if (self.delivery)(ty).map_err(|reason| error(installation, reason))?
@@ -966,15 +1183,179 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             }
                         }
                     } else {
-                        if (self.delivery)(ty).map_err(|reason| error(installation, reason))?
-                            != Delivery::Copy
+                        if code_paths.is_empty()
+                            && (self.delivery)(ty).map_err(|reason| error(installation, reason))?
+                                != Delivery::Copy
+                        {
+                            // Pointer-free owned data is borrowed from the installer.
+                            // Preserve the complete responsibility on every exit,
+                            // just as for a code-bearing environment.
+                            borrowed_owner_roots.insert(*binding);
+                        }
+                        // Owned captures are borrowed, not delivered. Their
+                        // complete environment must survive every handler exit;
+                        // the post-analysis check below includes failed and
+                        // suspended exits as well as ordinary completion.
+                        if code_paths.is_empty() {
+                            self.require_capture_value_layout(ty, installation, 0)?;
+                        } else if !super::super::memory::effect_borrowed_code_layout(
+                            self.package,
+                            ty,
+                            &mut self.fuel,
+                        )
+                        .map_err(|reason| error(installation, reason))?
                         {
                             return Err(error(
                                 installation,
-                                "handler lexical capture requires scalar Copy evidence; affine captures need request-time ownership",
+                                "handler code aggregate requires a pointer-free capture layout",
                             ));
                         }
-                        self.require_capture_value_layout(ty, installation, 0)?;
+                    }
+                    if !code_paths.is_empty() {
+                        borrowed_code_roots.insert(*binding);
+                        borrowed_owner_roots.insert(*binding);
+                        let domains = self.stored_enum_domains(outer, &place, installation)?;
+                        let stable_domains = capture_domains
+                            .entry(*binding)
+                            .or_insert_with(EnumDomains::new);
+                        for fields in &code_paths {
+                            // Retain only tags guarding code leaves. Data siblings
+                            // may change across requests and supply no stable facts.
+                            let mut position = 0;
+                            while position + 1 < fields.len() {
+                                self.fuel = self.fuel.checked_sub(1).ok_or_else(|| {
+                                    error(installation, "handler code tag budget exhausted")
+                                })?;
+                                if fields[position] == VARIANT_PATH {
+                                    let prefix = &fields[..position];
+                                    if let Some(tags) = domains.get(prefix) {
+                                        self.fuel = self
+                                            .fuel
+                                            .checked_sub(
+                                                prefix
+                                                    .len()
+                                                    .saturating_add(tags.len())
+                                                    .saturating_add(1),
+                                            )
+                                            .ok_or_else(|| {
+                                                error(
+                                                    installation,
+                                                    "handler code tag copy budget exhausted",
+                                                )
+                                            })?;
+                                        stable_domains.insert(prefix.to_vec(), tags.clone());
+                                    }
+                                    position += 2;
+                                } else {
+                                    position += 1;
+                                }
+                            }
+                            if enum_path_excluded(fields, &domains) {
+                                // Empty is an absence certificate, never unknown
+                                // code. The stable ancestor tag above proves it.
+                                capture_memory_code.insert(
+                                    super::super::memory::CallablePlace {
+                                        binding: *binding,
+                                        fields: fields.clone(),
+                                    },
+                                    vec![],
+                                );
+                                continue;
+                            }
+                            let code_ty = self.field_type(ty, fields, installation)?;
+                            self.require_capture_value_layout(&code_ty, installation, 0)?;
+                            let code_place = Place {
+                                root: place.root,
+                                fields: fields.clone(),
+                            };
+                            let callable = outer.callable_at(&code_place).ok_or_else(|| {
+                                error(
+                                    installation,
+                                    "handler callable capture requires complete candidate evidence",
+                                )
+                            })?;
+                            bound_callable_copy(callable, &mut self.fuel, installation, 0)?;
+                            if let Some(named) =
+                                named_memory_callees(callable, &mut self.fuel, installation)?
+                            {
+                                capture_memory_named.insert(
+                                    super::super::memory::CallablePlace {
+                                        binding: *binding,
+                                        fields: fields.clone(),
+                                    },
+                                    named,
+                                );
+                            } else {
+                                let definitions = memory_code_definitions(
+                                    self.package,
+                                    callable,
+                                    &mut self.fuel,
+                                    installation,
+                                )?
+                                .ok_or_else(|| {
+                                    error(
+                                        installation,
+                                        "handler callable capture lacks memory evidence",
+                                    )
+                                })?;
+                                let input = super::super::memory::CallableInput {
+                                    parameter: 0,
+                                    fields: vec![],
+                                };
+                                let mut owned = super::super::memory::own_code_inputs(
+                                    &BTreeMap::from([(input.clone(), definitions)]),
+                                    &[],
+                                    &[],
+                                    &mut self.fuel,
+                                )
+                                .map_err(|reason| error(installation, reason))?;
+                                capture_memory_code.insert(
+                                    super::super::memory::CallablePlace {
+                                        binding: *binding,
+                                        fields: fields.clone(),
+                                    },
+                                    owned.remove(&input).unwrap(),
+                                );
+                            }
+                            capture_callables.insert(code_place, callable.clone());
+                        }
+                        if !outer.stable_handler_slots.contains(&place.root) {
+                            let function = self.exit_contract.ok_or_else(|| {
+                                error(
+                                    installation,
+                                    "handler callable capture lacks its complete lexical scope",
+                                )
+                            })?;
+                            // Aliases may survive from outside this installation. Writes,
+                            // however, only invalidate this snapshot while it is active.
+                            nir::visit::expression_in_closure_environment(&function.body, &mut self.fuel, |node, fuel| {
+                                if matches!(node.kind, K::AddressOf(_)) {
+                                    if let Some(exposed) = mutated_pointer_slot(node, fuel)? {
+                                        if exposed.root == place.root {
+                                            return Err("handler callable capture rebinding or address exposure requires a writeback contract".into());
+                                        }
+                                    }
+                                }
+                                Ok(())
+                            }).map_err(|reason| error(installation, reason))?;
+                            nir::visit::expression_in_closure_environment(expression, &mut self.fuel, |node, fuel| {
+                                if let Some(mutation) = mutated_pointer_slot(node, fuel)? {
+                                    if mutation.root == place.root {
+                                        // Data siblings may change without replacing code.
+                                        // Address exposure is normalized to the whole root
+                                        // above, so it still overlaps every code field.
+                                        for fields in &code_paths {
+                                            *fuel = fuel.checked_sub(mutation.fields.len().saturating_add(fields.len()).saturating_add(1))
+                                                .ok_or("handler code overlap budget exhausted")?;
+                                            if mutation.fields.starts_with(fields) || fields.starts_with(&mutation.fields) {
+                                                return Err("handler callable capture rebinding or address exposure requires a writeback contract".into());
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(())
+                            }).map_err(|reason| error(installation, reason))?;
+                        }
                     }
                     captures.push((*binding, ty.clone()));
                 }
@@ -1074,11 +1455,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         ));
                     }
                 }
-                let parameter_summary = super::super::memory::direct_handler_accesses(
+                let parameter_summary = super::super::memory::direct_handler_accesses_with_code(
                     self.package,
                     handler,
                     arm,
                     &captures,
+                    &capture_memory_named,
+                    &capture_memory_code,
                     &mut self.fuel,
                 )
                 .map_err(|reason| error(installation, reason))?;
@@ -1113,6 +1496,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 frame.effect_mutable_roots.insert(root(*binding));
                             }
                             this.persistent_roots.insert(root(*binding));
+                            if borrowed_code_roots.contains(binding) {
+                                frame.stable_handler_slots.insert(root(*binding));
+                            }
+                            for (place, callable) in &capture_callables {
+                                this.fuel = this.fuel.checked_sub(place.fields.len() + 1)
+                                    .ok_or_else(|| error(installation, "handler code field installation budget exhausted"))?;
+                                if place.root == root(*binding) {
+                                    bound_callable_copy(callable, &mut this.fuel, installation, 0)?;
+                                    frame.set_callable_at(place, callable.clone());
+                                }
+                            }
                             if let Some(domains)=capture_domains.get(binding) {
                                 let domains=copy_enum_domains(domains,&mut this.fuel,installation)?;
                                 this.install_enum_domains(frame,&Place {root:root(*binding),fields:vec![]},domains,installation)?;
@@ -1251,6 +1645,27 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     outer_completions,
                 ));
                 checked?;
+                for state in invocation
+                    .exits
+                    .iter()
+                    .chain(&invocation.failed_exits)
+                    .chain(invocation.effect_exits.iter().map(|(_, state)| state))
+                {
+                    for binding in &borrowed_owner_roots {
+                        self.fuel = self.fuel.checked_sub(1).ok_or_else(|| {
+                            error(
+                                installation,
+                                "handler callable environment preservation budget exhausted",
+                            )
+                        })?;
+                        state.require_present(&Place {root:root(*binding),fields:vec![]})
+                            .map_err(|_| error(installation, if borrowed_code_roots.contains(binding) {
+                                "borrowed handler callable environment must remain complete on every exit"
+                            } else {
+                                "borrowed handler data capture must remain complete on every exit"
+                            }))?;
+                    }
+                }
                 if let Some(summary) = parameter_summary {
                     local_accesses.extend(summary.accesses);
                 }
@@ -1334,8 +1749,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         )
                         .map_err(|reason| error(installation, reason))?;
                         if handler.fallback.is_some() {
-                            super::super::effect_transfer::with_fallback(
-                                local,
+                            super::super::effect_transfer::with_handler_fallback(
+                                handler,
                                 fallback_parameter.as_ref(),
                                 &mut self.fuel,
                             )
@@ -1398,6 +1813,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 expr.source,
                 "effect request with pointer dependencies requires a memory contract",
             ));
+        }
+        // The matched premise describes a value supplied at installation.
+        // Reading a pointer-free direct-passing slot cannot enter handler code or
+        // access its captures. Unrelated pointer/owner state need not satisfy
+        // the stronger precondition for invoking an ordinary direct handler.
+        if *abi == nir::effects::Abi::DirectPassing
+            && super::super::memory::data_passing_signature(self.package, signature, &mut self.fuel)
+                .map_err(|reason| error(expr.source, reason))?
+        {
+            return Ok(());
         }
         for targets in flow.pointers.values() {
             self.stable_handler_pointees(flow, targets, expr.source)?;
@@ -1518,11 +1943,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let Term::Function { parameters, result } = &handler.signature else {
                 return Ok(vec![]);
             };
-            let scalar = |ty: &Term| {
-                matches!(ty, Term::Primitive(_))
-                    && (nir::program::intrinsic_pointer_value(ty)
-                        || *ty == Term::Primitive(nir::Primitive::Void))
-            };
             let mut forwarded =
                 super::super::effect_transfer::forwarded_parameters(handler, &mut self.fuel)
                     .map_err(|reason| error(source, reason))?;
@@ -1536,8 +1956,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         && input.abi == handler.abi
                         && input.signature == handler.signature
                 });
-                forwarded = super::super::effect_transfer::with_fallback(
-                    forwarded,
+                forwarded = super::super::effect_transfer::with_handler_fallback(
+                    handler,
                     previous.and_then(|input| input.forwarded_parameters.as_ref()),
                     &mut self.fuel,
                 )
@@ -1556,7 +1976,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 handler.abi,
                 nir::effects::Abi::Direct | nir::effects::Abi::DirectPassing
             ) || handler.abi == nir::effects::Abi::DirectPassing
-                && (!parameters.is_empty() || !scalar(result))
+                && (!parameters.is_empty()
+                    || !super::super::memory::effect_data_layout(
+                        self.package,
+                        result,
+                        &mut self.fuel,
+                        0,
+                    )
+                    .map_err(|reason| error(source, reason))?)
             {
                 return Ok(vec![]);
             }
@@ -1716,6 +2143,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let variants = copy_enum_domains(&flow.value_variants, &mut self.fuel, source)?;
         Ok(std::sync::Arc::new(HandlerReturnValue {
             source,
+            origins: BTreeMap::new(),
+            pointer_guards: BTreeMap::new(),
             callable,
             fields,
             variants,

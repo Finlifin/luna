@@ -830,6 +830,86 @@ fn blanket_user_implementations_check_final_subject_eligibility() {
 }
 
 #[test]
+fn tuple_kind_conflict_excludes_uninferable_generic_candidates() {
+    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    let mut package = nir::program::Package {
+        normal_forms: vec![Head {
+            declaration: id(990),
+            role: Role::Tuple,
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: id(991),
+                binding: nir::program::LocalId {
+                    owner: 990,
+                    index: 0,
+                },
+                kind: Kind::TypeList,
+                ty: node(992, vec![ty(P::Type)]),
+            }],
+        }],
+        ..Default::default()
+    };
+    let tuple = |field| Term::NormalForm {
+        head: id(990),
+        sort: Sort::Type,
+        arguments: vec![Term::TypeListValue(vec![field])],
+    };
+    let mut trusted = Context::from_package(&package).unwrap();
+    trusted.admit_nominal_constructor(id(10));
+    let candidates = [
+        (
+            generic(200, node(10, vec![var(1)]), vec![id(1)]),
+            tuple(ty(P::Bool)),
+        ),
+        (
+            generic(201, tuple(var(1)), vec![id(1)]),
+            node(10, vec![ty(P::Bool)]),
+        ),
+        (
+            generic(202, Term::Pointer(Box::new(var(1))), vec![id(1)]),
+            tuple(ty(P::Bool)),
+        ),
+        (
+            generic(203, tuple(var(1)), vec![id(1)]),
+            Term::Pointer(Box::new(ty(P::Bool))),
+        ),
+    ];
+    package.normal_forms[0].role = Role::Opaque;
+    let mut opaque = Context::from_package(&package).unwrap();
+    opaque.admit_nominal_constructor(id(10));
+    for (candidate, subject) in candidates {
+        let TypeAssessment::Excluded(proof) =
+            candidate.assess_types(&subject, &[], &trusted, Budget::default())
+        else {
+            panic!("kind conflict must not wait for generic arguments");
+        };
+        trusted.verify_proof(&proof, Budget::default()).unwrap();
+        assert!(opaque.verify_proof(&proof, Budget::default()).is_err());
+        assert!(matches!(
+            candidate.assess_types(&subject, &[], &opaque, Budget::default()),
+            TypeAssessment::Pending(_)
+        ));
+        assert!(matches!(
+            candidate.assess_types(
+                &subject,
+                &[],
+                &trusted,
+                Budget {
+                    steps: 0,
+                    ..Budget::default()
+                }
+            ),
+            TypeAssessment::Pending(_)
+        ));
+        assert!(matches!(
+            candidate.assess_types(&subject, &[], &trusted, Budget::default()),
+            TypeAssessment::Excluded(_)
+        ));
+    }
+}
+
+#[test]
 fn tuple_subject_eligibility_requires_trusted_metadata_at_selection_and_replay() {
     use elaboration::{implementation::TypeAssessment, ptc::Context};
     use nir::normal_forms::{Head, Kind, Parameter, Role};
@@ -2797,4 +2877,93 @@ fn disjoint_open_nominal_impls_select_and_infer_their_value_arguments() {
             assert_eq!(evidence.type_arguments, vec![Term::Bool(value)]);
         }
     }
+}
+
+#[test]
+fn opaque_index_keys_see_open_inputs_inside_error_results() {
+    let opaque = |argument| Term::NormalForm {
+        head: id(91),
+        sort: Sort::Type,
+        arguments: vec![argument],
+    };
+    for argument in [
+        Term::error_result(vec![var(1)], ty(P::Bool)),
+        Term::error_result(vec![ty(P::Bool)], var(1)),
+    ] {
+        assert_eq!(
+            Key::from_type(&opaque(argument), Budget::default()).unwrap(),
+            Key::Wildcard
+        );
+    }
+    assert_ne!(
+        Key::from_type(
+            &opaque(Term::error_result(vec![ty(P::Bool)], ty(P::Bool))),
+            Budget::default()
+        )
+        .unwrap(),
+        Key::Wildcard
+    );
+}
+
+#[test]
+fn explicit_error_prefix_excludes_uninferable_ordinary_candidates() {
+    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(10));
+    let qualified = |result| Term::error_result(vec![ty(P::Bool)], result);
+    let error_head = generic(200, qualified(var(1)), vec![id(1)]);
+    for (candidate, subject) in [
+        (error_head.clone(), node(10, vec![ty(P::Char)])),
+        (
+            generic(201, node(10, vec![var(1)]), vec![id(1)]),
+            qualified(ty(P::Char)),
+        ),
+    ] {
+        let TypeAssessment::Excluded(proof) =
+            candidate.assess_types(&subject, &[], &context, Budget::default())
+        else {
+            panic!("known error prefix must not wait for an uninferred parameter");
+        };
+        context.verify_proof(&proof, Budget::default()).unwrap();
+    }
+    let subject = qualified(ty(P::Char));
+    let TypeAssessment::Applicable(evidence) =
+        error_head.assess_types(&subject, &[], &context, Budget::default())
+    else {
+        panic!("matching error subject must remain applicable");
+    };
+    error_head
+        .verify_type_evidence(&evidence, &subject, &[], &context, Budget::default())
+        .unwrap();
+    assert_eq!(evidence.type_arguments, vec![ty(P::Char)]);
+}
+
+#[test]
+fn coherence_proof_budget_is_not_diluted_by_unrelated_interfaces() {
+    let mut index = Index::default();
+    add(&mut index, 200, ty(P::Bool));
+    add(&mut index, 201, ty(P::Char));
+    for n in 0..30 {
+        let mut unrelated = head(300 + n, ty(P::Bool));
+        unrelated.interface = Some(id(500 + n));
+        index.insert(unrelated, Budget::default()).unwrap();
+    }
+    let context = elaboration::ptc::Context::default();
+    let budget = Budget {
+        steps: 2000,
+        ..Budget::default()
+    };
+    let report = index.check_type_coherence(&context, budget);
+    assert_eq!(report.pairs.len(), 32 * 31 / 2);
+    assert!(report.is_proved(), "{report}");
+    assert!(index.verify_type_coherence(&report, &context, budget));
+    let exhausted = Budget {
+        steps: 500,
+        ..budget
+    };
+    assert!(!index.check_type_coherence(&context, exhausted).is_proved());
+    assert!(!index.verify_type_coherence(&report, &context, exhausted));
+    add(&mut index, 202, ty(P::Bool));
+    assert!(!index.check_type_coherence(&context, budget).is_proved());
+    assert!(!index.verify_type_coherence(&report, &context, budget));
 }

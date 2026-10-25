@@ -261,6 +261,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<(), Error> {
         let metadata = n::Package {
+            target: self.target,
             structs: self.structs.values().cloned().collect(),
             enums: self.enums.values().cloned().collect(),
             normal_forms: self.normal_form_metadata(),

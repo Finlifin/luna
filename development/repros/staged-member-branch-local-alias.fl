@@ -1,0 +1,12 @@
+struct Outer {
+    pub struct Inner where T {pub typealias Payload = T;}
+    pub struct Other where T {pub typealias Payload = T;}
+}
+comptime fn Make() -> .Type'builtin {Outer}
+fn configured(comptime flag: bool) -> bool {
+    const Container = Make();
+    const Selected = if flag {const Local = Container.Inner<bool>; Local} else {Container.Other<bool>};
+    let value: Selected.Payload = flag;
+    value
+}
+fn run() -> bool {configured(true) and not configured(false)}

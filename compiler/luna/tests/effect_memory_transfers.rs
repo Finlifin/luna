@@ -572,7 +572,7 @@ fn ordinary_effect_preserves_tuple_newtype_and_variant_pointer_origins() {
     for (declarations, ty, construct, access) in [
         (
             "",
-            "(*bool,*bool)",
+            "Tuple<*bool,*bool>",
             "(flag.ref,flag.ref)",
             "value match {(p,_)=>p.*}",
         ),
@@ -600,7 +600,7 @@ fn ordinary_effect_preserves_tuple_newtype_and_variant_pointer_origins() {
         let valid = format!(
             "{declarations} fn run()->bool {{var flag=true;let value=install({construct});{access}}}"
         );
-        let package = support::compile(&valid);
+        let package = support::compile_with_tuple(&valid);
         elaboration::verification::memory::infer_in_package(
             &package,
             support::id(&package, "run"),
@@ -624,7 +624,7 @@ fn ordinary_effect_preserves_tuple_newtype_and_variant_pointer_origins() {
             fn subject()->#relay bool {{var flag=true;let value=relay({construct})#;{access}}}
             fn run()->bool {{subject()# {{relay(value)=>value,}}}}"
         );
-        let package = support::compile(&scalar);
+        let package = support::compile_with_tuple(&scalar);
         assert_eq!(
             luna::execution::interpret_with_protocols(
                 &package,
@@ -639,7 +639,7 @@ fn ordinary_effect_preserves_tuple_newtype_and_variant_pointer_origins() {
         let invalid = format!(
             "{declarations} fn run()->bool {{let value=do {{var flag=true;install({construct})}};{access}}}"
         );
-        let package = support::compile(&invalid);
+        let package = support::compile_with_tuple(&invalid);
         let failure = luna::execution::interpret_with_protocols(
             &package,
             "run",
@@ -972,7 +972,7 @@ fn effect_transfer_preserves_whole_aggregate_pattern_aliases() {
         ),
         (
             "",
-            "(bool,*bool)",
+            "Tuple<bool,*bool>",
             "(true,flag.ref)",
             "relay(value)=>value match {(_,_) as whole=>whole match {(true,_) as next=>next,(false,_) as next=>next}},",
             "value match {(_,p)=>p.*}",
@@ -1000,7 +1000,7 @@ fn effect_transfer_preserves_whole_aggregate_pattern_aliases() {
         ),
         (
             "",
-            "(bool,*bool)",
+            "Tuple<bool,*bool>",
             "(true,flag.ref)",
             "relay((true,_) as whole)=>whole,relay((false,_) as whole)=>whole,",
             "value match {(_,p)=>p.*}",
@@ -1029,7 +1029,7 @@ fn effect_transfer_preserves_whole_aggregate_pattern_aliases() {
         let source = format!(
             "{prefix} fn run()->bool {{var flag=true;let value=install({construct});{access}}}"
         );
-        let package = support::compile(&source);
+        let package = support::compile_with_tuple(&source);
         elaboration::verification::memory::infer_in_package(
             &package,
             support::id(&package, "run"),
@@ -1051,7 +1051,7 @@ fn effect_transfer_preserves_whole_aggregate_pattern_aliases() {
         let source = format!(
             "{prefix} fn run()->bool {{let value=do {{var flag=true;install({construct})}};{access}}}"
         );
-        let package = support::compile(&source);
+        let package = support::compile_with_tuple(&source);
         let error = luna::execution::interpret_with_protocols(
             &package,
             "run",
@@ -1120,15 +1120,23 @@ fn effect_whole_record_pattern_preserves_owned_callback_consumption() {
 }
 
 #[test]
-fn effect_aggregate_match_requires_an_observed_subject() {
-    for (input, argument, declarations, body) in [
+fn effect_aggregate_match_requires_producer_and_memory_evidence() {
+    for (input, argument, declarations, body, reason) in [
         (
             "Link",
             "value",
             "fn produce(value:Link)->Link {value}",
             "produce(value) match {{flag:_,target:_} as whole=>whole}",
+            "data-only",
         ),
-        ("Link", "value", "", "value.target.* match {_=>value}"),
+        // Identity preservation does not authorize reading an unknown target.
+        (
+            "Link",
+            "value",
+            "",
+            "value.target.* match {_=>value}",
+            "unknown memory target",
+        ),
     ] {
         let source=format!("struct Link {{flag:bool,target:*bool}} {declarations}
             effect relay({argument}:{input})->Link;
@@ -1141,7 +1149,7 @@ fn effect_aggregate_match_requires_an_observed_subject() {
             &mut 300_000,
         )
         .unwrap_err();
-        assert!(error.contains("data-only"), "{body}: {error}");
+        assert!(error.contains(reason), "{body}: {error}");
     }
 }
 
@@ -1472,13 +1480,15 @@ fn closed_handler_arms_infer_parameter_accesses_and_return_origins() {
 #[test]
 fn handler_parameter_inference_tracks_fields_and_rejects_missing_environments() {
     use elaboration::verification::memory;
-    for (source, expected) in [
+    for (source, expected, fields, writes) in [
         ("struct Link {target:*bool} effect touch(value:Link)->bool;
-          fn install(value:Link)->bool {touch(value)# {touch(value)=>do {value.target.* = true;value.target.*},}}", None),
+          fn install(value:Link)->bool {touch(value)# {touch(value)=>do {value.target.* = true;value.target.*},}}", None, vec![0], true),
         ("effect touch(pointer:*bool)->bool;
-          fn install(pointer:*bool,external:bool)->bool {touch(pointer)# {touch(pointer)=>external,}}", Some("capture environment")),
+          fn install(pointer:*bool,external:bool)->bool {touch(pointer)# {touch(pointer)=>external,}}", Some("capture environment"), vec![], false),
         ("effect touch(pointer:*bool)->bool;
-          fn install(pointer:*bool)->bool {touch(pointer)# {touch(pointer)=>do {return pointer.*;},}}", Some("lexical return")),
+          fn install(pointer:*bool)->bool {touch(pointer)# {touch(pointer)=>do {return pointer.*;},}}", None, vec![], false),
+        ("effect touch(pointer:*bool)->bool;
+          fn install(pointer:*bool)->*bool {touch(pointer)# {touch(pointer)=>do {return pointer;},};pointer}", Some("lexical return"), vec![], false),
     ] {
         let package=support::compile(source);
         let function=package.functions.iter().find(|function|function.name=="install").unwrap();
@@ -1492,8 +1502,12 @@ fn handler_parameter_inference_tracks_fields_and_rejects_missing_environments() 
             let error=result.unwrap_err();assert!(error.contains(expected),"{error}");
         } else {
             let summary=result.unwrap();
-            assert!(summary.accesses.iter().all(|access| access.parameter==0 && access.input_fields==[0]));
-            assert!(summary.accesses.iter().any(|access|access.read_value && access.write));
+            assert!(summary.accesses.iter().all(|access| access.parameter==0 && access.input_fields==fields));
+            assert!(summary.accesses.iter().any(|access|access.read_value && access.write==writes));
+            // A lexical scalar return evaluates its memory accesses but never
+            // becomes the operation's ordinary pointer result. Pointer-valued
+            // exits still need a separate exit summary, tested above.
+            assert!(summary.memory.result_targets.is_none());
         }
     }
 }
@@ -1623,8 +1637,8 @@ fn ordinary_handlers_access_aggregate_pointer_parameters() {
             "value.first.target.* = true;value.second.target.* = false;true",
         ),
         (
-            "impl Duplicate for (*bool,*bool) {}",
-            "(*bool,*bool)",
+            "impl Duplicate for Tuple<*bool,*bool> {}",
+            "Tuple<*bool,*bool>",
             "(left.ref,right.ref)",
             "value match {(a,b)=>do {a.* = true;b.* = false;true}}",
         ),
@@ -1647,7 +1661,7 @@ fn ordinary_handlers_access_aggregate_pointer_parameters() {
             "{prefix} fn run()->bool {{var left=false;var right=false;
             let result=install({construct});result and left and not right}}"
         );
-        let package = support::compile(&source);
+        let package = support::compile_with_tuple(&source);
         assert_eq!(
             luna::execution::interpret_with_protocols(
                 &package,
@@ -1663,7 +1677,7 @@ fn ordinary_handlers_access_aggregate_pointer_parameters() {
             "{prefix} fn run()->bool {{
             let value=do {{var left=false;var right=false;{construct}}};install(value)}}"
         );
-        let package = support::compile(&dangling);
+        let package = support::compile_with_tuple(&dangling);
         assert!(
             luna::execution::interpret_with_protocols(
                 &package,
@@ -1764,8 +1778,8 @@ fn ordinary_handlers_destructure_pointer_parameters() {
             "p.* = true;q.* = false;p.*",
         ),
         (
-            "impl Duplicate for (*bool,*bool) {}",
-            "(*bool,*bool)",
+            "impl Duplicate for Tuple<*bool,*bool> {}",
+            "Tuple<*bool,*bool>",
             "(flag.ref,other.ref)",
             "(p,q)",
             "p.* = true;q.* = false;p.*",
@@ -1794,7 +1808,7 @@ fn ordinary_handlers_destructure_pointer_parameters() {
             "{prefix} fn run()->bool {{var flag=false;var other=false;
             let result=install({construct});result and flag and not other}}"
         );
-        let package = support::compile(&source);
+        let package = support::compile_with_tuple(&source);
         assert_eq!(
             luna::execution::interpret_with_protocols(
                 &package,
@@ -1809,7 +1823,7 @@ fn ordinary_handlers_destructure_pointer_parameters() {
         let source = format!(
             "{prefix} fn run()->bool {{let value=do {{var flag=false;var other=false;{construct}}};install(value)}}"
         );
-        let package = support::compile(&source);
+        let package = support::compile_with_tuple(&source);
         assert!(
             luna::execution::interpret_with_protocols(
                 &package,
@@ -2035,8 +2049,8 @@ fn handlers_access_pointer_fields_in_captured_aggregates() {
             "captured.link.target.*",
         ),
         (
-            "impl Duplicate for (*bool,*bool) {}",
-            "(*bool,*bool)",
+            "impl Duplicate for Tuple<*bool,*bool> {}",
+            "Tuple<*bool,*bool>",
             "(right.ref,right.ref)",
             "captured match {(a,_)=>do {a.* = false;}}",
             "captured match {(_,b)=>b.*}",
@@ -2077,7 +2091,7 @@ fn handlers_access_pointer_fields_in_captured_aggregates() {
                 fn run()->bool {{var left=false;var right=true;
                     let result=install(left.ref,{construct});result and left=={parameter} and not right
                 }}");
-            let package = support::compile(&source);
+            let package = support::compile_with_tuple(&source);
             assert_eq!(
                 luna::execution::interpret_with_protocols(
                     &package,
@@ -2746,7 +2760,7 @@ fn variant_matches_route_qualified_pointers_to_typed_effect_requests() {
 }
 #[test]
 fn effect_aliases_preserve_variant_conditions_until_storage_is_replaced() {
-    let seed = support::compile(
+    let seed = support::compile_with_tuple(
         "typealias u32=.u32'builtin;trait Duplicate {}trait Retire {fn drop(*self);}",
     );
     let protocols = elaboration::program::Protocols {
@@ -3028,7 +3042,7 @@ fn effect_aliases_preserve_variant_conditions_until_storage_is_replaced() {
             struct Nested {{holder:Holder}} impl Duplicate for Nested {{}}
             newtype WrappedHolder=Holder; impl Duplicate for WrappedHolder {{}}
             struct Pair {{inner:Choice,flag:bool}} impl Duplicate for Pair {{}}
-            impl Duplicate for (Choice,bool) {{}}
+            impl Duplicate for Tuple<Choice,bool> {{}}
             newtype Wrapped=Choice; impl Duplicate for Wrapped {{}}
             enum Envelope {{none,slot(Choice)}} impl Duplicate for Envelope {{}}
             fn keep(value:Choice,other:*u32)->Choice {{value}}
@@ -3068,7 +3082,7 @@ fn effect_aliases_preserve_variant_conditions_until_storage_is_replaced() {
                 "{prefix} fn run()->bool {{var flag=false;var count:u32=0;var other:u32=0;
                 let result=install({value},other.ref);result and ({expected})}}"
             );
-            let package = support::compile_with_protocols(&source, &protocols)
+            let package = support::compile_with_tuple_protocols(&source, &protocols)
                 .unwrap_or_else(|error| panic!("{setup}: {error}"));
             assert_eq!(
                 luna::execution::interpret_with_protocols(
@@ -3087,7 +3101,7 @@ fn effect_aliases_preserve_variant_conditions_until_storage_is_replaced() {
             install(Choice.flag(flag.ref),other)}}"
         );
         if replaced {
-            let package = support::compile_with_protocols(&source, &protocols)
+            let package = support::compile_with_tuple_protocols(&source, &protocols)
                 .unwrap_or_else(|error| panic!("{setup}: {error}"));
             assert!(
                 luna::execution::interpret_with_protocols(
@@ -3573,7 +3587,7 @@ fn indirect_aggregate_load_exports_pointer_field_origins() {
             "let copied=p.*;copied.as(Link)",
         ),
         (
-            "(Link,bool)",
+            "Tuple<Link,bool>",
             "(Link {target:target},false)",
             "let (copied,_)=p.*;copied",
         ),
@@ -3584,7 +3598,7 @@ fn indirect_aggregate_load_exports_pointer_field_origins() {
             struct Link {{target:*bool}}impl Duplicate for Link {{}}
             struct Holder {{inner:Link}}impl Duplicate for Holder {{}}
             newtype Wrapped=Link;impl Duplicate for Wrapped {{}}
-            impl Duplicate for (Link,bool) {{}}
+            impl Duplicate for Tuple<Link,bool> {{}}
             fn load(p:*{ty})->Link {{{body}}}
             fn relay(p:*{ty})->Link {{load(p)}}"
         );
@@ -3605,7 +3619,7 @@ fn indirect_aggregate_load_exports_pointer_field_origins() {
                 false,
             ),
         ] {
-            let package = support::compile(&format!(
+            let package = support::compile_with_tuple(&format!(
                 "{prefix}fn run()->bool {{let flag=true;let target={target};{storage}let copied=relay(pointer);copied.target.*}}"
             ));
             let loader = package
@@ -4496,4 +4510,167 @@ fn indirect_enum_load_preserves_conditions_on_each_loaded_root() {
             assert!(result.is_err(), "expired intermediate enum accepted");
         }
     }
+}
+
+#[test]
+fn scalar_passing_request_footprint_is_independent_of_provider_storage() {
+    use elaboration::verification::memory;
+    let package = support::compile(
+        "^attrs.effects.direct_passing effect value()->T where T;
+         fn subject()->#value<T> T where T {value<T>()#}",
+    );
+    for primitive in [
+        nir::Primitive::Bool,
+        nir::Primitive::U128,
+        nir::Primitive::F64,
+    ] {
+        let arguments = [nir::Term::Primitive(primitive)];
+        let infer = |fuel: &mut usize| {
+            memory::infer_in_package(&package, support::id(&package, "subject"), &arguments, fuel)
+        };
+        assert!(infer(&mut 0).is_err());
+        let summary = infer(&mut 200000).unwrap();
+        assert!(summary.accesses.is_empty(), "{summary}");
+        // Empty memory footprint does not replace the separate conservative rejection analysis.
+        assert!(summary.may_reject, "{summary}");
+        assert!(!summary.may_run_cleanup, "{summary}");
+        assert_eq!(summary, infer(&mut 200000).unwrap());
+    }
+}
+
+#[test]
+fn scalar_passing_request_rule_does_not_erase_provider_access_or_rejection() {
+    use elaboration::verification::memory;
+    let package = support::compile(
+        "^attrs.effects.direct_passing effect ready()->bool;
+         fn subject()->#ready bool {ready()#}
+         fn install(target:*bool)->bool {
+             subject()# {ready()=>do {assumes target.*; target.* = false; true},}
+         }",
+    );
+    let summary =
+        memory::infer_in_package(&package, support::id(&package, "install"), &[], &mut 200000)
+            .unwrap();
+    assert!(
+        summary.accesses.iter().any(|access| access.read_value),
+        "{summary}"
+    );
+    assert!(
+        summary.accesses.iter().any(|access| access.write),
+        "{summary}"
+    );
+    assert!(summary.may_reject, "{summary}");
+}
+
+#[test]
+fn scalar_passing_request_rule_rejects_direct_pointer_and_forged_abi() {
+    use elaboration::verification::memory;
+    for (attribute, result) in [("", "bool"), ("^attrs.effects.direct_passing", "*bool")] {
+        let package = support::compile(&format!(
+            "{attribute} effect ready()->{result}; fn subject()->#ready {result} {{ready()#}}"
+        ));
+        let error =
+            memory::infer_in_package(&package, support::id(&package, "subject"), &[], &mut 200000)
+                .unwrap_err();
+        assert!(
+            error.contains("installed handler memory premise"),
+            "{error}"
+        );
+    }
+    let mut package = support::compile(
+        "^attrs.effects.direct_passing effect ready()->bool; fn subject()->#ready bool {ready()#}",
+    );
+    let id = support::id(&package, "subject");
+    for function in &mut package.functions {
+        nir::visit::expression_mut(&mut function.body, &mut 10000, |expr, _| {
+            if let nir::program::ExprKind::EffectRequest { abi, .. } = &mut expr.kind {
+                *abi = nir::effects::Abi::Direct;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+    assert!(
+        memory::infer_in_package(&package, id, &[], &mut 200000)
+            .unwrap_err()
+            .contains("disagrees with its premise")
+    );
+}
+
+#[test]
+fn passing_newtype_memory_summary_inspects_representation_without_copy_assumptions() {
+    use elaboration::verification::memory;
+    for (payload, accepted) in [("bool", true), ("*bool", false), ("fn()->bool", false)] {
+        let package = support::compile(&format!(
+            "newtype Wrapper<T> = T;
+            ^attrs.effects.direct_passing effect value()->Wrapper<{payload}>;
+            fn subject()->#value Wrapper<{payload}> {{value()#}}"
+        ));
+        let result =
+            memory::infer_in_package(&package, support::id(&package, "subject"), &[], &mut 200000);
+        if accepted {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("installed handler memory premise")
+            );
+        }
+    }
+}
+
+#[test]
+fn passing_error_result_memory_checks_success_and_all_error_payloads() {
+    use elaboration::verification::memory;
+    for (result, accepted) in [
+        ("!Payload bool", true),
+        ("!Borrowed bool", false),
+        ("!Payload *bool", false),
+        ("![Payload,Borrowed] bool", false),
+    ] {
+        let package = support::compile(&format!(
+            "struct Payload {{flag:bool}} struct Borrowed {{target:*bool}}
+            ^attrs.effects.direct_passing effect answer()->{result};
+            fn subject()->#answer {result} {{answer()#}}"
+        ));
+        let result =
+            memory::infer_in_package(&package, support::id(&package, "subject"), &[], &mut 200000);
+        if accepted {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("installed handler memory premise")
+            );
+        }
+    }
+}
+
+#[test]
+fn data_error_catches_keep_before_arm_and_after_memory_writes() {
+    use elaboration::verification::memory;
+    use std::collections::BTreeSet;
+    let package = support::compile(
+        "typealias Void=.void'builtin;
+        fn step(failed:bool)->!bool Void {if failed {return error true;}}
+        fn subject(failed:bool,before:*bool,arm:*bool,after:*bool) {
+            step(failed)! {
+                catch original=>{before.* = true;},
+                true=>{arm.* = true;},
+                catch original=>{after.* = true;},
+            };
+        }",
+    );
+    let id = support::id(&package, "subject");
+    assert!(memory::infer_in_package(&package, id, &[], &mut 0).is_err());
+    let summary = memory::infer_in_package(&package, id, &[], &mut 200000).unwrap();
+    let written: BTreeSet<_> = summary
+        .accesses
+        .iter()
+        .filter(|access| access.write)
+        .map(|access| access.target.parameter)
+        .collect();
+    assert_eq!(written, BTreeSet::from([1, 2, 3]));
 }

@@ -90,14 +90,30 @@ pub fn validate_completed(
     arguments: &[Term],
     fuel: &mut usize,
 ) -> Result<(), AdmissionError> {
-    validate_completed_with_layouts(parameters, domains, arguments, fuel, |_, _, _| {
-        Err("nominal value admission requires declaration layout evidence".into())
-    })
+    validate_completed_in(parameters, domains, arguments, fuel, None)
+}
+
+pub fn validate_completed_in(
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &[Term],
+    fuel: &mut usize,
+    target: Option<crate::target::TargetData>,
+) -> Result<(), AdmissionError> {
+    validate_completed_with_layouts_in(
+        parameters,
+        domains,
+        arguments,
+        fuel,
+        |_, _, _| Err("nominal value admission requires declaration layout evidence".into()),
+        target,
+    )
 }
 
 /// Admission with authoritative declaration-order payload domains. The callback
-/// must validate the nominal instance and variant; a value's own type tag is
-/// never sufficient evidence of its layout. All work shares the caller's fuel.
+/// must validate the nominal instance and variant, or a registered Tuple head
+/// for tuple value indices. A value's own type tag is never sufficient evidence
+/// of its layout. All work shares the caller's fuel.
 pub fn validate_completed_with_layouts(
     parameters: &[DeclarationId],
     domains: &[Term],
@@ -105,9 +121,26 @@ pub fn validate_completed_with_layouts(
     fuel: &mut usize,
     layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
 ) -> Result<(), AdmissionError> {
-    validate_with_evidence(parameters, domains, arguments, fuel, layout, |_, _, _| {
-        false
-    })
+    validate_completed_with_layouts_in(parameters, domains, arguments, fuel, layout, None)
+}
+
+pub fn validate_completed_with_layouts_in(
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &[Term],
+    fuel: &mut usize,
+    layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
+    target: Option<crate::target::TargetData>,
+) -> Result<(), AdmissionError> {
+    validate_with_evidence_in(
+        parameters,
+        domains,
+        arguments,
+        fuel,
+        layout,
+        |_, _, _| false,
+        target,
+    )
 }
 
 /// Symbolic value leaves require independent declaration-domain evidence.
@@ -116,8 +149,20 @@ pub fn validate_with_evidence(
     domains: &[Term],
     arguments: &[Term],
     fuel: &mut usize,
+    layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
+    declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+) -> Result<(), AdmissionError> {
+    validate_with_evidence_in(parameters, domains, arguments, fuel, layout, declared, None)
+}
+
+pub fn validate_with_evidence_in(
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &[Term],
+    fuel: &mut usize,
     mut layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
     mut declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+    target: Option<crate::target::TargetData>,
 ) -> Result<(), AdmissionError> {
     let parameters = binders(parameters, domains).map_err(|e| e.to_string())?;
     if parameters.len() != arguments.len() {
@@ -145,7 +190,15 @@ pub fn validate_with_evidence(
             fuel,
         )
         .map_err(AdmissionError::from)?;
-        validate_value(argument, &domain, fuel, &mut layout, &mut declared, 0)?;
+        validate_value(
+            argument,
+            &domain,
+            fuel,
+            &mut layout,
+            &mut declared,
+            0,
+            target,
+        )?;
     }
     Ok(())
 }
@@ -156,10 +209,29 @@ pub(crate) fn validate_symbolic_value(
     argument: &Term,
     domain: &Term,
     fuel: &mut usize,
+    layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
+    declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+) -> Result<(), AdmissionError> {
+    validate_symbolic_value_in(argument, domain, fuel, layout, declared, None)
+}
+
+pub(crate) fn validate_symbolic_value_in(
+    argument: &Term,
+    domain: &Term,
+    fuel: &mut usize,
     mut layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
     mut declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+    target: Option<crate::target::TargetData>,
 ) -> Result<(), AdmissionError> {
-    validate_value(argument, domain, fuel, &mut layout, &mut declared, 0)
+    validate_value(
+        argument,
+        domain,
+        fuel,
+        &mut layout,
+        &mut declared,
+        0,
+        target,
+    )
 }
 
 fn validate_value(
@@ -169,6 +241,7 @@ fn validate_value(
     layout: &mut impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
     declared: &mut impl FnMut(&Term, &Term, &mut usize) -> bool,
     depth: usize,
+    target: Option<crate::target::TargetData>,
 ) -> Result<(), AdmissionError> {
     if depth >= 128 {
         return Err("nominal value nesting exceeds admission depth".into());
@@ -187,6 +260,18 @@ fn validate_value(
             Err("nominal value index lacks matching completed domain evidence".into())
         };
     }
+    if let Term::ErrorValue { value, .. } = argument {
+        let payload = crate::error_results::frozen_payload_domain(argument, domain, fuel).map_err(
+            |error| {
+                if error == crate::error_results::Error::Budget {
+                    AdmissionError::Budget
+                } else {
+                    AdmissionError::from("error value index domain or branch mismatch")
+                }
+            },
+        )?;
+        return validate_value(value, payload, fuel, layout, declared, depth + 1, target);
+    }
     if let Term::NominalValue {
         ty,
         variant,
@@ -202,7 +287,20 @@ fn validate_value(
         }
         for (value, domain) in fields.iter().zip(&expected) {
             crate::type_computations::charge_term(domain, fuel).map_err(AdmissionError::from)?;
-            validate_value(value, domain, fuel, layout, declared, depth + 1)?;
+            validate_value(value, domain, fuel, layout, declared, depth + 1, target)?;
+        }
+        return Ok(());
+    }
+    if let (Term::TupleValue(values), Term::NormalForm { .. }) = (argument, domain) {
+        // Only the caller's registered layout evidence may expose a tuple
+        // normal form. Its body and its spelling do not establish this view.
+        let domains = layout(domain, None, fuel)?;
+        if values.len() != domains.len() {
+            return Err("nominal tuple index arity mismatch".into());
+        }
+        for (value, domain) in values.iter().zip(&domains) {
+            crate::type_computations::charge_term(domain, fuel).map_err(AdmissionError::from)?;
+            validate_value(value, domain, fuel, layout, declared, depth + 1, target)?;
         }
         return Ok(());
     }
@@ -211,7 +309,7 @@ fn validate_value(
             return Err("nominal tuple index arity mismatch".into());
         }
         for (value, domain) in values.iter().zip(domains) {
-            validate_value(value, domain, fuel, layout, declared, depth + 1)?;
+            validate_value(value, domain, fuel, layout, declared, depth + 1, target)?;
         }
         return Ok(());
     }
@@ -238,7 +336,7 @@ fn validate_value(
                 .iter()
                 .find_map(|(field, domain)| (field == name).then_some(domain))
                 .ok_or_else(|| AdmissionError::from("unknown nominal record index field"))?;
-            validate_value(value, domain, fuel, layout, declared, depth + 1)?;
+            validate_value(value, domain, fuel, layout, declared, depth + 1, target)?;
         }
         return Ok(());
     }
@@ -254,12 +352,16 @@ fn validate_value(
                 layout,
                 declared,
                 depth + 1,
+                target,
             )?;
         }
         return Ok(());
     }
     if let (Term::Integer(value), Term::Primitive(primitive)) = (argument, domain) {
-        if let Some((signed, width)) = primitive.fixed_integer_layout() {
+        if let Some((signed, width)) = target.map_or_else(
+            || primitive.fixed_integer_layout(),
+            |target| target.integer_layout(*primitive),
+        ) {
             let fits = if signed {
                 value.to_signed(width).is_ok()
             } else {

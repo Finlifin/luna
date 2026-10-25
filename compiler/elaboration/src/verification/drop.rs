@@ -348,6 +348,7 @@ pub use access::{AccessCheck, PointerMemory, check_access, check_access_with_mem
 
 mod plan;
 pub use plan::{
-    AcquiredCleanup, CleanupPlan, CleanupSession, CleanupStep, VariantCleanup, acquire_cleanup,
-    plan_cleanup, plan_cleanup_with_memory, plan_cleanup_with_variants,
+    AcquiredCleanup, CleanupPlan, CleanupReadFootprint, CleanupReader, CleanupSession, CleanupStep,
+    VariantCleanup, acquire_cleanup, plan_cleanup, plan_cleanup_with_memory,
+    plan_cleanup_with_variants,
 };

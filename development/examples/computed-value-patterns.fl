@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Int = .Integer'builtin;
 typealias Bool = true'type;
 typealias Byte = .u8'builtin;
@@ -16,14 +19,14 @@ comptime fn same_text(value: Text, expected: Text) -> Bool {
 comptime fn same_byte(value: Byte, expected: Byte) -> Bool {
     value match { 'expected => true, _ => false }
 }
-comptime fn rollback(value: (Int, Int)) -> Int {
+comptime fn rollback(value: Tuple<Int, Int>) -> Int {
     value match { (bound, < first() > ) or ( < first() > , bound) => bound, _ => 0 }
 }
-comptime fn run() -> (Int, Int, Int, Bool, Bool, Bool, Bool, Int) {
+comptime fn run() -> Tuple<Int, Int, Int, Bool, Bool, Bool, Bool, Int> {
     (choose(11), choose(17), choose(23), same(29, 29), same(29, 31),
      same_text("flurry", "flurry"), same_byte(127, 127), rollback((11, 37)))
 }
-comptime fn scalar_equal() -> (Bool, Bool, Bool, Bool, Bool, Bool) {
+comptime fn scalar_equal() -> Tuple<Bool, Bool, Bool, Bool, Bool, Bool> {
     let byte: Byte = 255;
     let signed: .i8'builtin = -128;
     (true == true, true != false, 'a' != 'b', "hello" == "hello",

@@ -137,13 +137,41 @@ pub(crate) enum ExprContext {
     ReachabilityAnnotation,
 }
 
+fn binary_operator(kind: NodeKind) -> Option<BinOp> {
+    match kind {
+        NodeKind::AddAdd => Some(BinOp::Concat),
+        NodeKind::Add => Some(BinOp::Add),
+        NodeKind::Sub => Some(BinOp::Sub),
+        NodeKind::Mul => Some(BinOp::Mul),
+        NodeKind::Div => Some(BinOp::Div),
+        NodeKind::Mod => Some(BinOp::Rem),
+        NodeKind::BoolEq => Some(BinOp::Eq),
+        NodeKind::BoolNotEq => Some(BinOp::Ne),
+        NodeKind::BoolGt => Some(BinOp::Gt),
+        NodeKind::BoolGtEq => Some(BinOp::Ge),
+        NodeKind::BoolLt => Some(BinOp::Lt),
+        NodeKind::BoolLtEq => Some(BinOp::Le),
+        NodeKind::BoolAnd => Some(BinOp::And),
+        NodeKind::BoolOr => Some(BinOp::Or),
+        _ => None,
+    }
+}
+
 impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     /// Lower an AST node in expression position into an HIR [`Expr`].
     pub(crate) fn lower_expr(&mut self, ctx: ExprContext, node: NodeIndex) -> Expr<'hir> {
-        let Some((kind, span, children)) = self.ast.get_node(node) else {
-            unreachable!("invalid expression node: no such node index {:?}", node);
-        };
+        let kind = self.ast.get_node(node).expect("valid expression node").0;
+        if binary_operator(kind).is_some() || matches!(kind, NodeKind::Negative | NodeKind::BoolNot)
+        {
+            self.lower_operator_expr(ctx, node)
+        } else {
+            self.lower_non_operator_expr(ctx, node)
+        }
+    }
 
+    #[inline(never)]
+    fn lower_non_operator_expr(&mut self, ctx: ExprContext, node: NodeIndex) -> Expr<'hir> {
+        let (kind, span, children) = self.ast.get_node(node).expect("valid expression node");
         match kind {
             NodeKind::ContextualExprType | NodeKind::ContextualPatternType => {
                 let subject = (kind == NodeKind::ContextualPatternType)
@@ -221,7 +249,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             }
             NodeKind::QuoteExpr | NodeKind::SpliceExpr => {
                 let body = self.lower_expr(ctx, children[0]);
-                let substitutions = self
+                let mut substitutions: Vec<hir::expr::CodeSubstitution<'hir>> = self
                     .ast
                     .get_multi_child_slice(children[1])
                     .unwrap_or(&[])
@@ -236,6 +264,76 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         }
                     })
                     .collect();
+                if kind == NodeKind::SpliceExpr {
+                    if let ExprKind::ResolvedClauseParam(_, definition) = body.kind {
+                        if let Some(ports) = self.test_template_ports.get(&definition).cloned() {
+                            let mut explicit = std::collections::HashSet::new();
+                            for entry in &substitutions {
+                                if !explicit.insert(entry.port.name) {
+                                    self.emit_malformed(
+                                        "duplicate test template splice port",
+                                        entry.port.span,
+                                    );
+                                }
+                                if !ports.iter().any(|port| port.name == entry.port.name) {
+                                    self.emit_malformed(
+                                        "unknown test template splice port",
+                                        entry.port.span,
+                                    );
+                                }
+                                if !matches!(
+                                    entry.binding.kind,
+                                    ExprKind::ResolvedLocal(..) | ExprKind::ResolvedFnParam(..)
+                                ) {
+                                    self.emit_malformed("test template substitution requires a local binding, not a computed value or global declaration", entry.binding.span);
+                                }
+                            }
+                            for port in ports {
+                                if substitutions
+                                    .iter()
+                                    .any(|entry| entry.port.name == port.name)
+                                {
+                                    continue;
+                                }
+                                let name = hir::Ident::new(port.name, span);
+                                let binding_kind =
+                                    self.resolve(name)
+                                        .ok()
+                                        .and_then(|resolution| match resolution.kind {
+                                            BindingKind::Local(site) => {
+                                                self.ast_ref_to_hir_id.get(&site).copied().map(
+                                                    |id| ExprKind::ResolvedLocal(port.name, id),
+                                                )
+                                            }
+                                            BindingKind::FnParam(site) => {
+                                                self.ast_ref_to_hir_id.get(&site).copied().map(
+                                                    |id| ExprKind::ResolvedFnParam(port.name, id),
+                                                )
+                                            }
+                                            BindingKind::ExpandedLocal(site, output) => self
+                                                .expanded_locals
+                                                .get(&(site, output))
+                                                .copied()
+                                                .map(|id| ExprKind::ResolvedLocal(port.name, id)),
+                                            _ => None,
+                                        });
+                                let Some(binding_kind) = binding_kind else {
+                                    self.emit_malformed(&format!("test template splice has no local binding for context port `{}`; supply an explicit substitution", port.name), span);
+                                    continue;
+                                };
+                                let binding = Expr {
+                                    hir_id: self.next_hir_id(),
+                                    span,
+                                    kind: binding_kind,
+                                };
+                                substitutions.push(hir::expr::CodeSubstitution {
+                                    port: name,
+                                    binding: self.arena.alloc_expr(binding),
+                                });
+                            }
+                        }
+                    }
+                }
                 let body = self.arena.alloc_expr(body);
                 Expr {
                     hir_id: self.next_hir_id(),
@@ -276,6 +374,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         Expr {
                             hir_id: self.next_hir_id(),
                             kind: ExprKind::TakeTupleEnumerate(self.arena.alloc_expr(value)),
+                            span,
+                        }
+                    }
+                    "intrinsic" => {
+                        let tag = self.lower_expr(ctx, children[0]);
+                        Expr {
+                            hir_id: self.next_hir_id(),
+                            kind: ExprKind::TakeIntrinsic(self.arena.alloc_expr(tag)),
                             span,
                         }
                     }
@@ -525,40 +631,6 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     span,
                 }
             }
-            NodeKind::AddAdd
-            | NodeKind::Add
-            | NodeKind::Sub
-            | NodeKind::Mul
-            | NodeKind::Div
-            | NodeKind::Mod
-            | NodeKind::BoolEq
-            | NodeKind::BoolNotEq
-            | NodeKind::BoolAnd
-            | NodeKind::BoolOr
-            | NodeKind::BoolGt
-            | NodeKind::BoolGtEq
-            | NodeKind::BoolLt
-            | NodeKind::BoolLtEq => {
-                self.lower_binary_expr(ctx, kind, children[0], children[1], span)
-            }
-            NodeKind::Negative => {
-                let inner = self.lower_expr(ctx, children[0]);
-                let inner_ref = self.arena.alloc_expr(inner);
-                Expr {
-                    hir_id: self.next_hir_id(),
-                    kind: ExprKind::Unary(UnOp::Neg, inner_ref),
-                    span,
-                }
-            }
-            NodeKind::BoolNot => {
-                let inner = self.lower_expr(ctx, children[0]);
-                let inner_ref = self.arena.alloc_expr(inner);
-                Expr {
-                    hir_id: self.next_hir_id(),
-                    kind: ExprKind::Unary(UnOp::Not, inner_ref),
-                    span,
-                }
-            }
             NodeKind::Refer => {
                 let inner = self.lower_expr(ctx, children[0]);
                 let inner_ref = self.arena.alloc_expr(inner);
@@ -681,10 +753,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             | NodeKind::UnsafeBlock
             | NodeKind::AsyncBlock
             | NodeKind::ComptimeBlock => {
-                if matches!(
-                    kind,
-                    NodeKind::UnsafeBlock | NodeKind::AsyncBlock | NodeKind::ComptimeBlock
-                ) {
+                if matches!(kind, NodeKind::AsyncBlock | NodeKind::ComptimeBlock) {
                     self.package
                         .pending_semantics
                         .push((span, format!("{kind:?}")));
@@ -693,7 +762,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let block_ref = self.arena.alloc_block(block);
                 Expr {
                     hir_id: self.next_hir_id(),
-                    kind: ExprKind::Block(block_ref),
+                    kind: if kind == NodeKind::UnsafeBlock {
+                        ExprKind::UnsafeBlock(block_ref)
+                    } else {
+                        ExprKind::Block(block_ref)
+                    },
                     span,
                 }
             }
@@ -834,7 +907,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 self.lower_assign_op_expr(ctx, kind, children[0], children[1], span)
             }
             NodeKind::Assumes => {
-                let condition = self.lower_expr(ExprContext::RuntimeProposition, children[0]);
+                let condition = self.lower_expr(ExprContext::RuntimeProposition, children[1]);
                 Expr {
                     hir_id: self.next_hir_id(),
                     kind: ExprKind::Assumes(self.arena.alloc_expr(condition)),
@@ -1022,10 +1095,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 self.lower_while_match_expr(ctx, children[0], children[1], children[2], span)
             }
 
-            // ── Desugaring: for ──────────────────────────────────────────
-            // `for :label? pat in iterable { body }`
-            //   →  `{ let __iter__ = iterable.__into_iter__(); loop { match __iter__.__next__() { Some(pat) => body, None => break :label } } }`
-            // Note: `__into_iter__` and `__next__` are placeholder method names.
+            // Preserve the iterable, pattern, guard and loop identity in HIR.
+            // Protocol selection belongs to elaboration, not AST lowering.
             NodeKind::ForStatement => self.lower_for_stmt(ctx, node),
 
             other => {
@@ -1104,10 +1175,20 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         span,
                     }
                 }
-                _ => unreachable!("TODO"),
+                BindingKind::LoopLabel(_) => {
+                    self.emit_malformed("loop label cannot be used as an expression", span);
+                    self.make_invalid_expr(span)
+                }
             },
             Err(err) => {
-                self.emit_resolve_error(err);
+                // Definition metadata is still awaiting attribute elaboration.
+                // Preserve unresolved names in the tree, as in its source-text
+                // predecessor; access errors must not be hidden by deferral.
+                if !matches!(ctx, ExprContext::Attribute | ExprContext::Configuration)
+                    || !matches!(err, resolve::ResolveError::UnresolvedIdentifier { .. })
+                {
+                    self.emit_resolve_error(err);
+                }
                 Expr {
                     hir_id: next_hir_id,
                     kind: ExprKind::UnresolvedIdent(identifier.name),
@@ -1173,7 +1254,18 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let children = self.ast.get_children(block_node);
                 let elems_node = children[0];
                 let elem_nodes = self.ast.get_multi_child_slice(elems_node).unwrap_or(&[]);
-                self.lower_stmts_to_block(ctx, elem_nodes, span)
+                let previous_scope = self.file_scope;
+                let previous_depth = self.resolver.ribs().depth();
+                if let Some(scope) = self.resolver.block_scope(self.ast_node_ref(block_node)) {
+                    self.file_scope = scope;
+                    self.resolver
+                        .ribs_mut()
+                        .push(resolve::Rib::new(RibKind::Block, scope));
+                }
+                let block = self.lower_stmts_to_block(ctx, elem_nodes, span);
+                self.local_exit(previous_depth);
+                self.file_scope = previous_scope;
+                block
             }
             _ => {
                 // Single expression treated as a block with a trailing expr
@@ -1210,6 +1302,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             match kind {
                 // Item definitions → ExprKind::Item
                 NodeKind::Function
+                | NodeKind::FunctionTemplateDef
+                | NodeKind::FunctionTemplateInstance
+                | NodeKind::FunctionTemplateInstanceWithParams
                 | NodeKind::StructDef
                 | NodeKind::EnumDef
                 | NodeKind::TraitDef
@@ -1274,25 +1369,44 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
                 // Attributes wrapping definitions
                 NodeKind::Attribute | NodeKind::AttributeSetTrue => {
-                    self.package
-                        .pending_semantics
-                        .push((span, "block attribute or modifier".into()));
                     let children = self.ast.get_children(stmt_node);
-                    let def_node = children[1];
+                    let mut def_node = children[1];
+                    while matches!(
+                        self.ast.get_node_kind(def_node),
+                        Some(NodeKind::Attribute | NodeKind::AttributeSetTrue)
+                    ) {
+                        def_node = self.ast.get_children(def_node)[1];
+                    }
                     let def_kind = self.ast.get_node_kind(def_node);
                     if matches!(
                         def_kind,
                         Some(
                             NodeKind::Function
+                                | NodeKind::FunctionTemplateDef
+                                | NodeKind::FunctionTemplateInstance
+                                | NodeKind::FunctionTemplateInstanceWithParams
                                 | NodeKind::StructDef
                                 | NodeKind::EnumDef
                                 | NodeKind::TraitDef
                                 | NodeKind::ImplDef
                                 | NodeKind::ImplTraitDef
                                 | NodeKind::TypealiasDef
+                                | NodeKind::ModuleDef
+                                | NodeKind::NormalFormHeadDef
+                                | NodeKind::AlgebraicEffect
+                                | NodeKind::EffectEnumDef
+                                | NodeKind::UnionDef
+                                | NodeKind::ExtendDef
+                                | NodeKind::ExtendTraitDef
+                                | NodeKind::CaseDef
+                                | NodeKind::NewtypeDef
+                                | NodeKind::ConstDef
+                                | NodeKind::TestDef
                         )
                     ) {
-                        let owner_id = self.lower_item_in_block(def_node);
+                        // Classify through wrappers, but lower the original chain so
+                        // attributes retain their targets and lexical environment.
+                        let owner_id = self.lower_item_in_block(stmt_node);
                         let stmt_span = self.ast.get_span(stmt_node).unwrap_or(span);
                         stmts.push(Expr {
                             hir_id: self.next_hir_id(),
@@ -1300,7 +1414,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                             span: stmt_span,
                         });
                     } else {
-                        let expr = self.lower_expr(ctx, def_node);
+                        self.package.pending_semantics.push((
+                            self.ast.get_span(stmt_node).unwrap_or(span),
+                            "block attribute or modifier".into(),
+                        ));
+                        let expr = self.lower_expr(ctx, children[1]);
                         let expr_ref = self.arena.alloc_expr(expr);
                         let stmt_span = self.ast.get_span(stmt_node).unwrap_or(span);
                         stmts.push(Expr {
@@ -1380,24 +1498,63 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         }
     }
 
-    fn lower_binary_expr(
-        &mut self,
-        ctx: ExprContext,
-        kind: NodeKind,
-        lhs_node: NodeIndex,
-        rhs_node: NodeIndex,
-        span: Span,
-    ) -> Expr<'hir> {
-        let op = self.lower_binop(kind);
-        let lhs = self.lower_expr(ctx, lhs_node);
-        let rhs = self.lower_expr(ctx, rhs_node);
-        let lhs_ref = self.arena.alloc_expr(lhs);
-        let rhs_ref = self.arena.alloc_expr(rhs);
-        Expr {
-            hir_id: self.next_hir_id(),
-            kind: ExprKind::Binary(op, lhs_ref, rhs_ref),
-            span,
+    // Keep unary/binary mixtures on one postorder frontier. Returning through
+    // lower_expr for unary operands would reintroduce recursive stack growth.
+    fn lower_operator_expr(&mut self, ctx: ExprContext, node: NodeIndex) -> Expr<'hir> {
+        enum Work {
+            Operand(NodeIndex),
+            Finish(BinOp, Span),
+            Unary(UnOp, Span),
         }
+        let mut pending = vec![Work::Operand(node)];
+        let mut values = Vec::new();
+        while let Some(work) = pending.pop() {
+            match work {
+                Work::Operand(node) => {
+                    let (kind, span, children) =
+                        self.ast.get_node(node).expect("operator operand AST node");
+                    if let Some(op) = binary_operator(kind) {
+                        pending.push(Work::Finish(op, span));
+                        pending.push(Work::Operand(children[1]));
+                        pending.push(Work::Operand(children[0]));
+                    } else if matches!(kind, NodeKind::Negative | NodeKind::BoolNot) {
+                        let op = if kind == NodeKind::Negative {
+                            UnOp::Neg
+                        } else {
+                            UnOp::Not
+                        };
+                        pending.push(Work::Unary(op, span));
+                        pending.push(Work::Operand(children[0]));
+                    } else {
+                        values.push(self.lower_non_operator_expr(ctx, node));
+                    }
+                }
+                Work::Unary(op, span) => {
+                    let value = values.pop().expect("lowered unary operand");
+                    let value = self.arena.alloc_expr(value);
+                    values.push(Expr {
+                        hir_id: self.next_hir_id(),
+                        kind: ExprKind::Unary(op, value),
+                        span,
+                    });
+                }
+                Work::Finish(op, span) => {
+                    let rhs = values.pop().expect("lowered right operand");
+                    let lhs = values.pop().expect("lowered left operand");
+                    // Allocate the parent only after both operands. This keeps
+                    // binding/owner identities and lexical lookup order equal
+                    // to ordinary left-to-right recursive lowering.
+                    let lhs_ref = self.arena.alloc_expr(lhs);
+                    let rhs_ref = self.arena.alloc_expr(rhs);
+                    values.push(Expr {
+                        hir_id: self.next_hir_id(),
+                        kind: ExprKind::Binary(op, lhs_ref, rhs_ref),
+                        span,
+                    });
+                }
+            }
+        }
+        values.pop().expect("lowered operator expression")
     }
 
     fn lower_application_expr(
@@ -1759,8 +1916,17 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         output_node: NodeIndex,
         span: Span,
     ) -> Expr<'hir> {
-        let input = self.lower_expr(ExprContext::Type, input_node);
+        // The input telescope owns names used by later inputs and the result.
+        // Nested result callables introduce their own scope without hiding
+        // differently named outer inputs.
+        let rib = self.local_enter(RibKind::Block);
+        let input = if self.ast.get_node_kind(input_node) == Some(NodeKind::FnType) {
+            self.lower_fn_type_telescope(input_node, self.ast.get_span(input_node).unwrap_or(span))
+        } else {
+            self.lower_expr(ExprContext::Type, input_node)
+        };
         let output = self.lower_expr(ExprContext::Type, output_node);
+        self.local_exit(rib);
         let input_ref = self.arena.alloc_expr(input);
         let output_ref = self.arena.alloc_expr(output);
         Expr {
@@ -2173,10 +2339,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         }
 
         // Failure executes in the preceding scope, before success bindings exist.
-        let otherwise = if let Some(&node) = children
-            .get(3)
-            .filter(|&&node| kind != NodeKind::ConstDecl && node != 0)
-        {
+        let otherwise = if let Some(&node) = children.get(3).filter(|&&node| node != 0) {
             let expr = self.lower_expr(ctx, node);
             Some(&*self.arena.alloc_expr(expr))
         } else {
@@ -2400,10 +2563,23 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     self.bind_arm_pattern_inner(node, &argument.pattern, seen);
                 }
             }
-            PatternKind::Tuple(fields)
-            | PatternKind::List(fields, _)
-            | PatternKind::AppTuple(_, fields) => {
-                let child = if matches!(pat.kind, PatternKind::Tuple(_) | PatternKind::List(..)) {
+            PatternKind::List(fields, rest) => {
+                let nodes = self
+                    .ast
+                    .get_multi_child_slice(children[0])
+                    .unwrap_or(&[])
+                    .to_vec();
+                for (&node, field) in nodes.iter().zip(*fields) {
+                    self.bind_arm_pattern_inner(node, field, seen);
+                }
+                if let (Some(rest), Some(node)) = (rest, nodes.last()) {
+                    if self.ast.get_node_kind(*node) == Some(ast::NodeKind::ListRestPattern) {
+                        self.bind_arm_pattern_inner(self.ast.get_children(*node)[0], rest, seen);
+                    }
+                }
+            }
+            PatternKind::Tuple(fields) | PatternKind::AppTuple(_, fields) => {
+                let child = if matches!(pat.kind, PatternKind::Tuple(_)) {
                     0
                 } else {
                     1
@@ -2518,6 +2694,13 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     }
 
     fn lower_fn_type_expr(&mut self, node: NodeIndex, span: Span) -> Expr<'hir> {
+        let rib = self.local_enter(RibKind::Block);
+        let result = self.lower_fn_type_telescope(node, span);
+        self.local_exit(rib);
+        result
+    }
+
+    fn lower_fn_type_telescope(&mut self, node: NodeIndex, span: Span) -> Expr<'hir> {
         // FnType: flags_u32, N (modifier_flags, parameter_types)
         let Some((NodeKind::FnType, _, children)) = self.ast.get_node(node) else {
             unreachable!(
@@ -2526,8 +2709,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             );
         };
 
-        let _flags = children[0]; // raw u32 bitmask
-        if _flags & !ast::FN_MOD_COMPTIME != 0 {
+        let flags = children[0]; // raw u32 bitmask
+        if flags & !(ast::FN_MOD_COMPTIME | ast::FN_MOD_UNSAFE) != 0 {
             self.package
                 .pending_semantics
                 .push((span, "function type modifiers".into()));
@@ -2538,20 +2721,65 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         // Result types are separate TyFnArrow nodes. Preserve each input's
         // staging modifier instead of lowering its wrapper as a Type expression.
+        let mut names = std::collections::HashSet::new();
         let ty_params: Vec<TyParam<'hir>> = param_nodes
             .iter()
             .map(|&n| {
                 let mut inner = n;
                 let mut flags = 0;
-                while let Some((NodeKind::ComptimeParam, _, children)) = self.ast.get_node(inner) {
-                    flags |= hir::common::TPARAM_COMPTIME;
+                while let Some((kind, _, children)) = self.ast.get_node(inner) {
+                    use hir::common::*;
+                    let flag = match kind {
+                        NodeKind::ComptimeParam => TPARAM_COMPTIME,
+                        NodeKind::ImplicitParam => TPARAM_IMPLICIT,
+                        NodeKind::QuoteParam => TPARAM_QUOTE,
+                        NodeKind::ErrorParam => TPARAM_ERROR,
+                        NodeKind::CatchParam => TPARAM_CATCH,
+                        NodeKind::LambdaParam => TPARAM_LAMBDA,
+                        NodeKind::AssocParam => TPARAM_ASSOC,
+                        NodeKind::OptionalTypeParam => TPARAM_OPTIONAL,
+                        _ => break,
+                    };
+                    flags |= flag;
                     inner = children[0];
                 }
-                let ty_expr = self.lower_expr(ExprContext::Type, inner);
-                let ty_ref = self.arena.alloc_expr(ty_expr);
-                let mut parameter =
-                    TyParam::new(self.next_hir_id(), TyParamKind::Positional(ty_ref), span);
+                let kind = match self.ast.get_node(inner) {
+                    Some((
+                        NodeKind::TypeBoundDeclClause | NodeKind::VarargDeclClause,
+                        _,
+                        children,
+                    )) => {
+                        let name = self.node_to_ident(children[0]);
+                        let ty = self.lower_expr(ExprContext::Type, children[1]);
+                        let ty = self.arena.alloc_expr(ty);
+                        if self.ast.get_node_kind(inner) == Some(NodeKind::VarargDeclClause) {
+                            TyParamKind::Varadic(name, ty)
+                        } else {
+                            TyParamKind::PositionalDependencyCatched(name, ty)
+                        }
+                    }
+                    Some((NodeKind::ItselfParam, _, _)) => TyParamKind::Itself { is_ref: false },
+                    Some((NodeKind::ItselfRefParam, _, _)) => TyParamKind::Itself { is_ref: true },
+                    _ => {
+                        let ty = self.lower_expr(ExprContext::Type, inner);
+                        TyParamKind::Positional(self.arena.alloc_expr(ty))
+                    }
+                };
+                let parameter_span = self.ast.get_span(n).unwrap_or(span);
+                let mut parameter = TyParam::new(self.next_hir_id(), kind, parameter_span);
                 parameter.flags = flags;
+                if let TyParamKind::PositionalDependencyCatched(name, _)
+                | TyParamKind::Varadic(name, _) = parameter.kind
+                {
+                    if !names.insert(name.name) {
+                        self.emit_unsupported_node(
+                            "duplicate function type parameter name",
+                            name.span,
+                        );
+                    } else {
+                        self.define_local(name, n, parameter.hir_id);
+                    }
+                }
                 parameter
             })
             .collect();
@@ -2559,7 +2787,19 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let params_slice = self.arena.alloc_ty_param_slice(ty_params);
         Expr {
             hir_id: self.next_hir_id(),
-            kind: if _flags & ast::FN_MOD_COMPTIME != 0 {
+            kind: if flags & !ast::FN_MOD_COMPTIME != 0 {
+                ExprKind::TyModifiedFn(
+                    hir::expr::FnTypeModifiers {
+                        is_pure: flags & ast::FN_MOD_PURE != 0,
+                        is_comptime: flags & ast::FN_MOD_COMPTIME != 0,
+                        is_inline: flags & ast::FN_MOD_INLINE != 0,
+                        is_unsafe: flags & ast::FN_MOD_UNSAFE != 0,
+                        is_spec: flags & ast::FN_MOD_SPEC != 0,
+                        is_verified: flags & ast::FN_MOD_VERIFIED != 0,
+                    },
+                    params_slice,
+                )
+            } else if flags & ast::FN_MOD_COMPTIME != 0 {
                 ExprKind::TyComptimeFn(params_slice)
             } else {
                 ExprKind::TyFn(params_slice)
@@ -2599,27 +2839,6 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 // If it's not a Property, just lower it as a normal expression.
                 Arg::Positional(self.arena.alloc_expr(self.lower_expr(ctx, node)))
             }
-        }
-    }
-
-    /// Convert an AST `NodeKind` to an HIR `BinOp`.
-    fn lower_binop(&self, kind: NodeKind) -> BinOp {
-        match kind {
-            NodeKind::AddAdd => BinOp::Concat,
-            NodeKind::Add => BinOp::Add,
-            NodeKind::Sub => BinOp::Sub,
-            NodeKind::Mul => BinOp::Mul,
-            NodeKind::Div => BinOp::Div,
-            NodeKind::Mod => BinOp::Rem,
-            NodeKind::BoolEq => BinOp::Eq,
-            NodeKind::BoolNotEq => BinOp::Ne,
-            NodeKind::BoolGt => BinOp::Gt,
-            NodeKind::BoolGtEq => BinOp::Ge,
-            NodeKind::BoolLt => BinOp::Lt,
-            NodeKind::BoolLtEq => BinOp::Le,
-            NodeKind::BoolAnd => BinOp::And,
-            NodeKind::BoolOr => BinOp::Or,
-            _ => unreachable!("lower_binop called with non-binop NodeKind: {:?}", kind),
         }
     }
 

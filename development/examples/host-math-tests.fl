@@ -1,0 +1,396 @@
+-- Supply library/math/lib.fl as the math package and bind
+-- Bind all Scalar operations as described in library/README.md.
+-- --host-fma math::target::Scalar::fma --host-sqrt math::target::Scalar::sqrt --host-copysign math::target::Scalar::copysign --test-native.
+
+test single_precision {
+    let checked_math_1 = math.bit_reverse<.u8'builtin>(1);
+    assumes checked_math_1 == 128;
+    let checked_math_2 = math.count_ones<.u128'builtin>(340282366920938463463374607431768211455);
+    assumes checked_math_2 == 128;
+    let checked_math_3 = math.minimum<.f32'builtin>(3.0, -2.0);
+    assumes checked_math_3 == -2.0;
+    let checked_math_4 = math.maximum<.f32'builtin>(3.0, -2.0);
+    assumes checked_math_4 == 3.0;
+    let minimum_number = math.minimumnum<.f32'builtin>(3.0, -2.0);
+    assumes minimum_number == -2.0;
+    var min_seen = false;
+    var max_seen = false;
+    let numeric = math.maximumnum<.f32'builtin>(
+        do { assumes not min_seen; min_seen = true; let value: .f32'builtin = 3.0; value },
+        do { assumes min_seen and not max_seen; max_seen = true; let value: .f32'builtin = -2.0; value });
+    assumes numeric == 3.0 and min_seen and max_seen;
+
+    var abs_seen = false;
+    let magnitude = math.abs<.f32'builtin>(do {
+        assumes not abs_seen; abs_seen = true;
+        let input: .f32'builtin = -3.5; input
+    });
+    assumes abs_seen and magnitude == 3.5;
+    let zero = math.abs<.f32'builtin>(-0.0);
+    assumes zero'bitvec == 0;
+
+    let result = math.fma<.f32'builtin>(3.0, 4.0, 5.0);
+    assumes result == 17.0;
+    var evaluated = false;
+    let root = math.sqrt<.f32'builtin>(do {
+        assumes not evaluated;
+        evaluated = true;
+        let value: .f32'builtin = 81.0;
+        value
+    });
+    assumes evaluated;
+    assumes root == 9.0;
+    var first = false;
+    var second = false;
+    let signed = math.copysign<.f32'builtin>(
+        do { assumes not first; first = true; let value: .f32'builtin = 3.5; value },
+        do { assumes first and not second; second = true; let value: .f32'builtin = -0.0; value });
+    assumes first and second;
+    assumes signed == -3.5;
+
+    var floor_seen = false;
+    let floor_result = math.floor<.f32'builtin>(do {
+        assumes not floor_seen;
+        floor_seen = true;
+        let input: .f32'builtin = -2.5;
+        input
+    });
+    assumes floor_seen and floor_result == -3.0;
+
+    var ceil_seen = false;
+    let ceil_result = math.ceil<.f32'builtin>(do {
+        assumes not ceil_seen;
+        ceil_seen = true;
+        let input: .f32'builtin = -2.5;
+        input
+    });
+    assumes ceil_seen and ceil_result == -2.0;
+
+    var trunc_seen = false;
+    let trunc_result = math.trunc<.f32'builtin>(do {
+        assumes not trunc_seen;
+        trunc_seen = true;
+        let input: .f32'builtin = -2.5;
+        input
+    });
+    assumes trunc_seen and trunc_result == -2.0;
+
+    var roundeven_seen = false;
+    let roundeven_result = math.roundeven<.f32'builtin>(do {
+        assumes not roundeven_seen;
+        roundeven_seen = true;
+        let input: .f32'builtin = -2.5;
+        input
+    });
+    assumes roundeven_seen and roundeven_result == -2.0;
+
+
+    var sin_seen = false;
+    let sin_result = math.sin<.f32'builtin>(do {
+        assumes not sin_seen; sin_seen = true;
+        let input: .f32'builtin = 0.5; input
+    });
+    assumes sin_seen and sin_result > 0.479425 and sin_result < 0.479426;
+
+    var cos_seen = false;
+    let cos_result = math.cos<.f32'builtin>(do {
+        assumes not cos_seen; cos_seen = true;
+        let input: .f32'builtin = 0.5; input
+    });
+    assumes cos_seen and cos_result > 0.877582 and cos_result < 0.877583;
+
+    var exp_seen = false;
+    let exp_result = math.exp<.f32'builtin>(do {
+        assumes not exp_seen; exp_seen = true;
+        let input: .f32'builtin = 1.0; input
+    });
+    assumes exp_seen and exp_result > 2.718281 and exp_result < 2.718283;
+
+    var exp2_seen = false;
+    let exp2_result = math.exp2<.f32'builtin>(do {
+        assumes not exp2_seen; exp2_seen = true;
+        let input: .f32'builtin = 3.0; input
+    });
+    assumes exp2_seen and exp2_result > 7.999999 and exp2_result < 8.000001;
+
+    var log_seen = false;
+    let log_result = math.log<.f32'builtin>(do {
+        assumes not log_seen; log_seen = true;
+        let input: .f32'builtin = 2.0; input
+    });
+    assumes log_seen and log_result > 0.693146 and log_result < 0.693148;
+
+    var log2_seen = false;
+    let log2_result = math.log2<.f32'builtin>(do {
+        assumes not log2_seen; log2_seen = true;
+        let input: .f32'builtin = 8.0; input
+    });
+    assumes log2_seen and log2_result > 2.999999 and log2_result < 3.000001;
+
+    var log10_seen = false;
+    let log10_result = math.log10<.f32'builtin>(do {
+        assumes not log10_seen; log10_seen = true;
+        let input: .f32'builtin = 1000.0; input
+    });
+    assumes log10_seen and log10_result > 2.999999 and log10_result < 3.000001;
+
+    var base_seen = false;
+    var exponent_seen = false;
+    let power = math.pow<.f32'builtin>(
+        do { assumes not base_seen; base_seen = true; let value: .f32'builtin = 2.0; value },
+        do { assumes base_seen and not exponent_seen; exponent_seen = true; let value: .f32'builtin = -3.0; value });
+    assumes base_seen and exponent_seen and power == 0.125;
+    let invalid_log = math.log<.f32'builtin>(-1.0);
+    assumes invalid_log != invalid_log;
+    let invalid_power = math.pow<.f32'builtin>(-2.0, 0.5);
+    assumes invalid_power != invalid_power;
+}
+
+test double_precision {
+    let checked_math_5 = math.minimum<.f64'builtin>(3.0, -2.0);
+    assumes checked_math_5 == -2.0;
+    let checked_math_6 = math.maximum<.f64'builtin>(3.0, -2.0);
+    assumes checked_math_6 == 3.0;
+    let minimum_number = math.minimumnum<.f64'builtin>(3.0, -2.0);
+    assumes minimum_number == -2.0;
+    var min_seen = false;
+    var max_seen = false;
+    let numeric = math.maximumnum<.f64'builtin>(
+        do { assumes not min_seen; min_seen = true; let value: .f64'builtin = 3.0; value },
+        do { assumes min_seen and not max_seen; max_seen = true; let value: .f64'builtin = -2.0; value });
+    assumes numeric == 3.0 and min_seen and max_seen;
+
+    var abs_seen = false;
+    let magnitude = math.abs<.f64'builtin>(do {
+        assumes not abs_seen; abs_seen = true;
+        let input: .f64'builtin = -3.5; input
+    });
+    assumes abs_seen and magnitude == 3.5;
+    let zero = math.abs<.f64'builtin>(-0.0);
+    assumes zero'bitvec == 0;
+
+    let result = math.fma<.f64'builtin>(3.0, 4.0, 5.0);
+    assumes result == 17.0;
+    var evaluated = false;
+    let root = math.sqrt<.f64'builtin>(do {
+        assumes not evaluated;
+        evaluated = true;
+        let value: .f64'builtin = 81.0;
+        value
+    });
+    assumes evaluated;
+    assumes root == 9.0;
+    var first = false;
+    var second = false;
+    let signed = math.copysign<.f64'builtin>(
+        do { assumes not first; first = true; let value: .f64'builtin = 3.5; value },
+        do { assumes first and not second; second = true; let value: .f64'builtin = -0.0; value });
+    assumes first and second;
+    assumes signed == -3.5;
+
+    var floor_seen = false;
+    let floor_result = math.floor<.f64'builtin>(do {
+        assumes not floor_seen;
+        floor_seen = true;
+        let input: .f64'builtin = -2.5;
+        input
+    });
+    assumes floor_seen and floor_result == -3.0;
+
+    var ceil_seen = false;
+    let ceil_result = math.ceil<.f64'builtin>(do {
+        assumes not ceil_seen;
+        ceil_seen = true;
+        let input: .f64'builtin = -2.5;
+        input
+    });
+    assumes ceil_seen and ceil_result == -2.0;
+
+    var trunc_seen = false;
+    let trunc_result = math.trunc<.f64'builtin>(do {
+        assumes not trunc_seen;
+        trunc_seen = true;
+        let input: .f64'builtin = -2.5;
+        input
+    });
+    assumes trunc_seen and trunc_result == -2.0;
+
+    var roundeven_seen = false;
+    let roundeven_result = math.roundeven<.f64'builtin>(do {
+        assumes not roundeven_seen;
+        roundeven_seen = true;
+        let input: .f64'builtin = -2.5;
+        input
+    });
+    assumes roundeven_seen and roundeven_result == -2.0;
+
+
+    var sin_seen = false;
+    let sin_result = math.sin<.f64'builtin>(do {
+        assumes not sin_seen; sin_seen = true;
+        let input: .f64'builtin = 0.5; input
+    });
+    assumes sin_seen and sin_result > 0.479425 and sin_result < 0.479426;
+
+    var cos_seen = false;
+    let cos_result = math.cos<.f64'builtin>(do {
+        assumes not cos_seen; cos_seen = true;
+        let input: .f64'builtin = 0.5; input
+    });
+    assumes cos_seen and cos_result > 0.877582 and cos_result < 0.877583;
+
+    var exp_seen = false;
+    let exp_result = math.exp<.f64'builtin>(do {
+        assumes not exp_seen; exp_seen = true;
+        let input: .f64'builtin = 1.0; input
+    });
+    assumes exp_seen and exp_result > 2.718281 and exp_result < 2.718283;
+
+    var exp2_seen = false;
+    let exp2_result = math.exp2<.f64'builtin>(do {
+        assumes not exp2_seen; exp2_seen = true;
+        let input: .f64'builtin = 3.0; input
+    });
+    assumes exp2_seen and exp2_result > 7.999999 and exp2_result < 8.000001;
+
+    var log_seen = false;
+    let log_result = math.log<.f64'builtin>(do {
+        assumes not log_seen; log_seen = true;
+        let input: .f64'builtin = 2.0; input
+    });
+    assumes log_seen and log_result > 0.693146 and log_result < 0.693148;
+
+    var log2_seen = false;
+    let log2_result = math.log2<.f64'builtin>(do {
+        assumes not log2_seen; log2_seen = true;
+        let input: .f64'builtin = 8.0; input
+    });
+    assumes log2_seen and log2_result > 2.999999 and log2_result < 3.000001;
+
+    var log10_seen = false;
+    let log10_result = math.log10<.f64'builtin>(do {
+        assumes not log10_seen; log10_seen = true;
+        let input: .f64'builtin = 1000.0; input
+    });
+    assumes log10_seen and log10_result > 2.999999 and log10_result < 3.000001;
+
+    var base_seen = false;
+    var exponent_seen = false;
+    let power = math.pow<.f64'builtin>(
+        do { assumes not base_seen; base_seen = true; let value: .f64'builtin = 2.0; value },
+        do { assumes base_seen and not exponent_seen; exponent_seen = true; let value: .f64'builtin = -3.0; value });
+    assumes base_seen and exponent_seen and power == 0.125;
+    let invalid_log = math.log<.f64'builtin>(-1.0);
+    assumes invalid_log != invalid_log;
+    let invalid_power = math.pow<.f64'builtin>(-2.0, 0.5);
+    assumes invalid_power != invalid_power;
+}
+
+-- Library consumers can now form constants at the selected generic float width.
+pure fn positive_magnitude(value: T) -> T
+where T, requires T == .f32'builtin or T == .f64'builtin {
+    math.copysign<T>(value, 0.0)
+}
+
+test rounding_f32 {
+    var seen = false;
+    let rounded = math.round<.f32'builtin>(do {
+        assumes not seen; seen = true;
+        let value: .f32'builtin = -2.5; value
+    });
+    assumes seen and rounded == -3.0;
+    let even = math.roundeven<.f32'builtin>(-2.5);
+    assumes even == -2.0;
+    let positive = math.round<.f32'builtin>(2.5);
+    assumes positive == 3.0;
+    let below = math.round<.f32'builtin>(0.499999);
+    assumes below == 0.0;
+    let negative_small = math.round<.f32'builtin>(-0.25);
+    assumes negative_small'bitvec == 2147483648;
+    let negative_zero = math.round<.f32'builtin>(-0.0);
+    assumes negative_zero'bitvec == 2147483648;
+    let magnitude = positive_magnitude<.f32'builtin>(-3.5);
+    assumes magnitude == 3.5;
+    let zero = positive_magnitude<.f32'builtin>(-0.0);
+    assumes zero'bitvec == 0;
+}
+
+test rounding_f64 {
+    var seen = false;
+    let rounded = math.round<.f64'builtin>(do {
+        assumes not seen; seen = true;
+        let value: .f64'builtin = -2.5; value
+    });
+    assumes seen and rounded == -3.0;
+    let even = math.roundeven<.f64'builtin>(-2.5);
+    assumes even == -2.0;
+    let positive = math.round<.f64'builtin>(2.5);
+    assumes positive == 3.0;
+    let below = math.round<.f64'builtin>(0.499999);
+    assumes below == 0.0;
+    let negative_small = math.round<.f64'builtin>(-0.25);
+    assumes negative_small'bitvec == 9223372036854775808;
+    let negative_zero = math.round<.f64'builtin>(-0.0);
+    assumes negative_zero'bitvec == 9223372036854775808;
+    let magnitude = positive_magnitude<.f64'builtin>(-3.5);
+    assumes magnitude == 3.5;
+    let zero = positive_magnitude<.f64'builtin>(-0.0);
+    assumes zero'bitvec == 0;
+}
+
+
+test number_extrema_32 {
+    var quiet: .f32'builtin = 0.0;
+    quiet'bitvec[0..32] = 2143363909;
+    var signaling: .f32'builtin = 0.0;
+    signaling'bitvec[0..32] = 2139095041;
+    let first = math.minimumnum(quiet, 3.0);
+    let second = math.maximumnum(3.0, signaling);
+    assumes first == 3.0;
+    assumes second == 3.0;
+    let both = math.minimumnum(quiet, signaling);
+    assumes both != both;
+    let low = math.minimumnum<.f32'builtin>(0.0, -0.0);
+    let high = math.maximumnum<.f32'builtin>(-0.0, 0.0);
+    assumes low'bitvec == 2147483648;
+    assumes high'bitvec == 0;
+}
+
+
+test number_extrema_64 {
+    var quiet: .f64'builtin = 0.0;
+    quiet'bitvec[0..64] = 9221140253039434428;
+    var signaling: .f64'builtin = 0.0;
+    signaling'bitvec[0..64] = 9218868437227405313;
+    let first = math.minimumnum(quiet, 3.0);
+    let second = math.maximumnum(3.0, signaling);
+    assumes first == 3.0;
+    assumes second == 3.0;
+    let both = math.minimumnum(quiet, signaling);
+    assumes both != both;
+    let low = math.minimumnum<.f64'builtin>(0.0, -0.0);
+    let high = math.maximumnum<.f64'builtin>(-0.0, 0.0);
+    assumes low'bitvec == 9223372036854775808;
+    assumes high'bitvec == 0;
+}
+
+
+test integer_power {
+    let inverse = math.powi<.f32'builtin>(2.0, -3);
+    let odd = math.powi<.f64'builtin>(-2.0, 3);
+    let minimum_exponent = math.powi<.f64'builtin>(1.0, -2147483648);
+    let zero_exponent = math.powi<.f32'builtin>(3.0, 0);
+    assumes inverse == 0.125 and odd == -8.0 and minimum_exponent == 1.0 and zero_exponent == 1.0;
+}
+
+
+test binary_scaling {
+    let subnormal32 = math.ldexp<.f32'builtin>(1.0, -149);
+    let subnormal64 = math.ldexp<.f64'builtin>(1.0, -1074);
+    let finite32 = math.ldexp<.f32'builtin>(0.5, 128);
+    let finite64 = math.ldexp<.f64'builtin>(0.5, 1024);
+    let signed_zero = math.ldexp<.f64'builtin>(-1.0, -2147483648);
+    assumes subnormal32'bitvec == 1 and subnormal64'bitvec == 1
+        and finite32'bitvec == 2130706432 and finite64'bitvec == 9214364837600034816
+        and signed_zero'bitvec == 9223372036854775808;
+}

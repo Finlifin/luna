@@ -18,13 +18,16 @@ fn trait_pattern_method_results_use_success_output_context() {
 
 #[test]
 fn trait_code_method_pattern_parameters_supply_partial_subject_context() {
-    let source = "comptime fn pair(seed:B)-><(A,B) -| left:A,right:B> where A,B {'<(left,right)>}
-        trait Builder {comptime fn build(code:<(bool,T) -| left:bool,right:T>)-><|-bool> where T;}
+    let source = "comptime fn pair(seed:B)-><Tuple<A,B> -| left:A,right:B> where A,B {'<(left,right)>}
+        trait Builder {comptime fn build(code:<Tuple<bool,T> -| left:bool,right:T>)-><|-bool> where T;}
         struct Flag {} impl Builder for Flag {
-            comptime fn build(input:<(bool,T) -| left:bool,right:T>)-><|-bool> where T {'(true)}
+            comptime fn build(input:<Tuple<bool,T> -| left:bool,right:T>)-><|-bool> where T {'(true)}
         }
         fn run()->bool {~<Flag.as(Builder).build(pair('a'))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -552,7 +555,7 @@ fn static_code_methods_reuse_default_and_argument_evaluation_order() {
 #[test]
 fn static_code_methods_reuse_spread_and_property_routing() {
     let source = "struct Builder {
-            pub comptime fn flags(...items:(bool,bool))-><|-bool> {let (a,b)=items;'(a and b)}
+            pub comptime fn flags(...items:Tuple<bool,bool>)-><|-bool> {let (a,b)=items;'(a and b)}
             pub comptime fn pack(...properties:T)-><|-T> where T {'(properties)}
         }
         fn run()->bool {
@@ -561,7 +564,10 @@ fn static_code_methods_reuse_spread_and_property_routing() {
             let record=~<packed>;
             ~<flags> and record.flag
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -860,11 +866,11 @@ fn trait_code_methods_keep_implicit_context_connections() {
 #[test]
 fn trait_code_methods_route_spread_and_property_inputs() {
     let source = "trait Builder {
-        comptime fn flags(...items:(bool,bool))-><|-bool>;
+        comptime fn flags(...items:Tuple<bool,bool>)-><|-bool>;
         comptime fn pack(...properties:T)-><|-T> where T;
     }
     struct Flag {} impl Builder for Flag {
-        comptime fn flags(...values:(bool,bool))-><|-bool> {let (a,b)=values;'(a and b)}
+        comptime fn flags(...values:Tuple<bool,bool>)-><|-bool> {let (a,b)=values;'(a and b)}
         comptime fn pack(...fields:U)-><|-U> where U {'(fields)}
     }
     fn run()->bool {
@@ -872,7 +878,10 @@ fn trait_code_methods_route_spread_and_property_inputs() {
         const packed=Flag.as(Builder).pack {flag:true};
         let record=~<packed>;~<flags> and record.flag
     }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -992,13 +1001,16 @@ fn code_method_value_receivers_keep_code_contexts() {
 fn code_method_value_receivers_route_property_and_spread_inputs() {
     let source="struct Builder {flag:bool} impl Builder {
         comptime fn pack(self,...properties:T)-><|-T> where T {'(properties)}
-        comptime fn flags(self,...items:(bool,bool))-><|-bool> {let(a,b)=items;let flag=self.flag;'(flag and a and b)}
+        comptime fn flags(self,...items:Tuple<bool,bool>)-><|-bool> {let(a,b)=items;let flag=self.flag;'(flag and a and b)}
     }
     fn run()->bool {
         const code=Builder{flag:true}.pack {flag:true};let record=~<code>;
         const flags=Builder{flag:true}.flags(...(true,true));record.flag and ~<flags>
     }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -1646,7 +1658,7 @@ fn pointer_aggregates_do_not_admit_runtime_callbacks() {
 
 #[test]
 fn generator_live_variadic_inputs_preserve_aliases_and_frozen_siblings() {
-    let source = "comptime fn write(...items:(*bool,*bool,bool))-><|-bool> {
+    let source = "comptime fn write(...items:Tuple<*bool,*bool,bool>)-><|-bool> {
         let (first,second,value)=items;
         first.* = value;
         let observed=second.*;
@@ -1658,14 +1670,17 @@ fn generator_live_variadic_inputs_preserve_aliases_and_frozen_siblings() {
         if flag {code} else {'(false)}
     }
     fn run()->bool {~<outer()>}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generator_live_spread_packets_evaluate_once_before_later_arguments() {
     for signature in [
         "first:*bool,second:*bool,value:bool",
-        "...items:(*bool,*bool,bool)",
+        "...items:Tuple<*bool,*bool,bool>",
     ] {
         let binding = if signature.starts_with("...") {
             "let(first,second,value)=items;"
@@ -1684,7 +1699,10 @@ fn generator_live_spread_packets_evaluate_once_before_later_arguments() {
         }}
         fn run()->bool {{~<outer()>}}"
         );
-        assert_eq!(support::run_iir(&source, "run", vec![]), Value::Bool(true));
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true)
+        );
     }
 }
 
@@ -1709,13 +1727,13 @@ fn generator_live_property_packets_preserve_writeback() {
 fn generator_live_collections_and_spreads_cannot_export_pointers() {
     for argument in ["flag.ref,true", "...do {(flag.ref,true)}"] {
         let source = format!(
-            "comptime fn export(...items:(*bool,bool))-><|-(*bool,bool)> {{'(items)}}
-            comptime fn outer()-><|-(*bool,bool)> {{
+            "comptime fn export(...items:Tuple<*bool,bool>)-><|-Tuple<*bool,bool>> {{'(items)}}
+            comptime fn outer()-><|-Tuple<*bool,bool>> {{
                 var flag=false;export({argument})
             }}
-            fn run()->(*bool,bool) {{~<outer()>}}"
+            fn run()->Tuple<*bool,bool> {{~<outer()>}}"
         );
-        assert!(support::compile_with_protocols(&source, &Default::default()).is_err());
+        assert!(support::compile_with_tuple_protocols(&source, &Default::default()).is_err());
     }
 }
 
@@ -2055,13 +2073,16 @@ fn discarded_trait_pattern_calls_keep_selection_and_mutation() {
 
 #[test]
 fn expression_method_results_receive_partial_result_context() {
-    let source="trait Builder {comptime fn pair(seed:B)-><x:A |-(A,B)> where A,B;}
+    let source="trait Builder {comptime fn pair(seed:B)-><x:A |-Tuple<A,B>> where A,B;}
         struct Host {} impl Builder for Host {
-            comptime fn pair(seed:B)-><x:A |-(A,B)> where A,B {'((x,seed))}
+            comptime fn pair(seed:B)-><x:A |-Tuple<A,B>> where A,B {'((x,seed))}
         }
-        comptime fn accepts(code:<x:bool |-(bool,T)>)-><|-bool> where T {'(true)}
+        comptime fn accepts(code:<x:bool |-Tuple<bool,T>>)-><|-bool> where T {'(true)}
         fn run()->bool {~<accepts(if true {Host.as(Builder).pair('a')} else {Host.as(Builder).pair('b')})>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]

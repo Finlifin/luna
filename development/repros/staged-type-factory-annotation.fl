@@ -1,0 +1,12 @@
+struct Holder where T {
+    pub typealias Payload = T;
+}
+comptime fn Make(T: .Type'builtin) -> .Type'builtin { Holder<T> }
+fn configured(comptime T: .Type'builtin, value: defer T) -> defer T {
+    const Container = Make(T);
+    let result: Container.Payload = value;
+    result
+}
+fn run() -> bool {
+    configured(bool, true) and configured(.u32'builtin, 7) == 7
+}

@@ -89,7 +89,7 @@ impl Checker<'_, '_> {
         }
     }
 
-    fn program_requirement(&mut self, value: &Expr<'_>) -> Result<bool, Error> {
+    pub(super) fn program_requirement(&mut self, value: &Expr<'_>) -> Result<bool, Error> {
         // Program predicates need not mention an ordinary parameter: a
         // completed associated Boolean can be the whole condition. Classify
         // before elaborating; a failed type proof must never trigger fallback
@@ -164,17 +164,39 @@ impl Checker<'_, '_> {
                 ItemKind::Impl(def) => def.clause_constraints,
                 ItemKind::Trait(def) => def.clause_constraints,
                 ItemKind::Associated(def) => def.clause_constraints,
-                // A lexical const has no declaration clauses; its initializer
-                // is checked separately by the required comptime evaluator.
-                ItemKind::Const(..) => &[],
+                // Lexical const initializers and explicit template-instance inputs
+                // have no declaration clauses of their own. The selected
+                // template contract is checked after preparing its inputs.
+                ItemKind::Const(..) | ItemKind::TestTemplateInstance { .. } => &[],
                 _ => return Err(error(span, "declaration does not have a type contract")),
             };
-            let mut requirements = if let Some(parent) = self.effect_parents.get(&owner).copied() {
-                self.ensure_contract(parent, span)?;
-                self.requirements[&parent].clone()
-            } else {
-                Vec::new()
-            };
+            let lexical_parent = matches!(
+                self.package.item(owner).map(|item| &item.kind),
+                Some(ItemKind::Fn(..) | ItemKind::FnDeclaration(..))
+            )
+            .then(|| self.package.lexical_parents.get(&owner).copied())
+            .flatten();
+            let mut requirements =
+                if let Some(parent) = self.effect_parents.get(&owner).copied().or(lexical_parent) {
+                    self.ensure_contract(parent, span)?;
+                    if lexical_parent == Some(parent) {
+                        self.requirements[&parent]
+                            .iter()
+                            .map(|requirement| {
+                                map_requirement(
+                                    requirement,
+                                    &mut |ty| self.lift_lexical_type(parent, ty, span),
+                                    span,
+                                    0,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        self.requirements[&parent].clone()
+                    }
+                } else {
+                    Vec::new()
+                };
             // Admission uses the same prerequisite discipline as signatures.
             // Only positive type atoms may become declaration assumptions.
             let mut pending_capabilities = Vec::new();
@@ -324,7 +346,7 @@ impl Checker<'_, '_> {
         self.ready_signature_capabilities_with_clauses(owner, pending, complete, check_clauses)
     }
 
-    fn ready_signature_capabilities_with_clauses<'h>(
+    pub(super) fn ready_signature_capabilities_with_clauses<'h>(
         &mut self,
         owner: OwnerId,
         pending: &mut Vec<Expr<'h>>,
@@ -500,6 +522,20 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         result: Option<(n::LocalId, &Term)>,
     ) -> Result<(Vec<n::Expr>, Vec<n::EntrySnapshot>), Error> {
+        let values = self
+            .program_postconditions
+            .get(&owner)
+            .cloned()
+            .unwrap_or_default();
+        self.program_postcondition_values(owner, result, values)
+    }
+
+    pub(super) fn program_postcondition_values(
+        &mut self,
+        owner: OwnerId,
+        result: Option<(n::LocalId, &Term)>,
+        values: Vec<&Expr<'_>>,
+    ) -> Result<(Vec<n::Expr>, Vec<n::EntrySnapshot>), Error> {
         let result = result.map(|(binding, ty)| {
             let ty = if let Term::Computation { result, .. } = ty {
                 result.as_ref()
@@ -515,11 +551,6 @@ impl Checker<'_, '_> {
         });
         let binding = result.map(|(binding, _)| binding);
         let previous = result.and_then(|(binding, ty)| self.locals.insert(binding, ty.clone()));
-        let values = self
-            .program_postconditions
-            .get(&owner)
-            .cloned()
-            .unwrap_or_default();
         let result: Result<Vec<n::Expr>, Error> = values
             .into_iter()
             .map(|value| {
@@ -1492,6 +1523,8 @@ impl Checker<'_, '_> {
                         })?;
                     if !contract.signature.is_comptime_callable()
                         && !contract.program.preconditions.is_empty()
+                        && !matches!(contract.signature.callable_signature(), Ok(Term::Function { parameters, .. })
+                            if parameters.iter().any(|p| p.sort != Sort::Runtime))
                     {
                         return Err(error(
                             expr.span,
@@ -1539,7 +1572,10 @@ impl Checker<'_, '_> {
                     .cloned()
                 {
                     if function.phase == n::FunctionPhase::Runtime {
-                        if !function.preconditions.is_empty() {
+                        if !function.preconditions.is_empty()
+                            && !matches!(&function.signature, Term::Function { parameters, .. }
+                                if parameters.iter().any(|p| p.sort != Sort::Runtime))
+                        {
                             return Err(error(
                                 expr.span,
                                 "function value would erase program preconditions; callable program contracts are not implemented",
@@ -1548,7 +1584,9 @@ impl Checker<'_, '_> {
                         runtime_function_identities.push(n::RuntimeFunctionIdentity {
                             declaration: id,
                             type_parameters: function.type_parameters,
-                            signature: function.signature,
+                            signature: function
+                                .signature
+                                .with_unsafe_call_requirement(function.is_unsafe),
                         });
                     } else {
                         queue.extend(function_references(
@@ -1577,13 +1615,17 @@ impl Checker<'_, '_> {
                     ItemKind::Fn(sig, _) if !sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head)) {
                     self.ensure_signature(owner, expr.span)?;
                     self.ensure_contract(owner, expr.span)?;
-                    if self.program_requirements.get(&owner).is_some_and(|requirements| !requirements.is_empty()) {
+                    let signature = self.known_callable_signature(owner)
+                        .ok_or_else(|| error(expr.span, "runtime function identity requires a known signature"))?;
+                    if self.program_requirements.get(&owner).is_some_and(|requirements| !requirements.is_empty())
+                        && !matches!(&signature, Term::Function { parameters, .. }
+                            if parameters.iter().any(|p| p.sort != Sort::Runtime)) {
                         return Err(error(expr.span, "function value would erase program preconditions; callable program contracts are not implemented"));
                     }
                     runtime_function_identities.push(n::RuntimeFunctionIdentity {
                         declaration: id,
                         type_parameters: self.type_parameters[&owner].clone(),
-                        signature: self.signatures[&owner].clone(),
+                        signature: self.callable_type(owner, signature),
                     });
                     continue;
                 }
@@ -1840,6 +1882,7 @@ impl Checker<'_, '_> {
                 });
             }
             let mut package = n::Package {
+                target: self.target,
                 runtime_function_identities,
                 traits,
                 implementations,
@@ -1939,6 +1982,22 @@ impl Checker<'_, '_> {
                 {
                     if sort == Sort::Type && !abstract_parameters.contains(&id) {
                         abstract_parameters.push(id);
+                    } else if sort == Sort::ComptimeValue
+                        && !abstract_value_parameters
+                            .iter()
+                            .any(|(known, _)| *known == id)
+                    {
+                        // Substitution can forward a caller's value binder
+                        // under a different callee declaration. Its domain
+                        // evidence belongs to that caller, not to the replaced
+                        // binder. Keep it opaque during required invocation.
+                        let domain = self.trait_input_domain(id).ok_or_else(|| {
+                            error(
+                                expr.span,
+                                "forwarded value input lacks declaration domain evidence",
+                            )
+                        })?;
+                        abstract_value_parameters.push((id, domain));
                     }
                 }
             }
@@ -1954,7 +2013,9 @@ impl Checker<'_, '_> {
                             }
                         }
                         let mut types: Vec<&Term> = match value {
-                            Value::Type(ty) | Value::Newtype { ty, .. } => vec![ty],
+                            Value::Type(ty)
+                            | Value::Newtype { ty, .. }
+                            | Value::ErrorResult { ty, .. } => vec![ty],
                             Value::TypeList(types) => types.iter().collect(),
                             Value::Closure(closure) => {
                                 let mut types = vec![closure.ty()];
@@ -2010,6 +2071,7 @@ impl Checker<'_, '_> {
                     copy_authority: self.protocols.copy.zip(self.protocols.drop).map(
                         |(copy, drop)| {
                             let resources = n::Package {
+                                target: self.target,
                                 traits: self.checked_traits.clone(),
                                 implementations: self.checked_implementations.clone(),
                                 normal_forms: package.normal_forms.clone(),
@@ -2112,6 +2174,7 @@ impl Checker<'_, '_> {
                 phase: n::FunctionPhase::Comptime,
                 inline: sig.modifiers.is_inline,
                 pure: sig.modifiers.is_pure,
+                is_unsafe: sig.modifiers.is_unsafe,
                 preconditions,
                 postconditions,
                 entry_snapshots,
@@ -2175,6 +2238,13 @@ pub(super) fn frozen_references<'a>(
                 }
                 Term::TupleValue(fields) => pending.extend(fields),
                 Term::RecordValue(fields) => pending.extend(fields.iter().map(|(_, value)| value)),
+                Term::ErrorValue { ty, label, value } => {
+                    pending.push(ty);
+                    if let Some(label) = label {
+                        pending.push(label);
+                    }
+                    pending.push(value);
+                }
                 Term::NominalValue { fields, .. } => pending.extend(fields),
                 _ => {}
             }
@@ -2278,7 +2348,8 @@ pub(super) fn references(
                     pending.push(Node::Pattern(pattern));
                     pending.push(Node::Expr(condition));
                 }
-                n::Pattern::Observe { inner: pattern, .. }
+                n::Pattern::ErrorResult { inner: pattern, .. }
+                | n::Pattern::Observe { inner: pattern, .. }
                 | n::Pattern::Remap { pattern, .. }
                 | n::Pattern::Binding { inner: pattern, .. } => {
                     pending.push(Node::Pattern(pattern))
@@ -2416,6 +2487,7 @@ pub(super) fn references(
                 }
                 | K::TypeList(fields)
                 | K::TupleType(fields)
+                | K::Intrinsic { inputs: fields, .. }
                 | K::Tuple(fields)
                 | K::AnonymousRecord { fields }
                 | K::Record { fields, .. }
@@ -2425,12 +2497,14 @@ pub(super) fn references(
                 | K::Let { value, .. }
                 | K::Assign { value, .. }
                 | K::BitAssign { value, .. }
+                | K::UnsafeScope(value)
                 | K::Discard(value)
                 | K::RequirePredicate(value)
                 | K::EnsurePredicate(value)
                 | K::CheckPredicate(value)
                 | K::BitSlice { value, .. }
                 | K::BitConvert(value)
+                | K::ErrorConvert { value: value, .. }
                 | K::NewtypeConvert(value)
                 | K::Snapshot(value)
                 | K::TakeBits(value)
@@ -2450,6 +2524,7 @@ pub(super) fn references(
                 | K::ScalarGreater(a, b)
                 | K::ScalarGreaterEqual(a, b)
                 | K::ScalarLessEqual(a, b)
+                | K::TemplateEqual(a, b)
                 | K::ScalarEqual(a, b)
                 | K::TypeEqual(a, b)
                 | K::TypeListIndex(a, b)
@@ -2612,7 +2687,7 @@ pub(super) fn mentions_value_parameter(
             }
             found
         }
-        H::Block(block) => {
+        H::Block(block) | H::UnsafeBlock(block) => {
             let mut found = false;
             for expression in block.stmts.iter().chain(block.expr) {
                 found |= mentions_value_parameter(expression, depth + 1, is_type)?;
@@ -2673,6 +2748,7 @@ pub(super) fn mentions_value_parameter(
         | H::MultiDeref(value)
         | H::TakeBitVec(value)
         | H::TakeTagName(value)
+        | H::TakeIntrinsic(value)
         | H::TakeTupleEnumerate(value)
         | H::Defer(value)
         | H::InlineControl(value)
@@ -2840,7 +2916,8 @@ pub(super) fn signature_inputs_ready_with_clauses(
         | H::Index(a, b)
         | H::TyFnArrow(a, b)
         | H::TyClosure(a, b)
-        | H::EffectQualifiedType(a, b) => ready(a)? & ready(b)?,
+        | H::EffectQualifiedType(a, b)
+        | H::ErrorQualifiedType(a, b) => ready(a)? & ready(b)?,
         H::Projection(value, _)
         | H::TyPtr(value)
         | H::TyOptional(value)
@@ -2863,7 +2940,7 @@ pub(super) fn signature_inputs_ready_with_clauses(
             }
             all
         }
-        H::Block(block) | H::Loop(block) => {
+        H::Block(block) | H::UnsafeBlock(block) | H::Loop(block) => {
             let mut all = true;
             for statement in block.stmts {
                 all &= ready(statement)?;
@@ -2933,7 +3010,10 @@ pub(super) fn signature_inputs_ready_with_clauses(
             }
             all
         }
-        H::TyFn(parameters) | H::TyComptimeFn(parameters) | H::TyNFFn(parameters) => {
+        H::TyFn(parameters)
+        | H::TyComptimeFn(parameters)
+        | H::TyModifiedFn(_, parameters)
+        | H::TyNFFn(parameters) => {
             let mut all = true;
             for parameter in *parameters {
                 match parameter.kind {

@@ -2,7 +2,7 @@
 //! Successful analysis does not lower Drop or certify complete program safety.
 use elaboration::{
     capabilities::World,
-    implementation::{ImplementationHead, Index},
+    implementation::Index,
     ptc::{Budget, Context},
     verification::moves::Report,
 };
@@ -12,6 +12,29 @@ use nir::{
     program::{FunctionPhase, Package},
 };
 use std::fmt;
+
+/// A source selector is resolved once; downstream execution preserves its identity.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Selection<'a> {
+    Name(&'a str),
+    Identity(DeclarationId),
+}
+impl fmt::Display for Selection<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Name(name) => f.write_str(name),
+            Self::Identity(id) => id.fmt(f),
+        }
+    }
+}
+impl Selection<'_> {
+    fn matches(self, definition: &nir::program::Trait) -> bool {
+        match self {
+            Self::Name(name) => definition.name == name,
+            Self::Identity(id) => definition.declaration == id,
+        }
+    }
+}
 
 pub struct Analysis {
     pub entry: DeclarationId,
@@ -59,7 +82,14 @@ pub fn analyze_with_protocols(
     drop_protocol: Option<&str>,
     fuel: u64,
 ) -> Result<Analysis, String> {
-    analyze_selected(package, entry, None, copy_protocol, drop_protocol, fuel)
+    analyze_selected(
+        package,
+        entry,
+        None,
+        Selection::Name(copy_protocol),
+        drop_protocol.map(Selection::Name),
+        fuel,
+    )
 }
 
 pub fn analyze_with_protocols_in_package(
@@ -74,18 +104,18 @@ pub fn analyze_with_protocols_in_package(
         package,
         entry,
         Some(identity),
-        copy_protocol,
-        drop_protocol,
+        Selection::Name(copy_protocol),
+        drop_protocol.map(Selection::Name),
         fuel,
     )
 }
 
-fn analyze_selected(
+pub(crate) fn analyze_selected(
     package: &Package,
     entry: &str,
     identity: Option<u64>,
-    copy_protocol: &str,
-    drop_protocol: Option<&str>,
+    copy_protocol: Selection<'_>,
+    drop_protocol: Option<Selection<'_>>,
     fuel: u64,
 ) -> Result<Analysis, String> {
     let mut entries = package
@@ -116,7 +146,7 @@ fn analyze_selected(
         steps,
         ..Default::default()
     };
-    let binding = ProtocolContext::new(package, copy_protocol, drop_protocol, budget)?;
+    let binding = ProtocolContext::selected(package, copy_protocol, drop_protocol, budget)?;
     let protocol = binding.copy;
     let drop_protocol = binding.drop;
     let world = binding.world(package);
@@ -151,7 +181,20 @@ impl ProtocolContext {
         drop_protocol: Option<&str>,
         budget: Budget,
     ) -> Result<Self, String> {
-        let mut protocols = package.traits.iter().filter(|t| t.name == copy_protocol);
+        Self::selected(
+            package,
+            Selection::Name(copy_protocol),
+            drop_protocol.map(Selection::Name),
+            budget,
+        )
+    }
+    pub(crate) fn selected(
+        package: &Package,
+        copy_protocol: Selection<'_>,
+        drop_protocol: Option<Selection<'_>>,
+        budget: Budget,
+    ) -> Result<Self, String> {
+        let mut protocols = package.traits.iter().filter(|t| copy_protocol.matches(t));
         let definition = protocols
             .next()
             .ok_or_else(|| format!("Copy protocol `{copy_protocol}` was not found"))?;
@@ -164,7 +207,7 @@ impl ProtocolContext {
         let protocol = definition.declaration;
         let drop_protocol = drop_protocol
             .map(|name| {
-                let mut definitions = package.traits.iter().filter(|t| t.name == name);
+                let mut definitions = package.traits.iter().filter(|t| name.matches(t));
                 let definition = definitions
                     .next()
                     .ok_or_else(|| format!("Drop protocol `{name}` was not found"))?;
@@ -176,29 +219,8 @@ impl ProtocolContext {
             .transpose()?;
         let context =
             Context::from_package(package).map_err(|e| format!("resource type context: {e}"))?;
-        let mut index = Index::default();
-        // Finalized inherent implementations belong to the member index, not
-        // the provisional open-interface bucket of trait selection.
-        for implementation in package
-            .implementations
-            .iter()
-            .filter(|implementation| implementation.interface.is_some())
-        {
-            index
-                .insert(
-                    ImplementationHead {
-                        parameter_types: implementation.parameter_types.clone(),
-                        declaration: implementation.declaration,
-                        interface: implementation.interface,
-                        interface_arguments: implementation.interface_arguments.clone(),
-                        subject: implementation.subject.clone(),
-                        type_parameters: implementation.type_parameters.clone(),
-                        requirements: implementation.requirements.clone(),
-                    },
-                    budget,
-                )
-                .map_err(|e| format!("resource implementation index: {e:?}"))?;
-        }
+        let index = crate::implementation_world::index(&package, budget)
+            .map_err(|error| format!("resource implementation index: {error}"))?;
         let mut items = LangItems::new();
         items
             .bind_source_traits(package, &[(LangItem::Copy, protocol)])

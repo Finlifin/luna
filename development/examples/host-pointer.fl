@@ -1,0 +1,14 @@
+-- Build with --copy-protocol Duplicate --drop-protocol Retire.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+
+fn borrow(pointer: *bool) -> *bool { pointer }
+fn enable(pointer: *bool) { pointer.* = true; }
+
+fn run() -> bool {
+    var enabled = false;
+    let pointer = borrow(enabled.ref);
+    enable(pointer);
+    enabled
+}

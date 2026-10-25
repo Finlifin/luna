@@ -61,7 +61,119 @@ comptime 指定阶段；quote、lambda、case、catch 与接收者各有自己�
 
 runtime 默认计算必须达到 **P3 稳定观测，并在合法入口下有限完成**。它可以观察有效的前序输入状态，不能隐含修改入口可观察状态、输出或交付新的可观察资源身份。适配与临时值清理也计入默认计算。
 
-开放函数的 runtime 默认值也使用完整调用图检查 P3，不局限于字面值或局部表达式。例如 `pure fn invert(value: bool) -> bool { not value }` 可以为前序 bool 参数提供 `invert(value)` 默认值。若调用的是已形成的开放实例，保留 comptime 形参本身不构成拒绝理由：阶段检查确认输入可用，P3 则检查实际输入计算和实例主体。 当前 P3 检查还要求调用处的 staged 实参已经完成为规范常量；仍待解析的局部引用不能仅凭类型和有限函数体取得这一依据。未证明有限的递归与无限循环仍拒绝；显式覆盖只跳过该次默认求值，不取消默认定义的合法性要求。
+开放函数的 runtime 默认值也使用完整调用图检查 P3，不局限于字面值或局部表达式。例如 `pure fn invert(value: bool) -> bool { not value }` 可以为前序 bool 参数提供 `invert(value)` 默认值。若调用的是已形成的开放实例，保留 comptime 形参本身不构成拒绝理由：阶段检查确认输入可用，P3 则检查实际输入计算和实例主体。 当前 P3 检查接受已经完成的规范常量，也接受依赖声明中 comptime 形参的实参计算，例如 `mode`、`not mode`、`mode == false` 或块内的局部绑定：这类值在调用时供应，不要求定义侧提前知道具体值。计算的自由绑定必须有 staged 依据，计算本身仍须通过有限性与副作用检查。检查仍覆盖被调函数的所有可能分支，并由阶段检查独立验证实际输入可用性；普通 runtime 局部变量不能据此取得 comptime 资格。依赖其他尚未确认输入的计算仍需额外可用性依据。未证明有限的递归与无限循环仍拒绝；显式覆盖只跳过该次默认求值，不取消默认定义的合法性要求。
+
+例如，普通调用中的 runtime 默认值可以转发前序 comptime 形参：
+
+```flurry
+fn invert(comptime mode: bool, value: bool) -> bool {
+    if mode { not value } else { value }
+}
+fn take(comptime mode: bool, value: bool, .next: bool = invert(mode, value)) -> bool {
+    next
+}
+fn check() -> bool {
+    take(true, false) and not take(false, false)
+}
+```
+
+两次调用分别供应 mode，默认值内部的调用取得本次已完成的 comptime 输入；这不把 runtime 的 value 提前执行。链式默认值仍读取前序参数本次实际供应的值。参数与结果域已经明确的供应函数也可以用 `inline if` 根据该输入展开主体：定义侧先检查所有分支的类型、稳定性与有限性，调用处取得 comptime 输入后再选择并展开。这个定义侧描述只供行为检查使用，不成为可执行函数。即使默认值被所有调用显式覆盖，或者整个定义尚未被调用，非法分支仍须拒绝，合法定义仍可通过检查。
+
+默认表达式也可以直接包含 inline 控制流。选择依赖不仅来自 subject，也来自 pattern 和 guard；即使 subject 是常量，pattern 仍可能需要本次调用供应的 comptime 参数：
+
+```flurry
+fn take(comptime mode: bool, value: bool,
+    .next: bool = inline if true is do {
+        'mode => not value,
+        _ => value,
+    }) -> bool {
+    next
+}
+fn check() -> bool {
+    take(true, false) and not take(false, false)
+}
+```
+
+这里 `'mode` 读取前序参数的值。两次调用选择不同分支，分支中的 `value` 仍是 runtime 输入。依赖扫描不能只看到常量 subject 就在定义处执行整个匹配；同样，经过合法局部绑定转交的 staged 输入也不能丢失。普通 runtime 参数不会因为出现在 inline 选择器中而自动提升为 comptime。
+
+模式转换也可以把 inline 分支用于默认计算，而不要求整个被解构值在 comptime 已知：
+
+```flurry
+fn transform(comptime mode: bool, value: bool, .next: bool = do {
+    let (first and (inline if mode { not first } else { first }) is result) = value;
+    result
+}) -> bool {
+    next
+}
+```
+
+`mode` 选择要生成的转换，`first` 在 runtime 取得 `value`，转换结果再绑定为 `result`。定义检查不能因为进入了 `let` 的 pattern 就立即执行 inline 选择器；也不能跳过未选分支的检查。若将 `mode` 改为 runtime 参数，该 inline 选择器仍不合法。
+
+默认块内的无条件数据 const 也可以依赖前序 comptime 参数：
+
+```flurry
+fn take(comptime mode: bool, value: bool, .next: bool = do {
+    const selected = not mode;
+    invert(selected, value)
+}) -> bool {
+    next
+}
+```
+
+定义侧保留经过检查的常量表达式及模式导出，不提前求值；具体调用再按实际输入物化常量。连续 const 别名、tuple 解构、已知 Type 常量和普通函数声明常量保留各自的信息。带 guard／else 的数据 const 也先检查定义，再按本次 comptime 输入选择：
+
+```flurry
+fn take(comptime mode: bool, .next: bool = do {
+    var selected = false;
+    while true {
+        const found if mode = true else { break; };
+        selected = found;
+        break;
+    }
+    selected
+}) -> bool {
+    next
+}
+fn run() -> bool {
+    take(true) and not take(false)
+}
+```
+
+initializer、模式中的计算及 guard 都须具有编译期依据。guard 可读取本次匹配的候选绑定；else 在外层 runtime 作用域执行，不能访问该条 const 成功后才导出的名字，且必须发散。这里的 break 退出默认表达式内的循环，不退出调用者。实际选择成功后才物化导出值，guard 对编译期闭包环境的修改不能被提前冻结。已知的 Type 结构证据可供后续注解使用。
+
+上述循环每条路径都退出，不会落入下一轮。当前有限性检查接受主体不落穿且没有指向本循环的 continue 的循环；仍检查其中每个操作、调用及嵌套循环。存在回边、无限子循环或未证明终止的递归调用时仍拒绝。这是有限性证据的一种实现，不把一般循环排除出语言契约。
+
+签名已明确、无需子句实例化的开放函数声明也可以保存为 const，再提供普通 comptime 参数：
+
+```flurry
+fn invert(comptime mode: bool, value: bool) -> bool {
+    inline if mode { not value } else { value }
+}
+fn take(comptime mode: bool, value: bool, .next: bool = do {
+    const operation = invert;
+    const selected = not mode;
+    operation(selected, value)
+}) -> bool {
+    next
+}
+```
+
+`operation` 保留声明身份和签名；调用时才依照 `selected` 形成具体实例。身份元数据及函数值标签本身不提供可执行主体。取函数值也不会因此自动获得尚未实现的 optional／implicit 等参数协议。待形成签名的开放函数值仍有独立实现缺口。
+
+已知签名还可以先实例化子句参数，或由函数类型上下文确定类型子句：
+
+```flurry
+fn choose(comptime mode: bool, first: T, second: T) -> T where T {
+    inline if mode { first } else { second }
+}
+fn run() -> bool {
+    const explicit = choose<bool>;
+    const contextual: fn(comptime bool, bool, bool) -> bool = choose;
+    explicit(true, true, false) and contextual(false, false, true)
+}
+```
+
+子句实参属于所保存的函数身份；普通 comptime 形参仍在调用处供应，不能用 runtime 值代替。值子句也按声明域检查，例如 `where flip: bool` 的显式实例化可以接受 `true`，不能接受类型值 `bool`。
 
 稳定性只在取得依据的范围内成立。同一个指针在两次调用中的内容可能不同，默认值不能只以指针位值为键永久缓存。默认值的纯度也不准许复制非 Copy 责任。
 

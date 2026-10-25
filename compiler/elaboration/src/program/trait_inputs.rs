@@ -79,6 +79,9 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn trait_input_domain(&self, id: DeclarationId) -> Option<Term> {
+        if let Some(domain) = self.lexical_input_domains.get(&id) {
+            return Some(domain.clone());
+        }
         if let Some(domain) = self.nominal_input_prefixes.get(&id) {
             return Some(domain.clone());
         }
@@ -148,7 +151,12 @@ impl Checker<'_, '_> {
             &mut fuel,
         );
         self.required_steps -= (before - fuel) as u64;
-        result.map_err(|e| error(span, format!("trait input domain substitution failed: {e}")))
+        let domain = result
+            .map_err(|e| error(span, format!("trait input domain substitution failed: {e}")))?;
+        // Substituting Self may make a previously abstract associated domain
+        // concrete. Obtain that view before contextual literals are checked,
+        // so widths and overflow rules come from the selected implementation.
+        self.callable_input_view(&domain, span)
     }
 
     fn supplied_trait_domain(
@@ -269,6 +277,53 @@ impl Checker<'_, '_> {
         self.forbidden_default_inputs = saved_forbidden;
         self.in_required_comptime = saved_mode;
         result
+    }
+
+    /// Fix an explicitly supplied positional prefix; remaining declaration
+    /// inputs are solved by the ordinary call candidate, not guessed here.
+    pub(super) fn partial_positional_clause_prefix(
+        &mut self,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        fixed: &[Term],
+        span: Span,
+    ) -> Result<Option<Vec<Term>>, Error> {
+        let clauses = self.type_clause_params(owner);
+        let count = self.type_parameters[&owner].len();
+        let inherited = count.saturating_sub(clauses.len());
+        if fixed.len() < inherited
+            || fixed.len() > count
+            || args.is_empty()
+            || args.len() >= count - fixed.len()
+            || self.has_optional_type_clauses(owner)
+            || !args.iter().all(|arg| matches!(arg, Arg::Positional(_)))
+        {
+            return Ok(None);
+        }
+        let domains = self.trait_domains(owner)?;
+        let mut supplied = vec![None; clauses.len()];
+        for (slot, value) in fixed[inherited..].iter().enumerate() {
+            supplied[slot] = Some(value.clone());
+        }
+        let mut result = fixed.to_vec();
+        for arg in args {
+            let Arg::Positional(value) = arg else {
+                unreachable!()
+            };
+            let slot = result.len() - inherited;
+            let domain = self.supplied_trait_domain(
+                owner,
+                &domains[result.len()],
+                &supplied,
+                &fixed[..inherited],
+                None,
+                span,
+            )?;
+            let value = self.normal_value_argument(value, &domain)?;
+            supplied[slot] = Some(value.clone());
+            result.push(value);
+        }
+        Ok(Some(result))
     }
 
     pub(super) fn trait_clause_arguments(

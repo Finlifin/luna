@@ -1,6 +1,150 @@
 # 开发入口
 
+Comptime invocation 性能基准：`python3 -B development/comptime_bench.py --repeat 5`。测量边界、调用帧重构数据及 definition builder 的当前缺口见 [comptime-vm.md](comptime-vm.md)。
+
+Cargo 输出转发按最多 64 KiB 的块进行，不按换行积攒整条输出；配额诊断匹配保留跨块尾部。若 stdout/stderr 的转发写入或 flush 失败，入口继续排空子进程管道，等待子进程结束后报告证据交付失败。此时不发布成功回调，也不因为证据故障重跑可能已执行的程序；EDQUOT/ENOSPC 会触发现有缓存清理。清理提示无法写出不阻止清理本身。外层日志文件写入仍由 process_tools 独立处理；这一机制不能把外层丢失的日志恢复出来。
+
+
 语言基础文档从 [docs/README.md](../docs/README.md)进入。当前开发规则是根 [AGENTS.md](../AGENTS.md)，默认直接实现并运行相关测试；[任务图协议](graph-workflow.md)已停用，仅供历史查阅。`main` 用于集成产物，开发在 `dev`。
+
+检查入口若无法保存日志或报告，会返回 125（evidence-error）。终端 JSON 的 `report_saved: false` 表示磁盘上的 result.json 可能仍是旧的 running 状态，应读取同一终端记录的 `evidence` 取得实际退出码与存储错误；不能根据旧文件重启仍在运行的任务。初始报告不能写入时不启动子进程，启动后 PID 发布失败时终止并回收子进程。日志失败仍排空管道并统计未保存字节，不据此宣称测试通过。
+
+
+聚合入口 library_check.py、host_examples.py、run_host.py 的 summary.json 也采用临时文件加原子替换。汇总写入失败时保留此前版本，终端输出 summary_saved=false、完整内存 evidence 和 wrapper_exit_code=125，并停止启动后续任务；旧汇总不是本次终态。run_host 的这类信息只输出到 stderr，程序 stdout 保持原始字节。正常测试失败仍遵循各入口的继续／停止选项；无法保存汇总属于基础设施失败，即使 --keep-going 也停止。此机制不删除旧报告、不绕过磁盘配额。
+
+## 独立库验收
+
+`python3 -B development/library_check.py --release --stage native-tuple` 可单独运行真实 Tuple/meta/resources 的四项源码原生测试，包括仿射字段解构与析构。`--stage` 可以重复；报告明确标记 selected 范围。不传该参数仍运行全部九阶段，完整 sysroot 的失败不会被隐藏。Math 阶段与 host 示例共用 intrinsic 配置，避免手写两份列表。
+
+## 运行 LLVM host 示例
+
+二进制指数缩放：`python3 -B development/host_examples.py math-ldexp --release-driver --compare-optimization`。`math.ldexp<T>` 接受 f32/f64 数值和 i32 指数，覆盖次正规数、上溢／下溢、负零和实参求值顺序；不把缩放改写成先计算浮点幂再相乘。
+
+
+整数指数幂：`python3 -B development/host_examples.py math-powi --release-driver --compare-optimization`。`math.powi<T>` 采用 f32/f64 底数和 i32 指数，覆盖负指数、最小指数、负零及实参各求值一次；这是 LLVM powi 包装，不承诺特定的浮点乘法舍入序列。
+
+
+quoted 契约与显式复制能力示例：`python3 -B development/host_examples.py quote-contract-patterns --release-driver --compare-optimization`。使用真实 Tuple/meta 包，并显式绑定本地 Duplicate 协议；这不代表标准库 resources.Copy 已为 Tuple 提供实现。删除该实现应在生成可执行文件前拒绝。
+
+真实 Tuple 库示例：`python3 -B development/host_examples.py library-tuple --release-driver --compare-optimization`。使用仓库 tuple/meta/resources 三个独立包，显式连接 tuples → meta；覆盖 comptime 类型列表、变参展开、空／单元素／嵌套 tuple 与单次消费后的解构，默认预算即可运行。
+
+内存契约示例：`python3 -B development/host_examples.py memory-result-contracts --release-driver --compare-optimization`。包含返回值与写入内存的联合后置条件、字段更新、默认指针别名，使用真实 resources Copy／Drop 协议。此例显式使用 `--fuel 1000000` 的总编译预算；默认 100000 仍不足，未改变全局默认值。
+
+当前交付路径为源码检查 → 具体 IIR → LLVM IR 校验／优化 → host 对象 → 链接和执行。LLVM 的布局只用于目标表示，不改写 Flurry 类型身份。可以先跑下方算术示例；前端待修项与最近一次失败证据集中在 [frontend-checkpoint.md](frontend-checkpoint.md)。
+
+带捕获回调的真实库示例：`python3 -B development/host_examples.py library-option-callback --release-driver --compare-optimization`。`map<bool>` 显式固定结果类型，尾部闭包环境从实参推断；Some 和 None 两条路径分别验证调用与未调用时的环境清理。
+
+真实 Result 库可运行：`python3 -B development/host_examples.py library-result --release-driver --compare-optimization`。覆盖成功／错误分支的查询和组合；这是普通库枚举，不是 `!E T` 的错误 ABI。
+
+真实 Option 库操作可直接运行：`python3 -B development/host_examples.py library-option --release-driver --compare-optimization`。示例加载实际 option.fl 与 resources.fl，覆盖查询、map、and_then 和 unwrap_or；依赖 panic 的 unwrap 尚不能使用。
+
+先运行一个无需额外库或协议配置的程序：
+
+```sh
+python3 -B development/run_host.py development/examples/host-arithmetic.fl --release-driver --opt-level 3
+```
+
+预期 stdout 为 `(unsigned-integer 42)`。入口完成编译器构建、LLVM 原生编译、链接和执行，打印产物与日志目录；输出来自生成的可执行文件。源码入口为 `fn run()`，结果打印使用开发驱动适配器，尚不等于标准库 `println` 已经可用。语义前端的恢复入口与未完成项见 [frontend-checkpoint.md](frontend-checkpoint.md)。
+
+最近的 handler／闭包场景已进入默认示例集，可单独运行：
+
+```sh
+python3 -B development/host_examples.py field-closure-state handler-record-callback handler-record-state handler-owned-data handler-restored-owner handler-enum-callback --release-driver --compare-optimization
+```
+
+这些示例分别覆盖字段闭包状态、记录回调借用、与代码字段分离的数据写入、拥有型数据借用、移动后恢复责任和枚举条件回调。源码位于 `development/examples/host-*.fl`；原 repro 路径保留相对软链接，历史复现与回归测试继续使用同一份源码。当前登记 61 个示例，默认命令全部运行；各程序的结果和协议绑定由运行器逐项核对。
+
+闭包交付链示例：`python3 -B development/host_examples.py owned-field-callback --release-driver --compare-optimization`。闭包拥有非 Copy 的 State，从记录字段移入泛型函数，按默认参数调用两次后返回，再装入嵌套记录调用一次；最终析构检查调用次数恰好为三、最终状态正确、责任只退休一次。它演示原位调用与按值转移的组合，不要求为闭包提供 Copy 实现。
+
+两个入口均支持 `--release-driver`，使用 Cargo release 配置构建 luna。该选项只控制编译器自身，与生成 Flurry 代码的 `--opt-level`／`--compare-optimization` 独立；默认仍使用 debug driver。首次 release 构建较慢，后续复用同一个受管 target。空间紧张时可用：
+
+```sh
+python3 -B development/host_examples.py generic-integers --release-driver --compare-optimization
+python3 -B development/run_host.py development/examples/host-arithmetic.fl --release-driver --opt-level 3
+```
+
+编译器副本仅在本次运行期间保留，结束时释放；生成的程序和日志继续保留。汇总报告的 `driver_profile` 记录实际选择，构建失败不会回退到另一个配置的旧编译器。
+
+私有 driver 复制遇到磁盘满或配额耗尽时，会在缓存维护锁内清理受管 target 并重试一次。复制期间保持源文件打开，因此清理后无需重新构建编译器；失败不保留半成品，不覆盖已有目标，也不清理历史运行目录。
+
+运行自己的单个源文件可以使用：
+
+```sh
+python3 -B development/run_host.py path/to/example.fl --entry run --opt-level 3 -- --copy-protocol Duplicate --drop-protocol Retire
+```
+
+`--` 后传给 luna 的是编译器选项；只在源码确实声明了这些协议时才传入。入口默认 `run`，优化默认 O0。工具自动构建私有 driver 和可执行文件，运行结束释放 driver、保留可执行文件，构建每步默认超时 300 秒，程序默认超时 10 秒，分别可用 `--build-timeout`、`--run-timeout` 调整。沿用受控 Cargo 缓存与进程组超时清理。stdout 只交付程序输出，运行器状态和诊断在 stderr；程序的非零状态及超时传播到退出码，截断日志不会被报告为完整成功。产物、逐阶段报告和 `summary.json` 保留在打印出的 `/tmp/luna-run-host-*/`。预配置协议／intrinsic 示例也可使用下方目录运行器。
+
+运行自定义多包输入时省略源文件位置参数，在 `--` 后直接使用现有 `--packages-v1` 协议。例如：
+
+```sh
+python3 -B development/run_host.py --opt-level 3 -- --packages-v1 \
+  --package 1 101 app development/examples/host-library-order.fl \
+  --package 2 202 comparison library/builtin/comparison.fl \
+  --package 3 303 resources library/builtin/resources.fl \
+  --dependency 1 comparison 2 --dependency 1 resources 3 --primary 1 \
+  --copy-protocol resources::Copy --drop-protocol resources::Drop
+```
+
+包身份、依赖别名、路径和编译器选项原样交给 luna 校验；相对路径基于调用时的工作目录。`summary.json` 的 `inputs` 保存本轮输入。交互式 stream 协议不用于该一次性运行入口。
+
+优化前后对照使用 `python3 -B development/host_examples.py --compare-optimization`，也可指定子集，例如 `python3 -B development/host_examples.py arithmetic callback --compare-optimization`。每个示例分别以 O0/O3 构建和执行，两档都必须满足同一输出契约；每档单独保留产物与报告，整批只构建一次驱动。此选项与 `--opt-level` 互斥，默认仍只运行 O0。
+
+整批诊断可追加 `--keep-going`：构建或执行某项失败后继续剩余示例／优化档，逐项保存 summary.json；只要有一项失败，最终状态仍为失败。默认保持遇到首项失败即停止。例如 `python3 -B development/host_examples.py --release-driver --compare-optimization --keep-going`。
+
+按位组合示例：`python3 -B development/host_examples.py bitwise --release-driver --compare-optimization`。`replace_bits` 用 `math.bit_and/bit_or/bit_xor` 保留掩码之外的位，再写入掩码内的新位；示例覆盖不同整数宽度及有符号位模式。这些接口支持 i8–i128／u8–u128 及按显式目标位宽处理的 usize/isize，同一调用的输入输出类型相同，不引入整数位运算符。
+
+无需额外协议配置的算法示例：
+
+```sh
+python3 -B development/run_host.py development/examples/host-number-theory.fl --opt-level 3
+```
+
+它计算 100 以下素数之和、gcd(48, 18) 和 Fibonacci(10)，输出 `(unsigned-integer 1121)`。源码使用普通运行时函数、循环、递归及 contract；暂时不能自动推导的数值界通过受检查的 `assumes` 明确给出。对照优化结果可运行 `python3 -B development/host_examples.py number-theory --compare-optimization`。
+
+类型数据包示例：`python3 -B development/host_examples.py type-packets --compare-optimization`。运行器显式注册 Tuple 与类型列表构造器；示例在 comptime 分支内通过嵌套 Tuple 和局部别名传递 Type，再以解构取得的类型选择泛型成员。普通 let 的取址与闭包捕获仍保留存储身份。
+
+`python3 -B development/host_examples.py` 构建并运行算术、浮点、UTF-8 字符串及含字符串的 record／Tuple、模板、函数回调、宽整数、析构、direct handler 清理、ordinary direct 跨函数调用、非局部返回与循环退出、direct passing 跨函数调用、聚合效应值的泛型／高阶调用、inline effect 清理、多包 math／库比较协议、错误结果与分阶段回调，computed pattern 分支重试／指针写回／析构组合，以及捕获回调／嵌套 handler fallback／非局部返回的四层清理，以及入口返回带所有权错误结果的显式清理，再加上整数 intrinsic 契约及浮点 intrinsic 运行时谓词，及浮点分类，及整数饱和加减、整数 min/max，以及递归节点、栈上链表反转和块内局部声明与泛型环境，以及局部 const 的编译期模式／guard 选择，以及 Type 数据包的分支内解构，以及数论循环／递归和泛型整数算法，以及自定义版本类型的 Ord 运算符，等登记示例，逐字节核对 UTF-8 原生 stdout 与结果末尾的单个换行；额外空白、无效 UTF-8、截断输出和非零退出均记为失败。资源示例自动启用 Duplicate/Retire 协议，inline effect 示例同时启用 inline 展开；summary.json 保存各项包输入、实际选项、优化级别、构建／执行报告路径，以及失败原因。可用 `--opt-level 3` 或在末尾指定 `arithmetic callback` 等子集。产物与每步日志保留在打印出的 `/tmp/luna-host-examples-*/`，汇总为 `summary.json`；构建或执行失败立即以非零状态退出。编译器只构建一次：`build_host_driver.py` 通过现有 Cargo 缓存管理入口，在共享维护锁内保存本轮私有可执行文件，再执行缓存回收；整批示例复用该文件，避免每项重新链接 luna。多包示例自动传入包身份、依赖别名和显式 intrinsic 绑定，例如 `python3 -B development/host_examples.py math-fma library-order --opt-level 3`。
+
+联合标量比较示例：`python3 -B development/host_examples.py generic-order --compare-optimization`。同一函数可处理固定整数、usize／isize、浮点和字符；平台整数采用明确的目标布局，动态检查上下界，浮点 NaN 仍保持无序。
+
+泛型迭代示例：`python3 -B development/host_examples.py generic-iteration --compare-optimization`。Newton 迭代同时使用泛型浮点默认参数、复合赋值和整数计数器，检查 f32／f64 实际运行结果。
+
+泛型浮点算法示例：`python3 -B development/host_examples.py floating --compare-optimization`。同一插值／除法／乘加函数接受 f32 或 f64；示例检查 NaN、无穷及普通乘加的分步舍入。
+
+泛型整数算法示例：`python3 -B development/host_examples.py generic-integers --compare-optimization`。同一 GCD 函数在 u32／u128 上运行，包含 u128 最大值输入；差值函数利用分支条件证明无符号减法安全。运行器加载实际 builtin/ops 独立协议包并绑定七个算术协议，同时验证五种有符号类型域上的泛型取负。完整 sysroot 的 String、panic 等入口仍待实现。
+
+有符号整数绝对值示例：`python3 -B development/host_examples.py wrapping-abs --compare-optimization`。最小有符号整数保持原值，普通负数得到正数；运行器自动配置 math 包及 intrinsic。
+
+整数契约与浮点谓词可一起运行：`python3 -B development/host_examples.py intrinsic-contract intrinsic-predicate --opt-level 3`。运行器自动绑定 ctlz／fma 并启用 Duplicate/Retire，无须手工指定协议。
+
+所有权结果示例可运行 `python3 -B development/host_examples.py owned-result --opt-level 3`。入口交付 `!Failure Ticket`，默认错误载荷经 newtype 包装；运行器使用 `--discard-result` 及 Copy/Drop 协议退休载荷，成功时输出 `(unit)`。这不是错误结果的隐式传播，也不是名义值打印接口。
+
+字符串示例可单独运行 `python3 -B development/host_examples.py string product-string-result --opt-level 3`。它们使用不可变字面量存储；当前 `str` backing storage 来源分析尚未接通，因此不启用 Copy/Drop 资源检查，不能据此推断通用字符串视图的安全支持已经完成。
+
+LLVM bitcode 可独立导出，供后续 LLVM 工具使用：
+
+```sh
+python3 -B development/check.py --timeout 300 -- run -p luna -- development/examples/host-direct-calls.fl --emit-bitcode run --copy-protocol Duplicate --drop-protocol Retire --opt-level 3 --output /tmp/flurry-direct.bc
+```
+
+`--emit-bitcode` 支持多包输入，要求 `--output`，不启动 llc 或链接器；其目标校验与原生对象输出一致。
+
+汇编导出可运行：
+
+```sh
+python3 -B development/check.py --timeout 300 -- run -p luna -- development/examples/host-direct-calls.fl --emit-asm run --copy-protocol Duplicate --drop-protocol Retire --opt-level 3 --output /tmp/flurry-direct.s
+python3 -B development/command.py --timeout 30 -- cc /tmp/flurry-direct.s -lm -o /tmp/flurry-direct
+python3 -B development/command.py --timeout 10 -- /tmp/flurry-direct
+```
+
+`--emit-asm` 不指定 `--output` 时输出到 stdout；也支持 `--packages-v1`。它与对象文件共用目标校验和优化路径，生成汇编时不需要链接器。
+
+单文件构建、LLVM IR／对象文件导出及当前后端边界见 [host-pipeline.md](host-pipeline.md)。语义前端续接状态见 [frontend-checkpoint.md](frontend-checkpoint.md)。
+
+## 多包进程接口
+
+`luna --packages-v1` 接收显式包身份、源码入口和依赖别名，复用多包 HIR/NIR 编译、源码输出保护和 source protocol 选择。参数、退出码、版本边界与构建工具调用示例见 [package-cli.md](package-cli.md)。它不自动加载 sysroot，也不代替 anar 的项目配置与依赖获取。
 
 ## 无人值守工具入口
 
@@ -21007,3 +21151,21 @@ P4 向 move/cleanup 分析传递回调时保留捕获位置上的代码证据和
 未解决的独立问题：泛型方法契约直接读取 `Self.as(Bounds<limit>).bound`、省略 `requires Self :- Bounds<limit>` 时，后声明实现尚未进入契约检查候选集合，报 no-applicable-candidate（`/tmp/luna-tools-kioq6xiq/result.json`）。正例显式声明 trait 前提；这不是新增语言限制，仍需修复契约与实现收集的调度。
 
 目录 `/home/fin/luna`，经 `python3 -B development/check.py --timeout 900 --`：nominal_value_parameters 与 quote_functions 共 274 项通过（`/tmp/luna-tools-61jtqyu5/result.json`）；comptime_interpretor nominal_types 19 项通过（`/tmp/luna-tools-rdao33pv/result.json`）；execution comptime 182 项通过（`/tmp/luna-tools-udoexq_v/result.json`）。全 workspace 格式检查 `/tmp/luna-tools-4qgil7vk/result.json` 退出 0；`git diff --check` 通过。dev 工作区未提交。
+
+普通 Flurry 测试声明的参考执行入口见 [source-tests.md](source-tests.md)。
+
+可运行的 intrinsic 规格示例：
+
+```sh
+python3 -B development/check.py --timeout 300 -- run -p luna -- development/examples/host-intrinsic-predicate.fl --build run --host-intrinsic fma=input::Ops::fma --copy-protocol Duplicate --drop-protocol Retire --opt-level 3 --output /tmp/flurry-intrinsic-predicate
+python3 -B development/command.py --timeout 10 -- /tmp/flurry-intrinsic-predicate
+```
+
+示例在 assumes 中直接执行具有标量目标证据的 FMA。unsafe 仍不授权谓词内的写入；一般泛型函数调用与含 intrinsic 的前后置条件静态推理尚待补齐。
+
+整数 intrinsic 范围契约示例见 `examples/host-intrinsic-contract.fl`：leading_zeros 的 `value > 0` 前置条件支持 `result < 32` 后置条件。
+
+```sh
+python3 -B development/check.py --timeout 300 -- run -p luna -- development/examples/host-intrinsic-contract.fl --build run --copy-protocol Duplicate --drop-protocol Retire --host-intrinsic ctlz=input::Ops::leading_zeros --opt-level 3 --output /tmp/flurry-intrinsic-contract
+python3 -B development/command.py --timeout 10 -- /tmp/flurry-intrinsic-contract
+```

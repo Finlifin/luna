@@ -1,0 +1,23 @@
+-- A stable callback field shares a record with request-time mutable data.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+struct Actions { call: fn(bool) -> bool, flag: bool }
+impl Retire for Actions { fn drop(*self) {} }
+fn identity(value: bool) -> bool { value }
+effect step() -> bool;
+fn subject() -> #step bool {
+    let first = step()#;
+    let second = step()#;
+    first and not second
+}
+fn run() -> bool {
+    var actions = Actions {call: identity, flag: false};
+    let result = subject()# {
+        step() => do {
+            actions.flag = not actions.flag;
+            resume actions.call(actions.flag);
+        },
+    };
+    result and not actions.flag and actions.call(true)
+}

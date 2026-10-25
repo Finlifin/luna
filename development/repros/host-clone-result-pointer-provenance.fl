@@ -1,0 +1,53 @@
+-- Regression: returned field provenance after a Clone that mutates a pointee.
+-- Supply library/builtin/resources.fl as package resources.
+-- --test-native --copy-protocol resources::Copy --drop-protocol resources::Drop
+use resources.{Once, Clone, Copy, Drop};
+
+test clone_scalar {
+    let original: .u32'builtin = 41;
+    let cloned = original.as(Clone).clone();
+    assumes original == 41 and cloned == original;
+}
+
+test clone_pointer {
+    var target = false;
+    let pointer = target.ref;
+    let cloned = pointer.as(Clone).clone();
+    cloned.* = true;
+    assumes target;
+    pointer.* = false;
+    assumes not cloned.*;
+}
+
+struct Watch { seen: *bool }
+impl Drop for Watch {
+    fn drop(*self) { self.seen.*.* = true; }
+}
+
+test scope_cleanup {
+    var seen = false;
+    do { let watch = Watch { seen: seen.ref }; };
+    assumes seen;
+}
+
+struct CounterView { counter: *bool }
+impl Once for CounterView {}
+impl Clone for CounterView {
+    fn clone(*self) -> Self {
+        self.counter.*.* = not self.counter.*.*;
+        self.*
+    }
+}
+impl Copy for CounterView {}
+
+test copy_does_not_call_clone {
+    var count = false;
+    let original = CounterView { counter: count.ref };
+    let copied = original;
+    assumes not count;
+    let cloned = original.as(Clone).clone();
+    assumes count;
+    let copied_value = copied.counter.*;
+    let cloned_value = cloned.counter.*;
+    assumes copied_value and cloned_value;
+}

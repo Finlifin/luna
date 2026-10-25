@@ -123,6 +123,7 @@ impl Checker<'_, '_> {
                 phase: n::FunctionPhase::Comptime,
                 inline: false,
                 pure: true,
+                is_unsafe: false,
                 signature: Term::Function {
                     parameters: inputs
                         .values()

@@ -411,7 +411,14 @@ fn reconstructed_aggregate_predicates_reject_effectful_fields() {
             value: Box::new(pure.clone()),
         },
     );
-    for (field, accepted) in [(pure.clone(), true), (call, false), (write, false)] {
+    let old = LocalId { owner: 7, index: 0 };
+    let new = LocalId { owner: 8, index: 1 };
+    for (field, accepted) in [
+        (pure.clone(), true),
+        (expr(boolean(), K::Local(old)), true),
+        (call, false),
+        (write, false),
+    ] {
         for aggregate in [
             expr(
                 nominal.clone(),
@@ -450,6 +457,19 @@ fn reconstructed_aggregate_predicates_reject_effectful_fields() {
                 },
             );
             assert_eq!(checkable_predicate(&predicate), accepted, "{predicate}");
+            let mut remapped = predicate.clone();
+            assert_eq!(
+                nir::contracts::remap_predicate(&mut remapped, &[(old, new)].into_iter().collect())
+                    .is_ok(),
+                accepted
+            );
+            if accepted {
+                nir::visit::expression(&remapped, &mut 1000, |expr, _| {
+                    assert!(!matches!(expr.kind,K::Local(id) if id==old));
+                    Ok(())
+                })
+                .unwrap();
+            }
         }
     }
 }

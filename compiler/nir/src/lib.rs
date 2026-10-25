@@ -4,14 +4,20 @@
 //! Elaboration must discharge those before publishing these terms. Structural
 //! equality here is an interning/cache operation, not a complete type solver.
 
+pub mod target;
 pub mod types;
 pub use types::*;
 
 pub mod enum_encoding;
+pub mod float_formation;
+pub mod integer_formation;
 mod nominal_parameters;
 pub mod program;
 mod trait_parameters;
-pub use trait_parameters::validate_record_index_with;
+pub use trait_parameters::{
+    validate_record_index_with, validate_record_index_with_admission,
+    validate_record_index_with_admission_in,
+};
 
 pub mod phases;
 
@@ -19,6 +25,7 @@ pub mod function_parameters;
 pub mod normal_forms;
 
 mod display;
+pub use display::QuotedDisplay;
 
 pub mod contracts;
 
@@ -47,8 +54,15 @@ pub mod code_interfaces;
 pub use nominal_parameters::{
     AdmissionError as NominalAdmissionError, binders as declaration_parameters,
     validate_completed as validate_declaration_arguments,
+    validate_completed_in as validate_declaration_arguments_in,
     validate_completed_with_layouts as validate_declaration_arguments_with_layouts,
+    validate_completed_with_layouts_in as validate_declaration_arguments_with_layouts_in,
     validate_with_evidence as validate_declaration_arguments_with_evidence,
+    validate_with_evidence_in as validate_declaration_arguments_with_evidence_in,
 };
 
 pub mod copy_budget;
+
+pub mod call_safety;
+
+pub mod intrinsics;

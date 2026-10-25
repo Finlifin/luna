@@ -1,0 +1,12 @@
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+struct Holder {pub typealias Payload = bool;}
+fn configured(comptime Container: .Type'builtin, value: *bool) -> bool {
+    let pointer: *Container.Payload = value;
+    pointer.*
+}
+fn run() -> bool {
+    let value = true;
+    configured(Holder, value.ref)
+}

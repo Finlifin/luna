@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Byte = .u8'builtin;
 
 fn selected(comptime value: Byte) -> Byte { value }
@@ -14,7 +17,7 @@ fn patch_high_nibble(comptime byte: Byte) -> Byte {
     })
 }
 
-fn run() -> (Byte, Byte, Byte, Byte) {
+fn run() -> Tuple<Byte, Byte, Byte, Byte> {
     (swap_nibbles(0), swap_nibbles(255),
      swap_nibbles(175), patch_high_nibble(175))
 }

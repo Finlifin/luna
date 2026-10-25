@@ -22,6 +22,18 @@ pub struct Expr<'hir> {
     pub span: Span,
 }
 
+/// Callable interface promises. Kept separate from definition-only modifiers
+/// (tests, templates and normal-form heads) and from parameter staging flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FnTypeModifiers {
+    pub is_pure: bool,
+    pub is_comptime: bool,
+    pub is_inline: bool,
+    pub is_unsafe: bool,
+    pub is_spec: bool,
+    pub is_verified: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind<'hir> {
     Lit(Lit),
@@ -83,6 +95,8 @@ pub enum ExprKind<'hir> {
     ),
     When(&'hir [CondictionArm<'hir>]),
     Block(&'hir Block<'hir>),
+    /// Lexical unsafe audit boundary; does not itself discharge behavior contracts.
+    UnsafeBlock(&'hir Block<'hir>),
     Loop(&'hir Block<'hir>),
     Match(&'hir Expr<'hir>, &'hir [PatternArm<'hir>]),
     /// Request/propagate the effects of a computation (`value#`).
@@ -176,6 +190,9 @@ pub enum ExprKind<'hir> {
     /// Function types are constructed using `TyFn` and `TyFnArrow`.
     TyFn(&'hir [TyParam<'hir>]),
     TyComptimeFn(&'hir [TyParam<'hir>]),
+    /// Modified callable interfaces must not become ordinary callable types
+    /// while their admission and compatibility rules remain unimplemented.
+    TyModifiedFn(FnTypeModifiers, &'hir [TyParam<'hir>]),
     TyNFFn(&'hir [TyParam<'hir>]),
     TyFnArrow(&'hir Expr<'hir>, &'hir Expr<'hir>),
 
@@ -214,6 +231,8 @@ pub enum ExprKind<'hir> {
     TakeOld(&'hir Expr<'hir>),
     TakeBitVec(&'hir Expr<'hir>),
     TakeTagName(&'hir Expr<'hir>),
+    /// Target-defined operation tag; operands and explicit output stay in Call/As.
+    TakeIntrinsic(&'hir Expr<'hir>),
     /// Structural enumeration keeps runtime elements distinct from comptime shape.
     TakeTupleEnumerate(&'hir Expr<'hir>),
     TypeOf(&'hir Expr<'hir>),

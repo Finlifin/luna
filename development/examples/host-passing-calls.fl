@@ -1,0 +1,27 @@
+-- luna host-passing-calls.fl --build run --copy-protocol Duplicate --drop-protocol Retire
+trait Duplicate {}
+trait Retire {fn drop(*self);}
+impl Duplicate for bool {}
+impl Duplicate for .u32'builtin {}
+
+^attrs.effects.direct_passing effect enabled()->bool;
+^attrs.effects.direct_passing effect ready()->bool;
+
+fn read(value:bool)->#ready bool {value and ready()#}
+fn read_again(value:bool)->#ready bool {read(value)}
+fn forwarded()->#[enabled,ready] bool {
+    -- The argument uses the caller's enabled slot; read only receives ready.
+    read_again(enabled()#)
+}
+fn recursive(remaining:.u32'builtin)->#ready bool {
+    if remaining == 0 {ready()#} else {recursive(remaining - 1)}
+}
+fn run()->bool {
+    var installed = false;
+    let result = forwarded()# {
+        enabled()=>true,
+        ready()=>do {assumes not installed; installed = true; true},
+    };
+    let recursively = recursive(3)# {ready()=>true,};
+    result and installed and recursively
+}

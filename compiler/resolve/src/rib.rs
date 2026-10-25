@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use symbol::Symbol;
 
 use crate::binding::Binding;
-use crate::ids::ScopeId;
+use crate::ids::{AstNodeRef, ScopeId};
 
 /// What syntactic construct pushed this rib.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +35,9 @@ pub struct Rib {
     pub bindings: HashMap<Symbol, Binding>,
     /// The scope this rib is associated with.
     pub scope_id: ScopeId,
+    /// A generated output scope at this lexical position. Known bindings in
+    /// this rib take precedence; outer bindings remain fallback candidates.
+    pub pending_outputs: Option<AstNodeRef>,
 }
 
 impl Rib {
@@ -43,6 +46,7 @@ impl Rib {
             kind,
             bindings: HashMap::new(),
             scope_id,
+            pending_outputs: None,
         }
     }
 
@@ -99,14 +103,23 @@ impl RibStack {
         }
     }
 
-    /// Look up a name by walking the rib stack top-to-bottom.
+    /// Ordinary-only lookup. Stop at a pending export scope rather than
+    /// silently selecting an outer binding; use Resolver's deferred query
+    /// when the caller can resume generated output resolution.
     pub fn lookup(&self, name: Symbol) -> Option<&Binding> {
         for rib in self.ribs.iter().rev() {
             if let Some(binding) = rib.get(name) {
                 return Some(binding);
             }
+            if rib.pending_outputs.is_some() {
+                return None;
+            }
         }
         None
+    }
+
+    pub fn inner_to_outer(&self) -> impl Iterator<Item = &Rib> {
+        self.ribs.iter().rev()
     }
 
     /// Depth of the stack.

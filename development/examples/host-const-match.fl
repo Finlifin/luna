@@ -1,0 +1,120 @@
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for .u32'builtin {}
+
+comptime fn enabled(flag: bool) -> bool { flag }
+
+fn configured(comptime flag: bool) -> bool {
+    -- Match and guard run after this instance receives flag.
+    const found if enabled(found) = flag else { return false; };
+    found
+}
+
+fn typed_configuration(comptime flag: bool) -> bool {
+    -- Definition checking retains this Type identity without invoking a type function.
+    const T if T == bool = bool else { return false; };
+    let value: T = flag;
+    value
+}
+
+pure comptime fn Descriptor<T, value: T> -> .Type'builtin { T }
+
+fn described_configuration(comptime flag: bool) -> bool {
+    -- Inspect Descriptor's explicit inputs; its body is not unfolded.
+    const Descriptor<T, value> = Descriptor<bool, true> else { return false; };
+    let checked: T = value;
+    checked and flag
+}
+
+struct Settings where T {
+    pub typealias Value = T;
+    pub struct Nested {
+        pub typealias Value = T;
+    }
+    pub struct Selected where U {
+        pub typealias Value = U;
+    }
+}
+
+fn aliased_configuration(comptime flag: bool) -> bool {
+    const Container = Settings<bool>;
+    const T = Container.Value;
+    let value: T = flag;
+    let nested: Container.Nested.Value = value;
+    nested
+}
+
+struct Switch where enabled: bool {
+    pub struct Nested {
+        pub const ENABLED = enabled;
+    }
+}
+
+fn nested_configuration(comptime flag: bool) -> bool {
+    -- Keep the value input until this staged instance is supplied.
+    const Container = Switch<flag>;
+    const enabled = Container.Nested.ENABLED;
+    enabled
+}
+
+comptime fn Configuration(enabled: bool) -> .Type'builtin { Switch<enabled> }
+
+fn computed_configuration(comptime flag: bool) -> bool {
+    -- The member chain is checked after the factory supplies its Type identity.
+    const Container = Configuration(flag);
+    const enabled = Container.Nested.ENABLED;
+    enabled
+}
+
+comptime fn ValueConfiguration(T: .Type'builtin) -> .Type'builtin { Settings<T> }
+
+fn configured_value(comptime T: .Type'builtin, value: defer T) -> defer T
+where requires T:-Duplicate {
+    const Container = ValueConfiguration(T);
+    const Selected = Container.Selected<T>;
+    const Alias: .Type'builtin = Selected.Value;
+    let result: *Alias = value.ref;
+    result.*
+}
+
+fn selected_configuration(comptime flag: bool) -> bool {
+    const Container = ValueConfiguration(bool);
+    -- Both branches retain member provenance until the instance supplies flag.
+    const Selected = if flag {
+        const Local = Container.Selected<bool>;
+        Local
+    } else {Container.Nested};
+    let value: Selected.Value = flag;
+    value
+}
+
+fn invert(value: bool) -> bool { not value }
+
+fn configured_callback(comptime Container: .Type'builtin,
+    action: fn(bool) -> bool, value: bool) -> bool {
+    let callback: fn(Container.Value) -> Container.Value = action;
+    callback(value)
+}
+
+fn run() -> bool {
+    -- The guard calls the captured callback once. The exported callback
+    -- retains its updated environment for the next comptime invocation.
+    const action if action() = do {
+        var flag = false;
+        || { flag = not flag; flag }
+    } else { return false; };
+    const next = action();
+    configured(true) and not configured(false)
+        and typed_configuration(true) and not typed_configuration(false)
+        and selected_configuration(true) and not selected_configuration(false)
+        and described_configuration(true) and not described_configuration(false)
+        and aliased_configuration(true) and not aliased_configuration(false)
+        and nested_configuration(true) and not nested_configuration(false)
+        and computed_configuration(true) and not computed_configuration(false)
+        and configured_value(bool, true)
+        and configured_value(.u32'builtin, 7) == 7
+        and configured_callback(Settings<bool>, invert, false)
+        and not configured_callback(Settings<bool>, invert, true)
+        and not next
+}

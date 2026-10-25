@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Flag = true'type;
 
 struct Box where T {
@@ -18,7 +21,7 @@ where T, U, requires T == Box<U> {
 }
 
 fn inspect(value: T) -> Flag
-where T, requires T == Choice<(Flag, Flag)> {
+where T, requires T == Choice<Tuple<Flag, Flag>> {
     value match {
         .none => false,
         .some((true, _)) => true,
@@ -29,5 +32,5 @@ where T, requires T == Choice<(Flag, Flag)> {
 
 fn run() -> Flag {
     let selected = change<Box<Flag>, Flag>(Box<Flag> { value: false }, true);
-    inspect(Choice<(Flag, Flag)>.some((false, selected)))
+    inspect(Choice<Tuple<Flag, Flag>>.some((false, selected)))
 }

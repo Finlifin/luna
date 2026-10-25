@@ -1,0 +1,17 @@
+fn identity(value: bool) -> bool { value }
+fn invert(value: bool) -> bool { not value }
+
+fn select(inverted: bool) -> fn(bool) -> bool {
+    if inverted { invert } else { identity }
+}
+
+fn apply(callback: fn(bool) -> bool, value: bool) -> bool {
+    callback(value)
+}
+
+fn run() -> bool {
+    var callback = select(false);
+    let first = apply(callback, true);
+    callback = select(true);
+    first and apply(callback, false)
+}

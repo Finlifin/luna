@@ -107,7 +107,7 @@ struct EnumerateIterator where I :- Iterator {
 }
 
 impl Iterator for EnumerateIterator<I> where I :- Iterator {
-    assoc Item: Type = (Int, I.Item);
+    assoc Item: Type = Tuple<Int, I.Item>;
     fn next(*self) -> ?Item {
         self.iter.next().map(|item| {
             let i = self.index;
@@ -123,7 +123,7 @@ struct ZipIterator where A :- Iterator, B :- Iterator {
 }
 
 impl Iterator for ZipIterator<A, B> where A :- Iterator, B :- Iterator {
-    assoc Item: Type = (A.Item, B.Item);
+    assoc Item: Type = Tuple<A.Item, B.Item>;
     fn next(*self) -> ?Item {
         let a = self.a.next();
         let b = self.b.next();

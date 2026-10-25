@@ -1,0 +1,59 @@
+-- Compare borrowed views, then transfer exactly one owner to the caller.
+use comparison.{Eq, Ord, Ordering};
+use resources.Drop;
+
+struct Candidate {
+    preferred: bool,
+    retired: *bool,
+}
+
+impl Drop for Candidate {
+    fn drop(*self) {
+        assumes not self.retired.*.*;
+        self.retired.*.* = true;
+    }
+}
+
+impl Eq for *Candidate {
+    fn eq(self, other: Self) -> bool {
+        assumes not self.retired.*.* and not other.retired.*.*;
+        self.preferred.* == other.preferred.*
+    }
+}
+
+impl Ord for *Candidate {
+    fn cmp(self, other: Self) -> Ordering {
+        assumes not self.retired.*.* and not other.retired.*.*;
+        if self.preferred.* == other.preferred.* { .Equal }
+        else if self.preferred.* { .Greater }
+        else { .Less }
+    }
+}
+
+fn precedes(a: T, b: T) -> bool where T :- Ord { a < b }
+
+fn choose(a: T, b: T) -> T where T, requires *T :- Ord {
+    if precedes(a.ref, b.ref) { b } else { a }
+}
+
+fn scenario(first: bool, second: bool) -> bool {
+    var left_retired = false;
+    var right_retired = false;
+    do {
+        let selected = choose(
+            Candidate { preferred: first, retired: left_retired.ref },
+            Candidate { preferred: second, retired: right_retired.ref });
+        assumes selected.preferred == (first or second);
+        assumes if not first and second {
+            left_retired and not right_retired
+        } else {
+            right_retired and not left_retired
+        };
+    };
+    left_retired and right_retired
+}
+
+fn run() -> bool {
+    scenario(false, true) and scenario(true, false)
+        and scenario(false, false) and scenario(true, true)
+}

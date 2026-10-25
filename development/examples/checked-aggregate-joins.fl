@@ -1,7 +1,10 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Byte = .u8'builtin;
 struct Pair { start: Byte, end: Byte }
 struct Outer { pair: Pair, tag: Byte }
-enum Choice { empty, pair(Byte, Byte), tuple((Byte, Byte)) }
+enum Choice { empty, pair(Byte, Byte), tuple(Tuple<Byte, Byte>) }
 fn tuple_if(a: Byte, b: Byte) -> Byte {
     let value = if a <= b { (a, b) } else { (b, a) };
     let (start, end) = value;
@@ -58,12 +61,12 @@ comptime fn run() -> Byte {
     end - start
 }
 fn literal_pairs(flag: true'type) -> Byte {
-    let value: (Byte, Byte) = if flag { (1, 2) } else { (100, 101) };
+    let value: Tuple<Byte, Byte> = if flag { (1, 2) } else { (100, 101) };
     let (start, end) = value;
     end - start
 }
 fn literal_match(flag: true'type) -> Byte {
-    let value: (Byte, Byte) = flag match { true => (1, 2), false => (100, 101) };
+    let value: Tuple<Byte, Byte> = flag match { true => (1, 2), false => (100, 101) };
     let (start, end) = value;
     end - start
 }

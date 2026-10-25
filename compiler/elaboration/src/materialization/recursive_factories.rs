@@ -145,8 +145,14 @@ impl Builder<'_> {
             site: candidate.source,
         });
         candidate.source = n::SourceRange::generated(source);
-        *expression =
-            template_factories::dispatch(candidate, &result, &selection.targets, &mut self.fuel)?;
+        *expression = template_factories::dispatch(
+            candidate,
+            &result,
+            &selection.targets,
+            &mut self.quote_cursor,
+            &mut self.quote_sources,
+            &mut self.fuel,
+        )?;
         expression.source = self.quote_sources[source as usize].original;
         Ok(true)
     }
@@ -205,7 +211,12 @@ impl Builder<'_> {
             }
             function.type_parameters.clear();
             dead_tails::prune(&mut function.body, &mut self.fuel)?;
-            mutable_callbacks::lower(&mut function.body, &mut self.quote_cursor, &mut self.fuel)?;
+            mutable_callbacks::lower(
+                &mut function.body,
+                &mut self.quote_cursor,
+                &mut self.quote_sources,
+                &mut self.fuel,
+            )?;
             staged::forward_template_aliases(
                 &mut function.body,
                 &mut self.quote_cursor,
@@ -392,7 +403,14 @@ impl Builder<'_> {
                     if node.locals.contains(&binding) && &expr.ty == result {
                         let mut tag = expr.clone();
                         tag.ty = tag_type.clone();
-                        *expr = template_factories::dispatch(tag, result, &targets, fuel)?;
+                        *expr = template_factories::dispatch(
+                            tag,
+                            result,
+                            &targets,
+                            &mut self.quote_cursor,
+                            &mut self.quote_sources,
+                            fuel,
+                        )?;
                         return Ok(false);
                     }
                 }
@@ -425,6 +443,8 @@ impl Builder<'_> {
                                 },
                                 result,
                                 &targets,
+                                &mut self.quote_cursor,
+                                &mut self.quote_sources,
                                 fuel,
                             )?;
                             return Ok(false);

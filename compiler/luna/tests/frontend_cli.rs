@@ -91,6 +91,196 @@ fn inline_control_flow_keeps_its_expansion_requirement_in_hir() {
 }
 
 #[test]
+fn function_type_telescope_bindings_are_ordered_nested_and_scoped() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "typealias Type=.Type'builtin; typealias T=bool;
+        typealias Callback=fn(comptime T:Type,value:T)->fn(comptime T:Type,other:T)->T;
+        typealias After=T;",
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = success(&output);
+    let targets = dump
+        .split("(resolved-local (name \"T\") (target ")
+        .skip(1)
+        .map(|tail| tail.split("))").next().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 3, "{dump}");
+    assert_ne!(
+        targets[0], targets[1],
+        "nested T must have a fresh identity: {dump}"
+    );
+    assert_eq!(
+        targets[1], targets[2],
+        "result must use the inner T: {dump}"
+    );
+    for source in [
+        "typealias Callback=fn(comptime T:.Type'builtin)->T; typealias Leaked=T;",
+        "typealias Callback=fn(comptime T:.Type'builtin); typealias Leaked=T;",
+        "typealias Callback=fn(value:T,comptime T:.Type'builtin)->T;",
+        "typealias Callback=fn(comptime T:.Type'builtin,comptime T:.Type'builtin)->T;",
+    ] {
+        sandbox.write("input.fl", source);
+        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        failure(&output, 1);
+        assert!(
+            !details(&output).contains("panicked"),
+            "{}",
+            details(&output)
+        );
+    }
+}
+
+#[test]
+fn function_type_parameters_keep_names_modifiers_and_optional_syntax() {
+    let sandbox = Sandbox::new();
+    for (parameter, flags, shape) in [
+        ("implicit bool", 1, "positional"),
+        ("quote bool", 4, "positional"),
+        ("error bool", 8, "positional"),
+        ("lambda bool", 16, "positional"),
+        ("assoc bool", 32, "positional"),
+        ("catch bool", 64, "positional"),
+        ("implicit comptime bool", 3, "positional"),
+        ("value:bool", 0, "positional-dependency-catched"),
+        (".value:bool", 128, "positional-dependency-catched"),
+        ("comptime .value:bool", 130, "positional-dependency-catched"),
+        ("...values:bool", 0, "variadic"),
+        ("itself", 0, "itself"),
+        ("*itself", 0, "itself"),
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!("typealias Callback=fn({parameter})->bool; fn entry() {{}}"),
+        );
+        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        let dump = success(&output);
+        assert!(
+            dump.contains(&format!("(flags {flags})")),
+            "{parameter}: {dump}"
+        );
+        assert!(dump.contains(&format!("({shape} ")), "{parameter}: {dump}");
+        if parameter.contains("value") {
+            assert!(
+                dump.contains("(name \"value") || dump.contains("(name \"values"),
+                "{parameter}: {dump}"
+            );
+        }
+        if parameter.contains("itself") {
+            assert!(
+                dump.contains(if parameter.starts_with('*') {
+                    "(ref true)"
+                } else {
+                    "(ref false)"
+                }),
+                "{dump}"
+            );
+        }
+        // Retaining syntax must not silently authorize an unsupported callable ABI.
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        if parameter == "value:bool" {
+            success(&output);
+            continue;
+        }
+        failure(&output, 1);
+        assert!(
+            details(&output).contains("function type parameter"),
+            "{parameter}: {}",
+            details(&output)
+        );
+    }
+    sandbox.write("input.fl", "typealias Callback=fn(.value:bool)->bool;");
+    let output = sandbox.run(&["input.fl", "--emit", "ast"]);
+    assert!(success(&output).contains("OptionalTypeParam"));
+    sandbox.write("input.fl", "typealias Callback=fn(value:bool)->bool;");
+    let output = sandbox.run(&["input.fl", "--emit", "ast"]);
+    assert!(!success(&output).contains("OptionalTypeParam"));
+}
+
+#[test]
+fn tuple_types_remain_explicit_through_both_cli_drivers() {
+    let sandbox = Sandbox::new();
+    let declarations = "typealias Type=.Type'builtin;
+        pure comptime fn List<T> -> Type {T}
+        pure comptime fn Tuple<...Es:List<Type>> -> Type {bool}
+        trait Duplicate {} trait Retire {fn drop(*self);}";
+    for mut base in [
+        vec!["input.fl"],
+        vec![
+            "--packages-v1",
+            "--package",
+            "1",
+            "17",
+            "input",
+            "input.fl",
+            "--primary",
+            "1",
+        ],
+    ] {
+        base.extend([
+            "--meta-list-type",
+            "input::List",
+            "--tuple-type",
+            "input::Tuple",
+        ]);
+        for invalid in [
+            "fn entry(value:(bool,bool)) {}",
+            "fn entry()->(bool,) {(true,)}",
+            "typealias Wrong=(); fn entry() {}",
+            "typealias Wrong=Tuple<(bool,bool)>; fn entry() {}",
+            "comptime fn Wrong(T:Type)->Type {(T,bool)} fn entry() {}",
+        ] {
+            sandbox.write("input.fl", &format!("{declarations} {invalid}"));
+            sandbox.write("result.lisp", "previous artifact");
+            let mut args = base.clone();
+            args.extend(["--emit", "nir", "--output", "result.lisp"]);
+            let output = sandbox.run(&args);
+            failure(&output, 1);
+            assert!(
+                details(&output).contains("value, not a type"),
+                "{invalid}: {}",
+                details(&output)
+            );
+            assert_eq!(
+                fs::read_to_string(sandbox.path("result.lisp")).unwrap(),
+                "previous artifact"
+            );
+        }
+        sandbox.write(
+            "input.fl",
+            &format!(
+                "{declarations}
+            typealias Flag=((bool));
+            typealias Pair=(Tuple<bool,bool>);
+            fn entry()->Flag {{
+                let pair:Pair=(true,false);
+                let (a,b)=pair;
+                let singleton:Tuple<bool> = (a,);
+                let (saved,)=singleton;
+                let empty:Tuple<> = ();
+                saved and not b
+            }}"
+            ),
+        );
+        let mut args = base.clone();
+        args.extend([
+            "--interpret",
+            "entry",
+            "--copy-protocol",
+            "input::Duplicate",
+            "--drop-protocol",
+            "input::Retire",
+        ]);
+        let output = sandbox.run(&args);
+        assert_eq!(success(&output).trim(), "(bool true)");
+        args.push("--inline-functions");
+        let output = sandbox.run(&args);
+        assert_eq!(success(&output).trim(), "(bool true)");
+    }
+}
+
+#[test]
 fn tuple_selectors_work_in_single_file_and_sysroot_commands() {
     let sandbox = Sandbox::new();
     sandbox.write(
@@ -180,12 +370,22 @@ fn tuple_selectors_work_in_single_file_and_sysroot_commands() {
 #[test]
 fn splice_selector_runs_automatic_conversion_and_rejects_invalid_bindings() {
     let sandbox = Sandbox::new();
+    let run = |args: &[&str]| {
+        let mut args = args.to_vec();
+        args.extend([
+            "--meta-list-type",
+            "input::TupleElements",
+            "--tuple-type",
+            "input::Tuple",
+        ]);
+        sandbox.run(&args)
+    };
     sandbox.write(
         "input.fl",
         include_str!("../../../development/examples/automatic-splice.fl"),
     );
     for selector in ["Splice", "input::Splice"] {
-        let output = sandbox.run(&[
+        let output = run(&[
             "input.fl",
             "--interpret",
             "run",
@@ -197,7 +397,7 @@ fn splice_selector_runs_automatic_conversion_and_rejects_invalid_bindings() {
             "(tuple (tuple (bool true) (bool false)) (tuple (bool false) (bool true)))"
         );
     }
-    failure(&sandbox.run(&["input.fl", "--interpret", "run"]), 1);
+    failure(&run(&["input.fl", "--interpret", "run"]), 1);
     for selector in [
         "Missing",
         "missing::Splice",
@@ -207,7 +407,7 @@ fn splice_selector_runs_automatic_conversion_and_rejects_invalid_bindings() {
     ] {
         sandbox.write("result", OLD_OUTPUT);
         failure(
-            &sandbox.run(&[
+            &run(&[
                 "input.fl",
                 "--interpret",
                 "run",
@@ -234,7 +434,7 @@ fn splice_selector_runs_automatic_conversion_and_rejects_invalid_bindings() {
             "Splice",
         ],
     ] {
-        failure(&sandbox.run(&args), 2);
+        failure(&run(&args), 2);
     }
     sandbox.write("input.fl", "trait NotSplice {} fn run()->bool {true}");
     let output = sandbox.run(&[
@@ -303,6 +503,9 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         splice_protocol: Some("Splice".into()),
         meta_list_type: None,
         index_protocol: None,
+        ord_protocol: None,
+        eq_protocol: None,
+        list_pattern_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,
@@ -372,11 +575,25 @@ impl Sandbox {
 }
 
 fn run_command(command: &mut Command) -> Output {
-    let mut child = command
+    command
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    // A concurrent fork may briefly retain the just-closed executable writer.
+    // Retry only failed exec, never a child that has actually started.
+    let launch = Instant::now();
+    let mut child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error)
+                if error.raw_os_error() == Some(26)
+                    && launch.elapsed() < Duration::from_millis(100) =>
+            {
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => panic!("cannot start CLI/native test: {error}"),
+        }
+    };
     // Drain both pipes while waiting: large diagnostics must not deadlock on a
     // full OS pipe. Keep bounded evidence even if error recovery loops noisily.
     fn drain(mut pipe: impl Read) -> Vec<u8> {
@@ -748,8 +965,8 @@ fn old_view_lowers_to_hir_but_rejects_noncontract_use() {
 }
 
 #[test]
-fn lowering_unsupported_test_definition_preserves_outputs() {
-    stage_failure_preserves_outputs("test sample {}\n", &["hir"]);
+fn lowering_invalid_test_definition_preserves_outputs() {
+    stage_failure_preserves_outputs("test sample {missing;}\n", &["hir"]);
 }
 
 #[test]
@@ -762,7 +979,7 @@ fn lowering_rejection_fixtures_are_valid_ast() {
     let sandbox = Sandbox::new();
     for (source, payload) in [
         ("fn f() { 1'old; }\n", "old"),
-        ("test sample {}\n", "sample"),
+        ("test sample {missing;}\n", "sample"),
         ("fn f() { 1'builtin; }\n", "builtin"),
     ] {
         sandbox.write("input.fl", source);
@@ -1394,17 +1611,27 @@ fn closure_environment_hir_preserves_binding_sources_and_quoted_names() {
 #[test]
 fn comptime_invocation_specializes_type_dispatch_and_preserves_failed_output() {
     let sandbox = Sandbox::new();
+    let run = |args: &[&str]| {
+        let mut args = args.to_vec();
+        args.extend([
+            "--meta-list-type",
+            "input::TupleElements",
+            "--tuple-type",
+            "input::Tuple",
+        ]);
+        sandbox.run(&args)
+    };
     sandbox.write(
         "input.fl",
         include_str!("../../../development/examples/staged-comptime-dispatch.fl"),
     );
-    let output = sandbox.run(&["input.fl", "--invoke-comptime", "entry"]);
+    let output = run(&["input.fl", "--invoke-comptime", "entry"]);
     assert_eq!(success(&output).trim(), "(tuple (bool true) (bool true))");
-    let output = sandbox.run(&["input.fl", "--invoke-comptime", "defaulted"]);
+    let output = run(&["input.fl", "--invoke-comptime", "defaulted"]);
     assert_eq!(success(&output).trim(), "(bool true)");
     sandbox.write("result.lisp", OLD_OUTPUT);
     failure(
-        &sandbox.run(&[
+        &run(&[
             "input.fl",
             "--invoke-comptime",
             "entry",
@@ -1416,7 +1643,7 @@ fn comptime_invocation_specializes_type_dispatch_and_preserves_failed_output() {
         1,
     );
     assert_eq!(fs::read(sandbox.path("result.lisp")).unwrap(), OLD_OUTPUT);
-    let output = sandbox.run(&[
+    let output = run(&[
         "input.fl",
         "--invoke-comptime",
         "entry",
@@ -2357,14 +2584,18 @@ fn owned_default_cli_constructs_and_delivers_aggregate_results() {
         "fn entry(.item:Item=do {Item {flag:true}})->bool {item.flag}",
         "struct Box {item:Item,} impl Retire for Box {fn drop(*self) {}} fn entry(.box:Box=do {Box {item:Item {flag:true}}})->bool {box.item.flag}",
         "enum Choice {none,some(Item)} fn entry(.choice:Choice=Choice.some(Item {flag:true}))->bool {choice match {.none=>false,.some(item)=>item.flag,}}",
-        "fn entry(.pair:(Item,bool)=do {(Item {flag:true},true)})->bool {let (item,flag)=pair;item.flag and flag}",
+        "fn entry(.pair:Tuple<Item,bool> = do {(Item {flag:true},true)})->bool {let (item,flag)=pair;item.flag and flag}",
         "fn target(flag:bool,.item:Item=if flag {Item {flag:true}} else {Item {flag:false}})->bool {item.flag} fn entry()->bool {let yes=target(true);let no=target(false);yes and not no}",
         "fn target(flag:bool,.item:Item=flag match {true=>Item {flag:true},false=>Item {flag:false},})->bool {item.flag} fn entry()->bool {target(true)}",
         "fn entry(.item:Item=do {let flag=true;Item {flag:flag}})->bool {item.flag}",
     ] {
-        sandbox.write("input.fl", format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}} struct Item {{flag:bool,}} impl Retire for Item {{fn drop(*self) {{}}}} {body}"));
+        sandbox.write("input.fl", format!("pure comptime fn List<T>->.Type'builtin {{T}} pure comptime fn Tuple<...Es:List<.Type'builtin>>->.Type'builtin {{bool}} trait Duplicate {{}} trait Retire {{fn drop(*self);}} struct Item {{flag:bool,}} impl Retire for Item {{fn drop(*self) {{}}}} {body}"));
         let result = sandbox.run(&[
             "input.fl",
+            "--meta-list-type",
+            "input::List",
+            "--tuple-type",
+            "input::Tuple",
             "--interpret",
             "entry",
             "--copy-protocol",
@@ -2842,6 +3073,8 @@ fn shipped_library_files_use_current_syntax() {
         "library/builtin/lib.fl",
         "library/std/lib.fl",
         "library/builtin/traits.fl",
+        "library/builtin/comparison.fl",
+        "library/builtin/resources.fl",
         "library/builtin/ops.fl",
         "library/builtin/iterator.fl",
         "library/std/collections.fl",
@@ -3523,7 +3756,7 @@ fn optional_callback_tails_use_explicit_return_payload_evidence() {
 fn shipped_clone_protocol_preserves_noncopy_sources() {
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in ["primitives", "traits"] {
+    for name in ["primitives", "traits", "resources", "comparison"] {
         fs::copy(
             repository.join(format!("library/builtin/{name}.fl")),
             sandbox.path(format!("{name}.fl")),
@@ -3639,10 +3872,25 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     for name in ["builtin", "std", "meta"] {
         fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();
     }
-    sandbox.write("library/builtin/lib.fl","pub typealias Type=.Type'builtin;pub use tuple.Tuple;pub use ops.*;pub mod prelude {pub use tuple.Tuple;}");
+    sandbox.write("library/builtin/lib.fl","pub typealias Type=.Type'builtin;pub use tuple.Tuple;pub use ops.*;pub use comparison.*;pub mod prelude {pub use tuple.Tuple;}");
+    sandbox.write(
+        "library/builtin/resources.fl",
+        include_str!("../../../library/builtin/resources.fl"),
+    );
+    // This isolated binding fixture supplies the optional constructor named
+    // by the real manifest. Actual Option methods have separate library tests;
+    // the full library smoke check uses the real file without replacements.
+    sandbox.write(
+        "library/builtin/option.fl",
+        "pub enum Option where T {Some(T),None}",
+    );
     sandbox.write(
         "library/builtin/tuple.fl",
         include_str!("../../../library/builtin/tuple.fl"),
+    );
+    sandbox.write(
+        "library/builtin/comparison.fl",
+        include_str!("../../../library/builtin/comparison.fl"),
     );
     sandbox.write(
         "library/builtin/ops.fl",
@@ -3657,7 +3905,12 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
         "library/language-items.conf",
         include_str!("../../../library/language-items.conf"),
     );
-    sandbox.write("input.fl","fn pair()->Tuple<bool,.u8'builtin> {(true,9)} fn run()->bool {let (flag,byte)=pair();flag and byte==9}");
+    fs::create_dir_all(sandbox.path("library/math")).unwrap();
+    sandbox.write(
+        "library/math/lib.fl",
+        include_str!("../../../library/math/lib.fl"),
+    );
+    sandbox.write("input.fl","fn pair()->Tuple<bool,.u8'builtin> {(true,9)} fn present()->?bool {.Some(true)} fn run()->bool {let (flag,byte)=pair();flag and byte==9 and (present() match {.Some(value)=>value,.None=>false})}");
     assert_eq!(
         success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
         "(bool true)"
@@ -3671,6 +3924,16 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
         struct Flag {value:bool}
         impl Add<.Rhs=bool> for Flag {assoc Output:Type=bool;fn add(self,rhs:bool)->bool {self.value and rhs}}
         fn run()->bool {Flag {value:true} + true}");
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        "(bool true)"
+    );
+    sandbox.write("input.fl", "struct Flag {value:bool}
+        impl builtin.Eq for Flag {fn eq(self,other:Self)->bool {self.value==other.value}}
+        impl builtin.Ord for Flag {fn cmp(self,other:Self)->builtin.Ordering {
+            if not self.value and other.value {.Less} else if self.value==other.value {.Equal} else {.Greater}
+        }}
+        fn run()->bool {Flag {value:false} < Flag {value:true} and Flag {value:true}==Flag {value:true} and Flag {value:false}!=Flag {value:true}}");
     assert_eq!(
         success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
         "(bool true)"
@@ -3690,7 +3953,7 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     // Defaults do not override explicit driver choices.
     sandbox.write(
         "library/language-items.conf",
-        "version = 1\nmeta-list-type = meta::List\ntuple-type = missing::Tuple\n",
+        format!("version = 1\nmeta-list-type = meta::List\ntuple-type = missing::Tuple\noptional-type = builtin::option::Option\n{}", include_str!("../../../library/language-items.conf").lines().filter(|line| line.starts_with("host-intrinsic.")).collect::<Vec<_>>().join("\n")),
     );
     failure(
         &sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]),
@@ -3712,6 +3975,11 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     sandbox.write(
         "library/language-items.conf",
         include_str!("../../../library/language-items.conf"),
+    );
+    fs::create_dir_all(sandbox.path("library/math")).unwrap();
+    sandbox.write(
+        "library/math/lib.fl",
+        include_str!("../../../library/math/lib.fl"),
     );
     sandbox.write("input.fl","typealias Type=.Type'builtin;pure comptime fn Tuple<...Es:meta.List<Type>>->Type {Tuple<...Es>} fn run()->Tuple<bool> {(true,)}");
     let shadow = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]);
@@ -4085,9 +4353,13 @@ fn index_protocol_sysroot_defaults_preserve_explicit_pointer_access() {
 #[test]
 fn checked_interpret_supplies_resource_identities_before_pure_validation() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", "trait Duplicate {} trait Retire {fn drop(*self);} struct Flag {value:bool} impl Duplicate for Flag {} pure fn duplicate(value:Flag)->(Flag,Flag) {(value,value)} fn run()->bool {let (first,second)=duplicate(Flag {value:true});first.value and second.value}");
+    sandbox.write("input.fl", "pure comptime fn List<T>->.Type'builtin {T} pure comptime fn Tuple<...Es:List<.Type'builtin>>->.Type'builtin {bool} trait Duplicate {} trait Retire {fn drop(*self);} struct Flag {value:bool} impl Duplicate for Flag {} pure fn duplicate(value:Flag)->Tuple<Flag,Flag> {(value,value)} fn run()->bool {let (first,second)=duplicate(Flag {value:true});first.value and second.value}");
     let result = sandbox.run(&[
         "input.fl",
+        "--meta-list-type",
+        "input::List",
+        "--tuple-type",
+        "input::Tuple",
         "--interpret",
         "run",
         "--copy-protocol",
@@ -4444,11 +4716,155 @@ fn deferred_definition_attributes_keep_target_scope_and_application_order() {
             "{attributes}"
         );
     }
+    assert_eq!(
+        attributes.matches("(hir-expression ").count(),
+        3,
+        "{attributes}"
+    );
+    assert!(attributes.contains("(unresolved-ident "), "{attributes}");
     let again = sandbox.run(&["input.fl", "--emit", "hir"]);
     assert_eq!(dump, hir_dump(&again));
     let rejected = sandbox.run(&["input.fl", "--emit", "nir"]);
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("definition attribute or modifier"));
+}
+
+#[test]
+fn definition_attribute_expressions_resolve_lexical_names_and_prior_parameters() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        fn annotation(value: bool) -> bool { value }
+        ^annotation(true)
+        fn selected(first: bool, ^annotation(first) second: bool) {}
+    "#,
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    let attributes = hir_form(dump, "definition-attributes");
+    assert_eq!(
+        attributes.matches("(hir-expression ").count(),
+        2,
+        "{attributes}"
+    );
+    assert_eq!(
+        attributes
+            .matches("(resolved-def (name \"annotation\")")
+            .count(),
+        2,
+        "{attributes}"
+    );
+    assert!(attributes.contains("(resolved-fn-param "), "{attributes}");
+    assert!(!attributes.contains("(unresolved-ident "), "{attributes}");
+    // HIR retention is not authorization to treat a bool as an attribute Object.
+    let checked = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(!checked.status.success(), "{}", details(&checked));
+}
+
+#[test]
+fn block_function_modifiers_reach_checked_nir_without_pending_attributes() {
+    for modifier in [
+        "inline",
+        "pure",
+        "comptime",
+        "pure comptime",
+        "quote",
+        "unsafe",
+    ] {
+        let sandbox = Sandbox::new();
+        sandbox.write(
+            "input.fl",
+            format!("fn enclosing() {{ {modifier} fn selected(value: bool) -> bool {{ value }} }}"),
+        );
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        assert!(output.status.success(), "{modifier}: {}", details(&output));
+        let dump = String::from_utf8_lossy(&output.stdout);
+        for flag in modifier.split_whitespace() {
+            let expected = match flag {
+                "comptime" => "(phase comptime)".into(),
+                "quote" => "(quote-template ".into(),
+                _ => format!("({flag} true)"),
+            };
+            assert!(dump.contains(&expected), "{modifier}: {dump}");
+        }
+    }
+}
+
+#[test]
+fn source_tests_can_call_block_local_functions() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "test local {inline fn answer(flag:bool)->bool {not flag} let answer=answer(false); assumes answer;}");
+    let output = sandbox.run(&["input.fl", "--test"]);
+    assert!(
+        success(&output).contains("(count 1)"),
+        "{}",
+        details(&output)
+    );
+}
+
+#[test]
+fn block_declarations_are_checked_even_when_unused() {
+    for body in [
+        "fn invalid()->bool {false;}",
+        "inline fn invalid()->bool {false;}",
+        "typealias Invalid=missing;",
+        "fn duplicate() {} fn duplicate() {}",
+        "do {fn hidden()->bool {true}}; hidden();",
+        "^unknown.attribute inline fn invalid()->bool {true}",
+    ] {
+        let sandbox = Sandbox::new();
+        sandbox.write("input.fl", format!("fn enclosing() {{{body}}}"));
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        assert!(!output.status.success(), "{body}: {}", details(&output));
+    }
+}
+
+#[test]
+fn block_definition_attributes_keep_nested_prefixes_and_outer_bindings() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        fn annotation(value: bool) -> bool { value }
+        fn enclosing(flag: bool) {
+            ^annotation(flag)
+            ^annotation(false)
+            fn selected(annotation: bool) {}
+        }
+    "#,
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    let attributes = hir_form(dump, "definition-attributes");
+    assert_eq!(
+        attributes.matches("(deferred-attribute ").count(),
+        2,
+        "{attributes}"
+    );
+    assert_eq!(
+        attributes
+            .matches("(resolved-def (name \"annotation\")")
+            .count(),
+        2,
+        "{attributes}"
+    );
+    assert!(attributes.contains("(resolved-fn-param "), "{attributes}");
+    assert!(!attributes.contains("(unresolved-ident "), "{attributes}");
+    assert!(
+        attributes.find("annotation(false)").unwrap()
+            < attributes.find("annotation(flag)").unwrap(),
+        "{attributes}"
+    );
+    assert_eq!(
+        attributes
+            .matches("(target (owner-id 3)) (lexical-owner (owner-id 2))")
+            .count(),
+        2,
+        "{attributes}"
+    );
+    let checked = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(!checked.status.success(), "{}", details(&checked));
 }
 
 #[test]
@@ -4581,20 +4997,16 @@ fn field_attribute_chains_keep_member_targets_and_application_order() {
         4,
         "{attributes}"
     );
-    assert_eq!(
-        attributes
-            .matches("(target (hir-id (owner 1) (local 1)))")
-            .count(),
-        2,
-        "{attributes}"
-    );
-    assert_eq!(
-        attributes
-            .matches("(target (hir-id (owner 1) (local 3)))")
-            .count(),
-        1,
-        "{attributes}"
-    );
+    for (offset, expected_count) in [2, 1].into_iter().enumerate() {
+        let start = fields.match_indices("(field (id ").nth(offset).unwrap().0;
+        let member = hir_form(&fields[start..], "field");
+        let id = hir_form(member, "hir-id");
+        assert_eq!(
+            attributes.matches(&format!("(target {id})")).count(),
+            expected_count,
+            "{attributes}"
+        );
+    }
     assert_eq!(
         attributes.matches("(lexical-owner (owner-id 1))").count(),
         4,
@@ -4863,14 +5275,16 @@ fn enum_variant_attributes_preserve_payloads_and_target_identity() {
         4,
         "{attributes}"
     );
-    for local in [1, 2, 3, 4] {
-        assert_eq!(
-            attributes
-                .matches(&format!("(target (hir-id (owner 1) (local {local})))"))
-                .count(),
-            1,
-            "{attributes}"
-        );
+    for tag in ["field", "variant"] {
+        for (start, _) in dump.match_indices(&format!("({tag} (id ")) {
+            let member = hir_form(&dump[start..], tag);
+            let id = hir_form(member, "hir-id");
+            assert_eq!(
+                attributes.matches(&format!("(target {id})")).count(),
+                1,
+                "{attributes}"
+            );
+        }
     }
     let checked = sandbox.run(&["nested.fl", "--emit", "nir"]);
     assert!(!checked.status.success());
@@ -5156,14 +5570,22 @@ fn tuple_enumeration_view_retains_operand_and_loop_structure_in_hir() {
     ] {
         sandbox.write(
             "input.fl",
-            &format!("fn run(values:(bool,bool)) {{{body}}}"),
+            &format!("pure comptime fn List<T>->.Type'builtin {{T}} pure comptime fn Tuple<...Es:List<.Type'builtin>>->.Type'builtin {{bool}} fn run(values:Tuple<bool,bool>) {{{body}}}"),
         );
         let output = sandbox.run(&["input.fl", "--emit", "hir"]);
         let dump = success(&output);
         assert!(dump.contains("(take-tuple-enumerate (value"), "{dump}");
         assert!(dump.contains("values"), "{dump}");
         assert!(!dump.contains("(invalid)"), "{dump}");
-        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        let output = sandbox.run(&[
+            "input.fl",
+            "--emit",
+            "nir",
+            "--meta-list-type",
+            "input::List",
+            "--tuple-type",
+            "input::Tuple",
+        ]);
         if runtime_view {
             failure(&output, 1);
             let diagnostic = String::from_utf8_lossy(&output.stderr);
@@ -5184,4 +5606,3178 @@ fn tuple_enumeration_view_retains_operand_and_loop_structure_in_hir() {
     assert!(success(&output).starts_with("(nir-package"));
     sandbox.write("input.fl", "fn run() {let view=missing'tuple_enumerate;}");
     failure(&sandbox.run(&["input.fl", "--emit", "hir"]), 1);
+}
+
+#[test]
+fn explicit_package_cli_compiles_cross_package_calls_and_preserves_outputs() {
+    let sandbox = Sandbox::new();
+    sandbox.write("client.fl", "use dep.answer;fn run()->bool {answer()}");
+    sandbox.write("provider.fl", "pub fn answer()->bool {true}");
+    let args = [
+        "--packages-v1",
+        "--package",
+        "7",
+        "701",
+        "client",
+        "client.fl",
+        "--package",
+        "9",
+        "901",
+        "provider",
+        "provider.fl",
+        "--primary",
+        "7",
+        "--dependency",
+        "7",
+        "dep",
+        "9",
+        "--emit",
+        "nir",
+    ];
+    let dump = success(&sandbox.run(&args)).to_owned();
+    assert!(dump.contains("answer") && dump.contains("run"), "{dump}");
+    let mut output_args = args.to_vec();
+    output_args.extend(["--output", "result.lisp"]);
+    success(&sandbox.run(&output_args));
+    assert_eq!(
+        fs::read_to_string(sandbox.path("result.lisp"))
+            .unwrap()
+            .trim(),
+        dump.trim()
+    );
+    // Source failures leave previous artifacts intact, including dependencies.
+    sandbox.write("provider.fl", "pub fn answer()->bool {missing}");
+    failure(&sandbox.run(&output_args), 1);
+    assert_eq!(
+        fs::read_to_string(sandbox.path("result.lisp"))
+            .unwrap()
+            .trim(),
+        dump.trim()
+    );
+    sandbox.write("provider.fl", "pub fn answer()->bool {true}");
+    *output_args.last_mut().unwrap() = "provider.fl";
+    failure(&sandbox.run(&output_args), 1);
+    assert_eq!(
+        fs::read_to_string(sandbox.path("provider.fl")).unwrap(),
+        "pub fn answer()->bool {true}"
+    );
+}
+
+#[test]
+fn explicit_package_cli_rejects_incomplete_or_unsupported_requests() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "fn run() {}");
+    for args in [
+        vec!["--packages-v1"],
+        vec!["--packages-v1", "--primary", "1"],
+        vec![
+            "--packages-v1",
+            "--package",
+            "1",
+            "18446744073709551616",
+            "app",
+            "input.fl",
+            "--primary",
+            "1",
+        ],
+        vec![
+            "--packages-v1",
+            "--package",
+            "-1",
+            "1",
+            "app",
+            "input.fl",
+            "--primary",
+            "1",
+        ],
+        vec![
+            "--packages-v1",
+            "--package",
+            "1",
+            "1",
+            "app",
+            "input.fl",
+            "--primary",
+            "1",
+            "--emit",
+            "ast",
+        ],
+        vec![
+            "--packages-v1",
+            "--package",
+            "1",
+            "1",
+            "app",
+            "input.fl",
+            "--primary",
+            "1",
+            "--primary",
+            "1",
+        ],
+        vec![
+            "--packages-v1",
+            "--package",
+            "1",
+            "1",
+            "app",
+            "input.fl",
+            "--primary",
+            "1",
+            "--sysroot",
+            "library",
+        ],
+    ] {
+        failure(&sandbox.run(&args), 2);
+    }
+    assert!(success(&sandbox.run(&["--packages-v1", "--help"])).contains("--packages-v1"));
+}
+
+#[test]
+fn explicit_package_cli_resolves_source_protocols_by_provider_name() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "provider space.fl",
+        "pub trait Merge where Rhs {assoc Output:.Type'builtin;fn add(self,rhs:Rhs)->Output;}",
+    );
+    sandbox.write("client space.fl", "use dependency.Merge;struct Flag {value:bool}
+        impl Merge<bool> for Flag {assoc Output:.Type'builtin=bool;fn add(self,rhs:bool)->bool {self.value and rhs}}
+        fn run()->bool {Flag {value:true} + true}");
+    let args = [
+        "--packages-v1",
+        "--package",
+        "3",
+        "300",
+        "client",
+        "client space.fl",
+        "--package",
+        "5",
+        "500",
+        "provider",
+        "provider space.fl",
+        "--primary",
+        "3",
+        "--dependency",
+        "3",
+        "dependency",
+        "5",
+        "--emit",
+        "nir",
+    ];
+    failure(&sandbox.run(&args), 1);
+    let mut selected = args.to_vec();
+    selected.extend(["--add-protocol", "provider::Merge"]);
+    success(&sandbox.run(&selected));
+    *selected.last_mut().unwrap() = "dependency::Merge";
+    failure(&sandbox.run(&selected), 1);
+}
+
+#[test]
+fn explicit_package_cli_checks_identities_edges_and_flag_named_inputs() {
+    let sandbox = Sandbox::new();
+    sandbox.write("--source.fl", "fn run()->bool {true}");
+    let base = [
+        "--packages-v1",
+        "--package",
+        "1",
+        "100",
+        "app",
+        "--source.fl",
+        "--primary",
+        "1",
+        "--emit",
+        "nir",
+    ];
+    success(&sandbox.run(&base));
+    for extra in [
+        vec!["--package", "1", "101", "other", "--source.fl"],
+        vec!["--package", "2", "100", "other", "--source.fl"],
+        vec!["--dependency", "1", "missing", "2"],
+        vec!["--dependency", "1", "self", "1"],
+        vec!["--builtin", "2"],
+    ] {
+        let mut args = base.to_vec();
+        args.extend(extra);
+        failure(&sandbox.run(&args), 1);
+    }
+}
+
+#[test]
+fn explicit_package_cli_designates_the_supplied_builtin_package() {
+    let sandbox = Sandbox::new();
+    sandbox.write("app.fl", "fn run()->Byte {7}");
+    sandbox.write(
+        "core.fl",
+        "pub mod prelude {pub typealias Byte=.u8'builtin;}",
+    );
+    let base = [
+        "--packages-v1",
+        "--package",
+        "1",
+        "100",
+        "app",
+        "app.fl",
+        "--package",
+        "2",
+        "200",
+        "core",
+        "core.fl",
+        "--primary",
+        "1",
+        "--dependency",
+        "1",
+        "builtin",
+        "2",
+        "--emit",
+        "nir",
+    ];
+    failure(&sandbox.run(&base), 1);
+    let mut args = base.to_vec();
+    args.extend(["--builtin", "2"]);
+    success(&sandbox.run(&args));
+}
+
+#[test]
+fn explicit_package_cli_runs_actions_in_primary_semantic_identity() {
+    let sandbox = Sandbox::new();
+    sandbox.write("client.fl", "use dep.answer; trait Duplicate {} trait Retire {fn drop(*self);} fn run()->bool {answer()} comptime fn compute()->bool {true}");
+    sandbox.write("provider.fl", "pub trait Duplicate {} pub trait Retire {fn drop(*self);} pub fn answer()->bool {true} pub fn run()->bool {false} pub comptime fn compute()->bool {false} pub fn dependency_only()->bool {false}");
+    let base = [
+        "--packages-v1",
+        "--package",
+        "7",
+        "701",
+        "client",
+        "client.fl",
+        "--package",
+        "9",
+        "901",
+        "provider",
+        "provider.fl",
+        "--primary",
+        "7",
+        "--dependency",
+        "7",
+        "dep",
+        "9",
+    ];
+    for action in [
+        vec!["--interpret", "run"],
+        vec!["--invoke-comptime", "compute"],
+        vec![
+            "--interpret",
+            "run",
+            "--copy-protocol",
+            "provider::Duplicate",
+            "--drop-protocol",
+            "provider::Retire",
+        ],
+        vec![
+            "--interpret",
+            "run",
+            "--inline-functions",
+            "--copy-protocol",
+            "provider::Duplicate",
+            "--drop-protocol",
+            "provider::Retire",
+        ],
+        vec!["--instantiate", "run"],
+        vec![
+            "--analyze-resources",
+            "run",
+            "--copy-protocol",
+            "provider::Duplicate",
+            "--drop-protocol",
+            "provider::Retire",
+        ],
+    ] {
+        let mut args = base.to_vec();
+        args.extend(&action);
+        let output = sandbox.run(&args);
+        let dump = success(&output);
+        if action[0] == "--interpret" || action[0] == "--invoke-comptime" {
+            assert_eq!(dump.trim(), "(bool true)");
+        } else {
+            assert!(
+                dump.starts_with(if action[0] == "--instantiate" {
+                    "(iir-package"
+                } else {
+                    "(resource-analysis"
+                }),
+                "{dump}"
+            );
+        }
+        args.extend(["--output", "result.lisp"]);
+        success(&sandbox.run(&args));
+        assert_eq!(
+            fs::read_to_string(sandbox.path("result.lisp"))
+                .unwrap()
+                .trim(),
+            dump.trim()
+        );
+    }
+    for action in ["--interpret", "--instantiate", "--invoke-comptime"] {
+        let mut args = base.to_vec();
+        args.extend([action, "dependency_only", "--output", "result.lisp"]);
+        sandbox.write("result.lisp", "previous");
+        failure(&sandbox.run(&args), 1);
+        assert_eq!(
+            fs::read_to_string(sandbox.path("result.lisp")).unwrap(),
+            "previous"
+        );
+    }
+    // Duplicate leaf names are legal: the selected source identity survives
+    // elaboration, including nested-module qualification.
+    sandbox.write("provider.fl", "pub mod memory {pub trait Duplicate {} pub trait Retire {fn drop(*self);}} pub fn answer()->bool {true}");
+    for selector in ["provider::memory", "dep::memory"] {
+        let copy = format!("{selector}::Duplicate");
+        let drop = format!("{selector}::Retire");
+        let mut args = base.to_vec();
+        args.extend([
+            "--interpret",
+            "run",
+            "--copy-protocol",
+            &copy,
+            "--drop-protocol",
+            &drop,
+        ]);
+        let output = sandbox.run(&args);
+        if selector == "provider::memory" {
+            assert_eq!(success(&output).trim(), "(bool true)");
+        } else {
+            failure(&output, 1);
+        }
+    }
+    let provider = fs::read(sandbox.path("provider.fl")).unwrap();
+    let mut overwrite = base.to_vec();
+    overwrite.extend(["--interpret", "run", "--output", "provider.fl"]);
+    failure(&sandbox.run(&overwrite), 1);
+    assert_eq!(fs::read(sandbox.path("provider.fl")).unwrap(), provider);
+    for extra in [
+        vec!["--interpret", "run", "--emit", "nir"],
+        vec!["--interpret", "run", "--invoke-comptime", "compute"],
+        vec!["--interpret", "run", "--inline-functions"],
+        vec!["--interpret", "run", "--fuel", "0"],
+        vec!["--fuel", "1"],
+    ] {
+        let mut args = base.to_vec();
+        args.extend(extra);
+        failure(&sandbox.run(&args), 2);
+    }
+    let mut args = base.to_vec();
+    args.extend([
+        "--interpret",
+        "run",
+        "--fuel",
+        "1",
+        "--output",
+        "result.lisp",
+    ]);
+    failure(&sandbox.run(&args), 1);
+    assert_eq!(
+        fs::read_to_string(sandbox.path("result.lisp")).unwrap(),
+        "previous"
+    );
+}
+
+#[test]
+fn single_input_resource_actions_keep_qualified_source_identities() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "trait Duplicate {} trait Retire {fn drop(*self);} mod selected {pub trait Duplicate {} pub trait Retire {fn drop(*self);}} struct Ticket {} impl selected.Retire for Ticket {fn drop(*self) {}} fn run()->bool {let ticket=Ticket {}; true}");
+    // Select a nested declaration despite duplicate leaf names in the root.
+    for action in ["--interpret", "--analyze-resources"] {
+        let args = [
+            "input.fl",
+            action,
+            "run",
+            "--copy-protocol",
+            "input::selected::Duplicate",
+            "--drop-protocol",
+            "input::selected::Retire",
+        ];
+        let output = sandbox.run(&args);
+        let dump = success(&output);
+        if action == "--interpret" {
+            assert_eq!(dump.trim(), "(bool true)");
+        } else {
+            assert!(dump.contains("(invoke-drop "), "{dump}");
+        }
+    }
+}
+
+#[test]
+fn sysroot_resource_actions_preserve_explicit_selection_and_action_scope() {
+    let sandbox = Sandbox::new();
+    fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
+    fs::create_dir_all(sandbox.path("library/std")).unwrap();
+    sandbox.write(
+        "library/builtin/lib.fl",
+        "pub mod prelude {} pub trait Duplicate {} pub trait Retire {fn drop(*self);}",
+    );
+    sandbox.write(
+        "library/std/lib.fl",
+        "pub trait Duplicate {} pub trait Retire {fn drop(*self);}",
+    );
+    sandbox.write(
+        "library/language-items.conf",
+        "version = 1\ncopy-protocol = builtin::Duplicate\ndrop-protocol = builtin::Retire\n",
+    );
+    sandbox.write("input.fl", "fn run()->bool {true}");
+    for provider in ["builtin", "std"] {
+        let copy = format!("{provider}::Duplicate");
+        let drop = format!("{provider}::Retire");
+        let mut args = vec![
+            "input.fl",
+            "--sysroot",
+            "library",
+            "--interpret",
+            "run",
+            "--copy-protocol",
+            &copy,
+            "--drop-protocol",
+            &drop,
+        ];
+        assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
+        args.push("--inline-functions");
+        assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
+    }
+    let output = sandbox.run(&[
+        "input.fl",
+        "--sysroot",
+        "library",
+        "--analyze-resources",
+        "run",
+        "--copy-protocol",
+        "std::Duplicate",
+    ]);
+    let dump = success(&output);
+    assert!(dump.contains("(stage ownership-obligations)"), "{dump}");
+    assert!(!dump.contains("(drop-protocol "), "{dump}");
+}
+
+#[test]
+fn all_source_bindings_require_elaboration_in_both_cli_modes() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "fn run()->bool {true}");
+    for flag in [
+        "--list-pattern-protocol",
+        "--add-protocol",
+        "--sub-protocol",
+        "--mul-protocol",
+        "--div-protocol",
+        "--rem-protocol",
+        "--neg-protocol",
+        "--not-protocol",
+        "--index-protocol",
+        "--ord-protocol",
+        "--eq-protocol",
+        "--literal-into-protocol",
+        "--splice-protocol",
+        "--meta-list-type",
+        "--tuple-type",
+        "--optional-type",
+    ] {
+        for base in [
+            vec!["input.fl"],
+            vec![
+                "--packages-v1",
+                "--package",
+                "1",
+                "701",
+                "input",
+                "input.fl",
+                "--primary",
+                "1",
+            ],
+        ] {
+            for stage in [None, Some("hir"), Some("ast")] {
+                let mut args = base.clone();
+                if let Some(stage) = stage {
+                    args.extend(["--emit", stage]);
+                }
+                args.extend([flag, "input::Missing", "--output", "result.lisp"]);
+                sandbox.write("result.lisp", "previous");
+                failure(&sandbox.run(&args), 2);
+                assert_eq!(
+                    fs::read_to_string(sandbox.path("result.lisp")).unwrap(),
+                    "previous"
+                );
+            }
+            let mut args = base;
+            args.extend(["--emit", "nir", flag, "input::Missing"]);
+            // It must now attempt semantic binding, rather than reject the action.
+            failure(&sandbox.run(&args), 1);
+        }
+    }
+}
+
+#[test]
+fn list_pattern_cli_binds_single_package_and_dependency_protocols() {
+    let sandbox = Sandbox::new();
+    let source = include_str!("../../../development/examples/list-patterns.fl");
+    sandbox.write("input.fl", source);
+    for mode in ["--emit", "--interpret", "--instantiate"] {
+        let entry = if mode == "--emit" { "nir" } else { "evaluate" };
+        let output = sandbox.run(&[
+            "input.fl",
+            mode,
+            entry,
+            "--list-pattern-protocol",
+            "input::ListView",
+        ]);
+        let dump = success(&output);
+        if mode == "--interpret" {
+            assert_eq!(dump.trim(), "(bool true)");
+        }
+    }
+    sandbox.write("client.fl", "use dep.evaluate; fn run()->bool {evaluate()}");
+    let base = [
+        "--packages-v1",
+        "--package",
+        "7",
+        "701",
+        "client",
+        "client.fl",
+        "--package",
+        "9",
+        "901",
+        "provider",
+        "input.fl",
+        "--primary",
+        "7",
+        "--dependency",
+        "7",
+        "dep",
+        "9",
+        "--interpret",
+        "run",
+    ];
+    let mut args = base.to_vec();
+    args.extend(["--list-pattern-protocol", "provider::ListView"]);
+    assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
+    for selector in ["dep::ListView", "provider::Missing", "provider::Repeated"] {
+        let mut args = base.to_vec();
+        args.extend(["--list-pattern-protocol", selector]);
+        failure(&sandbox.run(&args), 1);
+    }
+    failure(&sandbox.run(&base), 1);
+    for extra in [
+        vec!["--list-pattern-protocol"],
+        vec![
+            "--list-pattern-protocol",
+            "input::ListView",
+            "--list-pattern-protocol",
+            "input::ListView",
+        ],
+    ] {
+        let mut args = vec!["input.fl", "--emit", "nir"];
+        args.extend(extra);
+        failure(&sandbox.run(&args), 2);
+    }
+}
+
+#[test]
+fn list_pattern_cli_overrides_sysroot_manifest_default() {
+    let sandbox = Sandbox::new();
+    fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
+    fs::create_dir_all(sandbox.path("library/std")).unwrap();
+    sandbox.write("library/builtin/lib.fl", "pub mod prelude {}");
+    sandbox.write("library/std/lib.fl", "");
+    sandbox.write(
+        "library/language-items.conf",
+        "version = 1\nlist-pattern-protocol = builtin::Missing\n",
+    );
+    sandbox.write(
+        "input.fl",
+        include_str!("../../../development/examples/list-patterns.fl"),
+    );
+    let args = [
+        "input.fl",
+        "--sysroot",
+        "library",
+        "--interpret",
+        "evaluate",
+    ];
+    failure(&sandbox.run(&args), 1);
+    let mut selected = args.to_vec();
+    selected.extend(["--list-pattern-protocol", "input::ListView"]);
+    assert_eq!(success(&sandbox.run(&selected)).trim(), "(bool true)");
+}
+
+#[test]
+fn list_pattern_cli_checks_extractor_observation_with_cleanup_and_inlining() {
+    let sandbox = Sandbox::new();
+    let ordinary = format!(
+        "{}\ntrait Duplicate {{}} trait Retire {{fn drop(*self);}}",
+        include_str!("../../../development/examples/list-patterns.fl")
+    );
+    let quoted = ordinary
+        .replace(
+            "fn list_pattern_view_get_len(*self) -> Size {",
+            "quote fn list_pattern_view_get_len(*self) -> Size {",
+        )
+        .replace(
+            "fn list_pattern_view_get_element(*self, comptime index: Size) -> bool {",
+            "quote fn list_pattern_view_get_element(*self, comptime index: Size) -> bool {",
+        );
+    for source in [&ordinary, &quoted] {
+        for inline in [false, true] {
+            let mut args = vec![
+                "input.fl",
+                "--interpret",
+                "evaluate",
+                "--list-pattern-protocol",
+                "input::ListView",
+                "--copy-protocol",
+                "input::Duplicate",
+                "--drop-protocol",
+                "input::Retire",
+                "--output",
+                "result.lisp",
+            ];
+            if inline {
+                args.push("--inline-functions");
+            }
+            sandbox.write("input.fl", source);
+            success(&sandbox.run(&args));
+            assert_eq!(
+                fs::read_to_string(sandbox.path("result.lisp"))
+                    .unwrap()
+                    .trim(),
+                "(bool true)"
+            );
+            // A list extractor observes the scrutinee. Compiling its body is
+            // insufficient: checked execution must reject writes through it.
+            sandbox.write(
+                "input.fl",
+                &source.replace("self.value.*", "self.value.* = false; false"),
+            );
+            let output = sandbox.run(&args);
+            failure(&output, 1);
+            assert!(
+                details(&output).contains("observation"),
+                "{}",
+                details(&output)
+            );
+            assert_eq!(
+                fs::read_to_string(sandbox.path("result.lisp"))
+                    .unwrap()
+                    .trim(),
+                "(bool true)"
+            );
+        }
+    }
+}
+
+#[test]
+fn source_tests_run_named_anonymous_and_module_bodies() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "fn check()->bool {true} fn named()->bool {false} test named {let result=check();assumes result;} test {assumes true;} mod nested {test named {assumes true;}}");
+    let hir = sandbox.run(&["input.fl", "--emit", "hir"]);
+    assert!(success(&hir).contains("(test true)"));
+    let nir = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert_eq!(success(&nir).matches("(test-entry ").count(), 3);
+    let output = sandbox.run(&["input.fl", "--test"]);
+    let dump = success(&output);
+    assert!(dump.contains("(count 3)"), "{dump}");
+    assert_eq!(dump.matches("(passed ").count(), 3);
+    assert!(dump.contains("anonymous"));
+    sandbox.write(
+        "input.fl",
+        "test broken {assumes false;} test later {assumes true;}",
+    );
+    sandbox.write("result.lisp", "previous");
+    let output = sandbox.run(&["input.fl", "--test", "--output", "result.lisp"]);
+    failure(&output, 1);
+    assert!(details(&output).contains("broken"));
+    assert_eq!(
+        fs::read_to_string(sandbox.path("result.lisp")).unwrap(),
+        "previous"
+    );
+}
+
+#[test]
+fn source_tests_select_primary_package_and_validate_actions() {
+    let sandbox = Sandbox::new();
+    sandbox.write("client.fl", "test {assumes true;}");
+    sandbox.write("provider.fl", "test dependency {assumes false;}");
+    let base = [
+        "--packages-v1",
+        "--package",
+        "7",
+        "701",
+        "client",
+        "client.fl",
+        "--package",
+        "9",
+        "901",
+        "provider",
+        "provider.fl",
+        "--primary",
+        "7",
+    ];
+    let mut args = base.to_vec();
+    args.push("--test");
+    assert!(success(&sandbox.run(&args)).contains("(count 1)"));
+    for extra in [
+        vec!["--test", "--test"],
+        vec!["--test", "--interpret", "run"],
+        vec!["--interpret", "run", "--test"],
+        vec!["--test", "--emit", "nir"],
+        vec!["--test", "--fuel", "0"],
+    ] {
+        let mut args = vec!["client.fl"];
+        args.extend(extra);
+        failure(&sandbox.run(&args), 2);
+    }
+    sandbox.write("client.fl", "test {assumes missing;}");
+    failure(&sandbox.run(&["client.fl", "--test"]), 1);
+}
+
+#[test]
+fn source_tests_use_checked_cleanup_and_bounded_execution() {
+    let sandbox = Sandbox::new();
+    let source = "trait Duplicate {} trait Retire {fn drop(*self);} struct Ticket {} impl Retire for Ticket {fn drop(*self) {assumes true;}} test cleanup {let ticket=Ticket {}; }";
+    sandbox.write("input.fl", source);
+    let base = [
+        "input.fl",
+        "--test",
+        "--copy-protocol",
+        "input::Duplicate",
+        "--drop-protocol",
+        "input::Retire",
+    ];
+    assert!(success(&sandbox.run(&base)).contains("(count 1)"));
+    let mut inline = base.to_vec();
+    inline.push("--inline-functions");
+    assert!(success(&sandbox.run(&inline)).contains("(count 1)"));
+    sandbox.write("input.fl", &source.replace("assumes true", "assumes false"));
+    let output = sandbox.run(&base);
+    failure(&output, 1);
+    assert!(details(&output).contains("cleanup"));
+    sandbox.write("input.fl", "test spin {while true {}}");
+    let output = sandbox.run(&["input.fl", "--test", "--fuel", "1000"]);
+    failure(&output, 1);
+    assert!(details(&output).contains("spin"));
+    sandbox.write("input.fl", "fn ordinary() {}");
+    assert!(success(&sandbox.run(&["input.fl", "--test"])).contains("(count 0)"));
+}
+
+#[test]
+fn source_test_labels_do_not_become_callable_values() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "test same {} test same {} test {same();}");
+    failure(&sandbox.run(&["input.fl", "--test"]), 1);
+    sandbox.write("input.fl", "test same {} test same {}");
+    assert!(success(&sandbox.run(&["input.fl", "--test"])).contains("(count 2)"));
+    sandbox.write("input.fl", "fn outer() {test nested {}} ");
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    failure(&output, 1);
+    assert!(!details(&output).contains("panicked"));
+}
+
+#[test]
+fn source_tests_collect_independent_failures_and_continue_after_budget_exhaustion() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl","test rejected {assumes false;} test spinning {while true {}} test succeeds {assumes true;}");
+    sandbox.write("result.lisp", "previous");
+    let output = sandbox.run(&[
+        "input.fl",
+        "--test",
+        "--fuel",
+        "1000",
+        "--output",
+        "result.lisp",
+    ]);
+    failure(&output, 1);
+    let report = String::from_utf8_lossy(&output.stderr);
+    assert!(report.contains("(count 3) (failures 2)"), "{report}");
+    assert_eq!(report.matches("(failed ").count(), 2, "{report}");
+    assert_eq!(report.matches("(passed ").count(), 1, "{report}");
+    for name in ["rejected", "spinning", "succeeds"] {
+        assert!(report.contains(name), "{report}");
+    }
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        fs::read_to_string(sandbox.path("result.lisp")).unwrap(),
+        "previous"
+    );
+}
+
+#[test]
+fn repository_language_suite_runs_as_checked_source_tests() {
+    let sandbox = Sandbox::new();
+    sandbox.write("main.fl", include_str!("../../../tests/language/main.fl"));
+    sandbox.write(
+        "fixtures.fl",
+        include_str!("../../../tests/language/fixtures.fl"),
+    );
+    let args = [
+        "main.fl",
+        "--test",
+        "--copy-protocol",
+        "input::Duplicate",
+        "--drop-protocol",
+        "input::Retire",
+    ];
+    let output = sandbox.run(&args);
+    let report = success(&output);
+    assert!(report.contains("(count 28) (failures 0)"), "{report}");
+    assert_eq!(report.matches("(passed ").count(), 28);
+    let mut inline = args.to_vec();
+    inline.push("--inline-functions");
+    let output = sandbox.run(&inline);
+    assert!(success(&output).contains("(count 28) (failures 0)"));
+    let mut filtered = args.to_vec();
+    filtered.extend(["--test-filter", "template_"]);
+    let output = sandbox.run(&filtered);
+    assert!(success(&output).contains("(count 6) (failures 0) (filtered-out 22)"));
+    let output = sandbox.run(&["main.fl", "--list-tests", "--test-filter", "template_"]);
+    let inventory = success(&output);
+    assert!(
+        inventory.contains("(count 6) (filtered-out 22)"),
+        "{inventory}"
+    );
+    assert!(
+        !inventory.contains("flag_case"),
+        "template definitions must not become runnable tests"
+    );
+    sandbox.write(
+        "main.fl",
+        &include_str!("../../../tests/language/main.fl").replace(
+            "assumes first == 7 and second == 9;",
+            "assumes first == 8 and second == 9;",
+        ),
+    );
+    let output = sandbox.run(&args);
+    failure(&output, 1);
+    let report = String::from_utf8_lossy(&output.stderr);
+    assert!(report.contains("(count 28) (failures 1)"), "{report}");
+    assert_eq!(report.matches("(passed ").count(), 27);
+    assert!(report.contains("default_argument"));
+    sandbox.write(
+        "main.fl",
+        &include_str!("../../../tests/language/main.fl")
+            .replace("ticket.ready.* = true;", "ticket.ready.* = false;"),
+    );
+    for mode in [&args[..], &inline[..]] {
+        let output = sandbox.run(mode);
+        failure(&output, 1);
+        let report = String::from_utf8_lossy(&output.stderr);
+        assert!(report.contains("(count 28) (failures 2)"), "{report}");
+        assert_eq!(report.matches("(passed ").count(), 26);
+        assert!(report.contains("template_cleanup") && report.contains("template_early_cleanup"));
+    }
+    sandbox.write(
+        "main.fl",
+        &include_str!("../../../tests/language/main.fl").replace(
+            "template_boolean_result use typed_case { true }",
+            "template_boolean_result use typed_case { 'x' }",
+        ),
+    );
+    let output = sandbox.run(&["main.fl", "--test", "--test-filter", "generic"]);
+    failure(&output, 1);
+    assert!(details(&output).contains("type mismatch"));
+    assert!(!details(&output).contains("(test-results"));
+}
+
+#[test]
+fn source_test_filters_select_labels_without_skipping_frontend_checks() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "test good_one {} test bad {assumes false;} test good_two {} test {}",
+    );
+    for base in [
+        vec!["input.fl"],
+        vec![
+            "--packages-v1",
+            "--package",
+            "1",
+            "701",
+            "input",
+            "input.fl",
+            "--primary",
+            "1",
+        ],
+    ] {
+        for (filter, count, excluded) in [
+            ("good", 2, 2),
+            ("anonymous", 1, 3),
+            ("absent", 0, 4),
+            ("GOOD", 0, 4),
+        ] {
+            let mut args = base.clone();
+            args.extend(["--test", "--test-filter", filter]);
+            let output = sandbox.run(&args);
+            let report = success(&output);
+            assert!(
+                report.contains(&format!(
+                    "(count {count}) (failures 0) (filtered-out {excluded})"
+                )),
+                "{report}"
+            );
+        }
+        let mut args = base;
+        args.extend(["--test", "--test-filter", ""]);
+        let output = sandbox.run(&args);
+        failure(&output, 1);
+        assert!(details(&output).contains("(count 4) (failures 1) (filtered-out 0)"));
+    }
+    for args in [
+        vec!["input.fl", "--test-filter", "good"],
+        vec!["input.fl", "--test", "--test-filter"],
+        vec![
+            "input.fl",
+            "--test",
+            "--test-filter",
+            "good",
+            "--test-filter",
+            "bad",
+        ],
+    ] {
+        failure(&sandbox.run(&args), 2);
+    }
+    sandbox.write("input.fl", "test good {} test bad {unknown();}");
+    failure(
+        &sandbox.run(&["input.fl", "--test", "--test-filter", "good"]),
+        1,
+    );
+}
+
+#[test]
+fn source_tests_discover_files_without_merging_same_label_or_private_helpers() {
+    let sandbox = Sandbox::new();
+    fs::create_dir_all(sandbox.path("nested")).unwrap();
+    sandbox.write(
+        "main.fl",
+        "use alpha.ready; test shared {let result=ready();assumes result;}",
+    );
+    sandbox.write(
+        "alpha.fl",
+        "pub fn ready()->bool {true} test shared {let result=ready();assumes result;}",
+    );
+    sandbox.write(
+        "beta.fl",
+        "fn ready()->bool {false} test shared {let result=ready();assumes not result;}",
+    );
+    sandbox.write(
+        "nested/gamma.fl",
+        "fn ready()->bool {true} test shared {let result=ready();assumes result;}",
+    );
+    let args = ["main.fl", "--test", "--test-filter", "shared"];
+    let output = sandbox.run(&args);
+    let report = success(&output).to_owned();
+    assert!(report.contains("(count 4) (failures 0)"), "{report}");
+    assert_eq!(report.matches("(passed ").count(), 4);
+    assert_eq!(success(&sandbox.run(&args)), report);
+    sandbox.write(
+        "beta.fl",
+        "fn ready()->bool {false} test shared {let result=ready();assumes result;}",
+    );
+    let output = sandbox.run(&args);
+    failure(&output, 1);
+    let report = String::from_utf8_lossy(&output.stderr);
+    assert!(report.contains("(count 4) (failures 1)"), "{report}");
+    assert_eq!(report.matches("(passed ").count(), 3);
+    // An explicitly supplied nested package is not rediscovered as a module
+    // of the primary package, and its tests have their own semantic identity.
+    sandbox.write(
+        "beta.fl",
+        "fn ready()->bool {false} test shared {let result=ready();assumes not result;}",
+    );
+    fs::create_dir_all(sandbox.path("dependency")).unwrap();
+    sandbox.write("dependency/lib.fl", "test shared {assumes false;}");
+    let packages = [
+        "--packages-v1",
+        "--package",
+        "1",
+        "701",
+        "app",
+        "main.fl",
+        "--package",
+        "2",
+        "901",
+        "dependency",
+        "dependency/lib.fl",
+        "--test",
+        "--test-filter",
+        "shared",
+    ];
+    let mut primary = packages.to_vec();
+    primary.extend(["--primary", "1"]);
+    assert!(success(&sandbox.run(&primary)).contains("(count 4) (failures 0)"));
+    let mut dependency = packages.to_vec();
+    dependency.extend(["--primary", "2"]);
+    let output = sandbox.run(&dependency);
+    failure(&output, 1);
+    assert!(details(&output).contains("(count 1) (failures 1)"));
+}
+
+#[test]
+fn test_inventory_lists_without_executing_and_preserves_action_boundaries() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "test bad {assumes false;} test spin {while true {}} test {} test bad {}",
+    );
+    let output = sandbox.run(&["input.fl", "--list-tests"]);
+    success(&output);
+    let dump = String::from_utf8(output.stdout).unwrap();
+    assert!(dump.starts_with("(test-inventory"), "{dump}");
+    assert!(dump.contains("(count 4)"), "{dump}");
+    assert!(!dump.contains("passed"));
+    assert_eq!(dump.matches("(name (string \"bad\"))").count(), 2);
+    for args in [
+        vec!["input.fl", "--list-tests", "--test-filter", "bad"],
+        vec![
+            "--packages-v1",
+            "--package",
+            "1",
+            "701",
+            "app",
+            "input.fl",
+            "--primary",
+            "1",
+            "--list-tests",
+            "--test-filter",
+            "bad",
+        ],
+    ] {
+        let output = sandbox.run(&args);
+        success(&output);
+        let dump = String::from_utf8(output.stdout).unwrap();
+        assert!(dump.contains("(count 2) (filtered-out 2)"), "{dump}");
+    }
+    for args in [
+        vec!["input.fl", "--list-tests", "--test"],
+        vec!["input.fl", "--test", "--list-tests"],
+        vec!["input.fl", "--list-tests", "--interpret", "run"],
+        vec!["input.fl", "--list-tests", "--emit", "nir"],
+        vec!["input.fl", "--list-tests", "--inline-functions"],
+    ] {
+        assert_eq!(sandbox.run(&args).status.code(), Some(2), "{args:?}");
+    }
+    sandbox.write("input.fl", "test invalid {unknown();}");
+    assert_eq!(
+        sandbox
+            .run(&["input.fl", "--list-tests", "--test-filter", "absent"])
+            .status
+            .code(),
+        Some(1)
+    );
+}
+
+#[test]
+fn comptime_invocation_uses_explicit_resource_bindings_in_both_drivers() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl","typealias Type=.Type'builtin;
+        trait Duplicate {}trait Retire {fn drop(*self);}
+        impl Duplicate for Type {}
+        comptime fn Select()->Type {let selected=bool;let saved=selected.ref.*;selected.ref.* = .u8'builtin;saved}");
+    for prefix in [
+        vec!["input.fl"],
+        vec![
+            "--packages-v1",
+            "--package",
+            "0",
+            "17",
+            "app",
+            "input.fl",
+            "--primary",
+            "0",
+        ],
+    ] {
+        let mut args = prefix.clone();
+        args.extend([
+            "--invoke-comptime",
+            "Select",
+            "--copy-protocol",
+            "Duplicate",
+            "--drop-protocol",
+            "Retire",
+        ]);
+        let output = sandbox.run(&args);
+        success(&output);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("bool"));
+        let mut args = prefix.clone();
+        args.extend(["--invoke-comptime", "Select"]);
+        failure(&sandbox.run(&args), 1);
+        let mut args = prefix;
+        args.extend([
+            "--invoke-comptime",
+            "Select",
+            "--copy-protocol",
+            "Duplicate",
+        ]);
+        failure(&sandbox.run(&args), 2);
+    }
+}
+
+#[test]
+fn one_malformed_source_does_not_mark_later_modules_as_parse_failures() {
+    for invalid in ["fn broken( {", "fn broken() { 0xGG }"] {
+        let sandbox = Sandbox::new();
+        sandbox.write("app.fl", "use good.value; fn run()->bool {value()}");
+        let args = [
+            "--packages-v1",
+            "--package",
+            "1",
+            "101",
+            "app",
+            "app.fl",
+            "--package",
+            "2",
+            "102",
+            "bad",
+            "a_bad.fl",
+            "--package",
+            "3",
+            "103",
+            "good",
+            "z_good.fl",
+            "--package",
+            "4",
+            "104",
+            "other",
+            "y_bad.fl",
+            "--dependency",
+            "1",
+            "good",
+            "3",
+            "--primary",
+            "1",
+            "--emit",
+            "hir",
+        ];
+        sandbox.write("y_bad.fl", "fn initially_valid()->bool {true}");
+        sandbox.write("a_bad.fl", invalid);
+        sandbox.write("z_good.fl", "pub fn value()->bool {true}");
+        let output = sandbox.run(&args);
+        failure(&output, 1);
+        let message = details(&output);
+        assert_eq!(message.matches("FileParsingFailed").count(), 1, "{message}");
+        assert!(!message.contains("z_good"), "{message}");
+        sandbox.write("y_bad.fl", "fn another( {");
+        let output = sandbox.run(&args);
+        failure(&output, 1);
+        let message = details(&output);
+        assert_eq!(message.matches("FileParsingFailed").count(), 2, "{message}");
+        assert!(!message.contains("z_good"), "{message}");
+        sandbox.write("y_bad.fl", "fn other_repaired()->bool {true}");
+        sandbox.write("a_bad.fl", "fn repaired()->bool {true}");
+        success(&sandbox.run(&args));
+    }
+}
+
+#[test]
+fn explicit_package_cli_exports_observed_inputs_with_the_selected_result() {
+    let sandbox = Sandbox::new();
+    sandbox.write("client.fl", "use dep.answer;fn run()->bool {answer()}");
+    sandbox.write("provider.fl", "pub fn answer()->bool {true}");
+    let base = [
+        "--packages-v1",
+        "--package",
+        "7",
+        "701",
+        "client",
+        "client.fl",
+        "--package",
+        "9",
+        "901",
+        "provider",
+        "provider.fl",
+        "--primary",
+        "7",
+        "--dependency",
+        "7",
+        "dep",
+        "9",
+        "--with-inputs",
+    ];
+    for action in [
+        vec!["--emit", "hir"],
+        vec!["--emit", "nir"],
+        vec!["--interpret", "run"],
+    ] {
+        let mut args = base.to_vec();
+        args.extend(action);
+        let result = sandbox.run(&args);
+        let dump = success(&result);
+        assert!(
+            dump.starts_with("(compilation-result (version 1) (result "),
+            "{dump}"
+        );
+        assert!(dump.contains("(compilation-inputs (version 1)"), "{dump}");
+        assert!(
+            dump.contains("(source (resolution-id 7) (identity 701)"),
+            "{dump}"
+        );
+        assert!(
+            dump.contains("(source (resolution-id 9) (identity 901)"),
+            "{dump}"
+        );
+        assert!(
+            dump.contains("(text (string \"pub fn answer()->bool {true}\"))"),
+            "{dump}"
+        );
+        if args.contains(&"--interpret") {
+            assert!(dump.contains("(result (bool true))"), "{dump}");
+        }
+    }
+    let mut duplicate = base.to_vec();
+    duplicate.push("--with-inputs");
+    failure(&sandbox.run(&duplicate), 2);
+    failure(&sandbox.run(&["client.fl", "--with-inputs"]), 2);
+}
+
+#[test]
+fn explicit_package_cli_input_envelope_is_published_only_after_success() {
+    let sandbox = Sandbox::new();
+    sandbox.write("client.fl", "fn run()->bool {true}");
+    let mut args = vec![
+        "--packages-v1",
+        "--package",
+        "1",
+        "101",
+        "client",
+        "client.fl",
+        "--primary",
+        "1",
+        "--with-inputs",
+        "--interpret",
+        "run",
+        "--output",
+        "result.lisp",
+    ];
+    success(&sandbox.run(&args));
+    let completed = fs::read_to_string(sandbox.path("result.lisp")).unwrap();
+    assert!(completed.contains("(result (bool true))"));
+    // A missing entry fails after frontend input capture, before publication.
+    let entry = args.iter().position(|arg| *arg == "run").unwrap();
+    args[entry] = "missing";
+    failure(&sandbox.run(&args), 1);
+    assert_eq!(
+        fs::read_to_string(sandbox.path("result.lisp")).unwrap(),
+        completed
+    );
+    args[entry] = "run";
+    sandbox.write("client.fl", "fn run()->bool {missing}");
+    failure(&sandbox.run(&args), 1);
+    assert_eq!(
+        fs::read_to_string(sandbox.path("result.lisp")).unwrap(),
+        completed
+    );
+    sandbox.write("client.fl", "fn run()->bool {false}");
+    *args.last_mut().unwrap() = "client.fl";
+    failure(&sandbox.run(&args), 1);
+    assert_eq!(
+        fs::read_to_string(sandbox.path("client.fl")).unwrap(),
+        "fn run()->bool {false}"
+    );
+    *args.last_mut().unwrap() = "result.lisp";
+    success(&sandbox.run(&args));
+    let updated = fs::read_to_string(sandbox.path("result.lisp")).unwrap();
+    assert!(updated.contains("(result (bool false))"));
+    assert!(updated.contains("(text (string \"fn run()->bool {false}\"))"));
+}
+
+#[test]
+fn resident_package_compiler_reuses_and_recovers_across_live_requests() {
+    use std::io::{BufRead, BufReader, Write};
+    let sandbox = Sandbox::new();
+    sandbox.write("client.fl", "fn run()->bool {true}");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_luna"))
+        .args(["--packages-stream-v1", "--cache-entries", "1"])
+        .current_dir(&sandbox.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let output = child.stdout.take().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let encode = |args: &[&str]| {
+        args.iter()
+            .map(|arg| {
+                if arg.is_empty() {
+                    "-".into()
+                } else {
+                    arg.as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let args = [
+        "--package",
+        "1",
+        "101",
+        "client",
+        "client.fl",
+        "--primary",
+        "1",
+        "--emit",
+        "nir",
+        "--with-inputs",
+    ];
+    let mut exchange = |frame: &str| {
+        writeln!(input, "{frame}").unwrap();
+        input.flush().unwrap();
+        match receive.recv_timeout(Duration::from_secs(30)) {
+            Ok(line) => line.unwrap(),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("stream reply: {error}");
+            }
+        }
+    };
+    let first = exchange(&encode(&args));
+    assert!(
+        first.contains("(exit-code 0)") && first.contains("(reused false)"),
+        "{first}"
+    );
+    assert!(first.contains("compilation-inputs"));
+    assert!(exchange(&encode(&args)).contains("(reused true)"));
+    assert!(exchange("invalid hex").contains("(exit-code 2)"));
+    sandbox.write("client.fl", "fn run()->bool {false}");
+    let changed = exchange(&encode(&args));
+    assert!(
+        changed.contains("(exit-code 0)") && changed.contains("(reused false)"),
+        "{changed}"
+    );
+    assert!(changed.contains("fn run()->bool {false}"));
+    sandbox.write("client.fl", "fn run()->bool {missing}");
+    assert!(exchange(&encode(&args)).contains("(exit-code 1)"));
+    sandbox.write("client.fl", "fn run()->bool {true}");
+    assert!(exchange(&encode(&args)).contains("(exit-code 0)"));
+    let mut action = args[..7].to_vec();
+    action.extend(["--interpret", "run"]);
+    assert!(exchange(&encode(&action)).contains("(exit-code 2)"));
+    let mut output = args[..7].to_vec();
+    output.extend(["--output", "forbidden.lisp"]);
+    assert!(exchange(&encode(&output)).contains("(exit-code 2)"));
+    assert!(!sandbox.path("forbidden.lisp").exists());
+
+    drop(exchange);
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    for invalid in [
+        vec!["--packages-stream-v1", "--cache-entries", "-1"],
+        vec!["--packages-stream-v1", "--emit", "nir"],
+    ] {
+        failure(&sandbox.run(&invalid), 2);
+    }
+}
+
+#[test]
+fn native_inline_tests_preserve_package_identity_and_resource_bindings() {
+    let sandbox = Sandbox::new();
+    sandbox.write("support.fl", "pub trait Duplicate {} pub trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {self.target.*.* = not self.target.*.*;}}
+        pub inline effect get()->bool;
+        pub inline fn subject(target:*bool)->#get bool {let watch=Watch {target:target};get()#}
+        test shared {assumes false;}");
+    sandbox.write("app.fl", "use support.get;use support.subject;
+        fn shared()->bool {false}
+        test shared {let seen=false;let result=subject(seen.ref)# {get()=>true,};assumes result and seen;}
+        test shared {let seen=false;let result=subject(seen.ref)# {get()=>do {resume true;},};assumes result and seen;}");
+    let base = [
+        "--packages-v1",
+        "--package",
+        "1",
+        "101",
+        "app",
+        "app.fl",
+        "--package",
+        "2",
+        "202",
+        "support",
+        "support.fl",
+        "--dependency",
+        "1",
+        "support",
+        "2",
+        "--test-native",
+        "--inline-functions",
+        "--copy-protocol",
+        "support::Duplicate",
+        "--drop-protocol",
+        "support::Retire",
+    ];
+    for level in ["0", "3"] {
+        let mut app = base.to_vec();
+        app.extend(["--primary", "1", "--opt-level", level]);
+        let output = sandbox.run(&app);
+        let report = success(&output);
+        assert!(report.contains("(count 2) (failures 0)"), "{report}");
+        let mut dependency = base.to_vec();
+        dependency.extend(["--primary", "2", "--opt-level", level]);
+        let output = sandbox.run(&dependency);
+        failure(&output, 1);
+        let report = details(&output);
+        assert!(report.contains("(count 1) (failures 1)"), "{report}");
+    }
+}
+
+#[test]
+fn package_llvm_dump_selects_primary_identity_and_preserves_inputs() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new();
+    sandbox.write("app.fl", "use support.answer;fn run()->bool {answer()}");
+    let library = "pub trait Duplicate {} pub trait Retire {fn drop(*self);}impl Duplicate for bool {}pub inline fn answer()->bool {true}fn run()->bool {false}";
+    sandbox.write("support.fl", library);
+    let base = [
+        "--packages-v1",
+        "--package",
+        "1",
+        "101",
+        "app",
+        "app.fl",
+        "--package",
+        "2",
+        "202",
+        "support",
+        "support.fl",
+        "--dependency",
+        "1",
+        "support",
+        "2",
+        "--emit-llvm",
+        "run",
+    ];
+    for (primary, expected) in [
+        ("1", b"(bool true)\n".as_slice()),
+        ("2", b"(bool false)\n".as_slice()),
+    ] {
+        for level in ["0", "3"] {
+            let mut args = base.to_vec();
+            args.extend([
+                "--primary",
+                primary,
+                "--inline-functions",
+                "--copy-protocol",
+                "support::Duplicate",
+                "--drop-protocol",
+                "support::Retire",
+                "--opt-level",
+                level,
+            ]);
+            let output = sandbox.run(&args);
+            let ir = success(&output);
+            assert!(ir.contains("@main("), "{ir}");
+            let bytes = luna::host::executable(ir, &Default::default()).unwrap();
+            let path = sandbox.path("native");
+            fs::write(&path, bytes).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            let result = run_command(&mut Command::new(&path));
+            assert!(result.status.success());
+            assert_eq!(result.stdout, expected);
+        }
+    }
+    let mut observed = base.to_vec();
+    observed.extend(["--primary", "1", "--with-inputs"]);
+    let output = sandbox.run(&observed);
+    let envelope = success(&output);
+    assert!(
+        envelope.contains("(result (llvm-ir (string \""),
+        "{envelope}"
+    );
+    assert!(envelope.contains("\\n"));
+    observed.extend(["--output", "support.fl"]);
+    failure(&sandbox.run(&observed), 1);
+    assert_eq!(
+        fs::read_to_string(sandbox.path("support.fl")).unwrap(),
+        library
+    );
+}
+
+#[test]
+fn package_native_build_preserves_identity_resources_and_previous_artifacts() {
+    let sandbox = Sandbox::new();
+    let support = "pub trait Duplicate {}pub trait Retire {fn drop(*self);}impl Duplicate for bool {}impl Duplicate for *T where T {}struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {self.target.*.* = true;}}pub inline effect get()->bool;pub inline fn answer(target:*bool)->#get bool {let watch=Watch {target:target};get()#}fn run()->bool {false}";
+    sandbox.write("support.fl", support);
+    sandbox.write("app.fl", "use support.get;use support.answer;fn run()->bool {let seen=false;let result=answer(seen.ref)# {get()=>true,};result and seen}");
+    let base = [
+        "--packages-v1",
+        "--package",
+        "1",
+        "101",
+        "app",
+        "app.fl",
+        "--package",
+        "2",
+        "202",
+        "support",
+        "support.fl",
+        "--dependency",
+        "1",
+        "support",
+        "2",
+        "--build",
+        "run",
+        "--inline-functions",
+        "--copy-protocol",
+        "support::Duplicate",
+        "--drop-protocol",
+        "support::Retire",
+    ];
+    for level in ["0", "3"] {
+        for (primary, expected) in [
+            ("1", b"(bool true)\n".as_slice()),
+            ("2", b"(bool false)\n".as_slice()),
+        ] {
+            let mut args = base.to_vec();
+            args.extend([
+                "--primary",
+                primary,
+                "--opt-level",
+                level,
+                "--output",
+                "native",
+            ]);
+            let output = sandbox.run(&args);
+            assert_eq!(success(&output), "");
+            let output = run_command(&mut Command::new(sandbox.path("native")));
+            assert!(output.status.success(), "{}", details(&output));
+            assert_eq!(output.stdout, expected);
+        }
+    }
+    let mut args = base.to_vec();
+    args.extend(["--primary", "1", "--output", "native"]);
+    let previous = fs::read(sandbox.path("native")).unwrap();
+    let output = run_command(
+        sandbox
+            .command()
+            .args(&args)
+            .env("LUNA_LLVM_CONFIG", sandbox.path("absent-llvm")),
+    );
+    failure(&output, 1);
+    assert_eq!(fs::read(sandbox.path("native")).unwrap(), previous);
+    let output = run_command(
+        sandbox
+            .command()
+            .args(&args)
+            .env("LUNA_CC", sandbox.path("absent-linker")),
+    );
+    failure(&output, 1);
+    assert_eq!(fs::read(sandbox.path("native")).unwrap(), previous);
+    success(&sandbox.run(&args));
+    let recovered = run_command(&mut Command::new(sandbox.path("native")));
+    assert_eq!(success(&recovered), "(bool true)\n");
+    let previous = fs::read(sandbox.path("native")).unwrap();
+    let mut exhausted = args.clone();
+    exhausted.extend(["--fuel", "1"]);
+    failure(&sandbox.run(&exhausted), 1);
+    assert_eq!(fs::read(sandbox.path("native")).unwrap(), previous);
+    let mut observed = args.clone();
+    observed.push("--with-inputs");
+    failure(&sandbox.run(&observed), 2);
+    assert_eq!(fs::read(sandbox.path("native")).unwrap(), previous);
+    args.pop();
+    args.push("support.fl");
+    failure(&sandbox.run(&args), 1);
+    assert_eq!(
+        fs::read_to_string(sandbox.path("support.fl")).unwrap(),
+        support
+    );
+    #[cfg(unix)]
+    {
+        fs::hard_link(sandbox.path("support.fl"), sandbox.path("alias")).unwrap();
+        args.pop();
+        args.push("alias");
+        failure(&sandbox.run(&args), 1);
+        assert_eq!(
+            fs::read_to_string(sandbox.path("support.fl")).unwrap(),
+            support
+        );
+    }
+    let mut missing_output = base.to_vec();
+    missing_output.extend(["--primary", "1"]);
+    failure(&sandbox.run(&missing_output), 2);
+}
+
+#[test]
+fn package_discard_result_uses_selected_identity_and_checked_drop() {
+    let sandbox = Sandbox::new();
+    sandbox.write("support.fl","pub trait Duplicate {}pub trait Retire {fn drop(*self);}impl Duplicate for bool {}pub struct Token {valid:bool}impl Retire for Token {fn drop(*self) {assumes self.valid.*;self.valid.* = false;}}pub inline fn make()->Token {Token {valid:true}}fn run()->Token {Token {valid:false}}");
+    sandbox.write(
+        "app.fl",
+        "use support.Token;use support.make;fn run()->Token {make()}",
+    );
+    let base = [
+        "--packages-v1",
+        "--package",
+        "1",
+        "101",
+        "app",
+        "app.fl",
+        "--package",
+        "2",
+        "202",
+        "support",
+        "support.fl",
+        "--dependency",
+        "1",
+        "support",
+        "2",
+        "--discard-result",
+        "--inline-functions",
+        "--copy-protocol",
+        "support::Duplicate",
+        "--drop-protocol",
+        "support::Retire",
+    ];
+    for level in ["0", "3"] {
+        for primary in ["1", "2"] {
+            let mut args = base.to_vec();
+            args.extend([
+                "--primary",
+                primary,
+                "--build",
+                "run",
+                "--output",
+                "native",
+                "--opt-level",
+                level,
+            ]);
+            success(&sandbox.run(&args));
+            let result = run_command(&mut Command::new(sandbox.path("native")));
+            if primary == "1" {
+                assert_eq!(success(&result), "(unit)\n");
+            } else {
+                assert!(!result.status.success());
+                assert!(result.stdout.is_empty());
+            }
+        }
+    }
+    let mut args = base.to_vec();
+    args.extend(["--primary", "1", "--emit-llvm", "run", "--with-inputs"]);
+    let output = sandbox.run(&args);
+    assert!(success(&output).contains("(result (llvm-ir (string"));
+}
+
+#[test]
+fn intrinsic_view_hir_preserves_tag_call_and_explicit_result_boundary() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "enum Inst {fma,barrier}typealias F=.f32'builtin;fn run(a:F,b:F,c:F)->F {Inst.fma'intrinsic(a,b,c).as(F)}fn wait() {Inst.barrier'intrinsic();}");
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let hir = success(&output);
+    assert_eq!(hir.matches("(take-intrinsic (tag ").count(), 2, "{hir}");
+    assert!(hir.contains("(cast (value "), "{hir}");
+    let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+    failure(&output, 1);
+    assert!(
+        details(&output).contains("intrinsic_enum"),
+        "{}",
+        details(&output)
+    );
+}
+
+#[test]
+fn intrinsic_surface_does_not_bypass_operand_resolution_or_unsafe_admission() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "enum Inst {op}fn run() {Inst.op'intrinsic(missing);}",
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    failure(&output, 1);
+    assert!(details(&output).contains("missing"));
+    sandbox.write(
+        "input.fl",
+        "enum Inst {op}fn run()->bool {unsafe {Inst.op'intrinsic(true).as(bool)}}",
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let hir = success(&output);
+    assert!(hir.contains("(take-intrinsic (tag "));
+    assert!(hir.contains("unsafe-block-expr"), "{hir}");
+    failure(&sandbox.run(&["input.fl", "--emit", "nir"]), 1);
+    sandbox.write("input.fl","enum Inst {op}template fn signature(value:bool)->bool;fn wrap use signature {Inst.op'intrinsic(value).as(bool)}fn run()->bool {wrap(true)}");
+    success(&sandbox.run(&["input.fl", "--emit", "hir"]));
+    let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+    failure(&output, 1);
+    assert!(
+        !details(&output).contains("panicked"),
+        "{}",
+        details(&output)
+    );
+}
+
+#[test]
+fn unsafe_hir_retains_nested_scopes_and_function_call_boundary() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl","unsafe fn raw(value:bool)->bool {value}fn run()->bool {unsafe {let value=unsafe {raw(true)};value}}");
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let hir = success(&output);
+    assert_eq!(hir.matches("(unsafe-block-expr ").count(), 2, "{hir}");
+    assert_eq!(hir.matches("(unsafe true)").count(), 1, "{hir}");
+    assert!(hir.contains("(unsafe false)"));
+    assert!(!hir.contains("unsafe function admission"));
+    let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(success(&output).contains("(unsafe true)"));
+    assert!(!details(&output).contains("panicked"));
+    sandbox.write("input.fl", "fn run()->bool {unsafe {missing}}");
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    failure(&output, 1);
+    assert!(details(&output).contains("missing"));
+}
+
+#[test]
+fn callable_type_modifiers_survive_hir_without_erasing_admission() {
+    let sandbox = Sandbox::new();
+    for (prefix, field) in [
+        ("unsafe", "unsafe"),
+        ("pure", "pure"),
+        ("inline", "inline"),
+        ("spec", "spec"),
+        ("verified", "verified"),
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!("typealias Callback={prefix} fn(comptime T:.Type'builtin,value:T)->T;"),
+        );
+        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        let hir = success(&output);
+        assert!(hir.contains("(ty-modified-fn "), "{hir}");
+        assert!(hir.contains(&format!("({field} true)")), "{hir}");
+        assert!(hir.contains("(comptime false)"), "{hir}");
+        assert!(hir.contains("(ty-fn-arrow "), "{hir}");
+        assert_eq!(
+            hir.contains("function type modifiers"),
+            prefix != "unsafe",
+            "{hir}"
+        );
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        if prefix == "unsafe" {
+            success(&output);
+        } else {
+            failure(&output, 1);
+        }
+        assert!(!details(&output).contains("panicked"));
+    }
+    sandbox.write("input.fl", "typealias Callback=pure comptime inline unsafe fn(comptime T:.Type'builtin,value:T)->unsafe fn(T)->T;");
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let hir = success(&output);
+    assert_eq!(hir.matches("(ty-modified-fn ").count(), 2, "{hir}");
+    assert!(hir.contains("(fn-type-modifiers (pure true) (comptime true) (inline true) (unsafe true) (spec false) (verified false))"), "{hir}");
+    assert!(hir.contains("(fn-type-modifiers (pure false) (comptime false) (inline false) (unsafe true) (spec false) (verified false))"), "{hir}");
+    sandbox.write(
+        "input.fl",
+        "typealias Callback=unsafe fn(comptime T:.Type'builtin,value:T)->Missing;",
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    failure(&output, 1);
+    assert!(details(&output).contains("Missing"));
+}
+
+#[test]
+fn intrinsic_enum_attribute_preserves_family_identity_without_binding_an_operation() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "^intrinsic_enum enum TargetOps {fma,barrier}enum Ordinary {fma,barrier}^intrinsic_enum enum OtherTarget {fma}");
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let hir = success(&output);
+    assert_eq!(hir.matches("(intrinsic true)").count(), 2, "{hir}");
+    assert_eq!(hir.matches("(intrinsic false)").count(), 1, "{hir}");
+    assert!(!hir.contains("definition attribute or modifier"), "{hir}");
+    let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+    let nir = success(&output);
+    assert_eq!(nir.matches("(intrinsic true)").count(), 2, "{nir}");
+    assert_eq!(nir.matches("(intrinsic false)").count(), 1, "{nir}");
+    for name in ["TargetOps", "Ordinary", "OtherTarget"] {
+        assert!(nir.contains(&format!("(name \"{name}\")")), "{nir}");
+    }
+    sandbox.write("input.fl", "^intrinsic_enum enum TargetOps {fma}fn run()->bool {unsafe {TargetOps.fma'intrinsic(true).as(bool)}}");
+    let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(success(&output).contains("(intrinsic (intrinsic-tag"));
+    let output = sandbox.run(&["input.fl", "--build", "run", "--output", "native"]);
+    failure(&output, 1);
+    assert!(
+        details(&output).contains("intrinsic target behavior"),
+        "{}",
+        details(&output)
+    );
+}
+
+#[test]
+fn intrinsic_enum_attribute_requires_an_enum_and_preserves_other_attribute_checks() {
+    let sandbox = Sandbox::new();
+    for source in [
+        "^intrinsic_enum fn run()->bool {true}",
+        "^intrinsic_enum struct NotTags {}",
+    ] {
+        sandbox.write("input.fl", source);
+        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        failure(&output, 1);
+        assert!(
+            details(&output).contains("intrinsic_enum requires an enum declaration"),
+            "{}",
+            details(&output)
+        );
+    }
+    for source in [
+        "^unhandled ^intrinsic_enum enum Tags {fma}",
+        "^intrinsic_enum ^unhandled enum Tags {fma}",
+    ] {
+        sandbox.write("input.fl", source);
+        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        let hir = success(&output);
+        assert!(hir.contains("(intrinsic true)"), "{hir}");
+        assert!(hir.contains("definition attribute or modifier"), "{hir}");
+        failure(&sandbox.run(&["input.fl", "--emit", "nir"]), 1);
+    }
+}
+
+#[test]
+fn source_intrinsic_output_does_not_follow_surrounding_context_or_late_casts() {
+    let sandbox = Sandbox::new();
+    for body in [
+        "Ops.op'intrinsic(true)",
+        "let result:bool=Ops.op'intrinsic(true);result",
+        "let result=Ops.op'intrinsic(true);result.as(bool)",
+        "(do {Ops.op'intrinsic(true)}).as(bool)",
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!("^intrinsic_enum enum Ops {{op}} unsafe fn run()->bool {{{body}}}"),
+        );
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        failure(&output, 1);
+        assert!(
+            !details(&output).contains("panicked"),
+            "{}",
+            details(&output)
+        );
+    }
+    for body in [
+        "Ops.op'intrinsic(true).as(bool)",
+        "(Ops.op'intrinsic(true)).as(bool)",
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!("^intrinsic_enum enum Ops {{op}} unsafe fn run()->bool {{{body}}}"),
+        );
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        assert!(success(&output).contains("(intrinsic (intrinsic-tag"));
+    }
+}
+
+#[test]
+fn source_intrinsic_checks_permission_phase_and_arguments_before_publication() {
+    let sandbox = Sandbox::new();
+    for (source, diagnostic) in [
+        (
+            "^intrinsic_enum enum Ops {op} fn run()->bool {Ops.op'intrinsic(true).as(bool)}",
+            "unsafe",
+        ),
+        (
+            "^intrinsic_enum enum Ops {op} comptime fn run()->bool {unsafe {Ops.op'intrinsic(true).as(bool)}}",
+            "comptime",
+        ),
+        (
+            "^intrinsic_enum enum Ops {op} unsafe fn run()->bool {Ops.op'intrinsic(missing).as(bool)}",
+            "missing",
+        ),
+        (
+            "^intrinsic_enum enum Ops {op} unsafe fn run()->bool {Ops.op'intrinsic(not 4).as(bool)}",
+            "",
+        ),
+        (
+            "^intrinsic_enum enum Ops {op(bool)} unsafe fn run()->bool {Ops.op'intrinsic(true).as(bool)}",
+            "payload-free",
+        ),
+        (
+            "^intrinsic_enum enum Ops {op} unsafe fn run()->bool {Ops.op'intrinsic(true).as(missing)}",
+            "missing",
+        ),
+    ] {
+        sandbox.write("input.fl", source);
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        failure(&output, 1);
+        assert!(
+            details(&output).contains(diagnostic),
+            "{}",
+            details(&output)
+        );
+        assert!(!details(&output).contains("panicked"));
+    }
+}
+
+#[test]
+fn host_fma_cli_binds_qualified_source_before_purity_and_runs_example() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        include_str!("../../../development/examples/host-intrinsic-fma.fl"),
+    );
+    for level in ["0", "3"] {
+        success(&sandbox.run(&[
+            "input.fl",
+            "--host-fma",
+            "input::machine::Scalar::fused",
+            "--build",
+            "run",
+            "--opt-level",
+            level,
+            "--output",
+            "native",
+        ]));
+        let output = run_command(&mut Command::new(sandbox.path("native")));
+        assert_eq!(success(&output), "(float32 (bits 41880000))\n");
+    }
+    let output = sandbox.run(&[
+        "input.fl",
+        "--host-fma",
+        "input::machine::Scalar::fused",
+        "--emit-llvm",
+        "run",
+    ]);
+    assert!(success(&output).contains("@llvm.fma.f32"));
+    // An unbound pure declaration cannot claim target behavior on its own.
+    failure(&sandbox.run(&["input.fl", "--emit", "nir"]), 1);
+}
+
+#[test]
+fn host_fma_cli_rejects_invalid_selectors_and_preserves_output() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "^intrinsic_enum enum Ops {op} enum Ordinary {op} fn run()->bool {true}",
+    );
+    sandbox.write("native", "previous");
+    for selector in [
+        "Ops::op",
+        "missing::Ops::op",
+        "input::Missing::op",
+        "input::Ordinary::op",
+        "input::Ops::missing",
+        "input::::op",
+    ] {
+        let output = sandbox.run(&[
+            "input.fl",
+            "--build",
+            "run",
+            "--host-fma",
+            selector,
+            "--output",
+            "native",
+        ]);
+        failure(&output, 1);
+        assert_eq!(fs::read(sandbox.path("native")).unwrap(), b"previous");
+    }
+    for args in [
+        vec!["input.fl", "--emit", "nir", "--host-fma", "input::Ops::op"],
+        vec![
+            "input.fl",
+            "--emit-llvm",
+            "run",
+            "--host-fma",
+            "input::Ops::op",
+            "--host-fma",
+            "input::Ops::op",
+        ],
+        vec!["input.fl", "--emit-llvm", "run", "--host-fma"],
+    ] {
+        failure(&sandbox.run(&args), 2);
+    }
+    sandbox.write(
+        "input.fl",
+        "^intrinsic_enum enum Ops {op} fn run()->bool {unsafe {Ops.op'intrinsic(true).as(bool)}}",
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--build",
+        "run",
+        "--host-fma",
+        "input::Ops::op",
+        "--output",
+        "native",
+    ]);
+    failure(&output, 1);
+    assert!(
+        details(&output).contains("requires 3 operands"),
+        "{}",
+        details(&output)
+    );
+    assert_eq!(fs::read(sandbox.path("native")).unwrap(), b"previous");
+}
+
+#[test]
+fn host_fma_package_cli_uses_declared_package_identity() {
+    let sandbox = Sandbox::new();
+    let source = include_str!("../../../development/examples/host-intrinsic-fma.fl");
+    sandbox.write("one.fl", source);
+    sandbox.write("two.fl", source);
+    let base = [
+        "--packages-v1",
+        "--package",
+        "1",
+        "101",
+        "one",
+        "one.fl",
+        "--package",
+        "2",
+        "202",
+        "two",
+        "two.fl",
+        "--primary",
+        "1",
+    ];
+    let mut args = base.to_vec();
+    args.extend([
+        "--host-fma",
+        "one::machine::Scalar::fused",
+        "--emit-llvm",
+        "run",
+    ]);
+    // Both source packages contain pure wrappers: binding one cannot authorize
+    // the unrelated same-spelled tag in the other package.
+    failure(&sandbox.run(&args), 1);
+    sandbox.write(
+        "two.fl",
+        "^intrinsic_enum enum Scalar {fused} fn run()->bool {true}",
+    );
+    let output = sandbox.run(&args);
+    assert!(success(&output).contains("@llvm.fma.f32"));
+    let mut args = base.to_vec();
+    args.extend([
+        "--host-fma",
+        "one::machine::Scalar::fused",
+        "--build",
+        "run",
+        "--output",
+        "native",
+    ]);
+    success(&sandbox.run(&args));
+    assert_eq!(
+        success(&run_command(&mut Command::new(sandbox.path("native")))),
+        "(float32 (bits 41880000))\n"
+    );
+}
+
+#[test]
+fn host_fma_binding_preserves_resources_purity_and_unsafe_responsibility() {
+    let sandbox = Sandbox::new();
+    let header = "trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for .f32'builtin {} impl Duplicate for bool {}\n";
+    sandbox.write(
+        "input.fl",
+        &format!(
+            "{header}{}",
+            include_str!("../../../development/examples/host-intrinsic-fma.fl")
+        ),
+    );
+    success(&sandbox.run(&[
+        "input.fl",
+        "--host-fma",
+        "input::machine::Scalar::fused",
+        "--copy-protocol",
+        "Duplicate",
+        "--drop-protocol",
+        "Retire",
+        "--build",
+        "run",
+        "--output",
+        "native",
+    ]));
+    assert_eq!(
+        success(&run_command(&mut Command::new(sandbox.path("native")))),
+        "(float32 (bits 41880000))\n"
+    );
+    let old = fs::read(sandbox.path("native")).unwrap();
+    for (body, diagnostic) in [
+        (
+            "fn run()->F {let x:F=1.0;Ops.op'intrinsic(x,x,x).as(F)}",
+            "unsafe",
+        ),
+        (
+            "comptime fn run()->F {let x:F=1.0;unsafe {Ops.op'intrinsic(x,x,x).as(F)}}",
+            "comptime",
+        ),
+        (
+            "pure fn run(p:*F)->F {unsafe {Ops.op'intrinsic(p.*,p.*,p.*).as(F)}}",
+            "P4 evidence",
+        ),
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!("^intrinsic_enum enum Ops {{op}} typealias F=.f32'builtin;{body}"),
+        );
+        let output = sandbox.run(&[
+            "input.fl",
+            "--host-fma",
+            "input::Ops::op",
+            "--build",
+            "run",
+            "--output",
+            "native",
+        ]);
+        failure(&output, 1);
+        assert!(
+            details(&output).contains(diagnostic),
+            "{}",
+            details(&output)
+        );
+        assert!(!details(&output).contains("panicked"));
+        assert_eq!(fs::read(sandbox.path("native")).unwrap(), old);
+    }
+}
+
+#[test]
+fn repository_math_package_runs_generic_fma_and_rejects_nonfloat_inputs() {
+    let sandbox = Sandbox::new();
+    let math = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/math/lib.fl");
+    let math = math.to_str().unwrap();
+    sandbox.write(
+        "app.fl",
+        include_str!("../../../development/examples/host-math-fma.fl"),
+    );
+    let base = [
+        "--packages-v1",
+        "--package",
+        "1",
+        "101",
+        "app",
+        "app.fl",
+        "--package",
+        "2",
+        "202",
+        "math",
+        math,
+        "--dependency",
+        "1",
+        "math",
+        "2",
+        "--primary",
+        "1",
+        "--host-fma",
+        "math::target::Scalar::fma",
+        "--host-sqrt",
+        "math::target::Scalar::sqrt",
+        "--host-copysign",
+        "math::target::Scalar::copysign",
+        "--host-intrinsic",
+        "floor=math::target::Scalar::floor",
+        "--host-intrinsic",
+        "ceil=math::target::Scalar::ceil",
+        "--host-intrinsic",
+        "trunc=math::target::Scalar::trunc",
+        "--host-intrinsic",
+        "roundeven=math::target::Scalar::roundeven",
+        "--host-intrinsic",
+        "round=math::target::Scalar::round",
+        "--host-intrinsic",
+        "fabs=math::target::Scalar::fabs",
+        "--host-intrinsic",
+        "sin=math::target::Scalar::sin",
+        "--host-intrinsic",
+        "cos=math::target::Scalar::cos",
+        "--host-intrinsic",
+        "exp=math::target::Scalar::exp",
+        "--host-intrinsic",
+        "exp2=math::target::Scalar::exp2",
+        "--host-intrinsic",
+        "log=math::target::Scalar::log",
+        "--host-intrinsic",
+        "log2=math::target::Scalar::log2",
+        "--host-intrinsic",
+        "log10=math::target::Scalar::log10",
+        "--host-intrinsic",
+        "minimum=math::target::Scalar::minimum",
+        "--host-intrinsic",
+        "maximum=math::target::Scalar::maximum",
+        "--host-intrinsic",
+        "bswap=math::target::Scalar::bswap",
+        "--host-intrinsic",
+        "fshl=math::target::Scalar::fshl",
+        "--host-intrinsic",
+        "fshr=math::target::Scalar::fshr",
+        "--host-intrinsic",
+        "minimumnum=math::target::Scalar::minimumnum",
+        "--host-intrinsic",
+        "maximumnum=math::target::Scalar::maximumnum",
+        "--host-intrinsic",
+        "isnan=math::target::Scalar::isnan",
+        "--host-intrinsic",
+        "isinf=math::target::Scalar::isinf",
+        "--host-intrinsic",
+        "isfinite=math::target::Scalar::isfinite",
+        "--host-intrinsic",
+        "isnormal=math::target::Scalar::isnormal",
+        "--host-intrinsic",
+        "issubnormal=math::target::Scalar::issubnormal",
+        "--host-intrinsic",
+        "signbit=math::target::Scalar::signbit",
+        "--host-intrinsic",
+        "add_sat=math::target::Scalar::add_sat",
+        "--host-intrinsic",
+        "sub_sat=math::target::Scalar::sub_sat",
+        "--host-intrinsic",
+        "min=math::target::Scalar::min",
+        "--host-intrinsic",
+        "max=math::target::Scalar::max",
+        "--host-intrinsic",
+        "abs=math::target::Scalar::abs",
+        "--host-intrinsic",
+        "bit_and=math::target::Scalar::bit_and",
+        "--host-intrinsic",
+        "bit_or=math::target::Scalar::bit_or",
+        "--host-intrinsic",
+        "bit_xor=math::target::Scalar::bit_xor",
+        "--host-intrinsic",
+        "bitreverse=math::target::Scalar::bitreverse",
+        "--host-intrinsic",
+        "ctpop=math::target::Scalar::ctpop",
+        "--host-intrinsic",
+        "ctlz=math::target::Scalar::ctlz",
+        "--host-intrinsic",
+        "cttz=math::target::Scalar::cttz",
+        "--host-intrinsic",
+        "pow=math::target::Scalar::pow",
+        "--host-intrinsic",
+        "powi=math::target::Scalar::powi",
+        "--host-intrinsic",
+        "ldexp=math::target::Scalar::ldexp",
+    ];
+    for level in ["0", "3"] {
+        let mut args = base.to_vec();
+        args.extend(["--build", "run", "--output", "native", "--opt-level", level]);
+        success(&sandbox.run(&args));
+        assert_eq!(
+            success(&run_command(&mut Command::new(sandbox.path("native")))),
+            "(bool true)\n"
+        );
+    }
+    let mut args = base.to_vec();
+    args.extend(["--emit-llvm", "run"]);
+    let output = sandbox.run(&args);
+    let ir = success(&output);
+    assert!(
+        ir.contains("@llvm.fma.f32") && ir.contains("@llvm.fma.f64"),
+        "{ir}"
+    );
+    sandbox.write("app.fl",&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}} impl Duplicate for .f32'builtin {{}} impl Duplicate for .f64'builtin {{}} impl Duplicate for bool {{}}\n{}",include_str!("../../../development/examples/host-math-fma.fl")));
+    let mut checked = base.to_vec();
+    checked.extend([
+        "--build",
+        "run",
+        "--output",
+        "native",
+        "--copy-protocol",
+        "app::Duplicate",
+        "--drop-protocol",
+        "app::Retire",
+        "--opt-level",
+        "3",
+    ]);
+    success(&sandbox.run(&checked));
+    assert_eq!(
+        success(&run_command(&mut Command::new(sandbox.path("native")))),
+        "(bool true)\n"
+    );
+    let old = fs::read(sandbox.path("native")).unwrap();
+    sandbox.write("app.fl", "fn run()->bool {math.fma<bool>(true,true,true)}");
+    let mut args = base.to_vec();
+    args.extend(["--build", "run", "--output", "native"]);
+    let output = sandbox.run(&args);
+    failure(&output, 1);
+    assert!(
+        details(&output).contains("type requirement"),
+        "{}",
+        details(&output)
+    );
+    assert_eq!(fs::read(sandbox.path("native")).unwrap(), old);
+    sandbox.write(
+        "app.fl",
+        "fn run()->.f32'builtin {let a:.f32'builtin=1.0;let b:.f64'builtin=2.0;math.fma(a,b,a)}",
+    );
+    failure(&sandbox.run(&args), 1);
+    assert_eq!(fs::read(sandbox.path("native")).unwrap(), old);
+}
+
+#[test]
+fn native_tests_bind_host_fma_for_single_source_and_real_math_package() {
+    let sandbox = Sandbox::new();
+    let declarations = include_str!("../../../development/examples/host-intrinsic-fma.fl");
+    sandbox.write(
+        "single.fl",
+        &format!("{declarations}\ntest fused {{let value = run(); assumes value == 17.0;}}"),
+    );
+    for level in ["0", "3"] {
+        let output = sandbox.run(&[
+            "single.fl",
+            "--test-native",
+            "--host-fma",
+            "input::machine::Scalar::fused",
+            "--opt-level",
+            level,
+        ]);
+        assert!(success(&output).contains("(count 1) (failures 0)"));
+    }
+    for action in ["--test", "--list-tests", "--emit"] {
+        let mut args = vec!["single.fl", action];
+        if action == "--emit" {
+            args.push("nir");
+        }
+        args.extend(["--host-fma", "input::machine::Scalar::fused"]);
+        let output = sandbox.run(&args);
+        failure(&output, 2);
+        assert!(details(&output).contains("--host-fma requires"));
+    }
+    let output = sandbox.run(&[
+        "single.fl",
+        "--test-native",
+        "--host-fma",
+        "input::machine::Scalar::missing",
+    ]);
+    failure(&output, 1);
+    let math = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/math/lib.fl");
+    sandbox.write(
+        "app.fl",
+        &format!(
+            "{}\ntest fused {{let value = run(); assumes value;}}\ntest failing {{let value = run(); assumes not value;}}",
+            include_str!("../../../development/examples/host-math-fma.fl")
+        ),
+    );
+    let base = [
+        "--packages-v1",
+        "--package",
+        "1",
+        "101",
+        "app",
+        "app.fl",
+        "--package",
+        "2",
+        "202",
+        "math",
+        math.to_str().unwrap(),
+        "--dependency",
+        "1",
+        "math",
+        "2",
+        "--primary",
+        "1",
+        "--host-fma",
+        "math::target::Scalar::fma",
+        "--host-sqrt",
+        "math::target::Scalar::sqrt",
+        "--host-copysign",
+        "math::target::Scalar::copysign",
+        "--host-intrinsic",
+        "floor=math::target::Scalar::floor",
+        "--host-intrinsic",
+        "ceil=math::target::Scalar::ceil",
+        "--host-intrinsic",
+        "trunc=math::target::Scalar::trunc",
+        "--host-intrinsic",
+        "roundeven=math::target::Scalar::roundeven",
+        "--host-intrinsic",
+        "round=math::target::Scalar::round",
+        "--host-intrinsic",
+        "fabs=math::target::Scalar::fabs",
+        "--host-intrinsic",
+        "sin=math::target::Scalar::sin",
+        "--host-intrinsic",
+        "cos=math::target::Scalar::cos",
+        "--host-intrinsic",
+        "exp=math::target::Scalar::exp",
+        "--host-intrinsic",
+        "exp2=math::target::Scalar::exp2",
+        "--host-intrinsic",
+        "log=math::target::Scalar::log",
+        "--host-intrinsic",
+        "log2=math::target::Scalar::log2",
+        "--host-intrinsic",
+        "log10=math::target::Scalar::log10",
+        "--host-intrinsic",
+        "minimum=math::target::Scalar::minimum",
+        "--host-intrinsic",
+        "maximum=math::target::Scalar::maximum",
+        "--host-intrinsic",
+        "bswap=math::target::Scalar::bswap",
+        "--host-intrinsic",
+        "fshl=math::target::Scalar::fshl",
+        "--host-intrinsic",
+        "fshr=math::target::Scalar::fshr",
+        "--host-intrinsic",
+        "minimumnum=math::target::Scalar::minimumnum",
+        "--host-intrinsic",
+        "maximumnum=math::target::Scalar::maximumnum",
+        "--host-intrinsic",
+        "isnan=math::target::Scalar::isnan",
+        "--host-intrinsic",
+        "isinf=math::target::Scalar::isinf",
+        "--host-intrinsic",
+        "isfinite=math::target::Scalar::isfinite",
+        "--host-intrinsic",
+        "isnormal=math::target::Scalar::isnormal",
+        "--host-intrinsic",
+        "issubnormal=math::target::Scalar::issubnormal",
+        "--host-intrinsic",
+        "signbit=math::target::Scalar::signbit",
+        "--host-intrinsic",
+        "add_sat=math::target::Scalar::add_sat",
+        "--host-intrinsic",
+        "sub_sat=math::target::Scalar::sub_sat",
+        "--host-intrinsic",
+        "min=math::target::Scalar::min",
+        "--host-intrinsic",
+        "max=math::target::Scalar::max",
+        "--host-intrinsic",
+        "abs=math::target::Scalar::abs",
+        "--host-intrinsic",
+        "bit_and=math::target::Scalar::bit_and",
+        "--host-intrinsic",
+        "bit_or=math::target::Scalar::bit_or",
+        "--host-intrinsic",
+        "bit_xor=math::target::Scalar::bit_xor",
+        "--host-intrinsic",
+        "bitreverse=math::target::Scalar::bitreverse",
+        "--host-intrinsic",
+        "ctpop=math::target::Scalar::ctpop",
+        "--host-intrinsic",
+        "ctlz=math::target::Scalar::ctlz",
+        "--host-intrinsic",
+        "cttz=math::target::Scalar::cttz",
+        "--host-intrinsic",
+        "pow=math::target::Scalar::pow",
+        "--host-intrinsic",
+        "powi=math::target::Scalar::powi",
+        "--host-intrinsic",
+        "ldexp=math::target::Scalar::ldexp",
+        "--test-native",
+    ];
+    for level in ["0", "3"] {
+        let mut args = base.to_vec();
+        args.extend(["--opt-level", level, "--test-filter", "fused"]);
+        let output = sandbox.run(&args);
+        assert!(success(&output).contains("(count 1) (failures 0)"));
+    }
+    let source = fs::read_to_string(sandbox.path("app.fl")).unwrap();
+    sandbox.write("app.fl", &format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}} impl Duplicate for .f32'builtin {{}} impl Duplicate for .f64'builtin {{}} impl Duplicate for bool {{}}\n{source}"));
+    let mut checked = base.to_vec();
+    checked.extend([
+        "--copy-protocol",
+        "app::Duplicate",
+        "--drop-protocol",
+        "app::Retire",
+        "--test-filter",
+        "fused",
+        "--opt-level",
+        "3",
+    ]);
+    let output = sandbox.run(&checked);
+    assert!(success(&output).contains("(count 1) (failures 0)"));
+    let output = sandbox.run(&base);
+    failure(&output, 1);
+    assert!(
+        details(&output).contains("(count 2) (failures 1)"),
+        "{}",
+        details(&output)
+    );
+}
+
+#[test]
+fn repository_resource_package_executes_native_clone_and_cleanup() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "app.fl",
+        include_str!("../../../development/examples/host-library-resources.fl"),
+    );
+    let resources =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/builtin/resources.fl");
+    for body in ["self.*", "Self { counter: self.counter.* }"] {
+        let source = include_str!("../../../development/examples/host-library-resources.fl")
+            .replace("\n        self.*\n", &format!("\n        {body}\n"));
+        sandbox.write("app.fl", &source);
+        for level in ["0", "3"] {
+            let output = sandbox.run(&[
+                "--packages-v1",
+                "--package",
+                "1",
+                "101",
+                "app",
+                "app.fl",
+                "--package",
+                "2",
+                "202",
+                "resources",
+                resources.to_str().unwrap(),
+                "--dependency",
+                "1",
+                "resources",
+                "2",
+                "--primary",
+                "1",
+                "--copy-protocol",
+                "resources::Copy",
+                "--drop-protocol",
+                "resources::Drop",
+                "--test-native",
+                "--opt-level",
+                level,
+            ]);
+            assert!(success(&output).contains("(count 4) (failures 0)"));
+        }
+    }
+}
+
+#[test]
+fn host_sqrt_selector_runs_generic_code_and_rejects_conflicts() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "mod machine {^intrinsic_enum pub enum Scalar {radical}}
+        pure fn root(x:T)->T where T, requires T == .f32'builtin or T == .f64'builtin {
+            unsafe {machine.Scalar.radical'intrinsic(x).as(T)}
+        }
+        fn run()->.f64'builtin {root<.f64'builtin>(81.0)}
+        test {let value=root<.f32'builtin>(16.0); assumes value == 4.0;}",
+    );
+    let selector = "input::machine::Scalar::radical";
+    for level in ["0", "3"] {
+        success(&sandbox.run(&[
+            "input.fl",
+            "--host-sqrt",
+            selector,
+            "--build",
+            "run",
+            "--output",
+            "native",
+            "--opt-level",
+            level,
+        ]));
+        assert_eq!(
+            success(&run_command(&mut Command::new(sandbox.path("native")))),
+            "(float64 (bits 4022000000000000))\n"
+        );
+        assert!(
+            success(&sandbox.run(&[
+                "input.fl",
+                "--host-sqrt",
+                selector,
+                "--test-native",
+                "--opt-level",
+                level
+            ]))
+            .contains("(count 1) (failures 0)")
+        );
+    }
+    let old = fs::read(sandbox.path("native")).unwrap();
+    let output = sandbox.run(&[
+        "input.fl",
+        "--host-sqrt",
+        selector,
+        "--host-fma",
+        selector,
+        "--build",
+        "run",
+        "--output",
+        "native",
+    ]);
+    failure(&output, 1);
+    assert!(
+        details(&output).contains("cannot bind both"),
+        "{}",
+        details(&output)
+    );
+    assert_eq!(fs::read(sandbox.path("native")).unwrap(), old);
+    for args in [
+        vec!["input.fl", "--host-sqrt", selector, "--emit", "nir"],
+        vec![
+            "input.fl",
+            "--host-sqrt",
+            selector,
+            "--host-sqrt",
+            selector,
+            "--emit-llvm",
+            "run",
+        ],
+        vec!["input.fl", "--emit-llvm", "run", "--host-sqrt"],
+    ] {
+        failure(&sandbox.run(&args), 2);
+    }
+    for (source, expected) in [
+        (
+            "fn run()->F {let x:F=4.0; unsafe {Ops.sqrt'intrinsic(x,x).as(F)}}",
+            "requires 1 operands",
+        ),
+        (
+            "fn run()->F {unsafe {Ops.sqrt'intrinsic(true).as(F)}}",
+            "must match",
+        ),
+        (
+            "comptime fn run()->F {let x:F=4.0; unsafe {Ops.sqrt'intrinsic(x).as(F)}}",
+            "comptime",
+        ),
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!("^intrinsic_enum enum Ops {{sqrt}} typealias F=.f32'builtin; {source}"),
+        );
+        let output = sandbox.run(&[
+            "input.fl",
+            "--host-sqrt",
+            "input::Ops::sqrt",
+            "--build",
+            "run",
+            "--output",
+            "native",
+        ]);
+        failure(&output, 1);
+        assert!(details(&output).contains(expected), "{}", details(&output));
+        assert_eq!(fs::read(sandbox.path("native")).unwrap(), old);
+    }
+}
+
+#[test]
+fn host_copysign_selector_runs_generic_code_and_rejects_conflicts() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "mod machine {^intrinsic_enum pub enum Scalar {radical}}
+        pure fn root(x:T,y:T)->T where T, requires T == .f32'builtin or T == .f64'builtin {
+            unsafe {machine.Scalar.radical'intrinsic(x,y).as(T)}
+        }
+        fn run()->.f64'builtin {root<.f64'builtin>(3.5,-0.0)}
+        test {let value=root<.f32'builtin>(3.5,-0.0); assumes value == -3.5;}",
+    );
+    let selector = "input::machine::Scalar::radical";
+    for level in ["0", "3"] {
+        success(&sandbox.run(&[
+            "input.fl",
+            "--host-copysign",
+            selector,
+            "--build",
+            "run",
+            "--output",
+            "native",
+            "--opt-level",
+            level,
+        ]));
+        assert_eq!(
+            success(&run_command(&mut Command::new(sandbox.path("native")))),
+            "(float64 (bits c00c000000000000))\n"
+        );
+        assert!(
+            success(&sandbox.run(&[
+                "input.fl",
+                "--host-copysign",
+                selector,
+                "--test-native",
+                "--opt-level",
+                level
+            ]))
+            .contains("(count 1) (failures 0)")
+        );
+    }
+    let old = fs::read(sandbox.path("native")).unwrap();
+    let output = sandbox.run(&[
+        "input.fl",
+        "--host-copysign",
+        selector,
+        "--host-fma",
+        selector,
+        "--build",
+        "run",
+        "--output",
+        "native",
+    ]);
+    failure(&output, 1);
+    assert!(
+        details(&output).contains("cannot bind both"),
+        "{}",
+        details(&output)
+    );
+    assert_eq!(fs::read(sandbox.path("native")).unwrap(), old);
+    for args in [
+        vec!["input.fl", "--host-copysign", selector, "--emit", "nir"],
+        vec![
+            "input.fl",
+            "--host-copysign",
+            selector,
+            "--host-copysign",
+            selector,
+            "--emit-llvm",
+            "run",
+        ],
+        vec!["input.fl", "--emit-llvm", "run", "--host-copysign"],
+    ] {
+        failure(&sandbox.run(&args), 2);
+    }
+    for (source, expected) in [
+        (
+            "fn run()->F {let x:F=4.0; unsafe {Ops.sqrt'intrinsic(x).as(F)}}",
+            "requires 2 operands",
+        ),
+        (
+            "fn run()->F {unsafe {Ops.sqrt'intrinsic(true,true).as(F)}}",
+            "must match",
+        ),
+        (
+            "comptime fn run()->F {let x:F=4.0; unsafe {Ops.sqrt'intrinsic(x,x).as(F)}}",
+            "comptime",
+        ),
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!("^intrinsic_enum enum Ops {{sqrt}} typealias F=.f32'builtin; {source}"),
+        );
+        let output = sandbox.run(&[
+            "input.fl",
+            "--host-copysign",
+            "input::Ops::sqrt",
+            "--build",
+            "run",
+            "--output",
+            "native",
+        ]);
+        failure(&output, 1);
+        assert!(details(&output).contains(expected), "{}", details(&output));
+        assert_eq!(fs::read(sandbox.path("native")).unwrap(), old);
+    }
+}
+
+#[test]
+fn repeated_host_intrinsic_bindings_keep_package_identities_separate() {
+    let sandbox = Sandbox::new();
+    let library = "^intrinsic_enum pub enum Ops {root}
+        pub pure fn root(value:T)->T where T, requires T == .f32'builtin or T == .f64'builtin {
+            unsafe {Ops.root'intrinsic(value).as(T)}
+        }";
+    sandbox.write("left.fl", library);
+    sandbox.write("right.fl", library);
+    sandbox.write("app.fl","fn run()->bool {left.root<.f32'builtin>(4.0) == 2.0 and right.root<.f64'builtin>(9.0) == 3.0}
+        test {let ok=run();assumes ok;}");
+    let base = [
+        "--packages-v1",
+        "--package",
+        "1",
+        "101",
+        "app",
+        "app.fl",
+        "--package",
+        "2",
+        "202",
+        "left",
+        "left.fl",
+        "--package",
+        "3",
+        "303",
+        "right",
+        "right.fl",
+        "--dependency",
+        "1",
+        "left",
+        "2",
+        "--dependency",
+        "1",
+        "right",
+        "3",
+        "--primary",
+        "1",
+        "--host-intrinsic",
+        "sqrt=left::Ops::root",
+        "--host-intrinsic",
+        "sqrt=right::Ops::root",
+    ];
+    for level in ["0", "3"] {
+        let mut args = base.to_vec();
+        args.extend(["--build", "run", "--output", "native", "--opt-level", level]);
+        success(&sandbox.run(&args));
+        assert_eq!(
+            success(&run_command(&mut Command::new(sandbox.path("native")))),
+            "(bool true)\n"
+        );
+        let mut args = base.to_vec();
+        args.extend(["--test-native", "--opt-level", level]);
+        assert!(success(&sandbox.run(&args)).contains("(count 1) (failures 0)"));
+    }
+    let mut args = base.to_vec();
+    args.extend(["--emit-llvm", "run"]);
+    let baseline = success(&sandbox.run(&args)).to_owned();
+    assert!(baseline.contains("@llvm.sqrt.f32") && baseline.contains("@llvm.sqrt.f64"));
+    // Identical repeated bindings and the legacy spelling are idempotent.
+    args.extend([
+        "--host-intrinsic",
+        "sqrt=left::Ops::root",
+        "--host-sqrt",
+        "left::Ops::root",
+    ]);
+    assert_eq!(success(&sandbox.run(&args)), baseline);
+    let old = fs::read(sandbox.path("native")).unwrap();
+    let mut conflict = base.to_vec();
+    conflict.extend([
+        "--host-intrinsic",
+        "copysign=left::Ops::root",
+        "--build",
+        "run",
+        "--output",
+        "native",
+    ]);
+    let output = sandbox.run(&conflict);
+    failure(&output, 1);
+    assert!(
+        details(&output).contains("cannot bind both"),
+        "{}",
+        details(&output)
+    );
+    assert_eq!(fs::read(sandbox.path("native")).unwrap(), old);
+}
+
+#[test]
+fn generic_host_intrinsic_cli_rejects_invalid_bindings_without_replacing_output() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "^intrinsic_enum enum Ops {tag} typealias F=.f32'builtin;
+        fn run()->F {let x:F=4.0;unsafe {Ops.tag'intrinsic(x).as(F)}}",
+    );
+    let base = [
+        "input.fl",
+        "--build",
+        "run",
+        "--output",
+        "native",
+        "--host-intrinsic",
+    ];
+    let mut args = base.to_vec();
+    args.push("sqrt=input::Ops::tag");
+    success(&sandbox.run(&args));
+    let old = fs::read(sandbox.path("native")).unwrap();
+    for (binding, status, reason) in [
+        ("sqrt", 2, "requires operation="),
+        ("sqrt=", 2, "must not be empty"),
+        (
+            "mystery=input::Ops::tag",
+            2,
+            "unknown host intrinsic operation",
+        ),
+        ("sqrt=absent::Ops::tag", 1, "package is missing"),
+        ("sqrt=input::Ops::missing", 1, "declared unit variant"),
+        ("sqrt=input::Ops", 1, "selector requires"),
+        ("copysign=input::Ops::tag", 1, "requires 2 operands"),
+    ] {
+        let mut args = base.to_vec();
+        args.push(binding);
+        let output = sandbox.run(&args);
+        failure(&output, status);
+        assert!(details(&output).contains(reason), "{}", details(&output));
+        assert_eq!(fs::read(sandbox.path("native")).unwrap(), old);
+    }
+    for args in [
+        vec![
+            "input.fl",
+            "--host-intrinsic",
+            "sqrt=input::Ops::tag",
+            "--emit",
+            "nir",
+        ],
+        vec![
+            "input.fl",
+            "--test",
+            "--host-intrinsic",
+            "sqrt=input::Ops::tag",
+        ],
+        vec![
+            "input.fl",
+            "--build",
+            "run",
+            "--output",
+            "native",
+            "--host-intrinsic",
+        ],
+    ] {
+        failure(&sandbox.run(&args), 2);
+    }
+    let mut args = base.to_vec();
+    args.extend(["sqrt=input::Ops::tag", "--host-fma", "input::Ops::tag"]);
+    let output = sandbox.run(&args);
+    failure(&output, 1);
+    assert!(details(&output).contains("cannot bind both"));
+    assert_eq!(fs::read(sandbox.path("native")).unwrap(), old);
+}
+
+#[test]
+fn sysroot_repository_resource_defaults_execute_cleanup_and_reject_double_move() {
+    let sandbox = Sandbox::new();
+    fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
+    fs::create_dir_all(sandbox.path("library/std")).unwrap();
+    sandbox.write(
+        "library/builtin/lib.fl",
+        "pub use resources.Drop; pub mod prelude {}",
+    );
+    sandbox.write("library/std/lib.fl", "pub mod prelude {}");
+    sandbox.write(
+        "library/builtin/resources.fl",
+        include_str!("../../../library/builtin/resources.fl"),
+    );
+    // Isolate the real resource module and manifest bindings from unfinished
+    // String/panic modules. This is not the full-library smoke test.
+    let config = include_str!("../../../library/language-items.conf")
+        .lines()
+        .filter(|line| {
+            line.starts_with("version")
+                || line.starts_with("copy-protocol")
+                || line.starts_with("drop-protocol")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    sandbox.write("library/language-items.conf", config);
+    let source = "use builtin.Drop;
+        struct Watch {seen:*bool}
+        impl Drop for Watch {fn drop(*self) {assumes not self.seen.*.*;self.seen.*.* = true;}}
+        fn run()->bool {var seen=false;do {let watch=Watch {seen:seen.ref};};seen}";
+    sandbox.write("input.fl", source);
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        "(bool true)"
+    );
+    for level in ["0", "3"] {
+        success(&sandbox.run(&[
+            "input.fl",
+            "--sysroot",
+            "library",
+            "--build",
+            "run",
+            "--opt-level",
+            level,
+            "--output",
+            "program",
+        ]));
+        let output = Command::new(sandbox.path("program")).output().unwrap();
+        assert_eq!(success(&output).trim(), "(bool true)");
+    }
+    sandbox.write(
+        "input.fl",
+        format!("{source}\ntest cleanup {{let result=run();assumes result;}}"),
+    );
+    for action in ["--test", "--test-native"] {
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", action]));
+    }
+    for action in [
+        vec!["--interpret", "run"],
+        vec!["--test"],
+        vec!["--test-native"],
+    ] {
+        let mut args = vec!["input.fl", "--sysroot", "library", "--inline-functions"];
+        args.extend(action);
+        success(&sandbox.run(&args));
+    }
+    success(&sandbox.run(&[
+        "input.fl",
+        "--sysroot",
+        "library",
+        "--build",
+        "run",
+        "--inline-functions",
+        "--discard-result",
+        "--output",
+        "program",
+    ]));
+    let output = Command::new(sandbox.path("program")).output().unwrap();
+    assert_eq!(success(&output).trim(), "(unit)");
+    sandbox.write(
+        "input.fl",
+        source.replace(
+            "let watch=Watch {seen:seen.ref};",
+            "let watch=Watch {seen:seen.ref};let moved=watch;let again=watch;",
+        ),
+    );
+    sandbox.write("program", "previous");
+    let rejected = sandbox.run(&[
+        "input.fl",
+        "--sysroot",
+        "library",
+        "--build",
+        "run",
+        "--output",
+        "program",
+    ]);
+    failure(&rejected, 1);
+    let diagnostic = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        diagnostic.contains("unavailable") || diagnostic.contains("moved"),
+        "{diagnostic}"
+    );
+    assert_eq!(fs::read(sandbox.path("program")).unwrap(), b"previous");
+}
+
+#[test]
+fn sysroot_incomplete_resource_defaults_never_fall_back_to_unchecked_execution() {
+    let sandbox = Sandbox::new();
+    fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
+    fs::create_dir_all(sandbox.path("library/std")).unwrap();
+    sandbox.write(
+        "library/builtin/lib.fl",
+        "pub mod prelude {} pub trait Copy {} pub trait Drop {fn drop(*self);}",
+    );
+    sandbox.write("library/std/lib.fl", "pub mod prelude {}");
+    sandbox.write(
+        "input.fl",
+        "fn run()->bool {true} test simple {let value=run();assumes value;}",
+    );
+    for binding in [
+        "copy-protocol = builtin::Copy",
+        "drop-protocol = builtin::Drop",
+        "",
+    ] {
+        sandbox.write(
+            "library/language-items.conf",
+            format!("version = 1\n{binding}\n"),
+        );
+        for action in [
+            vec!["--interpret", "run"],
+            vec!["--emit-llvm", "run"],
+            vec!["--test"],
+            vec!["--test-native"],
+        ] {
+            for inline in [false, true] {
+                // With neither binding, ordinary unchecked developer execution
+                // stays available; explicitly requesting inlining requires both.
+                if binding.is_empty() && !inline {
+                    continue;
+                }
+                let mut args = vec!["input.fl", "--sysroot", "library", "--output", "previous"];
+                args.extend(action.iter().copied());
+                if inline {
+                    args.push("--inline-functions");
+                }
+                sandbox.write("previous", "keep");
+                let output = sandbox.run(&args);
+                failure(&output, 1);
+                let diagnostic = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    diagnostic.contains("Copy") || diagnostic.contains("Drop"),
+                    "{diagnostic}"
+                );
+                assert_eq!(fs::read(sandbox.path("previous")).unwrap(), b"keep");
+            }
+        }
+        sandbox.write("previous", "keep");
+        let output = sandbox.run(&[
+            "input.fl",
+            "--sysroot",
+            "library",
+            "--build",
+            "run",
+            "--discard-result",
+            "--output",
+            "previous",
+        ]);
+        failure(&output, 1);
+        assert_eq!(fs::read(sandbox.path("previous")).unwrap(), b"keep");
+    }
+}
+
+#[test]
+fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override() {
+    let sandbox = Sandbox::new();
+    for name in ["builtin", "std", "math"] {
+        fs::create_dir_all(sandbox.path(format!("library/{name}"))).unwrap();
+    }
+    sandbox.write("library/builtin/lib.fl", "pub mod prelude {}");
+    sandbox.write(
+        "library/builtin/resources.fl",
+        include_str!("../../../library/builtin/resources.fl"),
+    );
+    sandbox.write("library/std/lib.fl", "pub mod prelude {}");
+    fs::create_dir_all(sandbox.path("library/math")).unwrap();
+    sandbox.write(
+        "library/math/lib.fl",
+        include_str!("../../../library/math/lib.fl"),
+    );
+    let config = include_str!("../../../library/language-items.conf")
+        .lines()
+        .filter(|line| {
+            line.starts_with("version")
+                || line.starts_with("host-intrinsic.")
+                || line.starts_with("copy-protocol")
+                || line.starts_with("drop-protocol")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    sandbox.write("library/language-items.conf", &config);
+    sandbox.write(
+        "input.fl",
+        "fn run()->bool {
+        math.fma<.f64'builtin>(3.0,4.0,5.0) == 17.0
+        and math.sqrt<.f64'builtin>(4.0) == 2.0
+        and math.wrapping_abs<.i8'builtin>(-5) == 5
+    }",
+    );
+    for level in ["0", "3"] {
+        success(&sandbox.run(&[
+            "input.fl",
+            "--fuel",
+            "1000000",
+            "--sysroot",
+            "library",
+            "--build",
+            "run",
+            "--opt-level",
+            level,
+            "--output",
+            "native",
+        ]));
+        let output = Command::new(sandbox.path("native")).output().unwrap();
+        assert_eq!(success(&output).trim(), "(bool true)");
+    }
+    let bad = config.replace(
+        "host-intrinsic.sqrt = math::target::Scalar::sqrt",
+        "host-intrinsic.sqrt = missing::Ops::sqrt",
+    );
+    sandbox.write("library/language-items.conf", &bad);
+    let previous = fs::read(sandbox.path("native")).unwrap();
+    let output = sandbox.run(&[
+        "input.fl",
+        "--fuel",
+        "1000000",
+        "--sysroot",
+        "library",
+        "--build",
+        "run",
+        "--output",
+        "native",
+    ]);
+    failure(&output, 1);
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("host intrinsic package is missing or ambiguous")
+    );
+    assert_eq!(fs::read(sandbox.path("native")).unwrap(), previous);
+    for override_args in [
+        ["--host-sqrt", "math::target::Scalar::sqrt"],
+        ["--host-intrinsic", "sqrt=math::target::Scalar::sqrt"],
+    ] {
+        let mut args = vec![
+            "input.fl",
+            "--fuel",
+            "1000000",
+            "--sysroot",
+            "library",
+            "--build",
+            "run",
+            "--output",
+            "native",
+        ];
+        args.extend(override_args);
+        success(&sandbox.run(&args));
+        assert_eq!(
+            success(&Command::new(sandbox.path("native")).output().unwrap()).trim(),
+            "(bool true)"
+        );
+    }
 }

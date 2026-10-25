@@ -50,7 +50,27 @@ impl Newtype {
             &mut usize,
         ) -> Result<Vec<Term>, crate::NominalAdmissionError>,
     ) -> Result<(), crate::NominalAdmissionError> {
-        self.validate_completed_arguments_with_evidence(arguments, fuel, layout, |_, _, _| false)
+        self.validate_completed_arguments_with_layouts_in(arguments, fuel, layout, None)
+    }
+
+    pub fn validate_completed_arguments_with_layouts_in(
+        &self,
+        arguments: &[Term],
+        fuel: &mut usize,
+        layout: impl FnMut(
+            &Term,
+            Option<u32>,
+            &mut usize,
+        ) -> Result<Vec<Term>, crate::NominalAdmissionError>,
+        target: Option<crate::target::TargetData>,
+    ) -> Result<(), crate::NominalAdmissionError> {
+        self.validate_completed_arguments_with_evidence_in(
+            arguments,
+            fuel,
+            layout,
+            |_, _, _| false,
+            target,
+        )
     }
 
     /// Residual invocation may supply independent declaration-domain evidence.
@@ -66,19 +86,35 @@ impl Newtype {
         ) -> Result<Vec<Term>, crate::NominalAdmissionError>,
         declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
     ) -> Result<(), crate::NominalAdmissionError> {
+        self.validate_completed_arguments_with_evidence_in(arguments, fuel, layout, declared, None)
+    }
+
+    pub fn validate_completed_arguments_with_evidence_in(
+        &self,
+        arguments: &[Term],
+        fuel: &mut usize,
+        layout: impl FnMut(
+            &Term,
+            Option<u32>,
+            &mut usize,
+        ) -> Result<Vec<Term>, crate::NominalAdmissionError>,
+        declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+        target: Option<crate::target::TargetData>,
+    ) -> Result<(), crate::NominalAdmissionError> {
         let own = self
             .type_parameters
             .len()
             .checked_sub(self.capture_count)
             .ok_or("invalid newtype capture count")?;
         if self.capture_count == 0 {
-            return crate::nominal_parameters::validate_with_evidence(
+            return crate::nominal_parameters::validate_with_evidence_in(
                 &self.type_parameters,
                 &self.parameter_types,
                 arguments,
                 fuel,
                 layout,
                 declared,
+                target,
             );
         }
         if arguments.len() != self.type_parameters.len()
@@ -114,13 +150,14 @@ impl Newtype {
             .iter()
             .map(|&i| arguments[i].clone())
             .collect::<Vec<_>>();
-        crate::nominal_parameters::validate_with_evidence(
+        crate::nominal_parameters::validate_with_evidence_in(
             &parameters,
             &domains,
             &arguments,
             fuel,
             layout,
             declared,
+            target,
         )
     }
 

@@ -8,7 +8,7 @@ fn declaration(source: &str) -> Result<(Ast, NodeIndex), String> {
     let map = SourceMap::new(FilePathMapping::empty());
     let file = map.new_source_file(FileName::Custom("trait-clauses.fl".into()), source.into());
     let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
-    assert!(errors.is_empty());
+    assert!(errors.is_empty(), "{source}: {errors:?}");
     let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
     let root = parser
         .try_statement_or_definition()
@@ -81,5 +81,48 @@ fn delimited_defaults_accept_constructors_without_consuming_definition_bodies() 
         "pure comptime fn Packet<.config:Config=>->Type {bool}",
     ] {
         assert!(declaration(source).is_err(), "accepted: {source}");
+    }
+}
+
+#[test]
+fn predicate_clauses_preserve_infix_spacing_across_layout_variations() {
+    for separator in [", ", ",\n            "] {
+        for expression in [
+            "x * x + y * y + x + y >= 0",
+            "x\t*\tx + y\n*\ny + x + y >= 0",
+        ] {
+            let source = format!(
+                "fn checked(x:Int,y:Int)->result:bool\n        where requires (x >= -1000 and x <= 1000 and y >= -1000 and y <= 1000){separator}ensures result {{{expression}}}"
+            );
+            declaration(&source).unwrap_or_else(|failure| panic!("{source}\n{failure}"));
+        }
+        for expression in ["x*x", "x *x", "x* x", "x/y", "x+y", "x-y"] {
+            let source = format!(
+                "fn checked(x:Int,y:Int)->result:Int where requires true{separator}ensures true {{{expression}}}"
+            );
+            let failure = declaration(&source).unwrap_err();
+            assert!(
+                failure.contains("requires whitespace on both sides"),
+                "{source}\n{failure}"
+            );
+        }
+    }
+}
+
+#[test]
+fn infix_spacing_diagnostics_preserve_prefix_types_and_statement_boundaries() {
+    for source in [
+        "fn run(value:*T)->*T {value}",
+        "fn run(value:Int)->Int { -value }",
+        "fn run(ready:bool,value:Int) {if ready {} -value;}",
+        "fn run(ready:bool) {if ready {} *T;}",
+        "fn run(value:*T)->T {value.*}",
+        "fn run(value:List<T>)->List<T> {value}",
+        "fn run(value:Int)->Int {value * -value}",
+        "fn run()->#relay *bool {relay()#}",
+        "fn run()->!Failure *bool {value}",
+        "fn run()->#relay !Failure *bool {value}",
+    ] {
+        declaration(source).unwrap_or_else(|failure| panic!("{source}\n{failure}"));
     }
 }

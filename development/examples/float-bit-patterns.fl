@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Single = .f32'builtin;
 typealias Double = .f64'builtin;
 typealias Byte = .u8'builtin;
@@ -6,11 +9,11 @@ typealias Mantissa = .BitVec'builtin<23>;
 typealias Exponent64 = .BitVec'builtin<11>;
 typealias Mantissa64 = .BitVec'builtin<52>;
 
-fn decode(value: Single) -> (Byte, Byte, .u32'builtin) {
+fn decode(value: Single) -> Tuple<Byte, Byte, .u32'builtin> {
     let 0b(sign: Sign) (exponent: Byte) (mantissa: Mantissa) = value'bitvec;
     (sign.as(Byte), exponent, mantissa.as(.u32'builtin))
 }
-fn decode_double(value: Double) -> (Byte, .u16'builtin, .u64'builtin) {
+fn decode_double(value: Double) -> Tuple<Byte, .u16'builtin, .u64'builtin> {
     let 0b(sign: Sign) (exponent: Exponent64) (mantissa: Mantissa64) = value'bitvec;
     (sign.as(Byte), exponent.as(.u16'builtin), mantissa.as(.u64'builtin))
 }
@@ -20,7 +23,7 @@ fn is_nan(value: Single) -> true'type {
         _ => false,
     }
 }
-fn example() -> (Byte, Byte, .u32'builtin) { decode(13.625) }
+fn example() -> Tuple<Byte, Byte, .u32'builtin> { decode(13.625) }
 fn flipped() -> Single {
     var value: Single = 13.625;
     value'bitvec[31] = 1;

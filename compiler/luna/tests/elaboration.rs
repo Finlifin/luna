@@ -207,7 +207,31 @@ fn details(output: &Output) -> String {
 }
 
 fn accepted(source: &str) -> String {
-    let output = Sandbox::new(source).run(&["--emit", "nir"]);
+    accepted_with_tuple(source, false)
+}
+fn accepted_tuple(source: &str) -> String {
+    accepted_with_tuple(&tuple_source(source), true)
+}
+fn accepted_bound_tuple(source: &str) -> String {
+    accepted_with_tuple(source, true)
+}
+fn tuple_source(source: &str) -> String {
+    format!(
+        "pure comptime fn TupleElements<T>->.Type'builtin {{T}} pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>>->.Type'builtin {{bool}} {source}"
+    )
+}
+fn accepted_with_tuple(source: &str, tuple: bool) -> String {
+    let source = source.to_owned();
+    let mut args = vec!["--emit", "nir"];
+    if tuple {
+        args.extend([
+            "--meta-list-type",
+            "input::TupleElements",
+            "--tuple-type",
+            "input::Tuple",
+        ]);
+    }
+    let output = Sandbox::new(&source).run(&args);
     assert!(output.status.success(), "{}", details(&output));
     assert!(output.stderr.is_empty(), "{}", details(&output));
     let dump = String::from_utf8(output.stdout).unwrap();
@@ -215,9 +239,28 @@ fn accepted(source: &str) -> String {
     dump
 }
 fn rejected(source: &str, message: &str) {
-    let sandbox = Sandbox::new(source);
+    rejected_with_tuple(source, message, false)
+}
+fn rejected_tuple(source: &str, message: &str) {
+    rejected_with_tuple(&tuple_source(source), message, true)
+}
+fn rejected_bound_tuple(source: &str, message: &str) {
+    rejected_with_tuple(source, message, true)
+}
+fn rejected_with_tuple(source: &str, message: &str, tuple: bool) {
+    let source = source.to_owned();
+    let sandbox = Sandbox::new(&source);
     fs::write(sandbox.0.join("result"), "previous output").unwrap();
-    let output = sandbox.run(&["--emit", "nir", "--output", "result"]);
+    let mut args = vec!["--emit", "nir", "--output", "result"];
+    if tuple {
+        args.extend([
+            "--meta-list-type",
+            "input::TupleElements",
+            "--tuple-type",
+            "input::Tuple",
+        ]);
+    }
+    let output = sandbox.run(&args);
     assert_eq!(
         output.status.code(),
         Some(1),
@@ -227,7 +270,7 @@ fn rejected(source: &str, message: &str) {
     assert!(output.stdout.is_empty(), "{}", details(&output));
     assert!(
         String::from_utf8_lossy(&output.stderr).contains(message),
-        "{}",
+        "source: {source}\nexpected diagnostic: {message}\n{}",
         details(&output)
     );
     assert_eq!(
@@ -340,10 +383,10 @@ fn parameter_identities_remain_distinct() {
 }
 #[test]
 fn tuples_and_explicit_returns_are_checked() {
-    accepted(
-        "typealias Flag = true'type; fn pair(x: Flag, y: Flag) -> (Flag, Flag) { (x, y) } fn early() -> Flag { return true; }",
+    accepted_tuple(
+        "typealias Flag = true'type; fn pair(x: Flag, y: Flag) -> Tuple<Flag,Flag> { (x, y) } fn early() -> Flag { return true; }",
     );
-    rejected(
+    rejected_tuple(
         "typealias Flag = true'type; fn bad() -> Flag { return 'x'; }",
         "type mismatch",
     );
@@ -1421,18 +1464,27 @@ fn generic_structs_check_definition_fields_and_explicit_argument_contracts() {
 
 #[test]
 fn generic_representation_checks_distinguish_finite_nesting_and_cycles() {
-    accepted(
+    accepted_tuple(
         "struct Box where T { value: T, } struct Middle { value: Box<true'type>, } struct Outer { value: Box<Middle>, }",
     );
-    rejected(
+    rejected_tuple(
         "struct Box where T { value: T, } struct Cycle { value: Box<Cycle>, }",
         "recursive by-value",
     );
-    rejected(
-        "struct Grow where T { value: Grow<(T, T)>, }",
+    rejected_tuple(
+        "struct Grow where T { value: Grow<Tuple<T,T>>, }",
         "representation expansion budget exhausted",
     );
-    accepted("struct Node where T { value: T, next: *Node<T>, }");
+    rejected_tuple(
+        "struct Cycle { value: Tuple<Cycle,bool> }",
+        "recursive by-value",
+    );
+    rejected_tuple(
+        "enum Cycle { value(Tuple<bool,Cycle>) }",
+        "recursive by-value",
+    );
+    accepted_tuple("struct Node { value: Tuple<bool,*Node> }");
+    accepted_tuple("struct Node where T { value: T, next: *Node<T>, }");
 }
 
 #[test]
@@ -1455,36 +1507,36 @@ fn generic_struct_type_values_are_not_mistaken_for_runtime_functions() {
 #[test]
 fn generic_enums_check_specialized_fields_patterns_and_defaults() {
     let prefix = "enum Choice where T { none, value(T), } ";
-    rejected(
+    rejected_tuple(
         &format!("{prefix} fn run() -> Choice<true'type> {{ .value('x') }}"),
         "type mismatch",
     );
-    rejected(
+    rejected_tuple(
         &format!(
             "{prefix} fn run(value: Choice<true'type>) -> true'type {{ value match {{ .none => false, .value(true) => true, }} }}"
         ),
         "non-exhaustive match",
     );
-    rejected(
+    rejected_tuple(
         &format!(
             "{prefix} fn run(value: Choice<'x''type>) -> true'type {{ value match {{ .none => false, .value(true) => true, .value(false) => false, }} }}"
         ),
         "type mismatch",
     );
-    rejected(
+    rejected_tuple(
         &format!("{prefix} fn run(value: Choice) {{}}"),
         "explicit type arguments",
     );
-    rejected(
+    rejected_tuple(
         "enum Bad where T { value { item: T = true }, }",
         "type mismatch",
     );
-    rejected(
+    rejected_tuple(
         "enum Choice where T { none, value(T), } struct Cycle { value: Choice<Cycle>, }",
         "recursive by-value",
     );
-    rejected(
-        "enum Grow where T { value(Grow<(T, T)>), }",
+    rejected_tuple(
+        "enum Grow where T { value(Grow<Tuple<T,T>>), }",
         "representation expansion budget exhausted",
     );
 }
@@ -1611,8 +1663,15 @@ fn constrained_coverage_does_not_hide_missing_or_guarded_cases() {
         "enum Pair where T { pair(T, T), } fn bad(value: Pair<T>) -> true'type where T, requires T == true'type { value match { .pair(true, _) => true, .pair(_, true) => true, } }",
         "non-exhaustive match",
     );
+    accepted(
+        "fn good(value: T) -> true'type where T, requires T == true'type { value match { true if true => true, false => false, } }",
+    );
     rejected(
-        "fn bad(value: T) -> true'type where T, requires T == true'type { value match { true if true => true, false => false, } }",
+        "fn bad(value: T) -> true'type where T, requires T == true'type { value match { true if false => true, false => false, } }",
+        "non-exhaustive match",
+    );
+    rejected(
+        "fn bad(value: T, gate:bool) -> true'type where T, requires T == true'type { value match { true if gate => true, false => false, } }",
         "non-exhaustive match",
     );
     rejected(
@@ -1623,44 +1682,44 @@ fn constrained_coverage_does_not_hide_missing_or_guarded_cases() {
 
 #[test]
 fn tuple_patterns_check_shape_field_types_and_complete_coverage() {
-    rejected(
+    rejected_tuple(
         "fn bad() { let (a, b) = true; }",
         "tuple pattern requires a tuple type",
     );
-    rejected(
+    rejected_tuple(
         "fn bad() { let (a,) = (true, false); }",
         "tuple pattern arity mismatch",
     );
-    rejected(
+    rejected_tuple(
         "fn bad() { let (true, x) = ('x', false); }",
         "type mismatch",
     );
-    rejected(
+    rejected_tuple(
         "fn bad() { let (true, x) = (true, false); }",
         "refutable let pattern",
     );
-    rejected(
-        "fn bad(value: (true'type, true'type)) -> true'type { value match { (true, _) => true, (_, true) => true, } }",
+    rejected_tuple(
+        "fn bad(value: Tuple<true'type,true'type>) -> true'type { value match { (true, _) => true, (_, true) => true, } }",
         "non-exhaustive match",
     );
-    rejected(
-        "fn bad(value: (true'type, true'type)) -> true'type { value match { (true, _) if true => true, (false, _) => false, } }",
+    rejected_tuple(
+        "fn bad(value: Tuple<true'type,true'type>) -> true'type { value match { (true, _) if true => true, (false, _) => false, } }",
         "non-exhaustive match",
     );
 }
 
 #[test]
 fn tuple_binding_scopes_enforce_mutability_and_or_compatibility() {
-    rejected(
+    rejected_tuple(
         "fn bad() { let (a, b) = (true, false); a = false; }",
         "cannot reassign a let binding",
     );
-    rejected(
-        "fn bad(value: (true'type, true'type)) -> true'type { value match { (x, true) or (false, y) => true, _ => false, } }",
+    rejected_tuple(
+        "fn bad(value: Tuple<true'type,true'type>) -> true'type { value match { (x, true) or (false, y) => true, _ => false, } }",
         "binding",
     );
-    rejected(
-        "fn bad(value: (true'type, 'x''type)) -> true'type { value match { (x, _) or (_, x) => true, } }",
+    rejected_tuple(
+        "fn bad(value: Tuple<true'type,'x''type>) -> true'type { value match { (x, _) or (_, x) => true, } }",
         "type mismatch",
     );
 }
@@ -1708,23 +1767,23 @@ fn record_patterns_check_names_types_and_exhaustiveness() {
 
 #[test]
 fn structural_views_require_proof_and_preserve_complete_pattern_checks() {
-    rejected(
+    rejected_tuple(
         "struct Box { value: true'type, } fn bad(value: T) -> true'type where T { value.value }",
         "field projection requires",
     );
-    rejected(
+    rejected_tuple(
         "struct A { value: true'type, } struct B { value: true'type, } fn bad(value: T) -> true'type where T, requires T == A or T == B { value.value }",
         "field projection requires",
     );
-    rejected(
-        "fn bad(value: T) -> true'type where T, requires T == (true'type, true'type) { value match { (true, _) => true, (_, true) => true, } }",
+    rejected_tuple(
+        "fn bad(value: T) -> true'type where T, requires T == Tuple<true'type,true'type> { value match { (true, _) => true, (_, true) => true, } }",
         "non-exhaustive match",
     );
-    rejected(
+    rejected_tuple(
         "enum E where T { some(T), none, } fn bad(value: T) -> true'type where T, requires T == E<true'type> { value match { .some(true) => true, .none => false, } }",
         "non-exhaustive match",
     );
-    rejected(
+    rejected_tuple(
         "struct Box { value: true'type, } fn bad(value: T) where T, requires T == Box { value.value = 'x'; }",
         "type mismatch",
     );
@@ -2949,22 +3008,22 @@ fn comptime_integer_values_cannot_escape_into_runtime_storage() {
         "struct Box { value: .Integer'builtin } fn bad(value: Box) -> Box { value }",
         "struct Box where T { value: T } fn bad(value: Box<.Integer'builtin>) -> Box<.Integer'builtin> { value }",
         "enum Choice { empty, some(.Integer'builtin) } fn bad(value: Choice) -> Choice { value }",
-        "fn bad(value: (.Integer'builtin, true'type)) -> (.Integer'builtin, true'type) { value }",
+        "fn bad(value: Tuple<.Integer'builtin,true'type>) -> Tuple<.Integer'builtin,true'type> { value }",
     ] {
-        rejected(source, "comptime-only value cannot inhabit runtime storage");
+        rejected_tuple(source, "comptime-only value cannot inhabit runtime storage");
     }
     // A phantom type argument does not create a stored comptime value.
-    accepted(
+    accepted_tuple(
         "struct Marker where T {} fn keep(value: Marker<.Integer'builtin>) -> Marker<.Integer'builtin> { value }",
     );
-    accepted(
+    accepted_tuple(
         "struct Box { value: .Integer'builtin } comptime fn keep(value: Box) -> Box { value }",
     );
-    rejected(
+    rejected_tuple(
         "comptime fn bad(value: .Integer'builtin) -> .Integer'builtin { value / 2 }",
         "Integer division operator rounding protocol is not implemented",
     );
-    rejected(
+    rejected_tuple(
         "comptime fn bad(value: .Integer'builtin) -> .Integer'builtin { value % 2 }",
         "protocol or construct not yet implemented",
     );
@@ -3364,20 +3423,20 @@ fn dependent_normal_form_inputs_reject_invalid_instantiations_and_ambiguous_expr
         "Negative(.u8'builtin)",
         "Number(true'type)",
     ] {
-        rejected(
+        rejected_bound_tuple(
             &format!("{prefix} typealias Bad = {input};"),
             "required comptime evaluation failed",
         );
     }
-    rejected(
+    rejected_bound_tuple(
         &format!("{prefix} typealias Bad = Pass(.u16'builtin, 8);"),
         "TypeContractRejected",
     );
-    rejected(
+    rejected_bound_tuple(
         &format!("{prefix} typealias Bad = Checked(.u16'builtin);"),
         "TypeContractRejected",
     );
-    accepted(&format!(
+    accepted_bound_tuple(&format!(
         "{prefix} comptime fn Conditional(ty: Type) -> Type {{ Tagged<ty, if true {{ 1 }} else {{ 2 }}> }}"
     ));
 }
@@ -3385,29 +3444,29 @@ fn dependent_normal_form_inputs_reject_invalid_instantiations_and_ambiguous_expr
 #[test]
 fn contextual_normal_form_branches_retain_ordinary_type_and_phase_checks() {
     let prefix = include_str!("../../../development/examples/contextual-normal-form-inputs.fl");
-    rejected(
+    rejected_bound_tuple(
         &format!("{prefix} typealias Bad = UnselectedOverflow(.u8'builtin);"),
         "required comptime evaluation failed",
     );
-    rejected(
+    rejected_bound_tuple(
         &format!(
             "{prefix} fn runtime() -> .u8'builtin {{ 1 }} comptime fn Bad(ty: Type) -> Type {{ Tagged<ty, if true {{ 1 }} else {{ runtime() }}> }}"
         ),
         "runtime function is unavailable during comptime",
     );
-    rejected(
+    rejected_bound_tuple(
         &format!(
             "{prefix} comptime fn Bad(ty: Type) -> Type {{ Tagged<ty, if true {{ 1 }} else {{ missing }}> }}"
         ),
         "missing",
     );
-    rejected(
+    rejected_bound_tuple(
         &format!(
             "{prefix} comptime fn Bad(ty: Type) -> Type {{ Tagged<ty, do {{ let hidden: .u8'builtin = 1; hidden }}>; Tagged<ty, hidden> }}"
         ),
         "hidden",
     );
-    accepted(&format!(
+    accepted_bound_tuple(&format!(
         "{prefix} typealias Good = Early(.u8'builtin, true);"
     ));
 }
@@ -3508,28 +3567,28 @@ fn normal_form_text_inputs_reject_wrong_kinds_and_different_names() {
 #[test]
 fn normal_form_tuple_values_reject_wrong_fields_shapes_and_contracts() {
     let prefix = include_str!("../../../development/examples/normal-form-tuples.fl");
-    rejected(
+    rejected_bound_tuple(
         &format!("{prefix} typealias Bad = Config<(true, 1)>;"),
         "type mismatch",
     );
-    rejected(
+    rejected_bound_tuple(
         &format!("{prefix} typealias Bad = Checked<Config<(8, true)>, (9, true)>;"),
         "type requirement",
     );
-    rejected(
-        &format!("{prefix} typealias Bad = Typed((.u8'builtin, .u8'builtin));"),
+    rejected_bound_tuple(
+        &format!("{prefix} typealias Bad = Typed(Tuple<.u8'builtin, .u8'builtin>);"),
         "TypeContractRejected",
     );
-    rejected(
-        &format!("{prefix} typealias Bad = Typed((.i8'builtin, Flag));"),
+    rejected_bound_tuple(
+        &format!("{prefix} typealias Bad = Typed(Tuple<.i8'builtin, Flag>);"),
         "required comptime evaluation failed",
     );
-    rejected(
+    rejected_bound_tuple(
         &format!("{prefix} typealias Bad = Partial(.i8'builtin);"),
         "required comptime evaluation failed",
     );
-    rejected(
-        &format!("{prefix} typealias Bad = Typed((.u8'builtin, Flag, Flag));"),
+    rejected_bound_tuple(
+        &format!("{prefix} typealias Bad = Typed(Tuple<.u8'builtin, Flag, Flag>);"),
         "Arity",
     );
 }
@@ -3554,14 +3613,14 @@ fn normal_form_bitvec_inputs_reject_width_range_and_wrong_contracts() {
 #[test]
 fn symbolic_tuple_normal_inputs_preserve_definition_binders() {
     let prefix = include_str!("../../../development/examples/normal-form-symbolic-tuples.fl");
-    accepted(prefix);
-    rejected(
+    accepted_bound_tuple(prefix);
+    rejected_bound_tuple(
         &format!(
             "{prefix} pure comptime fn Bad<N: Int> -> Type where requires Pair<(N, true)> == Pair<(N, true)> {{ RequirePair<Pair<(N, true)>, (N, false)> }}"
         ),
         "type requirement",
     );
-    rejected(
+    rejected_bound_tuple(
         &format!("{prefix} fn bad(value: Pair<(1, true, false)>) {{}}"),
         "arity mismatch",
     );
@@ -3583,19 +3642,19 @@ fn normal_form_unit_values_reject_non_unit_inputs() {
 #[test]
 fn contextual_type_tuples_reject_value_fields_and_check_unselected_arms() {
     let prefix = include_str!("../../../development/examples/contextual-type-tuples.fl");
-    rejected(
+    rejected_bound_tuple(
         &format!(
             "{prefix} comptime fn Bad(ty: Type) -> Type {{ Tagged<ty, (.u8'builtin, true)> }} typealias Wrong = Bad(Type);"
         ),
         "TypeContractRejected",
     );
-    rejected(
+    rejected_bound_tuple(
         &format!(
             "{prefix} comptime fn Bad(ty: Type) -> Type {{ Tagged<ty, if true {{ (.u8'builtin, ()) }} else {{ (.u8'builtin, true) }}> }} typealias Wrong = Bad(Type);"
         ),
         "TypeContractRejected",
     );
-    rejected(
+    rejected_bound_tuple(
         &format!(
             "{prefix} comptime fn Bad(ty: Type) -> Type {{ Tagged<ty, do {{}}> }} typealias Wrong = Bad(Type);"
         ),
@@ -3606,8 +3665,8 @@ fn contextual_type_tuples_reject_value_fields_and_check_unselected_arms() {
 #[test]
 fn type_facts_propagate_through_tuple_valued_normal_inputs() {
     let prefix = include_str!("../../../development/examples/normal-form-tuple-congruence.fl");
-    accepted(prefix);
-    rejected(
+    accepted_bound_tuple(prefix);
+    rejected_bound_tuple(
         &format!(
             "{prefix} pure comptime fn Bad<A: Type, B: Type> -> Type where requires Pair<(A, true)> == Pair<(B, true)> {{ Same<A, B> }}"
         ),
@@ -3617,11 +3676,11 @@ fn type_facts_propagate_through_tuple_valued_normal_inputs() {
 
 #[test]
 fn requires_type_operands_preserve_nested_formation_diagnostics() {
-    let prefix = "typealias Type = .Type'builtin; typealias Int = .Integer'builtin; pure comptime fn Pair<v: (Int, true'type)> -> Type { .u8'builtin } ";
+    let prefix = "typealias Type = .Type'builtin; typealias Int = .Integer'builtin; pure comptime fn Pair<v: Tuple<Int,true'type>> -> Type { .u8'builtin } ";
     let invalid_field =
         format!("{prefix} fn bad() where requires Pair<(false, true)> == .u8'builtin {{}}");
-    let start = invalid_field.find("false").unwrap();
-    rejected(
+    let start = tuple_source(&invalid_field).find("false").unwrap();
+    rejected_tuple(
         &invalid_field,
         &format!(
             "{start}..{}: requires type operand could not be elaborated: type mismatch",
@@ -3629,24 +3688,24 @@ fn requires_type_operands_preserve_nested_formation_diagnostics() {
         ),
     );
     for operand in ["Pair<(1, true, false)>", "Pair<(1,)>"] {
-        rejected(
+        rejected_tuple(
             &format!("{prefix} fn bad() where requires {operand} == .u8'builtin {{}}"),
             "normal-form tuple argument arity mismatch",
         );
-        rejected(
+        rejected_tuple(
             &format!("{prefix} fn bad() where requires .u8'builtin == {operand} {{}}"),
             "normal-form tuple argument arity mismatch",
         );
     }
-    rejected(
+    rejected_tuple(
         &format!("{prefix} fn bad() where requires Pair<(false, true)> == .u8'builtin {{}}"),
         "type mismatch",
     );
-    rejected(
+    rejected_tuple(
         "typealias Type = .Type'builtin; pure comptime fn Byte<T: Type> -> Type where requires T == .u8'builtin { T } fn bad() where requires Byte<.u16'builtin> == .u8'builtin {}",
         "type requirement is not satisfied",
     );
-    rejected(
+    rejected_tuple(
         "typealias Type = .Type'builtin; typealias Int = .Integer'builtin; comptime fn Loop() -> Type { Loop() } fn bad() where requires Loop() == .u8'builtin {}",
         "DepthExhausted",
     );
@@ -3823,7 +3882,7 @@ fn comptime_closure_environments_cannot_cross_phase_or_disappear() {
 
 #[test]
 fn explicit_closure_contexts_preserve_empty_elimination_and_ordered_type_identity() {
-    accepted(
+    accepted_tuple(
         r#"
         typealias Bool = true'type;
         typealias Char = 'a''type;
@@ -3837,31 +3896,34 @@ fn explicit_closure_contexts_preserve_empty_elimination_and_ordered_type_identit
     for source in [
         "fn bad(flag: true'type) -> %{} fn() -> true'type { || flag }",
         "fn bad() -> %{flag: true'type} fn() -> true'type { || true }",
-        "fn bad(a: true'type, b: 'a''type) -> %{b: 'a''type, a: true'type} fn() -> (true'type, 'a''type) { || (a, b) }",
     ] {
-        rejected(source, "type mismatch");
+        rejected_tuple(source, "type mismatch");
     }
-    rejected(
+    rejected_tuple(
+        "fn bad(a: true'type, b: 'a''type) -> %{b: 'a''type, a: true'type} fn() -> Tuple<true'type,'a''type> { || (a, b) }",
+        "unresolved type equality",
+    );
+    rejected_tuple(
         "typealias Bad = %{a: true'type, a: true'type} fn();",
         "duplicate closure environment binding",
     );
-    rejected(
+    rejected_tuple(
         "typealias Bad = %{a: true'type} %{b: true'type} fn();",
         "repeated nonempty closure qualification",
     );
-    rejected(
+    rejected_tuple(
         "typealias Bad = %{a: true'type} true'type;",
         "non-callable closure-qualified bodies",
     );
-    rejected(
+    rejected_tuple(
         "fn bad(flag: true'type) -> %{flag: true'type = flag} fn() -> true'type { || flag }",
         "dependency/provenance checking",
     );
-    rejected(
+    rejected_tuple(
         "fn bad(callback: %C fn()) where C {}",
         "open closure contexts require",
     );
-    rejected(
+    rejected_tuple(
         "fn bad() -> %{hidden: true'type} fn() -> true'type { || hidden }",
         "Unresolved identifier",
     );
@@ -3870,32 +3932,32 @@ fn explicit_closure_contexts_preserve_empty_elimination_and_ordered_type_identit
 #[test]
 fn generic_aliases_check_arity_scope_cycles_and_target_types() {
     for source in [
-        "typealias Pair<T> = (T, T); fn bad(value: Pair) {}",
-        "typealias Pair<T> = (T, T); fn bad(value: Pair<>) {}",
-        "typealias Pair<T> = (T, T); fn bad(value: Pair<true'type, 'a''type>) {}",
+        "typealias Pair<T> = Tuple<T,T>; fn bad(value: Pair) {}",
+        "typealias Pair<T> = Tuple<T,T>; fn bad(value: Pair<>) {}",
+        "typealias Pair<T> = Tuple<T,T>; fn bad(value: Pair<true'type, 'a''type>) {}",
     ] {
-        rejected(source, "type alias");
+        rejected_tuple(source, "type alias");
     }
-    rejected("typealias Bad<T, T> = T;", "duplicate clause parameter");
-    rejected(
+    rejected_tuple("typealias Bad<T, T> = T;", "duplicate clause parameter");
+    rejected_tuple(
         "typealias Identity<T> = T; fn bad(value: T) {}",
         "Unresolved identifier",
     );
-    rejected("typealias Bad<T> = true;", "type mismatch");
-    rejected("typealias Bad<T> = Missing;", "Unresolved identifier");
-    rejected(
+    rejected_tuple("typealias Bad<T> = true;", "type mismatch");
+    rejected_tuple("typealias Bad<T> = Missing;", "Unresolved identifier");
+    rejected_tuple(
         "typealias A<T> = B<T>; typealias B<U> = A<U>;",
         "cyclic type alias",
     );
-    rejected("typealias Loop<T> = Loop<(T, T)>;", "cyclic type alias");
-    accepted(
+    rejected_tuple("typealias Loop<T> = Loop<Tuple<T,T>>;", "cyclic type alias");
+    accepted_tuple(
         "typealias Sized<N: .Integer'builtin> = true'type; fn keep(value: Sized<7>)->bool {value}",
     );
-    rejected(
+    rejected_tuple(
         "typealias Sized<N: .Integer'builtin> = true'type; fn bad(value: Sized<true>) {}",
         "type mismatch",
     );
-    rejected(
+    rejected_tuple(
         "typealias Type = .Type'builtin; pure comptime fn Identity<T> -> Type { T } typealias Alias<T> = Identity<T>; fn bad(value: Alias<true'type>) -> true'type { value }",
         "unresolved type equality",
     );
@@ -3933,7 +3995,7 @@ fn generic_alias_targets_forward_the_callers_bound_evidence_without_skipping_def
 
 #[test]
 fn generic_alias_expansion_is_bounded_and_recovers_for_a_fresh_package() {
-    let mut source = String::from("typealias Level0<T> = (T, T);\n");
+    let mut source = String::from("typealias Level0<T> = Tuple<T,T>;\n");
     for level in 1..25 {
         source.push_str(&format!(
             "typealias Level{level}<T> = Level{}<Level{}<T>>;\n",
@@ -3942,9 +4004,9 @@ fn generic_alias_expansion_is_bounded_and_recovers_for_a_fresh_package() {
         ));
     }
     source.push_str("fn bad(value: Level24<true'type>) {}\n");
-    rejected(&source, "type alias expansion budget exhausted");
-    accepted(
-        "typealias Pair<T> = (T, T); typealias Four<T> = Pair<Pair<T>>; fn keep(value: Four<true'type>) -> ((true'type, true'type), (true'type, true'type)) { value }",
+    rejected_tuple(&source, "type alias expression expansion budget exhausted");
+    accepted_tuple(
+        "typealias Pair<T> = Tuple<T,T>; typealias Four<T> = Pair<Pair<T>>; fn keep(value: Four<true'type>) -> Tuple<Tuple<true'type,true'type>,Tuple<true'type,true'type>> { value }",
     );
 }
 
@@ -3965,12 +4027,12 @@ fn residual_aliases_preserve_bounds_and_reject_computation_cycles() {
 
 #[test]
 fn computed_tuple_type_fields_reject_values_and_runtime_calls() {
-    rejected(
-        "typealias Type = .Type'builtin; comptime fn Bad(value: Type) -> Type { (value, true) }",
+    rejected_tuple(
+        "typealias Type = .Type'builtin; comptime fn Bad(value: Type) -> Type { Tuple<value, true> }",
         "type mismatch",
     );
-    rejected(
-        "typealias Type = .Type'builtin; fn RuntimeType() -> Type { true'type } comptime fn PairType() -> Type { (RuntimeType(), true'type) } typealias Pair = PairType();",
+    rejected_tuple(
+        "typealias Type = .Type'builtin; fn RuntimeType() -> Type { true'type } comptime fn PairType() -> Type { Tuple<RuntimeType(), true'type> } typealias Pair = PairType();",
         "runtime",
     );
 }
@@ -4057,19 +4119,19 @@ fn computed_nominal_arguments_do_not_escape_formation_contracts() {
 
 #[test]
 fn dynamic_alias_arguments_keep_bounds_and_phase_checks() {
-    accepted(
+    accepted_tuple(
         "typealias Type = .Type'builtin; trait Marker {} impl Marker for bool {} typealias Checked<T :- Marker> = T; comptime fn CheckedType(value: Type) -> Type { Checked<value> } typealias Valid = CheckedType(bool);",
     );
-    rejected(
+    rejected_tuple(
         "typealias Type = .Type'builtin; trait Marker {} typealias Checked<T :- Marker> = T; comptime fn CheckedType(value: Type) -> Type { Checked<value> } typealias Invalid = CheckedType(bool);",
         "TypeContractUnresolved",
     );
-    rejected(
-        "typealias Type = .Type'builtin; typealias Pair<T> = (T, T); fn RuntimeType() -> Type { true'type } comptime fn Bad() -> Type { Pair<RuntimeType()> } typealias Invalid = Bad();",
+    rejected_tuple(
+        "typealias Type = .Type'builtin; typealias Pair<T> = Tuple<T,T>; fn RuntimeType() -> Type { true'type } comptime fn Bad() -> Type { Pair<RuntimeType()> } typealias Invalid = Bad();",
         "runtime",
     );
-    rejected(
-        "typealias Type = .Type'builtin; typealias Pair<T> = (T, T); comptime fn Bad() -> Type { Pair<true> }",
+    rejected_tuple(
+        "typealias Type = .Type'builtin; typealias Pair<T> = Tuple<T,T>; comptime fn Bad() -> Type { Pair<true> }",
         "type mismatch",
     );
 }
@@ -4081,13 +4143,13 @@ fn dynamic_alias_expression_expansion_has_a_work_limit() {
     );
     for level in 1..18 {
         source.push_str(&format!(
-            "typealias Level{level}<T> = (Level{}<T>, Level{}<T>);\n",
+            "typealias Level{level}<T> = Tuple<Level{}<T>, Level{}<T>>;\n",
             level - 1,
             level - 1
         ));
     }
     source.push_str("comptime fn Explode(value: Type) -> Type { Level17<value> }");
-    rejected(&source, "type alias expression expansion budget exhausted");
+    rejected_tuple(&source, "type alias expression expansion budget exhausted");
 }
 
 #[test]
@@ -4207,19 +4269,19 @@ fn normal_form_dependent_pattern_types_are_checked_per_candidate() {
 
 #[test]
 fn computed_value_patterns_require_compatible_equality_and_coverage() {
-    rejected(
+    rejected_tuple(
         "comptime fn bad(x: true'type, expected: .Integer'builtin) -> true'type { x match { 'expected => true, _ => false } }",
         "type mismatch",
     );
-    rejected(
+    rejected_tuple(
         "comptime fn bad(x: true'type, expected: true'type) -> true'type { x match { 'expected => true } }",
         "non-exhaustive match",
     );
-    rejected(
-        "comptime fn bad(x: (true'type, true'type), expected: (true'type, true'type)) -> true'type { x match { 'expected => true, _ => false } }",
+    rejected_tuple(
+        "comptime fn bad(x: Tuple<true'type,true'type>, expected: Tuple<true'type,true'type>) -> true'type { x match { 'expected => true, _ => false } }",
         "equality protocol for this type is not implemented",
     );
-    rejected(
+    rejected_tuple(
         "comptime fn bad(x: .u8'builtin, y: .u16'builtin) -> true'type { x == y }",
         "type mismatch",
     );
@@ -4253,9 +4315,9 @@ fn interval_coverage_rejects_gaps_dynamic_bounds_and_uncorrelated_products() {
         "comptime fn bad(x: Byte) -> Bool { x match { 0..128 => true, 128..255 => false } }",
         "comptime fn bad(x: Byte, high: Byte) -> Bool { x match { 0..='high => true } }",
         "comptime fn bad(x: Byte) -> Bool { x match { 0..=255 if false => true } }",
-        "comptime fn bad(x: (Byte, Bool)) -> Bool { x match { (0..128, true) => true, (128..=255, false) => false } }",
+        "comptime fn bad(x: Tuple<Byte,Bool>) -> Bool { x match { (0..128, true) => true, (128..=255, false) => false } }",
     ] {
-        rejected(&format!("{prefix}{body}"), "non-exhaustive match");
+        rejected_tuple(&format!("{prefix}{body}"), "non-exhaustive match");
     }
 }
 
@@ -4522,13 +4584,13 @@ fn checked_machine_matches_do_not_leak_failed_guards_or_forget_their_writes() {
 #[test]
 fn checked_machine_tuples_do_not_alias_source_variables_or_ignore_bad_branches() {
     for source in [
-        "fn bad() { var x: .u8'builtin = 255; let pair: (.u8'builtin, .u8'builtin) = (x, 1); x = 0; let callback = || { x; let (a, b) = pair; a + b }; }",
-        "fn bad() -> .u8'builtin { var x: .u8'builtin = 255; let pair: (.u8'builtin, .u8'builtin) = (x, 1); x = 0; let (a, b) = pair; a + b }",
-        "fn bad(flag: true'type) -> .u8'builtin { let pair: (.u8'builtin, .u8'builtin) = if flag { (255, 1) } else { (0, 0) }; let (a, b) = pair; a + b }",
-        "fn bad(pair: (.u8'builtin, .u8'builtin)) -> .u8'builtin { let (a, b) = pair; a + b }",
-        "fn bad() { let pair: (.u8'builtin, .u8'builtin) = (255, 1); let callback = || { let (a, b) = pair; a + b }; }",
+        "fn bad() { var x: .u8'builtin = 255; let pair: Tuple<.u8'builtin,.u8'builtin> = (x, 1); x = 0; let callback = || { x; let (a, b) = pair; a + b }; }",
+        "fn bad() -> .u8'builtin { var x: .u8'builtin = 255; let pair: Tuple<.u8'builtin,.u8'builtin> = (x, 1); x = 0; let (a, b) = pair; a + b }",
+        "fn bad(flag: true'type) -> .u8'builtin { let pair: Tuple<.u8'builtin,.u8'builtin> = if flag { (255, 1) } else { (0, 0) }; let (a, b) = pair; a + b }",
+        "fn bad(pair: Tuple<.u8'builtin,.u8'builtin>) -> .u8'builtin { let (a, b) = pair; a + b }",
+        "fn bad() { let pair: Tuple<.u8'builtin,.u8'builtin> = (255, 1); let callback = || { let (a, b) = pair; a + b }; }",
     ] {
-        rejected(source, "machine arithmetic range is not proven");
+        rejected_tuple(source, "machine arithmetic range is not proven");
     }
 }
 
@@ -4672,9 +4734,9 @@ fn checked_aggregate_joins_do_not_import_one_branch_or_wrong_variant_payloads() 
         "let value = flag match { true => { assumes a <= b; (a,b) }, false => (255,0) }; let (start,end) = value; end - start",
         "let value = if flag { assumes a <= b; Choice.pair(a,b) } else { Choice.tuple((255,0)) }; value match { .pair(start,end) => end - start, .tuple((start,end)) => end - start, _ => 0 }",
     ] {
-        rejected(
+        rejected_tuple(
             &format!(
-                "typealias Byte = .u8'builtin; struct Pair {{ start:Byte,end:Byte }} enum Choice {{ empty,pair(Byte,Byte),tuple((Byte,Byte)) }} fn bad(a:Byte,b:Byte,flag:true'type) -> Byte {{ {body} }}"
+                "typealias Byte = .u8'builtin; struct Pair {{ start:Byte,end:Byte }} enum Choice {{ empty,pair(Byte,Byte),tuple(Tuple<Byte,Byte>) }} fn bad(a:Byte,b:Byte,flag:true'type) -> Byte {{ {body} }}"
             ),
             "machine arithmetic range is not proven",
         );
@@ -4876,14 +4938,10 @@ fn pointer_operations_reject_unsupported_accesses() {
         "dereference requires a pointer",
     );
     rejected("fn run() -> *true'type { true.ref }", "address");
-    rejected(
-        "struct Cell { value:*bool } fn run(p:*Cell)->Cell {p.*}",
-        "pointer reads of non-intrinsic values",
-    );
-    rejected(
-        "struct Cell { value:*bool } fn run(p:*Cell,value:Cell) {p.* = value;}",
-        "non-Copy pointer writes",
-    );
+    // Formation preserves the operation; resource preparation separately
+    // requires whole-value Copy and valid pointer provenance.
+    accepted("struct Cell { value:*bool } fn run(p:*Cell)->Cell {p.*}");
+    accepted("struct Cell { value:*bool } fn run(p:*Cell,value:Cell) {p.* = value;}");
     accepted("comptime fn run() -> true'type { let value = true; value.ref.* }");
 }
 
@@ -4939,9 +4997,8 @@ fn dereferenced_field_places_reject_invalid_and_owned_deliveries() {
         "struct Cell {} fn run() { let cell = Cell {}; cell.ref.*.missing = true; }",
         "unknown struct field",
     );
-    rejected(
+    accepted(
         "struct Cell {value:*bool} struct Outer {cell:Cell} fn run(p:*Outer)->Cell {p.*.cell}",
-        "pointer reads of non-intrinsic values",
     );
     rejected(
         "struct Cell { fn consume(self) {} } fn run() { let cell = Cell {}; cell.ref.*.consume(); }",
@@ -5038,19 +5095,19 @@ fn possible_pointer_write_does_not_prove_every_candidate_was_overwritten() {
 
 #[test]
 fn variadic_routes_reject_duplicate_unknown_and_invalid_packages() {
-    let declaration = "fn take(...items:(bool,'x''type))->(bool,'x''type) {items}";
+    let declaration = "fn take(...items:Tuple<bool,'x''type>)->Tuple<bool,'x''type> {items}";
     for call in [
         "take(true,'x',.items=(false,'y'))",
         "take(.items=(false,'y'),true,'x')",
         "take(.items=(true,'x'),.items=(false,'y'))",
     ] {
-        rejected(
-            &format!("{declaration} fn run()->(bool,'x''type) {{{call}}}"),
+        rejected_tuple(
+            &format!("{declaration} fn run()->Tuple<bool,'x''type> {{{call}}}"),
             "parameter supplied more than once",
         );
     }
-    rejected(
-        &format!("{declaration} fn run()->(bool,'x''type) {{take(.item=(true,'x'))}}"),
+    rejected_tuple(
+        &format!("{declaration} fn run()->Tuple<bool,'x''type> {{take(.item=(true,'x'))}}"),
         "no named parameter entry",
     );
     for call in [
@@ -5059,16 +5116,16 @@ fn variadic_routes_reject_duplicate_unknown_and_invalid_packages() {
         "take('x',true)",
         "take(.items=true)",
     ] {
-        rejected(
-            &format!("{declaration} fn run()->(bool,'x''type) {{{call}}}"),
+        rejected_tuple(
+            &format!("{declaration} fn run()->Tuple<bool,'x''type> {{{call}}}"),
             "type",
         );
     }
-    rejected(
+    rejected_tuple(
         "typealias Type = .Type'builtin; fn take(...items:Type)->Type {items} fn run()->Type {take(bool,'x''type)}",
         "collection requires a tuple type",
     );
-    rejected(
+    rejected_tuple(
         "typealias Type = .Type'builtin; fn take(...items:T)->T where T {items} fn run()->Type {take(bool,'x''type)}",
         "collection requires a tuple type",
     );
@@ -5076,63 +5133,63 @@ fn variadic_routes_reject_duplicate_unknown_and_invalid_packages() {
 
 #[test]
 fn variadic_function_values_do_not_silently_erase_collection_protocols() {
-    rejected(
-        "fn take(...items:(bool,bool))->(bool,bool) {items} fn run() {let callback=take;}",
+    rejected_tuple(
+        "fn take(...items:Tuple<bool,bool>)->Tuple<bool,bool> {items} fn run() {let callback=take;}",
         "variadic function values require parameter protocol metadata",
     );
-    rejected(
-        "fn take(...items:T)->T where T {items} fn run() {let callback=take<(bool,bool)>;}",
+    rejected_tuple(
+        "fn take(...items:T)->T where T {items} fn run() {let callback=take<Tuple<bool,bool>>;}",
         "variadic function values require parameter protocol metadata",
     );
-    rejected(
-        "fn take(...items:T)->T where T {items} fn accept(callback:fn((bool,bool))->(bool,bool)) {} fn run() {accept(take);}",
+    rejected_tuple(
+        "fn take(...items:T)->T where T {items} fn accept(callback:fn(Tuple<bool,bool>)->Tuple<bool,bool>) {} fn run() {accept(take);}",
         "variadic function values require parameter protocol metadata",
     );
 }
 
 #[test]
 fn tuple_collection_respects_equations_without_unfolding_normal_form_heads() {
-    let prefix = "typealias Byte=.u8'builtin; pure comptime fn Identity<T> -> .Type'builtin {T} typealias Hidden=Identity<(Byte,bool)>; fn keep(...items:T)->T where T {items}";
-    rejected(
+    let prefix = "typealias Byte=.u8'builtin; pure comptime fn Identity<T> -> .Type'builtin {T} typealias Hidden=Identity<Tuple<Byte,bool>>; fn keep(...items:T)->T where T {items}";
+    rejected_tuple(
         &format!("{prefix} fn make()->Hidden {{keep<Hidden>(7,true)}}"),
         "structural type view remains unresolved",
     );
-    rejected(&format!("{prefix} fn make()->Hidden {{(7,true)}}"), "type");
+    rejected_tuple(&format!("{prefix} fn make()->Hidden {{(7,true)}}"), "type");
     for (body, message) in [
         ("keep<T>(7,7)", "integer runtime proxy"),
         ("keep<T>(7)", "type"),
         ("keep<T>(7,true,false)", "type"),
     ] {
-        rejected(
+        rejected_tuple(
             &format!(
-                "typealias Byte=.u8'builtin; fn keep(...items:T)->T where T {{items}} fn make()->T where T, requires T == (Byte,bool) {{{body}}}"
+                "typealias Byte=.u8'builtin; fn keep(...items:T)->T where T {{items}} fn make()->T where T, requires T == Tuple<Byte,bool> {{{body}}}"
             ),
             message,
         );
     }
-    accepted(&format!(
-        "{prefix} fn make()->Hidden where requires Hidden == (Byte,bool) {{keep<Hidden>(7,true)}}"
+    accepted_tuple(&format!(
+        "{prefix} fn make()->Hidden where requires Hidden == Tuple<Byte,bool> {{keep<Hidden>(7,true)}}"
     ));
 }
 
 #[test]
 fn tuple_spreads_reject_non_packets_wrong_arity_and_duplicate_supply() {
-    rejected("fn take(a:bool) {} fn run() {take(...true);}", "type");
-    rejected(
+    rejected_tuple("fn take(a:bool) {} fn run() {take(...true);}", "type");
+    rejected_tuple(
         "fn take(a:bool) {} fn run() {let packet=(true,false);take(...packet);}",
         "spread tuple widths exceed positional slots",
     );
-    rejected(
+    rejected_tuple(
         "fn take(a:bool,b:bool) {} fn run() {take(...(true,false,true));}",
         "spread tuple widths exceed positional slots",
     );
-    rejected(
+    rejected_tuple(
         "fn take(a:bool,b:bool) {} fn run() {take(...(true,));}",
         "missing anchored parameter",
     );
     // The complete package reserves all slots before contextual spread checking.
-    rejected(
-        "fn keep(...items:(bool,bool)) {} fn run() {let packet=(true,false);keep(...packet,.items=(false,true));}",
+    rejected_tuple(
+        "fn keep(...items:Tuple<bool,bool>) {} fn run() {let packet=(true,false);keep(...packet,.items=(false,true));}",
         "spread tuple widths exceed positional slots",
     );
 }
@@ -5309,19 +5366,19 @@ fn mixed_property_inputs_reject_duplicate_collection_and_missing_anchors() {
 #[test]
 fn property_contexts_reject_overflow_and_do_not_unfold_normal_forms() {
     let schema = "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {width:do {let n:.u8'builtin=0;n}};typealias Options=SAMPLE'type;";
-    rejected(
+    rejected_tuple(
         &format!(
             "{schema} fn keep(...properties:T)->T where T {{properties}} fn run() {{keep<Options> {{width:256}};}}"
         ),
         "integer does not fit",
     );
-    rejected(
+    rejected_tuple(
         &format!(
-            "{schema} fn keep(...properties:T)->(bool,T) where T {{(true,properties)}} fn run()->(bool,Options) {{keep {{width:256}}}}"
+            "{schema} fn keep(...properties:T)->Tuple<bool,T> where T {{(true,properties)}} fn run()->Tuple<bool,Options> {{keep {{width:256}}}}"
         ),
         "integer does not fit",
     );
-    rejected(
+    rejected_tuple(
         &format!(
             "{schema} pure comptime fn Identity<T> -> .Type'builtin {{T}} fn keep(...properties:Identity<Options>) {{}} fn run() {{keep {{width:9}};}}"
         ),
@@ -5349,22 +5406,22 @@ fn property_sibling_contexts_reject_overflow_and_conflicting_record_types() {
 #[test]
 fn multiple_collection_entries_require_unique_property_routing() {
     let head = "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;";
-    rejected(
+    rejected_tuple(
         &format!(
             "{head} fn take(...left:Options,...right:Options) {{}} fn run() {{take {{flag:true}};}}"
         ),
         "one variadic entrance",
     );
-    rejected(
-        "fn take(...left:(bool,bool),...right:(bool,bool)) {} fn run() {take {true,flag:true,false};}",
+    rejected_tuple(
+        "fn take(...left:Tuple<bool,bool>,...right:Tuple<bool,bool>) {} fn run() {take {true,flag:true,false};}",
         "one variadic entrance",
     );
-    rejected(
-        "fn take(...left:(bool,bool),...right:(bool,bool)) {} fn run() {take(true,false);}",
+    rejected_tuple(
+        "fn take(...left:Tuple<bool,bool>,...right:Tuple<bool,bool>) {} fn run() {take(true,false);}",
         "multiple variadic positional collections",
     );
-    rejected(
-        "fn take(...left:(bool,bool),...right:(bool,bool)) {} fn run() {take(.left=(true,false),.left=(false,true),true,false);}",
+    rejected_tuple(
+        "fn take(...left:Tuple<bool,bool>,...right:Tuple<bool,bool>) {} fn run() {take(.left=(true,false),.left=(false,true),true,false);}",
         "parameter supplied more than once",
     );
 }
@@ -5435,17 +5492,17 @@ fn explicit_generic_methods_check_arity_and_bounds() {
 
 #[test]
 fn generic_trait_contracts_match_alpha_renamed_method_binders() {
-    let dump = accepted(
+    let dump = accepted_tuple(
         "trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}}",
     );
     assert!(dump.contains("(type-parameters"));
-    accepted(
-        "trait Mapper where A {fn pair(a:A,b:B)->(A,B) where B;} struct Holder where X {} impl Mapper<X> for Holder<X> where X {fn pair(a:X,b:Y)->(X,Y) where Y {(a,b)}}",
+    accepted_tuple(
+        "trait Mapper where A {fn pair(a:A,b:B)->Tuple<A,B> where B;} struct Holder where X {} impl Mapper<X> for Holder<X> where X {fn pair(a:X,b:Y)->Tuple<X,Y> where Y {(a,b)}}",
     );
-    accepted(
+    accepted_tuple(
         "trait Mapper {fn keep(value:T)->T where T {value}} struct Holder {} impl Mapper for Holder {}",
     );
-    accepted(
+    accepted_tuple(
         "trait Mapper {fn keep(value:T)->T where T {value}} struct Holder {} impl Mapper for Holder {} struct Box where X {} impl Box<X> where X {fn flag()->bool {true}}",
     );
 }
@@ -5743,8 +5800,8 @@ fn associated_callable_values_do_not_recover_declaration_defaults_or_names() {
 
 #[test]
 fn associated_variadic_method_values_do_not_recover_collection_entries() {
-    rejected(
-        "trait Gather {fn gather(...items:(bool,bool))->bool;} struct Host {} impl Gather for Host {fn gather(items:(bool,bool))->bool {let (a,b)=items;a and not b}} trait Source {assoc action:fn((bool,bool))->bool=Host.as(Gather).gather;} struct Holder {} impl Source for Holder {} fn run()->bool {Holder.as(Source).action(true,false)}",
+    rejected_tuple(
+        "trait Gather {fn gather(...items:Tuple<bool,bool>)->bool;} struct Host {} impl Gather for Host {fn gather(items:Tuple<bool,bool>)->bool {let (a,b)=items;a and not b}} trait Source {assoc action:fn(Tuple<bool,bool>)->bool=Host.as(Gather).gather;} struct Holder {} impl Source for Holder {} fn run()->bool {Holder.as(Source).action(true,false)}",
         "argument count mismatch",
     );
 }
@@ -6235,11 +6292,11 @@ fn effect_computation_labels_require_valid_instances() {
     );
     rejected(
         "effect echo(value:T)->T where T; fn take(value:#echo bool) {}",
-        "effect operation Type argument count mismatch",
+        "argument count mismatch",
     );
     rejected(
         "effect enum IO where T {read()->T,} fn take(value:#IO bool) {}",
-        "effect group Type argument count mismatch",
+        "argument count mismatch",
     );
     rejected(
         "struct Data {} fn take(value:#Data bool) {}",
@@ -6291,17 +6348,17 @@ fn effect_qualified_types_are_operands_of_outer_type_requirements() {
 
 #[test]
 fn generic_calls_infer_effect_results_instances_and_residual_rows() {
-    accepted(
+    accepted_tuple(
         "effect a()->bool; fn retain(value:#a T)->#a T where T {value} fn caller(value:#a bool)->#a bool {retain(value)}",
     );
-    accepted(
+    accepted_tuple(
         "effect a()->bool; effect b()->bool; fn retain(value:#a T)->#a T where T {value} fn caller(value:#[b,a] bool)->#[b,a] bool {retain(value)}",
     );
-    accepted(
+    accepted_tuple(
         "effect echo(value:T)->T where T; fn retain(value:#[echo<T>,echo<bool>] bool)->#[echo<T>,echo<bool>] bool where T {value} fn caller(value:#[echo<bool>,echo<'x''type>] bool)->#[echo<bool>,echo<'x''type>] bool {retain(value)}",
     );
-    accepted(
-        "effect echo(value:T)->T where T; fn keep(value:#[echo<T>,echo<U>] bool,witness:(T,U))->(T,U) where T,U {witness} fn caller(value:#[echo<bool>,echo<'x''type>] bool)->(bool,'x''type) {keep(value,(true,'x'))}",
+    accepted_tuple(
+        "effect echo(value:T)->T where T; fn keep(value:#[echo<T>,echo<U>] bool,witness:Tuple<T,U>)->Tuple<T,U> where T,U {witness} fn caller(value:#[echo<bool>,echo<'x''type>] bool)->Tuple<bool,'x''type> {keep(value,(true,'x'))}",
     );
 }
 
@@ -6340,7 +6397,11 @@ fn source_effect_requests_do_not_call_groups_or_capture_unannotated_lambda_envir
     );
     rejected(
         "effect read()->bool; fn bad()->#read bool {let closure=|| read()#; read()#}",
-        "effect request requires an explicit allowed effect row",
+        "callback result needs a tail or explicit return type",
+    );
+    rejected(
+        "effect read()->bool; fn bad()->#read bool {let closure=|| -> bool {read()#}; read()#}",
+        "explicit allowed effect row",
     );
 }
 
@@ -6426,7 +6487,7 @@ fn direct_effect_handlers_reject_wrong_signatures_and_missing_outer_routes() {
 }
 
 #[test]
-fn direct_effect_handlers_check_arithmetic_inside_branches_without_capture_facts() {
+fn direct_effect_handlers_check_arithmetic_with_only_stable_capture_facts() {
     let prefix = "typealias Byte=.u8'builtin; effect read(value:Byte)->Byte; fn source()->#read Byte {read(0)#}";
     accepted(&format!(
         "{prefix} fn run()->Byte {{source()# {{read(value)=>if value < 255 {{value + 1}} else {{0}},}}}}"
@@ -6435,12 +6496,21 @@ fn direct_effect_handlers_check_arithmetic_inside_branches_without_capture_facts
         &format!("{prefix} fn run()->Byte {{source()# {{read(value)=>value + 1,}}}}"),
         "machine arithmetic range is not proven",
     );
-    rejected(
-        &format!(
-            "{prefix} fn run()->Byte {{var captured:Byte=0; source()# {{read(value)=>captured + 1,}}}}"
-        ),
-        "machine arithmetic range is not proven",
-    );
+    // `var` permits writes, but this storage is never written or exposed.
+    // Its installation fact therefore holds at every request, not just the first.
+    accepted(&format!(
+        "{prefix} fn run()->Byte {{var captured:Byte=0; source()# {{read(value)=>captured + 1,}}}}"
+    ));
+    for body in [
+        "var captured:Byte=0;(do {captured=255;source()})# {read(value)=>captured + 1,}",
+        "var captured:Byte=0;source()# {read(value)=>do {let result=captured + 1;captured=255;result},}",
+        "var captured:Byte=0;let pointer=captured.ref;(do {pointer.* = 255;source()})# {read(value)=>captured + 1,}",
+    ] {
+        rejected(
+            &format!("{prefix} fn run()->Byte {{{body}}}"),
+            "machine arithmetic range is not proven",
+        );
+    }
     accepted(&format!(
         "{prefix} fn run()->#read Byte {{source()# {{read(value) if value < 255=>value + 1,}}}}"
     ));
@@ -6465,7 +6535,7 @@ fn direct_effect_handlers_preserve_lexical_return_and_operation_result_distincti
     );
     rejected(
         "effect read()->bool; fn source()->#read bool {read()#} fn run()->bool {source()# {read()=> {let f=|| read()#; true},}}",
-        "explicit allowed effect row",
+        "callback result needs a tail or explicit return type",
     );
 }
 
@@ -6514,21 +6584,21 @@ fn direct_effect_handlers_group_labels_only_with_scoped_identity_evidence() {
 
 #[test]
 fn source_effect_signature_expansion_is_bounded_before_argument_or_branch_checking() {
-    let parameter = format!("({})", vec!["T"; 256].join(","));
-    let argument = format!("({})", vec!["bool"; 512].join(","));
+    let parameter = format!("Tuple<{}>", vec!["T"; 256].join(","));
+    let argument = format!("Tuple<{}>", vec!["bool"; 512].join(","));
     let prefix = format!("effect expanded(value:{parameter})->bool where T;");
     // No argument is needed to trigger the request signature guard. It must
     // reject expansion before reporting the later source arity mismatch.
-    rejected(
+    rejected_tuple(
         &format!("{prefix} fn request()->#[expanded<{argument}>] bool {{expanded<{argument}>()#}}"),
         "effect routing budget exhausted",
     );
     // An unused handler must still form its operation signature safely.
-    rejected(
+    rejected_tuple(
         &format!("{prefix} fn install()->bool {{true# {{expanded<{argument}>(_)=>true,}}}}"),
         "effect routing budget exhausted",
     );
-    accepted(
+    accepted_tuple(
         "effect echo(value:T)->T where T; fn run()->bool {echo<bool>(true)# {echo<bool>(value)=>value,}}",
     );
 }
@@ -6674,7 +6744,7 @@ fn typealias_defaults_reject_invalid_unused_defaults_and_missing_parameters() {
             "type default references",
         ),
         (
-            "typealias Pair<T,.U:.Type'builtin=T> = (T,U);typealias Bad=Pair;",
+            "typealias Pair<T,.U:.Type'builtin=T> = Tuple<T,U>;typealias Bad=Pair;",
             "requires explicit type arguments",
         ),
         (
@@ -6686,7 +6756,7 @@ fn typealias_defaults_reject_invalid_unused_defaults_and_missing_parameters() {
             "duplicate type argument",
         ),
     ] {
-        rejected(source, diagnostic);
+        rejected_tuple(source, diagnostic);
     }
 }
 
@@ -6870,8 +6940,8 @@ fn comptime_parameters_reject_runtime_inputs_and_failed_required_invocations() {
 
 #[test]
 fn staged_aggregate_forwarding_does_not_admit_runtime_dependencies() {
-    rejected(
-        "fn choose(comptime pair:(bool,bool))->bool {let (a,b)=pair;a and b} fn forward(comptime flag:bool,value:bool)->bool {choose((flag,value))}",
+    rejected_tuple(
+        "fn choose(comptime pair:Tuple<bool,bool>)->bool {let (a,b)=pair;a and b} fn forward(comptime flag:bool,value:bool)->bool {choose((flag,value))}",
         "comptime",
     );
 }
@@ -7080,12 +7150,12 @@ fn literal_spreads_do_not_promote_runtime_captures_to_comptime() {
 
 #[test]
 fn computed_spreads_do_not_promote_runtime_packets_to_comptime() {
-    rejected(
-        "fn packet(flag:bool)->(bool,bool) {(flag,not flag)} fn choose(comptime a:bool,b:bool)->bool {a and b} fn run()->bool {choose(...packet(true))}",
+    rejected_tuple(
+        "fn packet(flag:bool)->Tuple<bool,bool> {(flag,not flag)} fn choose(comptime a:bool,b:bool)->bool {a and b} fn run()->bool {choose(...packet(true))}",
         "comptime",
     );
-    rejected(
-        "comptime fn packet(flag:bool)->(bool,bool) {(flag,not flag)} fn choose(comptime a:bool,b:bool)->bool {a and b} fn run(flag:bool)->bool {choose(...packet(flag))}",
+    rejected_tuple(
+        "comptime fn packet(flag:bool)->Tuple<bool,bool> {(flag,not flag)} fn choose(comptime a:bool,b:bool)->bool {a and b} fn run(flag:bool)->bool {choose(...packet(flag))}",
         "comptime",
     );
 }
@@ -7144,16 +7214,16 @@ fn dependent_type_defaults_reject_runtime_dependencies_and_wrong_values() {
 
 #[test]
 fn dependent_type_packets_reject_mismatched_elements_and_runtime_producers() {
-    rejected(
-        "typealias Type=.Type'builtin;typealias Char='x''type;comptime fn packet()->(Type,Char) {(bool,'x')} fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(...packet())}",
+    rejected_tuple(
+        "typealias Type=.Type'builtin;typealias Char='x''type;comptime fn packet()->Tuple<Type,Char> {(bool,'x')} fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(...packet())}",
         "type mismatch",
     );
-    rejected(
-        "typealias Type=.Type'builtin;fn packet()->(Type,bool) {(bool,true)} fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(...packet())}",
+    rejected_tuple(
+        "typealias Type=.Type'builtin;fn packet()->Tuple<Type,bool> {(bool,true)} fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(...packet())}",
         "required comptime",
     );
-    rejected(
-        "typealias Type=.Type'builtin;pure comptime fn Identity<T>->Type {T} comptime fn packet()->(Type,bool) {(Identity<bool>,true)} fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(...packet())}",
+    rejected_tuple(
+        "typealias Type=.Type'builtin;pure comptime fn Identity<T>->Type {T} comptime fn packet()->Tuple<Type,bool> {(Identity<bool>,true)} fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(...packet())}",
         "unresolved type equality",
     );
 }
@@ -7172,20 +7242,20 @@ fn dependent_comptime_value_domain_refinement_does_not_allow_runtime_type_storag
 
 #[test]
 fn mixed_dependent_generic_inputs_check_domains_and_trait_requirements() {
-    rejected(
-        "typealias Type=.Type'builtin;fn pair(comptime T:Type,value:T,other:G)->(T,G) where G {(value,other)} fn run()->(bool,bool) {pair(bool,'x',true)}",
+    rejected_tuple(
+        "typealias Type=.Type'builtin;fn pair(comptime T:Type,value:T,other:G)->Tuple<T,G> where G {(value,other)} fn run()->Tuple<bool,bool> {pair(bool,'x',true)}",
         "type mismatch",
     );
-    rejected(
-        "typealias Type=.Type'builtin;trait Allowed {} impl Allowed for bool {} fn pair(comptime T:Type,value:T,other:G)->(T,G) where G :- Allowed {(value,other)} fn run()->(bool,'x''type) {pair(bool,true,'x')}",
+    rejected_tuple(
+        "typealias Type=.Type'builtin;trait Allowed {} impl Allowed for bool {} fn pair(comptime T:Type,value:T,other:G)->Tuple<T,G> where G :- Allowed {(value,other)} fn run()->Tuple<bool,'x''type> {pair(bool,true,'x')}",
         "trait bound is not established",
     );
 }
 
 #[test]
 fn scoped_generic_calls_do_not_equate_distinct_enclosing_type_inputs() {
-    rejected(
-        "typealias Type=.Type'builtin;fn pair(comptime T:Type,value:T,other:G)->(T,G) where G {(value,other)} fn wrong(comptime A:Type,comptime B:Type,value:A)->(B,bool) {pair(A,value,true)}",
+    rejected_tuple(
+        "typealias Type=.Type'builtin;fn pair(comptime T:Type,value:T,other:G)->Tuple<T,G> where G {(value,other)} fn wrong(comptime A:Type,comptime B:Type,value:A)->Tuple<B,bool> {pair(A,value,true)}",
         "generic call inference failed",
     );
 }
@@ -7200,12 +7270,12 @@ fn scoped_generic_function_value_contexts_do_not_equate_different_type_inputs() 
 
 #[test]
 fn scoped_computed_type_defaults_reject_conflicting_callback_contexts() {
-    rejected(
+    rejected_tuple(
         "typealias Type=.Type'builtin;
         comptime fn Choose(T:Type)->Type {if T == bool {bool} else {'x''type}}
-        fn pair(value:G,other:H,proof:K)->K where G,H,.K:Type=(G,Choose(H)) {proof}
+        fn pair(value:G,other:H,proof:K)->K where G,H,.K:Type=Tuple<G,Choose(H)> {proof}
         fn wrong(comptime A:Type,comptime B:Type) {
-            let action:fn(A,bool,(B,bool))->(B,bool)=pair;
+            let action:fn(A,bool,Tuple<B,bool>)->Tuple<B,bool> = pair;
         }",
         "generic function context inference failed",
     );
@@ -7353,8 +7423,8 @@ fn demanded_associated_type_domains_accept_type_indices_and_defaults() {
 
 #[test]
 fn scoped_structural_defaults_do_not_capture_same_index_callee_parameters() {
-    rejected(
-        "typealias Type=.Type'builtin;fn pair(comptime .T:Type=G,value:T,other:G)->(T,G) where G {(value,other)} fn wrong(comptime A:Type,comptime B:Type,left:A,right:B)->(A,B) {pair(left,right)}",
+    rejected_tuple(
+        "typealias Type=.Type'builtin;fn pair(comptime .T:Type=G,value:T,other:G)->Tuple<T,G> where G {(value,other)} fn wrong(comptime A:Type,comptime B:Type,left:A,right:B)->Tuple<A,B> {pair(left,right)}",
         "type equality",
     );
 }
@@ -7430,12 +7500,12 @@ fn mixed_ordinary_indices_check_the_dependent_value_domain() {
 
 #[test]
 fn dependent_type_default_inference_does_not_override_the_computed_type() {
-    rejected(
-        "typealias Type=.Type'builtin;comptime fn Choose(T:Type)->Type {'x''type} fn pair(comptime .T:Type=Choose(G),value:T,other:G)->(T,G) where G {(value,other)} fn run()->(bool,bool) {pair(true,false)}",
+    rejected_tuple(
+        "typealias Type=.Type'builtin;comptime fn Choose(T:Type)->Type {'x''type} fn pair(comptime .T:Type=Choose(G),value:T,other:G)->Tuple<T,G> where G {(value,other)} fn run()->Tuple<bool,bool> {pair(true,false)}",
         "type mismatch",
     );
-    rejected(
-        "typealias Type=.Type'builtin;comptime fn Choose(T:Type)->Type {Choose(T)} fn pair(comptime .T:Type=Choose(G),value:T,other:G)->(T,G) where G {(value,other)} fn run()->(bool,bool) {pair(true,false)}",
+    rejected_tuple(
+        "typealias Type=.Type'builtin;comptime fn Choose(T:Type)->Type {Choose(T)} fn pair(comptime .T:Type=Choose(G),value:T,other:G)->Tuple<T,G> where G {(value,other)} fn run()->Tuple<bool,bool> {pair(true,false)}",
         "required comptime evaluation failed",
     );
 }
@@ -7520,8 +7590,22 @@ fn ordinary_capability_dependencies_do_not_assume_missing_or_circular_evidence()
         &format!(
             "{prefix} fn bad(comptime A:Type)->bool where requires A.as(Source).Missing :- Allowed, requires A :- Source {{true}}"
         ),
-        "type expression",
+        "unknown trait member Missing",
     );
+}
+
+#[test]
+fn unknown_trait_members_do_not_query_implementation_evidence() {
+    let prefix = "typealias Type=.Type'builtin; trait Source {assoc Item:Type;}";
+    for body in [
+        "fn bad(comptime A:Type)->bool {A.as(Source).missing()}",
+        "fn bad(comptime A:Type)->bool where requires A :- Source {A.as(Source).missing()}",
+        "fn bad()->bool {bool.as(Source).missing()}",
+        "impl Source for bool {assoc Item:Type=bool;} fn bad()->bool {bool.as(Source).missing()}",
+        "trait Child :- Source {} fn bad(comptime A:Type)->bool where requires A :- Child {A.as(Child).missing()}",
+    ] {
+        rejected(&format!("{prefix} {body}"), "unknown trait member missing");
+    }
 }
 
 #[test]
@@ -7672,10 +7756,12 @@ fn staged_trait_calls_check_actual_ordinary_inputs() {
 
 #[test]
 fn method_signature_equivalence_cannot_use_implementation_only_equalities() {
+    // Callable signature checks can wait for associated-type equations; the
+    // independently invalid strengthening is diagnosed before that retry.
     rejected("typealias Type=.Type'builtin;
         trait Service {fn same(comptime A:Type,comptime B:Type,value:A)->A;}
         impl Service for bool {fn same(comptime A:Type,comptime B:Type,value:B)->B where requires A == B {value}}",
-        "does not match its trait signature");
+        "strengthens trait preconditions");
     rejected("typealias Type=.Type'builtin;
         trait Service {fn same(comptime A:Type,comptime B:Type,value:A)->A where requires A == B or A == bool;}
         impl Service for bool {fn same(comptime A:Type,comptime B:Type,value:B)->B {value}}",
@@ -7715,7 +7801,7 @@ fn callback_signature_equivalence_requires_interface_evidence() {
     rejected("typealias Type=.Type'builtin;
         trait Service {fn apply(comptime A:Type,comptime B:Type,callback:fn(A)->bool)->bool;}
         impl Service for bool {fn apply(comptime A:Type,comptime B:Type,callback:fn(B)->bool)->bool where requires A == B {true}}",
-        "does not match its trait signature");
+        "strengthens trait preconditions");
     rejected("typealias Type=.Type'builtin;
         trait Service {fn apply(comptime A:Type,comptime B:Type,callback:fn(A)->bool)->bool where requires A == B or A == bool;}
         impl Service for bool {fn apply(comptime A:Type,comptime B:Type,callback:fn(B)->bool)->bool {true}}",

@@ -155,7 +155,26 @@ impl Checker<'_, '_> {
             // Ordinary and open defaults share P3 evidence. Bodies need not
             // be available while signatures/defaults are demanded, so retain
             // the scoped analysis view for the complete-package check.
-            self.pending_default_stability.push((viewed, span));
+            // Open definitions may have no executable instances at all. Carry
+            // the lexical stage evidence with the obligation, rather than
+            // recovering it accidentally from some caller's formed instance.
+            let mut staged = BTreeSet::new();
+            if let Some(owner) = self.signature_owner {
+                if let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+                    self.package.item(owner).map(|item| &item.kind)
+                {
+                    // signature_domains is a temporary signature-building
+                    // telescope and has already been released here. The
+                    // checked declaration retains the parameter's phase.
+                    for parameter in sig.params {
+                        let binding = local(parameter.hir_id);
+                        if parameter.ty.is_comptime() && self.locals.contains_key(&binding) {
+                            staged.insert(binding);
+                        }
+                    }
+                }
+            }
+            self.pending_default_stability.push((viewed, span, staged));
         }
         Ok(())
     }

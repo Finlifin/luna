@@ -9,6 +9,7 @@
 //! not yet admitted. Limits are resource outcomes, not language type errors.
 mod admission;
 mod cleanup;
+mod environment;
 mod iir_execution;
 mod invocation_contracts;
 mod memory;
@@ -23,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-type Environment = BTreeMap<LocalId, Value>;
+use environment::Environment;
 // Invocation-local contextual interpretation choices; no active state is stored
 // in the owned NIR or reused across calls.
 enum PreparedNormalInput {
@@ -57,6 +58,12 @@ pub fn validate_snapshot_term(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
+    /// Tagged result data, with no continuation. None is the success branch.
+    ErrorResult {
+        ty: Term,
+        error: Option<usize>,
+        value: Box<Value>,
+    },
     Pointer(PointerValue),
     /// Interpreter-internal addressable local storage; never a source value.
     Storage(Storage),
@@ -184,7 +191,7 @@ impl Value {
                         visit(child, fuel, depth + 1, closures, storage, visitor)?;
                     }
                 }
-                Value::Newtype { value, .. } => {
+                Value::ErrorResult { value, .. } | Value::Newtype { value, .. } => {
                     visit(value, fuel, depth + 1, closures, storage, visitor)?
                 }
                 _ => {}
@@ -223,15 +230,16 @@ impl Value {
             }
             work = work.checked_add(1)?;
             let extra = match value {
-                Self::Type(ty) | Self::Newtype { ty, .. } | Self::AbstractValue { ty, .. } => {
-                    scoped_type_value_work_with_evidence(
-                        ty,
-                        &BTreeMap::new(),
-                        parameters,
-                        value_parameters,
-                        |_, _, _| None,
-                    )?
-                }
+                Self::Type(ty)
+                | Self::ErrorResult { ty, .. }
+                | Self::Newtype { ty, .. }
+                | Self::AbstractValue { ty, .. } => scoped_type_value_work_with_evidence(
+                    ty,
+                    &BTreeMap::new(),
+                    parameters,
+                    value_parameters,
+                    |_, _, _| None,
+                )?,
                 Self::TypeList(types) => {
                     if types.len() > 100_000 {
                         return None;
@@ -292,14 +300,16 @@ impl Value {
                 | Self::Variant { fields, .. }
                 | Self::Tuple(fields) => fields.len(),
                 Self::AnonymousRecord(fields) => fields.len(),
-                Self::Newtype { .. } => 1,
+                Self::ErrorResult { .. } | Self::Newtype { .. } => 1,
                 _ => 0,
             };
             if work.saturating_add(pending.len()).saturating_add(children) > 100_000 {
                 return None;
             }
             match value {
-                Self::Newtype { value, .. } => pending.push((value, depth + 1)),
+                Self::ErrorResult { value, .. } | Self::Newtype { value, .. } => {
+                    pending.push((value, depth + 1))
+                }
                 Self::Record { fields, .. }
                 | Self::Variant { fields, .. }
                 | Self::Tuple(fields) => pending.extend(fields.iter().map(|v| (v, depth + 1))),
@@ -321,7 +331,7 @@ impl Value {
     ) -> Result<Term, ErrorKind> {
         self.into_scoped_normal_term(budget, &BTreeSet::new())
     }
-    /// Freeze an invocation input, retaining named comptime callable identities
+    /// Freeze an invocation input, retaining named callable declaration identities
     /// inside immutable aggregates. Captured environments remain live values;
     /// this path never serializes their storage or execution state.
     pub fn into_scoped_invocation_term(
@@ -423,10 +433,12 @@ impl Value {
             }
             let instance = match value {
                 Value::Function(declaration) => Some((*declaration, &[][..])),
+                Value::RuntimeFunction {
+                    declaration,
+                    arguments,
+                } => Some((*declaration, arguments.as_slice())),
                 Value::Closure(closure)
-                    if closure.environment.is_empty()
-                        && closure.capture_order.is_empty()
-                        && closure.ty.is_comptime_callable() =>
+                    if closure.environment.is_empty() && closure.capture_order.is_empty() =>
                 {
                     closure.declaration_instance()
                 }
@@ -563,6 +575,59 @@ impl Value {
                     Term::Float(value.clone())
                 }
                 Value::Integer(value) => freeze_integer(value, budget)?,
+                Value::ErrorResult { ty, error, value } => {
+                    let Term::ErrorResult { errors, result: _ } = ty else {
+                        return Err(ErrorKind::Type);
+                    };
+                    let work = if invocation {
+                        scoped_type_value_work_with_evidence(
+                            ty,
+                            &BTreeMap::new(),
+                            parameters,
+                            value_parameters,
+                            |_, _, _| None,
+                        )
+                    } else {
+                        scoped_type_value_work(ty, &BTreeMap::new(), parameters)
+                    }
+                    .ok_or(ErrorKind::Type)?;
+                    charge(budget, work)?;
+                    if errors.is_empty() {
+                        return Err(ErrorKind::Type);
+                    }
+                    ty.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
+                    let label = error
+                        .map(|index| {
+                            errors
+                                .get(index)
+                                .cloned()
+                                .map(Box::new)
+                                .ok_or(ErrorKind::Type)
+                        })
+                        .transpose()?;
+                    let frozen = Term::ErrorValue {
+                        ty: Box::new(ty.clone()),
+                        label,
+                        value: Box::new(visit(
+                            value,
+                            depth + 1,
+                            budget,
+                            parameters,
+                            value_parameters,
+                            invocation,
+                        )?),
+                    };
+                    let work = scoped_term_value_work_with_evidence(
+                        &frozen,
+                        &BTreeMap::new(),
+                        parameters,
+                        value_parameters,
+                        |_, _, _| None,
+                    )
+                    .ok_or(ErrorKind::Type)?;
+                    charge(budget, work)?;
+                    frozen
+                }
                 Value::Newtype { ty, value } => {
                     if !matches!(ty, Term::Nominal { .. }) {
                         return Err(ErrorKind::Type);
@@ -718,7 +783,7 @@ impl Value {
                     pending.extend(fields.into_iter().map(|(_, value)| value))
                 }
                 Value::Type(ty) => ty.drop_iteratively(),
-                Value::Newtype { ty, value } => {
+                Value::ErrorResult { ty, value, .. } | Value::Newtype { ty, value } => {
                     ty.drop_iteratively();
                     pending.push(*value);
                 }
@@ -874,8 +939,15 @@ enum SelectedBitRange {
 // Prepared actual values are owned here; the cleanup frame remains installed
 // across preparation and invocation. Preparation temporaries do not occupy
 // every recursive caller's host stack while the callee executes.
+struct InterfaceExit {
+    conditions: Vec<Expr>,
+    result_binding: Option<LocalId>,
+    environment: Environment,
+    result_slot: usize,
+}
 enum PreparedCall {
     Invoke {
+        interface_exit: Option<Box<InterfaceExit>>,
         callee: Value,
         arguments: Vec<Value>,
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
@@ -903,17 +975,28 @@ pub enum ContractOutcome {
     Unknown,
 }
 
+enum TypeSolver<'a> {
+    Unmetered(&'a dyn Fn(&nir::program::TypePredicate) -> ContractOutcome),
+    Budgeted(&'a dyn Fn(&nir::program::TypePredicate, &mut u64) -> ContractOutcome),
+}
+
 enum PointerCopyPermission<'a> {
     Checked(&'a dyn Fn(&Term) -> bool),
     Budgeted(&'a dyn Fn(&Term, &mut u64) -> bool),
 }
 
 pub struct Interpreter<'a> {
+    target: Option<nir::target::TargetData>,
     effect_declarations: BTreeMap<DeclarationId, &'a nir::effects::Declaration>,
     effect_state: effects::State,
     effect_values: Option<&'a iir::effect_values::Plan<'a>>,
     graph: Option<&'a iir::Package>,
     cleanup_schedule: Option<&'a iir::cleanup::Schedule>,
+    cleanup_scopes: HashMap<&'a iir::InstanceKey, Vec<&'a iir::cleanup::FunctionSchedule>>,
+    // Borrowed from the validated, immutable schedule. Preserve all sites at
+    // each source position, including distinct contextual instances.
+    cleanup_sites:
+        HashMap<(u32, u32), Vec<(&'a iir::cleanup::FunctionSchedule, &'a iir::cleanup::Site)>>,
     cleanup_effect_context: HashMap<nir::effects::Operation, bool>,
     cleanup_frame: Option<iir::InstanceKey>,
     cleanup_failed: bool,
@@ -924,7 +1007,7 @@ pub struct Interpreter<'a> {
     comptime_only: bool,
     abstract_type_parameters: BTreeSet<DeclarationId>,
     abstract_value_parameters: BTreeMap<DeclarationId, Term>,
-    type_solver: Option<&'a dyn Fn(&nir::program::TypePredicate) -> ContractOutcome>,
+    type_solver: Option<TypeSolver<'a>>,
     pointer_copy: Option<PointerCopyPermission<'a>>,
     declaration_parameter_sorts: BTreeMap<DeclarationId, nir::Sort>,
     declaration_parameter_domains: BTreeMap<DeclarationId, Term>,
@@ -968,6 +1051,17 @@ impl<'a> Interpreter<'a> {
             })
             .collect()
     }
+    pub fn target(&self) -> Option<nir::target::TargetData> {
+        self.target
+    }
+
+    fn integer_layout(&self, primitive: Primitive) -> Option<(bool, u32)> {
+        match self.target {
+            Some(target) => target.integer_layout(primitive),
+            None => primitive.fixed_integer_layout(),
+        }
+    }
+
     pub fn new(package: &'a Package, budget: Budget) -> Result<Self, Error> {
         Self::with_assumptions(package, &[], budget)
     }
@@ -978,7 +1072,10 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Self, Error> {
         let mut runtime_function_identities = BTreeMap::new();
         for identity in &package.runtime_function_identities {
-            if !matches!(identity.signature, Term::Function { .. })
+            if !matches!(
+                identity.signature.callable_signature(),
+                Term::Function { .. }
+            ) || identity.signature.is_comptime_callable()
                 || package
                     .functions
                     .iter()
@@ -1010,7 +1107,7 @@ impl<'a> Interpreter<'a> {
         let mut structs = BTreeMap::new();
         let mut enums = BTreeMap::new();
         for definition in &package.enums {
-            if definition.validate_encoding().is_err() {
+            if definition.validate_encoding_in(package.target).is_err() {
                 return Err(Error {
                     kind: ErrorKind::InvalidCallPlan,
                     source: None,
@@ -1044,6 +1141,12 @@ impl<'a> Interpreter<'a> {
             source: None,
         };
         nir::normal_forms::validate(package).map_err(|_| invalid())?;
+        let completed_tuple_heads = package
+            .normal_forms
+            .iter()
+            .filter(|metadata| metadata.role == nir::normal_forms::Role::Tuple)
+            .map(|metadata| metadata.declaration)
+            .collect::<BTreeSet<_>>();
         let mut traits = BTreeMap::new();
         for interface in &package.traits {
             if traits.insert(interface.declaration, interface).is_some() {
@@ -1054,7 +1157,7 @@ impl<'a> Interpreter<'a> {
             for member in &interface.methods {
                 if !matches!(
                     member.signature.ordinary(),
-                    Ok(Term::Function { .. } | Term::ComptimeFunction(_))
+                    Ok(Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_))
                 ) {
                     return Err(invalid());
                 }
@@ -1336,11 +1439,12 @@ impl<'a> Interpreter<'a> {
                 .iter()
                 .find(|i| i.declaration == instance.implementation)
                 .ok_or_else(invalid)?;
-            nir::validate_declaration_arguments(
+            nir::validate_declaration_arguments_in(
                 &implementation.type_parameters,
                 &implementation.parameter_types,
                 &instance.arguments,
                 &mut trait_parameter_fuel,
+                package.target,
             )
             .map_err(|_| invalid())?;
             if implementation
@@ -1442,9 +1546,31 @@ impl<'a> Interpreter<'a> {
                 // Reconstruction cannot invoke arbitrary code or capture the
                 // invoking function's lexical environment.
                 let mut value_fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
-                nir::completed_values::validate(value, &mut value_fuel).map_err(|_| invalid())?;
-                nir::completed_values::validate(original, &mut value_fuel)
-                    .map_err(|_| invalid())?;
+                nir::completed_values::validate_with_declarations_in(
+                    value,
+                    package.newtypes.iter(),
+                    &|head| completed_tuple_heads.contains(&head),
+                    &|id, fuel| nir::completed_values::lookup_nominal(package, id, fuel),
+                    package.target,
+                    &mut value_fuel,
+                )
+                .map_err(|_| invalid())?;
+                nir::completed_values::validate_with_declarations_in(
+                    original,
+                    package.newtypes.iter(),
+                    &|head| completed_tuple_heads.contains(&head),
+                    &|id, fuel| nir::completed_values::lookup_nominal(package, id, fuel),
+                    package.target,
+                    &mut value_fuel,
+                )
+                .map_err(|_| invalid())?;
+                nir::copy_budget::charge_substitution(
+                    original,
+                    &input_binders(&implementation.type_parameters),
+                    &instance.arguments,
+                    &mut value_fuel,
+                )
+                .map_err(|_| invalid())?;
                 if originals.next().is_some()
                     || original
                         .instantiate_parameters(
@@ -1512,6 +1638,7 @@ impl<'a> Interpreter<'a> {
                         .with_comptime_phase(
                             function.phase == nir::program::FunctionPhase::Comptime,
                         )
+                        .with_unsafe_call_requirement(function.is_unsafe)
                 } else if let Some(identity) = runtime_function_identities.get(&method.body) {
                     identity
                         .signature
@@ -1657,7 +1784,10 @@ impl<'a> Interpreter<'a> {
             effect_state: effects::State::default(),
             effect_values: None,
             graph: None,
+            target: package.target,
             cleanup_schedule: None,
+            cleanup_scopes: HashMap::new(),
+            cleanup_sites: HashMap::new(),
             cleanup_effect_context: HashMap::new(),
             cleanup_frame: None,
             cleanup_failed: false,
@@ -1738,8 +1868,34 @@ impl<'a> Interpreter<'a> {
         mut self,
         solver: &'a dyn Fn(&nir::program::TypePredicate) -> ContractOutcome,
     ) -> Self {
-        self.type_solver = Some(solver);
+        self.type_solver = Some(TypeSolver::Unmetered(solver));
         self
+    }
+
+    /// Charge host proof work against this invocation, without granting the
+    /// callback authority to replenish its execution budget.
+    pub fn with_budgeted_type_solver(
+        mut self,
+        solver: &'a dyn Fn(&nir::program::TypePredicate, &mut u64) -> ContractOutcome,
+    ) -> Self {
+        self.type_solver = Some(TypeSolver::Budgeted(solver));
+        self
+    }
+
+    fn solve_type_predicate(&mut self, predicate: &nir::program::TypePredicate) -> ContractOutcome {
+        match &self.type_solver {
+            Some(TypeSolver::Unmetered(solver)) => solver(predicate),
+            Some(TypeSolver::Budgeted(solver)) => {
+                if self.budget.steps == 0 {
+                    return ContractOutcome::Unknown;
+                }
+                let mut remaining = self.budget.steps;
+                let result = solver(predicate, &mut remaining);
+                self.budget.steps = self.budget.steps.min(remaining);
+                result
+            }
+            None => ContractOutcome::Unknown,
+        }
     }
 
     /// Host-checked Copy delivery, including representation and Drop legality.
@@ -1849,12 +2005,13 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
     fn type_description_work(&self, ty: &Term) -> Option<usize> {
-        scoped_type_value_work_with_evidence(
+        scoped_type_value_work_with_evidence_in(
             ty,
             &self.normal_forms,
             &self.abstract_type_parameters,
             &self.abstract_value_parameters,
             |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
+            self.target,
         )
     }
     fn normal_value_fields(
@@ -1967,6 +2124,57 @@ impl<'a> Interpreter<'a> {
     pub fn remaining_steps(&self) -> u64 {
         self.budget.steps
     }
+    fn charge_copy_work(
+        &mut self,
+        source: Option<SourceRange>,
+        check: impl FnOnce(&mut usize) -> Result<(), nir::copy_budget::CopyBudgetExhausted>,
+    ) -> Result<(), Error> {
+        let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let result = check(&mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        result.map_err(|reason| {
+            self.failure(
+                match reason {
+                    nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
+                    nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
+                },
+                source,
+            )
+        })
+    }
+    fn copy_invocation_condition(
+        &mut self,
+        condition: &Expr,
+        definition: &nir::program::Function,
+        function: &Value,
+    ) -> Result<Expr, Error> {
+        let arguments = match function {
+            Value::Closure(closure) if self.graph.is_none() => {
+                closure.instance_arguments.as_deref()
+            }
+            _ => None,
+        };
+        let binders = if arguments.is_some() {
+            self.input_binders(&definition.type_parameters)
+        } else {
+            Vec::new()
+        };
+        self.charge_copy_work(Some(condition.source), |fuel| {
+            nir::copy_budget::charge_substitution(
+                condition,
+                &binders,
+                arguments.unwrap_or(&[]),
+                fuel,
+            )
+        })?;
+        match arguments {
+            Some(arguments) => condition
+                .instantiate_parameters(&binders, arguments)
+                .map_err(|_| self.failure(ErrorKind::Type, Some(condition.source))),
+            None => Ok(condition.clone()),
+        }
+    }
     pub fn invoke(
         &mut self,
         function: DeclarationId,
@@ -2003,12 +2211,13 @@ impl<'a> Interpreter<'a> {
         }
         self.tick(None)?;
         for ty in &types {
-            let work = scoped_term_value_work_with_evidence(
+            let work = scoped_term_value_work_with_evidence_in(
                 ty,
                 &self.normal_forms,
                 &self.abstract_type_parameters,
                 &self.abstract_value_parameters,
                 |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
+                self.target,
             )
             .ok_or_else(|| self.failure(ErrorKind::Type, None))? as u64;
             self.budget.steps = self
@@ -2022,11 +2231,24 @@ impl<'a> Interpreter<'a> {
             .functions
             .get(&function)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
+        let binders = self.input_binders(&definition.type_parameters);
+        if binders.len() != types.len() {
+            return Err(self.failure(ErrorKind::Type, None));
+        }
+        self.charge_copy_work(None, |fuel| {
+            nir::copy_budget::charge_type_substitution(
+                &definition.signature,
+                &binders,
+                &types,
+                fuel,
+            )
+        })?;
         let signature = definition
             .signature
             .instantiate_parameters(&self.input_binders(&definition.type_parameters), &types)
             .map_err(|_| self.failure(ErrorKind::Type, None))?
-            .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime);
+            .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime)
+            .with_unsafe_call_requirement(definition.is_unsafe);
         let expression = Expr {
             source: definition.body.source,
             ty: signature,
@@ -2109,6 +2331,24 @@ impl<'a> Interpreter<'a> {
             }
         }
         if self.cleanup_schedule.is_some() && context.is_none() {
+            let named_instance = match &function {
+                Value::Function(declaration) => Some((*declaration, &[][..])),
+                Value::Closure(closure) => closure.origin.map(|declaration| {
+                    (
+                        declaration,
+                        closure.instance_arguments.as_deref().unwrap_or(&[]),
+                    )
+                }),
+                _ => None,
+            };
+            if let Some((declaration, arguments)) = named_instance {
+                for key in &self.cleanup_schedule.unwrap().borrowed_callable_functions {
+                    self.tick(None)?;
+                    if key.declaration == declaration && key.arguments == arguments {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, None));
+                    }
+                }
+            }
             if let Some(declaration) = origin {
                 let definition = self
                     .invocation_definition(declaration, &function)
@@ -2174,7 +2414,7 @@ impl<'a> Interpreter<'a> {
                     }
                     (
                         definition.parameters.as_slice(),
-                        Environment::new(),
+                        Environment::with_capacity(definition.parameters.len()),
                         &definition.body,
                         &definition.signature,
                     )
@@ -2223,6 +2463,15 @@ impl<'a> Interpreter<'a> {
                         _ => &[],
                     };
                     for requirement in &definition.requirements {
+                        let binders = self.input_binders(&definition.type_parameters);
+                        self.charge_copy_work(Some(body.source), |fuel| {
+                            nir::copy_budget::charge_predicate_substitution(
+                                requirement,
+                                &binders,
+                                generic_arguments,
+                                fuel,
+                            )
+                        })?;
                         let requirement = requirement
                             .instantiate_parameters(
                                 &self.input_binders(&definition.type_parameters),
@@ -2289,24 +2538,8 @@ impl<'a> Interpreter<'a> {
                     environment.insert(snapshot.binding, value);
                 }
                 for condition in &definition.preconditions {
-                    let mut condition = if let Value::Closure(closure) = &function {
-                        if let Some(arguments) = &closure.instance_arguments
-                            && self.graph.is_none()
-                        {
-                            condition
-                                .instantiate_parameters(
-                                    &self.input_binders(&definition.type_parameters),
-                                    arguments,
-                                )
-                                .map_err(|_| {
-                                    self.failure(ErrorKind::Type, Some(condition.source))
-                                })?
-                        } else {
-                            condition.clone()
-                        }
-                    } else {
-                        condition.clone()
-                    };
+                    let mut condition =
+                        self.copy_invocation_condition(condition, definition, &function)?;
                     if let Some(scope) = &type_scope {
                         self.specialize_input_types(&mut condition, scope)?;
                     }
@@ -2353,24 +2586,8 @@ impl<'a> Interpreter<'a> {
                     environment.insert(binding, value.clone());
                 }
                 for condition in &definition.postconditions {
-                    let mut condition = if let Value::Closure(closure) = &function {
-                        if let Some(arguments) = &closure.instance_arguments
-                            && self.graph.is_none()
-                        {
-                            condition
-                                .instantiate_parameters(
-                                    &self.input_binders(&definition.type_parameters),
-                                    arguments,
-                                )
-                                .map_err(|_| {
-                                    self.failure(ErrorKind::Type, Some(condition.source))
-                                })?
-                        } else {
-                            condition.clone()
-                        }
-                    } else {
-                        condition.clone()
-                    };
+                    let mut condition =
+                        self.copy_invocation_condition(condition, definition, &function)?;
                     if let Some(scope) = &type_scope {
                         self.specialize_input_types(&mut condition, scope)?;
                     }
@@ -2512,6 +2729,32 @@ impl<'a> Interpreter<'a> {
         self.has_type_at(value, ty, 0)
     }
     fn has_type_at(&self, value: &Value, ty: &Term, depth: usize) -> bool {
+        if let (Some(graph), Value::RuntimeTraitMethod(identity)) = (self.graph, value) {
+            return graph
+                .template_method_type(
+                    &identity.interface,
+                    &identity.subject,
+                    identity.member,
+                    &identity.method_arguments,
+                )
+                .is_some_and(|logical| logical == ty);
+        }
+        if let (
+            Some(graph),
+            Value::RuntimeFunction {
+                declaration,
+                arguments,
+            },
+        ) = (self.graph, value)
+        {
+            return graph.templates.iter().any(|table| {
+                table.logical_type() == ty
+                    && table
+                        .targets()
+                        .iter()
+                        .any(|key| key.declaration == *declaration && &key.arguments == arguments)
+            });
+        }
         if let Value::AbstractValue {
             declaration,
             ty: domain,
@@ -2524,6 +2767,29 @@ impl<'a> Interpreter<'a> {
 
         if depth >= 128 {
             return false;
+        }
+        if let Value::ErrorResult {
+            ty: actual,
+            error,
+            value,
+        } = value
+        {
+            if actual != ty {
+                return false;
+            }
+            let Term::ErrorResult { errors, result } = ty else {
+                return false;
+            };
+            let payload = match error {
+                None => result.as_ref(),
+                Some(index) => {
+                    let Some(label) = errors.get(*index) else {
+                        return false;
+                    };
+                    label
+                }
+            };
+            return self.has_type_at(value, payload, depth + 1);
         }
         if let Value::Newtype { ty: actual, value } = value {
             if actual != ty {
@@ -2550,12 +2816,11 @@ impl<'a> Interpreter<'a> {
                     });
             }
             return self.newtypes.get(declaration).is_some_and(|d| {
-                d.validate_completed_arguments_with_evidence(
+                d.validate_completed_arguments_with_evidence_in(
                     arguments,
                     &mut 100_000,
                     |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
-                )
+                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), self.target)
                 .is_ok()
                     && d.parameter_binders().is_ok_and(|parameters| {
                         self.capabilities_hold_parameters(&d.capabilities, &parameters, arguments)
@@ -2649,14 +2914,13 @@ impl<'a> Interpreter<'a> {
                         .enums
                         .get(declaration)
                         .filter(|definition| {
-                            nir::validate_declaration_arguments_with_evidence(
+                            nir::validate_declaration_arguments_with_evidence_in(
                                 &definition.type_parameters,
                                 &definition.parameter_types,
                                 arguments,
                                 &mut 100_000,
                                 |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
-                            )
+                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), self.target)
                             .is_ok()
                                 && definition.parameter_binders().is_ok_and(|parameters| {
                                     self.capabilities_hold_parameters(
@@ -2708,8 +2972,8 @@ impl<'a> Interpreter<'a> {
             | (Value::Char(_), Term::Primitive(Primitive::Char))
             | (Value::String(_), Term::Primitive(Primitive::Str))
             | (Value::Symbol(_), Term::Primitive(Primitive::Symbol)) => true,
-            (Value::SignedInteger(value), Term::Primitive(primitive)) => primitive
-                .fixed_integer_layout()
+            (Value::SignedInteger(value), Term::Primitive(primitive)) => self
+                .integer_layout(*primitive)
                 .is_some_and(|(signed, width)| {
                     signed
                         && comptime_runtime::machine::MachineInteger::from_signed(
@@ -2718,8 +2982,8 @@ impl<'a> Interpreter<'a> {
                         )
                         .is_ok()
                 }),
-            (Value::UnsignedInteger(value), Term::Primitive(primitive)) => primitive
-                .fixed_integer_layout()
+            (Value::UnsignedInteger(value), Term::Primitive(primitive)) => self
+                .integer_layout(*primitive)
                 .is_some_and(|(signed, width)| {
                     !signed
                         && comptime_runtime::machine::MachineInteger::from_unsigned(
@@ -2770,14 +3034,13 @@ impl<'a> Interpreter<'a> {
                 },
             ) if declaration == expected && actual_arguments == arguments => {
                 self.structs.get(declaration).is_some_and(|s| {
-                    if nir::validate_declaration_arguments_with_evidence(
+                    if nir::validate_declaration_arguments_with_evidence_in(
                         &s.type_parameters,
                         &s.parameter_types,
                         arguments,
                         &mut 100_000,
                         |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
-                    )
+                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), self.target)
                     .is_err()
                         || !s.parameter_binders().is_ok_and(|parameters| {
                             self.capabilities_hold_parameters(
@@ -2805,13 +3068,14 @@ impl<'a> Interpreter<'a> {
                     })
                 })
             }
-            (Value::Function(id), ty @ (Term::Function { .. } | Term::ComptimeFunction(_))) => {
+            (Value::Function(id), ty @ (Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_))) => {
                 self.functions.get(id).is_some_and(|f| {
                     f.type_parameters.is_empty()
+                        && f.phase != nir::program::FunctionPhase::NormalForm
                         && (self.comptime_only
                             || (f.requirements.is_empty() && f.capabilities.is_empty()))
-                        && (f.phase == nir::program::FunctionPhase::Comptime)
-                            == matches!(ty, Term::ComptimeFunction(_))
+                        && (f.phase == nir::program::FunctionPhase::Comptime) == ty.is_comptime_callable()
+                        && f.is_unsafe == ty.is_unsafe_callable()
                         && selected_types::same(
                             &f.signature,
                             ty.callable_signature(),
@@ -2869,7 +3133,9 @@ impl<'a> Interpreter<'a> {
                             self.validate_function_inputs(&ids, &arguments, &mut 100_000)
                                 .is_ok()
                                 && !contract.signature.is_comptime_callable()
-                                && contract.program.preconditions.is_empty()
+                                && (contract.program.preconditions.is_empty()
+                                    || (self.comptime_only && matches!(contract.signature.callable_signature(), Ok(Term::Function { parameters, .. })
+                                        if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))))
                                 && contract
                                     .signature
                                     .instantiate_parameters(parameters, &arguments)
@@ -2930,7 +3196,7 @@ impl<'a> Interpreter<'a> {
         }
     }
     fn eval_pointer(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
-        if nir::program::pointer_operation_error(expr).is_some() {
+        if nir::program::pointer_operation_error_in(expr, self.target).is_some() {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
         let result = match &expr.kind {
@@ -3048,6 +3314,14 @@ impl<'a> Interpreter<'a> {
         Ok(Flow::Value(result))
     }
     fn eval(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
+        self.eval_in_position(expr, environment, false)
+    }
+    fn eval_in_position(
+        &mut self,
+        expr: &Expr,
+        environment: &mut Environment,
+        direct_callee: bool,
+    ) -> Result<Flow, Error> {
         self.tick(Some(expr.source))?;
         self.depth += 1;
         let result = if self.graph.is_some()
@@ -3056,6 +3330,8 @@ impl<'a> Interpreter<'a> {
                 K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
             ) {
             self.eval_iir_callable(expr)
+        } else if direct_callee && matches!(expr.kind, K::TraitMethod { .. }) {
+            self.eval_trait_method(expr, environment, true)
         } else {
             self.eval_inner(expr, environment)
         };
@@ -3071,6 +3347,14 @@ impl<'a> Interpreter<'a> {
         environment: &mut Environment,
         result: Result<Flow, Error>,
     ) -> Result<Flow, Error> {
+        // Most comptime evaluation has no scheduled runtime cleanup. Avoid
+        // dispatching both delivery hooks per instruction in that mode; effect
+        // transfers still need their scope handler even without a schedule.
+        if self.cleanup_schedule.is_none()
+            && !matches!(&result, Err(error) if error.kind == ErrorKind::EffectControlTransfer)
+        {
+            return result;
+        }
         let mut result = if matches!(&result,Err(error) if error.kind==ErrorKind::EffectControlTransfer)
             && self.effect_transfer_targets_scope()?
         {
@@ -3264,6 +3548,7 @@ impl<'a> Interpreter<'a> {
             | K::ScalarGreater(..)
             | K::ScalarGreaterEqual(..) => self.eval_scalar_comparison(expr, environment),
             K::TypeEqual(..) => self.eval_type_equal(expr, environment),
+            K::TemplateEqual(..) => self.eval_template_equal(expr, environment),
             K::TypeListIndex(..) => self.eval_type_list_index(expr, environment),
             K::TupleType(..) => self.eval_tuple_type(expr, environment),
             K::TypeList(..) => self.eval_type_list(expr, environment),
@@ -3277,7 +3562,7 @@ impl<'a> Interpreter<'a> {
             | K::PointerAnonymousField { .. }
             | K::PointerField { .. }
             | K::WritePointer { .. } => self.eval_pointer(expr, environment),
-            K::TraitMethod { .. } => self.eval_trait_method(expr, environment),
+            K::TraitMethod { .. } => self.eval_trait_method(expr, environment, false),
             K::AssociatedValue { .. } => self.eval_associated_value(expr),
             K::FunctionInstance { .. } => self.eval_function_instance(expr, environment),
             K::Closure { .. } => self.eval_closure(expr, environment),
@@ -3293,6 +3578,8 @@ impl<'a> Interpreter<'a> {
             K::RequirePredicate(..) | K::EnsurePredicate(..) | K::CheckPredicate(..) => {
                 self.eval_check_predicate(expr, environment)
             }
+            K::Intrinsic { .. } => Err(self.failure(ErrorKind::Unsupported, Some(expr.source))),
+            K::UnsafeScope(body) => self.eval(body, environment),
             K::Discard(..) => self.eval_discard(expr, environment),
             K::Return(..) => self.eval_return(expr, environment),
             K::If { .. } => self.eval_if(expr, environment),
@@ -3306,6 +3593,7 @@ impl<'a> Interpreter<'a> {
             K::IntegerNegate(..) => self.eval_integer_negate(expr, environment),
             K::IntegerBinary { .. } => self.eval_integer_binary(expr, environment),
             K::BitConvert(..) => self.eval_bit_convert(expr, environment),
+            K::ErrorConvert { .. } => self.eval_error_convert(expr, environment),
             K::NewtypeConvert(..) => self.eval_newtype_convert(expr, environment),
             K::BitConcat(..) => self.eval_bit_concat(expr, environment),
             K::EnumName(operand) => {
@@ -3804,8 +4092,8 @@ impl<'a> Interpreter<'a> {
                     Term::Primitive(Primitive::BitVec(width)) => Value::BitVec(
                         self.bit_operation(*source, |budget| integer.to_bitvec(*width, budget))?,
                     ),
-                    Term::Primitive(primitive) if primitive.fixed_integer_layout().is_some() => {
-                        let (signed, bits) = primitive.fixed_integer_layout().unwrap();
+                    Term::Primitive(primitive) if self.integer_layout(*primitive).is_some() => {
+                        let (signed, bits) = self.integer_layout(*primitive).unwrap();
                         if signed {
                             Value::SignedInteger(
                                 integer
@@ -4007,7 +4295,7 @@ impl<'a> Interpreter<'a> {
                 arms,
             } => {
                 let value = value!(self.eval(value, environment));
-                let existing: BTreeSet<_> = environment.keys().copied().collect();
+                let existing = environment.snapshot();
                 for arm in arms {
                     let flow = (|| {
                         self.tick(Some(*source))?;
@@ -4034,7 +4322,7 @@ impl<'a> Interpreter<'a> {
             A::Block {
                 statements, result, ..
             } => {
-                let existing: BTreeSet<_> = environment.keys().copied().collect();
+                let existing = environment.snapshot();
                 let flow = (|| {
                     for statement in statements {
                         value!(self.eval(statement, environment));
@@ -4076,9 +4364,7 @@ impl<'a> Interpreter<'a> {
         let outcome = match predicate.trivial_truth() {
             Some(true) => ContractOutcome::Satisfied,
             Some(false) => ContractOutcome::Rejected,
-            None => self
-                .type_solver
-                .map_or(ContractOutcome::Unknown, |solver| solver(predicate)),
+            None => self.solve_type_predicate(predicate),
         };
         match outcome {
             ContractOutcome::Satisfied => Ok(()),
@@ -4101,7 +4387,8 @@ impl<'a> Interpreter<'a> {
             K::ComptimeValue(value) => {
                 let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
                 let before = fuel;
-                let checked = nir::comptime_values::validate(value, &expr.ty, &mut fuel);
+                let checked =
+                    nir::comptime_values::validate_in(value, &expr.ty, self.target, &mut fuel);
                 self.budget.steps -= (before - fuel) as u64;
                 checked.map_err(|error| {
                     self.failure(
@@ -4298,7 +4585,10 @@ impl<'a> Interpreter<'a> {
         } else if environment.is_empty() {
             body
         } else {
-            if !matches!(body, Term::Function { .. } | Term::ComptimeFunction(_)) {
+            if !matches!(
+                body,
+                Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+            ) {
                 return Err(self.failure(ErrorKind::Type, Some(signature.source)));
             }
             Term::Closure {
@@ -4726,7 +5016,7 @@ impl<'a> Interpreter<'a> {
         // Captured newtype binders follow their own capture-first admission
         // order; do not replace it with the ordinary declaration telescope.
         let valid = if let Some(def) = self.newtypes.get(declaration).filter(|_| alias.is_none()) {
-            def.validate_completed_arguments_with_evidence(
+            def.validate_completed_arguments_with_evidence_in(
                 &types,
                 &mut remaining,
                 |ty, variant, fuel| {
@@ -4740,10 +5030,9 @@ impl<'a> Interpreter<'a> {
                         }
                     })
                 },
-                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
-            )
+                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), self.target)
         } else {
-            nir::validate_declaration_arguments_with_evidence(
+            nir::validate_declaration_arguments_with_evidence_in(
                 &ids,
                 domains,
                 &types,
@@ -4760,6 +5049,7 @@ impl<'a> Interpreter<'a> {
                     })
                 },
                 |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
+                self.target,
             )
         };
         self.budget.steps -= (before - remaining) as u64;
@@ -4836,7 +5126,7 @@ impl<'a> Interpreter<'a> {
         } else {
             Term::Primitive(Primitive::Bool)
         };
-        let supported = |ty: &Term| matches!(ty, Term::Primitive(p) if matches!(p, Primitive::Bool | Primitive::Char | Primitive::Str | Primitive::Symbol | Primitive::Float | Primitive::F32 | Primitive::F64 | Primitive::Never) || p.fixed_integer_layout().is_some());
+        let supported = |ty: &Term| matches!(ty, Term::Primitive(p) if matches!(p, Primitive::Bool | Primitive::Char | Primitive::Str | Primitive::Symbol | Primitive::Float | Primitive::F32 | Primitive::F64 | Primitive::Never) || self.integer_layout(*p).is_some());
         if expr.ty != result_ty
             || !supported(&left.ty)
             || !supported(&right.ty)
@@ -4980,13 +5270,13 @@ impl<'a> Interpreter<'a> {
         }
         // Failure to entail equality is not evidence of inequality. Ask for
         // a proof of its negation separately; Unknown must not select a branch.
-        if let Some(solver) = self.type_solver {
+        if self.type_solver.is_some() {
             self.tick(Some(expr.source))?;
-            if solver(&predicate) == ContractOutcome::Satisfied {
+            if self.solve_type_predicate(&predicate) == ContractOutcome::Satisfied {
                 return Ok(Flow::Value(Value::Bool(true)));
             }
             self.tick(Some(expr.source))?;
-            if solver(&nir::program::TypePredicate::Not(Box::new(predicate)))
+            if self.solve_type_predicate(&nir::program::TypePredicate::Not(Box::new(predicate)))
                 == ContractOutcome::Satisfied
             {
                 return Ok(Flow::Value(Value::Bool(false)));
@@ -5117,60 +5407,85 @@ impl<'a> Interpreter<'a> {
 
     #[inline(never)]
     fn eval_literal(&mut self, expr: &Expr, _environment: &mut Environment) -> Result<Flow, Error> {
+        if let K::Literal(Literal::PendingInteger { spelling, negative }) = &expr.kind {
+            let Term::Primitive(domain) = expr.ty else {
+                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            };
+            let target = self.target;
+            let literal = self.integer_operation(Some(expr.source), |budget| {
+                nir::integer_formation::form(spelling, *negative, domain, target, budget)
+            })?;
+            return self.eval_literal(
+                &Expr {
+                    source: expr.source,
+                    ty: expr.ty.clone(),
+                    kind: K::Literal(literal),
+                },
+                _environment,
+            );
+        }
+        if let K::Literal(Literal::PendingFloat { spelling, negative }) = &expr.kind {
+            let Term::Primitive(domain @ (Primitive::Float | Primitive::F32 | Primitive::F64)) =
+                expr.ty
+            else {
+                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            };
+            let literal = self.integer_operation(Some(expr.source), |budget| {
+                nir::float_formation::FloatFormation::parse(spelling, *negative, budget)?
+                    .form(domain, budget)
+            })?;
+            return self.eval_literal(
+                &Expr {
+                    source: expr.source,
+                    ty: expr.ty.clone(),
+                    kind: K::Literal(literal),
+                },
+                _environment,
+            );
+        }
+        if let K::Literal(literal) = &expr.kind {
+            if !literal.has_primitive_type_in(&expr.ty, self.target) {
+                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            }
+        }
         let result = match &expr.kind {
             K::Literal(literal) => match literal {
                 Literal::Integer(spelling) => {
-                    if expr.ty != Term::Primitive(Primitive::Integer) {
-                        return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                    }
                     Value::Integer(self.integer_literal(spelling, Some(expr.source))?)
                 }
                 Literal::BitVec { width, words } => {
-                    if expr.ty != Term::Primitive(Primitive::BitVec(*width)) {
-                        return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                    }
                     Value::BitVec(self.bit_operation(expr.source, |budget| {
                         comptime_runtime::bitvec::BitVec::from_words(*width, words, budget)
                     })?)
                 }
                 Literal::Float(spelling) => {
-                    if expr.ty != Term::Primitive(Primitive::Float) {
-                        return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                    }
                     Value::Float(self.integer_operation(Some(expr.source), |budget| {
                         comptime_runtime::decimal::DecimalValue::parse_literal(spelling, budget)
                     })?)
                 }
-                Literal::Float32(bits) => {
-                    if expr.ty != Term::Primitive(Primitive::F32) {
-                        return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                    }
-                    Value::Float32(*bits)
-                }
-                Literal::Float64(bits) => {
-                    if expr.ty != Term::Primitive(Primitive::F64) {
-                        return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                    }
-                    Value::Float64(*bits)
-                }
+                Literal::Float32(bits) => Value::Float32(*bits),
+                Literal::Float64(bits) => Value::Float64(*bits),
                 Literal::SignedInteger(v) => {
                     let value = Value::SignedInteger(*v);
-                    if !self.has_type(&value, &expr.ty) {
-                        return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                    }
                     value
                 }
                 Literal::UnsignedInteger(v) => {
                     let value = Value::UnsignedInteger(*v);
-                    if !self.has_type(&value, &expr.ty) {
-                        return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                    }
                     value
                 }
                 Literal::Bool(v) => Value::Bool(*v),
                 Literal::Char(v) => Value::Char(*v),
-                Literal::String(v) => Value::String(Arc::from(v.as_str())),
-                Literal::Symbol(v) => Value::Symbol(Arc::from(v.as_str())),
+                Literal::String(v) | Literal::Symbol(v) => {
+                    self.integer_operation(Some(expr.source), |budget| {
+                        budget.consume(v.len().saturating_add(1))
+                    })?;
+                    let text = Arc::from(v.as_str());
+                    if matches!(literal, Literal::String(_)) {
+                        Value::String(text)
+                    } else {
+                        Value::Symbol(text)
+                    }
+                }
                 _ => return Err(self.failure(ErrorKind::Unsupported, Some(expr.source))),
             },
             _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
@@ -5402,6 +5717,7 @@ impl<'a> Interpreter<'a> {
         &mut self,
         expr: &Expr,
         environment: &mut Environment,
+        direct_callee: bool,
     ) -> Result<Flow, Error> {
         let result = match &expr.kind {
             K::TraitMethod {
@@ -5417,6 +5733,19 @@ impl<'a> Interpreter<'a> {
                     .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
                 let parameters = parameters.clone();
                 let contract = *contract;
+                // Raw NIR can check an immediate interface call, but cannot
+                // erase its program domain into an implementation function
+                // value. IIR transports the identity and specializes the call.
+                let retained_template = self.comptime_only
+                    && !contract.signature.is_comptime_callable()
+                    && matches!(contract.signature.callable_signature(), Ok(Term::Function { parameters, .. })
+                        if parameters.iter().any(|p| p.sort != nir::Sort::Runtime));
+                if !direct_callee
+                    && !contract.program.preconditions.is_empty()
+                    && !retained_template
+                {
+                    return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
+                }
                 if method_arguments.len() != contract.type_parameters.len() {
                     return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
                 }
@@ -5469,7 +5798,7 @@ impl<'a> Interpreter<'a> {
                         )
                         .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
                     if !selected_types::same(&signature, &expr.ty, &self.associated_values)
-                        || !contract.program.preconditions.is_empty()
+                        || (!contract.program.preconditions.is_empty() && !retained_template)
                     {
                         return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
                     }
@@ -5496,7 +5825,8 @@ impl<'a> Interpreter<'a> {
                         &arguments,
                     )
                     .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?
-                    .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime);
+                    .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime)
+                    .with_unsafe_call_requirement(definition.is_unsafe);
                 if !selected_types::same(&ty, &expr.ty, &self.associated_values) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
@@ -5506,7 +5836,7 @@ impl<'a> Interpreter<'a> {
                         &arguments,
                         expr.source,
                     )?;
-                    if !contract.program.preconditions.is_empty() {
+                    if !contract.program.preconditions.is_empty() && !retained_template {
                         return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
                     }
                     // Transport the public interface identity even when this
@@ -5580,14 +5910,39 @@ impl<'a> Interpreter<'a> {
                     ErrorKind::Type
                 }
             })?;
-            nir::validate_declaration_arguments_with_evidence(
+            if let Term::TypeListValue(elements) = argument {
+                nir::type_computations::charge_term(argument, fuel).map_err(|failure| {
+                    if matches!(failure, nir::type_computations::Error::Budget) {
+                        ErrorKind::StepsExhausted
+                    } else {
+                        ErrorKind::Type
+                    }
+                })?;
+                argument.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
+                let Term::NormalForm { head, .. } = &domain else {
+                    return Err(ErrorKind::Type);
+                };
+                // Constructor metadata was validated for uniqueness when this
+                // interpreter was created. Never infer the role from spelling.
+                if !self
+                    .normal_forms
+                    .get(head)
+                    .is_some_and(|head| head.is_type_list_instance(&domain))
+                    || elements
+                        .iter()
+                        .any(|element| element.sort() != nir::Sort::Type)
+                {
+                    return Err(ErrorKind::Type);
+                }
+                continue;
+            }
+            nir::validate_declaration_arguments_with_evidence_in(
                 &[binder.declaration],
                 &[domain],
                 std::slice::from_ref(argument),
                 fuel,
                 |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
-            )
+                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), self.target)
             .map_err(|failure| {
                 if matches!(failure, nir::NominalAdmissionError::Budget) {
                     ErrorKind::StepsExhausted
@@ -5625,6 +5980,15 @@ impl<'a> Interpreter<'a> {
         {
             if let Some(identity) = self.runtime_function_identities.get(declaration).copied() {
                 self.admit_function_inputs(&identity.type_parameters, arguments, expr.source)?;
+                let binders = self.input_binders(&identity.type_parameters);
+                self.charge_copy_work(Some(expr.source), |fuel| {
+                    nir::copy_budget::charge_type_substitution(
+                        &identity.signature,
+                        &binders,
+                        arguments,
+                        fuel,
+                    )
+                })?;
                 let signature = identity
                     .signature
                     .instantiate_parameters(
@@ -5652,11 +6016,29 @@ impl<'a> Interpreter<'a> {
                     .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(expr.source)))?;
                 self.admit_function_inputs(&definition.type_parameters, arguments, expr.source)?;
                 let key = (*declaration, arguments.clone());
+                let binders = self.input_binders(&definition.type_parameters);
+                if !self.instances.contains_key(&key) {
+                    self.charge_copy_work(Some(expr.source), |fuel| {
+                        nir::copy_budget::charge_function_substitution(
+                            definition, &binders, arguments, fuel,
+                        )
+                    })?;
+                }
                 if self.comptime_only {
                     let definition = *self.functions.get(declaration).ok_or_else(|| {
                         self.failure(ErrorKind::UnknownFunction, Some(expr.source))
                     })?;
                     for requirement in &definition.requirements {
+                        // Cache hits reuse the body, but invocation contracts
+                        // are substituted again in the current input scope.
+                        self.charge_copy_work(Some(expr.source), |fuel| {
+                            nir::copy_budget::charge_predicate_substitution(
+                                requirement,
+                                &binders,
+                                arguments,
+                                fuel,
+                            )
+                        })?;
                         let requirement = requirement
                             .instantiate_parameters(
                                 &self.input_binders(&definition.type_parameters),
@@ -5721,9 +6103,11 @@ impl<'a> Interpreter<'a> {
                         environment: Environment::new(),
                         capture_order: vec![],
                         body: Arc::new(body),
-                        ty: signature.with_comptime_phase(
-                            definition.phase == nir::program::FunctionPhase::Comptime,
-                        ),
+                        ty: signature
+                            .with_comptime_phase(
+                                definition.phase == nir::program::FunctionPhase::Comptime,
+                            )
+                            .with_unsafe_call_requirement(definition.is_unsafe),
                     });
                     self.events.push(Event::InstantiateFunction {
                         declaration: *declaration,
@@ -5753,7 +6137,9 @@ impl<'a> Interpreter<'a> {
                 } => {
                     let capture_types: &[Term] = match &expr.ty {
                         Term::Closure { environment, .. } => environment,
-                        Term::Function { .. } | Term::ComptimeFunction(_) => &[],
+                        Term::Function { .. }
+                        | Term::ComptimeFunction(_)
+                        | Term::UnsafeFunction(_) => &[],
                         _ => return Err(this.failure(ErrorKind::Type, Some(expr.source))),
                     };
                     let Term::Function {
@@ -5892,7 +6278,7 @@ impl<'a> Interpreter<'a> {
         match &expr.kind {
             K::Match { value, arms } => {
                 let value = value!(self.eval(value, environment));
-                let existing: BTreeSet<_> = environment.keys().copied().collect();
+                let existing = environment.snapshot();
                 for arm in arms {
                     let flow = (|| {
                         self.tick(Some(expr.source))?;
@@ -5947,10 +6333,7 @@ impl<'a> Interpreter<'a> {
                 };
             };
             self.budget.steps = remaining;
-            frames.push((
-                current,
-                environment.keys().copied().collect::<BTreeSet<_>>(),
-            ));
+            frames.push((current, environment.snapshot()));
             let (K::Block { statements, result } | K::CallPreparation { statements, result }) =
                 &current.kind
             else {
@@ -6012,7 +6395,7 @@ impl<'a> Interpreter<'a> {
             } => {
                 let value_source = value.source;
                 let value = value!(self.eval(value, environment));
-                let existing: BTreeSet<_> = environment.keys().copied().collect();
+                let existing = environment.snapshot();
                 let succeeds = self.match_arm_guard_with_bindings(
                     pattern,
                     guard.as_deref(),
@@ -6057,7 +6440,7 @@ impl<'a> Interpreter<'a> {
         let mut width = match storage_type {
             Term::Primitive(Primitive::BitVec(width)) => *width,
             Term::Primitive(p) => p
-                .unrestricted_scalar_width()
+                .unrestricted_scalar_width_in(self.target)
                 .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?
                 as usize,
             _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
@@ -6154,7 +6537,7 @@ impl<'a> Interpreter<'a> {
                 let Term::Primitive(primitive) = storage_type else {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 };
-                let Some(width) = primitive.unrestricted_scalar_width() else {
+                let Some(width) = primitive.unrestricted_scalar_width_in(self.target) else {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 };
                 let raw = match target {
@@ -6184,8 +6567,8 @@ impl<'a> Interpreter<'a> {
                     Value::Float32(raw as u32)
                 } else if *primitive == Primitive::F64 {
                     Value::Float64(raw as u64)
-                } else if primitive
-                    .fixed_integer_layout()
+                } else if self
+                    .integer_layout(*primitive)
                     .is_some_and(|(signed, _)| signed)
                 {
                     let shift = 128 - width;
@@ -6216,7 +6599,15 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         };
         self.charge_preparation(selections.len())?;
-        if nir::program::bit_update_error(storage_type, selections, &value.ty, &expr.ty).is_some() {
+        if nir::program::bit_update_error_in(
+            storage_type,
+            selections,
+            &value.ty,
+            &expr.ty,
+            self.target,
+        )
+        .is_some()
+        {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
         let target_value = value!(self.eval(pointer, environment));
@@ -6270,8 +6661,14 @@ impl<'a> Interpreter<'a> {
                     return Err(self.failure(ErrorKind::MissingBinding, Some(expr.source)));
                 }
                 self.charge_preparation(selections.len())?;
-                if nir::program::bit_update_error(storage_type, selections, &value.ty, &expr.ty)
-                    .is_some()
+                if nir::program::bit_update_error_in(
+                    storage_type,
+                    selections,
+                    &value.ty,
+                    &expr.ty,
+                    self.target,
+                )
+                .is_some()
                 {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
@@ -6756,7 +7153,9 @@ impl<'a> Interpreter<'a> {
         primitive: Primitive,
     ) -> Result<Flow, Error> {
         use comptime_runtime::machine::{Error as MError, MachineInteger};
-        let (signed, width) = primitive.fixed_integer_layout().unwrap();
+        let (signed, width) = self
+            .integer_layout(primitive)
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
         let (left, right, op) = match &expr.kind {
             K::IntegerNegate(value) => (value.as_ref(), None, None),
             K::IntegerBinary { op, left, right }
@@ -6857,7 +7256,7 @@ impl<'a> Interpreter<'a> {
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        if let Some(primitive) = nir::program::machine_integer_type(expr) {
+        if let Some(primitive) = nir::program::machine_integer_type_in(expr, self.target) {
             return self.eval_machine_integer(expr, environment, primitive);
         }
         let result = match &expr.kind {
@@ -6889,7 +7288,7 @@ impl<'a> Interpreter<'a> {
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        if let Some(primitive) = nir::program::machine_integer_type(expr) {
+        if let Some(primitive) = nir::program::machine_integer_type_in(expr, self.target) {
             return self.eval_machine_integer(expr, environment, primitive);
         }
         let result = match &expr.kind {
@@ -6959,11 +7358,12 @@ impl<'a> Interpreter<'a> {
                         self.bit_operation(expr.source, |budget| bits.widen(width, budget))?,
                     ),
                     Term::Primitive(primitive) => {
-                        let Some(width) = primitive.unrestricted_scalar_width() else {
+                        let Some(width) = primitive.unrestricted_scalar_width_in(self.target)
+                        else {
                             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                         };
-                        let widening = primitive
-                            .fixed_integer_layout()
+                        let widening = self
+                            .integer_layout(primitive)
                             .is_some_and(|(signed, _)| !signed);
                         if (width as usize) < bits.width()
                             || (!widening && width as usize != bits.width())
@@ -6981,8 +7381,8 @@ impl<'a> Interpreter<'a> {
                         match primitive {
                             Primitive::F32 => Value::Float32(value as u32),
                             Primitive::F64 => Value::Float64(value as u64),
-                            _ if primitive
-                                .fixed_integer_layout()
+                            _ if self
+                                .integer_layout(primitive)
                                 .is_some_and(|(signed, _)| signed) =>
                             {
                                 let shift = 128 - width;
@@ -7122,7 +7522,10 @@ impl<'a> Interpreter<'a> {
                         let Term::Primitive(primitive) = operand.ty else {
                             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                         };
-                        if primitive.unrestricted_scalar_width().map(|w| w as usize) != Some(width)
+                        if primitive
+                            .unrestricted_scalar_width_in(self.target)
+                            .map(|w| w as usize)
+                            != Some(width)
                             || !self.has_type(&value, &operand.ty)
                         {
                             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
@@ -7153,22 +7556,47 @@ impl<'a> Interpreter<'a> {
 
     #[inline(never)]
     fn eval_not(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
-        let result = match &expr.kind {
-            K::Not(operand) => {
-                match Self::concrete_value(value!(self.eval(operand, environment)), expr.source)? {
+        // A linear Not spine needs no native recursion. Keep every node's
+        // execution cost and delivery boundary; only the host stack frames are
+        // removed. The enclosing eval already charged the outermost node.
+        let mut pending = vec![expr];
+        let mut current = expr;
+        let mut result = loop {
+            let K::Not(operand) = &current.kind else {
+                unreachable!("expression dispatcher selected an incompatible evaluator")
+            };
+            if !matches!(operand.kind, K::Not(_)) {
+                break self.eval(operand, environment);
+            }
+            if let Err(error) = self.tick(Some(operand.source)) {
+                break Err(error);
+            }
+            current = operand;
+            pending.push(current);
+        };
+        while let Some(node) = pending.pop() {
+            result = result.and_then(|flow| {
+                let Flow::Value(value) = flow else {
+                    return Ok(flow);
+                };
+                let value = match Self::concrete_value(value, node.source)? {
                     Value::Bool(value) => Value::Bool(!value),
                     Value::BitVec(value) => {
-                        if expr.ty != Term::Primitive(Primitive::BitVec(value.width())) {
-                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                        if node.ty != Term::Primitive(Primitive::BitVec(value.width())) {
+                            return Err(self.failure(ErrorKind::Type, Some(node.source)));
                         }
-                        Value::BitVec(self.bit_operation(expr.source, |budget| value.not(budget))?)
+                        Value::BitVec(self.bit_operation(node.source, |budget| value.not(budget))?)
                     }
-                    _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
-                }
+                    _ => return Err(self.failure(ErrorKind::Type, Some(node.source))),
+                };
+                Ok(Flow::Value(value))
+            });
+            if !pending.is_empty() {
+                result = self.finish_evaluation(node, environment, result);
             }
-            _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
-        };
-        Ok(Flow::Value(result))
+        }
+        // The enclosing eval delivers the outermost result exactly once.
+        result
     }
 
     #[inline(never)]
@@ -7216,6 +7644,27 @@ impl<'a> Interpreter<'a> {
         Ok(Flow::Value(result))
     }
 
+    fn copy_interface_program(
+        &mut self,
+        program: &nir::contracts::ProgramContract,
+        parameters: &[nir::DeclarationParameter],
+        arguments: &[Term],
+        source: SourceRange,
+    ) -> Result<nir::contracts::ProgramContract, Error> {
+        self.charge_copy_work(Some(source), |fuel| {
+            *fuel = fuel
+                .checked_sub(program.entry_snapshots.len().saturating_add(1))
+                .ok_or(nir::copy_budget::CopyBudgetExhausted::Steps)?;
+            for condition in program.preconditions.iter().chain(&program.postconditions) {
+                nir::copy_budget::charge_substitution(condition, parameters, arguments, fuel)?;
+            }
+            Ok(())
+        })?;
+        program
+            .instantiate_parameters(parameters, arguments)
+            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))
+    }
+
     #[inline(never)]
     fn prepare_call(
         &mut self,
@@ -7239,7 +7688,7 @@ impl<'a> Interpreter<'a> {
             unreachable!("call preparation")
         };
         let this = self;
-        let interface_preconditions = if let K::TraitMethod {
+        let interface_program = if let K::TraitMethod {
             method_arguments,
             interface,
             member,
@@ -7254,24 +7703,32 @@ impl<'a> Interpreter<'a> {
                 *member,
                 method_arguments,
             )? {
-                method.program.preconditions.clone()
+                this.copy_interface_program(&method.program, &[], &[], expr.source)?
             } else {
                 let (parameters, contract) = this
                     .method_contracts
                     .get(&(*interface, *member))
                     .ok_or_else(|| this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
+                this.budget.steps = this
+                    .budget
+                    .steps
+                    .checked_sub(parameters.len() as u64)
+                    .ok_or_else(|| this.failure(ErrorKind::StepsExhausted, Some(expr.source)))?;
+                let contract = *contract;
+                let parameters = parameters.clone();
                 let arguments: Vec<_> = std::iter::once(subject.clone())
                     .chain(interface_arguments.clone())
                     .chain(method_arguments.clone())
                     .collect();
-                contract
-                    .program
-                    .instantiate_parameters(parameters, &arguments)
-                    .map_err(|_| this.failure(ErrorKind::Type, Some(expr.source)))?
-                    .preconditions
+                this.copy_interface_program(
+                    &contract.program,
+                    &parameters,
+                    &arguments,
+                    expr.source,
+                )?
             }
         } else {
-            vec![]
+            Default::default()
         };
         let interface_parameters = if let K::TraitMethod {
             method_arguments,
@@ -7301,7 +7758,7 @@ impl<'a> Interpreter<'a> {
             None
         };
         let callee_source = callee.source;
-        let callee = prepared_value!(this.eval(callee, environment));
+        let callee = prepared_value!(this.eval_in_position(callee, environment, true));
         this.retain_residual(callee_source, &callee)?;
         let parameters = match &callee {
             Value::RuntimeFunction { .. } | Value::RuntimeTraitMethod(_) => {
@@ -7365,11 +7822,26 @@ impl<'a> Interpreter<'a> {
         // The public interface domain is checked even when the chosen
         // implementation accepts a wider domain. Argument routing uses
         // declaration-side locals, independently of body parameter names.
-        if !interface_preconditions.is_empty() {
+        if !interface_program.is_empty() {
             for (binding, value) in preparation_parameters.iter().zip(&arguments) {
-                default_scope.insert(*binding, value.clone());
+                let observed = match value {
+                    Value::Storage(storage) => this.read_owned_value(storage)?,
+                    value => this.checkpoint_representation(value, expr.source)?,
+                };
+                default_scope.insert(*binding, observed);
             }
-            for condition in interface_preconditions {
+            for snapshot in &interface_program.entry_snapshots {
+                if !preparation_parameters.contains(&snapshot.parameter) {
+                    return Err(this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
+                }
+                let value =
+                    this.local_value(&default_scope, snapshot.parameter, Some(expr.source))?;
+                default_scope.insert(snapshot.binding, value);
+            }
+            if !interface_program.postconditions.is_empty() {
+                this.require_interface_exit_site(expr.source)?;
+            }
+            for condition in interface_program.preconditions {
                 if this.cleanup_schedule.is_some() {
                     if !nir::program::checkable_predicate(&condition) {
                         return Err(this.failure(ErrorKind::Type, Some(condition.source)));
@@ -7409,8 +7881,17 @@ impl<'a> Interpreter<'a> {
                 }
             }
         }
+        let interface_exit = (!interface_program.postconditions.is_empty()).then(|| {
+            Box::new(InterfaceExit {
+                conditions: interface_program.postconditions,
+                result_binding: interface_program.result_binding,
+                environment: default_scope,
+                result_slot: arguments.len(),
+            })
+        });
         let invocation_context = this.invocation_cleanup_context(&callee, expr.source)?;
         Ok(PreparedCall::Invoke {
+            interface_exit,
             callee,
             arguments,
             context: invocation_context,
@@ -7427,14 +7908,16 @@ impl<'a> Interpreter<'a> {
         effects: Option<Vec<effects::Entry>>,
     ) -> Result<Flow, Error> {
         self.with_prepared_frame(expr.source, |this| {
-            let (callee, arguments, context) = match this.prepare_call(expr, environment)? {
-                PreparedCall::Invoke {
-                    callee,
-                    arguments,
-                    context,
-                } => (callee, arguments, context),
-                PreparedCall::Control(control) => return Ok(control),
-            };
+            let (callee, arguments, context, interface_exit) =
+                match this.prepare_call(expr, environment)? {
+                    PreparedCall::Invoke {
+                        interface_exit,
+                        callee,
+                        arguments,
+                        context,
+                    } => (callee, arguments, context, interface_exit),
+                    PreparedCall::Control(control) => return Ok(control),
+                };
             this.transfer_prepared();
             // Callee selection and all actual/default arguments have completed
             // in the caller's environment. Only invocation receives the row map.
@@ -7445,7 +7928,12 @@ impl<'a> Interpreter<'a> {
                 this.effect_state.environment = previous;
             }
             match invoked {
-                Ok(value) => Ok(Flow::Value(value)),
+                Ok(value) => {
+                    if let Some(exit) = interface_exit {
+                        this.check_interface_exit(*exit, &value, expr.source, environment)?;
+                    }
+                    Ok(Flow::Value(value))
+                }
                 Err(error) => {
                     this.cleanup_effect_failure(&error, expr.source, environment)?;
                     Err(error)
@@ -7458,6 +7946,14 @@ impl<'a> Interpreter<'a> {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ErrorResult { ty, error, value } => {
+                write!(f, "(error-result (type {ty}) (branch ")?;
+                match error {
+                    Some(index) => write!(f, "(error {index})")?,
+                    None => f.write_str("success")?,
+                };
+                write!(f, ") (value {value}))")
+            }
             Self::RuntimeTraitMethod(identity) => identity.fmt(f),
             Self::Newtype { ty, value } => {
                 write!(f, "(newtype-value (type {ty}) (representation {value}))")
@@ -7574,6 +8070,8 @@ impl fmt::Display for Value {
     }
 }
 
+#[cfg(test)]
+mod pattern_budget_tests;
 mod pattern_journal;
 #[cfg(test)]
 mod pattern_remap_tests;
@@ -7657,6 +8155,27 @@ impl Interpreter<'_> {
         let matched = match pattern {
             Pattern::CodeEvidence { .. } => {
                 return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
+            }
+            Pattern::ErrorResult { label, inner } => {
+                let Value::ErrorResult { ty, error, value } = input else {
+                    return Ok(Flow::Value(Value::Bool(false)));
+                };
+                let Term::ErrorResult { errors, .. } = ty else {
+                    return Err(self.failure(ErrorKind::Type, None));
+                };
+                let selected = match error {
+                    None => label.is_none(),
+                    Some(index) => {
+                        let actual = errors
+                            .get(*index)
+                            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                        label.as_ref() == Some(actual)
+                    }
+                };
+                if !selected {
+                    return Ok(Flow::Value(Value::Bool(false)));
+                }
+                return self.match_pattern_field(inner, value, environment, undo, Some(0));
             }
             Pattern::Wild => true,
             Pattern::Unit => matches!(input, Value::Unit),
@@ -7753,7 +8272,14 @@ impl Interpreter<'_> {
                 }
             }
             Pattern::Literal(Literal::BitVec { width, words }) => {
-                matches!(input, Value::BitVec(actual) if actual.width() == *width && actual.words() == words)
+                if let Value::BitVec(actual) = input {
+                    self.integer_operation(None, |budget| {
+                        budget.consume(actual.words().len().min(words.len()).saturating_add(1))
+                    })?;
+                    actual.width() == *width && actual.words() == words
+                } else {
+                    false
+                }
             }
             Pattern::Literal(Literal::Float(spelling)) => {
                 if let Value::Float(actual) = input {
@@ -7785,11 +8311,21 @@ impl Interpreter<'_> {
             Pattern::Literal(Literal::Char(expected)) => {
                 matches!(input, Value::Char(actual) if actual == expected)
             }
-            Pattern::Literal(Literal::Symbol(expected)) => {
-                matches!(input, Value::Symbol(actual) if actual.as_ref() == expected)
-            }
-            Pattern::Literal(Literal::String(expected)) => {
-                matches!(input, Value::String(actual) if actual.as_ref() == expected)
+            Pattern::Literal(Literal::Symbol(expected))
+            | Pattern::Literal(Literal::String(expected)) => {
+                let actual = match (pattern, input) {
+                    (Pattern::Literal(Literal::Symbol(_)), Value::Symbol(actual))
+                    | (Pattern::Literal(Literal::String(_)), Value::String(actual)) => Some(actual),
+                    _ => None,
+                };
+                if let Some(actual) = actual {
+                    self.integer_operation(None, |budget| {
+                        budget.consume(actual.len().min(expected.len()).saturating_add(1))
+                    })?;
+                    actual.as_ref() == expected
+                } else {
+                    false
+                }
             }
             _ => unreachable!("pattern dispatcher selected an incompatible evaluator"),
         };
@@ -8253,6 +8789,9 @@ impl Interpreter<'_> {
             return Err(self.failure(ErrorKind::DepthExhausted, None));
         }
         self.tick(None)?;
+        if term.has_pending_error_branch() {
+            return Err(self.failure(ErrorKind::AbstractValueUnresolved, None));
+        }
         if let Term::Rigid {
             declaration,
             sort: nir::Sort::ComptimeValue,
@@ -8279,6 +8818,18 @@ impl Interpreter<'_> {
                 Term::String(value) | Term::Symbol(value) => value.len(),
                 Term::BitVec(value) => value.words().len(),
                 Term::TupleValue(values) | Term::TypeListValue(values) => values.len(),
+                Term::ErrorValue { ty, label, .. } => {
+                    let mut work = self
+                        .type_description_work(ty)
+                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                    if let Some(label) = label {
+                        work = work.saturating_add(
+                            self.type_description_work(label)
+                                .ok_or_else(|| self.failure(ErrorKind::Type, None))?,
+                        );
+                    }
+                    work.saturating_add(1)
+                }
                 Term::NominalValue { ty, fields, .. } => fields.len().saturating_add(
                     self.type_description_work(ty)
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?,
@@ -8353,15 +8904,33 @@ impl Interpreter<'_> {
                         arguments,
                     },
                     ty,
-                ) if ty.is_comptime_callable() => {
-                    let function = self
-                        .functions
-                        .get(declaration)
-                        .copied()
-                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                    if function.phase != nir::program::FunctionPhase::Comptime {
-                        return Err(self.failure(ErrorKind::Type, None));
-                    }
+                ) if matches!(
+                    ty,
+                    Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                ) =>
+                {
+                    let source = if let Some(identity) =
+                        self.runtime_function_identities.get(declaration)
+                    {
+                        if ty.is_comptime_callable() || identity.signature.is_comptime_callable() {
+                            return Err(self.failure(ErrorKind::Type, None));
+                        }
+                        SourceRange { start: 0, end: 0 }
+                    } else {
+                        let function = self
+                            .functions
+                            .get(declaration)
+                            .copied()
+                            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                        if function.phase == nir::program::FunctionPhase::NormalForm
+                            || (function.phase == nir::program::FunctionPhase::Comptime)
+                                != ty.is_comptime_callable()
+                            || function.is_unsafe != ty.is_unsafe_callable()
+                        {
+                            return Err(self.failure(ErrorKind::Type, None));
+                        }
+                        function.body.source
+                    };
                     for argument in arguments {
                         let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
                         let before = fuel;
@@ -8379,7 +8948,7 @@ impl Interpreter<'_> {
                         }
                     }
                     let expression = Expr {
-                        source: function.body.source,
+                        source,
                         ty: ty.clone(),
                         kind: K::FunctionInstance {
                             declaration: *declaration,
@@ -8424,6 +8993,32 @@ impl Interpreter<'_> {
                 (Term::Float32(bits), Term::Primitive(Primitive::F32)) => Value::Float32(*bits),
                 (Term::Float64(bits), Term::Primitive(Primitive::F64)) => Value::Float64(*bits),
                 (Term::Unit, _) => Value::Unit,
+                (
+                    Term::ErrorValue {
+                        ty: actual,
+                        label,
+                        value,
+                    },
+                    Term::ErrorResult { errors, result },
+                ) if actual.as_ref() == ty => {
+                    let (error, payload) = match label {
+                        None => (None, result.as_ref()),
+                        Some(label) => (
+                            Some(
+                                errors
+                                    .iter()
+                                    .position(|ty| ty == label.as_ref())
+                                    .ok_or_else(|| self.failure(ErrorKind::Type, None))?,
+                            ),
+                            label.as_ref(),
+                        ),
+                    };
+                    Value::ErrorResult {
+                        ty: ty.clone(),
+                        error,
+                        value: Box::new(self.normal_pattern_value_at(value, payload, depth + 1)?),
+                    }
+                }
                 (
                     Term::NominalValue {
                         ty: actual,
@@ -8692,10 +9287,35 @@ fn scoped_type_value_work_with_evidence(
     value_parameters: &BTreeMap<DeclarationId, Term>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
 ) -> Option<usize> {
+    scoped_type_value_work_with_evidence_in(
+        ty,
+        heads,
+        parameters,
+        value_parameters,
+        nominal_fields,
+        None,
+    )
+}
+
+fn scoped_type_value_work_with_evidence_in(
+    ty: &Term,
+    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    parameters: &BTreeSet<DeclarationId>,
+    value_parameters: &BTreeMap<DeclarationId, Term>,
+    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
+    target: Option<nir::target::TargetData>,
+) -> Option<usize> {
     if ty.sort() != nir::Sort::Type {
         return None;
     }
-    scoped_term_value_work_with_evidence(ty, heads, parameters, value_parameters, nominal_fields)
+    scoped_term_value_work_with_evidence_in(
+        ty,
+        heads,
+        parameters,
+        value_parameters,
+        nominal_fields,
+        target,
+    )
 }
 
 // Instance identities contain completed value arguments as well as types.
@@ -8723,9 +9343,31 @@ fn scoped_term_value_work_with_evidence(
     value_parameters: &BTreeMap<DeclarationId, Term>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
 ) -> Option<usize> {
-    let mut pending = vec![(ty, 0usize)];
+    scoped_term_value_work_with_evidence_in(
+        ty,
+        heads,
+        parameters,
+        value_parameters,
+        nominal_fields,
+        None,
+    )
+}
+
+fn scoped_term_value_work_with_evidence_in(
+    ty: &Term,
+    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    parameters: &BTreeSet<DeclarationId>,
+    value_parameters: &BTreeMap<DeclarationId, Term>,
+    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
+    target: Option<nir::target::TargetData>,
+) -> Option<usize> {
+    let mut pending = vec![(
+        ty,
+        0usize,
+        std::rc::Rc::new(Vec::<&[nir::Parameter]>::new()),
+    )];
     let mut work = 0usize;
-    while let Some((ty, depth)) = pending.pop() {
+    while let Some((ty, depth, frames)) = pending.pop() {
         work += 1;
         if depth > 128 || work > 100_000 {
             return None;
@@ -8754,6 +9396,7 @@ fn scoped_term_value_work_with_evidence(
             return None;
         }
         let children = match ty {
+            Term::ErrorValue { .. } => 3,
             Term::NominalValue { fields, .. } => fields.len().saturating_add(1),
             Term::Record(fields) | Term::RecordValue(fields) => fields.len(),
             Term::Tuple(items)
@@ -8800,8 +9443,24 @@ fn scoped_term_value_work_with_evidence(
                 }
                 let mut fuel = 100_000usize.checked_sub(work)?;
                 let before = fuel;
+                let mut bound_domains = BTreeMap::new();
+                for (frame_depth, frame) in frames.iter().rev().enumerate() {
+                    fuel = fuel.checked_sub(frame.len().saturating_add(1))?;
+                    for (index, parameter) in frame.iter().enumerate() {
+                        if parameter.sort != nir::Sort::ComptimeValue {
+                            continue;
+                        }
+                        nir::type_computations::charge_term(&parameter.ty, &mut fuel).ok()?;
+                        let mut domain = parameter.ty.clone();
+                        for _ in 0..frame_depth {
+                            nir::type_computations::charge_term(&domain, &mut fuel).ok()?;
+                            domain = domain.abstract_parameters(&[]).ok()?;
+                        }
+                        bound_domains.insert((frame_depth as u32, index), domain);
+                    }
+                }
                 metadata
-                    .check_arguments_with_evidence_budgeted(
+                    .check_arguments_in_scope_with_evidence_budgeted_in(
                         arguments,
                         |head| {
                             heads
@@ -8809,20 +9468,47 @@ fn scoped_term_value_work_with_evidence(
                                 .is_some_and(|head| head.role == nir::normal_forms::Role::Tuple)
                         },
                         &nominal_fields,
-                        |value, domain| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if value_parameters.get(declaration)==Some(domain)),
+                        |value, domain| match value {
+                            Term::Rigid {
+                                declaration,
+                                sort: nir::Sort::ComptimeValue,
+                            } => value_parameters.get(declaration) == Some(domain),
+                            Term::Bound {
+                                depth,
+                                index,
+                                sort: nir::Sort::ComptimeValue,
+                            } => bound_domains.get(&(*depth, *index)) == Some(domain),
+                            _ => false,
+                        },
+                        &frames
+                            .iter()
+                            .map(|frame| frame.iter().map(|p| p.sort).collect())
+                            .collect::<Vec<_>>(),
                         &mut fuel,
+                        target,
                     )
                     .ok()?;
                 work = work.checked_add(before - fuel)?;
             }
         }
         match ty {
+            Term::ErrorValue { ty, label, value } => {
+                pending.push((ty, depth + 1, frames.clone()));
+                if let Some(label) = label {
+                    pending.push((label, depth + 1, frames.clone()));
+                }
+                pending.push((value, depth + 1, frames.clone()));
+            }
             Term::NominalValue { ty, fields, .. } => {
-                pending.push((ty, depth + 1));
-                pending.extend(fields.iter().map(|field| (field, depth + 1)));
+                pending.push((ty, depth + 1, frames.clone()));
+                pending.extend(
+                    fields
+                        .iter()
+                        .map(|field| (field, depth + 1, frames.clone())),
+                );
             }
             Term::Record(fields) | Term::RecordValue(fields) => {
-                pending.extend(fields.iter().map(|(_, ty)| (ty, depth + 1)));
+                pending.extend(fields.iter().map(|(_, ty)| (ty, depth + 1, frames.clone())));
             }
             Term::Rigid {
                 declaration,
@@ -8856,31 +9542,47 @@ fn scoped_term_value_work_with_evidence(
             | Term::NormalForm {
                 arguments: items, ..
             } => {
-                pending.extend(items.iter().map(|t| (t, depth + 1)));
+                pending.extend(items.iter().map(|t| (t, depth + 1, frames.clone())));
             }
             Term::ErrorResult { errors, result } => {
-                pending.push((result, depth + 1));
-                pending.extend(errors.iter().map(|ty| (ty, depth + 1)));
+                pending.push((result, depth + 1, frames.clone()));
+                pending.extend(errors.iter().map(|ty| (ty, depth + 1, frames.clone())));
             }
             Term::Computation { effects, result } => {
-                pending.push((result, depth + 1));
+                pending.push((result, depth + 1, frames.clone()));
                 for operation in effects {
-                    pending.extend(operation.arguments.iter().map(|t| (t, depth + 1)));
+                    pending.extend(
+                        operation
+                            .arguments
+                            .iter()
+                            .map(|t| (t, depth + 1, frames.clone())),
+                    );
                 }
             }
             Term::Closure {
                 environment,
                 signature,
             } => {
-                pending.extend(environment.iter().map(|t| (t, depth + 1)));
-                pending.push((signature, depth + 1));
+                pending.extend(environment.iter().map(|t| (t, depth + 1, frames.clone())));
+                pending.push((signature, depth + 1, frames.clone()));
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) => {
-                pending.push((inner, depth + 1))
+            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
+                pending.push((inner, depth + 1, frames.clone()))
             }
             Term::Function { parameters, result } => {
-                pending.extend(parameters.iter().map(|p| (&p.ty, depth + 1)));
-                pending.push((result, depth + 1));
+                work = work.checked_add(frames.len().saturating_add(1))?;
+                if work > 100_000 {
+                    return None;
+                }
+                let mut nested = frames.as_ref().clone();
+                nested.push(parameters);
+                let frames = std::rc::Rc::new(nested);
+                pending.extend(
+                    parameters
+                        .iter()
+                        .map(|p| (&p.ty, depth + 1, frames.clone())),
+                );
+                pending.push((result, depth + 1, frames.clone()));
             }
             _ => {}
         }
@@ -8892,6 +9594,93 @@ fn scoped_term_value_work_with_evidence(
 #[cfg(test)]
 mod computation_type_tests {
     use super::*;
+
+    #[test]
+    fn callable_bound_value_domains_are_checked_without_admitting_foreign_or_later_inputs() {
+        use nir::{Parameter, Sort};
+        let id = DeclarationId {
+            package: 9,
+            local: 1,
+        };
+        let metadata = nir::normal_forms::Head {
+            role: Default::default(),
+            declaration: id,
+            requirements: vec![],
+            parameters: vec![nir::normal_forms::Parameter {
+                declaration: DeclarationId {
+                    package: 9,
+                    local: 2,
+                },
+                binding: LocalId { owner: 1, index: 0 },
+                kind: nir::normal_forms::Kind::Value,
+                ty: Term::Primitive(Primitive::Bool),
+            }],
+        };
+        let heads = BTreeMap::from([(id, &metadata)]);
+        let head = |depth, index| Term::NormalForm {
+            head: id,
+            sort: Sort::Type,
+            arguments: vec![Term::Bound {
+                depth,
+                index,
+                sort: Sort::ComptimeValue,
+            }],
+        };
+        let parameter = Parameter {
+            sort: Sort::ComptimeValue,
+            ty: Term::Primitive(Primitive::Bool),
+        };
+        let valid = Term::Function {
+            parameters: vec![parameter.clone()],
+            result: Box::new(head(0, 0)),
+        };
+        assert!(type_value_work(&valid, &heads).is_some());
+        let nested = Term::Function {
+            parameters: vec![parameter.clone()],
+            result: Box::new(Term::Function {
+                parameters: vec![],
+                result: Box::new(head(1, 0)),
+            }),
+        };
+        assert!(type_value_work(&nested, &heads).is_some());
+        for invalid in [
+            Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Runtime,
+                    ..parameter.clone()
+                }],
+                result: Box::new(head(0, 0)),
+            },
+            Term::Function {
+                parameters: vec![Parameter {
+                    ty: Term::Primitive(Primitive::U8),
+                    ..parameter.clone()
+                }],
+                result: Box::new(head(0, 0)),
+            },
+            Term::Function {
+                parameters: vec![parameter.clone()],
+                result: Box::new(head(0, 1)),
+            },
+            Term::Function {
+                parameters: vec![parameter.clone()],
+                result: Box::new(head(1, 0)),
+            },
+            Term::Function {
+                parameters: vec![
+                    Parameter {
+                        sort: Sort::Runtime,
+                        ty: head(0, 1),
+                    },
+                    parameter,
+                ],
+                result: Box::new(Term::Primitive(Primitive::Bool)),
+            },
+        ] {
+            assert!(type_value_work(&invalid, &heads).is_none(), "{invalid}");
+        }
+        assert!(type_value_work(&valid, &heads).is_some());
+    }
 
     #[test]
     fn instance_argument_budget_accepts_completed_values_but_rejects_open_terms() {
@@ -9217,7 +10006,14 @@ mod normal_input_data_tests {
                 arguments: vec![Term::Primitive(Primitive::Bool)]
             }
         );
-        for unsupported in [captured, anonymous, runtime] {
+        assert_eq!(
+            freeze(Value::Closure(Arc::new(runtime))).unwrap(),
+            Term::FunctionValue {
+                declaration,
+                arguments: vec![]
+            }
+        );
+        for unsupported in [captured, anonymous] {
             assert_eq!(
                 freeze(Value::Tuple(vec![Value::Closure(Arc::new(
                     unsupported.clone()
@@ -9584,6 +10380,7 @@ mod pointer_copy_budget_tests {
     }
 }
 
+mod error_results;
 mod newtypes;
 
 #[cfg(test)]
@@ -9822,3 +10619,62 @@ mod nominal_environment_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod metered_type_solver_tests {
+    use super::*;
+
+    #[test]
+    fn host_type_proof_spends_invocation_budget_and_cannot_replenish_it() {
+        let package = Package::default();
+        let predicate = nir::program::TypePredicate::Equal(
+            Term::Primitive(Primitive::Bool),
+            Term::Primitive(Primitive::U8),
+        );
+        let calls = std::cell::Cell::new(0);
+        let solver = |_: &nir::program::TypePredicate, remaining: &mut u64| {
+            calls.set(calls.get() + 1);
+            *remaining = remaining.saturating_sub(7);
+            ContractOutcome::Unknown
+        };
+        let mut vm = Interpreter::for_comptime(
+            &package,
+            Budget {
+                steps: 10,
+                depth: 128,
+            },
+        )
+        .unwrap()
+        .with_budgeted_type_solver(&solver);
+        assert_eq!(
+            vm.solve_type_predicate(&predicate),
+            ContractOutcome::Unknown
+        );
+        assert_eq!(vm.remaining_steps(), 3);
+        vm.solve_type_predicate(&predicate);
+        assert_eq!(vm.remaining_steps(), 0);
+        vm.solve_type_predicate(&predicate);
+        assert_eq!(calls.get(), 2);
+        let replenish = |_: &nir::program::TypePredicate, remaining: &mut u64| {
+            *remaining = u64::MAX;
+            ContractOutcome::Satisfied
+        };
+        let mut fresh = Interpreter::for_comptime(
+            &package,
+            Budget {
+                steps: 10,
+                depth: 128,
+            },
+        )
+        .unwrap()
+        .with_budgeted_type_solver(&replenish);
+        assert_eq!(
+            fresh.solve_type_predicate(&predicate),
+            ContractOutcome::Satisfied
+        );
+        assert_eq!(fresh.remaining_steps(), 10);
+    }
+}
+
+#[cfg(test)]
+mod not_spine_tests;

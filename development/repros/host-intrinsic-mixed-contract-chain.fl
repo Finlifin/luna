@@ -1,0 +1,38 @@
+-- Mixed constant/range contract chain: retain all caller values.
+-- Regression: build with --fuel 1000000 and all seven operation bindings.
+trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
+typealias U=.u16'builtin;impl Duplicate for U {}
+^intrinsic_enum enum Ops {ctpop,ctlz,cttz,bitreverse,bswap,fshl,fshr}
+fn constant0()->r:U where ensures r == 0 {let x0:U=0;unsafe {Ops.ctpop'intrinsic(x0).as(U)}}
+fn constant1()->r:U where ensures r == 16 {let x0:U=65535;unsafe {Ops.ctpop'intrinsic(x0).as(U)}}
+fn constant2()->r:U where ensures r == 16 {let x0:U=0;unsafe {Ops.ctlz'intrinsic(x0).as(U)}}
+fn constant3()->r:U where ensures r == 15 {let x0:U=1;unsafe {Ops.ctlz'intrinsic(x0).as(U)}}
+fn constant4()->r:U where ensures r == 16 {let x0:U=0;unsafe {Ops.cttz'intrinsic(x0).as(U)}}
+fn constant5()->r:U where ensures r == 15 {let x0:U=32768;unsafe {Ops.cttz'intrinsic(x0).as(U)}}
+fn constant6()->r:U where ensures r == 32768 {let x0:U=1;unsafe {Ops.bitreverse'intrinsic(x0).as(U)}}
+fn constant7()->r:U where ensures r == 2 {let x0:U=1;let x1:U=0;let x2:U=17;unsafe {Ops.fshl'intrinsic(x0,x1,x2).as(U)}}
+fn constant8()->r:U where ensures r == 1 {let x0:U=0;let x1:U=2;let x2:U=17;unsafe {Ops.fshr'intrinsic(x0,x1,x2).as(U)}}
+fn constant9()->r:U where ensures r == 1 {let x0:U=1;let x1:U=2;let x2:U=16;unsafe {Ops.fshl'intrinsic(x0,x1,x2).as(U)}}
+fn constant10()->r:U where ensures r == 2 {let x0:U=1;let x1:U=2;let x2:U=16;unsafe {Ops.fshr'intrinsic(x0,x1,x2).as(U)}}
+fn constant11()->r:U where ensures r == 256 {let x0:U=1;unsafe {Ops.bswap'intrinsic(x0).as(U)}}
+fn bounded_ctpop(a:U)->r:U where requires unsafe {Ops.ctpop'intrinsic(a).as(U)} <= 16, ensures r <= 16 {unsafe {Ops.ctpop'intrinsic(a).as(U)}}
+fn bounded_ctlz(a:U)->r:U where requires unsafe {Ops.ctlz'intrinsic(a).as(U)} <= 16, ensures r <= 16 {unsafe {Ops.ctlz'intrinsic(a).as(U)}}
+fn bounded_cttz(a:U)->r:U where requires unsafe {Ops.cttz'intrinsic(a).as(U)} <= 16, ensures r <= 16 {unsafe {Ops.cttz'intrinsic(a).as(U)}}
+fn run()->bool {
+let value0=constant0();assumes value0 == 0;
+let value1=constant1();assumes value1 == 16;
+let value2=constant2();assumes value2 == 16;
+let value3=constant3();assumes value3 == 15;
+let value4=constant4();assumes value4 == 16;
+let value5=constant5();assumes value5 == 15;
+let value6=constant6();assumes value6 == 32768;
+let value7=constant7();assumes value7 == 2;
+let value8=constant8();assumes value8 == 1;
+let value9=constant9();assumes value9 == 1;
+let value10=constant10();assumes value10 == 2;
+let value11=constant11();assumes value11 == 256;
+let count_ctpop=bounded_ctpop(65535);assumes count_ctpop <= 16;
+let count_ctlz=bounded_ctlz(65535);assumes count_ctlz <= 16;
+let count_cttz=bounded_cttz(65535);assumes count_cttz <= 16;
+true
+}

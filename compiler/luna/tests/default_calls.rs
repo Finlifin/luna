@@ -2,7 +2,10 @@
 use comptime_interpretor::{Budget, Interpreter, Value};
 #[path = "support/execution.rs"]
 mod execution_support;
-use execution_support::{calls, compile, compile_with_protocols, id};
+use execution_support::{
+    calls, compile_with_tuple as compile, compile_with_tuple_protocols as compile_with_protocols,
+    id,
+};
 
 fn run(source: &str, expected: Value, order: &[&str]) {
     let package = compile(source);
@@ -13,6 +16,334 @@ fn run(source: &str, expected: Value, order: &[&str]) {
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         expected
     );
+}
+
+#[test]
+fn inline_control_in_runtime_defaults_keeps_selector_dependencies_and_all_branches() {
+    for expression in [
+        "inline if mode {not value} else {value}",
+        "inline when {mode=>not value,else=>value}",
+        "inline if mode is do {true=>not value,false=>value}",
+        "inline if true is do {'mode=>not value,_=>value}",
+        "inline if true is do { < mode > =>not value,_=>value}",
+        "do {let selected=mode; inline if selected {not value} else {value}}",
+        "do {let (first and (inline if mode {not first} else {first}) is result)=value; result}",
+    ] {
+        let source = format!(
+            "fn take(comptime .mode:bool=true,value:bool,.next:bool={expression})->bool {{next}}
+            fn run()->bool {{take(false) and not take(false,.mode=false)}}"
+        );
+        let package = execution_support::compile_with_protocols(&source, &Default::default())
+            .unwrap_or_else(|error| panic!("{expression}: {error}"));
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+        let unused = source.replace("take(false) and not take(false,.mode=false)", "true");
+        execution_support::compile_with_protocols(&unused, &Default::default()).unwrap();
+        let bad = unused
+            .replace("not value", "value + value")
+            .replace("not first", "first + first");
+        assert!(execution_support::compile_with_protocols(&bad, &Default::default()).is_err());
+        let unstaged = unused.replace("comptime .mode", ".mode");
+        assert!(
+            execution_support::compile_with_protocols(&unstaged, &Default::default()).is_err(),
+            "runtime selector was accepted: {expression}"
+        );
+    }
+    let bad = "fn take(comptime seed:bool,mode:bool,.next:bool=inline if mode {seed} else {false})->bool {next}
+        fn run()->bool {take(true,true,.next=true)}";
+    assert!(execution_support::compile_with_protocols(bad, &Default::default()).is_err());
+}
+
+#[test]
+fn constant_inline_default_does_not_require_an_open_method_signature() {
+    for value in [
+        "inline if true {true} else {false}",
+        "inline if true {mode} else {false}",
+        "inline when {true=>mode,else=>false}",
+        "inline if true is do {true=>mode,false=>false}",
+    ] {
+        let source = format!(
+            "struct Holder {{fn take(comptime mode:bool,.next:bool={value})->bool {{next}}}}
+            fn run()->bool {{Holder.take(true)}}"
+        );
+        let package =
+            execution_support::compile_with_protocols(&source, &Default::default()).unwrap();
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn inline_suppliers_in_defaults_are_checked_before_inputs_are_available() {
+    let source = include_str!("../../../development/repros/default-forwarded-comptime-input.fl");
+    let package = execution_support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let unused = source.replace("take(true, false) and not take(false, false)", "true");
+    execution_support::compile_with_protocols(&unused, &Default::default()).unwrap();
+    let with_resources = format!(
+        "mod resources {{ {} }}\n{unused}",
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    execution_support::compile_with_source_bindings(
+        &with_resources,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            copy: Some("input::resources::Copy"),
+            drop: Some("input::resources::Drop"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // Explicit override cannot hide a divergent or ill-typed supplier branch.
+    let overridden = source
+        .replace("take(true, false)", "take(true, false, .next = true)")
+        .replace("take(false, false)", "take(false, false, .next = false)");
+    for invalid in [
+        overridden.replace("else { value }", "else { invert(mode, value) }"),
+        overridden.replace("else { value }", "else { value + value }"),
+        source.replace("fn take(comptime mode", "fn take(mode"),
+    ] {
+        assert!(
+            execution_support::compile_with_protocols(&invalid, &Default::default()).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn single_iteration_defaults_require_no_fallthrough_or_backedge() {
+    let source = "fn take(flag:bool,.next:bool=do {var result=false;while true {if flag {result=true;break;} break;} result})->bool {next} fn run()->bool {take(true) and not take(false)}";
+    for candidate in [
+        source.to_owned(),
+        source.replace("if flag", "while true {break;} if flag"),
+    ] {
+        let package =
+            execution_support::compile_with_protocols(&candidate, &Default::default()).unwrap();
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+    for candidate in [
+        source.replace("result=true;break;", "result=true;continue;"),
+        source.replace("} break;", "}"),
+        source.replace("if flag", "while true {} if flag"),
+        source
+            .replace("result=true;break;", "result=spin();break;")
+            .replace("fn take", "fn spin()->bool {spin()} fn take"),
+    ] {
+        assert!(
+            execution_support::compile_with_protocols(&candidate, &Default::default()).is_err(),
+            "{candidate}"
+        );
+    }
+}
+
+#[test]
+fn conditional_constants_in_defaults_wait_for_guard_inputs() {
+    let source = include_str!("../../../development/repros/default-conditional-constant.fl");
+    for candidate in [
+        source.to_owned(),
+        source.replace("found if mode = true", "true as found = mode"),
+        source.replace("found if mode = true", "'mode as found = true"),
+        source.replace("if mode", "if found and mode"),
+        source.replace(
+            "const found if mode = true else { break; };",
+            "const T if mode = bool else { break; }; let found:T = true;",
+        ),
+        format!(
+            "comptime fn enabled(flag:bool)->bool {{flag}} {}",
+            source.replace("if mode", "if enabled(mode)")
+        ),
+    ] {
+        let package = execution_support::compile_with_protocols(&candidate, &Default::default())
+            .unwrap_or_else(|error| panic!("{candidate}: {error}"));
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+        let unused = candidate.replace("take(true) and not take(false)", "true");
+        execution_support::compile_with_protocols(&unused, &Default::default()).unwrap();
+    }
+    for invalid in [
+        source.replace("comptime mode", "mode"),
+        source.replace("else { break; }", "else { false; }"),
+        source.replace("else { break; }", "else { selected = found; break; }"),
+        source.replace("if mode", "if mode + mode"),
+        format!(
+            "fn enabled(flag:bool)->bool {{flag}} {}",
+            source.replace("if mode", "if enabled(mode)")
+        ),
+        source.replace("else { break; }", "else { continue; }"),
+        source.replace("else { break; }", "else { while true {} }"),
+    ] {
+        assert!(
+            execution_support::compile_with_protocols(&invalid, &Default::default()).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn generic_open_function_constants_preserve_explicit_and_contextual_clauses() {
+    let prefix = "typealias Byte=.u8'builtin; fn choose(comptime mode:bool,first:T,second:T)->T where T {inline if mode {first} else {second}}";
+    for binding in [
+        "const operation=choose<bool>;",
+        "const operation:fn(comptime bool,bool,bool)->bool=choose;",
+    ] {
+        let source = format!(
+            "{prefix} fn run()->bool {{{binding} const bytes=choose<Byte>; operation(true,true,false) and not operation(false,true,false) and bytes(true,7,9)==7}}"
+        );
+        let package = execution_support::compile_with_protocols(&source, &Default::default())
+            .unwrap_or_else(|error| panic!("{binding}: {error}"));
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+        let bad = source.replace("operation(true,true,false)", "operation(true,1,false)");
+        assert!(execution_support::compile_with_protocols(&bad, &Default::default()).is_err());
+        let runtime = source
+            .replace("fn run()->bool", "fn run(mode:bool)->bool")
+            .replace("operation(true,true,false)", "operation(mode,true,false)");
+        assert!(execution_support::compile_with_protocols(&runtime, &Default::default()).is_err());
+    }
+    let source = "fn invert(comptime mode:bool,value:bool)->bool where flip:bool {inline if mode==flip {not value} else {value}}
+        fn run()->bool {const operation=invert<true>;operation(true,false) and not operation(false,false)}";
+    let package = execution_support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(
+        execution_support::compile_with_protocols(
+            &source.replace("invert<true>", "invert<bool>"),
+            &Default::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn open_function_constants_in_defaults_prepare_each_staged_call() {
+    let source = include_str!("../../../development/repros/default-open-function-constant.fl");
+    let package = execution_support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let unused = source.replace("take(false, false) and not take(true, false)", "true");
+    execution_support::compile_with_protocols(&unused, &Default::default()).unwrap();
+    for invalid in [
+        unused.replace("comptime mode", "mode"),
+        unused.replace("else { value }", "else { invert(mode, value) }"),
+        unused.replace("else { value }", "else { value + value }"),
+        unused.replace("value: bool) -> bool", ".value: bool = false) -> bool"),
+    ] {
+        assert!(execution_support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn local_constants_in_defaults_wait_for_invocation_inputs() {
+    let source = include_str!("../../../development/repros/default-local-comptime-binding.fl");
+    let package = execution_support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for binding in [
+        "const (selected, ignored) = (not mode, mode);",
+        "const original = mode; const selected = not original;",
+        "const Flag = bool; const selected:Flag = not mode;",
+        "const operation = ordinary; const selected = not mode;",
+    ] {
+        let mut variant = source.replace("const selected = not mode;", binding);
+        if binding.contains("const operation") {
+            variant.push_str("\nfn ordinary(value:bool)->bool {value}");
+            variant = variant.replace(
+                "invert(selected, value)",
+                "invert(selected, operation(value))",
+            );
+        }
+        let package = compile_with_protocols(&variant, &Default::default()).unwrap();
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+    let unused = source.replace("take(false, false) and not take(true, false)", "true");
+    execution_support::compile_with_protocols(&unused, &Default::default()).unwrap();
+    for invalid in [
+        unused.replace("comptime mode", "mode"),
+        unused.replace("not mode;", "not value;"),
+        unused.replace("else { value }", "else { value + value }"),
+    ] {
+        assert!(execution_support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn computed_staged_inputs_in_defaults_keep_phase_and_finiteness_checks() {
+    for input in [
+        "not mode",
+        "mode == false",
+        "do {let inverse=not mode; inverse}",
+    ] {
+        let source = format!(
+            "fn invert(comptime flag:bool,value:bool)->bool {{inline if flag {{not value}} else {{value}}}}
+            fn take(comptime mode:bool,value:bool,.next:bool=invert({input},value))->bool {{next}}
+            fn run()->bool {{take(false,false) and not take(true,false)}}"
+        );
+        let package = execution_support::compile_with_protocols(&source, &Default::default())
+            .unwrap_or_else(|error| panic!("{input}: {error}"));
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+        let unused = source.replace("take(false,false) and not take(true,false)", "true");
+        execution_support::compile_with_protocols(&unused, &Default::default()).unwrap();
+        for invalid in [
+            unused.replace("comptime mode", "mode"),
+            unused.replace("else {value}", "else {invert(flag,value)}"),
+            unused.replace("else {value}", "else {value + value}"),
+        ] {
+            assert!(
+                execution_support::compile_with_protocols(&invalid, &Default::default()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+}
+
+#[test]
+fn runtime_defaults_forward_declared_staged_inputs_without_guessing_values() {
+    let source = "fn invert(comptime mode:bool,value:bool)->bool {if mode {not value} else {value}}
+        fn take(comptime mode:bool,value:bool,.next:bool=invert(mode,value))->bool {next}
+        fn run()->bool {take(true,false) and not take(false,false)}";
+    let package = execution_support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("fn take(comptime mode", "fn take(mode"),
+        source.replace(
+            "not value} else {value}",
+            "not value} else {invert(mode,value)}",
+        ),
+    ] {
+        assert!(
+            execution_support::compile_with_protocols(&invalid, &Default::default()).is_err(),
+            "{invalid}"
+        );
+    }
 }
 
 #[test]
@@ -66,7 +397,7 @@ fn computed_code_patterns_in_defaults_require_known_finite_behavior() {
 #[test]
 fn finite_call_chains_supply_defaults_at_runtime_in_declaration_order() {
     run(
-        "fn choose(first:bool,.second:bool=opposite(first),.third:bool=opposite(second))->(bool,bool,bool) {(first,second,third)} fn opposite(value:bool)->bool {identity(not value)} fn identity(value:bool)->bool {value} fn input()->bool {true} fn run()->(bool,bool,bool) {choose(input())}",
+        "fn choose(first:bool,.second:bool=opposite(first),.third:bool=opposite(second))->Tuple<bool,bool,bool> {(first,second,third)} fn opposite(value:bool)->bool {identity(not value)} fn identity(value:bool)->bool {value} fn input()->bool {true} fn run()->Tuple<bool,bool,bool> {choose(input())}",
         Value::Tuple(vec![
             Value::Bool(true),
             Value::Bool(false),
@@ -110,7 +441,7 @@ fn guard_default_code_values_preserve_their_own_identity() {
 #[test]
 fn explicit_supply_skips_only_its_default_and_keeps_later_dependencies() {
     run(
-        "fn choose(first:bool,.second:bool=opposite(first),.third:bool=opposite(second))->(bool,bool) {(second,third)} fn opposite(value:bool)->bool {not value} fn input()->bool {true} fn override_value()->bool {true} fn run()->(bool,bool) {choose(input(),.second=override_value())}",
+        "fn choose(first:bool,.second:bool=opposite(first),.third:bool=opposite(second))->Tuple<bool,bool> {(second,third)} fn opposite(value:bool)->bool {not value} fn input()->bool {true} fn override_value()->bool {true} fn run()->Tuple<bool,bool> {choose(input(),.second=override_value())}",
         Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
         &["run", "input", "override_value", "opposite", "choose"],
     );
@@ -318,7 +649,7 @@ fn defaults_cannot_write_prior_inputs_or_hide_invalid_unused_suppliers() {
 
 #[test]
 fn tuple_supplier_analysis_preserves_the_bound_normal_form() {
-    let source = "typealias Type=.Type'builtin;pure comptime fn List<T>->Type {T} pure comptime fn Tuple<...Es:List<Type>>->Type {bool} fn pair(value:bool)->(bool,bool) {(value,not value)} fn first(pair:(bool,bool))->bool {let (first,second)=pair;first} fn take(value:bool,.pair:(bool,bool)=pair(value),.flag:bool=first(pair))->bool {flag} fn run()->bool {take(true)}";
+    let source = "typealias Type=.Type'builtin;pure comptime fn List<T>->Type {T} pure comptime fn Tuple<...Es:List<Type>>->Type {bool} fn pair(value:bool)->Tuple<bool,bool> {(value,not value)} fn first(pair:Tuple<bool,bool>)->bool {let (first,second)=pair;first} fn take(value:bool,.pair:Tuple<bool,bool> = pair(value),.flag:bool=first(pair))->bool {flag} fn run()->bool {take(true)}";
     let package = execution_support::compile_with_source_bindings(
         source,
         &Default::default(),

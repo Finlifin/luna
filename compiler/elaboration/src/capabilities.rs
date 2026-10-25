@@ -296,13 +296,23 @@ impl World<'_> {
         requirement: &TraitRequirement,
         budget: Budget,
     ) -> Option<TraitRequirement> {
-        Solver {
+        self.given_metered(requirement, &mut { budget })
+    }
+    /// Return the solver's remaining allowance on success and failure alike.
+    pub fn given_metered(
+        &self,
+        requirement: &TraitRequirement,
+        budget: &mut Budget,
+    ) -> Option<TraitRequirement> {
+        let mut solver = Solver {
             world: self,
             scope: ResolutionScope::capture(self),
             active: HashSet::new(),
             remaining: budget.steps,
-        }
-        .given(requirement, budget)
+        };
+        let result = solver.given(requirement, *budget);
+        budget.steps = budget.steps.min(solver.remaining);
+        result
     }
     /// Search existing evidence in an ordinary caller telescope. This does not
     /// select implementations or turn an unresolved query into negative proof.
@@ -330,13 +340,23 @@ impl World<'_> {
         requirement: &TraitRequirement,
         budget: Budget,
     ) -> Option<TraitRequirement> {
-        Solver {
+        self.given_in_context_metered(requirement, &mut { budget })
+    }
+
+    pub(crate) fn given_in_context_metered(
+        &self,
+        requirement: &TraitRequirement,
+        budget: &mut Budget,
+    ) -> Option<TraitRequirement> {
+        let mut solver = Solver {
             world: self,
             scope: ResolutionScope::capture(self),
             active: HashSet::new(),
             remaining: budget.steps,
-        }
-        .given_frames(requirement, budget, &[], self.context.scope())
+        };
+        let result = solver.given_frames(requirement, *budget, &[], self.context.scope());
+        budget.steps = budget.steps.min(solver.remaining);
+        result
     }
 
     /// Search caller-owned premises while some runtime domains are unavailable.
@@ -370,19 +390,15 @@ impl World<'_> {
         subject: &Term,
         budget: Budget,
     ) -> Result<Resolution, String> {
-        Solver {
-            world: self,
-            scope: ResolutionScope::capture(self),
-            active: HashSet::new(),
-            remaining: budget.steps,
-        }
-        .resolve(interface, subject, budget, 0)
+        self.resolve_instance_metered(interface, subject, &mut { budget })
     }
-    pub(crate) fn resolve_projected_instance(
+    /// Report work tracked by the capability solver, including failed queries.
+    /// Candidate matching retains its own bounded subquery allowances.
+    pub fn resolve_instance_metered(
         &self,
         interface: &InterfaceInstance,
         subject: &Term,
-        budget: Budget,
+        budget: &mut Budget,
     ) -> Result<Resolution, String> {
         let mut solver = Solver {
             world: self,
@@ -390,21 +406,50 @@ impl World<'_> {
             active: HashSet::new(),
             remaining: budget.steps,
         };
-        let subject = solver.prerequisite_type(subject, budget, 0)?;
-        let arguments = interface
-            .arguments
-            .iter()
-            .map(|ty| solver.prerequisite_type(ty, budget, 0))
-            .collect::<Result<_, _>>()?;
-        solver.resolve(
-            &InterfaceInstance {
-                declaration: interface.declaration,
-                arguments,
-            },
-            &subject,
-            budget,
-            0,
-        )
+        let result = solver.resolve(interface, subject, *budget, 0);
+        budget.steps = budget.steps.min(solver.remaining);
+        result
+    }
+    pub(crate) fn resolve_projected_instance(
+        &self,
+        interface: &InterfaceInstance,
+        subject: &Term,
+        budget: Budget,
+    ) -> Result<Resolution, String> {
+        self.resolve_projected_instance_metered(interface, subject, &mut { budget })
+    }
+
+    pub(crate) fn resolve_projected_instance_metered(
+        &self,
+        interface: &InterfaceInstance,
+        subject: &Term,
+        budget: &mut Budget,
+    ) -> Result<Resolution, String> {
+        let mut solver = Solver {
+            world: self,
+            scope: ResolutionScope::capture(self),
+            active: HashSet::new(),
+            remaining: budget.steps,
+        };
+        let result = (|| {
+            let subject = solver.prerequisite_type(subject, *budget, 0)?;
+            let arguments = interface
+                .arguments
+                .iter()
+                .map(|ty| solver.prerequisite_type(ty, *budget, 0))
+                .collect::<Result<_, _>>()?;
+            solver.resolve(
+                &InterfaceInstance {
+                    declaration: interface.declaration,
+                    arguments,
+                },
+                &subject,
+                *budget,
+                0,
+            )
+        })();
+        budget.steps = budget.steps.min(solver.remaining);
+        result
     }
 
     pub fn resolve_inherent(
@@ -511,15 +556,17 @@ impl Solver<'_, '_> {
         let mut condition_support = BTreeMap::new();
         let index = self.world.index;
         let context = self.world.context;
+        let mut search_budget = Budget {
+            steps: budget.steps.min(self.remaining),
+            ..budget
+        };
+        let before_search = search_budget.steps;
         let types = index
-            .resolve_assessed_with(
+            .resolve_assessed_with_search_budget(
                 interface.declaration,
                 &interface.arguments,
                 subject,
-                Budget {
-                    steps: budget.steps.min(self.remaining),
-                    ..budget
-                },
+                &mut search_budget,
                 |head, allowance| {
                     let assessment = match head.match_types_with_layouts(
                         subject,
@@ -554,6 +601,9 @@ impl Solver<'_, '_> {
                 },
             )
             .map_err(|e| format!("capability query: {e:?}"));
+        self.remaining = self
+            .remaining
+            .saturating_sub(before_search - search_budget.steps);
         self.active.remove(&key);
         Ok(Resolution {
             scope: self.scope.clone(),
@@ -589,37 +639,37 @@ impl Solver<'_, '_> {
         scope: &[nir::Parameter],
         frames: &[Vec<nir::Sort>],
     ) -> Option<TraitRequirement> {
-        let valid = |requirement: &TraitRequirement| {
+        let world = self.world;
+        let valid = |requirement: &TraitRequirement, fuel: &mut usize| {
+            for input in
+                std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
+            {
+                if crate::associated::charge_projection_copy(input, fuel).is_err() {
+                    return false;
+                }
+            }
             if requirement.subject.sort() != nir::Sort::Type
                 || requirement.subject.check_scope(frames).is_err()
             {
                 return false;
             }
-            if let Some(contract) = self
-                .world
+            if let Some(contract) = world
                 .traits
                 .iter()
                 .find(|t| t.declaration == requirement.interface)
             {
-                let mut fuel = budget.steps;
                 contract
                     .validate_arguments_with_layouts(
                         &requirement.subject,
                         &requirement.interface_arguments,
                         frames,
-                        self.world.traits,
-                        &self.world.index.parameter_domains,
-                        &mut fuel,
+                        world.traits,
+                        &world.index.parameter_domains,
+                        fuel,
                         |left, right, fuel| {
-                            equivalent_domains(
-                                self.world.context,
-                                left,
-                                right,
-                                budget.max_depth,
-                                fuel,
-                            )
+                            equivalent_domains(world.context, left, right, budget.max_depth, fuel)
                         },
-                        Some(&self.world.index.nominal_layouts),
+                        Some(&world.index.nominal_layouts),
                     )
                     .is_ok()
             } else {
@@ -629,16 +679,30 @@ impl Solver<'_, '_> {
                     .all(|ty| ty.sort() == nir::Sort::Type && ty.check_scope(frames).is_ok())
             }
         };
-        if !valid(requirement) {
+        if !valid(requirement, &mut self.remaining) {
             return None;
         }
-        let equal = |left: &Term, right: &Term| {
+        let equal = |left: &Term, right: &Term, fuel: &mut usize| {
+            for input in [left, right] {
+                if crate::associated::charge_projection_copy(input, fuel).is_err() {
+                    return false;
+                }
+            }
             if left == right {
                 return true;
             }
             let closed = left.check_scope(&[]).is_ok() && right.check_scope(&[]).is_ok();
+            if !scope.is_empty() && !closed && world.context.scope() != frames {
+                for _ in 0..2 {
+                    for parameter in scope {
+                        if crate::associated::charge_projection_copy(&parameter.ty, fuel).is_err() {
+                            return false;
+                        }
+                    }
+                }
+            }
             let scoped = |ty: &Term| {
-                if scope.is_empty() || closed || self.world.context.scope() == frames {
+                if scope.is_empty() || closed || world.context.scope() == frames {
                     ty.clone()
                 } else {
                     Term::Function {
@@ -647,21 +711,30 @@ impl Solver<'_, '_> {
                     }
                 }
             };
-            matches!(
-                self.world
-                    .context
-                    .prove(Formula::equal(scoped(left), scoped(right)), budget),
-                Outcome::Entailed(_)
-            )
+            let goal = Formula::equal(scoped(left), scoped(right));
+            let mut proof_budget = Budget {
+                steps: budget.steps.min(*fuel),
+                ..budget
+            };
+            let before = proof_budget.steps;
+            let result = world.context.prove_metered(goal, &mut proof_budget);
+            *fuel = fuel.saturating_sub(before - proof_budget.steps);
+            matches!(result, Outcome::Entailed(_))
         };
-        for assumption in self.world.assumptions {
-            if !valid(assumption) {
+        for assumption in world.assumptions {
+            if self.remaining == 0 {
+                return None;
+            }
+            if !valid(assumption, &mut self.remaining) {
                 continue;
             }
             let mut pending = vec![assumption.clone()];
             let mut seen = HashSet::new();
             while let Some(current) = pending.pop() {
-                if !valid(&current) {
+                if self.remaining == 0 {
+                    return None;
+                }
+                if !valid(&current, &mut self.remaining) {
                     continue;
                 }
                 let interface = current.interface_instance();
@@ -678,8 +751,8 @@ impl Solver<'_, '_> {
                         .arguments
                         .iter()
                         .zip(&requirement.interface_arguments)
-                        .all(|(a, b)| equal(a, b))
-                    && equal(&current.subject, &requirement.subject)
+                        .all(|(a, b)| equal(a, b, &mut self.remaining))
+                    && equal(&current.subject, &requirement.subject, &mut self.remaining)
                 {
                     return Some(assumption.clone());
                 }
@@ -747,21 +820,26 @@ impl Solver<'_, '_> {
                 ..budget
             },
             &mut |interface, subject, budget| {
-                let subject = self.prerequisite_type(subject, budget, depth + 1)?;
-                let arguments = interface
-                    .arguments
-                    .iter()
-                    .map(|ty| self.prerequisite_type(ty, budget, depth + 1))
-                    .collect::<Result<_, _>>()?;
-                self.resolve(
-                    &InterfaceInstance {
-                        declaration: interface.declaration,
-                        arguments,
-                    },
-                    &subject,
-                    budget,
-                    depth + 1,
-                )
+                let before = self.remaining;
+                let result = (|| {
+                    let subject = self.prerequisite_type(subject, *budget, depth + 1)?;
+                    let arguments = interface
+                        .arguments
+                        .iter()
+                        .map(|ty| self.prerequisite_type(ty, *budget, depth + 1))
+                        .collect::<Result<_, _>>()?;
+                    self.resolve(
+                        &InterfaceInstance {
+                            declaration: interface.declaration,
+                            arguments,
+                        },
+                        &subject,
+                        *budget,
+                        depth + 1,
+                    )
+                })();
+                budget.steps = budget.steps.saturating_sub(before - self.remaining);
+                result
             },
         );
         match normalized {
@@ -973,5 +1051,56 @@ impl fmt::Display for Resolution {
             f.write_str(")")?;
         }
         f.write_str("))")
+    }
+}
+
+#[cfg(test)]
+mod projected_budget_tests {
+    use super::*;
+
+    #[test]
+    fn failed_projected_queries_report_consumed_work() {
+        let index = Index::default();
+        let context = Context::default();
+        let world = World {
+            index: &index,
+            implementations: &[],
+            traits: &[],
+            assumptions: &[],
+            context: &context,
+        };
+        let id = nir::DeclarationId {
+            package: 1,
+            local: 1,
+        };
+        let interface = InterfaceInstance {
+            declaration: id,
+            arguments: vec![],
+        };
+        let subject = Term::AssociatedType {
+            origin: Box::new(nir::AssociatedTypeOrigin {
+                interface: id,
+                member: id,
+            }),
+            subject: Box::new(Term::Primitive(nir::Primitive::Bool)),
+            arguments: vec![],
+        };
+        for steps in [0, 1, 1000] {
+            let mut budget = Budget {
+                steps,
+                ..Budget::default()
+            };
+            assert!(
+                world
+                    .resolve_projected_instance_metered(&interface, &subject, &mut budget)
+                    .is_err()
+            );
+            assert!(budget.steps <= steps);
+            // With fewer than two steps no normalization allowance can be
+            // reserved, so rejection occurs before any work is performed.
+            if steps > 1 {
+                assert!(budget.steps < steps);
+            }
+        }
     }
 }

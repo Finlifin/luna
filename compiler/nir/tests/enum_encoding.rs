@@ -426,3 +426,58 @@ fn exhausted_checks_never_publish_coverage_or_overlap_results() {
             .is_err()
     );
 }
+
+#[test]
+fn empty_payloads_preserve_identity_without_occupying_encoding_bits() {
+    let mut budget = Budget::default();
+    let mask = BitVec::from_words(8, &[255], &mut budget).unwrap();
+    let value = BitVec::from_words(8, &[170], &mut budget).unwrap();
+    let empty = BitVec::from_words(0, &[], &mut budget).unwrap();
+    let fields: Vec<_> = [0, 4, 8]
+        .into_iter()
+        .enumerate()
+        .map(|(i, start)| Field {
+            name: format!("empty{i}"),
+            start,
+            width: 0,
+        })
+        .collect();
+    let variant = Variant::new(
+        "data".into(),
+        mask.clone(),
+        value.clone(),
+        fields.clone(),
+        &mut budget,
+    )
+    .unwrap();
+    assert_eq!(
+        variant
+            .construct(&vec![empty.clone(); 3], &mut budget)
+            .unwrap(),
+        value
+    );
+    assert_eq!(
+        variant.extract(&value, &mut budget).unwrap(),
+        vec![empty; 3]
+    );
+    assert!(variant.construct(&[], &mut budget).is_err());
+    for invalid in [
+        vec![Field {
+            name: "outside".into(),
+            start: 9,
+            width: 0,
+        }],
+        vec![fields[0].clone(), fields[0].clone()],
+    ] {
+        assert!(
+            Variant::new(
+                "bad".into(),
+                mask.clone(),
+                value.clone(),
+                invalid,
+                &mut budget
+            )
+            .is_err()
+        );
+    }
+}

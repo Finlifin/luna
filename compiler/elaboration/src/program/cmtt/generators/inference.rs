@@ -750,9 +750,12 @@ impl Checker<'_, '_> {
                         let Some(domain) = self.trait_input_domain(all_parameters[index]) else {
                             return Ok(None);
                         };
-                        let domain = domain
-                            .instantiate_parameters(&binders[..index], &assigned)
-                            .map_err(|e| error(default.span, e.to_string()))?;
+                        let domain = self.instantiate_generator_type(
+                            &domain,
+                            &binders[..index],
+                            &assigned,
+                            default.span,
+                        )?;
                         self.generator_static_value_hint(default, &domain, bindings)?
                     };
                     let Some(ty) = hint else { return Ok(None) };
@@ -770,9 +773,8 @@ impl Checker<'_, '_> {
         }
         // Fix static defaults before inference. A dependent default can retain
         // an earlier mandatory parameter, but never becomes a fresh variable.
-        let signature = signature
-            .instantiate_parameters(&binders, &assigned)
-            .map_err(|e| error(site.span, e.to_string()))?;
+        let signature =
+            self.instantiate_generator_type(&signature, &binders, &assigned, site.span)?;
         let Term::Function {
             parameters: inputs, ..
         } = &signature
@@ -984,18 +986,24 @@ impl Checker<'_, '_> {
                 let Some(domain) = self.trait_input_domain(parameters[index]) else {
                     return Ok(None);
                 };
-                let domain = domain
-                    .instantiate_parameters(&binders[..index], &completed)
-                    .map_err(|e| error(value.span, e.to_string()))?;
+                let domain = self.instantiate_generator_type(
+                    &domain,
+                    &binders[..index],
+                    &completed,
+                    value.span,
+                )?;
                 self.generator_static_value_hint(value, &domain, bindings)?
             };
             let Some(hint) = hint else { return Ok(None) };
             completed.push(hint);
         }
-        result
-            .instantiate_parameters(&self.input_binders(&parameters), &completed)
-            .map(Some)
-            .map_err(|e| error(head.span, e.to_string()))
+        self.instantiate_generator_type(
+            &result,
+            &self.input_binders(&parameters),
+            &completed,
+            head.span,
+        )
+        .map(Some)
     }
 
     /// Read stable value evidence without invoking a producer or guessing an
@@ -1097,9 +1105,12 @@ impl Checker<'_, '_> {
                             let Some(domain) = self.trait_input_domain(binder.declaration) else {
                                 return Ok(None);
                             };
-                            let domain = domain
-                                .instantiate_parameters(&binders[..types.len()], &types)
-                                .map_err(|e| error(argument.span, e.to_string()))?;
+                            let domain = self.instantiate_generator_type(
+                                &domain,
+                                &binders[..types.len()],
+                                &types,
+                                argument.span,
+                            )?;
                             self.generator_static_value_hint(argument, &domain, bindings)?
                         };
                         let Some(value) = value else { return Ok(None) };
@@ -1285,7 +1296,10 @@ impl Checker<'_, '_> {
                 if environment.is_empty() {
                     return Ok(Some(signature));
                 }
-                if !matches!(signature, Term::Function { .. } | Term::ComptimeFunction(_)) {
+                if !matches!(
+                    signature,
+                    Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                ) {
                     return Ok(None);
                 }
                 Ok(Some(Term::Closure {
@@ -1382,9 +1396,13 @@ impl Checker<'_, '_> {
             let bounded = nir::type_computations::charge_term(declared, &mut fuel);
             self.required_steps = fuel as u64;
             bounded.map_err(|e| error(value.span, e.to_string()))?;
-            let domain = declared
-                .instantiate_parameters(&binders[..index], &completed)
-                .map_err(|e| error(value.span, e.to_string()))?;
+            let declared = declared.clone();
+            let domain = self.instantiate_generator_type(
+                &declared,
+                &binders[..index],
+                &completed,
+                value.span,
+            )?;
             let hint = if domain == p(P::Type) {
                 self.generator_static_type_hint(value, depth + 1, bindings)?
             } else {

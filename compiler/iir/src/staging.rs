@@ -10,6 +10,7 @@
 use nir::program::{Expr, ExprKind as K, Function, Literal, LocalId};
 use nir::{Primitive, Sort, Term};
 use std::collections::BTreeSet;
+mod error_values;
 mod patterns;
 mod preparation;
 pub use preparation::{preparation, preparation_with_layouts};
@@ -18,6 +19,7 @@ pub use preparation::{preparation, preparation_with_layouts};
 /// authorizes reconstruction only and never participates in type equality.
 #[derive(Clone, Copy)]
 pub struct Layouts<'a> {
+    target: Option<nir::target::TargetData>,
     heads: &'a [nir::normal_forms::Head],
     newtypes: &'a [nir::newtypes::Newtype],
     newtype_index:
@@ -29,6 +31,7 @@ impl<'a> Layouts<'a> {
         newtypes: &'a [nir::newtypes::Newtype],
     ) -> Self {
         Self {
+            target: None,
             heads,
             newtypes,
             newtype_index: None,
@@ -39,11 +42,24 @@ impl<'a> Layouts<'a> {
         newtypes: &'a std::collections::BTreeMap<nir::DeclarationId, nir::newtypes::Newtype>,
     ) -> Self {
         Self {
+            target: None,
             heads,
             newtypes: &[],
             newtype_index: Some(newtypes),
         }
     }
+    pub fn with_target(mut self, target: Option<nir::target::TargetData>) -> Self {
+        self.target = target;
+        self
+    }
+
+    fn integer_layout(self, primitive: Primitive) -> Option<(bool, u32)> {
+        match self.target {
+            Some(target) => target.integer_layout(primitive),
+            None => primitive.fixed_integer_layout(),
+        }
+    }
+
     fn representation(self, ty: &Term, fuel: &mut usize) -> Result<Option<Term>, String> {
         let Term::Nominal {
             declaration,
@@ -92,7 +108,7 @@ impl<'a> From<&'a Vec<nir::normal_forms::Head>> for Layouts<'a> {
 }
 impl<'a> From<&'a nir::program::Package> for Layouts<'a> {
     fn from(package: &'a nir::program::Package) -> Self {
-        Self::new(&package.normal_forms, &package.newtypes)
+        Self::new(&package.normal_forms, &package.newtypes).with_target(package.target)
     }
 }
 impl<'a> IntoIterator for Layouts<'a> {
@@ -448,7 +464,9 @@ fn collect_forwarded_locals<'layout>(
                 }
                 value.clone()
             } else {
-                let Some(dependencies) = structural_boolean_dependencies(initializer, fuel)? else {
+                let Some(dependencies) =
+                    structural_boolean_dependencies_in(initializer, heads.target, fuel)?
+                else {
                     continue;
                 };
                 if dependencies.iter().any(|id| unavailable.contains(id)) {
@@ -471,7 +489,8 @@ fn collect_forwarded_locals<'layout>(
                         charge(fuel, 1)?;
                         match pattern {
                             nir::program::Pattern::Wild => {}
-                            nir::program::Pattern::Observe { inner, .. }
+                            nir::program::Pattern::ErrorResult { inner, .. }
+                            | nir::program::Pattern::Observe { inner, .. }
                             | nir::program::Pattern::Binding { inner, .. } => patterns.push(inner),
                             nir::program::Pattern::Tuple(fields)
                             | nir::program::Pattern::AnonymousRecord { fields, .. }
@@ -507,6 +526,15 @@ pub fn structural_boolean_dependencies(
     expression: &Expr,
     fuel: &mut usize,
 ) -> Result<Option<BTreeSet<LocalId>>, String> {
+    structural_boolean_dependencies_in(expression, None, fuel)
+}
+
+pub fn structural_boolean_dependencies_in(
+    expression: &Expr,
+    target: Option<nir::target::TargetData>,
+    fuel: &mut usize,
+) -> Result<Option<BTreeSet<LocalId>>, String> {
+    let layouts = Layouts::new(&[], &[]).with_target(target);
     let mut inputs = BTreeSet::new();
     let mut local_bindings = BTreeSet::new();
     let mut supported = true;
@@ -516,7 +544,7 @@ pub fn structural_boolean_dependencies(
                 inputs.insert(*binding);
             }
             _ if total_bitvec_operation(expr) => {}
-            _ if total_bit_representation(expr) => {}
+            _ if total_bit_representation_in(expr, target) => {}
             _ if total_float_operation(expr) => {}
             K::Literal(_)
             | K::TypeValue(_)
@@ -542,7 +570,7 @@ pub fn structural_boolean_dependencies(
                 if expr.ty == Term::Primitive(Primitive::Bool)
                     && left.ty == right.ty
                     && matches!(left.ty,Term::Primitive(primitive)
-                        if primitive.fixed_integer_layout().is_some()
+                        if layouts.integer_layout(primitive).is_some()
                             || matches!(primitive, Primitive::Char | Primitive::Float | Primitive::F32 | Primitive::F64)
                             || (matches!(expr.kind,K::ScalarEqual(..))
                                 && matches!(primitive,Primitive::Bool | Primitive::Str | Primitive::Symbol))) =>
@@ -888,13 +916,18 @@ fn total_bitvec_operation(expr: &Expr) -> bool {
     }
 }
 
+#[cfg(test)]
 fn total_bit_representation(expr: &Expr) -> bool {
+    total_bit_representation_in(expr, None)
+}
+
+fn total_bit_representation_in(expr: &Expr, target: Option<nir::target::TargetData>) -> bool {
     match &expr.kind {
         K::TakeBits(value) => match (&value.ty, &expr.ty) {
             (Term::Primitive(source), Term::Primitive(Primitive::BitVec(width))) => {
                 *source == Primitive::BitVec(*width)
                     || source
-                        .unrestricted_scalar_width()
+                        .unrestricted_scalar_width_in(target)
                         .map(|value| value as usize)
                         == Some(*width)
             }
@@ -905,13 +938,20 @@ fn total_bit_representation(expr: &Expr) -> bool {
                 if let Primitive::BitVec(to) = to {
                     return from <= to;
                 }
-                to.unrestricted_scalar_width().is_some_and(|width| {
-                    if to.fixed_integer_layout().is_some_and(|(signed, _)| !signed) {
-                        *from <= width as usize
-                    } else {
-                        *from == width as usize
-                    }
-                })
+                to.unrestricted_scalar_width_in(target)
+                    .is_some_and(|width| {
+                        if target
+                            .map_or_else(
+                                || to.fixed_integer_layout(),
+                                |target| target.integer_layout(*to),
+                            )
+                            .is_some_and(|(signed, _)| !signed)
+                        {
+                            *from <= width as usize
+                        } else {
+                            *from == width as usize
+                        }
+                    })
             }
             _ => false,
         },
@@ -931,7 +971,7 @@ fn fold_bit_representation<'layout>(
         return Err("staged expression depth exceeded".into());
     }
     charge(fuel, 1)?;
-    if !total_bit_representation(expr) {
+    if !total_bit_representation_in(expr, heads.target) {
         return Err("staged bit representation domain mismatch".into());
     }
     let (K::TakeBits(operand) | K::BitConvert(operand)) = &expr.kind else {
@@ -993,7 +1033,7 @@ fn fold_bit_representation<'layout>(
                         Primitive::F32 => Literal::Float32(raw as u32),
                         Primitive::F64 => Literal::Float64(raw as u64),
                         _ => {
-                            let (signed, width) = primitive.fixed_integer_layout().unwrap();
+                            let (signed, width) = heads.integer_layout(primitive).unwrap();
                             if signed {
                                 Literal::SignedInteger(
                                     ((raw << (128 - width)) as i128) >> (128 - width),
@@ -1166,7 +1206,7 @@ fn substitute_forwarded_expression<'layout>(
         return Err("staged forwarding depth exceeded".into());
     }
     crate::visit::expression_mut_pruned(expression, fuel, |expr, fuel| {
-        if let Some(plan) = preparation(expr, fuel)? {
+        if let Some(plan) = preparation_with_layouts(heads, expr, fuel)? {
             let K::CallPreparation { statements, result } = &mut expr.kind else {
                 unreachable!()
             };
@@ -1402,11 +1442,7 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
     if actual.0 != template.declaration || actual.1 != declaration_arguments {
         return Err("staged call target differs from template identity".into());
     }
-    let signature_differs = callee.ty
-        != template
-            .signature
-            .clone()
-            .with_comptime_phase(template.phase == nir::program::FunctionPhase::Comptime);
+    let signature_differs = callee.ty != template.callable_type();
     let Term::Function { parameters, .. } = template.signature.callable_signature() else {
         return Err("staged template is not callable".into());
     };
@@ -1572,6 +1608,11 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
         }
     }
     let mut runtime_arguments = Vec::new();
+    charge(fuel, bindings.len())?;
+    let staged_values = bindings
+        .iter()
+        .map(|(binding, value)| (*binding, value))
+        .collect();
     for argument in arguments {
         if let Some(slot) = slots[argument.parameter] {
             crate::visit::expression(&argument.value, fuel, |_, _| Ok(()))?;
@@ -1582,6 +1623,19 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
                     charge(fuel, 1)?;
                     scope.rebind(ty).map_err(|e| e.to_string())
                 })?;
+                // This default is evaluated in the callee's preparation frame.
+                // Its nested staged calls need the completed inputs now, before
+                // runtime reconstruction hides them behind ordinary let nodes.
+                substitute_closure_locals(
+                    heads,
+                    &mut argument.value,
+                    &staged_values,
+                    &BTreeSet::new(),
+                    &BTreeSet::new(),
+                    false,
+                    fuel,
+                    0,
+                )?;
                 wrap(heads, &mut argument.value, &bindings, fuel)?;
             }
             runtime_arguments.push(argument);
@@ -1592,10 +1646,7 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
         source: call.source,
         kind: K::Call {
             callee: Box::new(Expr {
-                ty: function
-                    .signature
-                    .clone()
-                    .with_comptime_phase(function.phase == nir::program::FunctionPhase::Comptime),
+                ty: function.callable_type(),
                 source: callee.source,
                 kind: K::FunctionInstance {
                     declaration: key.declaration,
@@ -1944,7 +1995,7 @@ fn fold_scalar_comparison<'layout>(
         }
         (Term::Float32(a), Term::Float32(b)) => f32::from_bits(*a).partial_cmp(&f32::from_bits(*b)),
         (Term::Float64(a), Term::Float64(b)) => f64::from_bits(*a).partial_cmp(&f64::from_bits(*b)),
-        (Term::Integer(a), Term::Integer(b)) if matches!(left.ty,Term::Primitive(p) if p.fixed_integer_layout().is_some()) => {
+        (Term::Integer(a), Term::Integer(b)) if matches!(left.ty,Term::Primitive(p) if heads.integer_layout(p).is_some()) => {
             Some(a.cmp(b))
         }
         _ => {
@@ -2077,6 +2128,80 @@ fn fold_newtype_conversion(
     Err("staged newtype conversion requires a checked representation".into())
 }
 
+// Literal formation owns large temporary values. Keep it out of the recursive
+// dispatcher so nested expressions do not reserve that storage at every level.
+#[inline(never)]
+fn fold_pending_literal(
+    heads: Layouts<'_>,
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
+    if let K::Literal(Literal::PendingInteger { spelling, negative }) = &expr.kind {
+        if depth >= 128 {
+            return Err("staged expression depth exceeded".into());
+        }
+        charge(fuel, 1)?;
+        let Term::Primitive(domain) = expr.ty else {
+            return Err("staged integer formation requires a concrete integer domain".into());
+        };
+        let mut budget = comptime_runtime::Budget {
+            steps: *fuel,
+            max_limbs: *fuel,
+        };
+        let result =
+            nir::integer_formation::form(spelling, *negative, domain, heads.target, &mut budget);
+        *fuel = budget.steps;
+        return Ok(Expr {
+            source: expr.source,
+            ty: expr.ty.clone(),
+            kind: K::Literal(result.map_err(|cause| {
+                nir::integer_formation::FormationError {
+                    source: expr.source,
+                    target: expr.ty.clone(),
+                    layout: heads.target,
+                    cause,
+                }
+                .to_string()
+            })?),
+        });
+    }
+    if let K::Literal(Literal::PendingFloat { spelling, negative }) = &expr.kind {
+        if depth >= 128 {
+            return Err("staged expression depth exceeded".into());
+        }
+        charge(fuel, 1)?;
+        let Term::Primitive(domain @ (Primitive::Float | Primitive::F32 | Primitive::F64)) =
+            expr.ty
+        else {
+            return Err("staged float formation requires a concrete float domain".into());
+        };
+        // Folding may precede annotation normalization, but canonical-input
+        // validation must continue to reject an unformed literal.
+        let mut budget = comptime_runtime::Budget {
+            steps: *fuel,
+            max_limbs: *fuel,
+        };
+        let result = nir::float_formation::FloatFormation::parse(spelling, *negative, &mut budget)
+            .and_then(|formation| formation.form(domain, &mut budget));
+        *fuel = budget.steps;
+        return Ok(Expr {
+            source: expr.source,
+            ty: expr.ty.clone(),
+            kind: K::Literal(result.map_err(|cause| {
+                nir::float_formation::FormationError {
+                    source: expr.source,
+                    target: expr.ty.clone(),
+                    cause,
+                }
+                .to_string()
+            })?),
+        });
+    }
+
+    unreachable!("pending literal dispatcher")
+}
+
 fn fold_input<'layout>(
     heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
@@ -2084,6 +2209,13 @@ fn fold_input<'layout>(
     depth: usize,
 ) -> Result<Expr, String> {
     let heads = heads.into();
+    if matches!(
+        expr.kind,
+        K::Literal(Literal::PendingInteger { .. } | Literal::PendingFloat { .. })
+    ) {
+        return fold_pending_literal(heads, expr, fuel, depth);
+    }
+
     match &expr.kind {
         K::ScalarEqual(left, right)
         | K::ScalarLess(left, right)
@@ -2099,6 +2231,9 @@ fn fold_input<'layout>(
             return fold_scalar_comparison(heads, expr, left, right, fuel, depth);
         }
         _ => {}
+    }
+    if matches!(expr.kind, K::ErrorConvert { .. }) {
+        return error_values::fold(heads, expr, fuel, depth);
     }
     if matches!(expr.kind, K::NewtypeConvert(_)) {
         return fold_newtype_conversion(heads, expr, fuel, depth);
@@ -2343,6 +2478,11 @@ fn bind_staged_pattern<'layout>(
     charge(fuel, 1)?;
     match pattern {
         Pattern::Wild => Ok(()),
+        Pattern::ErrorResult { label, inner } => {
+            let payload = error_values::payload(value, label.as_ref(), fuel)?
+                .ok_or("staged error binding selected a different branch")?;
+            bind_staged_pattern(heads, inner, payload, locals, fuel, depth + 1)
+        }
         Pattern::Unit if matches!(value.kind, K::Unit) => Ok(()),
         Pattern::Binding { binding, inner } => {
             bind_staged_pattern(heads, inner, value, locals, fuel, depth + 1)?;
@@ -2524,7 +2664,7 @@ fn prepare_local_input_in_place<'layout>(
     })
 }
 
-// A closure's locals belong to a new invocation frame. Only closed producers
+// Closure bodies and call defaults belong to a new invocation frame. Only closed producers
 // are discovered here; enclosing values are not seeds for local evaluation.
 #[inline(never)]
 fn substitute_closure_locals<'layout>(
@@ -2579,8 +2719,8 @@ fn fold_machine_input<'layout>(
     let Term::Primitive(primitive) = expr.ty else {
         return Err("staged arithmetic requires a machine integer result".into());
     };
-    let (signed, width) = primitive
-        .fixed_integer_layout()
+    let (signed, width) = heads
+        .integer_layout(primitive)
         .ok_or("staged arithmetic requires a machine integer result")?;
     let operand = |value: &Expr, fuel: &mut usize| -> Result<MachineInteger, String> {
         if value.ty != expr.ty {
@@ -2678,7 +2818,7 @@ pub fn canonical_input_with_layouts(
     constant(layouts, expr, fuel, 0).map(|_| ())
 }
 
-// This accepts canonical immutable data and named comptime callable identities, never a call,
+// This accepts canonical immutable data and named callable identities, never a call,
 // local reference, pointer or expression whose evaluation could repeat effects.
 fn constant<'layout>(
     heads: impl Into<Layouts<'layout>>,
@@ -2692,7 +2832,12 @@ fn constant<'layout>(
     }
     charge(fuel, 1)?;
     Ok(match (&expr.kind, &expr.ty) {
-        (K::Function(declaration), ty) if ty.is_comptime_callable() => {
+        (K::Function(declaration), ty)
+            if matches!(
+                ty,
+                Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+            ) =>
+        {
             crate::completed_type(ty, &BTreeSet::new(), fuel)?;
             Term::FunctionValue {
                 declaration: *declaration,
@@ -2705,7 +2850,11 @@ fn constant<'layout>(
                 arguments,
             },
             ty,
-        ) if ty.is_comptime_callable() => {
+        ) if matches!(
+            ty,
+            Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+        ) =>
+        {
             crate::completed_type(ty, &BTreeSet::new(), fuel)?;
             for argument in arguments {
                 nir::type_computations::charge_term(argument, fuel)
@@ -2715,6 +2864,45 @@ fn constant<'layout>(
             Term::FunctionValue {
                 declaration: *declaration,
                 arguments: arguments.clone(),
+            }
+        }
+        (K::ErrorConvert { conversion, value }, ty) => {
+            use nir::error_results::Conversion as C;
+            charge(fuel, heads.len())?;
+            let tuple_heads: BTreeSet<_> = heads
+                .iter()
+                .filter(|head| head.role == nir::normal_forms::Role::Tuple)
+                .map(|head| head.declaration)
+                .collect();
+            nir::error_results::validate_conversion_with_tuple(
+                *conversion,
+                &value.ty,
+                ty,
+                fuel,
+                &mut |a, b| a == b,
+                &|head| tuple_heads.contains(&head),
+            )
+            .map_err(|error| error.to_string())?;
+            let payload = constant(heads, value, fuel, depth + 1)?;
+            match conversion {
+                C::Success | C::Failure => Term::ErrorValue {
+                    ty: Box::new(ty.clone()),
+                    label: (*conversion == C::Failure).then(|| Box::new(value.ty.clone())),
+                    value: Box::new(payload),
+                },
+                C::Embed | C::Product => {
+                    let plan = nir::error_results::transport_plan(
+                        &value.ty,
+                        ty,
+                        *conversion == C::Product,
+                        fuel,
+                        &mut |a, b| a == b,
+                        &|head| tuple_heads.contains(&head),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    plan.frozen(&payload, fuel)
+                        .map_err(|error| error.to_string())?
+                }
             }
         }
         (K::NewtypeConvert(value), ty) => {
@@ -2789,7 +2977,7 @@ fn constant<'layout>(
         }
         (K::Literal(Literal::UnsignedInteger(v)), Term::Primitive(p)) => {
             let value = comptime_runtime::Integer::from_u128(*v);
-            let Some((false, width)) = p.fixed_integer_layout() else {
+            let Some((false, width)) = heads.integer_layout(*p) else {
                 return Err("invalid staged unsigned integer type".into());
             };
             value.to_unsigned(width).map_err(|e| e.to_string())?;
@@ -2797,7 +2985,7 @@ fn constant<'layout>(
         }
         (K::Literal(Literal::SignedInteger(v)), Term::Primitive(p)) => {
             let value = comptime_runtime::Integer::from_i128(*v);
-            let Some((true, width)) = p.fixed_integer_layout() else {
+            let Some((true, width)) = heads.integer_layout(*p) else {
                 return Err("invalid staged signed integer type".into());
             };
             value.to_signed(width).map_err(|e| e.to_string())?;
@@ -2971,6 +3159,65 @@ pub fn prepare_input(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn platform_comparison_alias_retains_target_and_availability() {
+        use super::*;
+        let input = LocalId { owner: 1, index: 0 };
+        let alias = LocalId { owner: 1, index: 1 };
+        let make = |kind, primitive| Expr {
+            kind,
+            ty: Term::Primitive(primitive),
+            source: nir::program::SourceRange { start: 0, end: 1 },
+        };
+        let comparison = make(
+            K::ScalarLess(
+                Box::new(make(K::Local(input), Primitive::Usize)),
+                Box::new(make(
+                    K::Literal(Literal::UnsignedInteger(9)),
+                    Primitive::Usize,
+                )),
+            ),
+            Primitive::Bool,
+        );
+        let declaration = make(
+            K::Let {
+                binding: alias,
+                value: Box::new(comparison.clone()),
+            },
+            Primitive::Void,
+        );
+        for width in [32, 64] {
+            let target = Some(nir::target::TargetData::new(width).unwrap());
+            let layouts = Layouts::new(&[], &[]).with_target(target);
+            assert_eq!(
+                structural_boolean_dependencies_in(&comparison, target, &mut 1000).unwrap(),
+                Some(BTreeSet::from([input]))
+            );
+            assert_eq!(
+                structural_boolean_dependencies(&comparison, &mut 1000).unwrap(),
+                None
+            );
+            for unavailable in [BTreeSet::new(), BTreeSet::from([input])] {
+                let mut values = std::collections::BTreeMap::from([(
+                    input,
+                    make(K::Literal(Literal::UnsignedInteger(4)), Primitive::Usize),
+                )]);
+                collect_forwarded_locals(
+                    layouts,
+                    &declaration,
+                    &mut values,
+                    &unavailable,
+                    &mut 10000,
+                )
+                .unwrap();
+                if unavailable.is_empty() {
+                    assert_eq!(values[&alias].kind, K::Literal(Literal::Bool(true)));
+                } else {
+                    assert!(!values.contains_key(&alias));
+                }
+            }
+        }
+    }
     use super::*;
 
     #[test]
@@ -3470,7 +3717,7 @@ mod tests {
     fn nested_scalar_comparisons_and_blocks_reach_logical_depth_limits() {
         let yes = expr(K::Literal(Literal::Bool(true)), Primitive::Bool);
         for mode in 0..3 {
-            for depth in [16, 160] {
+            for depth in [16, 64, 127, 128, 160] {
                 let mut value = yes.clone();
                 for _ in 0..depth {
                     value = match mode {
@@ -3489,7 +3736,7 @@ mod tests {
                     };
                 }
                 let result = fold_value(&value, &mut 1_000_000);
-                if depth == 160 {
+                if depth >= 128 {
                     assert!(result.unwrap_err().contains("depth"), "mode={mode}");
                 } else {
                     assert_eq!(
@@ -3678,6 +3925,35 @@ mod tests {
             let mismatched = expr(K::FloatNegate(Box::new(value(0.0))), other);
             assert!(!total_float_operation(&mismatched));
             assert!(fold_value(&mismatched, &mut 1000).is_err());
+        }
+    }
+
+    #[test]
+    fn staged_platform_bit_representations_require_matching_target() {
+        for width in [32, 64] {
+            let layouts = Layouts::new(&[], &[])
+                .with_target(Some(nir::target::TargetData::new(width).unwrap()));
+            let value = expr(K::Literal(Literal::SignedInteger(-1)), Primitive::Isize);
+            let bits = expr(
+                K::TakeBits(Box::new(value.clone())),
+                Primitive::BitVec(width as usize),
+            );
+            let converted = expr(K::BitConvert(Box::new(bits.clone())), Primitive::Isize);
+            assert!(fold_value(&converted, &mut 10000).is_err());
+            assert!(fold_value_with_layouts(layouts, &converted, &mut 1).is_err());
+            assert_eq!(
+                fold_value_with_layouts(layouts, &converted, &mut 10000).unwrap(),
+                value
+            );
+            assert!(
+                structural_boolean_dependencies_in(&bits, layouts.target, &mut 1000)
+                    .unwrap()
+                    .is_some()
+            );
+            let wrong = Layouts::new(&[], &[]).with_target(Some(
+                nir::target::TargetData::new(if width == 32 { 64 } else { 32 }).unwrap(),
+            ));
+            assert!(fold_value_with_layouts(wrong, &converted, &mut 10000).is_err());
         }
     }
 
@@ -5168,3 +5444,6 @@ mod newtype_staging_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod error_transport_tests;

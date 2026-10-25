@@ -1,0 +1,23 @@
+-- Build with --copy-protocol Duplicate --drop-protocol Retire.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+typealias Word = .u32'builtin;
+typealias Bits5 = .BitVec'builtin<5>;
+enum Instruction {
+    .base_type Word,
+    .width 32,
+    .discrete_tag true,
+    add: 0b0000000 (rs2: Bits5) (rs1: Bits5) 000 (rd: Bits5) 0110011,
+    sub: 0b0100000 (rs2: Bits5) (rs1: Bits5) 000 (rd: Bits5) 0110011,
+}
+impl Duplicate for Instruction {}
+fn run() -> bool {
+    let instruction = Instruction.sub {rd: 1, rs2: 3, rs1: 2};
+    let encoding = (instruction'bitvec).as(Word);
+    let destination = instruction match {
+        .add {rd} => rd.as(Word),
+        .sub {rd} => rd.as(Word),
+    };
+    encoding == 1076953267 and destination == 1
+}

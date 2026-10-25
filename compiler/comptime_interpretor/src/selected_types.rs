@@ -84,6 +84,10 @@ fn normalize(
             .collect()
     };
     Ok(match ty {
+        Term::ErrorResult { errors, result } => Term::error_result(
+            many(errors, fuel)?,
+            normalize(result, values, fuel, depth + 1)?,
+        ),
         Term::Computation { effects, result } => {
             *fuel = fuel
                 .checked_sub(effects.len())
@@ -162,6 +166,21 @@ fn normalize(
                     .collect::<Result<_, ErrorKind>>()?,
             )
         }
+        Term::ErrorValue { ty, label, value } => {
+            let Term::ErrorResult { errors, result } = ty.as_ref() else {
+                return Err(ErrorKind::Type);
+            };
+            Term::error_value(
+                many(errors, fuel)?,
+                normalize(result, values, fuel, depth + 1)?,
+                match label {
+                    Some(label) => Some(Box::new(normalize(label, values, fuel, depth + 1)?)),
+                    None => None,
+                },
+                normalize(value, values, fuel, depth + 1)?,
+            )
+            .map_err(|_| ErrorKind::Type)?
+        }
         Term::NominalValue {
             ty,
             variant,
@@ -190,6 +209,9 @@ fn normalize(
         Term::Pointer(inner) => Term::Pointer(Box::new(normalize(inner, values, fuel, depth + 1)?)),
         Term::ComptimeFunction(inner) => {
             Term::ComptimeFunction(Box::new(normalize(inner, values, fuel, depth + 1)?))
+        }
+        Term::UnsafeFunction(inner) => {
+            Term::UnsafeFunction(Box::new(normalize(inner, values, fuel, depth + 1)?))
         }
         Term::Closure {
             environment,
@@ -395,5 +417,59 @@ mod tests {
             }],
         };
         assert!(!same(&projected, &opaque, &values));
+    }
+
+    #[test]
+    fn selected_error_views_resolve_labels_success_and_missing_evidence() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let character = Term::Primitive(Primitive::Char);
+        let label = value(boolean.clone());
+        let success = value(Term::error_result(vec![character.clone()], boolean.clone()));
+        let values = HashMap::from([(key(2), &label), (key(3), &success)]);
+        let input = Term::error_result(vec![projection(2), boolean.clone()], projection(3));
+        let expected = Term::error_result(vec![boolean.clone(), character], boolean);
+        assert_eq!(view(&input, &values).unwrap(), expected);
+        assert!(same(&input, &expected, &values));
+        assert_eq!(
+            view(&input, &HashMap::new()).unwrap_err(),
+            ErrorKind::UnmaterializedDispatch
+        );
+        assert_eq!(
+            normalize(&input, &values, &mut 0, 0).unwrap_err(),
+            ErrorKind::StepsExhausted
+        );
+    }
+
+    #[test]
+    fn selected_frozen_success_flattens_only_with_matching_domain() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let character = Term::Primitive(Primitive::Char);
+        let inner_type = Term::error_result(vec![character.clone()], boolean.clone());
+        let selected = value(inner_type.clone());
+        let values = HashMap::from([(key(2), &selected)]);
+        let inner = Term::ErrorValue {
+            ty: Box::new(inner_type.clone()),
+            label: Some(Box::new(character.clone())),
+            value: Box::new(Term::Char('x')),
+        };
+        let input = Term::ErrorValue {
+            ty: Box::new(Term::error_result(vec![boolean.clone()], projection(2))),
+            label: None,
+            value: Box::new(inner.clone()),
+        };
+        let expected = Term::ErrorValue {
+            ty: Box::new(Term::error_result(
+                vec![boolean.clone(), character.clone()],
+                boolean.clone(),
+            )),
+            label: Some(Box::new(character)),
+            value: Box::new(Term::Char('x')),
+        };
+        assert_eq!(view(&input, &values).unwrap(), expected);
+        let wrong = value(boolean);
+        assert_eq!(
+            view(&input, &HashMap::from([(key(2), &wrong)])).unwrap_err(),
+            ErrorKind::Type
+        );
     }
 }

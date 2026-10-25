@@ -66,6 +66,30 @@ impl TraitDecision<'_, '_> {
     }
 }
 
+// Each operation stays within its assigned slot; only reported work is
+// withdrawn from the shared query allowance, including errors.
+fn metered<T>(fuel: &mut usize, allowance: Budget, run: impl FnOnce(&mut Budget) -> T) -> T {
+    let mut local = Budget {
+        steps: allowance.steps.min(*fuel),
+        ..allowance
+    };
+    let before = local.steps;
+    let result = run(&mut local);
+    *fuel -= before - local.steps.min(before);
+    result
+}
+
+// Unmetered operations retain conservative charging, bounded by the actual
+// remaining counter rather than receiving fresh fuel after exhaustion.
+fn reserved<T>(fuel: &mut usize, allowance: Budget, run: impl FnOnce(Budget) -> T) -> T {
+    let local = Budget {
+        steps: allowance.steps.min(*fuel),
+        ..allowance
+    };
+    *fuel -= local.steps;
+    run(local)
+}
+
 impl<'w> World<'w> {
     /// Check a retained type contract without publishing world facts into the
     /// caller context. The scoped support is consumed by this check only.
@@ -82,8 +106,8 @@ impl<'w> World<'w> {
         Ok(self.prove_proposition(goal, budget)?.outcome().clone())
     }
     /// Share a single allowance across the direct proof and world-dependent
-    /// fallback. Trait decisions reserve their bounded allowance; PTC returns
-    /// the work it actually consumed.
+    /// fallback. Trait selection and PTC return unused work; operations without
+    /// accounting still reserve their bounded allowance.
     pub fn check_predicate_metered(
         &self,
         predicate: &nir::program::TypePredicate,
@@ -152,8 +176,10 @@ impl<'w> World<'w> {
         let mut context = self.context.fork();
         let mut decisions = Vec::new();
         for query in queries {
-            budget.steps -= allowance.steps;
-            let decision = self.decide_trait(query, allowance)?;
+            let mut query_budget = allowance;
+            let decision = self.decide_trait_metered(query, &mut query_budget);
+            budget.steps -= allowance.steps - query_budget.steps;
+            let decision = decision?;
             let fact = Formula::Trait(query.clone());
             match decision.truth {
                 TraitTruth::Established => context.assume(fact),
@@ -225,160 +251,190 @@ impl<'w> World<'w> {
         query: &TraitQuery,
         budget: Budget,
     ) -> Result<TraitDecision<'a, 'w>, String> {
+        self.decide_trait_metered(query, &mut { budget })
+    }
+
+    /// Return unused selection/proof allowance even if formation fails.
+    pub fn decide_trait_metered<'a>(
+        &'a self,
+        query: &TraitQuery,
+        remaining: &mut Budget,
+    ) -> Result<TraitDecision<'a, 'w>, String> {
+        let budget = *remaining;
         let mut fuel = budget.steps;
-        if query.subject.sort() != nir::Sort::Type {
-            return Err("trait proposition requires a Type subject".into());
-        }
-        for input in query.inputs() {
-            crate::associated::charge_projection_copy(input, &mut fuel)?;
-            input
-                .check_scope(self.context.scope())
-                .map_err(|e| format!("invalid trait proposition input: {e:?}"))?;
-        }
-        if !crate::ptc::within_limits(
-            &Formula::Trait(query.clone()),
-            budget.max_depth.min(128),
-            &mut fuel,
-        ) {
-            return Err("trait proposition input budget exhausted".into());
-        }
-        let contract = self
-            .traits
-            .iter()
-            .find(|t| t.declaration == query.interface)
-            .ok_or("trait proposition references an unknown interface")?;
-        if contract.type_parameters.len() != query.arguments.len() {
-            return Err("trait proposition interface argument count mismatch".into());
-        }
-        contract.validate_arguments_with_layouts(
-            &query.subject,
-            &query.arguments,
-            self.context.scope(),
-            self.traits,
-            &self.index.parameter_domains,
-            &mut fuel,
-            |left, right, fuel| {
-                super::equivalent_domains(self.context, left, right, budget.max_depth, fuel)
-            },
-            Some(&self.index.nominal_layouts),
-        )?;
-        let parameter_binders = contract.parameter_binders(&mut fuel)?;
-        // Reserve separate bounded allowances for every proof/selection query.
-        let count = contract
-            .requirements
-            .len()
-            .saturating_add(contract.capabilities.len().saturating_mul(2))
-            .saturating_add(query.arguments.len())
-            .saturating_add(4);
-        let allowance = Budget {
-            steps: fuel / count,
-            ..budget
-        };
-        if allowance.steps == 0 {
-            return Err("trait proposition budget exhausted".into());
-        }
-        for requirement in &contract.requirements {
-            if requirement.mentions_rigid(contract.self_parameter) {
-                continue;
+        let result = (|| {
+            if query.subject.sort() != nir::Sort::Type {
+                return Err("trait proposition requires a Type subject".into());
             }
-            let requirement = requirement
-                .instantiate_parameters_in_scope(
-                    &parameter_binders,
-                    &query.arguments,
-                    self.context.scope(),
-                )
-                .map_err(|e| e.to_string())?;
-            if !matches!(
-                self.context
-                    .prove(Formula::from_predicate(&requirement), allowance),
-                Outcome::Entailed(_)
+            for input in query.inputs() {
+                crate::associated::charge_projection_copy(input, &mut fuel)?;
+                input
+                    .check_scope(self.context.scope())
+                    .map_err(|e| format!("invalid trait proposition input: {e:?}"))?;
+            }
+            if !crate::ptc::within_limits(
+                &Formula::Trait(query.clone()),
+                budget.max_depth.min(128),
+                &mut fuel,
             ) {
-                return Err("trait proposition interface requirement is not established".into());
+                return Err("trait proposition input budget exhausted".into());
             }
-        }
-        for requirement in &contract.capabilities {
-            if requirement.mentions_rigid(contract.self_parameter) {
-                continue;
+            let contract = self
+                .traits
+                .iter()
+                .find(|t| t.declaration == query.interface)
+                .ok_or("trait proposition references an unknown interface")?;
+            if contract.type_parameters.len() != query.arguments.len() {
+                return Err("trait proposition interface argument count mismatch".into());
             }
-            let requirement = requirement
-                .instantiate_parameters_in_scope(
-                    &parameter_binders,
-                    &query.arguments,
-                    self.context.scope(),
-                )
-                .map_err(|e| e.to_string())?;
-            if self.given_in_context(&requirement, allowance).is_none() {
-                let (formed, _) =
-                    self.proposition_input_views(&TraitQuery::from(&requirement), allowance)?;
-                if formed.inputs().any(|ty| ty.check_scope(&[]).is_err()) {
-                    return Err("trait proposition interface capability is not established".into());
+            contract.validate_arguments_with_layouts(
+                &query.subject,
+                &query.arguments,
+                self.context.scope(),
+                self.traits,
+                &self.index.parameter_domains,
+                &mut fuel,
+                |left, right, fuel| {
+                    super::equivalent_domains(self.context, left, right, budget.max_depth, fuel)
+                },
+                Some(&self.index.nominal_layouts),
+            )?;
+            let parameter_binders = contract.parameter_binders(&mut fuel)?;
+            // Reserve separate bounded allowances for every proof/selection query.
+            let count = contract
+                .requirements
+                .len()
+                .saturating_add(contract.capabilities.len().saturating_mul(2))
+                .saturating_add(query.arguments.len())
+                .saturating_add(4);
+            let allowance = Budget {
+                steps: fuel / count,
+                ..budget
+            };
+            if allowance.steps == 0 {
+                return Err("trait proposition budget exhausted".into());
+            }
+            for requirement in &contract.requirements {
+                if requirement.mentions_rigid(contract.self_parameter) {
+                    continue;
                 }
-                let resolution = self.resolve_instance(
-                    &InterfaceInstance {
-                        declaration: formed.interface,
-                        arguments: formed.arguments,
-                    },
-                    &formed.subject,
-                    allowance,
-                )?;
-                if !matches!(resolution.types.selection, Selection::Selected(_)) {
-                    return Err("trait proposition interface capability is not established".into());
+                let requirement = requirement
+                    .instantiate_parameters_in_scope(
+                        &parameter_binders,
+                        &query.arguments,
+                        self.context.scope(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if !matches!(
+                    metered(&mut fuel, allowance, |budget| self
+                        .context
+                        .prove_metered(Formula::from_predicate(&requirement), budget)),
+                    Outcome::Entailed(_)
+                ) {
+                    return Err("trait proposition interface requirement is not established".into());
                 }
             }
-        }
-        let requirement = TraitRequirement {
-            interface: query.interface,
-            interface_arguments: query.arguments.clone(),
-            subject: query.subject.clone(),
-        };
-        if let Some(given) = self.given_in_context(&requirement, allowance) {
-            return Ok(TraitDecision {
-                world: self,
-                query: query.clone(),
-                truth: TraitTruth::Established,
-                given: Some(given),
-                resolution: None,
-                input_equalities: Vec::new(),
-            });
-        }
-        let (selected_query, input_equalities) = self.proposition_input_views(query, allowance)?;
-        if selected_query
-            .inputs()
-            .any(|ty| ty.check_scope(&[]).is_err())
-        {
-            return Ok(TraitDecision {
-                world: self,
-                query: query.clone(),
-                truth: TraitTruth::Pending,
-                given: None,
-                resolution: None,
-                input_equalities,
-            });
-        }
-        let resolution = self.resolve_instance(
-            &InterfaceInstance {
-                declaration: selected_query.interface,
-                arguments: selected_query.arguments.clone(),
-            },
-            &selected_query.subject,
-            allowance,
-        )?;
-        let truth = match &resolution.types.selection {
-            Selection::Selected(id)
-                if matches!(
-                    resolution.types.assessments.get(id),
-                    Some(TypeAssessment::Applicable(_))
-                ) && matches!(
-                    resolution.qualifications.get(id),
-                    Some(Qualification::Proved(_))
-                ) =>
+            for requirement in &contract.capabilities {
+                if requirement.mentions_rigid(contract.self_parameter) {
+                    continue;
+                }
+                let requirement = requirement
+                    .instantiate_parameters_in_scope(
+                        &parameter_binders,
+                        &query.arguments,
+                        self.context.scope(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if metered(&mut fuel, allowance, |budget| {
+                    self.given_in_context_metered(&requirement, budget)
+                })
+                .is_none()
+                {
+                    let (formed, _) = reserved(&mut fuel, allowance, |budget| {
+                        self.proposition_input_views(&TraitQuery::from(&requirement), budget)
+                    })?;
+                    if formed.inputs().any(|ty| ty.check_scope(&[]).is_err()) {
+                        return Err(
+                            "trait proposition interface capability is not established".into()
+                        );
+                    }
+                    let resolution = metered(&mut fuel, allowance, |budget| {
+                        self.resolve_instance_metered(
+                            &InterfaceInstance {
+                                declaration: formed.interface,
+                                arguments: formed.arguments,
+                            },
+                            &formed.subject,
+                            budget,
+                        )
+                    })?;
+                    if !matches!(resolution.types.selection, Selection::Selected(_)) {
+                        return Err(
+                            "trait proposition interface capability is not established".into()
+                        );
+                    }
+                }
+            }
+            let requirement = TraitRequirement {
+                interface: query.interface,
+                interface_arguments: query.arguments.clone(),
+                subject: query.subject.clone(),
+            };
+            if let Some(given) = metered(&mut fuel, allowance, |budget| {
+                self.given_in_context_metered(&requirement, budget)
+            }) {
+                return Ok(TraitDecision {
+                    world: self,
+                    query: query.clone(),
+                    truth: TraitTruth::Established,
+                    given: Some(given),
+                    resolution: None,
+                    input_equalities: Vec::new(),
+                });
+            }
+            let (selected_query, input_equalities) = reserved(&mut fuel, allowance, |budget| {
+                self.proposition_input_views(query, budget)
+            })?;
+            if selected_query
+                .inputs()
+                .any(|ty| ty.check_scope(&[]).is_err())
             {
-                TraitTruth::Established
+                return Ok(TraitDecision {
+                    world: self,
+                    query: query.clone(),
+                    truth: TraitTruth::Pending,
+                    given: None,
+                    resolution: None,
+                    input_equalities,
+                });
             }
-            Selection::NoApplicableCandidate
-                if self.closed_trait_inputs(&selected_query, allowance)
-                    && resolution.types.assessments.iter().all(
-                        |(id, assessment)| match assessment {
+            let resolution = metered(&mut fuel, allowance, |budget| {
+                self.resolve_instance_metered(
+                    &InterfaceInstance {
+                        declaration: selected_query.interface,
+                        arguments: selected_query.arguments.clone(),
+                    },
+                    &selected_query.subject,
+                    budget,
+                )
+            })?;
+            let truth = match &resolution.types.selection {
+                Selection::Selected(id)
+                    if matches!(
+                        resolution.types.assessments.get(id),
+                        Some(TypeAssessment::Applicable(_))
+                    ) && matches!(
+                        resolution.qualifications.get(id),
+                        Some(Qualification::Proved(_))
+                    ) =>
+                {
+                    TraitTruth::Established
+                }
+                Selection::NoApplicableCandidate
+                    if reserved(&mut fuel, allowance, |budget| {
+                        self.closed_trait_inputs(&selected_query, budget)
+                    }) && resolution.types.assessments.iter().all(|(id, assessment)| {
+                        match assessment {
                             TypeAssessment::Excluded(_)
                             | TypeAssessment::ValueIndexMismatch { .. }
                             | TypeAssessment::ForbiddenSubject(_) => true,
@@ -387,21 +443,24 @@ impl<'w> World<'w> {
                                 Some(Qualification::Excluded(_))
                             ),
                             _ => false,
-                        },
-                    ) =>
-            {
-                TraitTruth::Excluded
-            }
-            _ => TraitTruth::Pending,
-        };
-        Ok(TraitDecision {
-            world: self,
-            query: query.clone(),
-            truth,
-            given: None,
-            resolution: Some(resolution),
-            input_equalities,
-        })
+                        }
+                    }) =>
+                {
+                    TraitTruth::Excluded
+                }
+                _ => TraitTruth::Pending,
+            };
+            Ok(TraitDecision {
+                world: self,
+                query: query.clone(),
+                truth,
+                given: None,
+                resolution: Some(resolution),
+                input_equalities,
+            })
+        })();
+        remaining.steps = fuel;
+        result
     }
 }
 

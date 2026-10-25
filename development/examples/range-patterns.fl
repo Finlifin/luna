@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Int = .Integer'builtin;
 typealias Bool = true'type;
 typealias Byte = .u8'builtin;
@@ -20,7 +23,7 @@ comptime fn upper() -> Int { 9 }
 comptime fn computed(value: Int) -> Bool {
     value match { < lower() > ..= < upper() > => true, _ => false }
 }
-comptime fn run() -> (Int, Int, Int, Int, Bool, Bool, Bool, Bool) {
+comptime fn run() -> Tuple<Int, Int, Int, Int, Bool, Bool, Bool, Bool> {
     (classify(-1), classify(9), classify(20), classify(21), byte(255),
      digit('5'), bounded(3, 7, 2), any(false))
 }

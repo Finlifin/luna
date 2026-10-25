@@ -28,10 +28,93 @@ pub fn compile_with_resource_protocols(
     copy: Option<&str>,
     drop: Option<&str>,
 ) -> Result<Artifact, String> {
+    compile_bound_with_resource_protocols(options, copy, drop).map(|(artifact, _)| artifact)
+}
+
+/// Keep source-selected identities available to downstream execution.
+pub fn compile_bound_with_resource_protocols(
+    options: &Options,
+    copy: Option<&str>,
+    drop: Option<&str>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    compile_bound_with_host_protocols(options, copy, drop, None, None, None, &[])
+}
+
+pub fn compile_bound_with_host_protocols(
+    options: &Options,
+    copy: Option<&str>,
+    drop: Option<&str>,
+    host_fma: Option<&str>,
+    host_sqrt: Option<&str>,
+    host_copysign: Option<&str>,
+    host_intrinsics: &[(nir::intrinsics::Operation, String)],
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
     let mut selectors = source_protocols(options);
+    selectors.host_fma = host_fma;
+    selectors.host_sqrt = host_sqrt;
+    selectors.host_copysign = host_copysign;
+    selectors.host_intrinsics = host_intrinsics;
     selectors.copy = copy;
     selectors.drop = drop;
-    compile_in_package_with_source_protocols(options, 0, &Default::default(), selectors)
+    compile_bound(options, 0, &Default::default(), selectors)
+}
+
+pub fn compile_bound_for_native_host(
+    options: &Options,
+    copy: Option<&str>,
+    drop: Option<&str>,
+    host_fma: Option<&str>,
+    host_sqrt: Option<&str>,
+    host_copysign: Option<&str>,
+    host_intrinsics: &[(nir::intrinsics::Operation, String)],
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    let target = crate::host::Toolchain::default()
+        .target_layout()?
+        .semantic_target()?;
+    let mut selectors = source_protocols(options);
+    selectors.host_fma = host_fma;
+    selectors.host_sqrt = host_sqrt;
+    selectors.host_copysign = host_copysign;
+    selectors.host_intrinsics = host_intrinsics;
+    selectors.copy = copy;
+    selectors.drop = drop;
+    compile_bound_for_target(options, 0, &Default::default(), selectors, Some(target))
+}
+
+/// Discovery can succeed without a backend for target-independent sources.
+/// The native runner diagnoses toolchain failures for tests actually selected;
+/// no target-dependent integer is admitted when this query is unavailable.
+pub fn native_test_target() -> Option<nir::target::TargetData> {
+    crate::host::Toolchain::default()
+        .target_layout()
+        .ok()?
+        .semantic_target()
+        .ok()
+}
+
+pub fn compile_bound_for_native_tests(
+    options: &Options,
+    copy: Option<&str>,
+    drop: Option<&str>,
+    host_fma: Option<&str>,
+    host_sqrt: Option<&str>,
+    host_copysign: Option<&str>,
+    host_intrinsics: &[(nir::intrinsics::Operation, String)],
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    let mut selectors = source_protocols(options);
+    selectors.host_fma = host_fma;
+    selectors.host_sqrt = host_sqrt;
+    selectors.host_copysign = host_copysign;
+    selectors.host_intrinsics = host_intrinsics;
+    selectors.copy = copy;
+    selectors.drop = drop;
+    compile_bound_for_target(
+        options,
+        0,
+        &Default::default(),
+        selectors,
+        native_test_target(),
+    )
 }
 
 /// Compile one selected source package under a driver-assigned semantic identity.
@@ -61,22 +144,44 @@ pub fn compile_in_package_with_source_protocols(
     protocols: &elaboration::program::Protocols,
     selectors: crate::protocols::type_constructors::Selectors<'_>,
 ) -> Result<Artifact, String> {
-    if options.literal_into_protocol.is_some() && options.emit != Emit::Nir {
-        return Err("LiteralInto protocol binding requires NIR elaboration".into());
-    }
-    if options.index_protocol.is_some() && options.emit != Emit::Nir {
-        return Err("Index protocol binding requires NIR elaboration".into());
-    }
-    if options.splice_protocol.is_some() && options.emit != Emit::Nir {
-        return Err("Splice protocol binding requires NIR elaboration".into());
-    }
-    if (options.meta_list_type.is_some()
-        || options.tuple_type.is_some()
-        || options.optional_type.is_some())
-        && options.emit != Emit::Nir
-    {
-        return Err("type constructor binding requires NIR elaboration".into());
-    }
+    compile_bound(options, package_identity, protocols, selectors).map(|(artifact, _)| artifact)
+}
+
+fn compile_bound(
+    options: &Options,
+    package_identity: u64,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    compile_bound_for_target(options, package_identity, protocols, selectors, None)
+}
+
+/// Compile for explicit semantic target facts supplied by the build driver.
+pub fn compile_for_target(
+    options: &Options,
+    target: nir::target::TargetData,
+) -> Result<Artifact, String> {
+    compile_bound_for_target(
+        options,
+        0,
+        &Default::default(),
+        source_protocols(options),
+        Some(target),
+    )
+    .map(|(artifact, _)| artifact)
+}
+
+/// Compile with explicit source protocols and optional target facts supplied by
+/// the build driver; retain the selected protocol identities for later stages.
+pub fn compile_bound_for_target(
+    options: &Options,
+    package_identity: u64,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    target: Option<nir::target::TargetData>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    source_protocols(options).validate_stage(options.emit)?;
+    selectors.validate_stage(options.emit)?;
     let cwd = std::env::current_dir()
         .map_err(|error| format!("cannot determine the current directory: {error}"))?;
     let mut config = CompilerConfig::new("input", cwd);
@@ -90,7 +195,14 @@ pub fn compile_in_package_with_source_protocols(
             ));
         }
         if options.emit != Emit::Ast {
-            return compile_sysroot(options, package_identity, path, protocols, selectors);
+            return compile_sysroot(
+                options,
+                package_identity,
+                path,
+                protocols,
+                selectors,
+                target,
+            );
         }
     }
 
@@ -124,9 +236,12 @@ pub fn compile_in_package_with_source_protocols(
         return Err(instance.diag_ctx.failure_summary("parsing"));
     }
     let ast = parser.finalize();
+    ast.validate_structure()
+        .map_err(|error| error.to_string())?;
     if options.emit == Emit::Ast {
-        return Ok(Artifact::Ast(
-            ast.dump_to_s_expression(ast.root, &sess.source_map),
+        return Ok((
+            Artifact::Ast(ast.dump_to_s_expression(ast.root, &sess.source_map)),
+            protocols.clone(),
         ));
     }
     instance.vfs_mut().set_ast(file_id, ast);
@@ -233,24 +348,36 @@ pub fn compile_in_package_with_source_protocols(
             selectors,
             protocols,
         )?;
-        let program = elaboration::program::elaborate_packages_with_protocols(
+        let program = elaboration::program::elaborate_packages_for_target(
             package.package(),
             &std::collections::BTreeMap::from([(0, package_identity)]),
             &protocols,
+            target,
         )
         .map_err(|error| format!("elaboration failed: {error}"))?;
         crate::protocols::type_constructors::validate(&program, &protocols)?;
-        return Ok(Artifact::Nir(program));
+        return Ok((Artifact::Nir(program), protocols));
     }
-    Ok(Artifact::Hir(package.package().dump_to_lisp()))
+    Ok((
+        Artifact::Hir(package.package().dump_to_lisp()),
+        protocols.clone(),
+    ))
 }
 
-fn source_protocols(options: &Options) -> crate::protocols::type_constructors::Selectors<'_> {
+pub(crate) fn source_protocols(
+    options: &Options,
+) -> crate::protocols::type_constructors::Selectors<'_> {
     crate::protocols::type_constructors::Selectors {
-        list_pattern: None,
+        host_fma: None,
+        host_sqrt: None,
+        host_copysign: None,
+        host_intrinsics: &[],
+        list_pattern: options.list_pattern_protocol.as_deref(),
         copy: None,
         drop: None,
         index: options.index_protocol.as_deref(),
+        ordering: options.ord_protocol.as_deref(),
+        equality: options.eq_protocol.as_deref(),
         literal_into: options.literal_into_protocol.as_deref(),
         arithmetic: std::array::from_fn(|index| options.arithmetic_protocols[index].as_deref()),
         splice: options.splice_protocol.as_deref(),
@@ -266,7 +393,8 @@ fn compile_sysroot(
     root: &std::path::Path,
     protocols: &elaboration::program::Protocols,
     selectors: crate::protocols::type_constructors::Selectors<'_>,
-) -> Result<Artifact, String> {
+    target: Option<nir::target::TargetData>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
     use crate::packages::SourcePackage;
     let mut packages = vec![SourcePackage {
         resolution_id: 0,
@@ -277,7 +405,15 @@ fn compile_sysroot(
     // Standalone-driver identities are local to this package set. Build tools
     // needing persistent identities use packages::compile_with_builtin instead.
     let mut next_identity = 1u64;
-    for name in ["builtin", "std", "meta", "build", "attrs", "verification"] {
+    for name in [
+        "builtin",
+        "std",
+        "meta",
+        "build",
+        "attrs",
+        "verification",
+        "math",
+    ] {
         let directory = root.join(name);
         if !directory.exists() && name != "builtin" && name != "std" {
             continue;
@@ -321,8 +457,15 @@ fn compile_sysroot(
     } else {
         Default::default()
     };
-    let selectors = defaults.apply(selectors, protocols);
-    crate::packages::compile_stage_with_selectors(
+    let host_intrinsics = defaults.merged_host_intrinsics(selectors, protocols);
+    let selectors = defaults.apply(
+        crate::protocols::type_constructors::Selectors {
+            host_intrinsics: &host_intrinsics,
+            ..selectors
+        },
+        protocols,
+    );
+    crate::packages::compile_observed_for_target(
         &packages,
         &dependencies,
         0,
@@ -331,6 +474,8 @@ fn compile_sysroot(
         options.output.as_deref(),
         protocols,
         selectors,
+        None,
+        target,
     )
 }
 

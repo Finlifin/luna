@@ -40,6 +40,7 @@ fn package(body: Expr) -> Package {
             phase: FunctionPhase::Comptime,
             inline: false,
             pure: true,
+            is_unsafe: false,
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,
@@ -846,6 +847,173 @@ fn residual_nominal_payload_reification_keeps_indices_tags_and_closed_export_rul
                     &Default::default(),
                     &authority
                 )
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn frozen_error_values_round_trip_and_reject_invalid_branch_or_payload() {
+    let ty = Term::error_result(vec![bool_ty(), Term::Primitive(P::Char)], bool_ty());
+    let mut package = package(expr(ty.clone(), K::Local(local())));
+    let Term::Function { parameters, .. } = &mut package.functions[0].signature else {
+        unreachable!()
+    };
+    parameters[0].ty = ty.clone();
+    for (branch, payload) in [
+        (None, Value::Bool(true)),
+        (Some(0), Value::Bool(false)),
+        (Some(1), Value::Char('x')),
+    ] {
+        let value = Value::ErrorResult {
+            ty: ty.clone(),
+            error: branch,
+            value: Box::new(payload),
+        };
+        let frozen = value
+            .clone()
+            .into_normal_term(&mut Default::default())
+            .unwrap();
+        frozen.check_scope(&[]).unwrap();
+        assert_eq!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke_with_normal_arguments(id(0), vec![(ty.clone(), frozen.clone())])
+                .unwrap(),
+            value
+        );
+        assert!(matches!(frozen, Term::ErrorValue { .. }));
+    }
+    for frozen in [
+        Term::ErrorValue {
+            ty: Box::new(ty.clone()),
+            label: Some(Box::new(Term::Primitive(P::Str))),
+            value: Box::new(Term::String("x".into())),
+        },
+        Term::ErrorValue {
+            ty: Box::new(ty.clone()),
+            label: Some(Box::new(bool_ty())),
+            value: Box::new(Term::Char('x')),
+        },
+        Term::ErrorValue {
+            ty: Box::new(ty.clone()),
+            label: None,
+            value: Box::new(Term::Char('x')),
+        },
+    ] {
+        assert!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke_with_normal_arguments(id(0), vec![(ty.clone(), frozen)])
+                .is_err()
+        );
+    }
+    let invalid = Value::ErrorResult {
+        ty,
+        error: Some(2),
+        value: Box::new(Value::Bool(true)),
+    };
+    assert!(invalid.into_normal_term(&mut Default::default()).is_err());
+}
+
+#[test]
+fn pending_error_branch_cannot_be_reconstructed_as_a_selected_success() {
+    let inner = Term::error_result(vec![bool_ty()], bool_ty());
+    let ty = Term::error_result(vec![Term::Primitive(P::Char)], inner.clone());
+    let pending = Term::error_value(
+        vec![Term::Primitive(P::Char)],
+        inner,
+        None,
+        Term::Rigid {
+            declaration: id(10),
+            sort: Sort::ComptimeValue,
+        },
+    )
+    .unwrap();
+    let mut package = package(expr(ty.clone(), K::Local(local())));
+    let Term::Function { parameters, .. } = &mut package.functions[0].signature else {
+        unreachable!()
+    };
+    parameters[0].ty = ty.clone();
+    assert_eq!(
+        Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .invoke_with_normal_arguments(id(0), vec![(ty, pending)])
+            .unwrap_err()
+            .kind,
+        ErrorKind::AbstractValueUnresolved
+    );
+}
+
+#[test]
+fn explicit_physical_error_rows_freeze_and_use_checked_input_transport() {
+    let errors = vec![Term::Primitive(P::Char), bool_ty()];
+    let ty = Term::ErrorResult {
+        errors: errors.clone(),
+        result: Box::new(bool_ty()),
+    };
+    let canonical = Term::error_result(errors.clone(), bool_ty());
+    let mut package = package(expr(canonical.clone(), K::Local(local())));
+    let Term::Function { parameters, .. } = &mut package.functions[0].signature else {
+        unreachable!()
+    };
+    parameters[0].ty = canonical.clone();
+    let transport = nir::error_results::transport_plan(
+        &ty,
+        &canonical,
+        false,
+        &mut 10000,
+        &mut |a, b| a == b,
+        &|_| false,
+    )
+    .unwrap();
+    for (error, payload) in [
+        (None, Value::Bool(true)),
+        (Some(0), Value::Char('x')),
+        (Some(1), Value::Bool(false)),
+    ] {
+        let value = Value::ErrorResult {
+            ty: ty.clone(),
+            error,
+            value: Box::new(payload.clone()),
+        };
+        let frozen = value
+            .clone()
+            .into_normal_term(&mut Default::default())
+            .unwrap();
+        assert!(
+            matches!(&frozen,Term::ErrorValue {ty:domain,..} if domain.as_ref()==&ty),
+            "{frozen}"
+        );
+        assert!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke_with_normal_arguments(id(0), vec![(ty.clone(), frozen.clone())])
+                .is_err()
+        );
+        let transported = transport.frozen(&frozen, &mut 10000).unwrap();
+        let Term::ErrorResult {
+            errors: canonical_errors,
+            ..
+        } = &canonical
+        else {
+            unreachable!()
+        };
+        let expected = Value::ErrorResult {
+            ty: canonical.clone(),
+            error: error.map(|index| {
+                canonical_errors
+                    .iter()
+                    .position(|label| label == &errors[index])
+                    .unwrap()
+            }),
+            value: Box::new(payload),
+        };
+        assert_eq!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke_with_normal_arguments(id(0), vec![(canonical.clone(), transported)])
                 .unwrap(),
             expected
         );

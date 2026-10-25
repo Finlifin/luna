@@ -31,6 +31,12 @@ fn nested_expression_child() {
             "false or (".repeat(32),
             ")".repeat(32)
         ),
+        "mixed-logic" => {
+            let body = (0..32).fold("true".to_owned(), |body, _| {
+                format!("not (false or ({body}))")
+            });
+            format!("fn run()->bool {{{body}}}")
+        }
         "equal" => {
             let body = (0..32).fold("true".to_owned(), |body, _| format!("({body}) == true"));
             format!("fn run()->bool {{{body}}}")
@@ -93,6 +99,9 @@ fn nested_expression_child() {
         splice_protocol: None,
         meta_list_type: None,
         index_protocol: None,
+        ord_protocol: None,
+        eq_protocol: None,
+        list_pattern_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,
@@ -116,6 +125,7 @@ fn nested_scalar_operators_survive_frontend_and_execution() {
         "not",
         "and",
         "or",
+        "mixed-logic",
         "equal",
         "machine-logic",
         "negative",

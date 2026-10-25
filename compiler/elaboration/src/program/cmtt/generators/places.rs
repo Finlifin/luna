@@ -92,7 +92,9 @@ impl Checker<'_, '_> {
                         })?;
                     pending.extend(fields.iter().map(|(_, field)| (field, depth + 1)));
                 }
-                Value::Newtype { value, .. } => pending.push((value, depth + 1)),
+                Value::Newtype { value, .. } | Value::ErrorResult { value, .. } => {
+                    pending.push((value, depth + 1))
+                }
                 Value::Closure(closure) if closure.ty().is_comptime_callable() => {
                     callbacks.push(value)
                 }

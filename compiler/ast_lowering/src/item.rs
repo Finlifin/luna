@@ -116,7 +116,58 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         };
 
         match kind {
+            NodeKind::FunctionTemplateInstance | NodeKind::FunctionTemplateInstanceWithParams => {
+                self.lower_function_template_instance(node, FnModifiers::default())
+            }
+            NodeKind::FunctionTemplateDef => {
+                let owner = self.lower_top_level_node(children[0]);
+                let mut item = self
+                    .package
+                    .item(owner)
+                    .expect("lowered template item")
+                    .clone();
+                match &mut item.kind {
+                    ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature) => {
+                        if signature.modifiers.is_comptime {
+                            self.emit_malformed(
+                                "function templates cannot define comptime functions",
+                                span,
+                            );
+                        }
+                        signature.modifiers.is_function_template = true;
+                    }
+                    _ => self
+                        .emit_malformed("function template requires a function declaration", span),
+                }
+                let mut info = self.package.owner(owner).expect("template owner").clone();
+                info.node = OwnerNode::Item(self.arena.alloc_item(item));
+                self.package.insert_owner(owner, info);
+                self.package
+                    .pending_semantics
+                    .push((span, "function template expansion".into()));
+                owner
+            }
             NodeKind::Function => self.lower_function(node, FnModifiers::default()),
+            NodeKind::TestDef => self.lower_function(
+                node,
+                FnModifiers {
+                    is_test: true,
+                    ..Default::default()
+                },
+            ),
+            NodeKind::TestTemplateDef => {
+                self.package
+                    .pending_semantics
+                    .push((span, "test template CMTT expansion".into()));
+                self.lower_function(
+                    node,
+                    FnModifiers {
+                        is_test_template: true,
+                        ..Default::default()
+                    },
+                )
+            }
+            NodeKind::TestTemplateInstance => self.lower_test_template_instance(node),
             NodeKind::AlgebraicEffect => self.lower_callable(
                 node,
                 FnModifiers::default(),
@@ -136,6 +187,30 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
             // Attribute-wrapped definitions
             NodeKind::Attribute | NodeKind::AttributeSetTrue => {
+                if self.ast.get_node_kind(children[0]) == Some(NodeKind::Id)
+                    && self.node_to_ident(children[0]).name.as_str() == "intrinsic_enum"
+                {
+                    let owner = self.lower_top_level_node(children[1]);
+                    let mut item = self
+                        .package
+                        .item(owner)
+                        .expect("intrinsic enum target")
+                        .clone();
+                    match &mut item.kind {
+                        ItemKind::Enum(definition) => definition.is_intrinsic = true,
+                        _ => {
+                            self.emit_malformed("intrinsic_enum requires an enum declaration", span)
+                        }
+                    }
+                    let mut info = self
+                        .package
+                        .owner(owner)
+                        .expect("intrinsic enum owner")
+                        .clone();
+                    info.node = OwnerNode::Item(self.arena.alloc_item(item));
+                    self.package.insert_owner(owner, info);
+                    return owner;
+                }
                 // Recognize the supported phase modifiers and the built-in
                 // direct-passing attribute. Unknown attributes stay pending.
                 let mut cursor = node;
@@ -182,6 +257,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         "__flurry_kw_comptime" => modifiers.is_comptime = true,
                         "__flurry_kw_quote" => modifiers.is_quote = true,
                         "__flurry_kw_pure" => modifiers.is_pure = true,
+                        "__flurry_kw_unsafe" => modifiers.is_unsafe = true,
                         "__flurry_kw_async" => effect_modifiers.is_async = true,
                         "__flurry_kw_inline" => effect_modifiers.is_inline = true,
                         _ => break,
@@ -192,6 +268,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     && !modifiers.is_comptime
                     && !modifiers.is_pure
                     && !modifiers.is_quote
+                    && !modifiers.is_unsafe
                 {
                     return self.lower_callable(
                         cursor,
@@ -202,15 +279,31 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 if (modifiers.is_comptime
                     || modifiers.is_pure
                     || modifiers.is_quote
+                    || modifiers.is_unsafe
                     || effect_modifiers.is_inline)
                     && !effect_modifiers.is_async
                     && !effect_modifiers.is_direct_passing
-                    && self.ast.get_node_kind(cursor) == Some(NodeKind::Function)
+                    && matches!(
+                        self.ast.get_node_kind(cursor),
+                        Some(
+                            NodeKind::Function
+                                | NodeKind::FunctionTemplateInstance
+                                | NodeKind::FunctionTemplateInstanceWithParams
+                        )
+                    )
                 {
                     if modifiers.is_quote && modifiers.is_comptime {
                         self.emit_malformed("quote fn is not a comptime fn", span);
                     }
+                    if modifiers.is_unsafe && modifiers.is_comptime {
+                        self.package
+                            .pending_semantics
+                            .push((span, "unsafe staged function admission".into()));
+                    }
                     modifiers.is_inline = effect_modifiers.is_inline;
+                    if self.ast.get_node_kind(cursor) != Some(NodeKind::Function) {
+                        return self.lower_function_template_instance(cursor, modifiers);
+                    }
                     return self.lower_function(cursor, modifiers);
                 }
 
@@ -223,6 +316,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 // original expression and lexical owner for later evaluation;
                 // lowering the target must not move lookup into its body.
                 if kind == NodeKind::Attribute {
+                    let value = self.lower_expr(ExprContext::Attribute, children[0]);
+                    let value = self.arena.alloc_expr(value);
                     let expression = self.source_text(children[0]);
                     let expression_span = self.ast.get_span(children[0]).unwrap_or(span);
                     self.package
@@ -231,6 +326,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                             target: hir::AttributeTarget::Definition(target),
                             lexical_owner,
                             expression,
+                            value,
                             configuration_key: None,
                             span: expression_span,
                         });
@@ -362,10 +458,123 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         owner_id
     }
 
+    /// Bind the declaration being lowered to its scanned identity, not to a
+    /// sequential local that happens to shadow its spelling at this point.
+    fn resolve_declared(&self, ident: Ident) -> resolve::ResolveResult<resolve::Resolution> {
+        self.resolver
+            .scope_tree()
+            .get(self.file_scope)
+            .and_then(|scope| scope.items.get_direct(ident.name))
+            .map(resolve::Resolution::from_binding)
+            .ok_or_else(|| resolve::ResolveError::UnresolvedIdentifier {
+                name: ident.name.to_string(),
+                span: ident.span,
+            })
+    }
+
     /// Lower an item that appears inside a block (definition inside a
     /// function body, struct body, etc.)  Returns the new [`OwnerId`].
     pub fn lower_item_in_block(&mut self, node: NodeIndex) -> OwnerId {
-        self.lower_top_level_node(node)
+        let parent = self.current_owner;
+        let owner = self.lower_top_level_node(node);
+        self.package.lexical_parents.insert(owner, parent);
+        owner
+    }
+
+    fn lower_test_template_instance(&mut self, node: NodeIndex) -> OwnerId {
+        let span = self.ast.get_span(node).unwrap();
+        let children = self.ast.get_children(node);
+        let owner_id = self.package.alloc_owner_id();
+        let previous_owner = self.current_owner;
+        self.current_owner = owner_id;
+        self.ensure_owner_counter();
+        let template = self.lower_expr(ExprContext::Type, children[1]);
+        let mut head = &template;
+        while let ExprKind::NFApplication(callee, _) = &head.kind {
+            head = callee;
+        }
+        let names = match head.kind {
+            ExprKind::ResolvedDef { def_id, .. } => self
+                .resolver
+                .find_scope_for_def(def_id)
+                .and_then(|scope| self.resolver.scope_tree().get(scope))
+                .and_then(|scope| scope.test_template_context.clone()),
+            _ => None,
+        };
+        let Some(names) = names else {
+            self.emit_unsupported_node(
+                "test template instance requires a declared contextual body interface",
+                span,
+            );
+            self.current_owner = previous_owner;
+            return self.make_error_item(span);
+        };
+        let ident = Ident::new(
+            resolve::test_definition_name(
+                self.file_id,
+                node,
+                Some(self.node_to_ident(children[0]).name),
+            ),
+            span,
+        );
+        if let Ok(binding) = self.resolve_declared(ident) {
+            if let resolve::BindingKind::Definition(definition, _) = binding.kind {
+                self.package.bind_definition(definition, owner_id);
+            }
+        } else {
+            self.emit_malformed(
+                "test template instance requires a scanned declaration scope",
+                span,
+            );
+        }
+        let rib = self.local_enter(RibKind::FnParam);
+        let site = self.ast_node_ref(node);
+        let mut ports = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (index, (name, name_span)) in names.into_iter().enumerate() {
+            if !seen.insert(name) {
+                self.emit_malformed("duplicate test template context binding", name_span);
+                continue;
+            }
+            let name = Ident::new(name, name_span);
+            let binding = self.next_hir_id();
+            let index = index as u32;
+            self.expanded_locals.insert((site, index), binding);
+            self.define_symbol(name, resolve::BindingKind::ExpandedLocal(site, index));
+            ports.push(TestTemplatePort {
+                name,
+                binding,
+                formal: None,
+            });
+        }
+        let value = self.lower_expr(ExprContext::RuntimeFunctionBody, children[2]);
+        let value = self.arena.alloc_expr(value);
+        let body = self.alloc_body(HirId::make_owner(owner_id), Body { params: &[], value });
+        self.local_exit(rib);
+        let template = self.arena.alloc_expr(template);
+        let item = self.arena.alloc_item(Item {
+            owner_id,
+            ident,
+            span,
+            kind: ItemKind::TestTemplateInstance {
+                interface: None,
+                template,
+                ports,
+                body,
+            },
+        });
+        self.package.insert_owner(
+            owner_id,
+            OwnerInfo {
+                node: OwnerNode::Item(item),
+                nodes: OwnerNodes::new(),
+            },
+        );
+        self.package
+            .pending_semantics
+            .push((span, "test template CMTT expansion".into()));
+        self.current_owner = previous_owner;
+        owner_id
     }
 
     /// Lower `Function`: a, N, b, N, c
@@ -385,14 +594,37 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         };
 
         let id_node = children[0];
-        let params_multi = children[1];
-        let return_type_node = children[2];
+        let params_multi = if modifiers.is_test || modifiers.is_test_template {
+            0
+        } else {
+            children[1]
+        };
+        let return_type_node = if modifiers.is_test || modifiers.is_test_template {
+            0
+        } else {
+            children[2]
+        };
         debug_assert!(matches!(
             kind,
-            NodeKind::Function | NodeKind::AlgebraicEffect
+            NodeKind::Function
+                | NodeKind::AlgebraicEffect
+                | NodeKind::TestDef
+                | NodeKind::TestTemplateDef
         ));
-        let clauses_multi = children[3];
-        let body_node = children[4];
+        let clauses_multi = if modifiers.is_test {
+            0
+        } else if modifiers.is_test_template {
+            children[1]
+        } else {
+            children[3]
+        };
+        let body_node = if modifiers.is_test {
+            children[1]
+        } else if modifiers.is_test_template {
+            children[2]
+        } else {
+            children[4]
+        };
 
         // Allocate owner
         let owner_id = self.package.alloc_owner_id();
@@ -401,9 +633,28 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         self.ensure_owner_counter();
 
         // Identifier
-        let ident = self.node_to_ident(id_node);
+        let ident = if modifiers.is_test {
+            Ident {
+                name: resolve::test_definition_name(
+                    self.file_id,
+                    node,
+                    if id_node == 0 {
+                        None
+                    } else {
+                        Some(self.node_to_ident(id_node).name)
+                    },
+                ),
+                span,
+            }
+        } else {
+            self.node_to_ident(id_node)
+        };
         let previous_scope = self.file_scope;
-        if let Ok(binding) = self.resolve(ident) {
+        let resolved = self.resolve_declared(ident);
+        if modifiers.is_test && resolved.is_err() {
+            self.emit_malformed("test declaration requires a scanned declaration scope; tests inside runtime blocks are not supported", span);
+        }
+        if let Ok(binding) = resolved {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
                 self.package.bind_definition(definition, owner_id);
                 if let Some(scope) = self.resolver.find_scope_for_def(definition) {
@@ -427,6 +678,23 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 }
                 param.index = fn_params.len() as u32;
                 self.define_fn_param(param.name, param_node, param.hir_id);
+                let site = self.ast_node_ref(param_node);
+                if let Some(definition) = self
+                    .resolver
+                    .scope_tree()
+                    .get(self.file_scope)
+                    .and_then(|scope| {
+                        scope
+                            .staged_parameters
+                            .iter()
+                            .find(|(source, _)| *source == site)
+                    })
+                    .map(|(_, definition)| *definition)
+                {
+                    self.package
+                        .staged_parameter_definitions
+                        .insert(param.hir_id, definition);
+                }
                 fn_params.push(param);
             }
         }
@@ -470,6 +738,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             span,
         };
 
+        if let Err(message) = fn_sig.test_template_body() {
+            self.emit_malformed(message, span);
+        }
+
         if body_node == 0 {
             let item_ref = self.arena.alloc_item(Item {
                 owner_id,
@@ -507,6 +779,30 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 self.define_local(binding.name, node, binding.hir_id);
             }
         }
+        let saved_template_ports = self.test_template_ports.clone();
+        if let Ok(Some(parameter)) = fn_sig.test_template_body() {
+            let mut kind = &parameter.kind;
+            while let hir::ClauseParamKind::Quote(inner) = kind {
+                kind = inner;
+            }
+            if let hir::ClauseParamKind::Positional(_, ty) = kind {
+                if let ExprKind::ContextualExprType(entries, _) = &ty.kind {
+                    let mut names = std::collections::HashSet::new();
+                    for entry in entries {
+                        if !names.insert(entry.name.name) {
+                            self.emit_malformed(
+                                "duplicate test template context binding",
+                                entry.name.span,
+                            );
+                        }
+                    }
+                    if let Some(definition) = parameter.definition {
+                        self.test_template_ports
+                            .insert(definition, entries.iter().map(|entry| entry.name).collect());
+                    }
+                }
+            }
+        }
         // Body
         let body_expr = self.lower_expr(
             if modifiers.is_comptime {
@@ -516,6 +812,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             },
             body_node,
         );
+        self.test_template_ports = saved_template_ports;
         let body_expr_ref = self.arena.alloc_expr(body_expr);
 
         // Build Body with params
@@ -575,7 +872,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         let ident = self.node_to_ident(id_node);
         let previous_scope = self.file_scope;
-        if let Ok(binding) = self.resolve(ident) {
+        if let Ok(binding) = self.resolve_declared(ident) {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
                 self.package.bind_definition(definition, owner_id);
                 if let Some(scope) = self.resolver.find_scope_for_def(definition) {
@@ -683,7 +980,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         let ident = self.node_to_ident(id_node);
         let previous_scope = self.file_scope;
-        if let Ok(binding) = self.resolve(ident) {
+        if let Ok(binding) = self.resolve_declared(ident) {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
                 self.package.bind_definition(definition, owner_id);
                 if let Some(scope) = self.resolver.find_scope_for_def(definition) {
@@ -783,12 +1080,15 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let value_span = self.ast.get_span(children[1]).unwrap_or(span);
         let key = self.node_to_ident(children[0]).name.as_str().to_owned();
         let expression = self.source_text(children[1]);
+        let value = self.lower_expr(ExprContext::Configuration, children[1]);
+        let value = self.arena.alloc_expr(value);
         self.package
             .definition_attributes
             .push(hir::DeferredDefinitionAttribute {
                 target: hir::AttributeTarget::Definition(self.current_owner),
                 lexical_owner: self.current_owner,
                 expression,
+                value,
                 configuration_key: Some(key),
                 span: value_span,
             });
@@ -911,11 +1211,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         if let Some(field) = self.lower_struct_field(cursor) {
                             for expression in attributes.into_iter().rev() {
                                 let text = self.source_text(expression);
+                                let value = self.lower_expr(ExprContext::Attribute, expression);
+                                let value = self.arena.alloc_expr(value);
                                 self.package.definition_attributes.push(
                                     hir::DeferredDefinitionAttribute {
                                         target: hir::AttributeTarget::Member(field.hir_id),
                                         lexical_owner: self.current_owner,
                                         expression: text,
+                                        value,
                                         configuration_key: None,
                                         span: self.ast.get_span(expression).unwrap_or(field.span),
                                     },
@@ -986,12 +1289,15 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             span,
         };
         for expression in attributes.into_iter().rev() {
+            let value = self.lower_expr(ExprContext::Attribute, expression);
+            let value = self.arena.alloc_expr(value);
             self.package
                 .definition_attributes
                 .push(hir::DeferredDefinitionAttribute {
                     target: hir::AttributeTarget::Member(field.hir_id),
                     lexical_owner: self.current_owner,
                     expression: self.source_text(expression),
+                    value,
                     configuration_key: None,
                     span: self.ast.get_span(expression).unwrap_or(span),
                 });
@@ -1016,7 +1322,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         let ident = self.node_to_ident(id_node);
         let previous_scope = self.file_scope;
-        if let Ok(binding) = self.resolve(ident) {
+        if let Ok(binding) = self.resolve_declared(ident) {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
                 self.package.bind_definition(definition, owner_id);
                 if let Some(scope) = self.resolver.find_scope_for_def(definition) {
@@ -1081,7 +1387,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         let ident = self.node_to_ident(id_node);
         let previous_scope = self.file_scope;
-        if let Ok(binding) = self.resolve(ident) {
+        if let Ok(binding) = self.resolve_declared(ident) {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
                 self.package.bind_definition(definition, owner_id);
                 if let Some(scope) = self.resolver.find_scope_for_def(definition) {
@@ -1099,6 +1405,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let variants_slice = self.arena.alloc_variant_slice(variants);
 
         let enum_def = EnumDef {
+            is_intrinsic: false,
             variants: variants_slice,
             configurations,
             clause_params,
@@ -1381,12 +1688,15 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         };
         if let Some(variant) = &variant {
             for expression in attributes.into_iter().rev() {
+                let value = self.lower_expr(ExprContext::Attribute, expression);
+                let value = self.arena.alloc_expr(value);
                 self.package
                     .definition_attributes
                     .push(hir::DeferredDefinitionAttribute {
                         target: hir::AttributeTarget::Member(variant.hir_id),
                         lexical_owner: self.current_owner,
                         expression: self.source_text(expression),
+                        value,
                         configuration_key: None,
                         span: self.ast.get_span(expression).unwrap_or(span),
                     });
@@ -1416,7 +1726,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         let ident = self.node_to_ident(id_node);
         let previous_scope = self.file_scope;
-        if let Ok(binding) = self.resolve(ident) {
+        if let Ok(binding) = self.resolve_declared(ident) {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
                 self.package.bind_definition(definition, owner_id);
                 if let Some(scope) = self.resolver.find_scope_for_def(definition) {
@@ -1678,7 +1988,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         self.current_owner = owner_id;
         self.ensure_owner_counter();
         let ident = self.node_to_ident(children[0]);
-        if let Ok(binding) = self.resolve(ident) {
+        if let Ok(binding) = self.resolve_declared(ident) {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
                 self.package.bind_definition(definition, owner_id);
                 if let Some(scope) = self.resolver.find_scope_for_def(definition) {
@@ -1759,7 +2069,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         let ident = self.node_to_ident(id_node);
         let previous_scope = self.file_scope;
-        if let Ok(binding) = self.resolve(ident) {
+        if let Ok(binding) = self.resolve_declared(ident) {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
                 self.package.bind_definition(definition, owner_id);
                 if let Some(scope) = self.resolver.find_scope_for_def(definition) {
@@ -1818,14 +2128,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         self.ensure_owner_counter();
 
         let ident = self.node_to_ident(id_node);
-        if let Ok(binding) = self.resolve(ident) {
+        if let Ok(binding) = self.resolve_declared(ident) {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
                 self.package.bind_definition(definition, owner_id);
             }
         }
 
         let previous_scope = self.file_scope;
-        if let Ok(binding) = self.resolve(ident) {
+        if let Ok(binding) = self.resolve_declared(ident) {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
                 if let Some(scope) = self.resolver.find_scope_for_def(definition) {
                     self.file_scope = scope;
@@ -1878,7 +2188,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         owner_id
     }
 
-    fn lower_fn_param(&mut self, node: NodeIndex) -> Option<FnParam<'hir>> {
+    pub(crate) fn lower_fn_param(&mut self, node: NodeIndex) -> Option<FnParam<'hir>> {
         let (target, attributes) = self.peel_member_attributes(node);
         if target != node {
             self.package.pending_semantics.push((
@@ -2060,12 +2370,15 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             }
 
             for expression in attributes.into_iter().rev() {
+                let value = self.lower_expr(ExprContext::Attribute, expression);
+                let value = self.arena.alloc_expr(value);
                 self.package
                     .definition_attributes
                     .push(hir::DeferredDefinitionAttribute {
                         target: hir::AttributeTarget::Member(parameter.hir_id),
                         lexical_owner: self.current_owner,
                         expression: self.source_text(expression),
+                        value,
                         configuration_key: None,
                         span: self.ast.get_span(expression).unwrap_or(span),
                     });
@@ -2091,7 +2404,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         self.ensure_owner_counter();
 
         let ident = self.node_to_ident(id_node);
-        if let Ok(binding) = self.resolve(ident) {
+        if let Ok(binding) = self.resolve_declared(ident) {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
                 self.package.bind_definition(definition, owner_id);
             }
@@ -2130,7 +2443,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     }
 
     /// Create an error item (returns an OwnerId that maps to `ItemKind::Err`).
-    fn make_error_item(&mut self, span: Span) -> OwnerId {
+    pub(crate) fn make_error_item(&mut self, span: Span) -> OwnerId {
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;

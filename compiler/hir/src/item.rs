@@ -33,6 +33,25 @@ impl Item<'_> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ItemKind<'hir> {
     Fn(FnSig<'hir>, BodyId),
+    FunctionTemplateInstance {
+        template: &'hir Expr<'hir>,
+        /// The declaration-side signature, linked after all files are lowered.
+        signature: Option<FnSig<'hir>>,
+        explicit_parameters: Option<&'hir [crate::common::FnParam<'hir>]>,
+        parameters: Vec<FunctionTemplateInput>,
+        modifiers: FnModifiers,
+        body: BodyId,
+    },
+    /// Body ports have fresh instance-local identities. Their types and actual
+    /// substitutions are checked when the selected template is expanded.
+    TestTemplateInstance {
+        template: &'hir Expr<'hir>,
+        /// Filled after all source files have been lowered. This is the actual
+        /// declaration interface, not a copy resolved in the instance scope.
+        interface: Option<TestTemplateInterface<'hir>>,
+        ports: Vec<TestTemplatePort>,
+        body: BodyId,
+    },
     /// Required interface member or bodyless declaration. No synthetic runtime
     /// body may be invented for a signature-only function.
     FnDeclaration(FnSig<'hir>),
@@ -59,6 +78,26 @@ pub enum ItemKind<'hir> {
     Use(UsePath<'hir>),
     Const(&'hir Expr<'hir>, &'hir Expr<'hir>),
     Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestTemplatePort {
+    pub name: Ident,
+    pub binding: HirId,
+    pub formal: Option<HirId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionTemplateInput {
+    pub name: Ident,
+    pub binding: HirId,
+    pub formal: Option<HirId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestTemplateInterface<'hir> {
+    pub parameter: HirId,
+    pub ty: &'hir Expr<'hir>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -88,14 +127,49 @@ pub struct FnSig<'hir> {
     pub span: Span,
 }
 
+impl<'hir> FnSig<'hir> {
+    /// The body is supplied to the unique anchored clause input, independently
+    /// of its spelling. Optional and collection inputs are separate roles.
+    /// Type and trait-bound shorthand still denote anchored inputs; `quote`
+    /// changes the parameter's interpretation, not its routing category.
+    pub fn test_template_body(&self) -> Result<Option<&ClauseParam<'hir>>, &'static str> {
+        if !self.modifiers.is_test_template {
+            return Ok(None);
+        }
+        fn anchored(kind: &crate::ClauseParamKind<'_>) -> bool {
+            use crate::ClauseParamKind as K;
+            match kind {
+                K::Type(_) | K::Positional(..) | K::TraitBound(..) => true,
+                K::Optional(..) | K::Varadic(..) => false,
+                K::Quote(inner) => anchored(inner),
+            }
+        }
+        let mut inputs = self.clause_params.iter().filter(|p| anchored(&p.kind));
+        let body = inputs
+            .next()
+            .ok_or("test template requires exactly one anchored body parameter")?;
+        if inputs.next().is_some() {
+            return Err("test template has more than one anchored parameter");
+        }
+        Ok(Some(body))
+    }
+}
+
 /// Function phase and modifier metadata; normal-form heads remain opaque.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FnModifiers {
+    pub is_test: bool,
+    /// Contextual code template, not a runnable test or ordinary function.
+    pub is_test_template: bool,
+    /// Reusable signature/code definition, never an ordinary runtime entry.
+    pub is_function_template: bool,
     pub is_inline: bool,
     pub is_quote: bool,
     pub is_normal_form_head: bool,
     pub is_pure: bool,
     pub is_comptime: bool,
+    /// Declared unsafe call boundary, separate from purity and phase.
+    pub is_unsafe: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -131,6 +205,8 @@ pub struct FieldDef<'hir> {
 /// Definition body of an `enum` item.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDef<'hir> {
+    /// Declares a family of pipeline operation labels, not an implementation.
+    pub is_intrinsic: bool,
     pub variants: &'hir [Variant<'hir>],
     pub configurations: Vec<Configuration<'hir>>,
     pub clause_params: &'hir [ClauseParam<'hir>],
@@ -225,6 +301,8 @@ pub enum UseKind<'hir> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefKind {
     Fn,
+    FunctionTemplateInstance,
+    TestTemplateInstance,
     Effect,
     EffectGroup,
     Struct,
@@ -244,6 +322,8 @@ impl DefKind {
     pub fn from_item_kind(kind: &ItemKind<'_>) -> Self {
         match kind {
             ItemKind::Fn(..) | ItemKind::FnDeclaration(..) => DefKind::Fn,
+            ItemKind::FunctionTemplateInstance { .. } => DefKind::FunctionTemplateInstance,
+            ItemKind::TestTemplateInstance { .. } => DefKind::TestTemplateInstance,
             ItemKind::Effect(..) => DefKind::Effect,
             ItemKind::EffectGroup(..) => DefKind::EffectGroup,
             ItemKind::Struct(..) => DefKind::Struct,

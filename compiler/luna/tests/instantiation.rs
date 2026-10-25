@@ -1,10 +1,130 @@
 //! Source -> concrete high-level instance graph, without interpreting templates.
+#[path = "support/execution.rs"]
+#[allow(dead_code)]
+mod support;
 use luna::{
     cli::{Emit, Options},
     frontend::{self, Artifact},
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn binary_lowering_preserves_association_and_lexical_operand_order() {
+    let source = compile(
+        "fn left(flag:*bool)->bool {flag.* = true;true}
+         fn right(flag:*bool)->bool {let previous = flag.*; flag.* = false; previous}
+         fn run()->bool {
+             var flag=false;
+             let ordered=left(flag.ref) and right(flag.ref);
+             let outer=false;
+             let scoped=do {let outer=true;outer} and not outer;
+             let associated:.u8'builtin=20 - 3 - 3;
+             ordered and not flag and scoped and associated == 14
+         }",
+    );
+    let graph = luna::instantiation::instantiate(&source, "run", 100_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    assert_eq!(support::calls(&source, &vm), vec!["run", "left", "right"]);
+}
+
+#[test]
+fn long_boolean_source_chains_report_bounded_errors_without_stack_overflow() {
+    for depth in [140, 512] {
+        for operator in ["and", "or"] {
+            for inferred in [false, true] {
+                let chain = format!("true{}", format!(" {operator} true").repeat(depth));
+                let body = if inferred {
+                    format!("let result={chain};result")
+                } else {
+                    chain
+                };
+                let source = format!("fn run()->bool {{{body}}}");
+                let error =
+                    support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+                assert!(error.contains("type condition depth exhausted"), "{error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn logical_prefix_checking_preserves_runtime_short_circuiting() {
+    use comptime_interpretor::{Budget, Interpreter, Value};
+    for (operator, first, tail, result, calls) in [
+        ("and", "false", "true", false, vec!["run", "first"]),
+        ("or", "true", "false", true, vec!["run", "first"]),
+        ("and", "true", "true", true, vec!["run", "first", "right"]),
+        ("or", "false", "false", true, vec!["run", "first", "right"]),
+    ] {
+        let source = compile(&format!(
+            "fn first()->bool {{{first}}} fn right()->bool {{true}}
+             fn run()->bool {{let result=first() {operator} right(){};result}}",
+            format!(" {operator} {tail}").repeat(40)
+        ));
+        let graph = luna::instantiation::instantiate(&source, "run", 100_000).unwrap();
+        let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+            Value::Bool(result)
+        );
+        assert_eq!(support::calls(&source, &vm), calls);
+    }
+}
+
+#[test]
+fn binary_dependency_chains_preserve_calls_and_recover_from_depth_exhaustion() {
+    use comptime_interpretor::{Budget, Interpreter, Value};
+    for depth in [40, 140] {
+        let mut source = compile(&format!(
+            "fn left()->bool {{true}} fn right()->bool {{true}}
+             fn recovery()->bool {{true}}
+             fn run()->bool {{left() and right(){}}}",
+            " and true".repeat(40)
+        ));
+        // Exercise the materializer independently of source parser/checker
+        // recursion. Generated IR can add nesting after source checking.
+        let function = source
+            .functions
+            .iter_mut()
+            .find(|f| f.name == "run")
+            .unwrap();
+        for _ in 40..depth {
+            let operand = nir::program::Expr {
+                ty: nir::Term::Primitive(nir::Primitive::Bool),
+                source: function.body.source,
+                kind: nir::program::ExprKind::Literal(nir::program::Literal::Bool(true)),
+            };
+            let previous = std::mem::replace(&mut function.body, operand.clone());
+            function.body.kind = nir::program::ExprKind::And(Box::new(previous), Box::new(operand));
+        }
+        let result = luna::instantiation::instantiate(&source, "run", 100_000);
+        if depth == 40 {
+            let graph = result.unwrap();
+            let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+            assert_eq!(
+                vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(support::calls(&source, &vm), vec!["run", "left", "right"]);
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("dispatch materialization budget exhausted"),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            luna::execution::interpret(&source, "recovery", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
 fn compile(source: &str) -> nir::program::Package {
     compile_in(source, 0)
 }
@@ -24,6 +144,9 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
             splice_protocol: None,
             meta_list_type: None,
             index_protocol: None,
+            ord_protocol: None,
+            eq_protocol: None,
+            list_pattern_protocol: None,
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             tuple_type: None,
@@ -351,6 +474,25 @@ fn concrete_contract_execution_matches_normalized_execution() {
                 assert!(expected.is_ok(), "{name}({input}): {expected:?}");
             }
             assert_eq!(actual, expected, "{name}({input})");
+            if let Err(error) = &actual {
+                let event_source = concrete
+                    .events()
+                    .iter()
+                    .rev()
+                    .find_map(|event| match event {
+                        comptime_interpretor::Event::CheckPredicate {
+                            source,
+                            passed: false,
+                        } => Some(*source),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    error.source,
+                    event_source.original(&graph.expansion_sources)
+                );
+                assert!(error.source.unwrap().expansion_index().is_none());
+            }
         }
     }
 }
@@ -832,8 +974,8 @@ fn associated_value_origins_keep_inherited_interface_arguments_distinct() {
 #[test]
 fn associated_values_use_selected_member_types_and_aggregate_values() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
-        "trait Source {assoc Item:.Type'builtin;assoc initial:Item;fn make()->Item {initial}} impl Source for bool {assoc Item:.Type'builtin=bool;assoc initial:bool=true;} impl Source for 'x''type {assoc Item:.Type'builtin='x''type;assoc initial:'x''type='x';} fn query()->T.as(Source).Item where T :- Source {T.as(Source).initial} fn entry()->(bool,'x''type) {(bool.as(Source).make(),query<'x''type>())}",
+    let package = support::compile_with_tuple(
+        "trait Source {assoc Item:.Type'builtin;assoc initial:Item;fn make()->Item {initial}} impl Source for bool {assoc Item:.Type'builtin=bool;assoc initial:bool=true;} impl Source for 'x''type {assoc Item:.Type'builtin='x''type;assoc initial:'x''type='x';} fn query()->T.as(Source).Item where T :- Source {T.as(Source).initial} fn entry()->Tuple<bool,'x''type> {(bool.as(Source).make(),query<'x''type>())}",
     );
     let graph = luna::instantiation::instantiate(&package, "entry", 100000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
@@ -841,8 +983,8 @@ fn associated_values_use_selected_member_types_and_aggregate_values() {
         vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Char('x')])
     );
-    let package = compile(
-        "trait Pair {assoc values:(bool,bool)=(true,false);fn get()->(bool,bool) {values}} impl Pair for bool {} fn entry()->(bool,bool) {bool.as(Pair).get()}",
+    let package = support::compile_with_tuple(
+        "trait Pair {assoc values:Tuple<bool,bool> = (true,false);fn get()->Tuple<bool,bool> {values}} impl Pair for bool {} fn entry()->Tuple<bool,bool> {bool.as(Pair).get()}",
     );
     let graph = luna::instantiation::instantiate(&package, "entry", 100000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
@@ -1981,4 +2123,67 @@ fn staged_inline_expansion_keeps_results_without_requiring_residual_entrypoints(
         let mut vm=Interpreter::from_iir(&graph,Default::default()).unwrap();
         assert_eq!(vm.invoke_instance(&graph.roots[0],vec![]).unwrap(),Value::Bool(true));
     }
+}
+
+#[test]
+fn instance_copy_budget_counts_expanded_parameter_occurrences_and_recovers() {
+    let source = compile(&format!(
+        "fn repeat(value:T)->T where T {{ {0} value }} fn phantom(value:bool)->bool where T {{ {0} value }}",
+        "let discarded=value;".repeat(40)
+    ));
+    let before = source.to_string();
+    let declaration = source
+        .functions
+        .iter()
+        .find(|f| f.name == "repeat")
+        .unwrap()
+        .declaration;
+    let key = iir::InstanceKey {
+        declaration,
+        arguments: vec![nir::Term::Tuple(vec![
+            nir::Term::Primitive(
+                nir::Primitive::Bool
+            );
+            128
+        ])],
+    };
+    let attempt = |steps| {
+        elaboration::materialization::instantiate(
+            &source,
+            std::slice::from_ref(&key),
+            Default::default(),
+            elaboration::ptc::Budget {
+                steps,
+                ..Default::default()
+            },
+        )
+    };
+    let error = attempt(3000).unwrap_err();
+    assert!(
+        error.contains("dispatch template copy budget exhausted"),
+        "{error}"
+    );
+    let phantom = iir::InstanceKey {
+        declaration: source
+            .functions
+            .iter()
+            .find(|f| f.name == "phantom")
+            .unwrap()
+            .declaration,
+        arguments: key.arguments.clone(),
+    };
+    elaboration::materialization::instantiate(
+        &source,
+        &[phantom],
+        Default::default(),
+        elaboration::ptc::Budget {
+            steps: 3000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let graph = attempt(100_000).unwrap();
+    graph.validate(&mut 100_000).unwrap();
+    assert_eq!(graph.roots, vec![key]);
+    assert_eq!(source.to_string(), before);
 }

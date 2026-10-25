@@ -15,9 +15,10 @@ pub(super) fn cannot_complete(expr: &Expr, fuel: &mut usize, depth: usize) -> Re
     }
     match &expr.kind {
         K::Return(_) | K::Break(_) | K::Continue(_) => Ok(true),
-        K::Discard(value) | K::Let { value, .. } | K::Assign { value, .. } => {
-            cannot_complete(value, fuel, depth + 1)
-        }
+        K::UnsafeScope(value)
+        | K::Discard(value)
+        | K::Let { value, .. }
+        | K::Assign { value, .. } => cannot_complete(value, fuel, depth + 1),
         K::Block { statements, result } | K::CallPreparation { statements, result } => {
             for statement in statements {
                 if cannot_complete(statement, fuel, depth + 1)? {
@@ -78,9 +79,9 @@ pub(super) fn pattern_observes(pattern: &Pattern, depth: usize) -> bool {
     match pattern {
         Pattern::CodeEvidence { .. } => true,
         Pattern::Observe { .. } | Pattern::Then { .. } | Pattern::Guard { .. } => true,
-        Pattern::Binding { inner, .. } | Pattern::Remap { pattern: inner, .. } => {
-            pattern_observes(inner, depth + 1)
-        }
+        Pattern::ErrorResult { inner, .. }
+        | Pattern::Binding { inner, .. }
+        | Pattern::Remap { pattern: inner, .. } => pattern_observes(inner, depth + 1),
         Pattern::Tuple(fields)
         | Pattern::TypeTuple(fields)
         | Pattern::Or(fields)

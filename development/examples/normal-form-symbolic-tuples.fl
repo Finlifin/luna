@@ -1,14 +1,17 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 typealias Int = .Integer'builtin;
 typealias Flag = true'type;
-pure comptime fn Pair<value: (Int, Flag)> -> Type { .u8'builtin }
-pure comptime fn RequirePair<T: Type, value: (Int, Flag)> -> Type
+pure comptime fn Pair<value: Tuple<Int, Flag>> -> Type { .u8'builtin }
+pure comptime fn RequirePair<T: Type, value: Tuple<Int, Flag>> -> Type
 where requires T == Pair<value> { T }
 pure comptime fn Forward<N: Int> -> Type
 where requires Pair<(N, true)> == Pair<(N, true)>
 { RequirePair<Pair<(N, true)>, (N, true)> }
-pure comptime fn Nested<value: ((Int, Flag), Type)> -> Type { .u8'builtin }
-pure comptime fn RequireNested<T: Type, value: ((Int, Flag), Type)> -> Type
+pure comptime fn Nested<value: Tuple<Tuple<Int, Flag>, Type>> -> Type { .u8'builtin }
+pure comptime fn RequireNested<T: Type, value: Tuple<Tuple<Int, Flag>, Type>> -> Type
 where requires T == Nested<value> { T }
 pure comptime fn NestedForward<T: Type, N: Int> -> Type
 where requires Nested<((N, false), T)> == Nested<((N, false), T)>

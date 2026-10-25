@@ -189,6 +189,7 @@ fn method_contract_summary_preserves_and_instantiates_local_binders() {
     let contract = MethodContract {
         is_quote: false,
         pure: true,
+        is_unsafe: false,
         type_arguments: vec![],
         type_parameters: vec![id(1)],
         capabilities: vec![TraitRequirement {

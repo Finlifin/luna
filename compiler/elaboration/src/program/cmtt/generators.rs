@@ -173,7 +173,7 @@ impl Checker<'_, '_> {
                         ));
                     }
                 };
-                if !nir::normal_forms::supported_input_type_in_scope(
+                if !nir::normal_forms::supported_input_type_in_scope_in(
                     &domain,
                     &self.input_binders(&visible_parameters),
                     |head| Some(head) == self.protocols.tuple,
@@ -183,6 +183,7 @@ impl Checker<'_, '_> {
                             || self.newtypes.contains_key(&id)
                             || self.context.is_nominal_constructor(id)
                     },
+                    self.target,
                 ) {
                     return Err(error(
                         parameter.span,
@@ -216,7 +217,7 @@ impl Checker<'_, '_> {
                     _ => {
                         return Err(error(
                             parameter.span,
-                            "code generator reference receivers are not yet implemented",
+                            "code generator dependent parameter bindings are not yet implemented",
                         ));
                     }
                 };
@@ -372,6 +373,7 @@ impl Checker<'_, '_> {
         let outer = (
             self.context.clone(),
             std::mem::take(&mut self.type_input_bindings),
+            std::mem::take(&mut self.partial_staged_bindings),
             std::mem::take(&mut self.value_input_bindings),
             self.default_input_scope.take(),
             self.default_input_owner.take(),
@@ -426,6 +428,7 @@ impl Checker<'_, '_> {
         (
             self.context,
             self.type_input_bindings,
+            self.partial_staged_bindings,
             self.value_input_bindings,
             self.default_input_scope,
             self.default_input_owner,
@@ -460,6 +463,7 @@ impl Checker<'_, '_> {
         // Even an unused identity generator must not admit comptime-only
         // storage through a composite runtime context or result type.
         let metadata = n::Package {
+            target: self.target,
             structs: self.structs.values().cloned().collect(),
             enums: self.enums.values().cloned().collect(),
             normal_forms: self.normal_form_metadata(),
@@ -600,6 +604,31 @@ impl Checker<'_, '_> {
         result.map_err(|e| error(span, e.to_string()))
     }
 
+    fn instantiate_generator_type(
+        &mut self,
+        ty: &Term,
+        parameters: &[nir::DeclarationParameter],
+        arguments: &[Term],
+        span: Span,
+    ) -> Result<Term, Error> {
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let result = nir::type_computations::charge_parameter_substitution(
+            ty, parameters, arguments, &mut fuel,
+        )
+        .and_then(|()| {
+            ty.instantiate_parameters(parameters, arguments)
+                .map_err(nir::type_computations::Error::Scope)
+        });
+        self.required_steps -= (before - fuel) as u64;
+        result.map_err(|e| {
+            error(
+                span,
+                format!("code generator type substitution failed: {e}"),
+            )
+        })
+    }
+
     fn copy_code_generator(&mut self, owner: OwnerId, span: Span) -> Result<Generator, Error> {
         let definition = &self.code_generators[&owner];
         Self::charge_code_generator(definition, &mut self.required_steps, span)?;
@@ -616,10 +645,8 @@ impl Checker<'_, '_> {
             let values: Vec<_> = captures.iter().map(|(_, value)| value.clone()).collect();
             definition.captures = captures.clone();
             Self::charge_code_generator(&definition, &mut self.required_steps, span)?;
-            let mut substitute = |ty: &Term| {
-                ty.instantiate_parameters(&parameters, &values)
-                    .map_err(|e| error(span, e.to_string()))
-            };
+            let mut substitute =
+                |ty: &Term| self.instantiate_generator_type(ty, &parameters, &values, span);
             definition.signature = definition.signature.try_map_types(&mut substitute)?;
         }
         Ok(definition)
@@ -643,9 +670,7 @@ impl Checker<'_, '_> {
             .collect::<Vec<_>>();
         let binders = self.input_binders(&parameters);
         let mut substitute = |ty: &Term| -> Result<Term, Error> {
-            let ty = self.copy_alias_type(ty, span)?;
-            ty.instantiate_parameters(&binders, types)
-                .map_err(|e| error(span, e.to_string()))
+            self.instantiate_generator_type(ty, &binders, types, span)
         };
         definition.signature = definition.signature.try_map_types(&mut substitute)?;
         definition.types = parameters.into_iter().zip(types.iter().cloned()).collect();
@@ -697,8 +722,8 @@ impl Checker<'_, '_> {
         let types = type_plan
             .iter()
             .map(|ty| {
-                ty.instantiate_parameters(&self.input_binders(parameters), &hints)
-                    .map_err(|e| error(span, e.to_string()))
+                let binders = self.input_binders(parameters);
+                self.instantiate_generator_type(ty, &binders, &hints, span)
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.instantiate_code_generator(template, &types, span)
@@ -1664,11 +1689,13 @@ impl Checker<'_, '_> {
             let mut types = type_plan
                 .iter()
                 .map(|ty| {
-                    ty.instantiate_parameters(
-                        &self.input_binders(&parameters),
+                    let binders = self.input_binders(&parameters);
+                    self.instantiate_generator_type(
+                        ty,
+                        &binders,
                         &instance.type_arguments,
+                        site.span,
                     )
-                    .map_err(|e| error(site.span, e.to_string()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             for (slot, value) in completed.clauses {
@@ -2551,6 +2578,151 @@ impl Checker<'_, '_> {
         self.data_binding(decl, false)
     }
 
+    /// Execute matching and its guard once at comptime, exporting only the
+    /// successful binding packet. The source else remains runtime control flow.
+    pub(super) fn conditional_local_data_binding(
+        &mut self,
+        decl: &hir::decl::LetDecl<'_>,
+    ) -> Result<n::Expr, Error> {
+        let init = decl
+            .init
+            .ok_or_else(|| error(decl.span, "local const requires an initializer"))?;
+        let otherwise = decl
+            .otherwise
+            .map(|body| self.check_failure_branch(body))
+            .transpose()?;
+        if otherwise.as_ref().is_some_and(|body| !is_never(&body.ty)) {
+            return Err(error(decl.span, "const else branch must diverge"));
+        }
+        let annotation = decl.ty.map(|ty| self.type_expr(ty)).transpose()?;
+        let (data, ty) = self.required_typed_expression(init, annotation.as_ref())?;
+        let value = self.materialize_local_constant(data, ty.clone(), init.span)?;
+        self.immutable.extend(pattern_binding_ids(&decl.pattern));
+        let observed = self.known_pattern_type_value(&value);
+        let pattern = self.with_staged_input(true, |this| {
+            this.pattern_observed(&decl.pattern, &ty, observed.as_ref())
+        })?;
+        let bindings = pattern_bindings(&decl.pattern)?
+            .into_values()
+            .map(|id| {
+                self.locals
+                    .get(&id)
+                    .cloned()
+                    .map(|ty| (id, ty))
+                    .ok_or_else(|| error(decl.span, "constant pattern output has no type"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let staged = bindings.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>();
+        self.check_inline_pattern_availability(&pattern, decl.pattern.span)?;
+        let guard = decl
+            .guard
+            .map(|guard| {
+                let checked =
+                    self.with_staged_input(true, |this| this.expr(guard, Some(&p(P::Bool))))?;
+                self.check_inline_input_availability(&checked, &staged, guard.span)?;
+                Ok(checked)
+            })
+            .transpose()?;
+        if otherwise.is_none() && (guard.is_some() || !self.pattern_exhaustive(&pattern, &ty)) {
+            return Err(error(
+                decl.span,
+                "refutable const pattern requires a diverging else branch",
+            ));
+        }
+        let packet_ty = self.tuple_value_type(
+            bindings.iter().map(|(_, ty)| ty.clone()).collect(),
+            decl.span,
+        )?;
+        let result_ty = Term::ErrorResult {
+            errors: vec![p(P::Void)],
+            result: Box::new(packet_ty.clone()),
+        };
+        let packet = n::Expr {
+            source: source(decl.span),
+            ty: packet_ty,
+            kind: K::Tuple(
+                bindings
+                    .iter()
+                    .map(|(id, ty)| n::Expr {
+                        source: source(decl.span),
+                        ty: ty.clone(),
+                        kind: K::Local(*id),
+                    })
+                    .collect(),
+            ),
+        };
+        let success = n::Expr {
+            source: source(decl.span),
+            ty: result_ty.clone(),
+            kind: K::ErrorConvert {
+                conversion: nir::error_results::Conversion::Success,
+                value: Box::new(packet),
+            },
+        };
+        let failure = n::Expr {
+            source: source(decl.span),
+            ty: result_ty.clone(),
+            kind: K::ErrorConvert {
+                conversion: nir::error_results::Conversion::Failure,
+                value: Box::new(n::Expr {
+                    source: source(decl.span),
+                    ty: p(P::Void),
+                    kind: K::Unit,
+                }),
+            },
+        };
+        let root = n::Expr {
+            source: source(decl.span),
+            ty: result_ty,
+            kind: K::Match {
+                value: Box::new(value),
+                arms: vec![
+                    n::MatchArm {
+                        pattern,
+                        guard,
+                        body: success,
+                    },
+                    n::MatchArm {
+                        pattern: n::Pattern::Wild,
+                        guard: None,
+                        body: failure,
+                    },
+                ],
+            },
+        };
+        let (selected, _) = self.required_normal_input(init, root, vec![])?;
+        let comptime_interpretor::Value::ErrorResult {
+            error: selected_error,
+            value: selected,
+            ..
+        } = selected
+        else {
+            return Err(error(
+                decl.span,
+                "invalid constant pattern selection packet",
+            ));
+        };
+        if selected_error.is_some() {
+            return otherwise
+                .ok_or_else(|| error(decl.span, "constant pattern failed without an else branch"));
+        }
+        let comptime_interpretor::Value::Tuple(values) = *selected else {
+            return Err(error(decl.span, "invalid constant pattern binding packet"));
+        };
+        if bindings.len() != values.len() {
+            return Err(error(decl.span, "constant pattern output arity mismatch"));
+        }
+        for ((binding, ty), value) in bindings.into_iter().zip(values) {
+            let value = self.materialize_local_constant(value, ty, decl.span)?;
+            self.generator_data.insert(binding, Some(value));
+        }
+        Ok(n::Expr {
+            source: source(decl.span),
+            ty: p(P::Void),
+            kind: K::Unit,
+        })
+    }
+
     pub(super) fn local_data_binding(
         &mut self,
         decl: &hir::decl::LetDecl<'_>,
@@ -2783,8 +2955,14 @@ impl Checker<'_, '_> {
             }
             remaining -= 1;
             match ty {
+                Term::ErrorResult { errors, result } => {
+                    pending.extend(errors.iter().map(|ty| (ty, depth + 1)));
+                    if !is_never(result) {
+                        pending.push((result, depth + 1));
+                    }
+                }
                 Term::Pointer(inner) => pending.push((inner, depth + 1)),
-                Term::Function { .. } | Term::ComptimeFunction(_) => {}
+                Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_) => {}
                 Term::Closure {
                     environment,
                     signature,
@@ -2806,7 +2984,7 @@ impl Checker<'_, '_> {
                     };
                     pending.extend(fields.iter().map(|ty| (ty, depth + 1)));
                 }
-                _ if nir::normal_forms::supported_input_type_in_scope(
+                _ if nir::normal_forms::supported_input_type_in_scope_in(
                     ty,
                     &self.input_binders(parameters),
                     |head| Some(head) == self.protocols.tuple,
@@ -2816,6 +2994,7 @@ impl Checker<'_, '_> {
                             || self.newtypes.contains_key(&declaration)
                             || self.context.is_nominal_constructor(declaration)
                     },
+                    self.target,
                 ) => {}
                 _ => return false,
             }
@@ -2999,6 +3178,160 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
+    /// Project only the explicit structure of a known type description. A
+    /// normal-form head is never invoked to discover additional structure.
+    fn known_type_pattern_outputs(
+        &mut self,
+        pattern: &n::Pattern,
+        ty: &Term,
+        span: Span,
+    ) -> Result<BTreeMap<n::LocalId, n::Expr>, Error> {
+        let mut result = BTreeMap::new();
+        let mut pending = vec![(pattern, ty)];
+        while let Some((pattern, value)) = pending.pop() {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(span, "type pattern evidence budget exhausted"))?;
+            match (pattern, value) {
+                (n::Pattern::Binding { binding, inner }, value) => {
+                    if value.sort() == Sort::Type && self.locals.get(binding) == Some(&p(P::Type)) {
+                        let expression = n::Expr {
+                            source: source(span),
+                            ty: p(P::Type),
+                            kind: K::TypeValue(value.clone()),
+                        };
+                        constants::charge_copy(&expression, &mut self.required_steps, span)?;
+                        result.insert(*binding, expression);
+                    }
+                    pending.push((inner, value));
+                }
+                (
+                    n::Pattern::NormalForm { head, arguments },
+                    Term::NormalForm {
+                        head: actual,
+                        arguments: values,
+                        ..
+                    },
+                ) if head == actual && arguments.len() == values.len() => {
+                    pending.extend(arguments.iter().zip(values));
+                }
+                (n::Pattern::TypeTuple(patterns), value) => {
+                    let fields = match value {
+                        Term::Tuple(fields) => Some(fields.as_slice()),
+                        _ => self.bound_tuple_elements(value),
+                    };
+                    if let Some(fields) = fields.filter(|fields| fields.len() == patterns.len()) {
+                        pending.extend(patterns.iter().zip(fields));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(result)
+    }
+
+    pub(in crate::program) fn known_pattern_types(
+        &mut self,
+        pattern: &n::Pattern,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<BTreeMap<n::LocalId, n::Expr>, Error> {
+        let mut known_types = BTreeMap::new();
+        // Retain Type witnesses already present in checked syntax. This
+        // is structural projection, not invocation or value sampling.
+        let mut pending = vec![(pattern, value)];
+        while let Some((pattern, value)) = pending.pop() {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(span, "generator type evidence budget exhausted"))?;
+            let mut value = value;
+            loop {
+                self.required_steps = self
+                    .required_steps
+                    .checked_sub(1)
+                    .ok_or_else(|| error(span, "generator type projection budget exhausted"))?;
+                let projected = match &value.kind {
+                    K::Field {
+                        value: base,
+                        declaration,
+                        index,
+                    } => match &base.kind {
+                        K::Record {
+                            declaration: actual,
+                            fields,
+                        } if declaration == actual => fields.get(*index),
+                        _ => None,
+                    },
+                    K::AnonymousField {
+                        value: base,
+                        name,
+                        index,
+                    } => match (&base.kind, &base.ty) {
+                        (K::AnonymousRecord { fields }, Term::Record(types))
+                            if types.get(*index).is_some_and(|(actual, _)| name == actual) =>
+                        {
+                            fields.get(*index)
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let Some(projected) = projected else { break };
+                value = projected;
+            }
+            if let Some(ty) = self.known_pattern_type_value(value) {
+                known_types.extend(self.known_type_pattern_outputs(pattern, &ty, span)?);
+                continue;
+            }
+            match (pattern, &value.kind) {
+                (n::Pattern::Binding { binding, inner }, _) => {
+                    if let Some(known) = self.generator_known_type_data(value, span)? {
+                        known_types.insert(*binding, known);
+                    }
+                    pending.push((inner, value));
+                }
+                (n::Pattern::Tuple(patterns), K::Tuple(values))
+                    if patterns.len() == values.len() =>
+                {
+                    pending.extend(patterns.iter().zip(values));
+                }
+                (
+                    n::Pattern::Record {
+                        declaration,
+                        fields: patterns,
+                    },
+                    K::Record {
+                        declaration: actual,
+                        fields: values,
+                    },
+                ) if declaration == actual && patterns.len() == values.len() => {
+                    pending.extend(patterns.iter().zip(values));
+                }
+                (
+                    n::Pattern::AnonymousRecord {
+                        names,
+                        fields: patterns,
+                    },
+                    K::AnonymousRecord { fields: values },
+                ) if patterns.len() == values.len() => {
+                    if let Term::Record(types) = &value.ty
+                        && names.len() == types.len()
+                        && names
+                            .iter()
+                            .zip(types)
+                            .all(|(name, (actual, _))| name == actual)
+                    {
+                        pending.extend(patterns.iter().zip(values));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(known_types)
+    }
+
     fn bind_generator_pattern(
         &mut self,
         decl: &hir::decl::LetDecl<'_>,
@@ -3016,95 +3349,11 @@ impl Checker<'_, '_> {
                 "refutable generator let pattern requires a diverging else branch",
             ));
         }
-        let mut known_types = BTreeMap::new();
-        if self.checking_code_generator && !decl.mutable {
-            // Retain Type witnesses already present in checked syntax. This
-            // is structural projection, not invocation or value sampling.
-            let mut pending = vec![(&pattern, &value)];
-            while let Some((pattern, value)) = pending.pop() {
-                self.required_steps = self
-                    .required_steps
-                    .checked_sub(1)
-                    .ok_or_else(|| error(decl.span, "generator type evidence budget exhausted"))?;
-                let mut value = value;
-                loop {
-                    self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
-                        error(decl.span, "generator type projection budget exhausted")
-                    })?;
-                    let projected = match &value.kind {
-                        K::Field {
-                            value: base,
-                            declaration,
-                            index,
-                        } => match &base.kind {
-                            K::Record {
-                                declaration: actual,
-                                fields,
-                            } if declaration == actual => fields.get(*index),
-                            _ => None,
-                        },
-                        K::AnonymousField {
-                            value: base,
-                            name,
-                            index,
-                        } => match (&base.kind, &base.ty) {
-                            (K::AnonymousRecord { fields }, Term::Record(types))
-                                if types.get(*index).is_some_and(|(actual, _)| name == actual) =>
-                            {
-                                fields.get(*index)
-                            }
-                            _ => None,
-                        },
-                        _ => None,
-                    };
-                    let Some(projected) = projected else { break };
-                    value = projected;
-                }
-                match (pattern, &value.kind) {
-                    (n::Pattern::Binding { binding, inner }, _) => {
-                        if let Some(known) = self.generator_known_type_data(value, decl.span)? {
-                            known_types.insert(*binding, known);
-                        }
-                        pending.push((inner, value));
-                    }
-                    (n::Pattern::Tuple(patterns), K::Tuple(values))
-                        if patterns.len() == values.len() =>
-                    {
-                        pending.extend(patterns.iter().zip(values));
-                    }
-                    (
-                        n::Pattern::Record {
-                            declaration,
-                            fields: patterns,
-                        },
-                        K::Record {
-                            declaration: actual,
-                            fields: values,
-                        },
-                    ) if declaration == actual && patterns.len() == values.len() => {
-                        pending.extend(patterns.iter().zip(values));
-                    }
-                    (
-                        n::Pattern::AnonymousRecord {
-                            names,
-                            fields: patterns,
-                        },
-                        K::AnonymousRecord { fields: values },
-                    ) if patterns.len() == values.len() => {
-                        if let Term::Record(types) = &value.ty
-                            && names.len() == types.len()
-                            && names
-                                .iter()
-                                .zip(types)
-                                .all(|(name, (actual, _))| name == actual)
-                        {
-                            pending.extend(patterns.iter().zip(values));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let mut known_types = if self.checking_code_generator && !decl.mutable {
+            self.known_pattern_types(&pattern, &value, decl.span)?
+        } else {
+            BTreeMap::new()
+        };
         if let n::Pattern::Binding { binding, inner } = &pattern {
             if matches!(**inner, n::Pattern::Wild) {
                 self.generator_data.insert(

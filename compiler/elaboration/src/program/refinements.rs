@@ -20,6 +20,38 @@ fn has_trait(predicate: &n::TypePredicate) -> bool {
     }
     false
 }
+// None means executable/program syntax; Some records whether the pure
+// proposition actually observes a type. Classification must not change domains
+// merely because a type atom is buried under a long Boolean prefix.
+fn classify_refinement<'a>(
+    expr: &Expr<'a>,
+    mut type_operand: impl FnMut(&Expr<'a>) -> bool,
+) -> Option<bool> {
+    let mut observed = false;
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        match &expr.kind {
+            H::TraitBound(..) => observed = true,
+            H::Lit(hir::Lit {
+                kind: hir::LitKind::Bool(_),
+                ..
+            }) => {}
+            H::Unary(UnOp::Not, value) => pending.push(value),
+            H::Binary(BinOp::And | BinOp::Or, left, right) => {
+                pending.push(right);
+                pending.push(left);
+            }
+            H::Binary(BinOp::Eq | BinOp::Ne, left, right)
+                if type_operand(left) && type_operand(right) =>
+            {
+                observed = true
+            }
+            _ => return None,
+        }
+    }
+    Some(observed)
+}
+
 impl Checker<'_, '_> {
     /// Publish only consequences of normal completion, not a branch's entire
     /// local proof context. These formulas contain immutable Type identities.
@@ -208,7 +240,7 @@ impl Checker<'_, '_> {
             (known, None) | (None, known) => known,
         };
         Ok(match pattern {
-            P::CodeEvidence { .. } => None,
+            P::ErrorResult { .. } | P::CodeEvidence { .. } => None,
             P::Observe { .. } => None,
             P::Guard { pattern, condition } => {
                 // The canonical constant Type pattern binds its input and
@@ -466,37 +498,10 @@ impl Checker<'_, '_> {
     // arbitrary code under another meaning. Calls/control flow are executable
     // predicates and remain outside PTC's type-proposition language.
     pub(super) fn extracted_refinement(&self, expr: &Expr<'_>) -> bool {
-        match &expr.kind {
-            H::TraitBound(..)
-            | H::Lit(hir::Lit {
-                kind: hir::LitKind::Bool(_),
-                ..
-            }) => true,
-            H::Unary(UnOp::Not, value) => self.extracted_refinement(value),
-            H::Binary(BinOp::And | BinOp::Or, a, b) => {
-                self.extracted_refinement(a) && self.extracted_refinement(b)
-            }
-            H::Binary(BinOp::Eq | BinOp::Ne, a, b) => {
-                self.refinement_type_operand(a) && self.refinement_type_operand(b)
-            }
-            _ => false,
-        }
+        classify_refinement(expr, |value| self.refinement_type_operand(value)).is_some()
     }
     pub(super) fn is_type_assumption(&self, expr: &Expr<'_>) -> bool {
-        fn observes_type(expr: &Expr<'_>, depth: usize) -> bool {
-            if depth >= 128 {
-                return false;
-            }
-            match &expr.kind {
-                H::TraitBound(..) | H::Binary(BinOp::Eq | BinOp::Ne, ..) => true,
-                H::Binary(BinOp::And | BinOp::Or, a, b) => {
-                    observes_type(a, depth + 1) || observes_type(b, depth + 1)
-                }
-                H::Unary(UnOp::Not, value) => observes_type(value, depth + 1),
-                _ => false,
-            }
-        }
-        self.extracted_refinement(expr) && observes_type(expr, 0)
+        classify_refinement(expr, |value| self.refinement_type_operand(value)) == Some(true)
     }
 
     pub(super) fn check_refinement_expression(&mut self, expr: &Expr<'_>) -> Result<(), Error> {
@@ -642,5 +647,45 @@ impl Checker<'_, '_> {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    #[test]
+    fn deep_type_observations_keep_their_domain_without_native_recursion() {
+        let arena = hir::HirArena::new();
+        let node = |kind| {
+            arena.alloc_expr(Expr {
+                hir_id: hir::HirId::INVALID,
+                span: rustc_span::DUMMY_SP,
+                kind,
+            })
+        };
+        let ty = node(H::TyType);
+        let literal = node(H::Lit(hir::Lit {
+            kind: hir::LitKind::Bool(true),
+            span: rustc_span::DUMMY_SP,
+        }));
+        let mut value = node(H::Binary(BinOp::Eq, ty, ty));
+        for _ in 0..4096 {
+            value = node(H::Binary(
+                BinOp::And,
+                node(H::Unary(UnOp::Not, value)),
+                literal,
+            ));
+        }
+        let classify =
+            |value| classify_refinement(value, |operand| matches!(operand.kind, H::TyType));
+        assert_eq!(classify(value), Some(true));
+        assert_eq!(classify(literal), Some(false));
+        // A runtime operand remains program syntax even behind a known type
+        // observation; classification does not perform Boolean simplification.
+        let runtime = node(H::Unit);
+        assert_eq!(classify(node(H::Binary(BinOp::And, value, runtime))), None);
+        assert_eq!(classify(node(H::Binary(BinOp::Eq, ty, runtime))), None);
+        assert_eq!(classify(node(H::Binary(BinOp::Or, runtime, value))), None);
     }
 }

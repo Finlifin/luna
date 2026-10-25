@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias UInt = .u32'builtin;
 
 fn quotient(numerator: UInt, denominator: UInt) -> result: UInt
@@ -16,6 +19,6 @@ fn configured(comptime numerator: UInt,
     value
 }
 
-fn run() -> (UInt, UInt) {
+fn run() -> Tuple<UInt, UInt> {
     (checked_quotient(20, 3), configured(20))
 }

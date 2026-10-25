@@ -1,0 +1,27 @@
+-- luna host-closure.fl --build run --output /tmp/flurry-closure
+-- The native entry reports (bool true).
+typealias Toggle = %{state: bool} fn() -> bool;
+
+fn toggle(initial: bool) -> Toggle {
+    var state = initial;
+    || {
+        state = not state;
+        state
+    }
+}
+
+fn check(next: Toggle) -> bool {
+    let first = next();
+    let second = next();
+    first and not second
+}
+
+fn run() -> bool {
+    -- Returning the closure transfers its environment out of toggle's frame.
+    let next = toggle(false);
+    let independent = toggle(false);
+    let first = next();
+    let other = independent();
+    let second = next();
+    first and other and not second and check(toggle(false))
+}

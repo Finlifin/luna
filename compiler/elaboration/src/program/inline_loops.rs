@@ -2,8 +2,8 @@
 use super::*;
 
 impl Checker<'_, '_> {
-    /// Check availability without invoking computations in a rejected iteration.
-    fn check_inline_input_availability(
+    /// Check availability without invoking an inactive staged computation.
+    pub(super) fn check_inline_input_availability(
         &mut self,
         value: &n::Expr,
         staged: &BTreeSet<n::LocalId>,
@@ -37,7 +37,7 @@ impl Checker<'_, '_> {
             }
             return Err(error(
                 span,
-                "inline iteration computation cannot read a runtime parameter or unstaged local",
+                "inline computation cannot read a runtime parameter or unstaged local",
             ));
         }
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
@@ -73,8 +73,7 @@ impl Checker<'_, '_> {
                     }
                     if !normal_head {
                         return Err(
-                            "runtime callable is unavailable in an inline iteration computation"
-                                .into(),
+                            "runtime callable is unavailable in an inline computation".into()
                         );
                     }
                 }
@@ -140,8 +139,14 @@ impl Checker<'_, '_> {
             // The ordinary description already checked staged endpoints. The
             // behavior witness models runtime bodies, not boundary invocation.
             if !self.checking_open_behavior {
-                self.expr(start, Some(&p(P::Integer)))?;
-                self.expr(end, Some(&p(P::Integer)))?;
+                for boundary in [start, end] {
+                    let checked = self.expr(boundary, Some(&p(P::Integer)))?;
+                    self.check_inline_input_availability(
+                        &checked,
+                        &BTreeSet::new(),
+                        boundary.span,
+                    )?;
+                }
             }
             (comptime_runtime::Integer::from_u128(0), 0)
         } else {
@@ -185,6 +190,8 @@ impl Checker<'_, '_> {
             (current, count)
         };
         let saved_locals = self.locals.clone();
+        let saved_partial_values: BTreeSet<_> =
+            self.partial_staged_bindings.keys().copied().collect();
         let saved_data = self.generator_data.clone();
         let saved_immutable = self.immutable.clone();
         let saved_context = self.context.clone();
@@ -198,6 +205,8 @@ impl Checker<'_, '_> {
             // nested inline conditions that have no selected iteration.
             for index in 0..count.max(1) {
                 self.locals = saved_locals.clone();
+                self.partial_staged_bindings
+                    .retain(|binding, _| saved_partial_values.contains(binding));
                 self.generator_data = saved_data.clone();
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
@@ -210,13 +219,7 @@ impl Checker<'_, '_> {
                     .copied()
                     .collect();
                 if !self.checking_open_behavior {
-                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                    let before = fuel;
-                    let observations = nir::visit::pattern_observations(&pattern, &mut fuel);
-                    self.required_steps -= (before - fuel) as u64;
-                    for observation in observations.map_err(|message| error(pat.span, message))? {
-                        self.check_inline_input_availability(observation, &staged, pat.span)?;
-                    }
+                    self.check_inline_pattern_availability(&pattern, pat.span)?;
                 }
                 if self.checking_open_behavior {
                     // An abstract index is an input to the behavior witness,
@@ -278,7 +281,16 @@ impl Checker<'_, '_> {
                     self.inline_selection = Some((expr.hir_id, usize::MAX));
                     self.in_unselected_inline = true;
                 }
-                let checked = discard_result(self.block(body, None)?);
+                // Failed/empty iterations have no concrete index value, but
+                // their binders still belong to comptime. Nested suppressed
+                // computations may depend on them without invoking them.
+                let saved_staged = self.open_staged_locals.clone();
+                let saved_members = self.open_member_locals.clone();
+                self.open_staged_locals.extend(staged.iter().copied());
+                let checked = self.block(body, None);
+                self.open_staged_locals = saved_staged;
+                self.open_member_locals = saved_members;
+                let checked = discard_result(checked?);
                 if count == 0 {
                     if self.checking_open_behavior {
                         // Keep the abstract iteration for definition-side P4
@@ -336,6 +348,8 @@ impl Checker<'_, '_> {
         })();
         self.loops.pop();
         self.locals = saved_locals;
+        self.partial_staged_bindings
+            .retain(|binding, _| saved_partial_values.contains(binding));
         self.generator_data = saved_data;
         self.immutable = saved_immutable;
         self.context = saved_context;
@@ -372,6 +386,7 @@ impl Checker<'_, '_> {
         };
         let (index_source, element_source) = self.tuple_iteration_patterns(pat)?;
         let (input, elements) = self.tuple_enumeration_input(input)?;
+        let observed_elements = self.observed_tuple_elements(&input, elements.len(), expr.span)?;
         if elements.is_empty() {
             return Err(error(
                 expr.span,
@@ -386,6 +401,8 @@ impl Checker<'_, '_> {
         }
         self.required_steps -= elements.len() as u64;
         let saved_locals = self.locals.clone();
+        let saved_partial_values: BTreeSet<_> =
+            self.partial_staged_bindings.keys().copied().collect();
         let saved_data = self.generator_data.clone();
         let saved_immutable = self.immutable.clone();
         let saved_context = self.context.clone();
@@ -417,6 +434,8 @@ impl Checker<'_, '_> {
             let mut iterations = Vec::new();
             for (index, (ty, temporary)) in elements.iter().zip(&storage).enumerate() {
                 self.locals = saved_locals.clone();
+                self.partial_staged_bindings
+                    .retain(|binding, _| saved_partial_values.contains(binding));
                 self.generator_data = saved_data.clone();
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
@@ -437,19 +456,7 @@ impl Checker<'_, '_> {
                 };
                 let staged: BTreeSet<_> = index_bindings.iter().map(|(id, _)| *id).collect();
                 if !self.checking_open_behavior {
-                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                    let before = fuel;
-                    let observations = nir::visit::pattern_observations(&index_pattern, &mut fuel);
-                    self.required_steps -= (before - fuel) as u64;
-                    for observation in
-                        observations.map_err(|message| error(index_source.span, message))?
-                    {
-                        self.check_inline_input_availability(
-                            observation,
-                            &staged,
-                            index_source.span,
-                        )?;
-                    }
+                    self.check_inline_pattern_availability(&index_pattern, index_source.span)?;
                 }
                 let index_matched = if suppressed {
                     if self.checking_open_behavior {
@@ -473,6 +480,13 @@ impl Checker<'_, '_> {
                     self.in_unselected_inline = true;
                 }
                 let element_pattern = self.pattern(element_source, ty)?;
+                if let Some(observed) = &observed_elements {
+                    self.record_observed_pattern(
+                        &element_pattern,
+                        &observed[index],
+                        element_source.span,
+                    )?;
+                }
                 let element_irrefutable = self.pattern_exhaustive(&element_pattern, ty);
                 let selected = if let Some(guard) = guard {
                     if suppressed || !index_matched {
@@ -646,6 +660,8 @@ impl Checker<'_, '_> {
         })();
         self.loops.pop();
         self.locals = saved_locals;
+        self.partial_staged_bindings
+            .retain(|binding, _| saved_partial_values.contains(binding));
         self.generator_data = saved_data;
         self.immutable = saved_immutable;
         self.context = saved_context;

@@ -6,11 +6,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
+    compile_with_tuple_option(source, emit, false)
+}
+
+fn compile_with_tuple_option(source: &str, emit: Emit, tuple: bool) -> Result<Artifact, String> {
     let path = std::env::temp_dir().join(format!(
         "quote-functions-{}-{}.fl",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    let source = if tuple {
+        format!(
+            "pure comptime fn TupleElements<T>->.Type'builtin {{T}}
+        pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>>->.Type'builtin {{bool}}
+        {source}"
+        )
+    } else {
+        source.to_owned()
+    };
     std::fs::write(&path, source).unwrap();
     let result = frontend::compile(&Options {
         input: path.clone(),
@@ -18,10 +31,13 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         output: None,
         sysroot: None,
         splice_protocol: None,
-        meta_list_type: None,
-        tuple_type: None,
+        meta_list_type: tuple.then(|| "input::TupleElements".into()),
+        tuple_type: tuple.then(|| "input::Tuple".into()),
         optional_type: None,
         index_protocol: None,
+        ord_protocol: None,
+        eq_protocol: None,
+        list_pattern_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
     });
@@ -81,7 +97,16 @@ fn execute(
     source: &str,
     inputs: Vec<comptime_interpretor::Value>,
 ) -> (comptime_interpretor::Value, Vec<String>) {
-    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+    execute_with_tuple_option(source, inputs, false)
+}
+
+fn execute_with_tuple_option(
+    source: &str,
+    inputs: Vec<comptime_interpretor::Value>,
+    tuple: bool,
+) -> (comptime_interpretor::Value, Vec<String>) {
+    let Artifact::Nir(package) = compile_with_tuple_option(source, Emit::Nir, tuple).unwrap()
+    else {
         panic!("wrong stage")
     };
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
@@ -631,28 +656,28 @@ fn nested_callable_modifiers_are_preserved_and_checked() {
 #[test]
 fn quote_variadics_collect_expand_and_forward_complete_packets() {
     let source = "quote fn pack(...items:T)->T where T {return items;}
-        fn packet()->(bool,.char'builtin) {(true,'a')}
+        fn packet()->Tuple<bool,.char'builtin> {(true,'a')}
         fn run()->bool {
             let (a,b,c)=pack(...packet(),false);
             let (d,e)=pack(.items=(true,'a'));
             pack();
             a and b == 'a' and not c and d and e == 'a'
         }";
-    let (value, calls) = execute(source, vec![]);
+    let (value, calls) = execute_with_tuple_option(source, vec![], true);
     assert_eq!(value, comptime_interpretor::Value::Bool(true));
     assert_eq!(calls, ["run", "packet"]);
 }
 
 #[test]
 fn quote_variadic_properties_preserve_interleaved_producers() {
-    let source = "fn packet()->(bool,bool) {(true,false)}
+    let source = "fn packet()->Tuple<bool,bool> {(true,false)}
         fn before()->bool {true} fn after()->bool {false}
-        quote fn configure(...items:(bool,bool),...properties:T)->T where T {properties}
+        quote fn configure(...items:Tuple<bool,bool>,...properties:T)->T where T {properties}
         fn run()->bool {
             let config=configure {first:before(),...packet(),last:after()};
             config.first and not config.last
         }";
-    let (value, calls) = execute(source, vec![]);
+    let (value, calls) = execute_with_tuple_option(source, vec![], true);
     assert_eq!(value, comptime_interpretor::Value::Bool(true));
     assert_eq!(calls, ["run", "before", "packet", "after"]);
 }
@@ -660,25 +685,25 @@ fn quote_variadic_properties_preserve_interleaved_producers() {
 #[test]
 fn quote_variadic_methods_evaluate_receiver_before_packets() {
     let source = "struct Flag {value:bool}
-        impl Flag {quote fn choose(self,...items:(bool,bool))->bool {
+        impl Flag {quote fn choose(self,...items:Tuple<bool,bool>)->bool {
             let (a,b)=items;if self.value {return a;} b
         }}
         fn receiver()->Flag {Flag {value:true}}
-        fn packet()->(bool,bool) {(true,false)}
+        fn packet()->Tuple<bool,bool> {(true,false)}
         fn run()->bool {receiver().choose(...packet())}";
-    let (value, calls) = execute(source, vec![]);
+    let (value, calls) = execute_with_tuple_option(source, vec![], true);
     assert_eq!(value, comptime_interpretor::Value::Bool(true));
     assert_eq!(calls, ["run", "receiver", "packet"]);
 }
 
 #[test]
 fn quote_variadics_keep_default_dependencies_and_argument_context() {
-    let source = "pure fn first(items:(bool,bool))->bool {let (a,b)=items;a}
-        quote fn choose(...items:(bool,bool),.flag:bool=first(items))->bool {
+    let source = "pure fn first(items:Tuple<bool,bool>)->bool {let (a,b)=items;a}
+        quote fn choose(...items:Tuple<bool,bool>,.flag:bool=first(items))->bool {
             let (a,b)=items;if flag {return a;} b
         }
         fn run()->bool {choose(true,false) and not choose(true,false,.flag=false)}";
-    let (value, calls) = execute(source, vec![]);
+    let (value, calls) = execute_with_tuple_option(source, vec![], true);
     assert_eq!(value, comptime_interpretor::Value::Bool(true));
     assert_eq!(calls, ["run", "first"]);
 }
@@ -688,7 +713,7 @@ fn quote_variadic_calls_still_enforce_phase_and_single_hole() {
     let prefix = "quote fn pack(...items:T)->T where T {items} ";
     for (body, anchor) in [
         (
-            "comptime fn bad()->(bool,bool) {pack(true,false)}",
+            "comptime fn bad()->Tuple<bool,bool> {pack(true,false)}",
             "runtime phase",
         ),
         (
@@ -701,7 +726,7 @@ fn quote_variadic_calls_still_enforce_phase_and_single_hole() {
         ),
         ("fn run(){pack {a:true,a:false};}", "more than once"),
     ] {
-        let failure = compile(&format!("{prefix}{body}"), Emit::Nir)
+        let failure = compile_with_tuple_option(&format!("{prefix}{body}"), Emit::Nir, true)
             .err()
             .unwrap();
         assert!(failure.contains(anchor), "{failure}");
@@ -1876,30 +1901,71 @@ fn quote_callable_cleanup_invalidates_external_observations() {
 }
 
 #[test]
-fn quote_callable_consumers_require_pointer_memory_contracts() {
+fn quote_callable_consumers_apply_inferred_cleanup_memory_effects() {
     for modifier in ["", "quote "] {
         let source = format!(
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
             trait Consume {{fn consume(self);}}
             struct Held {{target:*bool}}
-            impl Retire for Held {{{modifier}fn drop(*self) {{self.target.*.* = true;}}}}
+            impl Retire for Held {{{modifier}fn drop(*self) {{assumes not self.target.*.*;self.target.*.* = true;}}}}
             impl Consume for Held {{{modifier}fn consume(self) {{}}}}
             fn run()->bool {{var flag=false;Held {{target:flag.ref}}.as(Consume).consume();flag}}"
         );
         let Artifact::Nir(package) = compile(&source, Emit::Nir).unwrap() else {
             panic!("wrong stage")
         };
-        let failure = luna::execution::interpret_with_protocols(
+        let result = luna::execution::interpret_with_protocols(
             &package,
             "run",
             "Duplicate",
             "Retire",
             100_000,
         )
-        .unwrap_err();
+        .unwrap();
+        assert_eq!(result, comptime_interpretor::Value::Bool(true));
+        // The inferred destructor footprint must not bypass its predicate, nor
+        // execute cleanup twice after moving the owner into the consumer.
+        let invalid = source.replace("var flag=false", "var flag=true");
+        let Artifact::Nir(package) = compile(&invalid, Emit::Nir).unwrap() else {
+            panic!("wrong stage")
+        };
         assert!(
-            failure.contains("pointer dependencies requires a memory contract"),
-            "{failure}"
+            luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                100_000,
+            )
+            .is_err(),
+            "cleanup with a false predicate was admitted: {modifier}"
         );
+    }
+}
+
+#[test]
+fn unsafe_quote_calls_are_checked_before_expansion_erases_the_call() {
+    for caller in [
+        "fn run()->bool {unsafe {quoted(true)}}",
+        "unsafe fn run()->bool {quoted(true)}",
+    ] {
+        let source = format!(
+            "unsafe fn leaf(value:bool)->bool {{value}}
+            unsafe quote fn quoted(value:bool)->bool {{leaf(value)}} {caller}"
+        );
+        compile(&source, Emit::Nir).unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+    for declarations in [
+        "unsafe quote fn quoted(value:bool)->bool {value}",
+        "unsafe fn leaf(value:bool)->bool {value}
+         unsafe quote fn quoted(value:bool)->bool {leaf(value)}",
+        "unsafe quote fn leaf(value:bool)->bool {value}
+         quote fn quoted(value:bool)->bool {leaf(value)}",
+    ] {
+        let source = format!("{declarations} fn run()->bool {{quoted(true)}}");
+        let error = compile(&source, Emit::Nir)
+            .err()
+            .expect("unsafe quote call accepted");
+        assert!(error.contains("unsafe"), "{error}");
     }
 }

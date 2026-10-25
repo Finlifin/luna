@@ -303,7 +303,8 @@ fn scan<'a>(
             Work::Pattern(pattern, context) => match pattern {
                 Pattern::CodeEvidence { .. } => return Err("unresolved pattern-code evidence"),
                 Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => (),
-                Pattern::Observe { inner: pattern, .. }
+                Pattern::ErrorResult { inner: pattern, .. }
+                | Pattern::Observe { inner: pattern, .. }
                 | Pattern::Binding { inner: pattern, .. }
                 | Pattern::Remap { pattern, .. } => {
                     work.push(Work::Pattern(pattern, context.clone()))
@@ -378,6 +379,16 @@ fn scan<'a>(
                             .filter_map(|c| c.value.as_deref())
                             .map(|node| Work::Expr(node, context.clone())),
                     );
+                }
+                K::ErrorConvert { value, .. } | K::NewtypeConvert(value) => {
+                    // Representation conversions are not contract rejection.
+                    // The operand and resulting cleanup obligation still
+                    // contribute to the invocation's behavior, including a
+                    // newtype wrapper's own destructor.
+                    if cleanup_rejection(&context.ty(&expr.ty, fuel)?, fuel, cleanup)? {
+                        return Ok((true, visited));
+                    }
+                    work.push(Work::Expr(value, context.clone()));
                 }
                 K::Tuple(fields)
                 | K::AnonymousRecord { fields }
@@ -504,6 +515,7 @@ fn scan<'a>(
                 | K::Let { value, .. }
                 | K::Assign { value, .. }
                 | K::BitAssign { value, .. }
+                | K::UnsafeScope(value)
                 | K::Discard(value)
                 | K::BitSlice { value, .. }
                 | K::AddressOf(value)
@@ -519,6 +531,34 @@ fn scan<'a>(
                 | K::EnumName(value)
                 | K::Not(value)
                 | K::Loop { body: value, .. } => work.push(Work::Expr(value, context.clone())),
+                K::BitUpdate {
+                    selections, value, ..
+                }
+                | K::BitWritePointer {
+                    selections, value, ..
+                } => {
+                    // Range and storage legality are mandatory program/memory
+                    // obligations, as for BitAssign and integer arithmetic.
+                    // Rejection evidence must still inspect all computations.
+                    *fuel = fuel
+                        .checked_sub(selections.len())
+                        .ok_or("rejection bit selection budget exhausted")?;
+                    if let K::BitWritePointer { pointer, .. } = &expr.kind {
+                        work.push(Work::Expr(pointer, context.clone()));
+                    }
+                    work.push(Work::Expr(value, context.clone()));
+                    for input in selections
+                        .iter()
+                        .flat_map(nir::program::BitSelection::expressions)
+                    {
+                        work.push(Work::Expr(input, context.clone()));
+                    }
+                }
+                K::BitWindow { value, start, end } => {
+                    for input in [value, start, end] {
+                        work.push(Work::Expr(input, context.clone()));
+                    }
+                }
                 K::WritePointer {
                     pointer: left,
                     value: right,
@@ -529,8 +569,10 @@ fn scan<'a>(
                 | K::ScalarGreater(left, right)
                 | K::ScalarLessEqual(left, right)
                 | K::ScalarGreaterEqual(left, right)
+                | K::TemplateEqual(left, right)
                 | K::ScalarEqual(left, right)
                 | K::BitEqual(left, right)
+                | K::BitIndex(left, right)
                 | K::BitConcat(left, right) => {
                     work.push(Work::Expr(left, context.clone()));
                     work.push(Work::Expr(right, context.clone()));
@@ -585,6 +627,7 @@ mod tests {
             phase: FunctionPhase::Runtime,
             inline: false,
             pure: false,
+            is_unsafe: false,
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,
@@ -603,6 +646,56 @@ mod tests {
             defaults: vec![],
         }
     }
+    #[test]
+    fn error_tags_preserve_operand_and_cleanup_rejection_without_becoming_rejection() {
+        for conversion in [
+            nir::error_results::Conversion::Success,
+            nir::error_results::Conversion::Failure,
+        ] {
+            for rejecting_operand in [false, true] {
+                for rejecting_cleanup in [false, true] {
+                    let boolean = Term::Primitive(Primitive::Bool);
+                    let target = Term::error_result(vec![boolean.clone()], boolean.clone());
+                    let literal = Expr {
+                        ty: boolean.clone(),
+                        ..expr(K::Literal(Literal::Bool(true)))
+                    };
+                    let operand = if rejecting_operand {
+                        Expr {
+                            ty: boolean,
+                            ..expr(K::Block {
+                                statements: vec![rejected()],
+                                result: Some(Box::new(literal)),
+                            })
+                        }
+                    } else {
+                        literal
+                    };
+                    let body = Expr {
+                        ty: target.clone(),
+                        ..expr(K::ErrorConvert {
+                            conversion,
+                            value: Box::new(operand),
+                        })
+                    };
+                    let mut definition = function(0, body);
+                    definition.signature = Term::Function {
+                        parameters: vec![],
+                        result: Box::new(target),
+                    };
+                    let mut package = Package::default();
+                    package.functions.push(definition);
+                    let actual = Cache::new(Some(&package))
+                        .may_reject_with_cleanup(&callee(0), &mut 10000, &mut |_, _| {
+                            Ok(rejecting_cleanup)
+                        })
+                        .unwrap();
+                    assert_eq!(actual, rejecting_operand || rejecting_cleanup);
+                }
+            }
+        }
+    }
+
     #[test]
     fn structural_mismatch_does_not_erase_prior_pattern_rejection() {
         for computation_first in [false, true] {
@@ -833,7 +926,10 @@ mod tests {
                     &mut 1000,
                     &mut |ty, _| {
                         calls += 1;
-                        assert!(matches!(ty, Term::Function { .. } | Term::Closure { .. }));
+                        assert!(matches!(
+                            ty,
+                            Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+                        ));
                         Ok(matches!(ty, Term::Closure { .. }))
                     },
                 )

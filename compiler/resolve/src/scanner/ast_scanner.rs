@@ -89,7 +89,12 @@ impl<'a> AstScanner<'a> {
                     )?;
                     self.def_names.push((def_id, name));
                 }
-                NodeKind::Function
+                NodeKind::TestDef
+                | NodeKind::TestTemplateDef
+                | NodeKind::TestTemplateInstance
+                | NodeKind::FunctionTemplateInstance
+                | NodeKind::FunctionTemplateInstanceWithParams
+                | NodeKind::Function
                 | NodeKind::AssocDecl
                 | NodeKind::NormalFormHeadDef
                 | NodeKind::AlgebraicEffect => {
@@ -118,6 +123,9 @@ impl<'a> AstScanner<'a> {
         let mut visibility = Visibility::Package;
         loop {
             match self.ast.get_node_kind(item) {
+                Some(NodeKind::FunctionTemplateDef) => {
+                    item = self.ast.get_children(item)[0];
+                }
                 Some(NodeKind::Pub) => {
                     visibility = Visibility::Public;
                     item = self.ast.get_children(item)[0];
@@ -312,7 +320,22 @@ impl<'a> AstScanner<'a> {
         item: NodeIndex,
         vis: Visibility,
     ) -> ResolveResult<()> {
-        let name = self.extract_name(self.ast.get_children(item)[0])?;
+        let name = if matches!(
+            self.ast.get_node_kind(item),
+            Some(NodeKind::TestDef | NodeKind::TestTemplateInstance)
+        ) {
+            crate::test_definition_name(
+                self.file_id,
+                item,
+                if self.ast.get_children(item)[0] == 0 {
+                    None
+                } else {
+                    Some(self.extract_name(self.ast.get_children(item)[0])?)
+                },
+            )
+        } else {
+            self.extract_name(self.ast.get_children(item)[0])?
+        };
         let def_id = self.def_gen.next();
         let scope_id = self.scope_gen.next();
 
@@ -326,6 +349,54 @@ impl<'a> AstScanner<'a> {
             true, // ordered
         );
         if self.ast.get_node_kind(item) == Some(NodeKind::Function) {
+            let entries = self.ast.get_children(item)[1];
+            let mut parameters = Vec::new();
+            let mut known = true;
+            for &entry in self.ast.get_multi_child_slice(entries).unwrap_or(&[]) {
+                let source_entry = entry;
+                let mut staged = false;
+                let mut entry = entry;
+                loop {
+                    match self.ast.get_node_kind(entry) {
+                        Some(NodeKind::Attribute | NodeKind::AttributeSetTrue) => {
+                            entry = self.ast.get_children(entry)[1]
+                        }
+                        Some(NodeKind::ComptimeParam) => {
+                            staged = true;
+                            entry = self.ast.get_children(entry)[0];
+                        }
+                        Some(
+                            NodeKind::ImplicitParam
+                            | NodeKind::LambdaParam
+                            | NodeKind::ErrorParam
+                            | NodeKind::CatchParam
+                            | NodeKind::QuoteParam,
+                        ) => entry = self.ast.get_children(entry)[0],
+                        _ => break,
+                    }
+                }
+                let name = match self.ast.get_node_kind(entry) {
+                    Some(
+                        NodeKind::TypeBoundParam | NodeKind::OptionalParam | NodeKind::VarargParam,
+                    ) => self.ast.get_children(entry)[0],
+                    Some(NodeKind::Id) => entry,
+                    _ => {
+                        known = false;
+                        continue;
+                    }
+                };
+                if staged {
+                    scope.staged_parameters.push((
+                        AstNodeRef::new(self.file_id, source_entry),
+                        self.def_gen.next(),
+                    ));
+                }
+                parameters.push((
+                    self.extract_name(name)?,
+                    self.ast.get_span(name).unwrap_or_default(),
+                ));
+            }
+            scope.function_parameters = known.then_some(parameters);
             let mut result = self.ast.get_children(item)[2];
             if self.ast.get_node_kind(result) == Some(NodeKind::ResultWithId) {
                 result = self.ast.get_children(result)[1];
@@ -343,6 +414,43 @@ impl<'a> AstScanner<'a> {
                 scope.pattern_result_outputs = Some(outputs);
             }
         }
+        if self.ast.get_node_kind(item) == Some(NodeKind::TestTemplateDef) {
+            let clauses = self.ast.get_children(item)[1];
+            let mut anchors = Vec::new();
+            for &clause in self.ast.get_multi_child_slice(clauses).unwrap_or(&[]) {
+                let mut clause = clause;
+                while self.ast.get_node_kind(clause) == Some(NodeKind::QuoteDeclClause) {
+                    clause = self.ast.get_children(clause)[0];
+                }
+                if matches!(
+                    self.ast.get_node_kind(clause),
+                    Some(
+                        NodeKind::TypeBoundDeclClause
+                            | NodeKind::TypeDeclClause
+                            | NodeKind::TraitBoundDeclClause
+                    )
+                ) {
+                    anchors.push(clause);
+                }
+            }
+            if let [anchor] = anchors.as_slice() {
+                if self.ast.get_node_kind(*anchor) == Some(NodeKind::TypeBoundDeclClause) {
+                    let ty = self.ast.get_children(*anchor)[1];
+                    if self.ast.get_node_kind(ty) == Some(NodeKind::ContextualExprType) {
+                        let entries = self.ast.get_children(ty)[1];
+                        let mut names = Vec::new();
+                        for &entry in self.ast.get_multi_child_slice(entries).unwrap_or(&[]) {
+                            let name = self.ast.get_children(entry)[0];
+                            names.push((
+                                self.extract_name(name)?,
+                                self.ast.get_span(name).unwrap_or_default(),
+                            ));
+                        }
+                        scope.test_template_context = Some(names);
+                    }
+                }
+            }
+        }
         self.scope_tree.add_scope(scope);
         self.scope_tree.add_child(parent_scope, scope_id);
 
@@ -356,7 +464,23 @@ impl<'a> AstScanner<'a> {
         )?;
         self.def_names.push((def_id, name));
 
+        if self.ast.get_node_kind(item) == Some(NodeKind::TestDef) {
+            self.scan_runtime_blocks(scope_id, self.ast.get_children(item)[1])?;
+            return Ok(());
+        }
+        if self.ast.get_node_kind(item) == Some(NodeKind::TestTemplateInstance) {
+            return Ok(());
+        }
+        if self.ast.get_node_kind(item) == Some(NodeKind::TestTemplateDef) {
+            return self.scan_clauses(scope_id, def_id, item, 1);
+        }
         // Function/effect clauses use slot 3; associated declarations use slot 4.
+        if matches!(
+            self.ast.get_node_kind(item),
+            Some(NodeKind::FunctionTemplateInstance | NodeKind::FunctionTemplateInstanceWithParams)
+        ) {
+            return Ok(());
+        }
         if self.ast.get_node_kind(item) == Some(NodeKind::NormalFormHeadDef) {
             self.scan_clauses(scope_id, def_id, item, 1)?;
             self.scan_clauses(scope_id, def_id, item, 3)?;
@@ -369,6 +493,86 @@ impl<'a> AstScanner<'a> {
             self.scan_clauses(scope_id, def_id, item, 4)?;
         }
 
+        if self.ast.get_node_kind(item) == Some(NodeKind::Function) {
+            self.scan_runtime_blocks(scope_id, self.ast.get_children(item)[4])?;
+        }
+        Ok(())
+    }
+
+    /// Discover static declarations without treating ordinary local bindings as
+    /// unordered items. Each source block has its own file-qualified scope.
+    fn scan_runtime_blocks(&mut self, parent: ScopeId, node: NodeIndex) -> ResolveResult<()> {
+        use ast::NodeType as T;
+        let Some(kind) = self.ast.get_node_kind(node) else {
+            return Ok(());
+        };
+        if matches!(
+            kind,
+            NodeKind::QuoteExpr
+                | NodeKind::QuotePattern
+                | NodeKind::FunctionTemplateDef
+                | NodeKind::TestDef
+                | NodeKind::TestTemplateDef
+                | NodeKind::TestTemplateInstance
+                | NodeKind::FunctionTemplateInstance
+                | NodeKind::FunctionTemplateInstanceWithParams
+        ) {
+            return Ok(());
+        }
+        let children = self.ast.get_children(node);
+        if kind == NodeKind::Block {
+            let id = self.scope_gen.next();
+            let owner = self.scope_tree.get(parent).expect("block parent").owner_def;
+            let mut scope = Scope::new(id, ScopeKind::Block, Some(parent), None, owner, false);
+            scope.block_site = Some(AstNodeRef::new(self.file_id, node));
+            self.scope_tree.add_scope(scope);
+            self.scope_tree.add_child(parent, id);
+            let statements = self.ast.get_multi_child_slice(children[0]).unwrap_or(&[]);
+            for &statement in statements {
+                let (inner, _) = self.strip_pub_wrapper(statement);
+                if !matches!(
+                    self.ast.get_node_kind(inner),
+                    Some(
+                        NodeKind::ConstDecl
+                            | NodeKind::TestDef
+                            | NodeKind::TestTemplateDef
+                            | NodeKind::TestTemplateInstance
+                    )
+                ) {
+                    self.scan_items(id, &[statement])?;
+                }
+            }
+            for &statement in statements {
+                self.scan_runtime_blocks(id, statement)?;
+            }
+            return Ok(());
+        }
+        let (single, multi) = match kind.node_type() {
+            T::NoChild => (0, None),
+            T::SingleChild => (1, None),
+            T::DoubleChildren => (2, None),
+            T::TripleChildren => (3, None),
+            T::QuadrupleChildren => (4, None),
+            T::MultiChildren => (0, Some(0)),
+            T::SingleWithMultiChildren => (1, Some(1)),
+            T::DoubleWithMultiChildren => (2, Some(2)),
+            T::TripleWithMultiChildren => (3, Some(3)),
+            // Declaration bodies have their own scanner; raw FnType flags are
+            // not AST indices. Neither may be traversed as runtime syntax.
+            _ => return Ok(()),
+        };
+        for &child in &children[..single] {
+            self.scan_runtime_blocks(parent, child)?;
+        }
+        if let Some(index) = multi {
+            for &child in self
+                .ast
+                .get_multi_child_slice(children[index])
+                .unwrap_or(&[])
+            {
+                self.scan_runtime_blocks(parent, child)?;
+            }
+        }
         Ok(())
     }
 

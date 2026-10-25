@@ -949,7 +949,8 @@ impl<'h> Checker<'_, 'h> {
         subject: Option<&Term>,
         span: Span,
     ) -> Result<Vec<Term>, Error> {
-        self.type_clause_arguments_with_prefix(owner, args, subject, span, Vec::new())
+        let prefix = self.lexical_function_arguments(owner, span)?;
+        self.type_clause_arguments_with_prefix(owner, args, subject, span, prefix)
     }
 
     pub(super) fn type_clause_arguments_with_prefix(

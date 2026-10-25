@@ -1,0 +1,8 @@
+-- The builtin root re-exports Option to its child modules.
+-- Keep the unresolved panic contract separate from total value operations.
+impl Option<T> where T {
+    pub fn unwrap(self) -> T = self match {
+        .Some(v) => v,
+        .None => panic("called Option.unwrap() on a None value"),
+    };
+}

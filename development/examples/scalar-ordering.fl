@@ -1,14 +1,17 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Bool = true'type;
 typealias Byte = .u8'builtin;
 typealias Signed = .i128'builtin;
 typealias Char = 'a''type;
-comptime fn byte(a: Byte, b: Byte) -> (Bool, Bool, Bool, Bool) {
+comptime fn byte(a: Byte, b: Byte) -> Tuple<Bool, Bool, Bool, Bool> {
     (a < b, a <= b, a > b, a >= b)
 }
-comptime fn signed(a: Signed, b: Signed) -> (Bool, Bool, Bool, Bool) {
+comptime fn signed(a: Signed, b: Signed) -> Tuple<Bool, Bool, Bool, Bool> {
     (a < b, a <= b, a > b, a >= b)
 }
-comptime fn character(a: Char, b: Char) -> (Bool, Bool, Bool, Bool) {
+comptime fn character(a: Char, b: Char) -> Tuple<Bool, Bool, Bool, Bool> {
     (a < b, a <= b, a > b, a >= b)
 }
 comptime fn left() -> Byte { 255 }
@@ -17,7 +20,7 @@ comptime fn less() -> Bool { left() < right() }
 comptime fn less_equal() -> Bool { left() <= right() }
 comptime fn greater() -> Bool { left() > right() }
 comptime fn greater_equal() -> Bool { left() >= right() }
-comptime fn run() -> (Bool, Bool, Bool, Bool) {
+comptime fn run() -> Tuple<Bool, Bool, Bool, Bool> {
     let value: Byte = 255;
     (0 < value, value >= 255, 'a' <= 'z',
      1000000000000000000000000000000000000000000000 > 999999999999999999999999999999999999999999999)

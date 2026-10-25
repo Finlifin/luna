@@ -202,7 +202,7 @@ fn empty_and_invalid_packages_are_single_complete_expressions() {
     let mut package = Package::new();
     assert_eq!(
         package.to_string(),
-        "(hir-package\n  (root (owner-id 4294967295))\n  (owners)\n  (bodies) (definitions) (member-projections) (deferred-member-projections) (member-access) (definition-attributes) (pending-semantics))"
+        "(hir-package\n  (root (owner-id 4294967295))\n  (owners)\n  (bodies) (definitions) (member-projections) (deferred-member-projections) (member-access) (lexical-parents) (staged-parameter-definitions) (definition-attributes) (pending-semantics))"
     );
     let item = Item {
         owner_id: owner(0),
@@ -570,6 +570,7 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
         ),
         (ExprKind::When(&conds), "when", vec![]),
         (ExprKind::Block(&block), "block-expr", vec![]),
+        (ExprKind::UnsafeBlock(&block), "unsafe-block-expr", vec![]),
         (ExprKind::Loop(&block), "loop", vec![]),
         (
             ExprKind::For {
@@ -696,6 +697,20 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![("type", &b_tree)],
         ),
         (ExprKind::TyFn(&typarams), "ty-fn", vec![]),
+        (
+            ExprKind::TyModifiedFn(
+                hir::expr::FnTypeModifiers {
+                    is_pure: true,
+                    is_comptime: true,
+                    is_inline: true,
+                    is_unsafe: true,
+                    ..Default::default()
+                },
+                &typarams,
+            ),
+            "ty-modified-fn",
+            vec![],
+        ),
         (ExprKind::TyNFFn(&typarams), "ty-nf-fn", vec![]),
         (
             ExprKind::TyFnArrow(&a, &b),
@@ -739,6 +754,11 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
         ),
         (ExprKind::TypeOf(&a), "type-of", vec![("value", &a_tree)]),
         (
+            ExprKind::TakeIntrinsic(&a),
+            "take-intrinsic",
+            vec![("tag", &a_tree)],
+        ),
+        (
             ExprKind::TakeTagName(&a),
             "take-tag-name",
             vec![("value", &a_tree)],
@@ -755,7 +775,7 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![("value", &a_tree)],
         ),
     ];
-    assert_eq!(cases.len(), 84);
+    assert_eq!(cases.len(), 87);
     for (kind, tag, children) in cases {
         let tree = parsed(&kind);
         assert_eq!(tree.tag(), tag);
@@ -799,7 +819,7 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
                     5
                 );
             }
-            "block-expr" | "loop" => {
+            "block-expr" | "unsafe-block-expr" | "loop" => {
                 let block = tree.field(if tag == "loop" { "body" } else { "block" });
                 assert_id(block.field("id"), 7, 14);
                 assert_eq!(
@@ -856,11 +876,20 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
                 assert_eq!(&decl.field("type").list()[1], &b_tree);
                 assert_eq!(&decl.field("init").list()[1], &a_tree);
             }
-            "ty-fn" | "ty-nf-fn" => {
+            "ty-fn" | "ty-nf-fn" | "ty-modified-fn" => {
                 let param = &tree.field("params").list()[0];
                 assert_id(param.field("id"), 7, 18);
                 param.field("flags").atom(2);
                 assert_eq!(param.field("kind").field("type"), &b_tree);
+                if tag == "ty-modified-fn" {
+                    let modifiers = tree.field("modifiers");
+                    for name in ["pure", "comptime", "inline", "unsafe"] {
+                        assert_eq!(modifiers.field(name), &Sexp::Atom("true".into()));
+                    }
+                    for name in ["spec", "verified"] {
+                        assert_eq!(modifiers.field(name), &Sexp::Atom("false".into()));
+                    }
+                }
             }
             _ => {}
         }
@@ -1035,11 +1064,15 @@ fn function_signatures_preserve_parameters_flags_clauses_return_binding_and_body
         return_bind: Some(name("result")),
         return_binding: None,
         modifiers: FnModifiers {
+            is_test_template: false,
+            is_function_template: false,
+            is_test: false,
             is_inline: true,
             is_quote: false,
             is_normal_form_head: false,
             is_pure: true,
             is_comptime: true,
+            is_unsafe: true,
         },
         clause_params: &clauses,
         clause_constraints: &constraints,
@@ -1244,6 +1277,7 @@ fn item_definitions_include_fields_variants_nested_owners_and_import_styles() {
         ),
         (
             ItemKind::Enum(EnumDef {
+                is_intrinsic: true,
                 variants: &variants,
                 configurations: vec![],
                 clause_params: &clauses,
@@ -1572,4 +1606,43 @@ fn deferred_member_candidates_dump_in_stable_container_order() {
     assert!(dump.contains(
         "(container (def-id (package 1) (index 4))) (target (def-id (package 1) (index 5)))"
     ));
+}
+
+#[test]
+fn lexical_parents_dump_stable_child_and_parent_identities() {
+    let mut package = Package::new();
+    package.lexical_parents.insert(owner(9), owner(4));
+    package.lexical_parents.insert(owner(4), owner(1));
+    let first = package.to_string();
+    Sexp::parse(&first);
+    assert!(first.contains("(lexical-parents (lexical-parent (child (owner-id 4)) (parent (owner-id 1))) (lexical-parent (child (owner-id 9)) (parent (owner-id 4))))"));
+    package.lexical_parents.clear();
+    package.lexical_parents.insert(owner(4), owner(1));
+    package.lexical_parents.insert(owner(9), owner(4));
+    assert_eq!(first, package.to_string());
+}
+
+#[test]
+fn staged_input_dump_preserves_source_identity_and_order() {
+    let mut package = Package::new();
+    let entries = [
+        (id(9), DefId { pkg: 3, index: 12 }),
+        (id(2), DefId { pkg: 3, index: 11 }),
+    ];
+    for (binding, definition) in entries {
+        package
+            .staged_parameter_definitions
+            .insert(binding, definition);
+    }
+    let first = package.to_string();
+    Sexp::parse(&first);
+    assert!(first.contains("(definition (def-id (package 3) (index 11)))"));
+    assert!(first.find("(index 11)").unwrap() < first.find("(index 12)").unwrap());
+    package.staged_parameter_definitions.clear();
+    for (binding, definition) in entries.into_iter().rev() {
+        package
+            .staged_parameter_definitions
+            .insert(binding, definition);
+    }
+    assert_eq!(first, package.to_string());
 }

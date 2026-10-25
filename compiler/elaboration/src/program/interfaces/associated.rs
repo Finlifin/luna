@@ -238,15 +238,21 @@ impl Checker<'_, '_> {
             // Preserve observation identity even for a literal initializer: a
             // caller's checked assumes must describe the same constant as a
             // deferred method contract. Materialization evaluates the reference.
-            return Ok(Some(n::Expr {
-                ty: value.ty,
+            let (parameters, inputs) = self.interface_substitution(&interface, &subject);
+            let ty = self.instantiate_input_types(&member_type, &parameters, &inputs, span)?;
+            let reference = n::Expr {
+                ty,
                 source: source(span),
                 kind: K::AssociatedValue {
                     interface,
                     member,
                     subject,
                 },
-            }));
+            };
+            // As for method values, expose the proved concrete type through
+            // an outer view while retaining the declaration type on the
+            // observation node itself for phase validation.
+            return Ok(Some(self.callable_value_view(reference, None, span)?));
         }
         value.source = source(span);
         Ok(Some(value))
@@ -328,7 +334,24 @@ impl Checker<'_, '_> {
                     self.required_steps -= (before - fuel) as u64;
                     let template = specialized.map_err(|e| error(span, e))?.into_expression();
                     let before = fuel;
-                    let completed = nir::completed_values::validate(&template, &mut fuel);
+                    let completed = nir::completed_values::validate_with_declarations(
+                        &template,
+                        self.newtypes.values(),
+                        &|head| self.protocols.tuple == Some(head),
+                        &|id, fuel| {
+                            *fuel = fuel.checked_sub(1)?;
+                            match (self.structs.get(&id), self.enums.get(&id)) {
+                                (Some(definition), None) => Some(
+                                    nir::normal_forms::NominalValueDeclaration::Struct(definition),
+                                ),
+                                (None, Some(definition)) => Some(
+                                    nir::normal_forms::NominalValueDeclaration::Enum(definition),
+                                ),
+                                _ => None,
+                            }
+                        },
+                        &mut fuel,
+                    );
                     self.required_steps -= (before - fuel) as u64;
                     if completed.is_ok() {
                         return Ok(template);
@@ -863,6 +886,13 @@ impl Checker<'_, '_> {
                 | Term::TupleValue(arguments) => {
                     pending.extend(arguments.into_iter().map(|t| Work::Visit(t, depth + 1)))
                 }
+                Term::ErrorValue { ty, label, value } => {
+                    pending.push(Work::Visit(*ty, depth + 1));
+                    if let Some(label) = label {
+                        pending.push(Work::Visit(*label, depth + 1));
+                    }
+                    pending.push(Work::Visit(*value, depth + 1));
+                }
                 Term::NominalValue { ty, fields, .. } => {
                     pending.push(Work::Visit(*ty, depth + 1));
                     pending.extend(
@@ -874,12 +904,20 @@ impl Checker<'_, '_> {
                 Term::Record(fields) | Term::RecordValue(fields) => {
                     pending.extend(fields.into_iter().map(|(_, t)| Work::Visit(t, depth + 1)))
                 }
-                Term::Pointer(inner) | Term::ComptimeFunction(inner) => {
-                    pending.push(Work::Visit(*inner, depth + 1))
-                }
+                Term::Pointer(inner)
+                | Term::ComptimeFunction(inner)
+                | Term::UnsafeFunction(inner) => pending.push(Work::Visit(*inner, depth + 1)),
                 Term::Function { parameters, result } => {
                     pending.push(Work::Visit(*result, depth + 1));
                     pending.extend(parameters.into_iter().map(|p| Work::Visit(p.ty, depth + 1)));
+                }
+                Term::ErrorResult { errors, result } => {
+                    pending.push(Work::Visit(*result, depth + 1));
+                    pending.extend(
+                        errors
+                            .into_iter()
+                            .map(|label| Work::Visit(label, depth + 1)),
+                    );
                 }
                 Term::Computation { effects, result } => {
                     pending.push(Work::Visit(*result, depth + 1));

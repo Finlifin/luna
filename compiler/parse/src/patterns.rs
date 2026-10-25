@@ -818,17 +818,23 @@ impl Parser<'_> {
         })
     }
 
-    /// Try parse list rest pattern: `...id`
+    /// Try parse list rest pattern: `...id` or `..._`.
     fn try_list_rest_pattern(&mut self) -> ParseResult {
         self.scoped(|p| {
             if !p.peek(&[TokenKind::Dot, TokenKind::Dot, TokenKind::Dot]) {
                 return Ok(0);
             }
             p.eat_tokens(3); // consume '...'
-            let id = p.try_id()?;
+            let id = if p.peek(&[TokenKind::Underscore]) {
+                let span = p.next_token_span();
+                p.eat_tokens(1);
+                NodeBuilder::new(NodeKind::Wildcard, span).build(&mut p.ast)
+            } else {
+                p.try_id()?
+            };
             if id == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected an identifier after `...` in list rest pattern".to_string(),
+                    "Expected an identifier or `_` after `...` in list rest pattern".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));

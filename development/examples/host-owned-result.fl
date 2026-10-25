@@ -1,0 +1,29 @@
+-- Build run with --discard-result --copy-protocol Duplicate --drop-protocol Retire.
+-- The entry delivers an owned success/error payload; the host adapter retires it.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+
+struct Ticket { ready: bool }
+impl Retire for Ticket {
+    fn drop(*self) {
+        assumes self.ready.*;
+        self.ready.* = false;
+    }
+}
+
+newtype Envelope = Ticket;
+impl Retire for Envelope { fn drop(*self) {} }
+
+enum Failure { denied(Envelope), expired(Ticket) }
+
+fn run(.failed: bool = true, .expired: bool = false, .valid: bool = true) -> !Failure Ticket {
+    let ticket = Ticket { ready: valid };
+    if failed {
+        if expired { error Failure.expired(ticket) }
+        else { error Failure.denied(ticket.as(Envelope)) }
+    } else { ticket }
+}
+
+-- Reference execution uses the same ordinary source-level discard operation.
+fn reference() { run(); }

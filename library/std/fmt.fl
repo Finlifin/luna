@@ -2,8 +2,8 @@
 -- std/fmt – string formatting
 -- ==========================================================================
 
-pub fn format(template: String, ...args: Any) -> String {
-    __builtin_format(template, args)
+pub fn format(format_string: String, ...args: Any) -> String {
+    __builtin_format(format_string, args)
 }
 
 pub trait Display {

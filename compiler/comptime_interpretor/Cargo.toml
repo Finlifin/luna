@@ -7,3 +7,7 @@ edition = "2024"
 nir = { path = "../nir" }
 comptime_runtime = { path = "../comptime_runtime" }
 iir = { path = "../iir" }
+
+[[bench]]
+name = "invocation"
+harness = false

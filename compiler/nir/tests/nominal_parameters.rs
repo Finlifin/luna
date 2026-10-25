@@ -174,6 +174,7 @@ fn enum_payload_substitution_uses_the_same_value_binders() {
         }],
         groups: vec![],
         encoding: None,
+        is_intrinsic: false,
         symbol_encoding: None,
     };
     let variants = enumeration
@@ -629,4 +630,100 @@ fn layout_lookup_preserves_exhaustion_evidence_for_valid_indices() {
         }
         assert!(succeeded);
     }
+}
+
+#[test]
+fn symbolic_tuple_indices_require_registered_layout_and_leaf_evidence() {
+    let boolean = Term::Primitive(P::Bool);
+    let tuple = Term::NormalForm {
+        head: id(70),
+        sort: Sort::Type,
+        arguments: vec![Term::TypeListValue(vec![boolean.clone(), boolean.clone()])],
+    };
+    let symbolic = rigid(71, Sort::ComptimeValue);
+    let check = |domain: &Term, fields: Vec<Term>, registered: bool, evidence: bool, budget| {
+        nir::validate_declaration_arguments_with_evidence(
+            &[id(72)],
+            &[domain.clone()],
+            &[Term::TupleValue(fields)],
+            &mut { budget },
+            |requested, variant, _| {
+                if registered && requested == &tuple && variant.is_none() {
+                    Ok(vec![boolean.clone(), boolean.clone()])
+                } else {
+                    Err(nir::NominalAdmissionError::Invalid(
+                        "tuple layout unavailable".into(),
+                    ))
+                }
+            },
+            |value, domain, _| evidence && value == &symbolic && domain == &boolean,
+        )
+    };
+    let fields = vec![symbolic.clone(), Term::Bool(false)];
+    check(&tuple, fields.clone(), true, true, 1000).unwrap();
+    assert!(check(&tuple, fields.clone(), false, true, 1000).is_err());
+    assert!(check(&tuple, fields.clone(), true, false, 1000).is_err());
+    assert!(check(&tuple, vec![symbolic.clone()], true, true, 1000).is_err());
+    assert!(
+        check(
+            &tuple,
+            vec![symbolic.clone(), Term::Primitive(P::Bool)],
+            true,
+            true,
+            1000
+        )
+        .is_err()
+    );
+    let mut unrelated = tuple.clone();
+    if let Term::NormalForm { head, .. } = &mut unrelated {
+        *head = id(73);
+    }
+    assert!(check(&unrelated, fields.clone(), true, true, 1000).is_err());
+    assert!(matches!(
+        check(&tuple, fields, true, true, 0),
+        Err(nir::NominalAdmissionError::Budget)
+    ));
+}
+
+#[test]
+fn platform_index_admission_preserves_recursive_target_and_budget() {
+    let parameters = [id(1)];
+    let domains = [Term::Record(vec![(
+        "count".into(),
+        Term::Primitive(P::Usize),
+    )])];
+    let arguments = [Term::RecordValue(vec![(
+        "count".into(),
+        Term::Integer(comptime_runtime::Integer::from_u128(1u128 << 32)),
+    )])];
+    for (target, accepted) in [
+        (None, false),
+        (Some(nir::target::TargetData::new(32).unwrap()), false),
+        (Some(nir::target::TargetData::new(64).unwrap()), true),
+    ] {
+        assert!(matches!(
+            nir::validate_declaration_arguments_in(
+                &parameters,
+                &domains,
+                &arguments,
+                &mut 0,
+                target
+            ),
+            Err(nir::NominalAdmissionError::Budget)
+        ));
+        assert_eq!(
+            nir::validate_declaration_arguments_in(
+                &parameters,
+                &domains,
+                &arguments,
+                &mut 1000,
+                target
+            )
+            .is_ok(),
+            accepted
+        );
+    }
+    assert!(
+        nir::validate_declaration_arguments(&parameters, &domains, &arguments, &mut 1000).is_err()
+    );
 }

@@ -211,6 +211,17 @@ fn pattern_subject(
             *bindings = local;
             inner
         }
+        Pattern::Observe { binding, inner } => {
+            charge_operand(subject, fuel)?;
+            let previous = bindings.insert(*binding, subject.clone());
+            let result = pattern_subject(inner, subject, bindings, fuel, depth + 1);
+            if let Some(previous) = previous {
+                bindings.insert(*binding, previous);
+            } else {
+                bindings.remove(binding);
+            }
+            return result;
+        }
         Pattern::Binding { binding, inner } => {
             let Some(inner) = pattern_subject(inner, subject, bindings, fuel, depth + 1)? else {
                 return Ok(None);
@@ -436,15 +447,26 @@ fn condition_predicate(
             result: Some(result),
         } => {
             let mut locals = copy_bindings(bindings, fuel)?;
+            let mut owned = BTreeSet::new();
             let mut evaluations = Vec::new();
             for statement in statements {
                 spend(fuel, 1)?;
-                let K::Let { binding, value } = &statement.kind else {
-                    return Ok(None);
+                let statement = match &statement.kind {
+                    K::Discard(inner) => inner.as_ref(),
+                    _ => statement,
                 };
                 if statement.ty != Term::Primitive(Primitive::Void) {
                     return Ok(None);
                 }
+                let (binding, value, declaration) = match &statement.kind {
+                    K::Let { binding, value } => (*binding, value, true),
+                    K::Assign { place, value }
+                        if place.fields.is_empty() && owned.contains(&place.root) =>
+                    {
+                        (place.root, value, false)
+                    }
+                    _ => return Ok(None),
+                };
                 let value = if value.ty == Term::Primitive(Primitive::Bool) {
                     condition_predicate(value, &locals, fuel, depth + 1)?
                         .map(|value| Operand::Predicate(Box::new(value)))
@@ -455,8 +477,12 @@ fn condition_predicate(
                     return Ok(None);
                 };
                 evaluations.push(operand_evaluation(&value, fuel)?);
-                if locals.insert(*binding, value).is_some() {
+                if declaration && locals.contains_key(&binding) {
                     return Ok(None);
+                }
+                locals.insert(binding, value);
+                if declaration {
+                    owned.insert(binding);
                 }
             }
             let Some(result) = condition_predicate(result, &locals, fuel, depth + 1)? else {
@@ -866,6 +892,41 @@ mod tests {
                 expected
             );
         }
+        let mut assigned = condition.clone();
+        let K::Block { statements, .. } = &mut assigned.kind else {
+            unreachable!()
+        };
+        statements.push(expr(
+            K::Assign {
+                place: nir::program::Place {
+                    root: endpoint,
+                    fields: vec![],
+                },
+                value: Box::new(expr(
+                    K::Literal(Literal::Float("2.0".into())),
+                    Primitive::Float,
+                )),
+            },
+            Primitive::Void,
+        ));
+        let predicate = extract(&pattern(assigned.clone()), &mut 10_000)
+            .unwrap()
+            .unwrap();
+        for (text, expected) in [("1.5", true), ("2.0", false), ("2.5", false)] {
+            let value = decimal(text, &mut 10_000).unwrap();
+            assert_eq!(
+                predicate.matches(Cell::Point(&value), &mut 10_000).unwrap(),
+                expected
+            );
+        }
+        let K::Block { statements, .. } = &mut assigned.kind else {
+            unreachable!()
+        };
+        let K::Assign { place, .. } = &mut statements.last_mut().unwrap().kind else {
+            unreachable!()
+        };
+        place.root = subject;
+        assert!(extract(&pattern(assigned), &mut 10_000).unwrap().is_none());
         let mut duplicate = condition.clone();
         let K::Block { statements, .. } = &mut duplicate.kind else {
             unreachable!()

@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 fn selected(comptime value: bool) -> bool { value }
 
 fn round_trip(comptime initial: bool) -> bool {
@@ -12,6 +15,6 @@ fn round_trip(comptime initial: bool) -> bool {
     })
 }
 
-fn run() -> (bool, bool) {
+fn run() -> Tuple<bool, bool> {
     (round_trip(false), round_trip(true))
 }

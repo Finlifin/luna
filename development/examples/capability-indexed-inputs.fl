@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- Ordinary comptime values may index opaque types in trait requirements.
 typealias Type = .Type'builtin;
 
@@ -30,6 +33,6 @@ where T, G, requires bool :- Allowed<Tagged<T, value>> {
     extra
 }
 
-fn run() -> (bool, bool, bool) {
+fn run() -> Tuple<bool, bool, bool> {
     (accept(bool, bool), forward(bool, bool), generic(bool, true))
 }

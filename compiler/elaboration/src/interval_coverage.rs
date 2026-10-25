@@ -306,19 +306,35 @@ fn condition_inner(
             result: Some(result),
         } => {
             let mut state = copy_state(state, steps)?;
+            let mut owned = std::collections::BTreeSet::new();
             for statement in statements {
                 spend(steps, 1)?;
-                let K::Let {
-                    binding,
-                    value: expr,
-                } = &statement.kind
-                else {
-                    return Ok(None);
+                let statement = match &statement.kind {
+                    K::Discard(inner) => inner.as_ref(),
+                    _ => statement,
                 };
-                let Some(v) = value(expr, &state, steps, depth + 1)? else {
-                    return Ok(None);
-                };
-                state.bindings.insert(*binding, v);
+                match &statement.kind {
+                    K::Let {
+                        binding,
+                        value: input,
+                    } => {
+                        let Some(v) = value(input, &state, steps, depth + 1)? else {
+                            return Ok(None);
+                        };
+                        state.bindings.insert(*binding, v);
+                        owned.insert(*binding);
+                    }
+                    K::Assign {
+                        place,
+                        value: input,
+                    } if place.fields.is_empty() && owned.contains(&place.root) => {
+                        let Some(v) = value(input, &state, steps, depth + 1)? else {
+                            return Ok(None);
+                        };
+                        state.bindings.insert(place.root, v);
+                    }
+                    _ => return Ok(None),
+                }
             }
             return condition(result, &state, steps, depth + 1);
         }
@@ -430,6 +446,22 @@ fn pattern_subject(
     }
     match pat {
         Pattern::Wild => Ok(vec![state]),
+        Pattern::Observe { binding, inner } => {
+            let mut state = state;
+            charge_value(subject, steps)?;
+            let previous = state.bindings.insert(*binding, subject.clone());
+            let mut states = pattern_subject(inner, subject, state, steps, depth + 1, complete)?;
+            for state in &mut states {
+                spend(steps, 1)?;
+                if let Some(previous) = &previous {
+                    charge_value(previous, steps)?;
+                    state.bindings.insert(*binding, previous.clone());
+                } else {
+                    state.bindings.remove(binding);
+                }
+            }
+            Ok(states)
+        }
         Pattern::Binding { binding, inner } => {
             let mut states = pattern_subject(inner, subject, state, steps, depth + 1, complete)?;
             for state in &mut states {
@@ -592,6 +624,29 @@ pub(crate) fn extract_exact(pat: &Pattern, steps: &mut usize) -> Result<Vec<Inte
     extract_with_completeness(pat, steps, true)
 }
 
+// Reuse the bounded predicate evaluator for the two Boolean subjects. There
+// is no arithmetic encoding of bool: Predicate denotes its exact truth value.
+pub(crate) fn boolean_case(
+    pat: &Pattern,
+    subject: bool,
+    steps: &mut usize,
+) -> Result<Option<bool>, ()> {
+    let subject = Value::Predicate(if subject { whole() } else { vec![] });
+    let mut complete = true;
+    let states = pattern_subject(
+        pat,
+        &subject,
+        State {
+            ranges: whole(),
+            bindings: BTreeMap::new(),
+        },
+        steps,
+        0,
+        &mut complete,
+    )?;
+    Ok(complete.then(|| states.iter().any(|state| !state.ranges.is_empty())))
+}
+
 fn extract_with_completeness(
     pat: &Pattern,
     steps: &mut usize,
@@ -614,7 +669,10 @@ fn extract_with_completeness(
     Ok(states.into_iter().flat_map(|state| state.ranges).collect())
 }
 
-pub(crate) fn domain(primitive: Primitive) -> Option<Vec<Interval>> {
+pub(crate) fn domain_in(
+    primitive: Primitive,
+    target: Option<nir::target::TargetData>,
+) -> Option<Vec<Interval>> {
     let finite = |start, end| Interval {
         start: Edge::Finite(Integer::from_u128(start)),
         end: Edge::Finite(Integer::from_u128(end)),
@@ -625,7 +683,10 @@ pub(crate) fn domain(primitive: Primitive) -> Option<Vec<Interval>> {
     if primitive == Primitive::Char {
         return Some(vec![finite(0, 0xd800), finite(0xe000, 0x110000)]);
     }
-    let (signed, width) = primitive.fixed_integer_layout()?;
+    let (signed, width) = target.map_or_else(
+        || primitive.fixed_integer_layout(),
+        |target| target.integer_layout(primitive),
+    )?;
     let mut budget = Budget::default();
     let (start, maximum) = if signed {
         (
@@ -696,6 +757,138 @@ mod tests {
             source: SourceRange { start: 0, end: 0 },
         }
     }
+    #[test]
+    fn boolean_guards_match_all_truth_tables_without_external_evidence() {
+        let binding = LocalId { owner: 0, index: 1 };
+        let predicate = |mask: u8| Pattern::Guard {
+            pattern: Box::new(Pattern::Binding {
+                binding,
+                inner: Box::new(Pattern::Wild),
+            }),
+            condition: Box::new(expr(
+                Primitive::Bool,
+                K::Match {
+                    value: Box::new(expr(Primitive::Bool, K::Local(binding))),
+                    arms: [false, true]
+                        .into_iter()
+                        .map(|value| nir::program::MatchArm {
+                            pattern: Pattern::Literal(Literal::Bool(value)),
+                            guard: None,
+                            body: expr(
+                                Primitive::Bool,
+                                K::Literal(Literal::Bool(mask & (1 << u8::from(value)) != 0)),
+                            ),
+                        })
+                        .collect(),
+                },
+            )),
+        };
+        for left in 0..4 {
+            for right in 0..4 {
+                let alternatives = Pattern::Or(vec![predicate(left), predicate(right)]);
+                for value in [false, true] {
+                    assert_eq!(
+                        boolean_case(&alternatives, value, &mut 10_000),
+                        Ok(Some((left | right) & (1 << u8::from(value)) != 0))
+                    );
+                }
+                assert_eq!(
+                    check(
+                        &BTreeMap::new(),
+                        &Term::Primitive(Primitive::Bool),
+                        &[&alternatives],
+                        10_000
+                    ),
+                    if left | right == 3 {
+                        Coverage::Exhaustive
+                    } else {
+                        Coverage::Missing
+                    }
+                );
+            }
+        }
+        let unknown = Pattern::Guard {
+            pattern: Box::new(Pattern::Wild),
+            condition: Box::new(expr(Primitive::Bool, K::Local(binding))),
+        };
+        assert_eq!(boolean_case(&unknown, false, &mut 100), Ok(None));
+        assert_eq!(boolean_case(&predicate(3), true, &mut 0), Err(()));
+        assert_eq!(
+            boolean_case(&predicate(3), true, &mut 10_000),
+            Ok(Some(true))
+        );
+    }
+
+    #[test]
+    fn guard_assignment_preserves_saved_values_and_cannot_write_outer_bindings() {
+        let subject = LocalId { owner: 0, index: 0 };
+        let mutable = LocalId { owner: 0, index: 1 };
+        let saved = LocalId { owner: 0, index: 2 };
+        let local = |binding| expr(Primitive::Bool, K::Local(binding));
+        let make = |target| Pattern::Guard {
+            pattern: Box::new(Pattern::Binding {
+                binding: subject,
+                inner: Box::new(Pattern::Wild),
+            }),
+            condition: Box::new(expr(
+                Primitive::Bool,
+                K::Block {
+                    statements: vec![
+                        expr(
+                            Primitive::Void,
+                            K::Let {
+                                binding: mutable,
+                                value: Box::new(local(subject)),
+                            },
+                        ),
+                        expr(
+                            Primitive::Void,
+                            K::Let {
+                                binding: saved,
+                                value: Box::new(local(mutable)),
+                            },
+                        ),
+                        expr(
+                            Primitive::Void,
+                            K::Discard(Box::new(expr(
+                                Primitive::Void,
+                                K::Assign {
+                                    place: nir::program::Place {
+                                        root: target,
+                                        fields: vec![],
+                                    },
+                                    value: Box::new(expr(
+                                        Primitive::Bool,
+                                        K::Not(Box::new(local(mutable))),
+                                    )),
+                                },
+                            ))),
+                        ),
+                    ],
+                    result: Some(Box::new(expr(
+                        Primitive::Bool,
+                        K::ScalarEqual(
+                            Box::new(local(saved)),
+                            Box::new(expr(Primitive::Bool, K::Not(Box::new(local(mutable))))),
+                        ),
+                    ))),
+                },
+            )),
+        };
+        for value in [false, true] {
+            assert_eq!(
+                boolean_case(&make(mutable), value, &mut 10_000),
+                Ok(Some(true))
+            );
+            assert_eq!(boolean_case(&make(subject), value, &mut 10_000), Ok(None));
+        }
+        assert_eq!(boolean_case(&make(mutable), true, &mut 3), Err(()));
+        assert_eq!(
+            boolean_case(&make(mutable), true, &mut 10_000),
+            Ok(Some(true))
+        );
+    }
+
     fn range(
         ty: Primitive,
         lower: Option<Literal>,

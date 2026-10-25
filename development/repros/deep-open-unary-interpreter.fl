@@ -1,0 +1,5 @@
+-- Regression: direct NIR and host execution both handle this Not spine.
+fn choose(comptime flag:bool,value:bool)->bool {
+    not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not (do {inline if flag {value} else {false}})
+}
+fn run()->bool {choose(true,true)}

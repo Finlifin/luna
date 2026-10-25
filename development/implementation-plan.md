@@ -4,7 +4,51 @@ The active objective is implementation of the language defined by `docs/`. Indiv
 
 ## Current executable boundary
 
-`luna` accepts source and exports AST, HIR, or type-elaborated NIR (`--emit nir`). It also explicitly invokes a concrete comptime entry with `--invoke-comptime <name>` under a configurable execution fuel budget, returning an S-expression value. The connected NIR path covers explicit function signatures, aliases, Type-parameter generic functions with definition-side checking and inferred/explicit instances and context-inferred function values, forward/recursive calls, higher-order function values, contextual/annotated lambdas with explicit structural capture environments, local inference, nominal structs including explicitly instantiated Type-parameter templates, with declaration-ordered named/default initialization, field reads/writes and named-field pattern destructuring, let/var rebinding checks, closed enums including explicit Type-parameter instances, with unit/positional/named variants and definition-scoped field defaults, nested payload binding and bounded constructor-matrix exhaustiveness checking, tuples with nested heterogeneous pattern destructuring and constructor-matrix coverage, booleans, strings/chars, if/when branches, returns, local assignment, ordered scalar matches with guards/bindings/exhaustiveness checks, sequential and-is patterns with candidate-local bindings and embedded computations, corresponding or-pattern binders, refutable let bindings with diverging failure branches, nested loops with lexical break/continue targets, named optional arguments and finite scalar/tuple default computations. It rejects unsupported protocols and retained pending stage/attribute information. Source-level generic direct calls now use candidate-local inference and obligation freezing; seven inference-store tests cover trial isolation, stale commit rejection, occurs checks and export of solved terms. Type equality/inequality and Boolean `requires` now provide definition-local assumptions and caller-proved instance obligations, including generic inference and function values. Runtime predicates stay outside PTC. Full PTC/trait integration, general numeric/operator protocols, dependent/value generics, general partial-type contextual elaboration, comptime phase authorization, resource/effect verification and executable code generation remain incomplete. NIR output is not a resource-verified IIR artifact. A concrete interpreter executes the supported value/control-flow fragment through the shared frontend with malformed NIR rejection and materialization budget checks. A phase-checked entry now executes closed first-order comptime computations required by type formation under shared fuel/depth limits; general eligibility, residual scheduling and invocation remain incomplete.
+Frontend artifact reuse (2026-10-23): `CompilationCache` now provides bounded process-local LRU reuse of completed artifacts, resolved protocols and source observations. Full requests plus cwd key entries; source membership/content and output-alias checks run on hits. Stale entries are evicted before recompilation, read/protection failures do not fall back to old results, and failed compilations are not retained. Fresh results are revalidated before insertion. No execution results, active inference state, persistent cache or daemon protocol are included. Tests prove immutable Arc reuse, source/dependency invalidation and recovery, directory changes, conservative key separation, LRU/zero-capacity behavior, and output hard-link rejection after a prior successful compile. In `/home/fin/luna`, `python3 -B development/check.py --timeout 300 -- test -p luna --test compilation_cache --test packages` exited 0, 5 + 46 passed (`/tmp/luna-tools-fb7s59ay/result.json`).
+
+Discovery revalidation (2026-10-23): observations now retain each scan root, canonical root, explicit package exclusions and relative membership. `changed_discovery()` reuses source discovery to report sorted added/removed files and directories by resolution ID; missing roots remove recorded members, while retargeted roots and scan failures reject. Source content checks remain separate. Tests cover new modules, non-source files, empty-directory changes, dependency isolation, root deletion/restoration, unsupported symlinks and same-content root retargeting. The process envelope carries these discovery inputs, and changes have S-expression Display with lossless native path bytes. In `/home/fin/luna`, the check wrapper with timeout 300 and `test -p luna --test packages --test frontend_cli` passed 46 + 172 (`/tmp/luna-tools-ykv8f9sk/result.json`); after extracting shared path formatting, `test -p luna --test packages compilation_` passed 5 (`/tmp/luna-tools-yixqtjz9/result.json`). Neither revalidation API is an atomic filesystem transaction or a complete cache-key validator.
+
+Raw input revalidation (2026-10-23): observed compilation now uses a recording source loader, retaining the original UTF-8 text before SourceMap BOM/CRLF normalization and reusing the first loaded text for repeated filename requests. `SourceInput::raw_text` and `CompilationInputs::changed_sources()` enable exact file-byte comparison; deletion is a change, other read failures remain errors. The process envelope adds `raw-text` only when it differs from normalized `text`. Directory membership and complete cache keys still need separate revalidation. Normal compilation does not install the recording loader. BOM/CRLF, normalization-only edits, restoration, deletion, invalid UTF-8 replacement and read failures are covered. In `/home/fin/luna`, `python3 -B development/check.py --timeout 300 -- test -p luna --test packages --test frontend_cli` exited 0, 45 + 172 passed (`/tmp/luna-tools-eip59t47/result.json`).
+
+Process input export (2026-10-23): `--packages-v1 --with-inputs` wraps the selected operation result and its same-invocation source observations in a version-1 S-expression envelope. It shares compilation and selector resolution with existing actions, retains source-output alias checks and publishes only after the action succeeds. Duplicate flags and use outside package-set mode reject as usage errors. CLI tests cover HIR, NIR, reference execution, dependency snapshots, atomic preservation after frontend/action failure, source overwrite rejection and successful recovery. In `/home/fin/luna`, `python3 -B development/check.py --timeout 300 -- test -p luna --test frontend_cli` exited 0 (`/tmp/luna-tools-si058z77/result.json`). The anar checkout location has been requested; its absence does not block independent luna implementation.
+
+Build input observations (2026-10-23): `packages::compile_with_inputs` returns the NIR artifact with the source-map text and package/path identities consumed by that invocation, plus scanned directories for membership invalidation. Existing entry points retain their allocation behavior by leaving observation disabled. Directory ownership uses the same discovery path as compilation; text observations do not reread files afterward. This is not a complete cache key or an atomic filesystem snapshot; configuration, dependencies, target/compiler identity and input revalidation remain build-tool responsibilities. No confirmed anar checkout was found in the inspected environment; this provides the luna-side Rust API and package-set `--with-inputs` export. See `development/package-cli.md`. In `/home/fin/luna`, the check wrapper with `test -p luna --test packages` passed 44 (`/tmp/luna-tools-ca7wi2i0/result.json`); package CLI regression evidence is `/tmp/luna-tools-cwppg93t/result.json` for `test -p luna --test frontend_cli explicit_package_cli`, exit 0. Both used timeout 300.
+
+Closure rewrite scheduling (2026-10-23): the NIR work stack carries separate capture and shared-body steps, preserving capture-type/initializer order and delaying `Arc::make_mut` until earlier captures succeed. Regression checks cover failure without cloning or touching later captures, recovery, and 157 nested shared closure bodies on a 2 MiB worker while preserving the original template. In `/home/fin/luna`, `python3 -B development/check.py --timeout 300 -- test -p nir --test type_rewrite --test copy_budget` passed 8 + 13 (`/tmp/luna-tools-41vtyoi5/result.json`); the same wrapper with `test -p luna --test captured_memory --test function_type_dependencies --test cmtt_methods --test drop` passed 94 + 33 + 142 + 987 (`/tmp/luna-tools-vm072yon/result.json`).
+
+NIR traversal extension (2026-10-23): the explicit work stack also covers conditions, returns, calls, aggregate fields, closure type components, effect resume/run/computation and request children. Effect identity/signature annotations retain their prior rewrite order. A call-order regression deliberately reverses parameter slot numbers while checking source-order visitation; mixed conditional/aggregate/return chains exercise the admitted copy depth on a 2 MiB worker. Specialized error-conversion and match metadata handling remains intact. In `/home/fin/luna`, `python3 -B development/check.py --timeout 300 -- test -p nir --test type_rewrite --test copy_budget` passed 7 + 12 (`/tmp/luna-tools-75528wci/result.json`); the same wrapper with `test -p luna --test error_surface --test effect_memory_transfers --test quote_functions --test cmtt_methods` passed 117 + 85 + 103 + 142 (`/tmp/luna-tools-z7p2nrjs/result.json`).
+
+NIR rewrite traversal (2026-10-23): ordinary block/preparation scopes, unary nodes, binary nodes and bit windows now use an explicit mutable-child work stack, preserving expression/type callback preorder, pruning and error short-circuiting. Specialized nodes whose metadata depends on rewritten children retain their dedicated traversal; this is not a claim that every NIR traversal is stackless. The small-worker copy test now mixes unary, binary and preparation scopes at the admitted depth. In `/home/fin/luna`, `python3 -B development/check.py --timeout 300 -- test -p nir --test type_rewrite --test copy_budget` passed 6 + 12 (`/tmp/luna-tools-dc60w_a6/result.json`), and the same wrapper with `test -p luna --test quote_functions --test cmtt --test drop` passed 103 + 523 + 987 (`/tmp/luna-tools-yulwohar/result.json`).
+
+Workspace integration evidence (2026-10-23): in `/home/fin/luna`, `python3 -B development/check.py --timeout 900 -- test --workspace --no-fail-fast` completed 197 groups with 8,032 passed, 2 failed and 11 ignored (`/tmp/luna-tools-duxn_obn/result.json`). Both failures were stale assertions: contextual constructor copy used the former literal depth limit, and raw contracted trait-value transport expected late InvalidCallPlan rather than the earlier Unsupported rejection. After correcting those assertions, `test -p elaboration --lib` passed 217 (`/tmp/luna-tools-0it7eazo/result.json`) and `test -p comptime_interpretor --test runtime_function_identities` passed 13 (`/tmp/luna-tools-oyu3ekfp/result.json`), using the check wrapper with timeout 300. These are targeted retests, not a second full-workspace pass. The real sysroot smoke command `python3 -B development/check.py --timeout 300 -- run -p luna -- development/examples/library-smoke.fl --sysroot library --interpret run` still exits 1 at multi-package HIR resolution (`/tmp/luna-tools-_yky17qz/result.json`): unresolved panic, String, Any and allocation/formatting/I/O hooks, as already documented in `library/README.md`. Library execution remains incomplete.
+
+Quote expansion copy-depth integration (2026-10-23): the supported 32-frame quote chain generates more than 128 nested IR nodes because argument preparation, callee parameters and lexical cleanup retain separate scopes. NIR copy preflight now bounds the complete tree at 160 levels, while individual type terms remain capped at 128. Unary expression rewriting uses the small traversal frame rather than retaining the large operation dispatcher. A 2 MiB worker regression checks admitted-depth cloning, rewriting and destruction, rejection beyond the boundary, and recovery. This does not remove expansion-cycle checks or relax the 32-frame quote limit. In `/home/fin/luna`, `python3 -B development/check.py --timeout 300 -- test -p luna --test quote_functions --test instantiation --test drop` passed 103 + 52 + 987 tests (`/tmp/luna-tools-ev3zsbb5/result.json`); `python3 -B development/check.py --timeout 300 -- test -p nir --test copy_budget --test type_rewrite` passed 12 + 5 (`/tmp/luna-tools-wd3j51la/result.json`). No new full-suite pass is claimed.
+
+As of 2026-10-22, the connected compiler is substantially beyond the original first-order NIR milestone. Source compilation includes multi-package inputs and explicit dependency/protocol binding (`compiler/luna/src/packages.rs`), also exposed through the versioned `--packages-v1` process interface (see `development/package-cli.md`), generic and dependent calls, staged values, closures, trait dispatch, error/effect handling, CMTT and inline expansion. The reference execution paths instantiate concrete programs, perform their selected verification/lowering steps and execute them; they are not native code generation. Resource-checked execution has a distinct explicit protocol entry (`interpret_with_protocols`), so passing ordinary execution tests does not by itself establish ownership correctness.
+
+Program verification is implemented separately from PTC: memory/resource analysis, runtime specifications, bounded polynomial range/sign/nonzero evidence and runtime checks have dedicated paths. IIR contains staging, cleanup and effect representations and transformations, rather than only a skeleton. Coverage is partial throughout; the presence of these paths or passing tests must not be read as language completion.
+
+Concrete outstanding source boundaries include general ordinary `for` protocol/effect elaboration and empty `tuple_enumerate` body checking in runtime, open-function and generator contexts. Ordinary `for` interface signatures and direct-Iter/conversion selection are still unconfirmed: `docs/control-flow/basic.md` fixes protocol names only; `development/iteration-protocol-proposal.fl` is explicitly a proposal, and the legacy `library/builtin/iterator.fl` next-based protocol is not the intended lowering contract. The author has been asked to settle that specific interface; do not infer approval from silence. Signed `/` and remainder require a bound protocol; their absence must not be repaired by silently choosing a rounding policy. Explicitly rounded integer IR already executes and is verified. End-to-end native generation, complete standard-library coverage and full anar integration still require their own completion evidence.
+
+Dependent callable types now bind explicit comptime Type/value inputs with lexical telescope scope, retain normal-form heads, and validate callable-local domains during comptime type-value inspection. Comptime closures can capture these callables. Runtime closures now retain finite sets of named-function and trait-method template identities and specialize their calls, including runtime if/match selection, mutable cells, cyclic local aliases, declaration arguments and nested closures. Domain analysis takes a bounded union of recognized initializers and assignments, then removes cells and dependent aliases with unknown producers. Actual values stay in runtime cells: construction snapshots and later private capture writes remain distinct. Selection effects run at initialization; internal TemplateEqual nodes compare the captured identity during dispatch without exposing source-level function equality. Trait identities retain interface, subject, member and method inputs independently of selected implementation-body identity; shared code cannot merge distinct method identities. Default methods and method value parameters participate in the same path. Finite runtime staged method identities retain interface preconditions, result postconditions and entry-value snapshots through specialization and nested capture. Raw NIR execution rejects stored methods whose preconditions would be erased; direct calls retain their contract checks. Comptime factories and generic associated initializers can transport contracted runtime staged method identities without executing runtime bodies. Capture-domain collection follows associated-value resolution so runtime selection retains each interface instance and its entry domain. Ordinary and comptime method values with preconditions remain restricted pending general callable program contracts. Factory integration verification (cwd `/home/fin/luna`): CMTT 523, elaboration 448, execution 1,365 and dependent-callable 27 tests passed in `/tmp/luna-tools-slq6bwgw/result.json`; that run stopped on obsolete expectations/reserved-word fixture names in `function_type_parameters`. After correcting those fixtures, `python3 -B development/check.py --timeout 300 -- test -p luna --test function_type_parameters --test nominal_value_parameters --test resources` exited 0 with 55 + 265 + 357 tests (`/tmp/luna-tools-mwedoycs/result.json`). Total distinct passing cases: 3,040. Contract regression evidence (cwd `/home/fin/luna`): `python3 -B development/check.py --timeout 300 -- test -p luna --test execution --test cmtt --test resources --test function_type_dependencies` exited 0 (`/tmp/luna-tools-swsbnkfe/result.json`, 2,269 tests); after adding the entry-snapshot mutation case, the focused `function_type_dependencies` rerun exited 0 with 25 tests (`/tmp/luna-tools-btgzynvn/result.json`). The formerly ignored `runtime_closures_capture_dependent_callable_templates` acceptance test now executes and checks that the logical capture survives in IIR. Closed immutable local pointer aliases now contribute template loads and stores to domain analysis. Direct pointer callees are read into fresh logical-callable temporaries before argument evaluation; argument writes cannot retarget the current invocation, and normal arguments still execute once. Returned, captured, retargeted or otherwise escaped pointers remain excluded until broader alias analysis is available. Arbitrary higher-order propagation remains incomplete; erasing captures or inserting dummy values is not a valid implementation.
+
+Named runtime templates with explicit comptime inputs now retain declaration program contracts through runtime selection, nested captures and comptime factories. Declaration arguments distinguish target domains; entry snapshots and postconditions survive specialization. Ordinary non-staged callable contract erasure remains rejected. The resource-checked factory regression now rejects the illegal call during residual program-contract analysis, before interpretation. Explicit `assumes` supplies unknown entry evidence and retains its runtime failure check; arbitrary capture-domain correlations are not yet statically discharged. Validation in `/home/fin/luna`: elaboration 448 and dependent callables 29 passed (`/tmp/luna-tools-hyygbzr4/result.json`, subsequently stopped on an obsolete instantiation-only rejection expectation); execution 1,365, function-type parameters 55 and resources 357 passed after updating that expectation (`/tmp/luna-tools-xonx8gr1/result.json`). The final dependent-callable run including resource-checked cases passed 29 tests (`/tmp/luna-tools-ik5mbrcs/result.json`). Commands use `python3 -B development/check.py --timeout 300 -- test -p luna --test <group>`; 2,254 distinct cases passed.
+
+Program-flow call analysis now resolves `runtime_instances` by full declaration/argument identity through `Package::runtime_body`, uses the residual parameter bindings and contracts, and does not reapply completed substitutions. Missing or duplicate direct targets reject rather than silently losing their contracts; lookup work is budgeted. A source-to-IIR regression checks two instances of one declaration inside a captured callback, static rejection of a false precondition, duplicate-instance rejection and recovery after exhausted fuel. Resource-checked source execution now rechecks residual program contracts, fixed-width arithmetic and bit index/window/update/write endpoints before publishing cleanup schedules. Regressions remove checked assumptions from already-elaborated arithmetic and zero-width window bodies, verifying that later transformations cannot rely solely on the earlier source check. The low-level cleanup planner remains available for injected-failure interpreter tests and does not claim source certification. Reference execution without resource protocols retains runtime checks. Bodies requiring higher-order or effect-result cleanup contexts now undergo residual direct-contract checking before the contextual-schedule skip. Context-dependent callback contracts and captured target/argument correlations still need broader static integration. Validation: in `/home/fin/luna`, `python3 -B development/check.py --timeout 300 -- test -p luna --test function_type_dependencies --test elaboration --test execution --test integer_contracts --test resources` exited 0, 2,212 tests (`/tmp/luna-tools-0qe5fy1w/result.json`).
+
+Residual-gate integration validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 300 -- test -p luna --test function_type_dependencies --test resources --test drop --test captured_memory` passed 31 + 357 + 987 + 94 tests (`/tmp/luna-tools-80pbh4i2/result.json`). After adding explicit-assumption failure evidence, the dependent-callable, CLI and source-test groups passed 31 + 170 + 6 (`/tmp/luna-tools-jgp3mjhq/result.json`). Total distinct cases: 1,645. The earlier low-level planner gate failed intentional contract-rejection cleanup tests; the final source-checked entrypoint boundary preserves those tests without weakening the source gate.
+
+Higher-order residual-gate regression: a wrapper accepting an ordinary callable and invoking a locally stored staged target must establish the target precondition; adding the wrapper entry requirement discharges it. Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 300 -- test -p luna --test function_type_dependencies --test resources` passed 32 + 357 (`/tmp/luna-tools-n3gcja34/result.json`); default calls 33, extended calls 35, CLI 170 and function-type parameters 55 passed (`/tmp/luna-tools-rbv9g7sk/result.json`). Total: 682 cases.
+
+Residual arithmetic/endpoint validation: in `/home/fin/luna`, `python3 -B development/check.py --timeout 300 -- test -p luna --test integer_contracts --test resources --test frontend_cli --test function_type_dependencies` exited 0, 573 cases (`/tmp/luna-tools-psi1wnad/result.json`). The expanded pointer-template ordering regression now budgets 2,000,000 steps for the additional residual branch/snapshot range analysis; its one-step failure and subsequent successful recovery remain checked. Temporary cost instrumentation was removed.
+
+Residual program-contract diagnostics map generated source identities back through the graph expansion table before reporting checked-execution failure. A regression compares raw flow failure on an expanded call with the source-facing driver diagnostic and rejects leaked generated offsets. In `/home/fin/luna`, `python3 -B development/check.py --timeout 300 -- test -p luna --test function_type_dependencies --test frontend_cli` exited 0, 203 tests (`/tmp/luna-tools-aituqcsk/result.json`).
+
+Runtime-body lookup now rejects duplicate/malformed selected residuals, non-runtime residual phases, remaining staged inputs, mismatched parameter arity, duplicate source/quote declarations and wrong source declaration argument counts. An invalid matching instance never falls back to source. `runtime_body_checked` preserves lookup diagnostics for imported callable evidence; the existing optional lookup remains a wrapper. Validation in `/home/fin/luna`: the captured-memory, drop and dependent-callable groups passed 94 + 987 + 33 (`/tmp/luna-tools-pz38ofaz/result.json`); two resource diagnostics initially regressed and were corrected through the checked lookup API. Resources then passed all 357 (`/tmp/luna-tools-0elelh1c/result.json`). `python3 -B development/check.py --timeout 300 -- test -p nir --test runtime_instances` passed all 3 focused cases (`/tmp/luna-tools-14bh19kz/result.json`), covering selection identity, malformed shadowing, precise diagnostics and recovery. Total distinct passing cases: 1,474.
+
+`iir::template_storage::TemplateStorage` now provides the bounded finite-target representation contract, keeping the logical callable type separate from its tag storage and requiring identity translation across tables. Its public constructor resolves targets against source-package declarations, checks runtime phase and declaration argument domains, and substitutes the actual signature before admitting a target. Invocation preconditions and implementation-selection obligations remain separate checks. Source regression `template_storage_checks_source_declarations_and_recovers_after_rejection` covers Type/value arguments, invalid domains, mismatched signatures, missing/duplicate declarations and budget recovery. IIR now carries these identity tables separately from executable instances; the reference evaluator stores the real selected identity in capture cells. Validation rejects dangling or retyped identities, duplicate tables and residual runtime calls with staged inputs. Calls through finite-domain captures specialize before execution; branch dispatch retains runtime selection and ordinary argument evaluation counts. Direct-call specialization can expose higher-order inputs, but open higher-order entries, escaped-address domains and native layout lowering remain pending. Resource-checked execution observes TemplateEqual operands without transferring ownership or requiring Copy. Even singleton-domain dispatch retains an observational read so known target identity cannot authorize use of a moved capture; source rejection tests cover both singleton and multi-target domains. pointer loads/replacement still acquire actual Copy evidence. Source tests cover local-pointer writes and capture snapshots through interpret_with_protocols, and verify that raw execution does not bypass the pointer permission boundary. Do not replace the logical environment type with `u64`: type identity and type observation must retain the source callable type.
+
+The chronological entries below record superseding changes. The dependency table is a navigation index, not a complete feature checklist; old prose saying a now-tested subsystem is wholly pending must not drive duplicate implementation.
 
 The older `middle` type objects and disabled backend/typeck directories are implementation inputs to evaluate, not semantic foundations to preserve unconditionally. In particular, fixed-width literals, pure-head unfolding, and conflating runtime identity with type-core identity cannot become compatibility requirements.
 
@@ -13,16 +57,16 @@ The older `middle` type objects and disabled backend/typeck directories are impl
 | Group | Required behavior | Prerequisites and exit evidence | State |
 |---|---|---|---|
 | Source and diagnostics | Lexer, parser boundaries, source spans, grouped patterns, attributes, complete AST/HIR payloads, explicit unsupported diagnostics | CLI source fixtures, rejection cases, structured IR dumps, deterministic diagnostics | CLI/display and literal frontend established; trait required-function/associated-value declarations and file-qualified impl scopes retained in HIR; other syntax incomplete |
-| Binding and organization | Package/module/static-container identities, imports, visibility, signature collection, recursion and query dependencies | Multi-file fixtures with identity and negative-query invalidation checks | Single source-root discovery, file/directory/inline modules, static calls, imports and glob candidate propagation connected; 23 multi-file test groups plus 3 permission-core tests. Aliases, nested groups, anchors and private import entries connected. Multi-package loading/integration and incremental discovery invalidation pending |
+| Binding and organization | Package/module/static-container identities, imports, visibility, signature collection, recursion and query dependencies | Multi-file fixtures with identity and negative-query invalidation checks | Multi-package compilation with explicit dependency edges and protocol selectors is connected, alongside file/directory/inline modules, visibility and imports. See packages.rs, modules.rs and frontend_cli.rs tests. Incremental discovery invalidation and complete build-tool integration require separate evidence |
 | Stable semantic representation | Immutable type core plus scoped substitution; rigid parameters, runtime binders and inference variables distinct; normal-form heads opaque | Representation tests: shared core/different environments, repeated identities, nested substitution, capture avoidance, rollback; S-expression Display | NIR type core/reference foundations, runtime abstraction and use-site scope checks and dependent function-signature instantiation implemented with 24 tests; dependent contract solving remains pending; monomorphic HIR elaboration now produces typed expression trees |
 | Elaboration engine | Bidirectional expected information, candidate-local transactions, wait/wakeup obligations, dependency-aware failure and diagnostics | Expressions/calls checked through CLI; no success placeholders; candidate rejection/retry and cancellation fixtures | Monomorphic CLI path uses scoped PTC type equality; candidate region supports structural matching of two open substitutions while retaining original equality obligations, and joins whole-call type inference, ordered dependent substitution, PTC facts, original-relation obligations and directed wait/wakeup; Type-parameter generic calls and type-only requires on functions/structs/enums connected to source, including deferred nominal formation obligations and definition-scoped constrained defaults; transactional nested argument retries and early result-context propagation connected; partial callback contexts support lambdas, generic function values and nested generic calls through blocks/if/match/when, with body results feeding inference; proof-backed structural views connect constrained tuple/record/enum operations, coverage and higher-order calls/lambda/function-value contexts; function signature dependencies now resolve on demand with cycle/depth checks; observed calls retain definition-scoped deferred contracts and declaration obligations survive speculative rollback; general partial-type continuations and comptime scheduling integration pending |
 | Comptime and freezing | Interpretation and invocation with common semantics; stable residual definitions and legal delays; type comptime completion at IIR entry | Definition-to-instance tests, required-computation failures, no duplicate impure execution, opaque NF identity tests | Concrete NIR interpreter kernel and source execution tests; explicit comptime/pure modifiers survive declaration scanning and lowering, NIR function phases are displayed and checked, and a dedicated first-order comptime interpreter entry validates call phases and enforces execution budgets; closed required computations now form aliases, explicit function signature types and computed BitVec widths by preparing reachable comptime bodies on demand; successful alias completion is reused per declaration, dependency cycles and shared execution budgets are checked, and unresolved trait-world dependencies explicitly block execution; first-order Type-parameter instances now substitute signatures and bodies for required computation and nested comptime execution; type-only declaration contracts now prepare on demand and discharge instance obligations in their recorded definition/caller scope before execution, including independent contract-operand formation checks; ordinary optional defaults now prepare on demand with definition-scoped prior-parameter bindings, and comptime defaults execute through the ordered call plan only when omitted; generic default binders no longer masquerade as caller inference evidence; Type-parameter/Type-result normal-form heads now parse, resolve, check their bodies/contracts and export opaque head-plus-argument types with a non-invocable NIR definition phase; canonical arbitrary-precision Integer head arguments now evaluate closed inputs, retain symbolic declaration inputs and coexist with Type arguments without unfolding; Bool and fixed-width signed/unsigned integer inputs now share stable-value checking and symbolic forwarding, including range checks and mixed input ordering; prior Type inputs can now determine later scalar/Type input types, with ordered substitution and proof-backed symbolic forwarding; owned NIR now exports ordered head input descriptors with explicit Type/value roles, declaration/binding identities and dependent input types, validated against body metadata before interpretation; concrete Type values now check applications of known heads against those descriptors, including dependent builtin input types and integer ranges; arbitrary dependent type expressions and other value-parameter normal forms, trait-world waits, general automatic invocation/splicing, higher-order phase types and loose residual checking remain pending; comptime_runtime now provides canonical arbitrary-precision Integer parsing, bounded arithmetic and checked fixed-width conversion, verified independently up to 1024-bit operands; concrete source comptime Integer values now reach NIR/interpretation with exact add/subtract/multiply/negation/comparison, literal matching and shared operation budgets; runtime storage phase inspection follows actual aggregate fields without unfolding opaque heads; concrete Type values now preserve primitive/nominal/structural/opaque identities through calls and substitution, and the explicit BitVec type-value constructor evaluates Integer widths without allocating bit storage; source unsuffixed integer literals now splice into checked fixed-width signed/unsigned proxies through 128 bits, with deferred generic defaulting and contextual patterns/defaults; exact decimal literal components and direct finite f32/f64 proxies now connect source context, generic defaulting, defaults and patterns without double rounding; general Float arithmetic, float overflow policy, target pointer-width plumbing, LiteralInto suffix protocols, full comptime phase authorization, residual scheduling and invocation pending |
 | PTC and trait protocols | Type-only atomic propositions and theory solvers; implementation selection, associated declarations, capabilities through elaboration | Atom-by-atom accepted/rejected/unknown fixtures and solver isolation; actual LiteralInto/pattern protocol calls | Type equality with explicitly registered nominal constructor contracts (including inference, proof replay and concrete countermodel validation), closed type classification, integer difference constraints and mixed Boolean coordination implemented with scoped proofs/replay and validated type/integer countermodels; integer arithmetic capacity is bounded with Unknown on exhaustion; source type equality/Boolean requires connected; implementation indexing and tri-state selection connect candidate-local Type inference, proved/refuted requirements and replayable type-applicability evidence, with versioned world snapshots and fixed-interface package-ownership admission; type-only same-precision coherence now checks alpha-renamed heads, complete interface arguments and combined requirements without caller assumptions, with independent proof/report replay and world freshness; generic source trait implementation Type telescopes and type-only requires now reach NIR, definition-side member checks, parent obligations and statically selected method substitutions; compile-time concrete dispatch materialization follows function instances, closures, pattern computations and nominal capabilities and feeds a validated interpreter lookup table; generic implementation execution is connected for this Type-only fragment, while phase/environment delivery remains pending; concrete source trait/inherent static methods now check contracts and dispatch explicit interface views through real candidate resolution, including explicit Self substitution and subject-specialized default bodies, with by-value receiver calls/capture, evaluate-once ordering and definition-fixed same-interface/parent-interface calls inside default bodies and independent concrete parent implementation obligations, unambiguous inherited projections and default-body implicit capability lookup and ordinary generic-function positive trait bounds with caller-side obligation checks and generic nominal-type capability formation checks; generic inherent methods now use a separate name-filtered index with type evidence replay, coherent specialization and inherited head parameters/contracts, connected through function instances to execution, including named/optional inherent method arguments through the shared ordered call planner; trait calls now preserve interface entry names/defaults and definition-local preparation frames independently of selected implementation locals, across concrete/generic/default/parent calls; positive implementation trait bounds now qualify candidates before ranking using scoped assumptions, parent implications and recursive immutable-world resolution, with cycle/abstract absence pending and compile-time dispatch dependencies; complete Type-argument interface identities now survive NIR substitution, parent evidence, candidate queries and concrete dispatch, with NIR-only parameterized-interface execution tests; Type-parameterized trait declarations, implementation heads, explicit interface views, bounds and inherited/default member calls now also execute from source, including rigid symbolic queries and interface-only implementation parameters; trait Type-parameter bounds and type-only requirements now check interface formation, provide scoped default-body assumptions and materialize concrete dependencies; Self-dependent trait type requirements now check implementation subjects and concrete dispatch materialization, and export bounded scoped type guarantees through declared capabilities and parents into function/default-body checking; Self-dependent parameter capabilities now defer to implementation-subject checking, substitute fully in materialization/runtime validation, and propagate through parent/parameter edges for generic member lookup and bound forwarding with complete-source budget checks; value/dependent interface arguments, pointer adaptation, negative trait predicates and associated substitution remain pending |
-| Functions and runtime types | Parameters/defaults, contracts, closures, dependent environments, user types, rows and dispatch | Call-order/evaluate-once tests; layout versus environment separation; all explicit lowering forms retained | Syntax/HIR incomplete; semantics pending |
-| Resources and runtime specification | Once/Clone/Copy, memory views, affine operations, safe-mode predicate limits and runtime checks | Positive/negative alias and lifecycle fixtures, higher-order effect propagation, cleanup paths; separate program-verification layer | Pending; never route program-state predicates through PTC |
-| Effects and staging | Distinct error/effect ABIs, handlers and runtime instances, deterministic inline effects; rank-1/two-stage/single-splice CMTT and quoted arms | Semantic execution tests for handler cleanup, evaluation counts, staging boundaries and hygiene | Pending |
+| Functions and runtime types | Parameters/defaults, contracts, closures, dependent environments, user types, rows and dispatch | Call-order/evaluate-once tests; layout versus environment separation; all explicit lowering forms retained | Implemented paths include extended/default/dependent calls, closure environment parameters, nominal value parameters and higher-order dispatch; see corresponding luna test groups. General completeness remains unproven |
+| Resources and runtime specification | Once/Clone/Copy, memory views, affine operations, safe-mode predicate limits and runtime checks | Positive/negative alias and lifecycle fixtures, higher-order effect propagation, cleanup paths; separate program-verification layer | Program verification, memory flow, moves, cleanup and runtime contracts are implemented in verification/ and exercised by resources, captured_memory, drop and staged_aggregate_contracts tests. Full resource semantics remains incomplete; PTC stays type-only |
+| Effects and staging | Distinct error/effect ABIs, handlers and runtime instances, deterministic inline effects; rank-1/two-stage/single-splice CMTT and quoted arms | Semantic execution tests for handler cleanup, evaluation counts, staging boundaries and hygiene | Error/effect handling, CMTT, quote functions and inline controls have executable paths and dedicated tests. Empty tuple enumeration remains rejected; complete ABI/backend delivery is not established |
 | Projection and synthesis | Pipeline projection, typed intrinsic/asm access, BitVec values/locations/unsafe construction, legal baseline on synthesis Unknown | Per-stage projection tests, bit width/ordering tests, baseline-versus-optimized behavioral checks | Arbitrary-width BitVec value kernel implements checked literal conversion, bitwise operations, concatenation, slices and widening with bounded work and S-expression Display; fixed-integer source views, concrete-width type identity, contextual integer literals, eager bitwise operations, concatenation, constant indices/slices, equality, checked widening/unsigned conversion and exact-width signed/IEEE reinterpretation now reach NIR execution; explicit builtin BitVec construction accepts checked literal and closed computed Integer widths without unfolding normal-form heads; dependent width/value-argument elaboration, runtime endpoint verification, general location mappings, unsafe construction and synthesis remain pending; static local/field bit writeback now preserves RHS snapshots and intervening writes for fixed integer/IEEE float/BitVec storage; float views preserve raw IEEE special-value bits; static segmented patterns retain radix/width, typed subpatterns and bindings (including unrestricted signed/IEEE scalar fields) through execution; bounded symbolic coverage handles bit-mask unions with cross-column correlations and Unknown on exhaustion, computed BitVec-valued segments now run under required-comptime phase/contract/budget checks and become fixed constraints used by coverage; general scalar computed-segment conversion and representation layouts remain pending |
-| IIR and executable backend | Non-SSA high-level IIR; completed type comptime, explicit runtime environments; lowering to current LLVM | Validated IIR dumps then executable semantic tests; each backend action has target/dependency evidence | IIR skeleton; LLVM 21 C API smoke probe passed separately |
+| IIR and executable backend | Non-SSA high-level IIR; completed type comptime, explicit runtime environments; lowering to current LLVM | Validated IIR dumps then executable semantic tests; each backend action has target/dependency evidence | IIR staging, cleanup, effect handling and concrete instance execution are implemented; inspect compiler/iir/src and luna execution/instantiation paths. LLVM probe evidence is not end-to-end native compilation evidence |
 | Library and anar | Real builtin/std protocol implementations; math intrinsic wrappers; packages, targets, build graph and cache invalidation | Versioned producer/consumer interfaces, compiler-backed library tests, reproducible build fixtures | Library exists but language coverage unverified; anar repository not located |
 
 Advanced verified-mode proof and synthesis extensions follow the executable foundation. Safe-mode runtime checks remain part of the resource model, not a deferred replacement for memory safety.
@@ -4898,3 +4942,2024 @@ The error layout planner now converts to/from Term. Generic templates reconstruc
 Validation in /home/fin/luna via development/check.py: check -p luna passed (/tmp/luna-tools-brhi_yva/result.json); the full nir suite passed 303 tests (/tmp/luna-tools-cbeme4ls/result.json). After the nested-success boundary fix, all 14 error_results tests passed (/tmp/luna-tools-kk2snw9i/result.json). error_surface (5), effect_spreads (19), function_type_parameters (55) passed (/tmp/luna-tools-0z7j45qr/result.json). Formatting passed (/tmp/luna-tools-nvautkpe/result.json), git diff --check passed. Changes remain uncommitted on dev.
 
 Remaining: source type formation and solver equality/row evidence, executable success/error values and embedding/propagation/elimination, resource cleanup and runtime ABI. Stable Term support does not claim these downstream paths are complete.
+
+### Source error types and PTC set congruence
+
+Connected ErrorQualifiedType to type-head recognition, type formation and signature-input readiness. Explicit singleton/list rows produce Term::ErrorResult, preserving generic labels and merging exact duplicates/nesting; empty rows erase. Added a distinct PTC error-row forward-congruence rule using only current branch equivalence classes. It treats labels as a set, permits permutation without assuming distinctness and coalesces labels only under established equality. Type input budgets/subterm discovery/bound detection traverse errors and success. This rule does not infer absence, disequality, injectivity or runtime representation equivalence.
+
+Source tests cover closed declarations, aliases, generic labels, nested/empty rows, row permutation, non-type labels, incompatible result types and successful execution of an empty qualifier. Dedicated PTC tests cover unknown-label commutation, assumption-dependent duplicate collapse with proof replay/foreign-context rejection, raw empty/nested wrappers and non-proofs for unmatched labels or differing success types.
+
+Validation in /home/fin/luna via development/check.py: error_rows (4), effect_rows (14), ptc (56) passed (/tmp/luna-tools-dprxquo1/result.json); error_surface (12) and effect_spreads (19) passed (/tmp/luna-tools-rnxrh359/result.json). Formatting passed (/tmp/luna-tools-6kreqatq/result.json), git diff --check passed. Changes remain uncommitted on dev.
+
+Nonempty result construction/injection, branch remapping, propagation/elimination and resource execution are still missing. Interpreter admission remains closed for ErrorResult. Row equality must not bypass representation mapping when these paths are connected. General computed/open error rows and stronger row theory also remain incomplete.
+
+### Evidence-based error-row disequality
+
+Added an error-result refutation rule to PTC. With both residual success types proven ordinary, it can refute equality from success-type disequality or a label proven distinct from every label in the opposite row. It reuses the existing branch-local type-class disequality machinery; Unknown is never treated as absence. Opaque success residuals remain pending because they may contain further error qualification, and ordinary residual evidence may come from current branch equalities.
+
+Tests cover closed-row missing labels, distinct success types, unknown versus assumed-distinct labels, foreign-context proof rejection and opaque residuals that become ordinary under an assumption. A finite-set oracle checks 256 closed-row/success combinations, including empty qualifiers and permutations, with proof replay for each result.
+
+Validation in /home/fin/luna via development/check.py: error_rows (7), effect_rows (14), ptc (56) passed (/tmp/luna-tools-t1547tzt/result.json); after adding the oracle, all 8 error_rows tests passed (/tmp/luna-tools-fnso0kxe/result.json). Formatting passed (/tmp/luna-tools-p9bn99ih/result.json), git diff --check passed. Changes remain uncommitted on dev. This adds type-theory evidence only; executable error construction/propagation/cleanup remains outstanding.
+
+
+### 错误结果构造与交付的执行接线
+
+- NIR `ErrorConvert` 区分成功注入、失败构造与已有结果的嵌入；共用有界转换验证，补齐表达式遍历、替换、阶段检查、预算、常量物化及 S-expression。源码上下文向成功值及单标签错误载荷提供类型提示。
+- IIR 校验转换和错误行内嵌类型，实例化收集错误标签的名义描述。参考解释器增加完整类型／分支／载荷表示，换序和扩行按标签映射、保持载荷一次求值；host admission 拒绝错误标签和载荷。修复 IIR 名义类型 admission 对已实例化描述错误地再次使用源参数表的问题。
+- 验证（cwd `/home/fin/luna`）：`python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test effect_spreads --test function_type_parameters`，退出 0，19 + 19 + 55 项通过，`/tmp/luna-tools-zjan11ui/result.json`。`test -p nir -p iir -p comptime_interpretor` 经同一入口，退出 0，共 549 项通过，`/tmp/luna-tools-f0395nag/result.json`。全 workspace 格式化退出 0，`/tmp/luna-tools-28tko35i/result.json`。
+- 边界：错误传播／消去、前后 catch、仿射责任与清理、完整纯度分析、错误值的 normal-form 输入冻结尚未完成；直接 IIR 解释器结果不能当作资源安全认证。运行时转换只接受实例化后直接匹配的身份，未解决的表示等式继续拒绝。改动保留 dev 工作区，未提交。
+
+### 显式错误传播与模式内嵌类型
+
+- `expr!` 在明确函数结果上下文下形成普通 Match／Return：成功分支交付载荷，错误分支逐标签检查目标行并构造返回值。保留错误载荷和一次操作数求值，允许调用者成功类型不同；不增加隐藏返回或 continuation ABI。
+- 新增 NIR ErrorResult 模式，标签使用完整类型身份，随泛型实例化替换；配套 S-expression、预算、绑定／表达式遍历、类型重写、解释器分支选择。IIR 单独验证模式内嵌类型，拒绝非 Type 标签和残留声明变量。内联返回沿用普通控制流改写。
+- 验证（cwd `/home/fin/luna`）：`python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test quote_functions --test inline_control` 退出 0，25 + 103 + 241 项通过，证据 `/tmp/luna-tools-14kpa65j/result.json`；同入口 `test -p nir -p iir -p comptime_interpretor` 退出 0，549 项通过，证据 `/tmp/luna-tools-ly1ren8f/result.json`。全 workspace 格式化退出 0，`/tmp/luna-tools-r792el9g/result.json`；`git diff --check` 通过。
+- 未完成：源级错误模式消去、前后 catch、返回类型推断下的延迟传播检查、错误结果资源责任与完整清理接线。直接参考执行仍不构成资源安全认证。改动保留 dev，未提交。
+
+
+### 源级错误模式与结果覆盖
+
+- 普通 match 接入成功模式、错误载荷模式和错误通配符；单标签上下文提供载荷类型，多标签通过限定枚举 variant 选择完整身份（含具名字段与同头不同实参）。绑定收集遍历错误包装，支持 guard 回退、泛型载荷及 let-else；多标签无可识别类型的载荷模式仍诊断，不猜测身份。
+- 覆盖矩阵拆分成功与每个错误分支，递归分析载荷，Never 成功主体为空域。增加 16 种有限分支集合的独立覆盖对照、预算耗尽及恢复检查；遗漏成功、错误或载荷值的源码拒绝例都检查实际诊断。
+- 验证（cwd `/home/fin/luna`）：`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib coverage::` 退出 0，53 项通过，`/tmp/luna-tools-mfjsc5er/result.json`。同入口 `test -p luna --test error_surface --test normal_patterns --test list_patterns --test symbols` 退出 0，34 + 32 + 17 + 29 项通过，`/tmp/luna-tools-xuerwkzg/result.json`。全 workspace 格式化日志 `/tmp/luna-tools-eze1___t/result.json`。
+- 后续：专用错误 handler、catch 顺序、错误结果清理责任与完整纯度接线；当前普通匹配参考执行不等于资源安全认证。改动保留 dev，未提交。
+
+### 普通错误 handler 与独立输出行
+
+- 新增 program/error_handlers.rs，接通无 catch 的 `expr! { ... }`：操作数一次求值，成功直达，普通 arm 按载荷匹配，未覆盖／guard 未通过的错误保留在结果中。完整覆盖按输入标签判定，分支产生的错误独立参与输出；允许重新产生刚处理的标签，支持上下文目标及结果推导。
+- 降低沿用 Match、ErrorResult 模式、ErrorConvert 和普通 Return，内联保留返回边界；错误结果与 effect ABI 分离。模式和 guard 的类型事实通过已有分支作用域接口检查。覆盖检查增加实际预算计量，逐标签使用共享 elaboration 预算，失败预算也记账，Unknown 不用于删除输入标签。
+- 验证（cwd `/home/fin/luna`）：`python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test inline_control --test effect_spreads` 退出 0，42 + 241 + 19 项通过，`/tmp/luna-tools-ukmiqrqd/result.json`；同入口 `test -p elaboration --lib coverage::` 退出 0，54 项通过，`/tmp/luna-tools-zje80no1/result.json`。全 workspace 格式化退出 0，`/tmp/luna-tools-__1li8ga/result.json`；`git diff --check` 通过。
+- 前后 catch 仍明确拒绝，待原始完整结果的观察／交付及资源责任接通；没有通过生成隐式副本模拟该行为。完整仿射清理、纯度和传播中的延迟函数返回推断仍未完成。保留 dev 工作区，未提交。
+
+### 错误结果的独立清理执行
+
+- Drop 清理布局将 ErrorResult 作为分支载荷处理，取得成功／各错误分支的字段与析构证据；执行复用 cleanup switch，内部编号为成功 0、错误行位置加 1，不改变错误类型身份。预置分支证据在执行任何析构前校验。
+- 清理私有载荷投影携带完整结果类型和活动分支；结果类型或分支改变后，旧投影拒绝访问。清理复制／快照遍历纳入该值节点，但不自动授予源码 Copy。上下文需求扫描检查所有可能载荷，避免指针或 callable 责任藏在错误限定里。
+- 补齐 implementation 主体资格及证据重放对 ErrorResult 的支持，否则普通名义 Drop 候选不能排除而使自动清理永久待定。适用性／一致性及 opaque index 的嵌套遍历保留标签和主体中的类型参数，不把开放输入错误缓存成闭合 identity。
+- 验证（cwd `/home/fin/luna`）：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface` 退出 0，778 + 42 项通过，`/tmp/luna-tools-kb_fy9fy/result.json`。同入口 `test -p elaboration --test implementation` 退出 0，65 项通过，`/tmp/luna-tools-zgsleq0q/result.json`；`test -p comptime_interpretor --lib` 退出 0，67 项通过，`/tmp/luna-tools-lt6g2092/result.json`。全 workspace 格式化退出 0，`/tmp/luna-tools-4xxqtrn6/result.json`，`git diff --check` 通过。
+- 新用例验证活动分支唯一析构、错误分支证据无副作用拒绝、重复清理拒绝、析构失败保留写入并停止兄弟字段清理，以及类型／分支改变后投影失效。未完成：源码构造、模式、传播与 catch 的全路径责任转移和清理调度；独立清理程序通过不能替代这些检查。保留 dev 工作区，未提交。
+
+### 错误结果的源码责任转移
+
+错误构造现与普通聚合共用字段准备／转移规则。成功和错误载荷通过私有分支布局取得清理责任；整体移动、重新赋值、嵌套聚合和跨函数交付保持责任唯一。行扩展／重排映射符号路径、分支域及指针 guard，物理载荷位置保持不变，新增分支的不可达证据不能替代原有分支的 Unknown 来源。
+
+新增 11 项源码测试覆盖：两种构造、移动和赋值、聚合、重复使用拒绝、栈指针逃逸拒绝、析构访问借用位置、谓词失败、部分构造失败、行映射及跨调用清理／借用依赖。仍未连接错误模式解构、传播和 catch 的全路径源码资源调度。
+
+扩大回归发现新增映射局部变量增大递归分析栈帧，使原有固定 2 MiB 栈的深层内联测试溢出。已将映射提取为不内联的独立分析函数，保持原测试栈限制；定向复验和相关完整测试组均通过。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface`：退出 0，789 + 42 项通过，`/tmp/luna-tools-nc2piljz/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib verification::`：退出 0，56 项通过，`/tmp/luna-tools-_ydfds2r/result.json`。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`：退出 0，`/tmp/luna-tools-2y462y1z/result.json`；`git diff --check` 通过。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`：退出 0，67 项通过，`/tmp/luna-tools-soafg740/result.json`。本轮最终相关检查合计 954 项通过，改动留在 dev 工作区，未提交。
+
+### 错误模式、传播与普通 handler 的源码资源调度
+
+成功／错误模式按完整错误类型选择私有载荷分支，再复用字段转移、指针 guard 选择、残余责任和备选模式绑定规则。参考解释器的错误载荷匹配现在记录字段 0 的实际投影，供源码清理调度转移责任。备选模式的展开、导出绑定、绑定顺序及重映射均遍历错误模式；guard 失败保留原值，guard 不能消费仿射载荷。
+
+传播最初的源码资源验收发现多个生成节点共用来源范围，导致 TemporaryEnd 无法唯一定位。传播和普通 handler 的生成读取／包装／Return 现使用已登记的独立 ExpansionSource，保留原始诊断来源。真正执行 inline 展开后的成功和错误路径均保持调用边界与析构顺序。
+
+新增 10 项源码资源测试，覆盖两种模式、guard 回退与非法消费拒绝、借用载荷、嵌套备选模式、多错误标签备选／通配符、传播清理、真实内联展开及 handler 消费／重抛。前后 catch 与传播的延迟返回类型推断仍未实现。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test inline_control --test normal_patterns`：退出 0，799 + 42 + 241 + 32 项通过，`/tmp/luna-tools-wyl1_i9n/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib verification::`：退出 0，56 项通过，`/tmp/luna-tools-k7sbc5fj/result.json`。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`：退出 0，`/tmp/luna-tools-xmpfrey1/result.json`；`git diff --check` 通过。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`：退出 0，67 项通过，`/tmp/luna-tools-29jk2xpl/result.json`。本轮最终相关检查合计 1,237 项通过，保留 dev 工作区改动，未提交。
+
+### 前后 catch 的顺序控制流与资源检查
+
+catch 以普通 Match／Block 传递同一个原始完整结果，不新增 continuation 或隐式 Copy。前置和普通 arm 正常完成时先丢弃其结果，再交付原值；后置 arm 交付最终结果或显式退出。保留整值时仅允许有 Copy 许可的重叠组成部分绑定，整体不正常完成的 arm 可直接消费。前置未匹配时继续，后置未匹配时保留原错误；输出行不吸收被丢弃的中间错误值。确定退出的前置／普通前缀可参与覆盖，但被普通完成分支遮住的后续退出不能据此消去错误。
+
+新增 13 项源码资源测试和 5 项错误表面测试，覆盖顺序、成功跳过、原值身份、丢弃中间资源、非法消费拒绝、return／continue、guard 回退、谓词失败、泛型显式实例化、真正内联展开、后置解构，以及条件借用和重叠载荷位置的不同指针目标。
+
+借用用例暴露并修复三处证据缺口：选择载荷时按实际类型筛选物理指针槽；错误模式用已知分支域排除不可能的成功分支；指针可能性分析识别 ErrorResult 的分支布局，区分未激活槽与未知地址。没有把 Unknown 当作无依赖，也未放松 Drop 对有效指针目标的检查。
+
+仍有独立缺口：传播的延迟函数返回类型推断、完整纯度分析、错误 comptime 值冻结。泛型 catch 已支持实例化；仅由错误行反推类型实参仍可能 NeedsContext，本轮泛型验收显式提供类型实参，未将其报告为泛型推断完成。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test inline_control --test normal_patterns`：退出 0，812 + 47 + 241 + 32 项通过，`/tmp/luna-tools-ntxybw2v/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib verification::`：退出 0，56 项通过，`/tmp/luna-tools-h9pf6z32/result.json`。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`：退出 0，`/tmp/luna-tools-2kz1_u62/result.json`；`git diff --check` 通过。
+
+最终相关检查合计 1,188 项通过。改动保留在 dev 工作区，未提交。
+
+### 错误结果接入纯度与默认值行为分析
+
+ErrorConvert 现在检查载荷计算并传递函数来源，构造／行扩展／重排不隐式调用函数或析构载荷。错误模式按完整类型定位载荷代码路径；循环中的构造、映射、绑定和赋值参与函数来源不动点，新增错误标签的不可达信息不覆盖原有未知来源。
+
+修复清理行为分析的过度保守处理：已取得的清理选择可按剩余所有权树遍历，只检查实际剩余的组成部分。外层析构仍检查，未精化的值仍覆盖所有可能组成部分，未移动的兄弟字段不被跳过；该遍历不授予访问权限或 Copy，也不替代执行清理计划。
+
+新增 9 项源码测试，覆盖构造／传播／catch、回调行重排、循环更新、不纯调用与未知函数来源拒绝、运行时默认值、已转移的不纯析构载荷，以及仍持有的不纯兄弟字段。测试需要析构证据时显式绑定 Copy／Drop 协议，没有通过默认假定无析构来放宽纯度。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test runtime_purity --test trait_purity --test default_calls --test error_surface`：退出 0，61 + 20 + 33 + 47 项通过，`/tmp/luna-tools-xvtaj6a5/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib program::purity::`：退出 0，7 项通过，`/tmp/luna-tools-axha_u4c/result.json`。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`：退出 0，`/tmp/luna-tools-0p8spfi0/result.json`；`git diff --check` 通过。
+
+最终相关检查合计 168 项通过。传播的延迟函数返回类型推断与错误 comptime 值冻结仍未实现；行为分析对未知代码身份和缺失清理证据仍保守失败。改动留在 dev，未提交。
+
+### 闭包错误传播的延迟结果完成
+
+未标注结果类型的普通闭包允许先检查传播输入，把错误出口保存在当前推断事务中；尾表达式／显式 return 提供成功结果后，合并传播标签、尾结果行与已观察的 return 错误行，完成失败出口及成功交付。显式 return 的转换逐个验证，不靠跳过类型检查接受不兼容成功结果。完成后仅导出普通 ErrorConvert／Match／Return。
+
+新增状态随嵌套闭包、定义、默认输入与候选检查保存／恢复，使用独立展开来源识别传播出口。泛型 apply 和 inline apply 均能消费推断结果；资源执行确认成功路径与提前传播路径清理局部一次，错误路径不执行后续调用。具名函数签名规则不变；带 computation 结果的闭包仍要求明确结果上下文，错误 comptime 值冻结仍未实现。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test runtime_purity --test inline_control --test closure_environment_parameters`：退出 0，52 + 61 + 241 + 20 项通过，`/tmp/luna-tools-ztvf7zp2/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface inferred_error_callback`：退出 0，1 + 6 项通过，含随后新增的泛型／内联调用与资源执行用例，`/tmp/luna-tools-njjed064/result.json`。
+- 本批新增 7 项测试；两轮最终相关检查覆盖 376 个不同用例。全 workspace 格式化退出 0，`/tmp/luna-tools-yap8dewi/result.json`；`git diff --check` 通过。改动保留 dev 工作区，未提交。
+
+### 错误结果进入 CMTT 数据与闭包快照
+
+生成器数据域检查递归检查错误标签与成功域；Never 成功域不要求构造值。错误结果重新物化使用已有受检 ErrorConvert 路径，载荷递归遵守生成器数据规则。闭包快照检查完整错误类型及载荷，required invocation 的活动数据扫描保留错误类型中的合法泛型参数。活动存储扫描也深入错误载荷，避免漏掉指针别名或混合 runtime 回调图。
+
+新增 9 项源码测试，覆盖成功／错误交付、嵌套聚合与换序、runtime 函数身份、comptime 闭包快照、泛型标签、活动指针别名、先前 quote 的赋值隔离，以及指针逃逸／提前 runtime 调用／混合活动回调图拒绝。代码生成的数据重新物化与 normal-form 值实参冻结是不同边界；后者仍缺少错误值表示与完整身份支持，未报告为完成。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_methods --test error_surface`：退出 0，522 + 142 + 53，共 717 项通过，`/tmp/luna-tools-4xpehk5k/result.json`。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`：退出 0，`/tmp/luna-tools-kuwg1f4d/result.json`；`git diff --check` 通过。
+
+改动保留 dev 工作区，未提交。
+
+### 已知效应行下的闭包错误结果推断
+
+高阶输入上下文独立保存已完成的 computation 行及尚未确定的结果域。泛型效应实参必须先完成；未知行不会凭闭包主体猜测。闭包检查取得这份允许行，在 computation 正文中推导结果；错误出口最终只改变结果中的错误行，外层效应行与 handler ABI 不变。普通／内联调用、显式 return 和泛型 callable 转发共用该路径。
+
+缺少允许行的候选检查改为可等待上下文，修复泛型转发先探测闭包时的过早失败。已知允许行不包含请求操作仍拒绝。显式完整返回标注继续保留原有类型，不能因为正文是 Never 就改写公开结果。
+
+新增 7 项源码测试：错误传播与 handler 组合、显式返回、未授权效应拒绝、泛型效应实参、普通结果类型不匹配拒绝、泛型 callable 转发以及成功／错误两条退出路径清理一次。未知效应行仍需补足上下文；normal-form 错误值冻结仍未实现。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test effect_spreads --test inline_control --test closure_environment_parameters`：退出 0，57 + 21 + 241 + 20 项通过，`/tmp/luna-tools-_pxhno5a/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop inferred_error_effect_callback`：退出 0，1 项通过，`/tmp/luna-tools-qsdpxoo7/result.json`。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`：退出 0，`/tmp/luna-tools-4zbe61yw/result.json`；`git diff --check` 通过。
+
+最终相关检查覆盖 340 个用例。改动留在 dev 工作区，未提交。
+
+### 已知错误行的部分结果上下文与成功域推导
+
+高阶上下文保留 `!E T` 中已知错误标签和待推导成功域，并可嵌入已知 computation 行。上下文提供单标签错误构造信息，成功值注入约定行，if／match／when 与泛型转发保留上下文。错误分支的 Never 成功域不会提前固定闭包结果；所有显式出口完成后统一校验交付，非法新增标签不能扩张声明行。
+
+推断匹配器补充错误结果成功域的结构提案，仍以原始完整类型等式作最终义务。错误行不按位置配对，不从位置推断未知标签；行重排和重复标签由原有 PTC 规则判断。
+
+新增 9 项测试，覆盖成功注入、两种分支顺序、显式失败／成功返回、效应组合、未知标签拒绝、match／when／泛型转发、错误行等式义务与资源清理。normal-form 错误值冻结和仅由错误行反推未知标签仍未实现。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test calls --test error_rows`：退出 0，38 + 8 项通过，`/tmp/luna-tools-opgnn_8i/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test effect_spreads --test closure_environment_parameters --test inline_control`：退出 0，63 + 21 + 20 + 241 项通过，`/tmp/luna-tools-1c2xh5gv/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop partial_error_callback`：退出 0，1 项通过，`/tmp/luna-tools-ud9c6yjg/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-tv6aih8c/result.json`；`git diff --check` 通过。
+
+相关检查合计 392 项通过。改动保留 dev 工作区，未提交。
+
+### 错误标签推导、后续证据收敛与实参行转换
+
+新增有预算的错误行匹配模块：单一候选标签可提出替换，已注册 nominal 头排除不同生成类型，完整相同成功域下可用唯一未覆盖标签补齐唯一未知标签。集合合并不消耗重复标签；多个不同候选保持未决，opaque normal-form 头不反推实参。所有提案仍由原始完整类型等式校验。
+
+修复两项集成缺口：匹配关系在推断状态实际改变后按共享预算迭代，后续实参可解除前面行的歧义；结构提案读取已经解决的替换组件。直接泛型调用完成推导后，为布局不同但语义兼容的错误实参补上 Embed，避免调用入口只按类型相等而忽略运行时标签排列。转换保留一次求值与原载荷责任。
+
+新增 8 项测试，覆盖单标签／成功域独立推导、重复合并／唯一剩余标签、歧义排列与预算恢复、泛型枚举标签行重排、后续参数证据、opaque 头拒绝，以及行转换后拥有载荷清理一次。原先单标签保守拒绝的用例改为真正有多个候选的歧义用例，并另增单标签成功验收。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test calls --test obligations --test error_rows`：退出 0，41 + 9 + 8 项通过，`/tmp/luna-tools-sbztat_v/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test effect_spreads --test function_type_parameters --test inline_control --test closure_environment_parameters`：退出 0，67 + 21 + 55 + 241 + 20 项通过，`/tmp/luna-tools-hikhfbm9/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop inferred_generic_error_row_conversion`：退出 0，1 项通过，`/tmp/luna-tools-i5cledge/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-t_8wtrti/result.json`；`git diff --check` 通过。
+
+相关检查合计 463 项通过。多候选错误行仍需其他证据或显式实参；错误 comptime 值的 normal-form 冻结仍待实现。改动留在 dev，未提交。
+
+### 泛型产品实参内部的错误行布局转换
+
+展开实参、固有方法、trait 方法验收通过；进一步定位并修复了元组内部错误值未重映射的问题。已完成泛型输入类型之间，通过受检结构视图解构元组／同序匿名记录，每个字段仅转移一次，递归重映射错误载荷，再构造目标产品。生产表达式只执行一次，正式 Tuple 保留 normal-form 头。仅检查明确结构，不强制求解无关关联类型；修复完整资源回归发现的两处过早关联类型查询。
+
+新增 8 项测试：6 项源码执行／拒绝测试，1 项拥有字段清理测试，以及 1 项整个产品自定义 Drop 的预期行为回归。最后这一项仍未实现，显式 ignored，不能计入通过：当前 unpack/rebuild 产生的源产品清理会触发 Drop 精确签名／布局检查，无法正确转移整个产品的析构责任。普通拥有字段的清理和一次求值已经通过；不以它们证明整个产品 Drop 已完成。
+
+下一步应实现受检的产品表示转移操作，整体搬运根析构责任与字段状态，而非用普通模式解构隐式丢弃／重建根责任。不能通过放宽 Drop 的 ABI 检查绕过问题。对应回归为 `inferred_error_product_conversion_does_not_add_outer_destructor_calls`；失败证据 `/tmp/luna-tools-9ot_h9qz/result.json`。指针目标与任意 nominal 容器内部转换也尚未接通。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test function_type_parameters --test inline_control --test effect_spreads`：退出 0，73 + 817 + 55 + 241 + 21 = 1,207 项通过，1 项上述待实现测试 ignored，`/tmp/luna-tools-quri8mse/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-w_lp1a0k/result.json`；`git diff --check` 通过。
+
+改动留在 dev，未提交。产品表示转换尚未完整完成，目标保持进行中。
+
+### 产品错误布局的整值所有权转移
+
+以受检的 `ErrorConvert Product` 替代上一阶段的 unpack/rebuild。NIR 生成带预算的递归表示计划，IIR 验证同序字段、完整错误行集合及可信 Tuple 头；解释器只求值一次，整体搬运值并转换标签。根析构责任直接交付目标所有者，转换不执行 Drop，不放宽 Drop ABI。计划提供稳定的 S-expression Display。
+
+内存、移动与纯度分析共用该计划，同步转换符号路径、分支域和物理指针 guard，并保留字段指针身份和函数值来源。恢复之前 ignored 的整个产品自定义 Drop 回归；新增指针别名／guard、纯函数字段来源、路径双向映射、预算耗尽、行扩张拒绝与未注册 Tuple 头拒绝测试。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test error_results`：退出 0，17 项通过，`/tmp/luna-tools-1z9za1i_/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test runtime_purity --test inline_control --test cmtt`：退出 0，819 + 73 + 62 + 241 + 522 = 1,717 项通过，无 ignored，`/tmp/luna-tools-jsuloi_7/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-vwgfkj2_/result.json`；`git diff --check` 通过。
+
+相关检查合计 1,734 项通过。上一节整个产品 Drop 的缺口已补齐；指针目标、任意 nominal 容器内部布局转换与错误 comptime 值的 normal-form 冻结仍待实现。改动保留 dev 工作区，未提交。
+
+### 错误 comptime 值的冻结、类型实参身份与 staged 重建
+
+增加 `Term::ErrorValue { ty, label, value }`，保留完整错误类型与分支标签，数字 tag 不进入冻结分支身份。接通值导出、normal-form 参数域及载荷校验、解释器重建、staged 求值结果物化与常量输入提取。错误值可含已有支持的 nominal 载荷；成功／错误即使载荷相同仍是不同实参，normal-form 头不展开。
+
+同步处理替换、作用域、预算、类型引用／依赖遍历、匹配、trait index admission／coherence 与类型应用的向前 congruence。泛型替换暴露嵌套错误成功域时同步展平冻结分支，避免类型已展平而载荷仍多一层。所有值身份关系仅作为类型应用的不可变输入证据，不增加一般程序值的 PTC 命题。NIR dump 使用显式 type／branch／payload S-expression。
+
+新增 9 项回归覆盖冻结往返、缺失标签／错误载荷拒绝、域检查、隐藏未绑定槽、预算、标签替换、嵌套成功域展平、行换序与标签等式、nominal 载荷、opaque 头，以及普通 staged 参数执行。源码验收过程中发现并补齐了 staged dispatcher 原先缺少 ErrorResult 物化的入口。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test error_results --test normal_inputs`：退出 0，19 + 12 项通过，`/tmp/luna-tools-ok1o1u8z/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test error_rows --test ptc --test implementation`：退出 0，9 + 56 + 65 项通过，`/tmp/luna-tools-nol3sa7a/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test abstract_values`：退出 0，17 项通过，`/tmp/luna-tools-dh__61_2/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test runtime_purity --test staged_aggregate_contracts --test cmtt`：退出 0，76 + 62 + 31 + 522 项通过，`/tmp/luna-tools-nu3vtz3z/result.json`。补充成功／错误同载荷拒绝例后重跑 error_surface，77 项通过，`/tmp/luna-tools-cmxha4d4/result.json`。
+- 最终全 workspace 格式化退出 0，`/tmp/luna-tools-xifoftxg/result.json`；`git diff --check` 通过。
+
+最终相关测试组去重计 870 项通过。指针／活跃环境不是冻结许可范围；任意 nominal 容器内部布局转换仍待实现，staged 产品转换需先求值物化。未声明整个错误系统或语言完成。改动保留 dev 工作区，未提交。
+
+### staged 产品转换与错误常量匹配
+
+受检表示计划现在保留源错误类型，运行时转换与冻结值转换均核对源布局。新增有预算的冻结产品转换，递归保留元组／匿名记录字段，使用完整标签定位活动分支，再写入目标完整类型；拒绝源类型不匹配、字段不匹配与产品内部错误行扩张。冻结常量不引入独立求值或清理操作。
+
+IIR staged 常量入口接通 Product／Embed，统一使用表示计划。新增常量折叠模块，把已完成的错误转换整理为可解构的常量构造，供 tuple／record 解构和错误模式匹配继续使用。错误模式支持 guard 回退与候选绑定隔离，未选中分支不求值；未知局部、需要用户调用的生产者仍由原来的求值边界处理，不借折叠隐式执行。正式 Tuple 仅由可信角色元数据授权。
+
+新增 7 项测试覆盖冻结记录嵌套、错误源布局与预算恢复、直接 staged 产品转换及拒绝例、未完成输入拒绝、guard 顺序／绑定、成功及错误 Embed 匹配、深度上限，以及源码泛型 staged 嵌套产品调用。源码 fixture 初版错误地把泛型 T 载荷当成 bool，已按定义端语义修正为匹配后返回固定 bool，未放宽泛型检查。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test error_results`：退出 0，20 项通过，`/tmp/luna-tools-zaf59_95/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p iir --lib`：退出 0，46 项通过，`/tmp/luna-tools-ty1y2nhz/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test staged_aggregate_contracts`：退出 0，78 + 819 + 522 + 31 项通过，`/tmp/luna-tools-7c4veuj6/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-gpp9rhqo/result.json`；`git diff --check` 通过。
+
+相关检查合计 1,516 项通过，无 ignored。上一节 staged 产品必须先经额外物化的限制已解除；未完成输入仍不属于常量折叠范围。指针目标与任意 nominal 容器内部的布局转换仍待实现。改动保留 dev 工作区，未提交。
+
+### trait 记录索引中的错误值与 nominal 载荷
+
+补齐记录索引校验对嵌套 ErrorValue／结构元组的递归域检查。错误分支检查完整结果类型及标签成员，成功分支检查成功域，空错误行与不匹配载荷拒绝；记录字段顺序不放宽。新增可返回具体失败的叶子校验入口，nominal 载荷必须取得声明布局并检查字段，符号值仍需独立域证据。
+
+源码验收发现 impl 候选参数校验使用另一条旧记录入口，已同步接通声明布局与符号域证据。直接错误索引、记录中嵌套错误索引及 nominal 错误载荷均可在选中方法中重建。具体成功／错误索引即使载荷相同仍能选择不同实现；重复索引实现继续拒绝。
+
+新增 6 项测试：两项 NIR 域／布局拒绝与预算恢复，四项源码覆盖直接错误索引、记录嵌套、nominal 载荷、具体分支实现选择及重复实现拒绝。未增加程序值的 PTC 命题，也未通过放宽域或布局校验实现接受。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test trait_parameters --test error_results --test normal_inputs`：退出 0，19 + 20 + 12 项通过，`/tmp/luna-tools-96lt6ks_/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test implementation --test error_rows --test ptc`：退出 0，65 + 9 + 56 项通过，`/tmp/luna-tools-m3v52x21/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test trait_purity --test staged_aggregate_contracts`：退出 0，82 + 20 + 31 项通过，`/tmp/luna-tools-_f5xyss5/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-itkfooa2/result.json`；`git diff --check` 通过。
+
+相关检查合计 314 项通过，无 ignored。指针目标与任意 nominal 容器内部表示转换仍待实现；本轮不宣称所有类型容器与泛型组合均已覆盖。改动保留 dev 工作区，未提交。
+
+### 关联错误类型的递归视图与冻结值重建
+
+补齐解释器 selected_types 对 ErrorResult 标签／成功域的递归解析；原先该分支落入整体 clone，遗漏了已选关联类型证据，也没有正确计量这些子项。引入共享的 `Term::error_value` 重建规则，替换、关联类型正规化及解释器已选类型视图共用。成功值展平前检查内层完整类型对应原成功域；不匹配包装拒绝，错误分支自身的错误载荷不展平。normal-form 头继续保留。
+
+源码泛型 trait 调用揭示另一条遗漏：候选方法的关联项等式收集未遍历错误结果，导致合法实现签名被拒绝。已补齐标签与成功域遍历；关联错误标签可穿过泛型方法调用，冲突签名继续拒绝。
+
+新增 5 项测试，覆盖展平域证据及错误载荷保持、已选错误行解析／缺失证据／预算、关联成功域展平及不匹配拒绝、normal-form 头保持、源码关联错误标签与冲突实现。未用类型函数体推导头等式。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test error_results --test normal_inputs --test trait_parameters`：退出 0，21 + 12 + 19 项通过，`/tmp/luna-tools-f1jiwhdo/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib selected_types`：退出 0，6 项通过，`/tmp/luna-tools-swxvf733/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test associated --test error_rows --test implementation`：退出 0，18 + 9 + 65 项通过，`/tmp/luna-tools-2gqzs1gi/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test trait_purity --test cmtt --test drop`：退出 0，83 + 20 + 522 + 819 项通过，`/tmp/luna-tools-vazft4bb/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-yxihn1cy/result.json`；`git diff --check` 通过。
+
+相关检查合计 1,594 项通过，无 ignored。指针目标与任意 nominal 容器内部表示转换等尚未完成项仍保留，不宣称完整语言已实现。改动留在 dev 工作区，未提交。
+
+### 分阶段替换中的待完成错误分支
+
+修复冻结成功值过早展平：先得到错误成功域而尚无内层值时，保留原成功域和待完成载荷，多层包装不丢失域关系；后续值替换完成后再展平。空替换保持可继续完成，分阶段与同时替换得到相同最终结果。成功域和载荷仍是符号时，也不能先决定分支。Display 将该状态标为 `(branch pending-inner)`。
+
+normal-form、nominal 和记录索引准入共用有预算的冻结载荷域检查；比较规范化的外层资格，但验证载荷时使用未展平的内层域。只有独立声明域证据才能接受符号载荷，闭合输入不能把它当作完成常量。已知模式选择返回未知；coherence 不据此证明不相交；需要区分未知分支的 impl 匹配保持 Pending，已有相同输入和普通绑定仍保留。解释器直接重建返回 AbstractValueUnresolved，避免伪造成功分支。
+
+新增 6 项测试覆盖分阶段／同时替换一致、多层空替换与恢复、精确内层域证据及闭合拒绝、已知模式不选分支、重叠判断不误证不相交、执行边界拒绝重建。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test error_results --test normal_inputs --test trait_parameters`：退出 0，23 + 13 + 19 项通过，`/tmp/luna-tools-tiz566_s/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test abstract_values`：退出 0，18 项通过，`/tmp/luna-tools-5xc33t6v/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib`：退出 0，181 项通过，`/tmp/luna-tools-b5b76bee/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test implementation --test associated --test error_rows`：退出 0，65 + 18 + 9 项通过，`/tmp/luna-tools-mprbq5_c/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test cmtt --test trait_purity`：退出 0，83 + 522 + 20 项通过，`/tmp/luna-tools-qvqbtf3a/result.json`。
+- 最终全 workspace 格式化退出 0，`/tmp/luna-tools-s61n0oqm/result.json`；`git diff --check` 通过。
+
+相关检查合计 971 项通过，无 ignored。待完成分支仍需取得值证据，不宣称任意符号程序求值可完成；指针／任意 nominal 容器布局转换等剩余项不变。改动留在 dev 工作区，未提交。
+
+### 泛型错误域实例化完成表达式转换
+
+源码验证发现：当成功注入操作的泛型输入类型实例化为 ErrorResult，原 NIR 仍保留 Success，解释器按完整类型校验时拒绝合法调用。Expr 类型重写现在记录操作数重写前的域；仅在原本不是错误结果、重写后新暴露错误结果时，将 Success 完成为 Embed。原本已是不合法的 Success／ErrorResult 组合不自动修复，后续 IR 校验继续拒绝。
+
+新增 5 项回归：NIR 新暴露域与非法旧 IR 的区别、普通 comptime Wrap 构造的 Key 与直接输入一致且成功／错误不混同、runtime 泛型成功／错误两条路径、关联成功域实例化、拥有型两条路径的一次求值及一次析构。源位置与原操作数表达式保持，normal-form 头不展开。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test error_results`：退出 0，24 项通过，`/tmp/luna-tools-guzm2s95/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control --test runtime_purity`：退出 0，86 + 820 + 522 + 241 + 62 项通过，`/tmp/luna-tools-9rkf5vh7/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-gpcvtykg/result.json`；`git diff --check` 通过。
+
+相关检查合计 1,755 项通过，无 ignored。其余未完成项继续保留；本轮接通已确认错误资格语义的泛型实例化路径，不宣称整个语言完成。改动留在 dev 工作区，未提交。
+
+### 泛型错误传播与 handler 的成功投影补全
+
+源码复现 `forward(value:!Other T)->!Other T where T {let result=value!;result}` 在 T 实例化为 `!Failure bool` 后，原成功模式仍将裸 bool 绑定为完整 T，解释器报 Type；此前仅补全 Success→Embed 未覆盖消去路径。NIR 类型重写现在在新暴露的错误域上补全透明成功投影：保留定义时已知错误标签的处理，将新暴露的成功／错误重建为原 T，再执行既有成功路径。普通 handler、guard 拒绝后的余行、重复标签和分阶段类型替换使用同一规则，不改变未知泛型主体的程序意义，也不展开 normal-form 头。
+
+拥有型回归进一步发现新增分支复用原 source 会使 cleanup storage mapping 不唯一。物化阶段为新增转换链分配独立来源表条目，保留 original/site，并检查预算；重复物化来源整理不继续生成条目。没有放宽 Drop ABI 或跳过清理。
+
+新增 9 项回归，覆盖普通/inline 调用的执行次数与退出边界、required comptime invocation、普通及 guarded handler、重叠错误身份、拥有型载荷与 fallback 的恰好一次释放，以及 NIR 分阶段替换、重复补全稳定性、转换合法性和来源恢复。当前补全针对编译器生成的透明成功投影；不宣称任意用户模式体、所有 catch 组合与任意容器布局转换均已完成。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control`：退出 0，92 + 822 + 522 + 241 项通过，`/tmp/luna-tools-kkvcqsr0/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test error_results`：退出 0，25 项通过，`/tmp/luna-tools-nfjkh8a9/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-b1s0hpkz/result.json`；`git diff --check` 通过。
+
+相关检查共 1,702 项通过，无 ignored；dev 工作区保留改动，未提交。
+
+### 泛型 catch 验证与显式 match 的 arm 顺序
+
+前置 catch／普通 arm／后置 catch 在新暴露错误域下的普通和 inline 泛型调用已用实际执行事件验证：仅定义时错误进入 catch 阶段，三个阶段顺序保持，输入求值一次。拥有型 catch 返回原值和显式 match 重构原错误均验证一次析构。
+
+源码进一步复现显式 match 的成功 arm 不在首位时仍报运行时 Type（`/tmp/luna-tools-g49cmzoz/result.json`）。原补全入口只检查第一个 arm，错误地依赖编译器生成的排列。现记录重写前所有透明成功投影的位置，逐一补全，并将新增分支插在对应成功 arm 后；既不越过前置通配分支，也不落入后置通配分支。保留原有 arm 顺序、类型身份和来源补全机制。新增 4 项源码回归覆盖非首位成功分支、前后通配优先级、catch 次数／顺序及拥有型清理。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop`：退出 0，94 + 823 项通过，`/tmp/luna-tools-dj5ituq9/result.json`。
+- 增加前置通配回归后，`python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface`：退出 0，95 项通过，`/tmp/luna-tools-a5p4sgo_/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test error_results`：退出 0，25 项通过，`/tmp/luna-tools-0ocw4jni/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-42ntqxnk/result.json`；`git diff --check` 通过。
+
+相关测试去重后 943 项通过，无 ignored。非透明成功模式体与成功模式 guard 的泛型投影仍不能由此次透明投影补全覆盖，不将这些路径宣称为完成。改动保留 dev 工作区，未提交。
+
+### 泛型成功绑定与任意分支体分离
+
+源码复现成功分支执行 `after(result)` 或绑定局部值时，实例化后仍将裸载荷交给要求完整 T 的调用，物化报 Type（`/tmp/luna-tools-1yljggn1/result.json`）。显式 match 的无 guard、简单绑定／通配成功模式现在在 elaboration 时引入新鲜物理载荷绑定及一次用户绑定初始化；类型替换只补全该初始化，分支体可正常调用、绑定、捕获和提前返回，不在每次变量读取时重复构造。`_!` 使用同样的抽象成功域恢复与作用域清理。
+
+NIR 投影入口可定位这种初始化，新增标签继续保留 arm 优先级。物化来源整理扩展到复制后的完整分支体和闭包表达式；每个分支独立映射来源，但保留分支内部原有的词法共享位置，仅把新增转换与操作数拆成独立位置，避免重复清理边界。
+
+新增源码调用／局部绑定／闭包捕获／return 回归和拥有型 `_!` 回归，扩展既有拥有型分支用例，验证成功、内层错误、外层错误均保持执行次数与一次析构。成功模式 guard、复杂解构模式及 inline match 的独立选择路径不在本次完成声明内。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control`：退出 0，96 + 824 + 522 + 241 项通过，`/tmp/luna-tools-g43xfpil/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test error_results`：退出 0，25 项通过，`/tmp/luna-tools-syr3y44v/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-sfkwsm5f/result.json`；`git diff --check` 通过。
+
+合计 1,708 项相关测试通过，无 ignored。dev 工作区保留改动，未提交。
+
+### 泛型成功 guard 的载荷恢复与有序回退
+
+源码复现简单成功模式 guard 在 T 实例化为错误限定类型后，仍通过旧绑定观察裸载荷，导致 Type 错误（`/tmp/luna-tools-uflglzmm/result.json`）。现在在原始覆盖检查之后，将该成功分支分为一次载荷恢复和内层 guarded match；guard 仍是原有 Pattern::Guard，接受后执行原分支体，拒绝后把同一值嵌回原错误行并按原顺序尝试剩余 arm。支持简单绑定与 `_!`，不重复输入求值，也不把已失败 guard 重新加入后续候选。后续候选复制沿用预算限制并分配独立的可追溯执行位置。
+
+新增 7 项回归覆盖连续 guard、普通/inline 调用的次数和回退顺序、required comptime invocation、关联输入类型经 trait 方法接收恢复后的引用、拥有型借用后拒绝及 `_!` 两条路径的一次析构、禁止修改 guard 调用方状态，以及借用不自动授予 Copy 读取权限。trait 读取整个错误结果的试例需要独立 Copy/内存转移依据；本次没有放松这条边界，正例只使用合法借用契约。一般复杂解构成功模式和 inline match 的独立选择路径仍需继续完善。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control`：退出 0，100 + 827 + 522 + 241 项通过，`/tmp/luna-tools-kfv6b5y9/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test error_results`：退出 0，25 项通过，`/tmp/luna-tools-zku6o8c_/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-udotr5jk/result.json`；`git diff --check` 通过。
+
+合计 1,715 项相关测试通过，无 ignored。改动保留在 dev 工作区，未提交。
+
+### 成功载荷内部 guard 与组合模式
+
+源码复现 `(result if allowed(result.ref,flag))!` 在新暴露错误域下仍按裸载荷调用 guard，报 Type（`/tmp/luna-tools-q68q39d9/result.json`）。原入口仅识别外层 Guard(ErrorResult)，不能覆盖括号内 guard、计算模式或 or-pattern。成功模式恢复现保留原有内层模式，并以有预算和深度限制的遍历处理外层 Guard、Then、Remap 及全部为成功候选的 Or。模式在恢复后的 T 上执行，拒绝仍沿用同一个值和原有有序回退。
+
+新增一组源码回归并扩展拥有型、required comptime 回归，覆盖 guard 位于限定内外、双层 guard、`and … is …` 位于限定内外、成功候选的 or-pattern 与绑定重映射。逐次验证输入／候选调用次数、接受／拒绝分支及一次析构。混合成功／错误候选和外层全值别名仍保留原 subject，不能错误地改成 payload；这些组合与 inline match 独立选择路径仍需后续完善。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control`：退出 0，101 + 827 + 522 + 241 项通过，`/tmp/luna-tools-vmrpw9lk/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-glhtbjkg/result.json`；`git diff --check` 通过。
+
+合计 1,691 项相关测试通过，无 ignored。本轮未改变 NIR 类型重写或 IR 结构，未重复无关检查。改动保留 dev 工作区，未提交。
+
+### 不依赖成功载荷的混合候选与全值别名
+
+源码复现 `((_! or _! or error Outer.Bad) as whole) if allowed(whole.ref,flag)` 在 T 新暴露 Inner 错误后漏掉该候选，连最终 guard 都不执行（`/tmp/luna-tools-xckctvvb/result.json`）。NIR 类型重写现分别保留原成功域与已知错误行；当成功域新暴露错误限定时，对不绑定／观察载荷的模式原位扩展标签测试。Guard、Or、Remap 和 Then 的控制结构及已有表达式保留，整个结果的 Binding／Observe 别名继续指向原完整输入，不复制 guard，也不把 or 拆成重复执行最终 guard 的独立 arm。
+
+忽略载荷的内部 guard 和计算模式可沿原结构扩展；真正绑定／观察载荷的模式仍走值恢复路径。遍历明确停止于不同 subject 域：错误载荷、产品字段和 computed next-pattern 不使用外层行的规则。新增 4 项回归验证混合候选、全值引用 guard 的一次执行、接受与拒绝后的整值交付及一次析构、required comptime invocation，以及分阶段替换稳定性与错误载荷域不受误改。仍不宣称已完成所有同时导出载荷／全值的组合和嵌套产品模式。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control`：退出 0，103 + 828 + 522 + 241 项通过，`/tmp/luna-tools-c0acy953/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test error_results`：退出 0，26 项通过，`/tmp/luna-tools-t2a2eh9r/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-vwmf4lb6/result.json`；`git diff --check` 通过。
+
+合计 1,720 项相关测试通过，无 ignored。改动保留 dev 工作区，未提交。
+
+### 结构字段、let 与计算模式的独立成功域
+
+泛型类型替换现在携带模式原始 subject 类型，沿元组字段、匿名记录的具名字段、let 模式以及计算模式的结果分别传递；错误载荷使用完整标签类型。新增成功标签只补入该 subject 的成功通配模式，不跨字段传播，也不展开名义或 normal-form 头。修复前元组内 Inner 错误被错误拒绝（`/tmp/luna-tools-ei1lyxf9/result.json`）。
+
+新增源码元组／let／逆序记录字段回归和计算模式域隔离 NIR 回归；扩展拥有型通配模式测试到这三种结构，覆盖成功、Inner、Outer 路径，逐一检查结果及一次析构。任意名义布局、正式 Tuple 的布局证据接入及一般嵌套载荷绑定仍需后续实现，未通过猜测类型实参放宽边界。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control`：退出 0，105 + 828 + 522 + 241 项通过，`/tmp/luna-tools-dk8fw4vh/result.json`。
+- 随后扩展清理场景，定向执行 `test -p luna --test drop generic_success_wildcard_retires_the_completed_payload_once`：退出 0，`/tmp/luna-tools-o7l3rry9/result.json`。
+- `test -p nir --test error_results`：退出 0，27 项通过，`/tmp/luna-tools-s7if8x88/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-1dg04bsn/result.json`；`git diff --check` 通过。
+
+相关测试去重 1,723 项通过，无 ignored。改动保留 dev 工作区，未提交。
+
+### 嵌套结构成功绑定的延迟载荷恢复
+
+源码 `(result!, flag) => after(result) and flag` 在 T 为错误限定类型时把裸载荷传给要求完整 T 的泛型调用，参考执行报 Type（`/tmp/luna-tools-togfkc1_/result.json`）。现在 elaboration 对无观察表达式的结构模式保留字段完整输入，使用该字段的成功通配测试；整个候选接受后才通过独立的 Match 初始化原始用户绑定。初始化复用已有泛型成功投影补全，因此分支体得到完整 T，多个字段分别使用自己的错误行，拒绝的候选不提前消费任何字段。
+
+遍历带预算与深度上限，仅使用显式元组和匿名记录布局；观察表达式检测复用 NIR 有预算的完整模式遍历，避免把 guard/computed-pattern 需要提前读取的绑定错误延迟到分支体。未实现的嵌套观察期恢复、名义／正式 Tuple 布局接入保持待办，不以猜测头参数替代布局证据。
+
+新增源码元组／多层元组／逆序记录字段绑定回归；拥有型回归扩展到记录和元组成功绑定，并新增双字段全部九种成功／Inner／Outer 组合，验证输入一次求值、仅整个候选接受后消费、拒绝后完整交付 fallback、两个 Item 各析构一次。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control`：退出 0，106 + 829 + 522 + 241 = 1,698 项通过，无 ignored；`/tmp/luna-tools-2hftowfj/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-pshtfzv7/result.json`；`git diff --check` 通过。
+
+改动保留 dev 工作区，未提交。
+
+### let 成功绑定的同作用域恢复
+
+`let result! = value else {return false;}; after(result)` 在 T 为错误限定类型时同样发生裸载荷交付 Type 错误（`/tmp/luna-tools-ecvften0/result.json`）。块 lowering 在已有 staged-pattern 物化和别名消除后，为不含观察表达式的 let 成功绑定追加恢复初始化；原声明与初始化保持同一作用域，失败分支继续发散且不能访问新绑定。复用结构模式的字段独立恢复，覆盖根成功绑定、元组和匿名记录；不引入会藏住用户绑定的内层 Block。
+
+第一次集成检查发现检查器过早要求 quoted pattern 的 CodeEvidence 完成，破坏既有 CMTT let-else（`/tmp/luna-tools-1u76f7qx/result.json`）。延迟绑定判定现采用预算受限的模式结构检查，遇到 Guard、Then 或未完成 CodeEvidence 保留原路径；并同步用于结构 match，避免把待展开模式当作已知无观察模式。
+
+新增源码 let 泛型绑定与 required comptime invocation 回归，扩展拥有型测试验证根／元组／记录的成功和 else 路径各析构一次。现有 CMTT quoted let-else 回归也已恢复。嵌套观察期恢复及正式 Tuple 布局证据仍待实现。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control`：退出 0，108 + 829 + 522 + 241 = 1,700 项通过，无 ignored；`/tmp/luna-tools-pfirypnn/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-34xorxde/result.json`；`git diff --check` 通过。
+
+改动保留 dev 工作区，未提交。
+
+### 根成功 let guard 的观察期恢复
+
+源码 `let (result! if allowed(result.ref,flag)) = value else {return false;}; after(result)` 在抽象 T 实例化为错误结果后，guard 仍收到裸载荷引用，执行报 Type（`/tmp/luna-tools-kvh65d_3/result.json`）。根成功绑定现在降低为带原始 guard 与发散 fallback 的 Match 初始化器，复用现有成功域恢复和有序拒绝逻辑。内部通过 Remap 导出新鲜绑定，Match 交付完整载荷后才建立声明的原始绑定；guard 内继续使用其原始词法绑定，不重写用户表达式或放松观察限制。
+
+支持限定内外 guard 的单个成功载荷导出；未把多个计算结果导出、复杂结构 guard 或未知 pattern-code 强行套入这一路径。新增普通执行、拥有型接受／拒绝及一次析构、禁止修改调用方状态、required comptime invocation 四项回归，逐一检查输入、guard 和消费函数执行次数。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control`：退出 0，110 + 831 + 522 + 241 = 1,704 项通过，无 ignored；`/tmp/luna-tools-_ingogxa/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-jz7ju0_q/result.json`；`git diff --check` 通过。
+
+改动保留 dev 工作区，未提交。
+
+### 成功 let 的计算模式多绑定交付
+
+源码 `(result and measure(result.ref,flag) is extra)!` 原先在抽象 T 的错误限定完成后给计算函数传入裸载荷引用，报 Type（`/tmp/luna-tools-6bixg42v/result.json`）。成功 let 的观察期恢复现收集已确认模式导出，处理 Guard、Then、Remap 和导出一致的 Or；收集受预算和深度限制。多个导出通过内部结构交付包离开初始化 Match，再在声明原作用域解构，保留载荷类型和计算结果类型。内部包不替代语言 Tuple 的 normal-form 头，不复制原始拥有型载荷。
+
+新增源码计算模式及最终 guard 回归，扩展 required comptime invocation 与拥有型原载荷回归，验证额外 bool 导出、一次计算、接受后交付和拒绝后原载荷一次清理。
+
+独立试验发现计算模式新建 Item 时，资源层明确拒绝“computed pattern value needs independent resource and failure-path transfer”（`/tmp/luna-tools-6wpi4ft8/result.json`，位置 compiler/elaboration/src/verification/moves.rs 的 Then 分支）。该能力仍未实现，未放松检查；对应 fixture 改为明确验证这项拒绝义务，不能把它算作拥有型计算结果的支持。后续必须设计计算结果独立所有者及接受／失败两条清理路径，再将此用例推进为正例。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control`：退出 0，111 + 832 + 522 + 241 = 1,706 项通过，无 ignored；`/tmp/luna-tools-0gmfiaov/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-u6r9k040/result.json`；`git diff --check` 通过。
+
+改动保留 dev 工作区，未提交。
+
+### 不导出绑定的拥有型计算结果
+
+继续沿资源层分析确认，直接将拥有型计算结果交付 Then 需要独立候选所有者；但后项不向外导出绑定时，结果的完整生命周期可以封闭在观察区域内。源码复现 `let (_ and make() is (_ if flag)) = true else ...` 原先因计算结果资源转移缺失被拒绝（`/tmp/luna-tools-igut6pfe/result.json`）。现将这类非标量结果的后项匹配放入 bool 观察块，用既有 Match 清理承担实际构造载荷的责任，再以 bool 后项选择接受／拒绝。前项仍先匹配，未接受不求值计算；拥有值在进入外部 continuation 前结束。
+
+初版裸 Match 被观察路径限制拒绝（`/tmp/luna-tools-ck35zxnr/result.json`），已改用完整观察区域检查，没有放宽外部状态或调用约束。降低保留原后项不可反驳性：已证明总能接受时 bool 后项使用 Wild，避免把原本合法的无 else 声明变成可反驳模式。模式导出收集扩展到完整结构与错误载荷，未知 CodeEvidence 保持原路径。
+
+新增五项源码回归：对象成功／guard 拒绝时一次清理且先于 continuation、枚举按活动载荷清理、禁止修改调用方状态、前项拒绝时跳过构造、无 else 的拥有型通配计算。向外导出新拥有值仍明确拒绝；本次未实现该跨候选所有者协议。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control`：退出 0，111 + 837 + 522 + 241 = 1,711 项通过，无 ignored；`/tmp/luna-tools-ck3_v9n_/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-9335weil/result.json`；`git diff --check` 通过。
+
+改动保留 dev 工作区，未提交。
+
+### 观察区域中的错误结果与程序拒绝边界
+
+拥有型计算结果的封闭观察路径扩展到 ErrorResult。原先 `make()->!Failure Item` 被 guard call result 的布局白名单拒绝（`/tmp/luna-tools-eewg_k_x/result.json`）。现在调用返回、区域私有实参、内联 ErrorConvert 构造均使用现有清理证据及无数据指针证明；布局证明递归检查成功域和每个完整错误标签，保持类型头不展开，缺预算／未知布局／任一分支存储数据指针仍拒绝。
+
+进一步复现返回 error 标签被拒绝摘要当作未知节点而认为可能程序拒绝（`/tmp/luna-tools-zjktc3p9/result.json`）。拒绝分析现在识别 ErrorConvert 为数据表示转换，继续检查操作数和目标域的析构拒绝义务；错误结果 ABI 不与程序规格拒绝混淆。新增单元用例覆盖成功／错误包装、拒绝操作数、拒绝清理，及带嵌套错误标签的指针布局、未知 normal-form、预算耗尽后恢复。
+
+源码正例覆盖成功／错误活动载荷、普通调用／inline／区域内按值转发，均只析构实际 Item 一次；负例验证含外部指针的拥有对象不能通过其析构隐藏调用方状态修改。向计算模式外导出新拥有值的独立协议仍未完成。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test drop --test cmtt --test inline_control`：退出 0，111 + 839 + 522 + 241 = 1,713 项通过，`/tmp/luna-tools-b3ry3f_y/result.json`。
+- `test -p elaboration --lib verification::rejection::tests`：13 项通过，`/tmp/luna-tools-zxl_uhnf/result.json`。
+- `test -p elaboration --lib pointer_footprints`：2 项通过，`/tmp/luna-tools-2ogadb1e/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-aw1hcx02/result.json`；`git diff --check` 通过。
+
+合计 1,728 项相关检查通过，无 ignored。改动保留 dev 工作区，未提交。
+
+### 拥有型 newtype 的封闭观察与析构拒绝
+
+源码计算模式构造 `Item.as(Inner).as(Outer)` 时，拒绝摘要将 NewtypeConvert 作为未知节点处理，普通供应调用被拒绝（`/tmp/luna-tools-amsig5zk/result.json`）。表示转换现与错误表示转换一样，遍历操作数并检查目标清理义务，不把转换本身当作程序规格拒绝。包装和表示的析构依然分别受检，没有展开或抹去类型身份。
+
+新增源码正例验证普通／inline 构造、匹配接受／拒绝下的实际析构序列严格为 Outer、Inner、Item，各一次；负例分别令包装析构或原载荷析构拒绝，观察调用继续被拒绝。执行轨迹测试工具补上 newtype 的名义析构名称，避免已有运行路径成功却在统计时误判“非名义 receiver”。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test runtime_purity`：退出 0，841 + 62 项通过，`/tmp/luna-tools-oaobztzn/result.json`。
+- `test -p elaboration --lib verification::rejection::tests`：退出 0，13 项通过，`/tmp/luna-tools-03peqjlc/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-gm1ajep4/result.json`；`git diff --check` 通过。
+
+合计 916 项相关检查通过，无 ignored；未重复不受此次修改影响的 CMTT／inline_control 全组。跨候选导出新拥有值仍待实现。改动保留 dev 工作区，未提交。
+
+### 计算模式资源路径的组合验收
+
+新增多候选所有权回归，覆盖两个新建拥有值、候选内 guard 和共享最终 guard 的八种真假组合。逐次核验 first 临时先于 second 重试清理、最终 guard 不因其自身拒绝而重试 or 的另一分支、原始仿射 Subject 保留至选定分支结束再清理；输入／构造／析构次数均检查。
+
+新增高阶泛型工厂回归，验证 `fn()->!Outer T` 在 T 为 `!Inner Item` 时仍将 Inner 视为成功域，Outer 拒绝，三种实际载荷各清理一次。工厂代码值的观察保留 Copy 协议要求：正例明确声明 Factory 的 Duplicate 证据，负例移除该证据并验证 Copy code observation 诊断。本轮补充组合证据，没有更改编译器语义或放宽资源约束。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop computed_`：退出 0，23 项通过，无 ignored；`/tmp/luna-tools-so075g27/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-984cvycw/result.json`；`git diff --check` 通过。
+
+本轮仅修改回归测试和实现记录，未重复全量测试。新拥有值的跨候选导出协议仍是独立待办；上述证据仅覆盖不导出新拥有值的观察。改动保留 dev 工作区，未提交。
+
+### 拥有型计算主体的标量字段交付
+
+将计算模式的封闭观察 lowering 提取到 `program/computed_patterns.rs`，扩展为可导出 bool、char、固定宽度整数、f32/f64 与单位值字段。后项匹配和 guard 在原拥有值上完成；观察结束时清理原主体，再把已检查的标量绑定发布到后续模式作用域。新拥有值、指针和尚未确定的字段类型仍走原有独立资源协议检查，未被这条路径放行。
+
+多个字段使用新鲜的编译器私有名义 struct 交付，具有单独的声明和字段布局，并纳入现有内部包元数据。没有为用户 Tuple 增加 Copy 实现或修改 normal-form 身份，也没有合成用户 Copy trait 实现；观察分析只对已标记的私有 struct 逐字段验证原始标量的 Copy 证据。函数体 lowering 之后补充输出包声明，避免生成引用缺少 IIR 声明。拒绝包的标量槽使用类型正确的惰性常量，false 判别在任何绑定发布前失败；有符号／无符号／浮点常量采用对应 NIR 值表示，不能用未转换的任意精度字面量冒充运行时 u8。
+
+新增源码回归覆盖不可反驳结构字段解构（无需 else）、owner 先于后续调用清理、枚举与 guard 拒绝时不交付字段、带指针字段保持拒绝。全组检查确认原不导出拥有值的路径、计算模式、多候选与泛型错误绑定继续工作。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test cmtt --test inline_control --test runtime_purity`：退出 0，846 + 111 + 522 + 241 + 62 = 1,782 项通过，无 ignored；`/tmp/luna-tools-adpbnx2j/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-0j3w8woc/result.json`；`git diff --check` 通过。
+
+新拥有值本身的跨候选导出仍待实现。改动保留 dev 工作区，未提交。
+
+### 标量聚合交付与无载荷失败变体
+
+计算模式交付扩展到由已确定标量组成的显式结构元组与匿名记录，递归形状检查带深度和共享预算。聚合字段仍需要该完整类型的 Copy 证据，不能因为其成员是标量而推导 Copy；新增正例分别声明 Pair／Fields 的 Duplicate 证据，并用移除证据的负例验证边界。
+
+内部交付类型改为私有枚举：成功变体携带实际导出，失败变体无载荷，避免为拒绝路径构造聚合占位值。原后项已证明不可反驳时只生成成功变体和对应 arm，保持无需 else 的语义。私有包声明在函数体检查后发布到输出枚举表；观察资格逐变体检查字段形状与 Copy 证据。没有用户 Tuple 或匿名记录的隐式协议实现，也不展开不透明类型头。
+
+新增组合验证：多候选字段重映射、拒绝后清理再重试、共享最终 guard 一次执行；必须执行的 comptime invocation 可访问私有包声明；元组和匿名记录字段接受／拒绝及原主体一次析构。所有相关正例与拒绝例均通过。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test cmtt --test inline_control --test runtime_purity`：退出 0，849 + 112 + 522 + 241 + 62 = 1,786 项通过，无 ignored；`/tmp/luna-tools-qfj9ddc4/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-a4q87aqm/result.json`；`git diff --check` 通过。
+
+指针、新拥有值和未取得布局的 normal-form 聚合字段导出仍待独立实现。改动保留 dev 工作区，未提交。
+
+### 正式 Tuple 的计算模式字段交付
+
+计算模式 lowering 和私有交付包的资源检查均支持通过协议注册的 Tuple 布局；递归遍历带深度与工作预算，实际字段类型保留原始 normal-form 头。完整字段的 Copy 检查保持独立，不展开其他类型函数或合成 trait 实现。新增源码回归验证成功／guard 拒绝、一次析构、包字段头身份，以及移除 Tuple Copy 证据后拒绝执行。
+
+验证目录 `/home/fin/luna`：计算模式定向 30 项通过（`/tmp/luna-tools-pwa3wqax/result.json`）；`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test type_spreads --test error_surface` 退出 0（`/tmp/luna-tools-1tiwkrcn/result.json`）。全 workspace 格式化退出 0（`/tmp/luna-tools-k00gxxc7/result.json`），`git diff --check` 通过。
+
+探索嵌套案例时，为两个不同 Tuple 实例分别声明 Copy 会触发现有“implementation overlap is not provably disjoint”检查；未通过假定 normal-form 单射性绕过。本次端到端证据仅覆盖单层正式 Tuple，嵌套实例的协议组合仍需单独验证。指针和新拥有值跨候选导出仍不在本次范围。改动保留 dev 工作区，未提交。
+
+### 嵌套 Tuple 与泛型清理候选的排除
+
+前一轮有实现和验证进展。本轮确认两份 Tuple Copy 实现的互斥问题不能靠推定 normal-form 单射性解决；单个带析取类型约束的实现可以合法覆盖内外两层。新增嵌套源码用例通过泛型 `make<T>` 构造 `Item<T>`，验证接受／guard 拒绝、元组头保留和一次析构；分别移除外层或内层 Copy 条件后保持拒绝。
+
+该用例暴露并修复了实际的候选推导缺口：查询 Tuple 的 Drop 时，`impl Retire for Item<T>` 会因为 T 无法推导而 pending。现在在参数推导前，对已注册 Tuple 与已登记名义构造子使用现有 PTC 分类不相容证明排除整个候选；仍保留原始头和参数，证明计入查询预算。不向任意不透明工厂推广，不增加 Tuple 单射性。底层双向回归检验证明重放、移除 Tuple 注册后拒绝重放且保留 pending、预算耗尽及新预算恢复。
+
+验证目录 `/home/fin/luna`：
+- 嵌套 Tuple 泛型源码回归退出 0：`/tmp/luna-tools-yainc68n/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test implementation`：66 项通过，退出 0；`/tmp/luna-tools-k1kvak_7/result.json`。
+- 全 workspace 格式化退出 0：`/tmp/luna-tools-zeowmtki/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test type_spreads --test newtypes`：退出 0；`/tmp/luna-tools-jpzwz3fu/result.json`。
+
+正式 Tuple 的嵌套字段交付与泛型拥有者清理已有端到端证据；不同 Tuple 实例的独立实现互斥证明未放宽。新拥有值跨候选导出仍是独立待办。改动保留 dev 工作区，未提交。
+
+### 泛型计算字段的受证布局与参数化交付包
+
+上轮有实现和验证进展。本轮先复现 `requires T == bool` 的字段仍被旧 lowering 当作未知拥有值拒绝（`/tmp/luna-tools-iysprs3_/result.json`），再接通已有 PTC 结构视图：只用等式证明确定导出形状，不改写导出字段的原始 T。结构视图查询计入 required 预算，递归深度受限。
+
+私有枚举收集字段中的自由 Type 参数，并在使用点携带对应实参；声明字段继续保留原始参数和 normal-form 头。资源检查通过受预算约束的名义布局接口逐变体实例化字段，再检查标量形状和完整 Copy 资格。运行时依赖、外层未封闭绑定以及非 Type 自由参数未被这条路径放行。
+
+新增源码验证包括：泛型 bool 字段及一次析构、泛型嵌套正式 Tuple 的接受／guard 拒绝与两层 Copy 负例、必须执行的 comptime invocation、`T == *bool` 不产生标量交付包且由内存来源检查拒绝。NIR 断言检查交付声明显式绑定 T，而非保留悬空字段参数。
+
+验证目录 `/home/fin/luna`：
+- 泛型标量修复后退出 0：`/tmp/luna-tools-xt4g0s3f/result.json`；泛型相关 3 项通过：`/tmp/luna-tools-vx5y16ie/result.json`；required invocation 回归退出 0：`/tmp/luna-tools-h2zlbbsj/result.json`。
+- 相关五组检查 `/tmp/luna-tools-3zk7l8dv/result.json` 首轮退出 101：CMTT 522 项和 Drop 853 项通过；新指针负例已被拒绝，但诊断断言预期晚于实际发生的内存来源错误。修正断言后定向重跑退出 0（`/tmp/luna-tools-inuvbmzz/result.json`），未改动实现。
+- 补跑首轮尚未执行的 `error_surface`、`inline_control`、`runtime_purity`：113 + 241 + 62 项通过，退出 0；`/tmp/luna-tools-u25ed0wm/result.json`。
+- 全 workspace 格式化退出 0（`/tmp/luna-tools-7m2ha_dh/result.json`），`git diff --check` 通过。
+
+新拥有值跨候选导出和运行时依赖字段的独立交付协议仍待实现。改动保留 dev 工作区，未提交。
+
+### 多泛型字段交付与具名 Copy 聚合
+
+上一轮有实现和验证进展。本轮先确认两个泛型字段通过不同候选、相反源码字段顺序重映射后仍按正确类型和值交付；最终共享 guard 只执行一次，候选临时 owner 在 guard 或重试前清理。各候选使用独立私有交付声明，明确绑定两个 Type 参数。
+
+计算模式的受检导出布局扩展到具名 struct、enum、newtype：lowering 与资源检查分别通过已有名义布局接口递归实例化声明字段；enum 检查全部变体，newtype 检查表示，保留声明身份。共享预算和深度限制继续适用。只确认布局并不授予 Copy，完整导出字段及其成员仍由现有资源协议验证。没有指针、未知布局或非 Copy owner 的隐式跨候选交付。
+
+新增源码回归覆盖具名结构、含载荷／空变体枚举、包装 newtype 的成功和 guard 拒绝，原 Holder 一次析构，根类型或叶子缺失 Copy 的拒绝，以及未选中的枚举变体含指针时也不得生成标量交付包。文档增加完整具名 Copy 字段示例。
+
+验证目录 `/home/fin/luna`：
+- 多泛型字段定向退出 0：`/tmp/luna-tools-82w6p9ol/result.json`。
+- 具名聚合及负例定向退出 0：`/tmp/luna-tools-g0058uyt/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test newtypes --test error_surface --test cmtt --test inline_control --test runtime_purity`：856 + 207 + 113 + 522 + 241 + 62 = 2,001 项通过，退出 0，无 ignored；`/tmp/luna-tools-26__nri3/result.json`。
+- 全 workspace 格式化退出 0：`/tmp/luna-tools-tfcwoe3b/result.json`；`git diff --check` 通过。
+
+非 Copy 新拥有值的跨候选转移、运行时依赖和指针字段的独立来源交付仍待实现。改动保留 dev 工作区，未提交。
+
+### 错误限定 Copy 字段与用户协议主体
+
+上轮有实现和验证进展。本轮接通 ErrorResult 计算字段的导出形状：成功域与完整错误标签逐项递归检查，保留错误行的类型实参和实际值。与具名聚合相同，仍须取得整个错误结果及所有组件的显式／内建 Copy 证据，并通过清理资格检查；不因活动标签已知而忽略其他标签，也不触及代数效应 ABI。
+
+首个源码回归暴露了入口不一致（`/tmp/luna-tools-6pnf56r1/result.json`）：底层候选选择／证据重放已接受错误限定主体，源码 impl 入口却拒绝它。修复源码主体资格检查，同时把错误结果加入 Copy 已支持表示的检查，与现有逐分支清理布局对齐。新增普通及受约束泛型 trait 实现的方法分派回归；typealias 指向错误结果不会增加身份或隐藏完整成功域／错误行。
+
+计算字段回归覆盖成功 true／false、Failure<bool>／Failure<u8> 错误分支、guard 接受／拒绝、Holder 一次析构、整体 Copy 缺失、未活动标签 Copy 缺失、未活动指针错误标签的拒绝。接口分派回归覆盖普通和泛型实现各三种结果。
+
+验证目录 `/home/fin/luna`：
+- 错误字段定向退出 0：`/tmp/luna-tools-dh291yec/result.json`；错误结果用户实现分派定向退出 0：`/tmp/luna-tools-j66tb6ji/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test newtypes --test error_surface --test cmtt --test inline_control --test runtime_purity`：857 + 207 + 114 + 522 + 241 + 62 = 2,003 项通过，退出 0，无 ignored；`/tmp/luna-tools-5iv9pl6y/result.json`。
+- 全 workspace 格式化退出 0（`/tmp/luna-tools-6cn_2qb2/result.json`），`git diff --check` 通过。
+
+非 Copy 拥有值跨候选交付、运行时依赖与指针来源交付仍待实现。改动保留 dev 工作区，未提交。
+
+### 错误前缀的定向缺失证明与整体 Drop
+
+上轮有实现和验证进展。本轮以错误限定类型自定义 Drop 的源码回归继续推进，复现泛型清理候选 pending（`/tmp/luna-tools-atybhtm_/result.json`）。根因是错误标签缺失证明要求两边成功残余都封闭，导致 `!Failure T` 中明确存在的前缀也不能排除普通类型。
+
+PTC 现在按方向检查标签缺失：只要求目标残余已知普通，并逐项证明源标签不同于目标全部完整标签；源的未知成功域可以增加标签，却不能删除已出现的标签。成功残余之间的结构不相容仍要求两边都封闭。新反例验证未知目标、未知标签等式以及源残余可能贡献目标额外标签时不能错误证明不相等；肯定结论均重放证明。
+
+实现匹配在未能推导全部参数前，对明确错误前缀与普通类型尝试受预算约束的 PTC 排除证明，避免无关泛型 Drop 候选阻塞清理；没有用推导失败代替反证。新增双向实现选择／证明重放测试，并验证真正匹配的错误主体仍能推导参数和分派。
+
+源码回归确认普通／泛型错误结果 Drop 在成功／错误分支均先执行整体析构，再只清理实际载荷；带载荷错误标签继续执行自己的析构后清理内部字段。整体有自定义 Drop 时，即使显式声明 Copy，也因非平凡清理责任被拒绝。
+
+验证目录 `/home/fin/luna`：
+- 自定义错误结果 Drop 定向退出 0：`/tmp/luna-tools-rput1y4v/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test error_rows --test implementation`：10 + 67 项通过，退出 0；`/tmp/luna-tools-09z8rbsq/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test newtypes`：859 + 114 + 207 项通过，退出 0；`/tmp/luna-tools-twc9_iia/result.json`。
+- 全 workspace 格式化退出 0（`/tmp/luna-tools-l8f0n4zk/result.json`），`git diff --check` 通过。
+
+非 Copy 计算结果跨候选交付仍待实现。改动保留 dev 工作区，未提交。
+
+### 正式 Tuple 分类参与错误前缀排除
+
+上轮有实现和验证进展。本轮复现泛型 `impl Retire for !Failure T` 阻塞正式 Tuple 成功载荷的自动清理（`/tmp/luna-tools-vnn2gmi_/result.json`）。此前普通类型的判定仅识别结构构造子，没有使用已注册 Tuple 的分类。
+
+错误行缺失证明现在把已注册 Tuple 视为普通成功残余；实现匹配的受证提前排除也使用同一分类。没有展开 Tuple 头或反推其元素。新增 PTC 双向证明及重放测试，明确检查撤销注册后不能重放、普通不透明工厂没有这份结论，以及 Tuple 单射性仍不能被推导。
+
+两个源码回归保留 NIR 中实际 Tuple normal-form 头，覆盖外层错误结果的成功／失败、泛型整体 Drop、以及 Tuple 第一个元素自身为另一错误结果时的四种分支组合。元组内错误留在元素里，不被提升到外层错误行；整体析构后只清理活动载荷。相关文档增加完整嵌套示例。
+
+验证目录 `/home/fin/luna`：
+- 两个源码定向回归退出 0：`/tmp/luna-tools-48xhg8qg/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib ptc::`：4 项通过，退出 0；`/tmp/luna-tools-0l8jjlsb/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test type_spreads`：861 + 114 + 92 项通过，退出 0；`/tmp/luna-tools-898mjtew/result.json`。
+- 全 workspace 格式化退出 0（`/tmp/luna-tools-j6jgo63u/result.json`），`git diff --check` 通过。
+
+非 Copy 计算结果跨候选交付仍待实现。改动保留 dev 工作区，未提交。
+
+### 错误行规范顺序与 Drop 接收者 ABI
+
+上轮有实现和验证进展。本轮复现语义相同但书写顺序相反的错误行选中同一 Drop 后，严格接收者 ABI 检查失败（`/tmp/luna-tools-acqnbg3y/result.json`）。没有放宽签名比较或把不同物理布局的指针强行传入析构函数。
+
+`Term::error_result` 在原有扁平化成功限定层及精确去重之后，以稳定的完整 S-expression 类型键排列标签；参数替换重新构造时也取得统一顺序。保持全部类型实参、normal-form 头及完整标签自身的限定层，不通过排序引入新的类型等式。源码同一完整错误行不再因书写顺序不同而产生两个接收者布局。新增回归验证成功和两种错误分支经过换序转发后，整体 Drop 与活动载荷各清理一次，生产者／转发调用各一次。
+
+底层物理布局仍保留独立顺序：`ResultType::to_term` 现在直接重建已检查布局，避免源类型构造器的规范化悄悄改变已有标签编号。NIR 与 IIR 的显式换序夹具改用原始物理类型构造，继续检验非恒等标签映射、冻结、guard、源域拒绝及预算恢复。源码测试改为检查实际 tag 指向的完整标签，不再假定 tag 等于源码书写位置。
+
+验证目录 `/home/fin/luna`：
+- Drop 换序回归修复后退出 0：`/tmp/luna-tools-q3_pap0y/result.json`。
+- NIR `error_results`、`normal_inputs`、`trait_parameters`：29 + 13 + 19 项通过，退出 0；`/tmp/luna-tools-h63jr2y5/result.json`。早期三项物理布局测试因构造器将换序变成恒等而失败；调整为显式物理夹具后仍保留原映射及拒绝预期。
+- IIR `error_transport` 5 项通过，退出 0；`/tmp/luna-tools-74mkx7aq/result.json`。
+- 源码相关七组首轮 `/tmp/luna-tools-4nmg9q65/result.json`：CMTT 522、Drop 862 项通过；error_surface 的三项旧数字 tag 断言失败。更新为完整标签身份断言后补跑 error_surface、type_spreads、inline_control、newtypes、runtime_purity，114 + 92 + 241 + 207 + 62 项通过，退出 0；`/tmp/luna-tools-51dfaksw/result.json`。
+- 解释器 `abstract_values` 退出 0：`/tmp/luna-tools-ap_27_s5/result.json`。
+- 全 workspace 格式化退出 0（`/tmp/luna-tools-b_o5ju4v/result.json`），`git diff --check` 通过。
+
+本轮覆盖相同错误标签集合的源码换序；不同类型之间的 Drop 责任适配及非 Copy 计算结果跨候选交付不由此完成。改动保留 dev 工作区，未提交。
+
+### 冻结错误值的物理域转换与参数替换验收
+
+上轮有实现和验证进展。本轮补齐规范行与显式物理域交界的证据，没有放宽已有实现。显式反序物理错误值冻结后保留原始域；直接作为规范化函数输入仍拒绝。通过现有受检 transport 进行完整标签映射后，成功、char 错误和 bool 错误均按目标域重建正确 tag 与载荷。首个直接往返试验 `/tmp/luna-tools-ljvzhso1/result.json` 验证了拒绝边界，最终回归同时检查拒绝和显式转换后的成功。
+
+新增源码验收让两个 Type 参数决定错误标签：实例化为 char/bool 时换序，bool/char 时保序，bool/bool 时合并；成功和错误分支分别作为 normal-form comptime 输入，与独立的具体预期值比较。错误标签或载荷不一致的反例必须拒绝，避免只检查“能编译”而遗漏冻结值身份。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test abstract_values`：19 项通过，退出 0；`/tmp/luna-tools-8067_9kz/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface generic_frozen_error_inputs -- --nocapture`：含上述六组正／反例的定向回归通过，退出 0；`/tmp/luna-tools-59467oks/result.json`。
+- 全 workspace 格式化退出 0（`/tmp/luna-tools-ftygpj7l/result.json`），`git diff --check` 通过。
+
+本轮只增加验证及接口说明，未重复大范围测试。不同错误类型之间的 Drop 责任适配、非 Copy 计算结果跨候选交付仍未完成。改动保留 dev 工作区，未提交。
+
+### 错误行扩大保留整体析构责任
+
+复现了错误行扩大只转移载荷、静默丢弃源结果整体自定义 Drop 的漏洞（`/tmp/luna-tools-eapx_kaw/result.json`，新增拒绝测试在修复前失败）。移动检查现在在消费源值之前，从当前 CleanupSession 的已取得责任中检查源整体；源整体无自定义 Drop 时允许搬运，已选中／假设／待定责任则要求显式责任转移证据。检查不要求载荷平凡，成功和错误载荷自己的 Drop 仍执行且只执行一次。相同类型及规范化后的标签换序保持原行为。
+
+这修复了隐式丢责任的路径，并未实现不同结果类型间的自定义 Drop 适配。相关实现限制已同步错误类型文档。
+
+验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface`，864 + 115 项通过，退出 0，报告 `/tmp/luna-tools-_dtmp2t5/result.json`。中间一次编译因新增测试遗漏局部 import 失败，补齐后上述整组通过。全 workspace 格式化退出 0（`/tmp/luna-tools-ywfscmo0/result.json`），`git diff --check` 通过。改动保留 dev，未提交。
+
+### 隐式错误转换的独立清理边界
+
+带整体 Drop 的结果经 `make()!` 传播并重新包装返回时，外层隐式转换与传播 Match 共用源码位置，导致清理调度报告两个 TemporaryEnd 边界。修复前回归失败报告 `/tmp/luna-tools-55n6i7_k/result.json`。现在 `convert_error_value` 统一分配可追溯的生成位置，并移除调用方重复分配；转换和操作数各自保留清理入口，不削弱唯一性检查。
+
+新增八个执行场景：直接传播、空 handler、先绑定再传播、条件分支，各覆盖成功与错误。每个场景验证构造函数只执行一次、源结果与新返回结果分别执行整体 Drop、活动载荷只析构一次。此处允许的部分移出仍经过现有析构访问检查；它不同于直接扩大错误行后丢弃源整体责任。
+
+验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test cmtt --test inline_control --test runtime_purity`，865 + 115 + 522 + 241 + 62 = 1805 项通过，退出 0；报告 `/tmp/luna-tools-sshc7miq/result.json`。全 workspace 格式化退出 0（`/tmp/luna-tools-70rjcp7y/result.json`），`git diff --check` 通过。未运行全 workspace 测试；不同类型的整体 Drop 适配与非 Copy 计算模式结果跨候选交付仍待实现。改动保留 dev，未提交。
+
+### 错误传播析构的实际内存行为验收
+
+增加六组执行／拒绝配对：直接返回、传播、空 handler，各含成功和错误载荷。载荷析构通过保存的指针写回调用者布尔位置，整体析构调用普通函数；验证最终写入、整体析构与载荷析构顺序，以及后续语句只在清理后执行。配对反例把指针指向被退出函数的局部位置，必须因逃逸拒绝，而不是只检查无操作析构的次数。
+
+探索发现明确的后续缺口：通过非 Copy 指针读取整个错误结果再匹配，在 elaboration 阶段即因缺少 Copy／内存转移契约支持而拒绝（`/tmp/luna-tools-1kwxy3ub/result.json`）。因此本轮没有声称完成任意整体载荷访问的 Drop，也未放宽指针读取限制。最终提交到工作区的测试使用已支持的字段级指针读取和写入，文档补充支持边界。
+
+验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop error_propagation_ -- --nocapture`，退出 0，报告 `/tmp/luna-tools-2wxbq8nq/result.json`。全 workspace 格式化退出 0（`/tmp/luna-tools-25i710qq/result.json`），`git diff --check` 通过。本轮新增验证及限制说明，没有修改编译器实现，未重复全量测试，未提交。
+
+### 错误结果的受检 Copy 指针读取与写回
+
+补齐源码存储形状检查和内存摘要的 ErrorResult 分支：递归检查成功载荷与所有完整错误标签；无可构造成功值的 Never 不作为实际存储载荷。形成读取不推导 Copy，完整结果和组成类型仍由不可变协议世界检查复制资格与平凡清理。标量载荷错误结果可按既有 Copy 写回规则替换，保留自定义 Drop 拒绝。
+
+嵌套指针读取揭示 `project_owned_storage` 只接受 nominal 变体（失败报告 `/tmp/luna-tools-207egdat/result.json`）；现按完整错误结果类型验证分支与载荷槽，保存匿名字段路径及分支 guard，继续重定位嵌套前缀。没有引入不带 guard 的错误载荷投影，也未开放任意指针聚合写回。
+
+源码回归覆盖成功／错误标签、重复读取保留原值、整体与错误标签缺少 Copy、自定义 Drop 冲突、带指针成功／错误载荷的读取和局部来源逃逸拒绝，以及两种分支写回。存储投影单测检查嵌套 guard、非法标签／字段／不完整路径及预算耗尽。旧表面测试改到真正的资源执行入口验证缺少 Copy 被拒绝，不再要求形成阶段提前拒绝所有错误结果读取。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib verification::memory::`：12 项通过，退出 0，`/tmp/luna-tools-61dzj052/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test runtime_purity --test newtypes`：drop 869 项通过，随后旧形成阶段拒绝测试失败，`/tmp/luna-tools-bunmrfr_/result.json`。
+- 更新该测试后 `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test runtime_purity --test newtypes`：115 + 62 + 207 项通过，退出 0，`/tmp/luna-tools-kfimo6us/result.json`。
+
+非 Copy 整体读取／借用匹配及自定义析构责任适配仍未实现。改动保留 dev，未提交。
+
+### 错误结果函数载荷的读取快照与跨函数缺口
+
+新增八个执行场景：成功／错误载荷中的 true／false 函数，分别经局部解引用和 quote fn 展开读取。读取后将原结果改写为另一函数，检验副本仍执行原目标。另有八个普通 fn／inline fn 拒绝场景，锁住当前不能取得调用目标时的安全拒绝，不把它们当成语言限制或已实现功能。
+
+实际缺口已定位：`named_callable_result` 为指针参数构造借用根，但不从调用方传入这些借用根的函数载荷；`CallableInput` 目前只描述参数的拥有型字段，不能描述跨指针加载后的条件存储位置。`walk_read_pointer` 只能从本地存储取得函数快照，跨参数读取后的返回信息因此丢失。后续应加入有类型、带分支条件的借用 callable 输入，并在调用点传递到上下文分析；不能直接把未知目标当成已知，也不能仅检查返回表达式语法来猜测 getter 行为。
+
+验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop copy_error_result_pointer_reads_preserve_callable -- --nocapture` 通过，退出 0，报告 `/tmp/luna-tools-pn4og2y_/result.json`。最初普通辅助函数正例失败 `/tmp/luna-tools-j9o6bfr1/result.json`，inline 辅助函数同样失败 `/tmp/luna-tools-5_7wmhgn/result.json`，据此保留明确的实现缺口。本轮新增测试与说明，未修改编译器实现，未提交。
+
+### 只读调用的借用函数载荷返回上下文
+
+接通调用方实际存储到被调函数借用根的函数身份与分支域。memory_call 在全部实参和默认值求值之后取得信息；只有已推导摘要不写内存且不会运行未建模清理时才建立本次调用的 BorrowedCode。对多个实际目标按分支条件合并函数候选与标签域，目标未知时不提供猜测证据。上下文返回分析将其安装到匹配参数、指针表示及 pointee 类型的合成借用根，正常分析完整函数体并取得返回信息，不对 getter 语法做特判，不缓存为类型固有属性。
+
+普通 fn／inline fn 的原拒绝回归已改为实际成功执行：成功和错误载荷均保留返回的函数身份，调用后改写原结果不影响副本。新增标量函数指针的多层辅助函数转发、不同目标合并、不同错误分支目标合并、后续实参改写存储后读取最新函数，以及会写内存的辅助函数不能使用只读证据的拒绝例。初始化借用根时先安装函数字段，再安装标签域，避免字段替换逻辑清空刚建立的域。
+
+仍未开放带任意写入／未建模清理的借用函数状态转换；嵌套指针参数和被调函数内部未知借用载荷调用也没有因此获得通用支持。当前信息仅在已验证的调用点内部传递，未扩展公开 CallableInput 的跨指针 ABI。后续需要把写入、别名关系和清理的实际作用纳入这类上下文。
+
+验证目录 `/home/fin/luna`：
+- 普通／inline 错误结果返回执行回归通过，报告 `/tmp/luna-tools-urkl4iec/result.json`。
+- 多层转发、多个目标和实参后置修改回归通过，报告 `/tmp/luna-tools-l5o5qkny/result.json`；最初测试直接使用无 Copy 权限的解释器实例而失败，改为完整协议执行入口后通过，未放宽解释器权限。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test cmtt --test runtime_purity --test newtypes`：871 + 115 + 522 + 62 + 207 = 1777 项通过，退出 0，`/tmp/luna-tools-syopiy_k/result.json`。
+- 全 workspace 格式化退出 0（`/tmp/luna-tools-o4_k8bs1/result.json`），`git diff --check` 通过。
+
+改动保留 dev，未提交。全语言目标仍未完成。
+
+### 聚合指针字段的借用函数载荷上下文
+
+将只读调用的 BorrowedCode 从参数根扩展到已经过检查的 pointer_input_layout 叶。上下文现在记录参数位置及完整输入字段路径；同一参数的多个指针字段、错误结果成功／错误分支中的指针各有独立身份。安装信息时核对 BorrowedRoot 的参数、完整路径和 pointee 类型，不以共享物理槽或仅参数编号代替匹配。直接指针／已有指针表示包装继续使用原来的根路径；没有实际指针目标的参数跳过额外布局遍历。
+
+新增执行验收覆盖一个结构体中的两个不同函数指针字段、错误结果两种活动分支的指针字段，以及运行时条件决定分支的共享载荷位置。实际返回函数随后被调用，结果分别验证 true／false，避免只检验“能形成 IR”。先前多个目标合并、实参后置修改和写调用拒绝也随定向组继续通过。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop borrowed_callable_ -- --nocapture`：通过，退出 0，`/tmp/luna-tools-zbev1asp/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test runtime_purity --test newtypes`：873 + 115 + 62 + 207 = 1257 项通过，退出 0，`/tmp/luna-tools-sfwht_he/result.json`。
+- 全 workspace 格式化退出 0（`/tmp/luna-tools-qo4tm0zm/result.json`），`git diff --check` 通过。
+
+已同步错误类型文档并补充聚合指针读取函数值的代码示例。连续多层指针加载、写入或未建模清理作用仍需后续接线；未改变只读证据的适用边界。改动保留 dev，未提交。
+
+### 用实例的 Copy 依据细化借用函数返回的清理条件
+
+修正“包中任意 Drop 实现使 Copy 聚合返回也无法传递函数身份”的过度保守行为。当摘要不写内存、返回值包含函数身份而粗略清理标志仍为真时，对实际实例的参数、主体、规格表达式及调用默认值检查清理资格：非内建简单表示需要完整 Copy 依据；嵌套调用另需独立的无清理摘要。未知调用、效应上下文或实际拥有型资源不获得放行。该检查有遍历／类型预算，不改写原摘要，也不把局部证据缓存为类型性质；没有函数返回信息需要恢复时不启动额外扫描。
+
+新增正例在包内存在无关自定义 Drop 时，通过带局部 Copy 绑定的普通函数返回成功／错误分支中的函数值并实际调用。新增反例让普通函数自身或嵌套辅助函数的 Watch 析构写入调用者布尔位置，不能以只读借用信息取得返回函数身份；对应 quote fn 展开路径实际执行该清理并读到 true。默认值清理还受到独立 P3 稳定性／终止性要求，探索中的无证据资源默认值在 elaboration 阶段被拒绝，最终保留此拒绝断言，没有放宽默认值规则。遍历采用包含默认值、但不进入新建闭包延迟主体的入口，避免漏掉调用准备期间的清理。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop borrowed_callable_ -- --nocapture`：5 项通过，退出 0，`/tmp/luna-tools-6_j4snp3/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test cmtt --test runtime_purity --test newtypes`：875 + 115 + 522 + 62 + 207 = 1781 项通过，退出 0，`/tmp/luna-tools-7j40smmi/result.json`。
+- 全 workspace 格式化退出 0（`/tmp/luna-tools-l2fi5pq4/result.json`），`git diff --check` 通过。
+
+实际析构状态转换及任意写调用仍未纳入借用函数身份分析；此轮仅消除能够独立证明平凡清理的误拒绝。改动保留 dev，未提交。
+
+### 平凡清理证明跨内部调用与递归实例传递
+
+将 callee_cleanup_is_trivial 从单层检查扩展为有预算的具体实例工作列表。内部调用的摘要若已证明无清理则直接采用；若仅有粗略可能清理标记，则将其实际函数实例加入检查。按声明身份和完整实例实参去重，同一实例仅检查一次，不展开 normal-form 类型头，也不把调用环判作终止性证明。每个实例的参数、主体、规格和调用默认值仍通过原有 Copy／已知简单表示检查；任一实际拥有型资源、未知调用或效应使整个证明失败。工作列表仅存在于本次证明内，不跨世界缓存尚未完成的结果。
+
+扩展执行回归：包中存在无关 Drop 时，通过多层普通辅助函数返回 Copy 错误结果的函数载荷；其中包含只观察 Copy 值的递归函数。拒绝回归增加递归分支中创建 Watch、由析构写入调用者位置的情况；quote fn 展开路径仍实际执行并得到 true，普通／inline 返回分析不得把这条路径当成无清理。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop borrowed_callable_ -- --nocapture`：通过，退出 0，`/tmp/luna-tools-eqgjrexs/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test runtime_purity`：875 + 62 = 937 项通过，退出 0，`/tmp/luna-tools-cpit3fmw/result.json`。
+- 全 workspace 格式化退出 0（`/tmp/luna-tools-x78ylpv2/result.json`），`git diff --check` 通过。
+
+真实析构写入与通用借用状态转换仍未实现。改动保留 dev，未提交。
+
+### 仿射聚合值的独立平凡清理证据
+
+将清理资格与 Copy 资格分开：CleanupSession 检查已取得的完整表示，只有根及全部字段、全部变体均为 NoCustomDrop 时才提供平凡清理证据。moves 在当前固定清理环境内保存已证明的类型，并传递给内部调用的返回分析；不向 Copy 协议增加实例，不改变移动规则。内部分析的预算现在也包含输入清理证据和效应输入的准备成本，避免子分析少计工作。
+
+新增普通非 Copy View 多层转发及成功／错误分支 View 的执行验收；返回函数值实际调用成功。重复使用已移动 View、根有 Drop、字段有 Drop、非活动错误标签有 Drop 均不能借此绕过检查。写调用及真实自定义析构的状态转换仍未实现。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop borrowed_callable_ -- --nocapture`：7 项通过，退出 0，`/tmp/luna-tools-scivjn2r/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test cmtt --test runtime_purity --test newtypes`：877 + 115 + 522 + 62 + 207 = 1783 项通过，退出 0，`/tmp/luna-tools-o8_f87he/result.json`。
+- 全 workspace 格式化退出 0，`/tmp/luna-tools-2fzdm6ug/result.json`；`git diff --check` 通过。
+
+同步错误类型文档的当前实现边界。改动保留 dev，未提交。
+
+### 多候选内存摘要保留所有候选的清理标记
+
+修正 moves::memory_candidate_summary 合并遗漏：may_run_cleanup 与显式访问、may_reject 一样按所有候选取并，不能由首个候选决定。新增两种候选顺序下的实际执行与拒绝测试：两个只读加载器、其中一个带非 Copy 但平凡清理的局部 View，均成功执行；其中一个构造带析构写入的 Watch 时保持拒绝。直接检查两个候选的原始摘要，确认其显式访问都只读，但清理标记分别为 false/true。
+
+修复前端到端拒绝例已被其他检查拦截（`/tmp/luna-tools-zhvrg9t1/result.json`），因此本次不声称复现了不安全执行；修复的是摘要信息合并不完整。检查中的下一缺口仍是 borrowed callable 在被调函数内部直接调用：memory::walk_read_pointer 目前只从 Local 根恢复 callable，参数根没有这类前提；moves 的 BorrowedCode 只在摘要已成功且只读时提供。下一步需要在内存摘要层表达带路径的借用代码前提，并处理写入使前提失效，不能直接提前无条件注入现有快照。
+
+验证目录 `/home/fin/luna`：8 项 borrowed_callable 定向回归通过（`/tmp/luna-tools-leucofo1/result.json`）；补充原始摘要断言后，`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test runtime_purity` 通过 878 + 62 = 940 项，退出 0，`/tmp/luna-tools-smhqtc2s/result.json`。全 workspace 格式化通过（`/tmp/luna-tools-vtt0z0hl/result.json`），`git diff --check` 通过。改动保留 dev，未提交。
+
+### 内存摘要中的借用代码前提与内部调用传递
+
+新增 memory::BorrowedCallableInputs 及 infer_with_borrowed_callable_inputs。外层路径选择实参中的指针，内层路径选择 pointee 中的函数字段；验证 runtime 参数、指针表示、带守卫的存储投影、代码实例及完整函数签名。缺失信息保持未知，空候选／NoReturn／Unknown 不能作为公开前提。前提进入 MemoryInstance 的缓存键及 Summary.borrowed_inputs，S-expression dump 显式列出条件；复制与遍历均计入预算。
+
+参数根的 ReadPointer 可以据此前提恢复 named callable，支持读取后直接调用、作为普通高阶实参继续传递，以及指针跨内部 named 调用时按实际目标重建前提。多个实际目标必须全部提供代码证据；候选取并，不假定不同参数互不别名。直到写入转换得到建模前，整个固定点结果只要可能写内存或执行未建模清理，新查询就拒绝返回可用摘要。当前仅支持 named 代码和一层输入指针的 pointee 路径；不是 Copy 权限，也不是运行时存储有效性的证明。
+
+新增源码形成后的摘要层验收覆盖：直接／高阶／指针转发调用、聚合指针字段、聚合函数字段、完整输入与摘要 dump、无前提查询不受污染、零预算、错误路径与不匹配签名、未知／空候选、前后写入与函数指针替换拒绝。同一辅助函数在一个固定点内接收不同代码前提，验证不能因缓存混用丢失后一个候选的读取、写入或析构；候选顺序均覆盖。
+
+尚未接入 moves 的调用点快照与 luna 清理调用上下文。下一步需把 BorrowedCode 导出到摘要查询，并将完整证据随 NamedCall／调用检查上下文传递到被调函数资源分析；只改 memory_call 使摘要成功而跳过被调函数资源检查并不构成完整支持。匿名闭包环境、写入后的精确状态转换及多重指针加载仍待接线。
+
+验证目录 `/home/fin/luna`：
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test cmtt --test runtime_purity --test newtypes`：880 + 115 + 522 + 62 + 207 = 1786 项通过，退出 0，`/tmp/luna-tools-rckdmzvn/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib verification::memory`：12 项通过，退出 0，`/tmp/luna-tools-li4k462j/result.json`。
+- workspace 格式检查通过，`/tmp/luna-tools-1e_x5esx/result.json`；`git diff --check` 通过。
+
+中间失败分别是 fixture 中 `.*=` 被词法读成复合运算符、已有函数指针替换检查先于稳定前提检查拒绝，以及测试闭包参数的 Rust lifetime 推断；修正用例写法、准确诊断断言和参数标注后通过，未放宽安全检查。改动保留 dev，未提交。
+
+### 借用函数调用接通资源检查与参考执行
+
+moves 在全部实参／默认值求值后，当普通摘要因动态调用身份未知而失败时，从实际目标捕获 BorrowedCode，再查询条件化内存摘要。只有该查询成功，才把快照标为调用前提；原有只用于返回值恢复的快照不因此强制创建新调用上下文。NamedCall 与 Report 携带不透明的 BorrowedCode，复制计预算，Display 使用 S-expression 并保留函数候选、字段、捕获与标签域。调用点继续检查实际目标访问，被调函数使用匹配借用根检查 Copy、移动和清理；签名、上下文入口前提以及递归复用均核对同一份证据。
+
+luna 的清理调度器为需要借用代码身份的实例建立逐调用清理上下文，不发布伪无条件根计划。IIR Schedule 增加 borrowed_callable_functions，解释器安装计划时核验实例及重复条目，调用时据此选择精确上下文或递归别名。缺失上下文时拒绝执行；外部无上下文调用也不能绕过此要求。旧的只按函数签名决定上下文的规则无法表达指针中代码身份，因此保留显式实例清单，而不是把所有指针参数函数都当成高阶函数。
+
+执行验收覆盖直接借用调用、普通辅助函数转发、读出后传给高阶函数、结构体指针字段、所指聚合的函数字段，各自执行 read/no 两个实际目标；另有后续实参改写存储后读取新目标、同一辅助函数不同调用身份、递归上下文复用。缺少 Copy、候选写入或析构不能通过；篡改清单、重复清单条目、删除调用上下文均拒绝。同步 drop-elaboration 文档与可执行风格示例。
+
+当前边界仍是 named 无环境代码及稳定只读调用。新的条件调用查询尚未接入之前“返回函数载荷”路径的独立平凡清理精化，包级粗略清理标记仍可能导致保守拒绝；不能把这当成语言限制。借用闭包环境、精确写入转换、多重间接加载与更完整的标签前提仍待实现。
+
+验证目录 `/home/fin/luna`：
+- 12 项 borrowed_callable 定向回归通过，退出 0，`/tmp/luna-tools-fk6nsk94/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test error_surface --test cmtt --test runtime_purity --test newtypes`：883 + 115 + 522 + 62 + 207 = 1789 项通过，退出 0，`/tmp/luna-tools-7ta4sf83/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p iir --lib`：69 + 46 = 115 项通过，退出 0，`/tmp/luna-tools-glfg7atd/result.json`。
+- workspace 格式检查退出 0，`/tmp/luna-tools-sfhcim5b/result.json`；`git diff --check` 通过。
+
+最初端到端入口在安装清理计划时报 InvalidCallPlan，据此补齐显式清单和解释器调用接线；另修正测试块表达式的 do 写法及实例身份读取方法。没有放宽 Copy、内存写入或清理检查。改动保留 dev，未提交。
+
+### 循环与候选报告保留借用来源和隐式访问
+
+补充执行验收确认借用函数在运行时选择多个指针目标，以及循环回边改写函数槽后重新调用，都保留正确代码身份。继续检查循环报告时发现：std::mem::take 隔离执行记录也抹去了当前调用的借用来源；Report::append 未合并 borrowed_roots 与 cleanup_call_accesses，导致循环内间接指针的清理访问无法导出，闭包清理访问也不能完整进入父报告。
+
+新增有预算的来源复制与 take_nested_report，同一调用内的循环、模式准备、候选观察沿用来源注册表，执行记录仍隔离。循环未收敛时只保留不可变来源元数据，以支持回边携带刚产生的 pointee；未收敛的清理动作与访问记录仍丢弃。最终 append 同时合并来源与调用清理访问。独立函数、闭包及默认实参调用帧保持原有独立命名空间，不用这个同调用内合并代替帧切换。
+
+扩展清理访问导出回归：循环内直接／间接借用、嵌套循环、循环调用闭包且由其析构访问直接／间接目标，均检查精确参数路径与写属性。最初回归 `/tmp/luna-tools-kv4hy0bf/result.json` 实际失败于丢失 enclosing invocation context。中间闭包用例误以显式写入测试 cleanup-only 导出，纠正为 Watch 析构写入后通过（`/tmp/luna-tools-eelq5ji1/result.json`），没有把显式访问混入清理专用接口。新增完整执行：循环两次调用闭包，Watch 恰好析构两次并更新调用者 bool，未重放分析轮次。同步清理文档。
+
+验证目录 `/home/fin/luna`：
+- 多目标与循环更新借用函数执行通过，`/tmp/luna-tools-rjgu542g/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes`：885 + 522 + 62 + 115 + 207 = 1791 项通过，退出 0，`/tmp/luna-tools-u0mcrl72/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib verification::moves`：20 项通过，退出 0，`/tmp/luna-tools-gu11cbfe/result.json`。
+- workspace 格式检查通过，`/tmp/luna-tools-y5ou8c14/result.json`；`git diff --check` 通过。
+
+改动保留 dev，未提交。借用闭包环境与可写调用中的代码状态转换仍是独立未完成项。
+
+### 借用代码的分支缺失证据
+
+补齐错误结果中借用函数调用的已知分支：原实现要求非活动分支也提供函数身份，实际执行准备失败于 dynamic call requires a richer memory contract（`/tmp/luna-tools-9fsn7uvr/result.json`）。BorrowedCallableInputs 的叶现用 BorrowedCallableValue 显式区分 Named 与 Absent；缺失条目仍是未知。Absent 必须指向函数叶，且输入指针路径或 pointee 字段路径有经过检查的变体条件。公开入口仍拒绝 Unknown、空候选和 NoReturn；内部固定点可把经验证的缺失分支转换为 bottom，沿辅助函数传递到已无外层变体包装的参数，不把它当成无条件代码前提。缓存键与 S-expression dump 保留这个区分。
+
+调用点根据已准备参数的标签域记录不存在的指针叶；pointee 内的代码缺失则来自实际存储的标签域。资源检查导入不存在的输入时，核对相应参数标签前提；不为不存在的分支制造借用根或复制许可。未知标签保留所有候选，写入目标依旧使稳定只读查询失败。
+
+执行验收覆盖成功／错误 View 两种分支直接调用及经辅助函数调用、指针所指 ErrorResult 函数字段、已知与运行时决定的标签，以及多层只读转发。拒绝例包括无条件标量／字段上的 Absent、非函数字段、非法变体、无证据查询，以及错误载荷中仍可能运行的写函数。同步错误类型文档的 call_at／invoke_action 示例。
+
+验证目录 `/home/fin/luna`：
+- 18 项 borrowed_callable 定向回归通过，`/tmp/luna-tools-0y5il2tg/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes`：889 + 522 + 62 + 115 + 207 = 1795 项通过，退出 0，`/tmp/luna-tools-418lq6o5/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib verification::`：59 项通过，退出 0，`/tmp/luna-tools-nlsh_b3e/result.json`。
+- workspace 格式检查通过，`/tmp/luna-tools-r5i3qlmt/result.json`；`git diff --check` 通过。
+
+最初 fixture 的 `p!=>` 被 lexer 识别为 `!=`，补空格后才取得上述语义失败证据。仍未开放借用闭包环境、写入后的精确代码状态转换或多重间接加载。改动保留 dev，未提交。
+
+### 守卫调用的间接指针观察
+
+memory guard 接受指针实参，再由普通调用的内存摘要与资源快照检查实际读取足迹。moves 不再要求观察实参之前已物化所有间接槽；按表达式验证观察行为和 Copy，随后完整执行分析验证来源、存活与初始化。观察前后的比较允许新增有精确 Indirect 来源的只读指针知识，仍要求已有指针事实、拥有资源与临时责任保持一致。同调用内的 guard 实参、match 和观察调用预检继续继承借用来源，不重复发布临时执行记录。
+
+新增执行验收覆盖一至三层指针、真假分支、调用与析构各一次；拒绝写入、可能拒绝的 assumes 和悬空目标。同步 runtime-purity 示例，明确当前观察路径与一般有副作用 guard 的实现边界。
+
+验证目录 `/home/fin/luna`：48 项 guard 定向回归通过，`/tmp/luna-tools-71e9g7jl/result.json`。第一次相关组检查 `/tmp/luna-tools-igqramzp/result.json` 在固定 2 MiB 栈的 inline-contract-cleanup 用例溢出；将观察预检及其临时报告移出递归 expr 栈帧，保持原测试栈大小，随后重新验证。
+
+后续验证：固定 2 MiB 栈的内联契约回归通过，`/tmp/luna-tools-izmby7tb/result.json`。相关组 `/tmp/luna-tools-ltl9203p/result.json` 中 cmtt 522、drop 891、error_surface 115 项通过；newtypes 的旧断言依赖“指针实参在摘要入口直接拒绝”，改为检查摘要保留写足迹，仍保留资源执行拒绝断言。随后 newtypes 207 与 runtime_purity 62 项全部通过，`/tmp/luna-tools-9uvrlt8h/result.json`；最终五组共 1797 项通过。格式检查 `/tmp/luna-tools-368ucody/result.json` 与 `git diff --check` 通过。改动留在 dev，未提交。
+
+### 内存摘要清理协议探测的索引与固定点共享
+
+检查借用调用的清理精化入口时，确认公开条件化摘要仍在缺少独立清理证明时拒绝 may_run_cleanup；完整精化需要把协议选择证据同时传过 moves 与 luna 的上下文复查，不能只在调用点清掉标记。本次未放宽该边界。
+
+消除 note_owned_cleanup 中 impl × trait 的交叉扫描：先收集含 drop 方法的 trait 身份，再检查实现，找到匹配即可结束。探测结果由单个 Infer 移至 Round，同一不可变包的函数实例和固定点迭代共享声明信息；不共享代码身份、存储事实或清理动作。预算仍覆盖声明、方法和实现遍历。
+
+新增 96 组 trait/impl、8 层辅助调用的预算验收，分别验证有／无 Drop 实现，8192 预算内返回正确清理标记。最初 2048 预算不足以覆盖完整调用类型分析（`/tmp/luna-tools-1r4z6ayw/result.json`），调整的是该集成用例总预算，没有绕开计费。另验证 bool、指针、函数三种表示的 newtype 自定义析构都保留 may_run_cleanup，借用条件查询继续拒绝；这些用例在修改之前已通过（`/tmp/luna-tools-uqy5t94f/result.json`），排除了最初关于结构视图抹掉析构的疑点，不能宣称修复了此问题。
+
+验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test newtypes`，893 + 207 = 1100 项通过，退出 0，`/tmp/luna-tools-vztoycv1/result.json`。改动保留 dev，未提交。
+
+内存摘要单元检查 `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib verification::memory` 通过，`/tmp/luna-tools-6i_aa5b2/result.json`。workspace 格式检查通过，`/tmp/luna-tools-99jwl4sf/result.json`；`git diff --check` 通过。
+
+### 借用函数调用接通独立平凡清理证明
+
+新增 infer_with_borrowed_callable_inputs_and_cleanup 与 moves 的对应上下文桥接。memory 固定点持有当前查询的 CleanupPolicy；对可能拥有清理责任的完整类型调用 is_trivial，并在本次固定点缓存已证明的类型。证明只消除这些类型的粗略清理可能性，不清掉其他调用合并来的标记、不授予 Copy、不改变显式写入检查。旧的无策略入口继续保守拒绝，查询缓存不跨 Drop 选择世界复用。
+
+调用点的 Analyzer 使用当前资源分析的清理策略；luna 发布逐调用清理上下文前，通过 protocols 适配器重新建立同一 LangItem::Drop 选择世界的 CleanupSession，复查条件化足迹。这样合法调用不再只通过第一层然后在上下文复查失败。资源检查与实际清理计划仍正常生成。
+
+新增端到端执行覆盖：动态选择两个借用函数，函数及转发辅助函数含无 Copy 的普通／嵌套聚合值；结果正确、选中函数恰好调用一次、没有伪造 Drop 调用。外层或字段有自定义析构仍拒绝，即使函数体为空。另一回归在同一包中依次使用 Retire、OtherDrop、Retire 协议，确认完整布局证明受选择世界约束，且每次无策略查询仍拒绝。同步 drop-elaboration 示例。
+
+最初 check 失败于适配器使用了错误 SourceRange 命名空间，改为 nir::program::SourceRange。首次手工构造解释器的测试漏装 Copy 权限回调，在 ReadPointer 报 Unsupported；改为通过真实 copy::acquire 查询提供权限，未放宽解释器复制检查。
+
+验证目录 `/home/fin/luna`：
+- 21 项 borrowed_callable 定向回归通过，`/tmp/luna-tools-uavljq7x/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes`：895 + 522 + 62 + 115 + 207 = 1801 项通过，退出 0，`/tmp/luna-tools-jr9mkyxj/result.json`。
+
+当前只精化完整布局无用户析构的情形；自定义析构的精细读写行为、借用闭包环境及可写代码存储转换仍待实现。改动留在 dev，未提交。
+
+验证补充：`test -p elaboration --lib verification::` 通过，`/tmp/luna-tools-blmecm2_/result.json`；workspace 格式检查通过，`/tmp/luna-tools-kl5gy8zu/result.json`；`git diff --check` 通过。
+
+### 平凡清理证明的高阶与默认实参交叉验收
+
+继续验证上一轮接口，而不是仅凭直接调用成功推断组合情形完成。新增源码执行矩阵：从指针读出代码后传给普通高阶函数、由局部闭包捕获并调用、经递归辅助函数转发，以及带聚合局部值的默认实参供应函数；各执行真假两组输入。辅助函数／闭包内均含无 Copy 的普通聚合责任，并在包中保留无关 Drop 实现。默认表达式显式通过 source selectors 绑定 Copy／Drop；未绑定版本仍拒绝 P3。最初用普通 compile 帮助函数导致未绑定协议拒绝，改用 compile_with_source_bindings 后全部通过，不是编译器缺陷修复。未知借用代码调用作为默认值仍需要独立 P3 证据，本用例使用可独立分析的 named 供应函数，不把已知调用点身份冒充声明侧证据。
+
+新增拒绝用例：借用函数内部把无自定义清理的 Plain 交付两次，资源分析仍报告已移动／不可用；平凡清理证明不赋予 Copy。此次无需修改核心实现，现有接口正确覆盖上述组合。
+
+验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop borrowed_callable -- --nocapture`，23 项通过，退出 0，`/tmp/luna-tools-_8uehl2y/result.json`。改动留在 dev，未提交。
+
+### 借用调用的自定义析构无内存影响证明
+
+CleanupPolicy 新增 is_memory_inert，默认仅接受原有 is_trivial 证据，保持已有策略的保守边界。CleanupSession 实现独立完整布局检查：收集选中析构实例，在同一协议世界查询每个方法的内存摘要，要求参数相对访问为空、没有未解释的嵌套清理，并排除程序谓词拒绝。析构体构造聚合值时摘要有粗略 may_reject 标记，使用既有 rejection Cache 和同一 CleanupSession 的 may_reject 精化，不直接清零。递归创建相同类型清理责任或相互依赖时保守返回未证明，深度和结构工作继续受预算限制。普通函数递归不由该证明承诺终止，内存摘要也不是 P3 完成证书。
+
+条件化 memory 查询改用此证明并在本轮缓存成功类型。is_trivial 的“没有自定义析构”含义保持不变，Copy 与错误嵌入等消费者不会因空 Drop 获得新许可。实际资源计划不省略用户 Drop。
+
+新增执行验收精确检查 entry → invoke → read → drop Outer → empty → drop Temporary → drop Inner，真假输入分别执行；覆盖外层、字段和析构体临时资源的自定义 Drop。拒绝用例覆盖析构写入、只读取接收者存储、assumes 失败、直接／相互递归清理依赖。已有外层／字段自定义析构拒绝用例改为实际拒绝谓词，因为空析构现已可证明；协议隔离用例同样保留真实行为差异。仿射重复交付反例改为带空 Drop 的 Plain，确认新证明不授予 Copy。
+
+首次定向运行在 Outer 析构构造 Temporary 时被粗略 may_reject 拒绝（`/tmp/luna-tools-4gbxt5ex/result.json`），接入独立拒绝精化后 25 项定向回归通过（`/tmp/luna-tools-itwmbd5r/result.json`）。同步 drop-elaboration 文档，明确读足迹组合仍未支持。
+
+验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes`，900 + 522 + 62 + 115 + 207 = 1806 项通过，退出 0，`/tmp/luna-tools-cxyje0i1/result.json`。改动留在 dev，未提交。
+
+验证补充：`test -p elaboration --lib verification::` 通过，`/tmp/luna-tools-73wunmvw/result.json`；workspace 格式检查通过，`/tmp/luna-tools-ksv79q0v/result.json`；`git diff --check` 通过。
+
+### 借用调用析构的接收者局部读取
+
+将清理的无外部内存影响证明细化为：允许只读、parameter=0、无 input_fields、无 through 加载的接收者路径；任何写入或越过指针字段的外部读取仍未证明。字段路径可以由普通辅助函数访问后映射回来，不凭字段类型猜测来源。每项访问检查计预算。证明只说明不引入外部读写依赖，不替代实际 Drop 计划对剩余初始化状态和 Copy 权限的检查；CleanupPolicy 契约及文档同步说明这个区分。
+
+新增执行验收覆盖析构读取 bool 字段、只加载指针字段值、将自身 bool 字段地址传给只读 helper，并验证 entry/invoke/read/drop Owned/peek 的执行顺序。新增成对用例：移出 token 后，Drop 读取 token.value 被拒绝，而只读仍在的 other 字段可以正常执行；未移出但尝试整体加载非 Copy 的 Token 也拒绝。现有拒绝用例新增接收者指针槽写入，并将外部读案例明确为 self.flag.*.*，保留对指针穿越的禁止。
+
+验证目录 `/home/fin/luna`：定向 borrowed_callable 通过，`/tmp/luna-tools-9mposf01/result.json`；最终 `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes`，902 + 522 + 62 + 115 + 207 = 1808 项通过，退出 0，`/tmp/luna-tools-wspa67sb/result.json`。带外部读足迹的析构仍待组合，改动保留 dev，未提交。
+
+验证补充：verification 单元组 59 项通过，`/tmp/luna-tools-4yhuwi0u/result.json`。新增断言格式检查最初失败，执行格式化后复查通过，`/tmp/luna-tools-_igw8ihy/result.json`；`git diff --check` 通过。
+
+### 清理行为证明复用共享依赖
+
+检查外部清理读足迹的组合路径时，确认仍需按实际清理位置映射访问，不能只用只读标志替代完整 footprint。本次未放宽外部读取。先消除嵌套析构跨内存查询的重复证明：CleanupSession 缓存完整类型的 is_memory_inert 成功结果，以及 may_reject 的否定结果（已经证明不拒绝）。缓存固定在该会话的 package／Drop protocol／World 内，保留完整 Term 键；查询失败、预算不足、递归未证明均不作为缓存事实。命中仍先对类型结构计预算，缓存插入同样计量克隆成本。资源计划和 is_trivial 的无用户析构语义不变。
+
+新增 12 层清理依赖，每层析构创建两份下一层类型。50,000 预算内完成证明，重复查询在 64 预算内完成；零预算仍拒绝。先用不足预算查询后再以充足预算成功，确认失败不污染后续证据。不同 Reject 类型仍保留谓词拒绝，不因已有成功类型而误判。
+
+验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test runtime_purity --test newtypes`，903 + 62 + 207 = 1172 项通过，退出 0，`/tmp/luna-tools-3lzva52j/result.json`。没有进行墙钟性能对比，结论仅为共享证明已缓存且上述预算验收通过。改动留在 dev，未提交。
+
+验证补充：verification 单元组通过，`/tmp/luna-tools-vvbwnhic/result.json`；workspace 格式检查通过，`/tmp/luna-tools-qmrg4lsm/result.json`；`git diff --check` 通过。
+
+### 外部清理读足迹的导出、重导入与调用者复查验收
+
+沿现有 Report.cleanup_memory_accesses → RuntimeInstance.cleanup_accesses → memory 摘要 → 调用者资源复查验证完整路径。新增两个指针字段的运行时选择，以及枚举两个重叠载荷槽的间接读取：导出恰好两条 read_value 足迹，保留 parameter、through 字段路径与各自变体条件。将导出足迹放入实例覆盖层后，内存摘要重新包含每条访问；篡改读目标类型被导入检查拒绝，S-expression 保留 cleanup-accesses 与 read-value。
+
+新增源执行矩阵覆盖直接调用、指针字段转发、枚举左右分支转发。正常目标均执行成功；在调用前移出原 Token 后，即使访问只发生于 Watch 析构，发布循环也重新检查调用者并拒绝失效目标。测试中多重指针字段读取改为先显式绑定已加载指针，再投影目标字段，符合现有 place lowering 边界。
+
+本轮验证了已有普通调用的桥接，没有放宽借用代码查询。借用代码尚未支持的外部析构读取，仍需要解决“在条件化内存查询前取得完整清理访问”这一依赖；不能用仅有 read-only 的类型级证明发布缺失访问的摘要，也不能将不同代码上下文的清理完成状态混为同一无条件证据。
+
+验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop cleanup_read -- --nocapture`，2 项测试（含导出／重导入及多组执行／拒绝场景）通过，退出 0，`/tmp/luna-tools-dgbzx_yp/result.json`。此次只扩展验收，未修改编译器实现；改动留在 dev，未提交。
+
+### 类型相对的结构化析构读足迹
+
+新增 drop::CleanupReadFootprint／CleanupReader 与 CleanupSession::read_footprint，实现在 drop/plan/reads.rs。足迹保留绑定的 Drop 协议、完整 subject、每个清理组件的 owned-layout receiver_path、接收者类型、选中 MethodInstance 以及方法相对的 Access。组件路径保留变体标记，不把重叠载荷或相同方法的不同字段合并。两层结构都有稳定 S-expression Display，字段只通过只读访问器公开。
+
+遍历完整 acquired layout，使用 project_owned_storage 复核组件路径与类型。对每个选中方法查询带同一 CleanupPolicy 的内存摘要：写入、未解释的嵌套清理、未知调用、程序谓词拒绝均不能产生已建立足迹；粗略拒绝标记继续用独立 rejection 分析复核。当前可以表达方法体及普通辅助调用的外部读取；析构体新建临时资源若还有未组合的外部清理读取，仍返回未证明。足迹不证明字段仍存在、变体已选中、指针存活、Copy 或终止性，也不作为跨选择世界的授权令牌。
+
+is_memory_inert 已复用 read_footprint，再筛除含 through 的外部读取；保留已有正向缓存及递归保护，消除原先重复的选中方法／拒绝检查实现。调用者可见的借用代码支持边界没有放宽，实际存储映射仍是后续接线。
+
+新增验收覆盖普通类型、两个字段、枚举、嵌套枚举、newtype、泛型实例、错误结果及无自定义析构；逐项检查 receiver_path、投影类型、间接读取、协议身份、稳定 dump，以及零预算后恢复。拒绝写入、谓词失败和未知函数调用。
+
+验证目录 `/home/fin/luna`：2 项新足迹定向测试通过，`/tmp/luna-tools-1udixh2q/result.json`。`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test runtime_purity --test newtypes`：907 + 62 + 207 = 1176 项通过，退出 0，`/tmp/luna-tools-tr6dgn8s/result.json`。改动留在 dev，未提交。
+
+验证补充：verification 单元组通过，`/tmp/luna-tools-ifxx0b4_/result.json`；workspace 格式检查通过，`/tmp/luna-tools-490bs_nh/result.json`；`git diff --check` 通过。
+
+### 析构读足迹组合到完整对象与外层字段
+
+CleanupReadFootprint 新增 root_accesses 与 accesses_at：前者将所有组件读取组合为指向完整 subject 的参数零访问，后者把 subject 放到更大存储根的指定 owned path。复用 StorageTraversal 的 then_guarded／load 处理字段 owner、类型与存在条件，不手工拼接解引用前后的 guard。组件条件与外层 receiver 条件只留在所在存储根；每次 load 开始新的条件坐标。重建 Access 保留 read_value、终点类型和各加载阶段的条件，去重只针对相同静态访问，不改变实际析构执行次数。每次遍历、复制、union 都计预算。
+
+is_memory_inert 已改用组合后的 root_accesses 判断外部加载；因此新路径进入既有调用检查，不是孤立的格式转换工具。accesses_at 仍只检查 typed storage path，不授予存活、初始化、Copy 或运行时标签事实；把参数零映射到实际调用根仍由资源分析负责。
+
+新增外层 Envelope/Choice 与指针所指 Payload 同时为枚举的测试，覆盖一层与两层中间指针。四组外层／内层标签组合分别保留：外层 guard 路径带 Envelope 字段前缀，内部 guard 在加载后的根从空路径开始；间接层增加时阶段号相应变化。组合足迹可通过 RuntimeInstance 覆盖层重新导入 memory 摘要。拒绝错误接收者类型／字段路径，零预算失败后正常查询仍恢复，输出顺序稳定。
+
+验证目录 `/home/fin/luna`：新增组合定向测试通过，`/tmp/luna-tools-jhx_xkx1/result.json`；`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test runtime_purity --test newtypes`，908 + 62 + 207 = 1177 项通过，退出 0，`/tmp/luna-tools-5qoq0l8k/result.json`。借用代码调用的外部析构读取尚未整体接通，本次完成的是完整对象及外层字段坐标中的足迹组合。改动留在 dev，未提交。
+
+
+### 借用函数调用组合实际值中的外部析构读取
+
+CleanupPolicy 新增完整 receiver-relative cleanup_reads 查询，CleanupSession 从已取得的类型清理足迹导出 root_accesses。memory 查询在当前 Round 内缓存成功足迹；构造、交付表达式及 owned 参数通过实际 pointer origins 映射第一个加载槽，后续加载与 guard 保持原来的阶段坐标。接收者自身的初始化、Copy、实际析构次数仍由资源计划检查。缺失来源保持 may_run_cleanup，不能发布不完整的只读摘要。
+
+新增 memory/cleanup.rs，按 PointerInputLeaf 的物理字段与变体条件选择来源，再组合后续加载路径。任何含指针存储的赋值／指针写入，以及调用摘要导入的此类写入，均使存在外部清理读的查询保持未证明；构造时快照不是清理时状态转换证明。read_footprint 增加独立递归栈，避免 is_memory_inert 失败后回退完整足迹查询造成递归证明循环。全部推导仍计预算，缓存不跨协议选择世界。
+
+执行验收覆盖直接构造、owned 参数交付、局部闭包、两个聚合字段、枚举两个分支；每条路径均检查正常执行与调用前移出目标被拒绝。两个字段指向同一目标时实际执行两次 Watch 析构。直接指针槽改写及辅助函数改写分别拒绝。辅助函数用例最初因 .*= 连写被词法识别为复合运算符而解析失败，修正为空格分隔；随后确认它在更早的 richer-contract 检查处拒绝，断言保留此合法拒绝阶段。
+
+验证目录 /home/fin/luna：五组集成命令 `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes`，909 + 522 + 62 + 115 + 207 = 1815 项通过，退出 0，/tmp/luna-tools-enf62tue/result.json。随后扩展上述测试矩阵，`test -p luna --test drop borrowed_callable` 29 项通过，退出 0，/tmp/luna-tools-be2ynpm3/result.json。文档同步说明支持边界。改动保留 dev 工作区，未提交。
+
+验证补充：verification 单元组通过，退出 0，/tmp/luna-tools-isvf1i0d/result.json；workspace 格式检查通过，/tmp/luna-tools-klrpljg_/result.json；git diff --check 通过。
+
+
+### 外部析构读证明复用共享依赖
+
+新增执行验收覆盖泛型资源构造与 owned 参数交付、析构内部新建有外部读取的临时资源、经双层指针读取目标；正常执行与调用前移出目标成对检查，现有组合逻辑通过，/tmp/luna-tools-ix3w9bzi/result.json。
+
+新增 12 层共享析构依赖，每层析构创建两份下一层资源，最底层读取外部 bool。原实现无法在 100,000 查询预算内取得完整足迹，失败复现 /tmp/luna-tools-holq50wl/result.json。CleanupSession 现在按完整类型缓存成功的 CleanupReadFootprint，固定在当前 package、Drop 协议及 World 内；失败、未完成递归和预算不足不缓存。缓存命中与插入均对 subject、receiver path/type、method 泛型参数及各 Access 的路径、guard、目标类型计量复制成本。ParameterPlace 的成本计算仅向 verification 内部开放以共享规则。递归栈仍保护活动查询，缓存不含实际指针来源或存活证据。
+
+修复后上述 12 层证明在 100,000 预算内完成，重复查询在 256 内返回相等的完整足迹。先以不足预算失败后可以恢复，零预算即使命中缓存也失败，另一有拒绝谓词的类型仍返回未证明；足迹含真实外部 read_value 访问且没有写入。定向验证 /tmp/luna-tools-avssc1ku/result.json。
+
+验证目录 /home/fin/luna：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes`，911 + 522 + 62 + 115 + 207 = 1817 项通过，退出 0，/tmp/luna-tools-1j_rnzk6/result.json。workspace 格式检查通过，/tmp/luna-tools-d6zafidg/result.json；git diff --check 通过。没有进行墙钟基准测试，不宣称整编译器性能倍数提升。源码、测试及相关文档留在 dev 工作区，未提交。
+
+
+### 所指枚举载荷的清理来源与最终字段条件
+
+新增端到端矩阵暴露了两层缺失：Watch 析构复制所指 Choice 后匹配其指针载荷，借用函数调用的内存摘要已有访问，但实际 Drop 计划缺少条件化指针来源；补齐来源后，清理访问导出又把最终枚举载荷字段当普通 struct 字段投影。原失败 /tmp/luna-tools-d9b92a2c/result.json，定位后的导出失败 /tmp/luna-tools-0y78nbjw/result.json。
+
+moves 在局部资源清理前用完整 readonly cleanup_reads 准备间接借用来源。已移出组件不重新取得清理责任；实际 acquired plan 仍检查父析构需要的字段。借用枚举的各载荷按独立条件取得 pointee，flow.pointers 与 pointer_guards 一起保存，不能以同一物理槽已有另一个分支的来源替代当前分支。聚合复制因此分别取得每个条件载荷。表达式临时资源及准备中的资源通过临时 Flow 快照执行相同准备，保留当前 borrowed_scope，实际资源状态和分支条件继续交给 plan_with_memory 检查。
+
+cleanup_memory 导出新增最终字段的条件投影：将 footprint 最后加载阶段的 guard 映射到实际目标路径，用 project_owned_storage 检查带变体标记的投影并保持正确的加载阶段。拒绝不属于目标字段路径的 guard；继承的中间加载条件不丢弃。导出错误附带函数名以定位实际失败层。
+
+验收覆盖 Choice 左右分支，Watch 直接构造／由 make 返回，分别绑定局部值／作为表达式临时值清理；每条路径正常执行，并在调用前移出 Token 时拒绝。另直接检查导出足迹：指针载荷本身的最终读取和经它解引用后的 bool 读取均保留标签 0、1，条件路径以各自正确根为空路径。定向通过 /tmp/luna-tools-iktiz0ho/result.json。
+
+验证目录 /home/fin/luna：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes`，912 + 522 + 62 + 115 + 207 = 1818 项通过，退出 0，/tmp/luna-tools-i4mm16j1/result.json。workspace 格式检查通过，/tmp/luna-tools-ggdhzij6/result.json；git diff --check 通过。指针槽写入后的精确状态转换仍未实现。改动及文档保留 dev 工作区，未提交。
+
+验证补充：verification 单元组通过，退出 0，/tmp/luna-tools-wsr3puks/result.json。
+
+
+### Guard 中的指针选择结果与条件来源观察
+
+新增 `read(choose(p))` 用例，choose 从所指枚举的左右载荷返回指针。先复现 memory guard 只允许 scalar/code 结果的拒绝，再复现资源观察把新取得的 GuardedIndirect 来源判为调用者修改，失败证据 /tmp/luna-tools-4fqnzk6k/result.json、/tmp/luna-tools-xmz6dqfy/result.json。
+
+memory guard 允许 Pointer 结果，moves 的 observe_guard_call 同步允许，并对所有指针结果查询内存摘要，即使调用没有直接指针实参，也不绕过写入、未知清理和拒绝检查。返回地址的实际来源和存活继续由普通资源调用分析检查。
+
+origins::observation_preserves_pointers 区分存储变化与新增只读知识：旧目标不得删除，其已有条件必须完全保留；新增目标必须对应报告中的准确 Indirect 槽，或 GuardedIndirect 的 base+fields 与带前缀 guards。没有来源、错误槽、改变标签或条件路径均拒绝；已知空集合不能被当成未知后再填充。比较及路径复制计预算。observe_checked_flow 继续核验状态、局部责任、临时责任及可完成性，只有上述来源有据的知识扩展获准。
+
+端到端覆盖两种枚举标签及真假 guard 结果；选择器写入、assumes 拒绝、返回失效局部地址、枚举载荷中的失效地址均拒绝。新增单元用例核验同一槽增加另一个条件目标合法、旧候选删除和旧条件移除非法、新条件标签／前缀错误非法、零预算失败。直接以聚合值作为 guard 调用实参的旧限制仍存在，初始探测 /tmp/luna-tools-8chytkw1/result.json，不把本次指针结果支持说成一般聚合观察完成。
+
+验证目录 /home/fin/luna：guard 定向组 50 项通过，/tmp/luna-tools-97llwu18/result.json。`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes`，914 + 522 + 62 + 115 + 207 = 1820 项通过，退出 0，/tmp/luna-tools-q17l8zd0/result.json。workspace 格式检查通过，/tmp/luna-tools-cygn5x9n/result.json；git diff --check 通过。源码与文档留在 dev 工作区，未提交。
+
+验证补充：verification 单元组通过，退出 0，/tmp/luna-tools-e386s44j/result.json。
+
+
+### Guard 的 Copy 聚合实参与内部指针依赖
+
+memory guard 实参检查允许已知可读取表示，不把结构布局当成 Copy 证据；moves 的观察实参交付对 Copy 聚合保留完整表示检查，并继续取得清理拒绝证据。非 Copy 私有输入仍走原来的 pointer-free 所有权规则，诊断明确区分 Copy 资格与私有交付。被调函数只读检查从“实参本身是指针”扩展到 pointer_input_layout 中任意指针叶，布局查询在候选循环外执行；聚合不能隐藏外部写入或未解释清理。
+
+端到端触发了结构体复制的来源缺失：从借用结构体复制整体时，未先单独加载过的普通指针字段被记录为 unknown。失败 /tmp/luna-tools-30lxzij8/result.json。聚合读取现在对无变体条件的借用槽复用 borrowed_pointer_contents，按已验证字段路径建立非 owned 间接目标；实际调用者仍检查真实存储。具体对象缺少来源时不制造此类前提。
+
+验收覆盖普通与嵌套结构体、枚举左右分支，真假 guard 结果，并分别通过 owned 参数与指针复制传递。拒绝缺少 Copy、聚合字段写入外部目标、assumes 可能拒绝、调用前移出目标。初次负例按已有 richer-memory-contract 诊断拒绝，随后明确为 Copy／私有 pointer-free 所有权诊断；没有放松负例。一般带指针聚合的观察内构造、私有非 Copy 交付及依赖指针字段的默认实参仍未声称完成。
+
+验证目录 /home/fin/luna：定向正例 /tmp/luna-tools-i4kpds9h/result.json，负例 /tmp/luna-tools-lakk_0iv/result.json 均通过。最终 `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes`，916 + 522 + 62 + 115 + 207 = 1822 项通过，退出 0，/tmp/luna-tools-xrqxygrl/result.json。workspace 格式检查通过，/tmp/luna-tools-wzzvqry4/result.json；git diff --check 通过。实现、测试与文档保留 dev 工作区，未提交。
+
+验证补充：verification 单元组通过，退出 0，/tmp/luna-tools-i1jo841h/result.json。
+
+
+### 观察区域内的指针聚合构造与私有所有权交付
+
+observation_region 的聚合形状检查改用已知可读取表示，形状接纳不授予 Copy、私有所有权或清理权限。memory 的观察区域识别同步覆盖有聚合输入／结果的调用；函数返回的 owner 与字面构造采用相同区域规则。moves 统一 check_observation_cleanup：隐式清理不得可能拒绝，带指针布局还必须取得完整 readonly cleanup_reads。局部构造、实参交付和 owned 返回均调用该证据检查；观察前后状态比较继续拒绝消费调用者已有非 Copy 资源。
+
+观察调用的指针内存摘要可以显式使用当前 CleanupPolicy，以组合私有资源的外部析构读取。初版全局启用导致 6 个效应处理器观察回归在析构选择仍 pending 时提前请求完整证明，证据 /tmp/luna-tools-z1_8esp4/result.json。已改为 memory_summary_with_cleanup_mode 的显式观察查询模式，普通调用仍保留原有延迟边界，不能将尚未完成的选择当成成功事实。区域中的普通指针实参也通过实际资源快照检查，避免工厂输入被错误视为 owned 聚合。
+
+验收覆盖 struct、enum 左右分支在 guard 直接构造及局部构造后交付，真假结果均执行。含外部只读 Drop 的非 Copy Watch 分别在局部块清理、直接构造交付、工厂返回后交付、局部接收后再交付，8 组执行都恰好调用一次析构。拒绝析构写入、析构 assumes、工厂写入、消费 guard 外已有 Watch、已移出目标。原 owned_observation_factories_reject_unsafe_results_and_inputs 中 Holder(pointer) 工厂的 blanket 拒绝属于旧实现边界，现拆为真实执行正例；未知工厂、调用者 owner 消耗及失败清理的原负例全部保留。
+
+验证目录 /home/fin/luna：54 项 guard 定向回归通过，/tmp/luna-tools-qjt3vrbd/result.json。最终 `python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes`，919 + 522 + 62 + 115 + 207 = 1825 项通过，退出 0，/tmp/luna-tools-0kz3sror/result.json。后续只修正过时的 pointer-free 诊断文字，无行为改动；git diff --check 通过。写入型 guard 的失败路径资源转移、依赖指针来源的默认实参等更一般能力仍未完成。源码、文档及验收留在 dev，未提交。
+
+验证补充：verification 单元组通过，退出 0，/tmp/luna-tools-5dpf792_/result.json；workspace 格式检查通过，/tmp/luna-tools-99ogy076/result.json。
+
+
+### 默认参数观察帧保留聚合内的指针前提
+
+复现 guard 默认表达式直接读取前序 View.target 的 provenance 缺失，/tmp/luna-tools-r5v7ey54/result.json。check_guard_arguments 原先只给隔离默认帧安装代码与枚举信息；新增 install_observation_input_borrows，按 pointer_input_layout 为参数各指针叶建立独立借用前提和带标签的存储槽，并使用 fresh borrowed_scope。这些前提仅证明默认值检查在有效输入下成立，不发布为真实目标存活或不别名证据；普通 call_with_memory 仍将默认值摘要映射到实际实参并检查读取。后序未准备参数仍被既有检查拒绝。直接指针参数现在也可经过同一默认帧路径。
+
+枚举供应函数默认值暴露前端 P3 的同类缺失：transfer_cleanup_is_pure 原先只为直接指针／指针 newtype 参数设置 borrowed_parameters。新增完整聚合 pointer_input_layout 的 BorrowedField 前提，保留带变体标记的 symbolic input path，并通过 analyze_in_package_with_field_context 检查复制、交付与清理。它仍只证明在有效输入下的 P3／清理行为，调用点负责真实生命周期；未选定 Copy／Drop 协议的例子不能借此取得 Copy 资格。
+
+验收覆盖直接指针、struct 指针字段、只读 helper 默认供应、链式默认值、显式 .answer=false 覆盖，以及 enum 左右指针载荷。使用源协议绑定验证 Copy enum 的供应函数；拒绝供应函数写入外部目标，目标移出后触发默认读取也拒绝。初始命名覆盖用例误用冒号，已按现有语法修正为等号，未修改语言语法。guard_defaults 四项（含既有后序未准备参数负例）通过，/tmp/luna-tools-hm9umcgw/result.json。
+
+验证目录 /home/fin/luna：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes`，922 + 522 + 62 + 115 + 207 = 1828 项通过，退出 0，/tmp/luna-tools-yrl0cnom/result.json。verification 单元组通过，/tmp/luna-tools-_1claotr/result.json；workspace 格式检查通过，/tmp/luna-tools-7kqr95k7/result.json；git diff --check 通过。后续仅补充前提不授予不别名证据的注释。实现、验收与文档保留 dev，未提交。
+
+验证补充：default_calls 专用组 33 项通过，/tmp/luna-tools-hwzc9rlx/result.json；program::purity 单元组通过，/tmp/luna-tools-7h7dcxly/result.json，均退出 0。
+
+
+### 观察区域中的局部／字段取址及默认结果链验收
+
+先扩展默认结果链验收：指针默认值直接转发或由 choose 返回，再供后续默认值解引用；Copy 聚合默认值直接构造或由 make 返回，再供后续默认值读字段。两类路径均已通过，不修改其既有实现。随后复现 guard 内 `read(View {target:flag.ref})` 被 observation_region 的语法白名单提前拒绝，/tmp/luna-tools-gboga4i4/result.json。
+
+observation_region 接纳 AddressOf，由普通资源分析验证位置存在和后续访问；memory::check_guard 为非区域式调用单独接纳 AddressOf，先用 pointer_operation_error 校验结果指针类型、位置结构及深度，再检查操作数观察行为。没有把取址当作读取值，也没有放宽写入、移动或目标生命周期规则。
+
+执行矩阵覆盖直接指针调用、构造视图借用外部 bool、非 Copy Holder 的 bool 字段、观察块内先建局部值再立即借用，真假结果均执行。拒绝把已退出局部块的地址包装后传给读函数、消费既有 Holder 后读取其字段、被调函数沿视图写入目标。61 项 guard 回归通过，/tmp/luna-tools-68xd8uia/result.json；默认返回链验收也在该组中。
+
+验证目录 /home/fin/luna：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes --test default_calls`，926 + 522 + 62 + 115 + 207 + 33 = 1865 项通过，退出 0，/tmp/luna-tools-1s1qj10q/result.json。workspace 格式检查通过，/tmp/luna-tools-ysztgzx4/result.json；git diff --check 通过。源码、验收及文档保留 dev 工作区，未提交。
+
+验证补充：verification 单元组通过，退出 0，/tmp/luna-tools-rhqpo4f2/result.json。
+
+### 观察块的指针结果与私有指针绑定
+
+修复 guard 参数中的非空块返回外部地址被统一按 owned result 拒绝的问题。`observe_guard_result` 对 Pointer 结果不再要求标量／Copy 值分类；观察快照仍检查调用者资源不变，实际参数求值沿 `evaluate_pointer_value` 保留来源并在块退出时执行 `check_scope_targets`。`observation_region` 的可读值结构允许 Pointer，用于私有 let／pattern 绑定和局部重新赋值；这不许可写目标或改写调用者绑定。
+
+新增执行矩阵覆盖真假 guard、嵌套块、循环、分支、非 Copy 容器字段、指针别名和局部指针重绑定；默认值矩阵增加块返回及 choose 后局部转发。重绑定用不同的初始／最终布尔目标检验结果。拒绝直接／别名／重绑定后的局部地址逃逸、移出对象后的字段访问、沿指针写入及修改调用者指针变量。首次复现 `/tmp/luna-tools-7zawv503/result.json`；扩展 guard 组先有 62 项通过，唯一失败是新负例把 `.* =` 写为 `.*=` 导致词法解析错误，已修正 fixture，未改变语法。
+
+集成检查还发现旧测试把 `let pointer=outside.ref;true` 当作非法观察块；这是已被本次实现解除的结构白名单限制，并非语言语义禁止借用。保留其拒绝测试位置，改为实际沿该指针写入 `pointer.* = false`；合法局部指针借用由新增执行矩阵覆盖。该次结果为 drop 927 通过、此旧预期 1 失败，`/tmp/luna-tools-hsw_raq4/result.json`。
+
+最终集成验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes --test default_calls`，928 + 522 + 62 + 115 + 207 + 33 = 1867 项通过，退出 0，`/tmp/luna-tools-uyu6kg5b/result.json`。workspace 格式检查退出 0，`/tmp/luna-tools-4db1ojgn/result.json`；`git diff --check` 通过。改动保留 dev，未提交。
+
+verification 单元组通过，退出 0，`/tmp/luna-tools-6m4mdsre/result.json`。
+
+### guard 中的指针值 match
+
+复现 `read(flag match {true=>yes.ref,false=>no.ref})` 被旧 scalar／Copy code match 白名单拒绝，`/tmp/luna-tools-hqk1uyjk/result.json`。moves 和 memory 的观察入口现在将 Pointer 结果的 Match 交给已有 observation_region 及普通资源／内存遍历；没有在旧分支里丢弃绑定来源后单独放行结果类型。候选绑定、guard、分支结果和清理仍使用原有完整路径，实际调用负责检查最终地址。
+
+执行矩阵覆盖真假分支、带 guard 的候选、分支内局部指针、Copy enum 两侧指针载荷和观察内临时构造的非 Copy enum。拒绝 caller-owned 非 Copy enum 被消费、移出目标后的载荷读取、分支局部地址逃逸，以及分支或候选 guard 修改外部存储。前三项定向测试通过 `/tmp/luna-tools-woooirmd/result.json`，随后新增私有／外部所有权矩阵随集成验证通过。
+
+验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes --test default_calls`，932 + 522 + 62 + 115 + 207 + 33 = 1871 项通过，退出 0，`/tmp/luna-tools-bv_vuezf/result.json`。实现及文档保留 dev，未提交。此项只补足只读观察中的指针选择，不代表任意带副作用 guard 或全部资源语义完成。
+
+verification 单元组退出 0，`/tmp/luna-tools-dc1y7nkq/result.json`；workspace 格式检查退出 0，`/tmp/luna-tools-9j9xdwcl/result.json`；`git diff --check` 通过。
+
+### 已绑定 newtype 的观察转换
+
+复现 `read(wrapped.as(*bool))` 在 guard 中被 conversion-result 白名单拒绝，`/tmp/luna-tools-t01u6jx8/result.json`。此前只有转换操作数不是已有位置时才进入完整观察区域；现在所有 NewtypeConvert 都进入该路径，以普通资源遍历检查实际复制／消费与来源，而不是给表示转换单独豁免。未展开 normal-form 类型头。
+
+执行矩阵覆盖 bool 与指针表示、直接转换、局部复制后转换、观察内新构造包装的消费，以及真实真假结果。拒绝外层非 Copy 包装被消费、指针目标移出、块内地址逃逸和转换后写入目标。六组集成命令（目录 `/home/fin/luna`）`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes --test default_calls` 通过 935 + 522 + 62 + 115 + 207 + 33 = 1874 项，退出 0，`/tmp/luna-tools-6t9bm3gb/result.json`。
+
+随后仅扩展测试验证函数表示转换后调用的 yes/no 身份与局部复制路径。首次未声明 Action 的 Duplicate，按独立函数值 Copy 要求正确拒绝，`/tmp/luna-tools-cs3hdht1/result.json`；补齐 fixture 的协议声明后执行通过，`/tmp/luna-tools-s07qky1v/result.json`，没有放松函数值 Copy 检查。另增缺失该 Copy 依据及被调函数 assumes false 的拒绝例。实现与文档留在 dev，未提交。
+
+追加 `guard_newtype_` 三项测试通过，`/tmp/luna-tools-p47_zcoh/result.json`；全 workspace 格式化退出 0，`/tmp/luna-tools-dd78v218/result.json`；`git diff --check` 通过。追加阶段无生产代码修改，未重复六组集成。
+
+### 内联指针选择器的执行次数与清理时序验收
+
+补足 guard 指针路径的实际运行顺序验收，而非只验证结果值。`guard_pointer_selection_preserves_call_and_cleanup_order` 覆盖 match 返回／提前 return、普通调用／显式 inline 展开、单次 guard／or 短路以及真假实参，共 16 个运行场景。选择器局部 Watch 的 Drop 确实读取外部 bool（`self.target.*.*`），事件序列逐项核对 picked → retired → reading；假 guard 进入 fallback，短路只在需要时进行第二次调用。初版只加载指针字段，随后加上第二次解引用并重新验证，没有把未读取外部目标的测试当作外部清理证明。
+
+新增拒绝矩阵覆盖 Drop 沿指针写入、Drop 中 assumes false、提前返回局部地址，普通与展开两种形式均拒绝。本轮未发现需修改生产实现的回归，没有为让测试通过改变语言语义。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p luna --test drop guard_pointer_`，12 项通过，退出 0，`/tmp/luna-tools-ux81os1k/result.json`。全 workspace 格式化退出 0，`/tmp/luna-tools-njj5culh/result.json`；`git diff --check` 通过。只增验收及记录，不重复全量测试，不提交。
+
+### 观察区域内的私有字段替换
+
+复现 guard 中 `var view=View {value:not flag};view.value=flag` 被直接字段赋值白名单拒绝，`/tmp/luna-tools-fqvmh4we/result.json`。observation_region 的 Assign 现在按根是否属于区域局部绑定判断，不再要求字段路径为空；路径布局、存活状态、旧字段清理和新值获取仍由普通资源分析完成。WritePointer 是独立节点，未加入允许范围；外层根仍被排除。
+
+新增执行矩阵覆盖普通／嵌套 bool 字段、指针字段改指向及先前复制的指针保持原目标。拒绝外层对象字段写入、借私有指针字段写外部目标、给字段重新安装失效地址后读取。另以执行事件逐项验证非 Copy Held 字段被替换时的清理：旧 Held 先 retired，随后 inspected，新 Held 在区域退出 retired，最后 selected 或 fallback；真假路径均只清理各值一次。
+
+目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes --test default_calls`，943 + 522 + 62 + 115 + 207 + 33 = 1882 项通过，退出 0，`/tmp/luna-tools-c8riq3m_/result.json`。全 workspace 格式化退出 0，`/tmp/luna-tools-x7jllew3/result.json`；`git diff --check` 通过。文档同步，改动留在 dev，未提交。
+
+verification 单元组通过，退出 0，`/tmp/luna-tools-d79vc2gr/result.json`。
+
+### 私有回调字段替换后的来源与拒绝证据
+
+补充两个端到端测试检查新允许的私有字段赋值是否正确更新函数身份。yes/no 双向替换分别验证直接字段调用使用新目标、先前复制出的 saved 使用旧目标；存入会执行 assumes false 的函数再覆盖为 yes 可以调用，但仍调用被替换后的拒绝函数或保存的旧拒绝函数必须拒绝。共五个执行场景、两个拒绝场景，未发现需要修改生产实现的问题。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p luna --test drop guard_private_callback_`，2 项通过，退出 0，`/tmp/luna-tools-1mvxxx42/result.json`。本轮仅增加回归验收，不重复全量测试、不提交。
+
+后续调查边界：memory/cleanup.rs 的 mutates_pointer_storage 仍在任何指针存储替换与外部清理读取共存时保守失败。不能仅删除该保护；进一步放宽需要证明私有槽未被取址／未进入捕获环境，或在状态转换后重新建立完整清理读取足迹，避免使用替换前的指针来源。本轮未放宽此限制。
+
+### 私有指针重绑定与只读清理摘要组合
+
+复现普通 observe 函数内 `var target=first;target=last;let watch=Watch {target:target}` 在 guard 调用时因 blanket mutates_pointer_storage 被拒绝，`/tmp/luna-tools-hr3a02uu/result.json`。新增有预算的整个函数体扫描，收集直接 Let 声明的 raw Pointer 变量，排除任何位置取址所引用的局部及闭包捕获（含恢复捕获值表达式引用）。闭包主体不向外导入候选，其自身摘要独立扫描。函数、闭包与默认表达式三个 Infer 入口接线；证明只保存在当前分析器，不跨查询缓存，也不加入 IR 身份。
+
+仅候选变量本身的直接赋值不再触发清理摘要的全局指针存储变更屏障。原有 K::Assign 正常更新 environment 目标；已复制到 owner 的指针字段不随变量更新，因此旧／新 Watch 的外部清理读取分别保留。参数、捕获槽、聚合字段、被取址变量及 WritePointer 仍走原有保守路径。没有用该证明授予 Copy、不别名的目标关系或目标存活。
+
+端到端覆盖真假目标、更新前后分别构造 Watch、旧／新目标移出时拒绝；无论取址发生在赋值之前还是之后，别名槽都保持保守拒绝。单元测试覆盖前后取址、捕获源与捕获槽不同身份、闭包局部不泄漏，以及零预算失败后重新查询恢复。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes --test default_calls`，948 + 522 + 62 + 115 + 207 + 33 = 1887 项通过，退出 0，`/tmp/luna-tools-eyx3d8ge/result.json`。verification 单元组通过，`/tmp/luna-tools-6g_jmdav/result.json`；之后只加强捕获测试中源／目标身份区别，未修改生产逻辑。文档同步，保留 dev 未提交。
+
+加强后的 private_pointer_tests 三项通过，`/tmp/luna-tools-rv6u6o8v/result.json`；workspace 格式检查通过，`/tmp/luna-tools-p_v__dng/result.json`；`git diff --check` 通过。
+
+### 私有聚合字段更新后的完整析构读取
+
+复现 `watch.target=last` 与 Watch 的外部只读 Drop 组合被全局指针变更屏障拒绝，`/tmp/luna-tools-hwk2c14p/result.json`。将上一轮未取址／未捕获的局部存储证明从 raw Pointer 根推广为直接 Let 根（private_storage_roots），仍扫描整个主体并隔离闭包。直接 Assign 只有在该根上才免于 blanket 屏障；赋值完成、指针及函数来源更新后，必须对完整根再次调用 record_value_cleanup_reads，以捕获任意外层／嵌套析构对新目标的读取。旧访问保留，类型复制计入预算。WritePointer、参数／捕获槽及被取址根仍保守处理。
+
+新增摘要级验收直接查看公开 memory Summary：直接字段、嵌套字段和整个子对象替换三类场景都必须包含参数 1 的 bool 读取，且没有写访问或未解释清理。主体只返回 true，不显式读取该参数，避免普通读取掩盖漏报的析构足迹。运行正例通过，新目标移出后拒绝，字段取址在赋值前／后两种情况都保持原有保守边界。
+
+集成初次有旧断言失败（950 通过，1 失败，`/tmp/luna-tools-7ht2vewv/result.json`）：旧 borrowed-callable 用例在 watch 后创建 other，再令 watch 指向 other。直接更新现在可证明，普通清理准确发现 other 先退出、watch 后析构时目标 unavailable。将该分支断言更新为实际生命周期错误；通过 replace(slot,...) 写别名槽仍须原有更丰富状态转换证明，保持独立拒绝断言。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes --test default_calls`，951 + 522 + 62 + 115 + 207 + 33 = 1890 项通过，退出 0，`/tmp/luna-tools-1qk2eouh/result.json`。文档同步，改动留在 dev，未提交。
+
+verification 单元组通过，`/tmp/luna-tools-ggimtk__/result.json`；workspace 格式检查通过，`/tmp/luna-tools-zo02xq5_/result.json`；`git diff --check` 通过。
+
+### 解构绑定的私有存储与清理更新
+
+复现 `var (target,flag)=(first,false);target=last` 与只读 Watch 清理组合被拒绝，`/tmp/luna-tools-habzstio/result.json`。私有存储扫描新增 LetPattern 的有预算绑定遍历：Binding 收集拥有根，Observe 排除候选观察别名，Remap 按源的拥有／别名属性传播，支持嵌套模式和选择模式；未解析 CodeEvidence 不发布证明。整个主体的取址／捕获排除仍在最后统一执行。赋值后的完整根清理读取复用上一轮实现。
+
+新增执行矩阵覆盖 tuple 解构出的指针、解构资源的指针字段和 or 模式的重映射，真假目标均执行。拒绝解构变量／字段取址后的更新与外部清理组合，以及新目标移出后触发析构读取。单元测试核验重映射链保留拥有根、观察别名不升级为拥有根及零预算拒绝。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes --test default_calls`，953 + 522 + 62 + 115 + 207 + 33 = 1892 项通过，退出 0，`/tmp/luna-tools-xvpbt1o7/result.json`。全 workspace 格式化退出 0，`/tmp/luna-tools-7nunvphl/result.json`；`git diff --check` 通过。文档同步，保留 dev 未提交。
+
+verification 单元组通过，退出 0，`/tmp/luna-tools-8uy2qvwj/result.json`。
+
+### 模式重映射证明的预算扩展性
+
+将 collect_pattern_storage 的反复全表扫描替换为按源索引的后继表和新增事实工作列表。每个拥有／别名事实仅传播一次；未知源不建立事实，观察别名在最终根过滤时优先。构建索引、初始种子、工作项与边访问分别计入同一预算，不引入跨查询缓存或语义身份。
+
+新增 1024 段逆序重映射链在 7000 单位预算内完成的压力验收；另验收有种子循环、无种子循环及拥有／观察别名合流。这里证明的是预算工作量不再因链长退化为平方级扫描，并非宣称 BTreeMap 操作的实际时间为严格线性。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib verification::`，66 项通过，退出 0，`/tmp/luna-tools-w6bjdvl0/result.json`。全 workspace 格式化退出 0，`/tmp/luna-tools-funnxqif/result.json`；`git diff --check` 通过。保留 dev 未提交。
+
+源级 `destructured_private_pointer_` 两项通过，退出 0，`/tmp/luna-tools-3dnezimw/result.json`；本轮未重复六组集成。
+
+### 私有字段清理读取在控制流合并中的验收
+
+扩展 private_field_updates_publish_new_cleanup_reads，新增条件赋值、单次 while 更新和 while/break 更新。所有六类赋值形式均直接核验摘要含新目标参数的 bool 清理读取、无写访问及无未解释清理；主体返回 true，避免显式读取新目标掩盖析构足迹缺失。每种形式执行 first=false/true 两个输入，并保留新目标移出后的拒绝验收，共 12 个执行场景、6 个拒绝场景与 6 次摘要检查。
+
+未发现生产实现回归，本轮只扩展行为验收。目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p luna --test drop private_field_updates_publish_new_cleanup_reads` 通过，退出 0，`/tmp/luna-tools-zi23_9w2/result.json`；不重复全量测试。改动留在 dev，未提交。
+
+### 精确局部指针槽写入与清理依赖
+
+复现 `let slot=watch.target.ref;slot.* = last` 在普通 observe 函数内被 pointer-store 白名单拒绝，`/tmp/luna-tools-xw3j9opo/result.json`。新增 write_local_pointer_slot：只接受唯一的 Local 存储目标，无剩余间接路径或变体条件；校验 storage 索引／binding／根类型及字段目标类型，排除 stable_capture_roots，要求新指针来源已知。更新普通 pointer 或 field_pointers 环境后，以整个根的新状态重新记录清理读取。外部、歧义、条件目标及捕获环境仍不发布转换摘要。
+
+raw Pointer 的 WritePointer 不再在遍历前一律置全局清理变更标记，而必须完成上述检查或报错；其他写入仍走原有约束。写入目标在右侧求值前 resolve_local_loads，防止右侧改写参与寻址的槽后改变本次写入地址。普通 guard 观察区域本身的 WritePointer 白名单未放宽；该实现用于被调函数的完整内存摘要及资源验证。
+
+验收覆盖局部 raw Pointer 槽、结构体指针字段、新目标析构读取的公开摘要、已保存旧指针副本，以及 `destination.*.* = do {destination.* = b.ref;last}` 的求值顺序；外部参数槽和两个可能局部目标均拒绝。存储更新后的目标存活仍由普通资源检查证明。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes --test default_calls`，956 + 522 + 62 + 115 + 207 + 33 = 1895 项通过，退出 0，`/tmp/luna-tools-kqjpfi8f/result.json`。全 workspace 格式化退出 0，`/tmp/luna-tools-2y7842f1/result.json`；`git diff --check` 通过。文档同步，改动保留 dev 未提交。
+
+verification 单元组通过，退出 0，`/tmp/luna-tools-lxjruvu_/result.json`。
+
+### 多个局部候选指针槽的弱更新
+
+复现条件选择两个局部槽后写入被 singleton 限制拒绝，`/tmp/luna-tools-ujty5u63/result.json`。内存摘要现与 moves::write_pointer 的既有语义一致：唯一目标强更新，多个已确认的局部无条件目标弱更新。每个候选都保留已知旧来源并合并新来源，随后重新记录对应拥有根的清理读取；缺失旧来源、空目标集合、外部／条件槽或捕获环境仍失败。集合复制与合并计入预算。
+
+新增 raw pointer 局部与 struct 字段的真假选择执行，检验未选中的槽保持原值。独立检查两个公开返回指针摘要必须同时包含参数 0 与 1，避免强更新错误被运行结果掩盖。旧“多个局部候选必须拒绝”的实现边界测试改由新正例覆盖，原外部槽拒绝保留，并新增局部／外部混合候选拒绝。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes --test default_calls`，958 + 522 + 62 + 115 + 207 + 33 = 1897 项通过，退出 0，`/tmp/luna-tools-73qqji5c/result.json`。全 workspace 格式化退出 0，`/tmp/luna-tools-_9ij7tg2/result.json`；`git diff --check` 通过。文档同步，改动留在 dev 未提交。
+
+verification 单元组通过，退出 0，`/tmp/luna-tools-3li9bjjo/result.json`。
+
+### 私有 BitVec 字段写回与动态位操作观察
+
+复现 guard 辅助函数内部对 packet.word 的位写回被 memory 根局部变量限制拒绝，`/tmp/luna-tools-5hrifs5c/result.json`。BitAssign／BitUpdate 现在通过 StorageTraversal 校验完整直接字段路径与存储类型，保留位写回结构、索引和载荷的独立检查。observation_region 同步接纳区域自有根上的 BitAssign／BitUpdate，使确定性展开后的私有写回也可检查，未开放外部根或 BitWritePointer。
+
+随后发现 rejection 查询遗漏动态 BitUpdate（`/tmp/luna-tools-4l96a6p4/result.json`）。补齐 BitUpdate、BitWritePointer、BitWindow、BitIndex 的所有操作数遍历；与既有 BitAssign／整数算术一样，程序验证仍承担范围和机器操作合法性，拒绝摘要只证明没有遗漏程序谓词／调用／清理的拒绝行为，不代替范围证明，不使用 PTC。
+
+新增静态／动态位置、普通／嵌套字段、展开前／后、真假输入的 16 个执行组合，另验证动态窗口／索引读取。拒绝索引和载荷中的外部写入与 runtime predicate。负例初版动态窗口无可知宽度，改为单比特索引；封闭 assumes false 在 required comptime 阶段提前拒绝，改为依赖 p.* 的 runtime predicate 来真正覆盖拒绝摘要，未放宽语义（中间报告 `/tmp/luna-tools-_eqda2v6/result.json`、`/tmp/luna-tools-gvcaelv5/result.json`）。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes --test default_calls --test pure_bitvec`，961 + 522 + 62 + 115 + 207 + 33 + 14 = 1914 项通过，退出 0，`/tmp/luna-tools-lzy2xs83/result.json`。文档新增代码示例，改动留在 dev 未提交。
+
+verification 单元组通过，`/tmp/luna-tools-bx40p0l_/result.json`；workspace 格式检查通过，`/tmp/luna-tools-bww_z1fa/result.json`；`git diff --check` 通过。
+
+### 动态位观察的程序验证边界验收
+
+新增 pure_bitvec 源级验收：guard 辅助函数中无范围证明的动态索引、字段位索引写回和动态窗口写回，普通 fn／inline fn 共六种组合都在程序验证阶段拒绝，诊断必须涉及 bound/range。另验证显式 `assumes i < 16` 的动态读取／写回：i=4 正常得到 true，i=20 在运行时以 ProgramContractRejected 退出，不能把成功路径范围事实当成移除该检查的依据。
+
+初版误要求未绑定资源协议的普通解释入口提前拒绝合法 i=4；该入口实际正确执行运行时检查。已改为合法／非法输入的行为验收，而不是把资源观察路径的实现限制强加给普通解释入口。未修改生产代码。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p luna --test pure_bitvec`，16 项通过，退出 0，`/tmp/luna-tools-1hiix7h_/result.json`。仅新增测试，不重复全量集成，保留 dev 未提交。
+
+### 观察区域中的私有指针写入与内联一致性
+
+复现普通辅助调用可执行的局部指针写入，在确定性内联后被 observation_region 的结构白名单拒绝，`/tmp/luna-tools-4p4f93ut/result.json`。结构层接纳 WritePointer 与 BitWritePointer；moves 在写入地址求值后、右侧求值前检查完整目标集合，只允许当前观察区域的局部根，空集合或任一外部候选都拒绝。此检查按候选数计入预算，不用最终资源状态未变来替代写入权限。原有 Copy、初始化、来源更新、清理、位范围与生命周期检查继续执行；write_pointer 保留独立栈帧属性。
+
+新增五类正例（标量、多个局部候选、结构体字段、指针槽重绑定、位写回），各执行真假输入及展开前／后，共 20 个场景。五类拒绝场景覆盖外部写入、混合目标、写后恢复和位指针写回。首次集成 962 个 drop 测试通过、1 项旧诊断断言失败，`/tmp/luna-tools-htrzzxny/result.json`；实际外部写入仍正确拒绝，诊断补回 observation region 上下文，不改变旧测试期望。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p luna --test drop --test cmtt --test runtime_purity --test error_surface --test newtypes --test default_calls --test pure_bitvec`，963 + 522 + 62 + 115 + 207 + 33 + 17 = 1919 项通过，退出 0，`/tmp/luna-tools-13bsouu9/result.json`。verification 单元组退出 0，`/tmp/luna-tools-woi5zir8/result.json`；workspace 格式检查退出 0，`/tmp/luna-tools-othgek7n/result.json`；`git diff --check` 通过。文档同步，保留 dev 未提交。一般有外部副作用的 guard 失败路径交付仍未在本轮实现。
+
+### 局部函数槽别名写入与代码候选更新
+
+首先检查写入地址求值顺序：普通标量写入、位载荷和位索引改写寻址槽的三种复现，公开 memory Summary 均保留参数 0 为唯一写目标。未发现生产缺陷，仅加入 memory_write_destinations_are_frozen_before_operand_mutations 回归，`/tmp/luna-tools-_ud6vyn_/result.json`。
+
+继而复现局部函数槽的别名替换被拒绝，`/tmp/luna-tools-oh3313xe/result.json`。WritePointer 对 Function 值冻结写入目标后求值右侧，记录命名代码及本地闭包候选，再更新经身份／类型检查的局部无条件槽。多个候选分别从同一个 RHS 后环境执行替换，再合并环境，保留未选中槽的旧身份。环境、代码集合与字段路径的复制沿用预算检查；外部槽、条件槽和捕获根继续要求转换契约。更新整个拥有根的清理读取；保存的旧函数副本不被重写。
+
+字段正例暴露两个关联缺口：无指针输入的 guard 辅助函数拒绝细化原先不带清理选择；memory 对所有普通聚合构造一律设置 may_reject。现在 guard 的细化查询使用当前清理选择，并同时拒绝摘要中的未知清理和外部写入；聚合载荷已遍历后，清理拒绝由选定 CleanupPolicy 判定，无选择仍保守。中间摘要明确显示 may_reject=true、may_run_cleanup=false，`/tmp/luna-tools-di_bjvh0/result.json`，并非运行时执行失败。
+
+定向两项测试通过，`/tmp/luna-tools-g30cbj57/result.json`：根／字段替换与保存旧身份，展开前后执行；多候选真假输入；拒绝调用新拒绝函数、保存的旧拒绝函数、仍可能未覆盖的拒绝候选及外部槽写入。正例额外检查公开 memory Summary 不含拒绝或未知清理。文档同步，改动保留 dev 未提交。
+
+集成首次 965 个 drop 测试通过、一项旧诊断断言失败，`/tmp/luna-tools-08jp3ekh/result.json`。析构中的外部指针槽自赋值仍拒绝，但改为更早报告 pointer store 缺少转换契约；仅为该明确用例接受具体诊断，其余外部析构访问与拒绝检查不变。
+
+目录 `/home/fin/luna`，七组集成命令同上一节，966 + 522 + 62 + 115 + 207 + 33 + 17 = 1922 项通过，退出 0，`/tmp/luna-tools-x32fe_9h/result.json`。workspace 格式检查退出 0，`/tmp/luna-tools-hf3kaz6f/result.json`；`git diff --check` 通过。
+
+verification 单元组退出 0，`/tmp/luna-tools-4s2sd219/result.json`。
+
+### 函数槽替换后的清理边界与单目标开销
+
+新增 guard 辅助函数内构造 Holder、通过字段别名替换函数后调用的清理验收：无操作／局部纯计算析构在展开前后均执行成功；assumes false 析构在展开前后拒绝；析构经指针字段写入外部 bool 同样拒绝。定向回归通过，`/tmp/luna-tools-3ptkcj60/result.json`。
+
+write_local_code_slots 对唯一目标直接更新当前环境，省去整份环境的保存、复制和分支结果保存；只有多个候选才执行原来的分支快照和合并。未改变代码身份、清理读取及目标校验，不宣称未经测量的端到端性能增幅。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test -p luna --test drop local_code_` 退出 0，`/tmp/luna-tools-ame0nol9/result.json`；workspace 格式化退出 0，`/tmp/luna-tools-kmcyk7rz/result.json`；`git diff --check` 通过。未重复七组集成，保留 dev 未提交。
+
+### 局部函数表的整体指针替换
+
+复现含多个函数字段的 Copy 结构体经局部指针整体写回被拒绝，`/tmp/luna-tools-sme0v7q2/result.json`。WritePointer 现在根据完整拥有布局识别代码字段；对可读取且无数据指针的代码聚合复用 write_local_code_slots，逐字段替换代码来源并保留多目标分支合并。混合数据指针、外部／条件／捕获槽仍不放宽。资源层继续检查整体 Copy，不能用字段 Copy 替代。
+
+新增普通／展开后的新表及旧副本各字段结果验收，另覆盖多个候选、嵌套字段、拒绝型新候选、未覆盖旧候选和缺少整体 Copy 的拒绝。首项定向通过，`/tmp/luna-tools-dtxkvzp6/result.json`。文档同步，改动保留 dev 未提交。
+
+目录 `/home/fin/luna`，七组集成命令同前节，969 + 522 + 62 + 115 + 207 + 33 + 17 = 1925 项通过，退出 0，`/tmp/luna-tools-u1jm2fk8/result.json`。`python3 -B development/check.py --timeout 900 -- test -p elaboration --lib verification::memory::` 退出 0，`/tmp/luna-tools-4r87a8p8/result.json`；workspace 格式化退出 0，`/tmp/luna-tools-6qwe7761/result.json`；`git diff --check` 通过。
+
+### 混合回调与数据指针聚合的整体替换
+
+沿用局部函数表转换，扩展为无变体条件的指针字段：前端赋值形成采用与聚合读取相同的表示检查，Copy 资格仍交由资源层；memory 同时替换代码候选及 pointer_fields，并重新记录完整根的清理读取；moves 更新每个实际存储叶的来源，多个候选合并旧／新目标。RHS 来源或布局需要变体条件时继续拒绝，不丢弃条件后放行。外部、捕获与条件槽的内存转换仍未实现。普通数据指针聚合的被调函数摘要路径也仍与混合代码路径分开，不能泛称全部聚合写入完成。
+
+基线 `/tmp/luna-tools-7qtasdym/result.json`；内存／资源实现后仍被前端旧表示限制拒绝，`/tmp/luna-tools-7zngnr88/result.json`；前端接通后定向通过，`/tmp/luna-tools-boa8yffe/result.json`。新增普通／展开后新回调、新指针与旧副本的结果检查，多候选真假输入，新目标移出、旧目标移出后旧副本访问的拒绝；旧目标移出不影响已强更新的新视图。公开 Summary 直接核验弱更新保留参数 0 和 1 的读取，避免只靠解释器运行掩盖静态摘要漏报。
+
+目录 `/home/fin/luna`，七组集成命令同前节，972 + 522 + 62 + 115 + 207 + 33 + 17 = 1928 项通过，退出 0，`/tmp/luna-tools-ll3fg_tz/result.json`。随后仅加强摘要断言，三项 mixed_callback_view_ 测试通过，`/tmp/luna-tools-a0sglsyl/result.json`；workspace 格式化退出 0，`/tmp/luna-tools-6uzke_2m/result.json`；`git diff --check` 通过。文档同步，保留 dev 未提交。
+
+verification 单元组退出 0，`/tmp/luna-tools-ro92_odr/result.json`。
+
+### 普通指针视图的整体替换统一
+
+复现不含回调的 View 整体替换仍走旧指针聚合限制，`/tmp/luna-tools-zylf9tlr/result.json`。memory 将具有聚合指针叶的类型也分派到统一 write_local_value_slots；裸指针及指针表示包装保留原路径。预扫描不再提前给显式 WritePointer 添加 blanket 标记：实际写入 visitor 必须完成局部来源转换或拒绝；导入调用足迹仍由 record_access 标记潜在变更。外部／捕获／条件槽没有放宽。
+
+新增双指针字段与旧副本、展开前后行为检查；多个候选的公开 Summary 必须包含参数 0 和 1 的读取；嵌套于自定义析构资源中的 View 替换，函数体仅返回 true，摘要仍须包含新目标清理读取且无未知清理／外部写访问。拒绝新目标移出、旧目标移出后使用旧副本、缺少整体 Copy 和外部槽转换。首项定向通过，`/tmp/luna-tools-ow_7dsj7/result.json`。文档同步，保留 dev 未提交。
+
+目录 `/home/fin/luna`，七组集成命令同前节，975 + 522 + 62 + 115 + 207 + 33 + 17 = 1931 项通过，退出 0，`/tmp/luna-tools-49ol9sld/result.json`。内存单元组退出 0，`/tmp/luna-tools-t6moa9nj/result.json`；workspace 格式化退出 0，`/tmp/luna-tools-upuo76fb/result.json`；`git diff --check` 通过。
+
+### Comptime 回调聚合的 Copy／Drop 表示
+
+扩大资源、捕获内存、comptime 内存、效应转移、执行及 elaboration 检查时，首个批次在构建阶段达到 900 秒超时（尚无测试输出），`/tmp/luna-tools-9j_7ans_/result.json`；同时尝试的格式化也达到 120 秒超时，`/tmp/luna-tools-k40txt2x/result.json`。两者均已确认终止，不计通过。磁盘剩余 13G；未证明超时根因，不归因于测试失败。
+
+拆出的 comptime 混合视图用例发现 Copy／Drop 表示遍历遗漏 ComptimeFunction，导致聚合写回报 cleanup layout 未建立，`/tmp/luna-tools-aioo8fcu/result.json`。将该阶段化函数类型作为原子清理布局，并加入 Copy 的受支持表示集合；没有赋予隐式 Copy，没有擦除函数阶段。定向正例通过，`/tmp/luna-tools-4p4rb2hz/result.json`。
+
+新增测试实际执行常量求值与 Type 形成中的混合视图替换；拒绝缺少聚合 Copy、缺少回调 Copy、以 runtime 函数替代 comptime 回调及临时目标过期。格式化重新执行成功，`/tmp/luna-tools-vvyqzenv/result.json`。文档同步，保留 dev 未提交。
+
+扩展九组批次再次于构建阶段超时，无测试输出，`/tmp/luna-tools-ortk38of/result.json`。改为拆分检查：comptime_memory / drop / newtypes / runtime_purity 共 13 + 975 + 207 + 62 = 1257 项通过，`/tmp/luna-tools-6sakn6w_/result.json`。
+
+捕获内存单独执行发现六个已有场景失败（88 通过），`/tmp/luna-tools-1v0i9bgn/result.json`。根因是 extend_storage_projection 的字段 owner 判断漏掉 Closure，而 owned_path_type 已支持其环境；补上匿名环境字段投影，不投影调用签名，不取消字段边界／变体条件。新增单元用例检查环境指针字段投影、加载后的 bool 类型、越界和预算耗尽。捕获内存 94 项与效应内存转移 85 项通过，`/tmp/luna-tools-oh5e3lf6/result.json`。这些失败在本次扩展验证发现，未通过基线对比确定首次引入时间。
+
+resources 单独以 180 秒预算执行仍在编译 luna 测试目标时超时，未运行测试，`/tmp/luna-tools-43vz0f5o/result.json`；因此不再重复大批次。verification 单元组 67 项通过（含新增闭包存储投影用例），`/tmp/luna-tools-wsq90ut_/result.json`。格式化退出 0，`/tmp/luna-tools-b09tqxrh/result.json`；`git diff --check` 通过。resources 的完整验收仍缺失，不能把其他组通过外推为它已通过。
+
+拆分 elaboration/execution 检查继续发现旧验收预期：聚合指针操作现在在前端形成、资源阶段检查 Copy／存活，原先两项前端拒绝断言改为形成成功；两个未注解的效应 lambda 先在结果推断阶段拒绝，保留该诊断，并补带结果注解的 lambda 检查效应行缺失；效应实例缺参仍拒绝，接受统一参数计数诊断。elaboration 448 项通过，`/tmp/luna-tools-2nax3jyi/result.json`。
+
+execution 同次 1334 项通过、2 项失败。opaque Type 用例原先伪造未知 package 19 的 normal-form 头并期望成功，与已实现头描述符校验冲突；改为源码声明 Opaque<T> 并传其真实声明身份，仍验证头不展开，同时将伪造头加入拒绝矩阵。该项定向通过，`/tmp/luna-tools-eu7j2f0v/result.json`。
+
+**尚待修复**：`compiler/luna/tests/execution.rs::writing_pointer_postconditions_export_joint_result_memory_relations` 的合法源在 887..979 发生 `verification-unknown (resource BudgetExhausted)`，`/tmp/luna-tools-2nax3jyi/result.json`。未提高预算、删断言或将其宣称通过。下一步定位联合结果／写后内存关系的证明工作量；resources 构建超时仍是独立验证缺口。改动留在 dev，未提交。
+
+### 精确区间查询避免重复差分闭包
+
+复现联合结果／写后内存后置条件用例在默认预算耗尽，`/tmp/luna-tools-7ys_64v5/result.json`。Polynomial::enclosure 原先在区间已为单点时仍遍历全部关系并重建差分图。现在完成区间求值及当前版本检查后，若上下界相等，直接返回这组足以确定值的区间前提；不提高预算、不跳过调用／内存契约，也不缓存跨状态证明。
+
+原源级用例连同三个拒绝变体通过，`/tmp/luna-tools-n3djiyjf/result.json`。新增单元构造 16 段无关关系链，精确值查询在 100 单位预算内完成，只保留对应值的前提；重新赋值后旧查询必须 StaleValue。verification 单元组 68 项通过，`/tmp/luna-tools-mlnh_007/result.json`。此前记录的联合内存后置条件预算失败已由此修复；resources 构建超时仍是独立验证缺口。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 180 -- test -p elaboration --test verification`，47 项通过，`/tmp/luna-tools-feho73ts/result.json`。`python3 -B development/check.py --timeout 180 -- test -p luna --test execution --test pure_bitvec --test runtime_purity`，1336 + 17 + 62 = 1415 项通过，`/tmp/luna-tools-pk40ng54/result.json`。全 workspace 格式化退出 0，`/tmp/luna-tools-hzyt7o1d/result.json`；`git diff --check` 通过。改动留在 dev 未提交。
+
+### 资源分析回调类型统一，关闭 resources 构建超时
+
+发现大型 Analyzer<F,G> 将 delivery／shape 的不同闭包类型传播至整套递归分析方法；resources 直接使用大量不同 policy 闭包，导致反复单态化。内部 analyze_with_shapes_and_borrowed_code 入口将两类 FnMut 借用统一为动态回调，公开泛型接口、调用顺序、可变状态和预算均不变。不改测试分组或缩减测试。
+
+改动后第一次 resources 构建及执行共 23.606 秒完成（此前 180／900 秒超时），`/tmp/luna-tools-kwdwaxnv/result.json`，351 通过、4 项旧预期失败。两项更新为更具体的清理证据缺失／模式越界诊断；两项区分 memory Summary 描述写入与 moves 准许 guard 写入，改为明确检查写入足迹，并单独验证 moves 仍拒绝外部写入；已有局部指针别名观察现作为正例。未删去拒绝行为检查。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 180 -- test -p luna --test resources`，355 项通过，退出 0，用时 4.537 秒，`/tmp/luna-tools-90nx0zd2/result.json`。这两个时长是本轮观测，不是严格基准测试。此前 resources 验收缺口现已关闭。workspace 格式化退出 0，`/tmp/luna-tools-ooz485v2/result.json`。改动留在 dev 未提交。
+
+相关七组集成 resources / drop / cmtt / captured_memory / effect_memory_transfers / runtime_purity / newtypes 共 2300 项通过，`/tmp/luna-tools-t1_p92jt/result.json`；verification 单元组通过，`/tmp/luna-tools-nexxpqet/result.json`；`git diff --check` 通过。没有恢复自动提交。
+
+### 名义指针包装的局部槽替换
+
+复现指针 newtype 经局部地址写回被 raw Pointer 限制拒绝，`/tmp/luna-tools-ke__0gqf/result.json`。WritePointer 与 write_local_pointer_slot 按已建立的指针表示识别槽值，仍比较完整名义目标类型；不展开 normal-form 头，不绕过名义 Copy 或包装转换。根槽与字段槽复用原来的强／弱来源更新及整个根清理读取。
+
+新增一层／两层 newtype、展开前后、新值／旧副本结果；根槽／字段槽多候选的运行结果和公开 Summary 同时保留参数 0、1；缺少 Copy、新目标移出、旧副本目标移出拒绝，旧目标移出不影响已更新的新值。定向初次通过，`/tmp/luna-tools-856s6yep/result.json`。
+
+目录 `/home/fin/luna`，resources / drop / cmtt / captured_memory / effect_memory_transfers / runtime_purity / newtypes / comptime_memory 八组共 2316 项通过，`/tmp/luna-tools-glgbqqsr/result.json`。workspace 格式化退出 0，`/tmp/luna-tools-qb6ine_8/result.json`；`git diff --check` 通过。文档同步，改动留在 dev 未提交。
+
+内存单元组通过，`/tmp/luna-tools-dqssldae/result.json`。
+
+### Newtype 指针字段更新后的外层析构路径
+
+新增摘要与执行验收发现：一／两层 newtype 字段更新后，摘要已准确包含新目标，但执行准备报 Drop field layout is missing，`/tmp/luna-tools-vseikd2d/result.json`。Drop access 的无标签路径 project 使用了只识别普通结构体的 field_type，漏掉内存分析导出的内部 newtype 表示步骤。改为复用 StorageTraversal 的类型、owner 与边界校验，再按已验证物理路径投影目标；不开放源码表示字段、不跳过变体条件。
+
+定向通过，`/tmp/luna-tools-kyokww0n/result.json`。新验收中 observe 只返回 true，没有普通读取掩盖析构足迹；另检查更新后移出旧目标可清理、移出当前目标必须拒绝。文档同步，保留 dev 未提交。
+
+目录 `/home/fin/luna`，前述八组集成共 2318 项通过，`/tmp/luna-tools-wfd8i0hv/result.json`；verification 单元组通过，`/tmp/luna-tools-70xl903u/result.json`。workspace 格式化退出 0，`/tmp/luna-tools-powhb9tp/result.json`；`git diff --check` 通过。改动留在 dev 未提交。
+
+### 局部枚举整体指针替换
+
+WritePointer 以整个值同步安装来源与标签条件，避免逐个物理载荷叶更新覆盖同槽的其他变体。多候选复用带标签的来源／guard 合并，空变体不抹掉未选中槽的旧依赖；memory 允许整体局部枚举替换，仍拒绝带条件的目标槽及外部／捕获槽。覆盖旧副本、空载荷、分支值、内联前后、混合回调载荷及 Copy／移出目标拒绝。
+
+目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 180 -- test -p luna --test drop --test resources --test captured_memory --test runtime_purity`，四组通过，`/tmp/luna-tools-u9hgw11q/result.json`。全 workspace 格式化通过，`/tmp/luna-tools-7w8iapzf/result.json`，`git diff --check` 通过。改动留在 dev，未提交。
+
+另发现含回调枚举经辅助函数参数传递后动态调用的 memory contract 缺口：`fn get(v:View)->bool {v match {.empty=>false,.left(f,p)=>f(p),.right(f,p)=>f(p)}}`，其中 View 为 `enum View {empty,left(Action,*bool),right(Action,*bool)}`，Action 为 `fn(*bool)->bool`。局部解构调用通过，经 get 传递仍报告 dynamic call requires a richer memory contract；复现日志 `/tmp/luna-tools-8r80ate0/result.json`。未以放宽未知调用检查掩盖该缺口。
+
+### 含回调枚举的跨调用标签依据
+
+关闭上一条 get(View) 的内存契约传递缺口。调用准备、guard 参数观察和 cleanup 辅助函数复核现在同时传递已校验的 EnumParameter。只有标签排除的代码叶才安装空 prepared-code 集；仍可能存在但没有身份的叶保持未知。校验参数布局、重复标签输入及代码身份与分支不存在的矛盾，不放宽公开 named-code 输入接口。
+
+目录 `/home/fin/luna`，八组集成 drop/resources/captured_memory/runtime_purity/effect_memory_transfers/cmtt/comptime_memory/newtypes 共 2322 项通过，`/tmp/luna-tools-9v99vm2r/result.json`。新增用例覆盖 helper 参数、空分支、弱更新、内联前后；补充直接 guard 调用的正负配对后定向测试通过，`/tmp/luna-tools-17wgfgv0/result.json`。格式化通过，`/tmp/luna-tools-gqgfm966/result.json`，`git diff --check` 通过。改动留在 dev 未提交；不宣称未知回调或任意捕获代码均已支持。
+
+verification 单元组通过，`/tmp/luna-tools-70_j65nn/result.json`。
+
+### Guard 摘要复用与枚举返回链验收
+
+同一次 observe_guard_call 中，指针观察已经取得的完整 memory Summary 直接用于后续拒绝行为检查，避免为相同参数、代码、标签与 cleanup world 重复求解。复用范围仅为当前调用候选的一次检查，不跨状态变更或候选事务。新增返回链用例验证代码和指针共同经 forward/make/get、多种退出路径及内联传递；目标移出／离开局部作用域仍拒绝。返回链初次即通过，属于已有能力的组合验收，不宣称新实现了返回值机制。
+
+目录 `/home/fin/luna`，定向测试 `/tmp/luna-tools-zoew898v/result.json` 通过；drop/runtime_purity/captured_memory/resources 四组通过，`/tmp/luna-tools-esl57_et/result.json`。格式化通过，`/tmp/luna-tools-mmn2dnqp/result.json`；`git diff --check` 通过。改动留在 dev 未提交。
+
+### 错误结果中的回调视图组合验收
+
+本轮扩大前端集成检查：`python3 -B development/check.py --timeout 180 -- test -p luna --test error_surface --test execution --test elaboration`，115 + 1336 + 448 = 1899 项通过，`/tmp/luna-tools-fsv3vyr7/result.json`。新增 error_callback_views_preserve_memory_through_propagation_and_handlers，成功载荷内函数及指针经错误传播和 handler，再由观察区域调用；覆盖成功／错误、不同数据值、内联前后。定向通过，`/tmp/luna-tools-y81nwsxx/result.json`。这轮是组合验收，未发现或声称修复新语义缺口。workspace 格式化通过，`/tmp/luna-tools-qjxx8lvy/result.json`。改动留在 dev 未提交。
+
+### 普通 for 接线前的协议核对与 elaboration 集成检查
+
+普通 for 在 program.rs 仍显式拒绝，HIR 保留主体／模式／guard；library/builtin/iterator.fl 是旧拉取式 Iterator.next，docs/control-flow/basic.md 写 IntoIterator/Iter，而作者此前提出整体迁移 inline fn + inline effect。不能把范围 inline for 或旧 next 名称约定当作已完成的普通迭代协议。已就协议方向提出最小问题，尚未改写库或降码。
+
+独立检查：目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 180 -- test -p elaboration` 全部通过，退出 0，`/tmp/luna-tools-g6kh_trb/result.json`。本轮没有发现该 crate 的基线失败，不因此宣称语言实现完成。改动留在 dev 未提交。
+
+### 完成值中的错误载荷重建
+
+constants.rs 将完成的 ErrorResult 序列化为 Success/Failure ErrorConvert，但 nir::completed_values 原先拒绝所有此类节点。NIR 定向复现 `/tmp/luna-tools-u2whg09l/result.json`。现按已有 error_results::validate_conversion 检查输入／输出域，且只允许完成载荷的 Success/Failure 封装；继续递归检查封闭性及预算，任意声明调用、错误域和不足预算均拒绝，不将 Embed/Product 执行程序视作完成值，不展开 normal-form 头。
+
+目录 `/home/fin/luna`，NIR completed_values/associated_initializers/error_results 共 39 项通过，`/tmp/luna-tools-vr6y1qeu/result.json`。普通及泛型 associated error value 源码用例通过；error_surface/execution 集成通过，`/tmp/luna-tools-fpkkvfnk/result.json`。格式化通过 `/tmp/luna-tools-ahq4pogw/result.json`，`git diff --check` 通过。改动在 dev 未提交。
+
+相邻待核对项：constants.rs 同样用 NewtypeConvert 重建包装值，而 completed_values 尚无该分支。接纳需要与名义包装的表示检查一致，不能仅因目标是 Nominal 就接受任意转换。
+
+### 声明驱动的 newtype 完成值重建
+
+关闭上一条 NewtypeConvert 的完成值缺口。新增 completed_values::validate_with_newtypes，以声明迭代器传入表示证据；复用 newtypes::conversion_from 检查完整名义实例与直接 Wrap 边，不猜测参数表示，不展开 normal-form 头。只有包装是重建，解包仍为执行操作。载荷递归使用同一声明证据与预算；旧无证据入口保持拒绝。
+
+接线到 associated value 选择前后、泛型 associated 模板快速路径和解释器 dispatch 实例准入。NIR 覆盖泛型表示、错误结果嵌套、缺失／重复声明、错误载荷、解包及不足预算；源码覆盖普通／泛型实现的包装常量与错误载荷。
+
+目录 `/home/fin/luna`：NIR completed_values 8 项通过 `/tmp/luna-tools-0tv_nxgj/result.json`；newtypes/error_surface 共 324 项通过 `/tmp/luna-tools-w4ul40j7/result.json`；elaboration associated 18 项通过 `/tmp/luna-tools-3n_esyab/result.json`；解释器 associated 过滤命中 0 项，未作为通过证据；随后完整 lib 69 项通过 `/tmp/luna-tools-l7o9ba8_/result.json`。格式化通过 `/tmp/luna-tools-ibqk5a0f/result.json`，`git diff --check` 通过。改动留在 dev 未提交。
+
+### 泛型替换保持完成值的错误行封装
+
+新增 NIR 复现：`Success(T, value)` 为完成值，T 代入带错误行的类型后，program 类型重写按既有规则将 Success 改成 Embed，原 completed_values 因只允许 Success/Failure 而拒绝。失败证据 `/tmp/luna-tools-hihu6bhy/result.json`。现允许对递归验证完成的载荷进行 Embed，复用原错误行转换校验，不允许丢失标签或改变成功域，也不放开任意调用。这里修正前两轮对“所有 row transport 都是待执行程序”的过窄分类；Product 的布局依据仍需另行接入。
+
+目录 `/home/fin/luna`，NIR completed_values/error_results/associated_initializers 共 41 项通过，`/tmp/luna-tools-fgbx0g_p/result.json`；luna error_surface 116 项通过，`/tmp/luna-tools-x3rhtvin/result.json`。格式化通过 `/tmp/luna-tools-l9wix19j/result.json`，`git diff --check` 通过。改动留在 dev 未提交。
+
+### 完成值的产品表示转换与正式 Tuple 证据
+
+completed_values 新增 validate_with_layouts 接口，Product 转换复用 error_results 的完整布局迁移检查，并递归要求输入是完成值。结构元组／匿名记录可直接检查，正式 Tuple 必须提供已注册 head 证据；不把同形 normal-form 参数当作布局。既有 newtype 证据继续沿递归传递。泛型 associated 模板用绑定 Tuple 身份，World 用 PTC Context 中已注册的 tuple head（只取类型布局登记，不把程序规格交给 PTC），解释器用通过元数据校验的 Tuple head 集合；集合仅在准入阶段建立一次。
+
+NIR 用例覆盖错误行重排、结构／正式元组、匿名记录、未注册头、缺失标签、成功域不匹配、字段改名及预算。目录 `/home/fin/luna`，completed_values/error_results 39 项通过 `/tmp/luna-tools-ags2o0uc/result.json`；newtypes/error_surface 324 项通过 `/tmp/luna-tools-bu6dn0r9/result.json`；解释器 lib 69 项通过 `/tmp/luna-tools-zsovvcaf/result.json`；elaboration associated 18 项通过 `/tmp/luna-tools-g0g1sfd_/result.json`。格式化通过 `/tmp/luna-tools-bhmmwya7/result.json`，`git diff --check` 通过。改动留在 dev 未提交。
+
+### 完成值阶段集成与真实 dispatch 准入覆盖
+
+NIR 全套 327 项通过 `/tmp/luna-tools-v4cch354/result.json`；comptime_interpretor 全套 187 项通过 `/tmp/luna-tools-q4a7vna4/result.json`。目录均为 `/home/fin/luna`，入口 development/check.py，退出 0。
+
+新增 interpreter_admission_rechecks_completed_newtype_dispatch_values。初始源码 fixture 并未包含 demanded completed dispatch value，断言揭示旧源码用例无法单独证明该准入入口；现使用源码生成的类型／trait／implementation 元数据，显式建立完成值 dispatch 实例，验证合法值通过、改动 newtype 表示后拒绝。定向通过 `/tmp/luna-tools-5cfpdu14/result.json`。本轮未修改实现逻辑，补的是准入边界的真实覆盖。格式化通过 `/tmp/luna-tools-s6tot1d2/result.json`，`git diff --check` 通过。改动留在 dev 未提交。
+
+### 完成字面量的域校验与解释器一致性
+
+完成值原来对 Bool/Char/Str/Symbol 等仅做大小遍历，对常量节点的注解域没有统一校验。新增 Literal::has_primitive_type，核对所有内建字面量的域及固定整数的符号／范围；completed_values 与解释器 eval_literal 共用它，去除后者重复的数值类型检查。Unit 和 TypeValue 也核对注解与 Type sort。此检查不代替整数／浮点拼写解析和 BitVec 载荷准入。
+
+新增 NIR 各字面量正负域、整数越界、伪造 Unit/TypeValue；dispatch 准入测试同时将实现与实例的 Bool 载荷改为 Char 而保留注解，确保表达式一致不能掩盖错误域。目录 `/home/fin/luna`，completed_values 11 项通过 `/tmp/luna-tools-0tptqrwp/result.json`；解释器全套 187 项通过 `/tmp/luna-tools-vc3p7c6c/result.json`；newtypes/execution 共 1545 项通过 `/tmp/luna-tools-9woccizq/result.json`。格式化通过 `/tmp/luna-tools-htfkaolp/result.json`，`git diff --check` 通过。改动留在 dev 未提交。
+
+### 完成字面量的有界载荷准入
+
+completed_values 对 Integer/Float 拼写和 BitVec 原始字块复用 comptime_runtime 的精确解析／from_words 校验；整数冻结形式的负号按解释器规则处理，浮点指数不经宿主浮点舍入。解析工作与缓冲大小受调用者剩余 fuel 约束，失败同样扣减，不额外创建独立的大预算。非法拼写、错误字块数和非零填充位不能作为完成值进入 associated/dispatch 路径。
+
+正例包含负十六进制、大整数、超宿主宽度浮点指数、零宽与跨字块 BitVec；拒绝例覆盖非法数字／指数、缺块／多块／填充位；低预算失败后独立充足预算重试成功。目录 `/home/fin/luna`，completed_values 12 项通过 `/tmp/luna-tools-2m0wx2p0/result.json`；newtypes/execution 1545 项通过 `/tmp/luna-tools-70a34t18/result.json`。格式化通过 `/tmp/luna-tools-banub0m3/result.json`，`git diff --check` 通过。改动留在 dev 未提交。
+
+### 结构产品完成值的字段校验
+
+completed_values 不再仅递归遍历 Tuple/AnonymousRecord 的子表达式：现在验证字段数量及各字段类型，匿名记录还拒绝重复字段名；正式 Tuple 只通过已注册 head 与单个 TypeListValue 参数取得布局，保留原 normal-form 类型，不将同形头当作元组。名义 struct/enum 的完整声明布局校验仍是独立待办，本轮没有将结构产品规则假装推广到所有名义构造。
+
+目录 `/home/fin/luna`，completed_values/associated_initializers 共 16 项通过 `/tmp/luna-tools-zdzx_rhb/result.json`；execution/cmtt 共 1858 项通过 `/tmp/luna-tools-ocntxp9u/result.json`。正负例覆盖字段数量／类型、重复名称、正式 Tuple 的注册及缺失证据。格式化通过 `/tmp/luna-tools-nsml4zby/result.json`，`git diff --check` 通过。改动在 dev 未提交。
+
+2026-10-22：完成值准入补齐 struct／enum 的声明布局校验，覆盖构造器身份、构造种类、枚举标签、字段数量及预算内泛型字段实例化；关联值获取、泛型模板和解释器 dispatch 准入共用校验，递归保留声明证据，不展开 opaque normal-form。新增 NIR 拒绝例、嵌套组合和预算失败恢复，以及泛型／非泛型实现提供 struct、enum 关联常量的源码执行用例。工作目录 `/home/fin/luna`：`development/check.py --timeout 180 -- test -p nir --test completed_values --test associated_initializers` 17 项通过（`/tmp/luna-tools-klqx3tdd/result.json`）；luna execution/newtypes 1545 项通过（`/tmp/luna-tools-zcja5e91/result.json`），新增源码用例单独通过（`/tmp/luna-tools-rfcnh_oi/result.json`）。全 workspace fmt 完成（`/tmp/luna-tools-hdpa6llo/result.json`），git diff --check 通过。改动保留 dev 工作区，未提交。
+
+2026-10-22：补齐关联值实例化的复制前预算：`copy_budget::charge_substitution` 保守计入表达式（含共享闭包体）与实参展开的乘积，避免仅分别检查输入大小后在 substitution 中放大分配。AssociatedInitializer、关联值获取和解释器 dispatch 完成值比对共用此检查。新增共享闭包体重复类型展开的预算失败／恢复测试，以及 struct／enum 模板和 dispatch 同时篡改字段数、字段类型、构造身份、构造种类／标签的解释器拒绝测试。工作目录 `/home/fin/luna`，所有命令通过 `python3 -B development/check.py --timeout 180 -- test ...`：nir associated_initializers 4 项通过（`/tmp/luna-tools-h6mw0plt/result.json`），luna execution/newtypes/cmtt 2068 项通过（`/tmp/luna-tools-_k6jp1ud/result.json`），新增 nominal dispatch 拒绝用例单独通过（`/tmp/luna-tools-5ms_38lr/result.json`），elaboration associated 通过（`/tmp/luna-tools-qxc5u82_/result.json`）。全 workspace fmt 与 git diff --check 通过。展开预算目前采用保守上界，并非精确内存计量；未提交。
+
+2026-10-22：CMTT generator 的四处类型替换统一接入 `instantiate_parameters_bounded`：方法捕获、签名实例化、候选提示与最终类型计划均在复制展开类型前计费，失败也保留已消耗预算。新增重复嵌套类型参数的 expr code 转发测试，验证 runtime context 保留、两种布尔输入和错误实参拒绝。工作目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 180 -- test -p luna --test cmtt` 522 项通过（`/tmp/luna-tools-ky11_p0d/result.json`），新增用例单独通过（`/tmp/luna-tools-eo1xzje3/result.json`）。全 workspace fmt 完成（`/tmp/luna-tools-u7oq5kqi/result.json`），git diff --check 通过；未提交。一般迭代协议和开放上下文的功能缺口仍在，不将本次预算修复视作这些功能已实现。
+
+2026-10-22：CMTT 候选提示与子句默认值的八处 declaration substitution 接入展开前预算检查。NIR 提供 `charge_parameter_substitution` 分离分配计费与完整类型作用域准入，完整 `instantiate_parameters_bounded` 仍验证 caller frames；生成器处理签名片段时保留原有声明替换检查，不把缺少 enclosing binder 的片段当封闭类型。最初直接套完整类型入口导致 185 个 CMTT 回归失败，已定位并修复；未放宽完整类型准入。新增 NIR 测试覆盖重复展开预算、开放片段、缺少 frame 拒绝和带 frame 成功。工作目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 180 -- test -p luna --test cmtt` 523 项通过（`/tmp/luna-tools-qwqqs8o8/result.json`）；`test -p nir --test type_computations` 13 项通过（`/tmp/luna-tools-j5200e2c/result.json`）。全 workspace fmt（`/tmp/luna-tools-hdbfm54g/result.json`）及 git diff --check 通过。未提交。
+
+2026-10-22：阶段性集成先验证 nir／comptime_interpretor 共 520 项测试（`/tmp/luna-tools-9y09czm5/result.json`）。随后将表达式 substitution 的乘积上界计费改为依照 declaration identity 的实际替换位置计费，复用展开类型遍历；共享闭包体仍纳入遍历，组合表达式／类型深度共同受限，未使用输入只检查一次。AssociatedInitializer、关联值获取和解释器 dispatch 同步提供参数 binder。新增未使用大实参不虚增展开量、错误实参 sort 仍拒绝的回归，原重复展开预算失败与恢复用例继续通过。工作目录 `/home/fin/luna`，经 development/check.py：NIR associated_initializers 5 项通过（`/tmp/luna-tools-0dlyx0ge/result.json`），luna execution/newtypes/cmtt 通过（`/tmp/luna-tools-cnmt3t7n/result.json`）；中途变量名编译错误已修复后重跑。全 workspace fmt（`/tmp/luna-tools-z_g3ntmt/result.json`）及 git diff --check 通过，未提交。
+
+2026-10-22：关联类型投影的完成 Type 模板改为复制前检查实际替换展开量；成员契约、接口类型命题与 capability 输入，以及保持开放 caller telescope 的规范化路径，同步进行实例化前计费。保留原有 scope/sort 检查及 opaque head 身份，不把内存规格引入 PTC。新增大型泛型关联 Type 的低预算失败、同 World 高预算重试成功及选择证据检查。工作目录 `/home/fin/luna`，development/check.py 检查：elaboration associated 19 项通过（`/tmp/luna-tools-v495ou5l/result.json`），luna execution 的 associated 组 114 项通过（`/tmp/luna-tools-osy4rwcq/result.json`），luna newtypes 211 项通过（`/tmp/luna-tools-ddbszvit/result.json`）。全 workspace fmt（`/tmp/luna-tools-_oy74sy2/result.json`）与 git diff --check 通过；未提交。
+
+2026-10-22 阶段性集成证据：在 `/home/fin/luna`，通过 `python3 -B development/check.py --timeout 180 -- test -p elaboration -p iir` 验证 29 组共 683 项测试，全部通过（`/tmp/luna-tools-p6grcqbi/result.json`）。随后 `--timeout 300 -- test -p luna --test error_surface --test resources --test drop --test runtime_purity --test effect_spreads --test comptime_memory` 共 1554 项通过（`/tmp/luna-tools-svknyau2/result.json`），覆盖错误结果、资源交付与清理、纯度、效应展开和 comptime 内存行为。git diff --check 通过。构建入口正常自动清理 luna 可重建产物 1.2 GiB。此轮未修改实现，不将测试通过解释为尚未实现的一般迭代协议、开放闭包上下文或其他语言缺口已完成；下一阶段可直接推进功能，无需无改动重复这些集成组。未提交。
+
+2026-10-22：修复 suppressed inline range 的阶段漏洞。未选分支／空外层迭代中的边界此前只检查 Integer 类型，可能接受 comptime 函数转发 runtime bool 参数；新增源码回归在修复前证实可被接受（`/tmp/luna-tools-kk7192k6/result.json`）。现在检查边界输入的 comptime 可用性及调用阶段，但不执行边界。检查外层空／失败迭代主体期间保留索引的 staged 身份并在退出时恢复，使内层合法依赖不被误拒绝。覆盖 runtime 参数与 runtime 调用、起止边界、未选分支／空范围，以及不终止 comptime 边界不执行和开放函数 staged 参数正例。文档同步说明。工作目录 `/home/fin/luna`：development/check.py inline_control 全部 243 项通过（`/tmp/luna-tools-anxhn_m2/result.json`），cmtt inline 相关组通过（`/tmp/luna-tools-5kdhmmb6/result.json`）。全 workspace fmt（`/tmp/luna-tools-1yx0wh29/result.json`）、git diff --check 通过，未提交。空 tuple 主体检查和一般 iterable 协议仍未实现。
+
+2026-10-22：补齐 inactive inline if／when／模式选择输入的阶段检查，并检查 inline when 首次命中后未调用的条件。使用已完成普通 elaboration 的 selector 验证 comptime 输入，不再次执行 selector，也不递归限制分支主体中的普通 runtime if。新增拒绝例在修复前复现（`/tmp/luna-tools-pwa0bg4l/result.json`），修复后 inline_control 245 项通过（`/tmp/luna-tools-l4pjxkvh/result.json`）；空外层索引、不终止 comptime selector 与 runtime arm body 组合正例也已纳入，相关两项单独复核通过（`/tmp/luna-tools-tdlcjymg/result.json`）。cmtt inline 11 项通过（`/tmp/luna-tools-upmc32q2/result.json`）。工作目录 `/home/fin/luna`，均经 development/check.py；全 workspace fmt（`/tmp/luna-tools-1pfeyhv2/result.json`）及 git diff --check 通过。文档已同步，未提交。
+
+2026-10-22：inline 模式分支补齐 guard／Then 观察计算的阶段准入；整个选择被抑制或前一 arm 已命中时也检查 runtime 依赖，但不调用未选计算。抑制的 HIR Match 用临时选择标记标识，退出时恢复；每个 arm 的模式绑定在主体检查期间保留 staged 身份并恢复外层集合，普通 runtime arm 控制流不提升阶段。修复前新增拒绝例失败（`/tmp/luna-tools-n7sjrs7w/result.json`）；修复后 inline_control 247 项通过，包含带不终止 guard／观察的正例和嵌套 staged 绑定（`/tmp/luna-tools-59zgq2if/result.json`），cmtt inline 11 项通过（`/tmp/luna-tools-xmnlgihr/result.json`）。工作目录 `/home/fin/luna`，经 development/check.py；全 workspace fmt（`/tmp/luna-tools-ck0_14b5/result.json`）与 git diff --check 通过。文档同步，未提交。
+
+2026-10-22：修复 inline 模式阶段检查只使用最终导出 binder 的误拒绝。or-pattern 后续候选内的 guard binder、Observe 私有别名等不一定出现在最终 locals；改用已有 lexical free-binding 分析区分模式内部引用与外部依赖，再检查每个观察表达式的阶段。inline match、Integer range 模式和 tuple_enumerate 索引模式共用此入口；主体仍只获得正常导出绑定。新增第二候选 guard 正例在修改前失败（`/tmp/luna-tools-tbschvbj/result.json`），修复后 inline_control 248 项通过（`/tmp/luna-tools-qopc2bek/result.json`）；新增范围／tuple 索引执行和外部 runtime guard 拒绝后，branch_local 两项通过（`/tmp/luna-tools-xtqk0t54/result.json`）。cmtt inline 11 项通过（`/tmp/luna-tools-37fn7js3/result.json`）。工作目录 `/home/fin/luna`，经 development/check.py；全 workspace fmt（`/tmp/luna-tools-whc_x9ia/result.json`）及 git diff --check 通过，未提交。
+
+2026-10-22：核查 CMTT 引用接收者后确认其固有／trait／默认方法调用、共享存储写回及 quote 快照已实现。`development/check.py --timeout 180 -- test -p luna --test cmtt_methods` 在 `/home/fin/luna` 完成 142 项测试，全部通过（`/tmp/luna-tools-ngo1f0a1/result.json`）。修正 docs/cmtt/index.md 中仍声称 `*self` 未接通的矛盾说明，并将生成器对 PositionalDependencyCatched 的旧引用接收者诊断改为实际未支持的 dependent parameter bindings。本轮未新增接收者实现；git diff --check 通过，未提交。
+
+2026-10-22：程序验证层新增目标导向的多项式单调性范围收紧。普通 enclosure 不足时，在原输入区间盒上计算各偏导数区间；符号确定才按方向替换端点，保留重复变量相关性，再与原范围相交。共享步骤／整数／项数预算，次数上限不变；证明保留被消去变量的版本及原有关系，replay 使用同一规则。接入机器算术检查，源码 `u8` 在 `1<=x<=6` 下的 `x*x*x-x` 可证安全并执行为 210。测试覆盖负系数、多变量、内部极值不得仅凭端点证明、预算失败后恢复、输入更新使证明失效，以及最终抵消不掩盖中间溢出。工作目录 `/home/fin/luna`，development/check.py：elaboration verification 50 项通过（`/tmp/luna-tools-_qg47g6h/result.json`），luna resources 356 项通过（`/tmp/luna-tools-c8j2_v9z/result.json`），luna execution 1337 项通过（`/tmp/luna-tools-5p4cju0y/result.json`）。文档补充已执行示例与边界；全 workspace fmt（`/tmp/luna-tools-mifyt36s/result.json`）及 git diff --check 通过，未提交。该算法不完全，无法确定导数符号／缺少界／预算不足继续保留 Unknown，不进入 PTC。
+
+2026-10-22：多项式单调性收紧接入程序 predicate 的区间判定，复用范围证明的端点规则；普通 enclosure 已决定真假时不增加收紧，线性式与单项式跳过无益尝试。保留严格／非严格／相等边界及版本校验。新增 `x³>=x` 在 `[1,10]` 可证、严格大于／相等无法普遍决定、改写输入使证据失效的验证测试；源码 `u8` 函数以 `ensures result` 返回 `x³>=x`，不需 assumes，改成严格 `>` 则拒绝。工作目录 `/home/fin/luna`，development/check.py：verification 51 项通过（`/tmp/luna-tools-f3k5z0gy/result.json`），luna execution/resources 通过（`/tmp/luna-tools-j080__1p/result.json`）。文档加入已验证契约示例。全 workspace fmt（`/tmp/luna-tools-z7f9964p/result.json`）与 git diff --check 通过，未提交；超出当前有界算法能力仍 Unknown，不涉及 PTC。
+
+2026-10-22：程序整数多项式加入有限差分单调性回退。导数区间不能确定方向时，预算内展开 `p(x+1)-p(x)` 的非抵消项；总次数不增加，差分区间符号确定才采用端点。该规则覆盖非负整数上的 `x²-x`／`x³-x`，正负系数共用，仍保留输入版本与 proof replay。源码确认 `u8` 的 cubic 比较后置条件可含零，`u16` 的二变量三次式 `x*x*y-x*y` 在范围约束内安全且执行为 270。内部极值和中间溢出拒绝例继续通过。工作目录 `/home/fin/luna`，development/check.py：verification 52 项通过（`/tmp/luna-tools-byzuko54/result.json`），execution 1339／resources 356 项通过（`/tmp/luna-tools-87pn8gdo/result.json`）。文档同步，全 workspace fmt（`/tmp/luna-tools-vdeg6vdf/result.json`）及 git diff --check 通过，未提交。有限差分仍是保守有界推理，不表示所有三次规格均可判定。
+
+2026-10-22：程序验证加入小整数区间盒的完整枚举回退，接入范围证明、predicate 与 proof replay。单调性仍不足时，对至多 256 个格点求值，覆盖内部极值；不枚举已经具有精确盒范围的单项式／仿射式，不使用部分枚举作为证据。共享原算术预算、输入版本和三次限制，不进入 PTC。300 组独立算术 oracle 现在要求全部真实范围可证，新增多变量三次内部极值、256 点边界、超限、预算失败／恢复及旧证据失效；源码 arch(x)=x*(4-x) 在 x<=4 下证明 result<=4，严格界和中间下溢拒绝。初次集成发现无益线性枚举耗尽两项契约预算，已跳过该路径，未提高预算。目录 /home/fin/luna，development/check.py --timeout 180：elaboration verification 57 项通过（/tmp/luna-tools-2s1cl4mt/result.json），luna execution/resources 1341+356 项通过（/tmp/luna-tools-i_cjvno9/result.json）。全 workspace fmt 通过（/tmp/luna-tools-au7dq8hh/result.json），git diff --check 通过；dev 未提交。大区间非单调多项式仍可能 Unknown。
+
+2026-10-22：非单调范围回退新增单变量二次式精确顶点检查。以正分母的整数 floor/ceil 定位 -b/(2a)，仅求值区间端点和落在域内的两个邻接整数，不依赖枚举体积或浮点近似；负系数、负顶点、证明回放和原输入版本保持有效。源码 u16 的 x*(500-x) 在 x<=500 下证明机器乘法安全且结果<=62500；奇数顶点 501 对应两个峰值 62750；错误严格界、下溢及 x*(600-x) 溢出仍拒绝。目录 /home/fin/luna，development/check.py --timeout 180：elaboration verification 58 项通过（/tmp/luna-tools-cct7au21/result.json），luna execution/resources 1342+356 项通过（/tmp/luna-tools-dsf0wzqj/result.json）。全 workspace fmt（/tmp/luna-tools-flqil1dq/result.json）及 git diff --check 通过。超出已实现算法的大域三次／多变量极值仍可能 Unknown；未提交。
+
+2026-10-22：程序范围求解支持无交叉项的多变量二次式分解，将每个变量的一元二次／线性范围与常数项相加，不枚举大区间笛卡尔积。分解遇到交叉项或三次项即退出，失败不发布局部结果，保留原变量版本和预算。新增大盒正负系数、线性／常数组合、独立笛卡尔穷举 oracle 与变量改写失效测试；源码 signed x,y 在 [-1000,1000] 内可证明 x*x+y*y+x+y>=0，严格界与错误交叉项拒绝。工作目录 /home/fin/luna，经 development/check.py --timeout 180：verification 60 项通过（/tmp/luna-tools-85kb3ss9/result.json）；execution 原有 1342 项通过，新用例初因示例格式解析失败（/tmp/luna-tools-sqf10glb/result.json），修正示例后单独通过（/tmp/luna-tools-94n0qts3/result.json）；resources 356 项通过（/tmp/luna-tools-c8hf16pg/result.json）。全 workspace fmt（/tmp/luna-tools-ovl4y1g6/result.json）及 git diff --check 通过；dev 未提交。一般带交叉项或大域三次极值仍未完全求解。
+
+2026-10-22：组合整数有限差分、坐标单调性及残余二次式顶点求解，支持 x*(400-x)*y 等大域三次范围。差分符号不足时使用二次式／独立分量规则收紧；完成单调坐标端点替换后保留剩余二次式的内部极值。实现中特别区分连续导数与整数差分，不将整数顶点范围用来证明连续导数符号；新增 4x³-6x²+x 在 0、1 导数均正但函数下降的拒绝回归。新增大域正负缩放、消去变量版本失效和三次单调测试，源码 u32 最大 4000000000 可证，扩大输入导致溢出及错误严格界拒绝。目录 /home/fin/luna，development/check.py --timeout 180：verification 63 项通过（/tmp/luna-tools-uayn1qr0/result.json），execution/resources 1344+356 项通过（/tmp/luna-tools-zy1pq1_o/result.json）。全 workspace fmt（/tmp/luna-tools-2ff5yfca/result.json）及 git diff --check 通过；dev 未提交。算法仍不完全，未证明一般三次规格可决定。
+
+2026-10-22：程序二次式范围增加对角占优平方和证据：无一次／三次项时，以精确整数系数检查每行 2*a_i>=sum(abs(b_ij))，证明非恒定部分非负；对相反数同样检查以证明上界。未改变一般二次型的 Unknown 边界，不调用 PTC。新增三变量平方和与常数偏移、大域正负界、变量改写失效及缺失对角／过强交叉项反例；源码平方和布尔契约正例、严格界／符号改变／中间溢出拒绝。目录 /home/fin/luna，经 development/check.py --timeout 180：verification 65 项通过（/tmp/luna-tools-b137xllh/result.json），execution/resources 1345+356 项通过（/tmp/luna-tools-zkgdn0zg/result.json）。全 workspace fmt（/tmp/luna-tools-5wmast8b/result.json）及 git diff --check 通过；dev 未提交。该条件只是充分判据，不声称所有半正定二次型可证。
+
+2026-10-22：核查此前契约示例解析失败，确认 grammar/index.md 的中缀双侧空白规则：x*x 应拒绝，换行子句本身合法。Pratt 解析器对紧贴的 +、-、*、/ 给出运算符位置的明确空白诊断，保留右花括号后的新语句边界。新增空格／制表／换行正例、单侧或双侧缺空白拒绝，以及指针类型、解引用、泛型尖括号、一元负号与 brace 后新语句回归；没有放宽语言语义。目录 /home/fin/luna，经 development/check.py --timeout 180：parse 全组 73 项通过（/tmp/luna-tools-gfqbtmr5/result.json），补充边界后 trait_clauses 5 项通过（/tmp/luna-tools-svm2s_nx/result.json），luna execution 1345 项通过（/tmp/luna-tools-y6g3c8ow/result.json）。全 workspace fmt（/tmp/luna-tools-6evi64xu/result.json）及 git diff --check 通过；dev 未提交。
+
+2026-10-22：新增 verification/quadratic.rs，用增广对称整数矩阵表示 2*p，通过正主元的 a*B-v*vᵀ 消元建立半正定／半负定证据，覆盖加权、平移、奇异平方和；不使用浮点或除法，矩阵最多16坐标且系数增长消耗共享预算。负主元和零主元非零剩余行只令证据失败，不发布反命题。新增加权仿射平方和、零常数／奇异主元、负值扰动、预算失败恢复与版本失效测试，以及源码正例、严格界／符号改变／中间溢出拒绝。集成发现上一轮中缀空白诊断误拦 #relay *bool，已让其尊重 stop_at_type_qualifier，并补效应／错误限定指针结果的解析回归。目录 /home/fin/luna，经 development/check.py --timeout 180：verification67（/tmp/luna-tools-uyy716l7/result.json）、parse74（/tmp/luna-tools-31mi0jwd/result.json）、execution1346/resources356（/tmp/luna-tools-kbw50bpz/result.json）全部通过；全 workspace fmt（/tmp/luna-tools-njz58lqv/result.json）及 git diff --check 通过。初次集成的资源两项解析回归（/tmp/luna-tools-49uvp47j/result.json）已修复，未提高预算；dev 未提交。该算法不覆盖一般三次规格，也不将证据失败解释为命题为假。
+
+2026-10-22：精确半正定消元加入前一正主元整除，控制未归一化 Schur 更新的指数系数膨胀。16维 I+u*uᵀ 回归修复前耗尽默认预算（/tmp/luna-tools-_1aopr20/result.json），修复后原预算通过；每次整除检查余数，非零则停止该证明路径，不截断系数。独立验证遍历15625个小整数三阶对称矩阵，与全部主子式条件比较；另检查2/4/8/16维Gram矩阵的秩亏、零行、符号、负对角反例和预算失败后恢复。目录 /home/fin/luna，经 development/check.py --timeout 180：矩阵测试3项（/tmp/luna-tools-8uen1p47/result.json）、verification67（/tmp/luna-tools-ah1b4kpv/result.json）、execution1346/resources356（/tmp/luna-tools-d5m2nuej/result.json）全部通过。全 workspace fmt（/tmp/luna-tools-8f9cfg1q/result.json）及 git diff --check 通过；文档更新，dev 未提交。
+
+2026-10-22：阶段性中间层集成：/home/fin/luna 经 development/check.py --timeout 300 -- test -p elaboration -p iir -p parse，44组共780项通过（/tmp/luna-tools-to7tdfgz/result.json）。核对 quote fn 值子句已有实现与回归，修正文档仍声称未接通的旧说明，加入实际执行的 Flag<bool> 推导／显式值／依赖默认示例；诊断分别指向未支持的子句协议和 contextual／dependent 参数，不再误称全部值泛型未实现。quote_functions 完整103项通过（/tmp/luna-tools-5jvyrpr4/result.json）；第一次调整诊断打破既有 contextual 文案锚点，拆分后恢复该诊断契约。全 workspace fmt（/tmp/luna-tools-z3b17hk5/result.json）及 git diff --check 通过，dev 未提交。本次是集成验证与能力说明纠错，不是新实现 quote 值泛型。
+
+2026-10-22：半正定证据接入目标范围 [L,U]，分别检查 p-L 与 U-p；矩阵常数项从原值独立恢复，禁止上下界平移串扰。普通精确盒范围与单项／仿射路径跳过无收益检查。新增平方和加7、100减平方、双边不可能目标、旧版本失效，以及源码 i32最小值加平方／最大值减平方的安全执行；反向算术和中间平方溢出拒绝。目录 /home/fin/luna，经 development/check.py --timeout 180：verification68（/tmp/luna-tools-_j2l15ym/result.json），execution1347/resources356（/tmp/luna-tools-kb69i6z3/result.json）通过。文档加入已执行的机器边界示例；全 workspace fmt（/tmp/luna-tools-kxx5h4oy/result.json）及 git diff --check 通过；dev 未提交。仍沿用矩阵大小和算术预算，不声称一般程序规格完全可判定。
+
+2026-10-22：新增 verification/cubic.rs，单变量三次式通过二次有限差分的顶点分段和精确整数二分定位符号变化，检查原区间端点与极值候选，不枚举大域、不使用浮点根；候选步进限制在 [lo,hi-1]，共享预算、原版本和replay保留。144组大域系数／区间组合与独立穷举极值一致，错误紧界拒绝；内部最大值、预算失败恢复及版本失效回归通过。原枚举超限回归改为仍需多变量推理的三次式，新增单变量正例，不再把已可证明的旧能力缺口当拒绝要求。源码u32的x*x*(3000-x)最大4000000000安全，严格界、减法下溢和更大域溢出拒绝。目录 /home/fin/luna，经 development/check.py --timeout 180：verification70（/tmp/luna-tools-s6rvi0kz/result.json）、execution1348/resources356（/tmp/luna-tools-n56fnis4/result.json）通过；全workspace fmt（/tmp/luna-tools-_drzfaz4/result.json）及git diff --check通过。文档同步，dev未提交；一般多变量三次规格仍不完全。
+
+2026-10-22：独立分量范围组合扩展到三次多项式；每个变量分量复用单变量三次／二次求解，常数与线性分量合并，不递归枚举多维盒。共享预算及全部变量版本保留，混合乘积项仍拒绝该分解。新增正负大域三次分量加线性／常数项、错误紧界、任一输入改写失效及独立笛卡尔穷举核验。源码 x²(300-x)+y²(300-y)<=8000000 的布尔后置条件通过，严格界、减法下溢及大域溢出拒绝。枚举超限回归保留真正混合的 x*y² 项，避免将已可解的独立分量固化为失败预期。目录 /home/fin/luna，经 development/check.py --timeout 180：verification72（/tmp/luna-tools-it8_lmf9/result.json）、execution1349/resources356（/tmp/luna-tools-4gulelky/result.json）通过。全workspace fmt（/tmp/luna-tools-253exeaq/result.json）及git diff --check通过；文档同步，dev未提交。一般混合多变量三次规格仍不完全。
+
+2026-10-22：近期解析诊断与程序规格求解改动后的 CMTT／inline 集成核验。目录 /home/fin/luna，python3 -B development/check.py --timeout 300 -- test -p luna --test cmtt --test cmtt_methods --test inline_control 全部通过（/tmp/luna-tools-oui1ajob/result.json）；覆盖代码／模式生成、引用方法与上下文、未选 inline 分支、嵌套阶段、元组枚举和资源传递。入口按授权自动清理 luna 可重建产物912.4MiB，未触及源码或 registry。空 tuple_enumerate 在 runtime/open/generator 路径仍明确拒绝，不能以非空异构元组回归通过宣称其完成；本次是集成验证，未新增这项能力，未提交。
+
+2026-10-22：程序predicate在多项式输入缺少有限区间时可使用全局二次半正定证据。先验证原输入版本再归一化，不为无界Integer补造区间；严格／非严格／相等／不等比较使用独立零或±1界，证据失败仍Unknown，预算错误保留。矩阵形成提取为共享入口，范围证明路径保持原契约。新增无界仿射平方、严格正负式、等号边界、输入改写和预算恢复；源码使用comptime fn及luna::invocation验证，未放宽Integer的comptime-only或跨阶段Splice要求。目录 /home/fin/luna，经 development/check.py --timeout 180：verification74（/tmp/luna-tools-hr51ss7e/result.json）；execution原1349项通过，新fixture最初错误使用runtime Integer后又遗漏Splice，改为正确comptime invocation后新用例通过（/tmp/luna-tools-7o5aq7nx/result.json）；resources356通过（/tmp/luna-tools-_ti8i4zl/result.json）。全workspace格式检查（/tmp/luna-tools-lq90fjb8/result.json）及git diff --check通过；文档同步，dev未提交。
+
+2026-10-22：无界一元二次predicate增加精确整数顶点证据，区分整数格点与实数半正定范围；按曲率只发布全局最小／最大值足以证明的比较，不将极值未排除零当作无根证据。新增330组系数、六种比较和两种真假目标的独立格点核验；源码comptime Integer可证明x*(x+1)>=0及2*x*x+x+1>0，等号处错误严格界拒绝，正式invocation验证大数输入。目录 /home/fin/luna，经development/check.py --timeout180：verification75（/tmp/luna-tools-zablix1j/result.json）、execution1351/resources356（/tmp/luna-tools-3ji6ao1r/result.json）通过。文档、全workspace fmt（/tmp/luna-tools-r_wh6sct/result.json）及git diff --check完成，dev未提交。一般整数无根判定和多变量整数格点优化仍不完全。
+
+2026-10-22：修复 program-facts dump 将失效保留条件仍标为 established 的误导。版本检查通过／失效／有界检查未完成分别显示 established、stale-condition、unchecked-condition，保留条件与旧版本供排查，不改变 Facts 或求解结果。新增当前→改写→失效 dump 回归，验证稳定顺序、括号结构、旧／新版本可见、旧proof回放拒绝及格式化不恢复事实。目录 /home/fin/luna，development/check.py --timeout180 -- test -p elaboration --test verification 共76项通过（/tmp/luna-tools-j7n0t8hk/result.json）；全workspace fmt（/tmp/luna-tools-x1sf87ak/result.json）和git diff --check通过。文档同步，dev未提交；本次只修改可观察性，不新增语言语义。
+
+2026-10-22：程序验证增加整数系数余数非零证据：非恒定系数gcd不整除常数时，证明三次以内多元式非零／等式恒假；使用精确Integer和共享预算，保留归一化前输入版本检查及证明回放。源码comptime三次契约、带符号系数、有／无界输入、预算恢复、旧版本失效与小整数反例核验通过。显式DivideTrunc/RemainderTrunc可复用证据验证100除以2*x+1；去掉偏移后拒绝。首次源码用例暴露已有signed /舍入协议未接入，改用现有显式IR验证且文档明确限制，未默认选取源码舍入策略。目录/home/fin/luna：development/check.py验证verification78（/tmp/luna-tools-8v9_o1rl/result.json），execution1353/resources356（/tmp/luna-tools-2r0lbzfb/result.json）；全workspace fmt（/tmp/luna-tools-uyovokrj/result.json）及git diff --check通过。dev未提交；一般整数无根判断仍不完全。
+
+2026-10-22：整数非零证据扩展到有限模剩余类，gcd不足时检查模2/3/5的全部赋值；最多8变量、每模256赋值，找到模根只跳过当前证据，部分枚举及预算失败不证明无根。负系数用规范非负余数，精确Integer降到小模数后才使用有界宿主算术。支持x³-x+1与x²+x+y²+y-1等gcd为1的多元／三次非零规格。625组系数独立具体根／模根核验、预算恢复、输入改写失效及源码comptime调用覆盖。目录/home/fin/luna，development/check.py：verification80（/tmp/luna-tools-gqht1g8h/result.json）、execution1354/resources356（/tmp/luna-tools-wfehgdap/result.json）通过；全workspace fmt（/tmp/luna-tools-5xn85d6y/result.json）、git diff --check通过。正式trait文档确认signed /应由绑定协议选择，未默认指定舍入；一般整数无根判断仍不完全。dev未提交。
+
+2026-10-22：重新核对实现基线，修正开头仍停留在早期NIR阶段的总述以及多包、函数、资源、效应和IIR整组Pending标记；依照当前入口和对应测试描述已连接路径，不宣称子系统完成。核实packages显式依赖输入、独立资源检查执行入口及IIR staging/cleanup/effects模块。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test packages --test modules --test frontend_cli：CLI144、modules56、packages41通过（/tmp/luna-tools-ijh9_1iq/result.json），git diff --check通过。本轮未新增语言能力；普通for与空tuple_enumerate检查仍为具体未完成边界，原生生成不能由解释器证据替代。dev未提交。
+
+2026-10-22：非零证据加入素数幂模4/8/9，覆盖在模2/3/5均有根的x²-6、x²-21、x²-24；共享有界剩余类枚举，不改整数源操作语义。新增源码大数与负数调用、平方偏移反例，以及8变量256赋值完整证明／9变量策略上限不发布证据回归。目录/home/fin/luna，development/check.py：verification81（/tmp/luna-tools-nkof9rac/result.json）、execution1355/resources356（/tmp/luna-tools-d5eongin/result.json）通过；全workspace fmt（/tmp/luna-tools-rwkx0r7e/result.json）、git diff --check通过。普通for仍受正式IntoIterator/Iter表述、库Iterator::next与作者inline-effect方向的接口未统一限制，未擅自写死其中一种；本轮推进独立程序验证能力。dev未提交。
+
+2026-10-22：首次本轮实际sysroot冒烟：/tmp/luna-library-smoke.fl仅包含fn run()->bool {true}，经development/check.py --timeout180 -- run -p luna -- /tmp/luna-library-smoke.fl --sysroot /home/fin/luna/library --emit nir --output /tmp/luna-library-smoke.lisp退出1（/tmp/luna-tools-0dymr9w7/result.json）。基线停在HIR名称解析：Option/Result的panic、traits/fmt/io的String、fmt的Any，以及collections/io/fmt的__builtin_*、__intrinsic_map_storage、todo均无定义。未用占位函数绕过，也未把隔离模块通过报告为完整sysroot通过。
+修复真实language-items.conf遗漏optional-type=builtin::option::Option；加载真实manifest的测试保护默认类型构造器/运算符绑定。新增library_protocols直接include仓库primitives.fl与ops.fl，五种二元运算检查异构Rhs和Output，另测Rhs=Self默认值及Neg/Not关联结果，共2组通过（/tmp/luna-tools-5lvgirqt/result.json）。luna --lib通过（/tmp/luna-tools-7f5976q1/result.json）。这些测试不复制库声明、不依赖虚构运行时接口；下一步库集成须逐项落地上述运行时与类型依赖。dev未提交。
+
+2026-10-22：新增development/library_check.py，将真实库声明、真实manifest与完整sysroot解释执行串为独立有界检查，始终使用cargo.py缓存入口；各阶段独立日志及总summary，失败后继续独立检查，任一失败总退出1。development/examples/library-smoke.fl实际使用?bool和Option.unwrap_or，sysroot成功还必须返回(bool true)。library/README.md明确当前不可用边界及复现入口，未加入占位panic/分配/IO实现。目录/home/fin/luna，python3 -B development/library_check.py --timeout180：声明与manifest通过，sysroot在既有未定义接口处失败，总退出1（/tmp/luna-library-mio7w9lh/summary.json）；非法非有限timeout已验证拒绝，git diff --check通过。panic终止/清理契约已向作者异步询问，等待期间不依赖该决定继续工作；整个语言目标不因此阻塞。dev未提交。
+
+2026-10-22：修复循环标签出现在值表达式中导致AST lowering unreachable!崩溃。修复前回归明确复现panic（/tmp/luna-tools-8l0yna90/result.json）；现在显式处理LoopLabel并报告源码诊断，覆盖while/for/闭包引用，普通局部同名遮蔽仍可正常编译。删除与现行HIR保留for结构不符的旧降糖注释。扩大CLI检查发现上一轮新增optional manifest绑定使临时List/Tuple sysroot fixture缺少声明，已补充明确的测试用Option构造器并验证默认?bool绑定，以及错误Tuple配置被显式选择覆盖时仍保留Optional绑定；完整真实库冒烟不作fixture替换。目录/home/fin/luna，development/check.py --timeout180 -- test -p luna --test iteration --test frontend_cli：144 CLI+3 iteration通过（/tmp/luna-tools-j0nkwsti/result.json）；fmt（/tmp/luna-tools-hfto9uji/result.json）、git diff --check通过。dev未提交。
+
+2026-10-22：整数非零剩余类证据接入当前区间事实。短区间只枚举可达余数，负端点规范化；无界输入及覆盖完整周期的区间保持全余数，256上限按实际域组合计数。移除仅对无界搜索成立的“必须含常数项”快捷限制，支持受限y与无界x的x²-y²-1及x²+y²非零契约。证明继续保留范围/版本，改写输入或放宽y包含0不复用旧结论。独立内核对1950组有符号区间/模数与逐整数枚举对照通过（/tmp/luna-tools-ahah0cxu/result.json）；最终verification82（/tmp/luna-tools-81funmoa/result.json）、execution1356/resources356（/tmp/luna-tools-4b5sl996/result.json）通过。目录/home/fin/luna，均经development/check.py；fmt --check（/tmp/luna-tools-895wbbt8/result.json）、git diff --check通过。文档同步，dev未提交。
+
+2026-10-22：接通非零因子传播与归一多项式公共变量因子提取。先检查当前版本的非零条件/区间，再对严格降低次数的剩余多项式复用既有符号、范围及余数证据；不递归证明同一多项式，不绕过机器溢出。原源码x!=0且y!=0仍不能证明x*x*y!=0的失败已复现（/tmp/luna-tools-zuzyf3ex/result.json），修复后支持该契约及x*y*y+x；缺少因子前提、可为零的剩余因子拒绝。分支join丢失前提、输入改写与预算恢复回归覆盖。目录/home/fin/luna，经development/check.py：verification83（/tmp/luna-tools-cx9jjvvw/result.json）、execution1357/resources356（/tmp/luna-tools-q2o1dwow/result.json）通过；fmt（/tmp/luna-tools-5uv_74fb/result.json）、git diff --check通过。文档同步，dev未提交。
+
+2026-10-22：补齐非零公共因子的反向蕴含：已保留的多项式非零/严格正负事实可推出每个公共变量因子非零，支持等式为假的分支和缩放后的单变量零比较；逐单项式确认公共因子，不能从x+y!=0推导x!=0。known_condition在归一化前验证原事实全部版本，目标之外的另一个因子改写、join丢失前提都使证据失效。原源码x*y!=0不能证明x/y各自非零已复现（/tmp/luna-tools-9wbqaq2f/result.json）。目录/home/fin/luna，development/check.py：verification84（/tmp/luna-tools-37icoo5d/result.json）、execution1358/resources356（/tmp/luna-tools-6wjruf2v/result.json）通过；fmt（/tmp/luna-tools-sy5la8qe/result.json）、git diff --check通过。文档同步，dev未提交。
+
+2026-10-22：加入当前整数单项式的负/零/正有限符号域，结合已有区间和保留比较；重复因子按幂的奇偶性处理，负系数翻转、零因子归零，不为无界Integer虚构范围。支持严格/非严格/等于/不等于六种比较，不能决定时继续原有证据路径。修复前源码正乘负契约失败（/tmp/luna-tools-65sar88l/result.json）；新增196组因子域/幂/系数组合、六比较双真假目标与独立具体整数样本对照，源码覆盖严格前提放宽的拒绝。目录/home/fin/luna，development/check.py：verification85（/tmp/luna-tools-4pvm1xrw/result.json）、execution1359/resources356（/tmp/luna-tools-mm07d_13/result.json）通过；fmt（/tmp/luna-tools-dycxveve/result.json）、git diff --check通过。文档同步，dev未提交。
+
+2026-10-22：有限符号域从单项式扩展到多项式求和，支持非负项+严格正项/对称负项契约，正负抵消时保守回退；同次只读查询缓存变量符号，不跨事实状态保存。修复前x>0不能证明x³+y²>0已复现（/tmp/luna-tools-he2xa_o6/result.json）。独立具体整数枚举核验49组符号域组合的加/乘表通过（/tmp/luna-tools-p7ydsw3b/result.json），源码覆盖混合三次项、严格前提放宽和减法反例。目录/home/fin/luna，development/check.py：verification85（/tmp/luna-tools-nrjmvvi2/result.json）、execution1360/resources356（/tmp/luna-tools-tmfq5wkw/result.json）通过；fmt（/tmp/luna-tools-5vwywfzv/result.json）、git diff --check通过。文档同步，dev未提交。
+
+2026-10-22：新增luna --packages-v1多包进程入口，显式传入u32解析ID/u64语义身份/包名/OS路径、依赖别名、primary/builtin与HIR/NIR及源码协议选择；复用现有package frontend和原子输出发布，不添加隐式sysroot、anar配置语言或包路径身份猜测。路径经普通CLI选项解析的--边界保真，支持空格、旗标形路径和非UTF8路径。新增跨包调用、失败保持旧产物、依赖源码覆盖拒绝、协议来源名与alias区分、身份/边拒绝及builtin选择回归。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --lib --test frontend_cli --test packages --test modules：12单元+149CLI+56模块+41多包=258通过（/tmp/luna-tools-az9k2ixa/result.json）；fmt（/tmp/luna-tools-q6t8g77v/result.json）、git diff --check通过。接口文档development/package-cli.md已接入README。anar仓库仍未在本轮核查目录中找到；该入口可供构建工具调用，但不宣称anar或native backend完成。dev未提交。
+
+2026-10-22：多包进程入口接通comptime invocation、IIR实例化、参考执行（可选inline/Copy/Drop清理）及资源分析，复用普通CLI互斥/预算规则。入口使用primary对应语义身份，不能误取依赖同名函数。回归发现资源执行层此前仅按叶名重新查找协议；新增内部Name/Identity选择，package frontend返回本次解析的协议身份，执行/分析沿用身份，不把限定路径降成叶名。覆盖重复协议名、嵌套模块限定路径、依赖alias拒绝、输出一致性、失败/低预算保留旧输出及依赖源码覆盖拒绝。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --lib --test frontend_cli --test packages --test execution --test resources：12+150+41+1360+356=1919通过（/tmp/luna-tools-p3nizv8b/result.json）。fmt通过（/tmp/luna-tools-3x1mtth9/result.json），git diff --check通过。development/package-cli.md与CLI帮助同步；仍为参考执行，不宣称native backend或anar实现完成。dev未提交。
+
+2026-10-22：单文件/sysroot资源动作保留前端解析后的Copy/Drop身份，与多包入口共用Action执行路径；新增bound frontend内部结果，既有返回Artifact的调用保持兼容。修复限定路径在执行时按叶名重查的断点，并保持命令动作范围：sysroot manifest的Drop默认绑定不自动使仅Copy分析转为清理分析。新CLI回归覆盖根/嵌套同名协议、实际Ticket析构计划、builtin/std同名协议选择、显式选择覆盖manifest、inline路径与无Drop分析。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --lib --test frontend_cli --test modules --test packages：12+152+56+41=261通过（/tmp/luna-tools-6k2r9j2p/result.json）；fmt通过（/tmp/luna-tools-nn_g2s4r/result.json），git diff --check通过。接口文档同步；dev未提交。
+
+2026-10-22：统一source selector阶段校验，修复七种算术协议在HIR/AST导出时被静默忽略，以及直接传入Copy/Drop/ListPatternView等selector绕过Options检查的问题。单文件CLI、多包CLI、frontend API与package API共用检查；package API明确拒绝AST，避免隐式输出NIR。新增13种CLI绑定×两入口×默认/HIR/AST拒绝与NIR实际解析失败、旧输出保护，并验证API在文件读取前拒绝不适用阶段。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --lib --test frontend_cli --test packages：13+153+41=207通过（/tmp/luna-tools-tjyug1n6/result.json）；fmt（/tmp/luna-tools-62hmp7i2/result.json）与git diff --check通过。接口文档同步，dev未提交。
+
+2026-10-22：接通--list-pattern-protocol，支持单文件与packages-v1的NIR导出、实例化和参考执行，并可覆盖sysroot manifest已有默认。Options及现有消费者同步，绑定沿用源码包名/模块路径解析与阶段检查，不按trait拼写推断权限。新增可运行development/examples/list-patterns.fl与CLI回归：实际两元素匹配返回true、跨包绑定、错误alias/缺失/非trait拒绝、重复/缺值拒绝及manifest覆盖；阶段矩阵加入该选项。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --lib --test frontend_cli --test list_patterns：13+155+17=185通过（/tmp/luna-tools-nm6ccn90/result.json）；check -p luna --tests通过（/tmp/luna-tools-ldg8g3zr/result.json），检查所有测试目标编译而未全量执行；fmt（/tmp/luna-tools-7i4lp1bh/result.json）、git diff --check通过。dev未提交。
+
+2026-10-22：新增CLI列表模式与资源检查组合验收，覆盖普通/quote fn提取器×可选inline展开，使用限定身份Copy/Drop绑定。每组正常列表匹配返回true；将提取器改为写观察对象后，检查拒绝且保留先前结果，验证CLI接线未绕过observation约束。本轮未修改语言实现，只增加此前API级覆盖之外的真实进程组合回归与接口说明。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test frontend_cli list_pattern_cli_checks：1组8次进程行为通过（/tmp/luna-tools-cpvbjt3m/result.json）；fmt（/tmp/luna-tools-llwi0d3m/result.json）与git diff --check通过。dev未提交。
+
+2026-10-22：补充ListPatternView协议/长度边界回归。u8长度域下0/1/255项模式可编译，256项必须拒绝而非截断；无任何列表模式调用时，错误Element类型、长度返回类型、元素返回类型及comptime长度方法仍被拒绝。协议拒绝用例移除impl，排除实现签名不匹配掩盖绑定检查；非Type的Element在声明类型检查阶段即诊断，其余由ListPatternView检查拒绝。本轮新增测试，未修改实现。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test list_patterns：19通过（/tmp/luna-tools-jd38_7mv/result.json）；fmt（/tmp/luna-tools-idjx4gl7/result.json）与git diff --check通过。dev未提交。
+
+2026-10-22：实现通配符取反的表示无关简化。在一般negated_pattern_domain检查前识别仅由not链与_组成的模式，按奇偶性生成空备选/通配符；不读取值、不引入绑定，不放宽其他取反模式的表示约束。新增泛型/指针主语、双重取反及带创建副作用与真实Drop的拥有型输入回归，分别观察创建/清理状态，验证恒定模式结果不抹除主语计算或清理。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test normal_patterns --test list_patterns --test float_ranges：34+19+16=69通过（/tmp/luna-tools-sul5ep9g/result.json）；fmt（/tmp/luna-tools-wcrf26nr/result.json）与git diff --check通过。正式模式文档同步。dev未提交。
+
+2026-10-22：将取反模式的纯覆盖简化移至一般表示域检查之前，先完整检查内部模式并恢复locals，再化简无执行行为的候选。替代上一轮仅识别not/_语法链的特判，支持泛型not captured及其嵌套取反，保持内部绑定不导出；含guard/提取调用仍走原表示检查和正常执行。修复前泛型用例明确失败于negated pattern domain（/tmp/luna-tools-u5qoaiea/result.json）；修复后绑定作用域拒绝及既有副作用/清理回归通过。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test normal_patterns --test list_patterns --test float_ranges --test execution --test resources：35+19+16+1360+356=1786通过（/tmp/luna-tools-048jvvwv/result.json）；fmt（/tmp/luna-tools-lncyssox/result.json）、git diff --check通过。模式文档同步，dev未提交。
+
+2026-10-22：解除字符串取反的前端表示域误拒绝，沿用既有字符串字面量匹配及not候选执行。修复前含str别名的正确源码在negated pattern domain失败（/tmp/luna-tools-z9bp825y/result.json）。新增comptime与参考执行覆盖匹配/不匹配、空串、Unicode及or组合。受检执行暴露既有str内存布局缺失（/tmp/luna-tools-4dy3lt5g/result.json）；保留拒绝并显式回归，不把Str加入intrinsic_pointer_value假定其布局/Copy权限，不宣称安全执行已接通。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test normal_patterns --test float_ranges：36+16=52通过（/tmp/luna-tools-shorhtvi/result.json）；fmt（/tmp/luna-tools-mhquuxq2/result.json）与git diff --check通过。正式模式文档注明限制，dev未提交。
+
+2026-10-22：核对正式moves-and-initialization.md的TextPacket/take_view与drop-elaboration.md的PrintOnDrop，确认str是借用字符分配的视图，不能按无指针标量处理。将owned_fields对Str的误导性callable-fields错误改为明确的string-view memory provenance未实现及backing character storage有效性要求。新增直接str、记录字段、元组字段三种输入，即使显式Copy仍拒绝忘记借用来源；既有字符串取反测试更新诊断。尚需在输入/结果指针来源、表示运输和解释器视图投影之间完整接线，不能仅给intrinsic_pointer_value添加Str。目录/home/fin/luna，development/check.py：resources borrowed_string_views（/tmp/luna-tools-fnki5npw/result.json）、normal_patterns negated_string（/tmp/luna-tools-mlb57x7l/result.json）均通过；fmt（/tmp/luna-tools-yvg2ky_v/result.json）与git diff --check通过。文档说明修正为借用来源缺失，dev未提交。
+
+2026-10-22：检查借用字符串接线时发现模式字面量比较绕过按内容大小计费：普通String/Symbol相等已计费，但match_literal对String/Symbol/BitVec仅执行宿主比较。现统一在扫描前从解释器共享预算扣除文本字节/bit words工作；类型不匹配保持快速false，不混淆Symbol与String。新增预算不足、Unicode长共同前缀相等/不等、空串、BitVec宽度不匹配回归。此修改不提供str借用来源支持。目录/home/fin/luna，development/check.py：comptime_interpretor --lib --test scalar_equality共71+5通过（/tmp/luna-tools-i356zpqu/result.json），luna normal_patterns 36通过（/tmp/luna-tools-i53i4b3_/result.json）；fmt（/tmp/luna-tools-xul0920p/result.json）与git diff --check通过。dev未提交。
+
+2026-10-22：核验普通BitEqual已按words计费；另修复String/Symbol字面量执行每次Arc分配未按字节消耗预算的问题，在分配前从共享预算扣除长度工作，保留源码错误位置。新增同一IR节点重复求值：首次600字节文本成功、第二次超过剩余额度并返回StepsExhausted及原源码位置，覆盖String/Symbol。目录/home/fin/luna，development/check.py：comptime_interpretor --lib --test scalar_equality 72+5通过（/tmp/luna-tools-n579cn8s/result.json）；luna normal_patterns/execution 36+1360通过（/tmp/luna-tools-70fj_ymx/result.json）；fmt（/tmp/luna-tools-mkolqinu/result.json）与git diff --check通过。dev未提交。
+
+2026-10-22：接通普通源语言test声明到参考测试入口。resolver为每个声明分配独立def与不可拼写内部名称（含文件/node身份及标签）；标签不占普通值命名空间，重复标签可共存。HIR复用无参void runtime函数并以is_test明确标记，Display同步；NIR维护并dump test-entry身份。luna --test及packages-v1 --test选择主包测试，逐个新解释器执行，返回S-expression passed/count报告；首个失败带标签/身份，旧输出保持。复用既有fuel、显式Copy/Drop及inline执行路径；块内未扫描test明确诊断，不分配冲突fallback身份。覆盖命名/匿名/模块、同名函数隔离、重复标签不可调用、依赖测试排除、无测试、Drop失败、无限循环预算及CLI互斥。更新旧“test不支持”回归为错误test正文拒绝；未调整语言预期以迁就实现。目录/home/fin/luna，development/check.py：hir/resolve 26通过（另3个原有ignored文档示例，/tmp/luna-tools-p4b52jhy/result.json）；luna --lib/frontend_cli/modules/packages 13+160+56+41=270通过（/tmp/luna-tools-0hplr6f9/result.json）；fmt（/tmp/luna-tools-l7nh0ecx/result.json）、git diff --check通过。development/source-tests.md说明命令与边界。template test、过滤、并行调度及native测试仍未实现。dev未提交。
+
+2026-10-22：普通源测试增加结构化TestReport/TestResult与S-expression Display，run_report保留逐测试成功/失败证据；CLI适配器失败时输出完整报告到错误通道，状态1且保留原输出。谓词拒绝和单测试预算耗尽后继续其余测试，每项独立解释器/预算；主包过滤与重复标签身份保持。测试metadata和driver配置在执行前校验，拒绝重复/缺失/歧义声明以及无协议inline。新增混合报告、后续成功、双失败、预算隔离、错误配置/metadata回归。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test source_tests --test frontend_cli：2+161=163通过（/tmp/luna-tools-w_8r7hmb/result.json）；fmt（/tmp/luna-tools-bw_zxfkz/result.json）与git diff --check通过。development/source-tests.md同步，dev未提交。
+
+2026-10-22：新增tests/language/main.fl的20项普通Flurry源测试，明确声明Byte与Copy/Drop协议，不依赖未完成sysroot。覆盖泛型、产品/枚举模式、or/not/guard、let-else、闭包、默认输入、trait调用、comptime分支、quote调用、短路、指针写入、循环、拓展变参与可观察Drop。CLI集成测试在受检执行与可选inline两模式各20成功，并故意改错一个默认参数谓词，验证仍执行全部20项、准确19通过/1失败。修正初稿误用未实现数值转换与inline let，改为明确类型局部和正式inline if调用。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test frontend_cli repository_language_suite通过（/tmp/luna-tools-5gy8dpf4/result.json）；文档中的实际run命令执行tests/language/main.fl并报告count20/failures0（/tmp/luna-tools-hbp79uzf/result.json）；fmt（/tmp/luna-tools-p2_ck37l/result.json）与git diff --check通过。tests/language/README.md及source-tests文档互链。dev未提交。
+
+2026-10-22：新增--test-filter标签子串筛选，单文件/packages-v1与结构化run_report_filtered API一致；保持旧API默认全选。区分大小写，匿名名称anonymous，空串全选，无匹配明确count0；报告附filtered-out计数，仅计主包内排除项。筛选发生在源码/metadata检查之后，不能隐藏未选中测试的名称或类型错误；执行失败与退出码规则保持。修复实现过程中通用option_value拒绝合法空filter、动作依赖校验落入单个分支的问题，最终覆盖多种选项顺序/缺值/重复/无--test拒绝。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test source_tests --test frontend_cli：2+163=165通过（/tmp/luna-tools-whf3rs3c/result.json）；fmt --check（/tmp/luna-tools-27127i13/result.json）与git diff --check通过。开发接口及语言测试README同步，dev未提交。
+
+2026-10-22：补充普通源测试的跨文件/嵌套目录/嵌套显式包集成回归。四文件同名shared测试、同名ready函数各按本模块解析（包含返回相反结果的私有函数）；重复运行报告一致，改变一个模块谓词准确得到1失败/3成功。加入嵌套dependency/lib.fl显式包后，主包仍仅4测试；切换primary到依赖只执行其1项失败测试，验证源码发现边界与测试语义身份不会合并。本轮新增进程级回归，未修改编译器实现。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test frontend_cli source_tests_discover_files：通过（/tmp/luna-tools-0hjyi44p/result.json）；fmt（/tmp/luna-tools-sph3udxn/result.json）与git diff --check通过。dev未提交。
+
+Source test execution now shares immutable checked package preparation (Copy/Drop
+context and optional inlining) across selected entries, uses declaration identities,
+and indexes discovery once. Instance graphs, cleanup schedules and interpreters
+remain independent with fresh per-stage budgets. Regression tests cover mixed
+cleanup/assertion/budget outcomes, repeat invocation without source IR mutation,
+and metadata checks before filtering. In /home/fin/luna, wrapper tests for execution,
+resources and source_tests passed 1360 + 357 + 4 tests (exit 0):
+/tmp/luna-tools-dp44eo4j/result.json. frontend_cli passed 164 tests in
+/tmp/luna-tools-lctdp76r/stdout.log; that initial combined command exited 101 due to
+two new source-test fixture errors, corrected and rerun in the passing command above.
+No end-to-end complexity or measured speedup claim; per-entry acquisition remains.
+
+2026-10-22：普通参考测试也按声明ID调用，复用不可变类型上下文和implementation索引；修复普通模式重新按名称查找而受检模式按身份调用的不一致。普通命名interpret仍保留歧义诊断，测试逐项实例化和独立预算不变。新增三个同名不同身份测试（成功/失败/成功），普通、受检、内联三模式重复运行均准确选择正文。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test source_tests --test frontend_cli --test execution：5+164+1360通过，退出0，/tmp/luna-tools-fdp9f3au/result.json。fmt通过（/tmp/luna-tools-sxx6ym7k/result.json），git diff --check通过；dev未提交。
+
+2026-10-22：复现并修复执行入口的implementation索引缺少名义布局与声明参数域：Packet<Config{flag:true}>的泛型Copy在资源检查中错误保持deferred，证据/tmp/luna-tools-69v_ptwb/result.json退出101。新增implementation_world共享构建入口，供runtime、resources、invocation、comptime_keys、memoization使用；保持inherent与trait候选分离。新增struct/enum/newtype值索引的普通及inline受检执行，删除Copy后重复交付仍拒绝。目录/home/fin/luna，经development/check.py --timeout240 -- test -p luna --test nominal_value_parameters --test execution --test resources --lib：264+1360+357+13通过，退出0，/tmp/luna-tools-njz22so1/result.json。fmt（/tmp/luna-tools-d5pyy6xp/result.json）及git diff --check通过；语义说明同步，dev未提交。
+
+2026-10-22：增加struct/enum/newtype值索引的泛型Drop可观察执行，两种受检执行模式均清理并写回调用者标记。继续复现默认参数P3检查遗漏符号值参数域：Flag<which>的泛型Copy误拒绝，/tmp/luna-tools-qwqre4cw/result.json退出101。purity的resource_world_parts现登记全部声明域并从共享fuel扣除收集工作；泛型默认参数可复制外部输入，缺少Copy或只有Flag<false>实现仍拒绝。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test runtime_purity --test nominal_value_parameters：63+265通过，/tmp/luna-tools-8vnq7mdw/result.json退出0。fmt（/tmp/luna-tools-9_9ko03c/result.json）和git diff --check通过，文档加入实际源码示例。dev未提交。
+
+2026-10-22：完成名义值索引缓存入口的端到端回归：Key<Config{enabled:true}>的泛型Eq/Hash执行、固定Hash碰撞下的不同输入结果、重复调用命中；Config{enabled:false}输入拒绝、零预算调用失败后缓存仍保持两条且可再次命中。本轮新增行为验证，未新增缓存语义。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test execution memoized_nominal_value_index_keys：1通过，/tmp/luna-tools-2yp5y3ok/result.json退出0。fmt（/tmp/luna-tools-f9u9dqpj/result.json）及git diff --check通过，dev未提交。
+
+2026-10-22：新增luna --list-tests及packages-v1同名动作，编译后输出test-inventory（身份、标签、count、filtered-out），不运行测试正文；discover/TestInventory API与执行入口共享身份/函数元数据验证和标签规则。支持标签过滤、主包选择及既有受保护输出路径；拒绝与执行/emit/inline动作混用。进程回归用assumes false和无限循环证明不执行，过滤不掩盖源码错误，重复标签保留独立身份。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test source_tests --test frontend_cli：6+165通过，/tmp/luna-tools-f1fo6ry7/result.json；末次CLI细化后test_inventory通过，/tmp/luna-tools-08djkdxm/result.json。fmt（/tmp/luna-tools-mttaz9sa/result.json）及git diff --check通过；开发接口文档同步，dev未提交。
+
+2026-10-22：修复长平面列表模式生成线性Then链导致实例化深度失败。255项源码可elaborate却在1,000,000预算实例化报dispatch materialization budget exhausted，/tmp/luna-tools-k2gws6bl/result.json退出101。list_patterns lowering将每个别名观察步骤保留为独立Then，以无副作用Unit桥构成平衡序列，不复制主语且保持长度先行、候选绑定和短路顺序。255项完整匹配/首项失败/长度不匹配的实际提取次数255/1/0验证通过，资源检查执行也通过。目录/home/fin/luna：全list_patterns初次20项通过/tmp/luna-tools-kcxpc2nk/result.json；补充计数与受检回归后筛选list_patterns/frontend_cli，19+5通过/tmp/luna-tools-5as8ctos/result.json。fmt/tmp/luna-tools-vp3xsouy/result.json与git diff --check通过；文档同步，dev未提交。
+
+2026-10-22：长列表平衡生成后的跨分组候选验证：255项or模式，末项guard读取首项绑定；true输入首候选末尾失败后二次完整观察，false输入首候选成功。逐项核对length/element调用序列，普通参考与受检执行结果一致。初次受检1,000,000步耗尽（/tmp/luna-tools-igq4mj76/result.json），5,000,000步通过（/tmp/luna-tools-2l4i98tx/result.json），不声称资源检查成本已优化。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test list_patterns long_list_alternatives：1通过退出0。本轮新增回归，不改变实现语义；dev未提交。
+
+2026-10-22：优化受检解释器热路径的清理作用域查询。计划验证完成后建立具体InstanceKey到作用域引用的索引；copy、transfer、block、residual、discard与cleanup_site仅检查对应实例的上下文，不再逐次扫描全计划。索引构建、实例参数哈希工作与复制引用数量均计费；候选内的重复/上下文检查、清理动作及顺序保持。此前长列表双候选在1,000,000步耗尽，现恢复该预算并通过（/tmp/luna-tools-iaopxdd2/result.json，最终回归见下），不再依赖5,000,000步。目录/home/fin/luna，development/check.py --timeout240 -- test -p luna --test execution --test resources --test list_patterns：1361+357+21通过，/tmp/luna-tools-z2cr1p83/result.json退出0；comptime_interpretor --lib 72通过，/tmp/luna-tools-yukbq37z/result.json。fmt/tmp/luna-tools-j3qsrnzi/result.json及git diff --check通过，dev未提交。计划安装前的部分全局一致性验证仍保留线性/平方扫描，本次不声称所有清理成本均已优化。
+
+2026-10-22：检查一般meta.List接线时复现阶段漏洞：普通fn参数List<Type>原可通过源码编译，/tmp/luna-tools-lbbb0nlh/result.json退出101（拒绝回归失败）。NIR comptime_storage现在识别可信TypeList头的所有元素域为comptime-only，并递归检查可信Tuple结构视图；不展开Opaque头，未知泛型Tuple结构仍由实例化后检查。新增直接/指针/struct/enum/newtype/回调隐藏列表拒绝、嵌套Tuple阶段检查，以及Identity<Type>保持不透明。一般值列表构造仍未实现。目录/home/fin/luna，development/check.py --timeout240：luna type_lists/execution 14+1361通过（/tmp/luna-tools-1mgi35bz/result.json）；nir phases16通过（/tmp/luna-tools-3lrgh0z5/result.json）。fmt（/tmp/luna-tools-oc5nsf6z/result.json）与git diff --check通过。文档同步，dev未提交。
+
+2026-10-22：NIR阶段遍历补齐ErrorResult所有错误载荷及成功载荷、Computation返回载荷；效应身份不当作runtime数据字段。源码覆盖!Fault Type、携Type的Fault、指针间接隐藏Integer拒绝，同样签名在comptime函数中允许，普通!Fault bool保持合法；NIR computation的bool/Type/Integer阶段分别验证。初稿源码直接使用.Type'builtin被解析为错误标签后缀，改为明确别名后验证，未将该解析错误作为阶段漏洞证据。目录/home/fin/luna，development/check.py：error_surface117通过/tmp/luna-tools-xe98o4tu/result.json；补充comptime正例定向通过/tmp/luna-tools-3s35962f/result.json；nir phases17通过/tmp/luna-tools-quv8gt9x/result.json；execution1361通过/tmp/luna-tools-va08qlqq/result.json。fmt/tmp/luna-tools-ndg0c2ys/result.json及git diff --check通过，文档同步，dev未提交。
+
+2026-10-22：复现泛型实例化后runtime签名未重新检查阶段：consume<Type>可生成runtime Type参数的IIR（/tmp/luna-tools-rhuv16h9/result.json拒绝测试失败）。materialization交付前对所有runtime具体签名调用存储阶段验证，使用原声明布局且不展开普通范式头。回归覆盖Type/Integer/Float直接、指针、Box<T>与错误结果输入拒绝，bool实例允许。目录/home/fin/luna，development/check.py --timeout240：execution1362通过/tmp/luna-tools-hyzs2lyv/result.json；nominal_staging/type_lists通过/tmp/luna-tools-hoz20cne/result.json；fmt/tmp/luna-tools-4h_y90px/result.json及git diff --check通过。文档同步，dev未提交。本次补齐具体签名交付边界，不宣称底层IIR独立校验器已完成所有阶段重检查。
+
+2026-10-22：将具体runtime签名阶段检查推进至IIR独立校验器，并删除elaboration出口重复检查。NIR提供接受已解析名义布局的共享存储阶段入口；IIR使用具体nominals索引提供struct/enum/newtype实际字段，不依赖源泛型元数据。新增直接改写IIR名义字段为Type、直接改写runtime参数为Type均拒绝，Phantom<Type>实际bool字段保留合法。目录/home/fin/luna，development/check.py --timeout240：luna execution/nominal_staging/type_lists通过/tmp/luna-tools-ys5p_v4h/result.json；iir全crate通过/tmp/luna-tools-03a3h4nb/result.json，均退出0。fmt/tmp/luna-tools-tfknhdia/result.json及git diff --check通过。文档同步，dev未提交；本次范围为具体签名，非所有表达式阶段规则重演。
+
+2026-10-22：复现IIR独立校验可接受runtime函数体内Type局部存储（/tmp/luna-tools-kz58jg89/result.json拒绝回归失败）。新增iir/storage.rs，使用有预算的pruned遍历检查runtime函数体/契约/runtime默认值，并按调用参数sort隔离comptime实参、保留两个TypeValue的类型观察；共享具体名义存储域检查，不展开普通头。目录/home/fin/luna，development/check.py --timeout240：execution1364通过/tmp/luna-tools-b1v6fvyr/result.json；iir全crate通过/tmp/luna-tools-mrqnvtzv/result.json。fmt/tmp/luna-tools-9wsv0m4z/result.json和git diff --check通过，文档同步，dev未提交。
+
+2026-10-22：为递归存储阶段验证接入共享预算；IIR签名/函数体检查向NIR入口传递剩余fuel，具体名义解析器在克隆每个字段前计费，递归类型scope/hash/clone前计费。旧source API保持默认有界入口。新增256字段布局的小预算拒绝、充足预算恢复、零预算与缺失布局拒绝，失败不修改类型世界。目录/home/fin/luna，development/check.py --timeout240：nir phases18通过/tmp/luna-tools-zb509nca/result.json；luna execution1364/list_patterns21通过/tmp/luna-tools-9lk3g22p/result.json，含100万步长列表案例。fmt/tmp/luna-tools-obzh2534/result.json及git diff --check通过；文档同步，dev未提交。
+
+
+### 编译期 ListPatternView 匹配
+
+列表协议验证同时保留 size 域和方法执行阶段；两个方法必须同阶段，候选 lowering 要求与当前表达式阶段一致。复用现有 Observe/Then 降码、关联方法选择和 invocation，无新增模式执行器。已覆盖编译期常量、类型选择、泛型关联元素、返回 Type 的提取、长度及元素短路、空模式、预算耗尽与后续调用恢复；运行时路径与混合阶段拒绝保留。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test list_patterns`，25 项通过，退出 0，报告 `/tmp/luna-tools-1zxcjo3r/result.json`；相关 comptime_memory 13 项通过，报告 `/tmp/luna-tools-vmbhfu8h/result.json`。全 workspace fmt 报告 `/tmp/luna-tools-ggoln5ek/result.json`。没有全量测试或提交。
+
+边界：驱动仍绑定一个列表协议身份；不是同时注册 runtime/comptime 两套协议的实现。rest/endless 和拥有资源提取尚未完成。探索 Type 字段指针读取时得到 `Copy representation is not established for this value category`，没有绕过现有证据检查；Type 元素回归验证的是方法计算并返回类型。
+
+
+### 显式 Type Copy 的表示证据
+
+Copy acquire 已接受不可变 Type 描述的表示，仍要求具体 Copy 能力和平凡清理；不把 Type 新增为 intrinsic Copy，也不改变 runtime 存储检查。受需 comptime invocation 可读取、替换 Type 局部存储，列表协议可提取 Type 字段。回归覆盖 normal-form 头保留、缺少 Copy 拒绝及清理/阶段拒绝。此前类型字段的表示限制已在此路径解除；原始解释器和未安装资源证据的调用入口仍不自行取得 Copy 权限。
+
+工作目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 240 -- test -p luna --test comptime_memory --test list_patterns` 40 项通过（`/tmp/luna-tools-hdx7r6o1/result.json`）；`-- test -p luna --test resources` 通过（`/tmp/luna-tools-9c__lnh3/result.json`）。fmt 退出 0（`/tmp/luna-tools-k8bv8b2_/result.json`），diff 检查通过。未提交。
+
+
+### 显式 comptime invocation 的 Copy 资源绑定
+
+新增 `invocation::invoke_with_protocols`，单文件及 packages-v1 的 `--invoke-comptime` 接受成对 Copy/Drop 选项。CLI 使用前端选定的声明身份，API 保留显式名称解析；Copy 表示/清理证明计入 invocation 剩余预算，并保留失败原因。未绑定不自动取得权限。验证覆盖 Type 指针传送、聚合复制/替换、缺少实现、非平凡清理、预算耗尽及后续恢复，以及两个 CLI 驱动的成功、无授权和不成对选项拒绝。
+
+工作目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 240 -- test -p luna --test comptime_memory --test frontend_cli --lib` 193 项通过（`/tmp/luna-tools-20rkg5_j/result.json`）；添加聚合回归后 comptime_memory 15 项通过（`/tmp/luna-tools-x_fgj5cs/result.json`）。fmt 报告 `/tmp/luna-tools-x8nd7_x0/result.json`。未执行全量测试，未提交。
+
+
+### 缓存 invocation 的资源授权
+
+Memoized Invocation 的 LangItems 可绑定成对源 Copy/Drop；准备时检查身份并随 owned package 固定。未命中执行安装有预算的表示/清理证据回调，失败保留原因且不发布结果；未授权快照不共享授权快照的缓存。测试覆盖 Type 局部读取/替换、首次执行与命中、低预算失败后恢复和无授权失败不缓存。
+
+工作目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 240 -- test -p luna --test execution memoized` 11 项通过（`/tmp/luna-tools-xqslh8gf/result.json`）；comptime_memory 16 项通过（`/tmp/luna-tools-nxmzbunw/result.json`）。fmt 退出 0（`/tmp/luna-tools-w5e98ego/result.json`），diff 检查通过；未提交。
+
+
+### 源 Eq/Hash 的编译期资源权限
+
+comptime_keys::Protocol 固定显式源 Copy/Drop 身份，在键方法执行中安装计入查询预算的 Copy 证据回调。没有改变不可变输入准入和源 Eq 判等规则。新增碰撞回归覆盖 Eq/Hash 内的局部聚合复制、缓存命中及未授权键失败不发布缓存。
+
+`/home/fin/luna`：`python3 -B development/check.py --timeout 240 -- test -p luna --test comptime_memory` 17 项通过（`/tmp/luna-tools-kwz_j41t/result.json`）；`-- test -p luna --test execution comptime_` 通过（`/tmp/luna-tools-jo59484s/result.json`）。格式化退出 0（`/tmp/luna-tools-m930qnof/result.json`），diff 检查通过；未提交。
+
+
+### 显式与缓存 invocation 的类型证明计费
+
+解释器新增 with_budgeted_type_solver，同时用于契约检查与类型相等的正向/否定证明；剩余预算只减不增，耗尽不再次调用宿主。luna 的显式 invocation、memoization 正文及 comptime_keys 已通过公共 solve_metered 适配到 World::check_predicate_metered。旧 with_type_solver 保持兼容；受需 elaboration/type-computation 等其它宿主接线尚未在本次统一迁移，不能称全部宿主求解已统一计费。
+
+`/home/fin/luna`：execution comptime_ 178 项通过（`/tmp/luna-tools-qak741s6/result.json`）；解释器 lib 73 项通过（`/tmp/luna-tools-yf68gb_p/result.json`）；execution memoized 11 项通过（`/tmp/luna-tools-jlt1_r2c/result.json`）。均通过 development/check.py，退出 0；fmt `/tmp/luna-tools-x5a18lq5/result.json`，diff 检查通过。未提交。
+
+
+### 受需求值的类型证明计费
+
+PreparedRequired 的类型求解器改为消耗 invocation 剩余预算，普通值解释器和 Type 结果 Session 均接入。Session 内部以 ProofSolver 区分旧回调和计费回调，公开旧 API 保持兼容。测试比较有/无非平凡契约的实际预算消耗，同时覆盖两类结果的低预算拒绝与新 invocation 恢复。不宣称 scope substitution 或所有编译器准备工作已统一计费。
+
+`/home/fin/luna`：`development/check.py --timeout 240 -- test -p luna --test comptime_memory --test type_lists` 31 项通过（`/tmp/luna-tools-k6x29gsg/result.json`）；`-- test -p elaboration --lib` 200 项通过（`/tmp/luna-tools-ddb5ke1h/result.json`）。fmt `/tmp/luna-tools-dd00yfd7/result.json`，diff 检查通过；未提交。
+
+
+### 运行时参考执行的类型证明预算与迁移回归
+
+execution 的三个解释器入口改用 with_budgeted_type_solver，测试会话复用后自动覆盖。扩大回归发现上一轮 PreparedRequired 将单次证明额度扩大到全部 remaining，trait 预留计费使布尔泛型契约转发过快耗尽预算。现恢复默认单次上限，并取 remaining 的较小值；没有恢复独立免费预算或改变 trait 语义。
+
+`/home/fin/luna`：首次 execution/source_tests 运行在泛型布尔 trait 转发处失败（`/tmp/luna-tools-8s5a8hft/result.json`）；修复后定向复现通过（`/tmp/luna-tools-c9q0ae6g/result.json`），完整 execution 1364 + source_tests 6 项通过（`/tmp/luna-tools-or5wvut6/result.json`）。均使用 development/check.py --timeout 240；fmt `/tmp/luna-tools-pthf0626/result.json`，diff 检查通过。未提交。
+
+
+### 受检运行时指针 Copy 证明计费
+
+CheckedSession 由独立预算 copy_delivery 回调改为 with_budgeted_pointer_copy_permission；直接取得具体 Copy/清理证据，将报告的证明消耗扣入运行时预算。错误附带 Copy 证据原因，保持同一协议和源布局世界。
+
+`/home/fin/luna`：development/check.py --timeout 240 -- test -p luna --test execution --test resources --test list_patterns 共 1749 项通过（`/tmp/luna-tools-2yq_peew/result.json`）；补充诊断后 resources copy 定向组通过（`/tmp/luna-tools-_l0nnjpi/result.json`）。fmt `/tmp/luna-tools-p2badk6b/result.json`，diff 检查通过；未提交。
+
+
+### 已有 trait 证据查找的内部共享预算
+
+Solver::given_frames 不再为每次参数形成与类型相等证明重新分配完整 allowance；输入遍历、telescope 复制及 PTC 相等证明消耗 Solver.remaining，预算耗尽立即停止遍历。新增宽类型相等输入的低预算拒绝/恢复用例。仍发现未解决边界：Copy classify 调用的 given/resolve_instance 不向 acquire 返回完整子查询消耗，候选匹配亦有独立 allowance；先前入口计费不可解释为这部分已完全计入外层。
+
+`/home/fin/luna`：elaboration lib 200 项（`/tmp/luna-tools-_d9krchr/result.json`）、capabilities 最终 38 项（`/tmp/luna-tools-6vky5cw9/result.json`）、luna nominal_value_parameters 265 与 resources 357 项（`/tmp/luna-tools-qyy_7rv5/result.json`）通过。均使用 development/check.py --timeout 240；fmt `/tmp/luna-tools-w3j3f6ss/result.json`，diff 检查通过；未提交。
+
+
+### Copy 分类回传能力求解器计数
+
+新增 World::given_metered 与 resolve_instance_metered，在成功/失败后均回传 Solver.remaining。Copy acquire 改用 classify_with_fuel，共享输入检查、已有证据查找及能力解析报告的消耗，不再丢弃这些计数。旧接口委托至新入口。仍未完成：implementation/applicability.rs::resolve_assessed_with 的候选匹配子预算完整回传，不能宣称所有嵌套证明已精确计费。
+
+`/home/fin/luna`：capabilities 最终 39 项（`/tmp/luna-tools-u7zvf5ok/result.json`）、verification 85 项（`/tmp/luna-tools-kcyrpahy/result.json`）；luna comptime_memory 17、nominal_value_parameters 265、resources 357 项（`/tmp/luna-tools-mhba76xv/result.json`）通过。development/check.py --timeout 240，fmt `/tmp/luna-tools-dqf6tfez/result.json`，diff 检查通过；未提交。
+
+
+### 候选搜索预算回传
+
+Index::candidates_metered 直接更新搜索剩余计数，键构造和扫描失败也保留消耗；resolve_assessed_with_search_budget 将搜索消耗交还能力 Solver，同时保持原候选 allowance 分配。新增宽类型无候选搜索的耗尽与成功计费回归。这里覆盖候选筛选，不等于 HeadMatch 内部和所有条件证明的完整计费。
+
+`/home/fin/luna`：capabilities 40、implementation 67 项通过（`/tmp/luna-tools-hukai1jh/result.json`）；comptime_memory 17、nominal_value_parameters 265 项通过（`/tmp/luna-tools-9uj865p0/result.json`）。使用 development/check.py --timeout 240；fmt `/tmp/luna-tools-pcddph_g/result.json`，diff 检查通过；未提交。首轮新增测试误访问私有字段导致编译失败，已改用 declarations()，没有修改 API 可见性。
+
+
+### 候选结构推断及义务推进的共享额度
+
+matching::propose_metered、Engine::match_many_metered 在失败后返回已有消耗，失败 trial 不发布推断赋值。advance_metered 在一个额度内推进多个义务，耗尽后未处理项继续排队；旧 advance 保留兼容。HeadMatch 使用这些接口，按关系数合并原先预留的匹配/证明 slots，而非把每个义务重置为整份预算。仍不宣称整个 HeadMatch 的全部准备/克隆/子查询消耗已回传到外层。
+
+`/home/fin/luna`：matching 14、obligations 10、implementation 67 项通过（`/tmp/luna-tools-lxrtlzle/result.json`）。首次集成发现布尔方法契约受局部额度分区错误影响（`/tmp/luna-tools-0_62gr1a/result.json`），合并原预留 slots 后定向通过（`/tmp/luna-tools-k74wwugc/result.json`），最终 execution 1364 + nominal_value_parameters 265 项通过（`/tmp/luna-tools-7kjw6us1/result.json`）。均使用 development/check.py --timeout 240；fmt `/tmp/luna-tools-i1o2a86u/result.json`，diff 检查通过；未提交。
+
+
+### 结构匹配输入先计费再复制
+
+新增 inference_budget::copy_input，迭代检查 inference syntax 和 Term 深度/规模，在复制匹配工作项前扣费。未使用的 substitution 输入只统计复制结构，不做变量查找或求值。回归覆盖宽相等输入不能靠结构快捷路径绕过小预算，以及未使用外来变量不会被计费检查强制解析。该改动不宣称 trial 状态克隆、后续 alias resolve 和全部冻结工作已统一计费。
+
+`/home/fin/luna`：implementation 67 项通过（`/tmp/luna-tools-v45wzov7/result.json`）；matching 最终 16 项通过（`/tmp/luna-tools-1am80300/result.json`）；luna execution boolean_ 定向组通过（`/tmp/luna-tools-byd8np59/result.json`）。使用 development/check.py --timeout 240；fmt `/tmp/luna-tools-_yyfhadf/result.json`，diff 检查通过；未提交。
+
+
+### 匹配中的有界别名解析
+
+InferenceContext::resolve_with_limits 计费遍历别名、冻结已完成类型及复制未解结构，matching::resolved_shape 使用该接口。已复制/计费且完全相等的输入跳过重复解析。HeadMatch 的共享推断额度合并输入观察、别名解析、匹配与每条关系证明的既有 slots，候选总预算保持不变。新增长别名链的低预算失败、保留末端未解变量与赋值后恢复回归。trial 状态克隆和其它旧 resolve 调用者仍未统一迁移。
+
+`/home/fin/luna`：最终 implementation 67、matching 17 项通过（`/tmp/luna-tools-p2nl3tsf/result.json`），luna execution boolean_ 30 项通过（`/tmp/luna-tools-c8zrzuz7/result.json`）。集成曾因未给输入观察/解析分配 slots 而失败（`/tmp/luna-tools-gvo9w3ll/result.json`），已修复；没有提高用户或测试预算。development/check.py --timeout 240，fmt `/tmp/luna-tools-bruaeyz0/result.json`，diff 检查通过；未提交。
+
+
+### 匹配赋值的有界 occurs-check
+
+新增 InferenceContext::assign_with_limits，匹配提议改走该入口。别名/有效 substitution 依赖遍历共享 fuel，模板在扫描参数前计费；只有检查完成后才发布赋值。sort 本身为常量时间分派，本轮不为它增加无关遍历。新增低预算失败、循环依赖拒绝及后续合法赋值恢复回归。旧 assign 调用者及整个 trial 状态复制尚未统一迁移。
+
+`/home/fin/luna`：implementation 67、matching 18 项通过（`/tmp/luna-tools-8iuv2ita/result.json`），luna execution boolean_ 30 项通过（`/tmp/luna-tools-9ocm4elj/result.json`）。使用 development/check.py --timeout 240；fmt `/tmp/luna-tools-7mdcktsa/result.json`，diff 检查通过；未提交。
+
+
+### 义务准备阶段的预算与恢复
+
+advance_metered 使用有界依赖扫描和冻结，包括稳定公式复制及 scope 域复制计费。准备阶段 Budget 错误保持 State::Ready 并重入 ready 队列，不把可重试耗尽记录为 InvalidInference；充分预算下无需伪造证明即可继续。候选共享额度纳入既有分区中的依赖扫描/冻结 slots，候选总预算不变。
+
+`/home/fin/luna`：最终 implementation 67、matching 18、obligations 11 项通过（`/tmp/luna-tools-38fq_bkv/result.json`）；execution boolean_ 30 项通过（`/tmp/luna-tools-4lt905be/result.json`）。新增阶段未分配 slots 时曾触发泛型方法回归（`/tmp/luna-tools-aam6oiu7/result.json`），已修复，未增加测试预算。development/check.py --timeout 240；fmt `/tmp/luna-tools-e0pbkx9g/result.json`，diff 检查通过；未提交。
+
+
+### 候选推断存储共享快照
+
+InferenceContext::trial 改为共享不可变表，首次 fresh/assign 才分离变量表；赋值后的 InferenceTerm 通过 Arc 共享，分离表不再递归复制既有类型结构。提交仍检查父身份与 revision，活动变量的赋值不会跨候选传播。预算赋值在检查成功后才分离存储。新增回归覆盖共享、写入隔离、失败不分离以及提交后兄弟候选失效。这里只优化推断存储，Engine 的义务、scope 和 PTC context 复制以及写时表复制计费仍需独立处理。
+
+/home/fin/luna：development/check.py --timeout 240 -- test -p elaboration --lib --test inference --test matching --test obligations --test implementation 共 312 项通过（/tmp/luna-tools-4pju8zks/result.json）；源级 execution/list_patterns/nominal_value_parameters/resources 共 2014 项通过（/tmp/luna-tools-def1xyd3/result.json）。全 workspace fmt 通过（/tmp/luna-tools-vg9n7ybc/result.json），git diff --check 通过。保留 dev 工作区，未提交。
+
+
+### PTC 分支上下文共享只读存储
+
+Context 的 scope、assumptions 和三类声明权限集合改为分别共享、写时分离；fork 不再深拷贝公式，theory_context/theory_in_scope 复用全局权限而清空局部假设。Proof/Witness 公开字段继续持有独立证据，回放要求精确相同的 scope、假设和权限。新增测试验证分支写入不传播、只分离被修改组件、全局上下文不继承局部矛盾，以及旧证明不能在已改变的分支回放。假设首次写入和证明构造仍需复制，未宣称所有复制已消除或计费。
+
+/home/fin/luna：development/check.py --timeout 240 下 elaboration implementation 67、obligations 11 通过（/tmp/luna-tools-2a7xjh_1/result.json）；新增测试后 lib 203、capabilities 40、ptc 56、ptc_integer 9、ptc_kinds 7 通过（/tmp/luna-tools-1akqh6o9/result.json）；luna execution 1364、nominal_value_parameters 265 通过（/tmp/luna-tools-c93u00bf/result.json）。全 workspace fmt（/tmp/luna-tools-6paypdka/result.json）及 git diff --check 通过。dev 未提交。
+
+
+### 完整候选事务的共享快照
+
+Engine 的 scope、义务表、ready 集合、watcher 表及每个 watcher 集合改为写时分离。义务节点与 Requirement 独立共享；重新入队用新状态替换节点，避免复制即将失效的旧证明。结合前两轮的 inference/context 共享，trial 现在不遍历这些表或公式；首次修改仍可能复制表结构，未声称写入或全部预算计费为常数成本。64 个共同依赖变量的义务回归验证父子及兄弟等待状态隔离、未修改证明共享、完成提交及 stale candidate 拒绝。
+
+/home/fin/luna：development/check.py --timeout 240 -- test -p elaboration --lib --test obligations --test matching --test implementation：204+11+18+67 项通过（/tmp/luna-tools-2294zjoh/result.json）；luna execution/list_patterns/nominal_value_parameters：1364+28+265 项通过（/tmp/luna-tools-b6r74bt7/result.json）。全 workspace fmt（/tmp/luna-tools-k2gz1d8x/result.json）及 git diff --check 通过。dev 未提交。
+
+
+### 测试模板的语法与定义 HIR
+
+开始接通 docs/functions/templates.md 的 template test：lexer 加入已由文档确定的 template 关键字；AST 区分 TestTemplateDef（名字、子句、正文）和 TestTemplateInstance（名字、模板表达式、正文）。解析保留 contextual 接口、qualified/参数化模板表达式和块边界，拒绝缺少名字/表达式/正文。resolver 为定义扫描锚定子句，lowering 保留定义的 contextual 输入及 splice，FnModifiers::is_test_template 和 S-expression dump 明确区分普通可执行测试。通过 pending_semantics 拒绝未展开模板生成 NIR；实例 contextual 绑定仍明确诊断，不伪造普通测试。尚未实现实例 HIR/CMTT 展开、唯一正文锚定参数验证及模板测试执行，后续应复用现有 code context 与卫生性机制。
+
+/home/fin/luna：development/check.py --timeout 240 -- test -p lex -p parse 全部通过（/tmp/luna-tools-afemfnp4/result.json），包含新增 4 组模板语法测试；luna test_templates 2 项与 source_tests 6 项通过（/tmp/luna-tools-pmh6uhta/result.json）。首轮 HIR 用例缺少普通别名 u32/void 导入而失败（/tmp/luna-tools-h1r19bmm/result.json），已为独立 fixture 显式声明别名，没有新增隐式 builtin 名称。全 workspace fmt（/tmp/luna-tools-of9j9zeo/result.json）与 git diff --check 通过。dev 未提交。
+
+
+### 测试模板正文入口身份
+
+FnSig::test_template_body 提供唯一锚定子句输入的查询；lowering 对缺失/重复入口诊断。入口依赖参数角色与 HirId，不依赖 body 这个名字；optional/variadic 不计入，Type/TraitBound 简写计入，quote 不改变路由类别。HIR dump 增加 template-body-binding，保留 contextual 参数原类型。模板实例 HIR、contextual 正文绑定和 CMTT 展开仍未实现，pending_semantics 继续阻止执行。
+
+/home/fin/luna：development/check.py --timeout 240，luna source_tests 6 与 test_templates 4 通过（/tmp/luna-tools-xkbt8ibq/result.json）；加强 dump 断言后模板 4 项复核通过（/tmp/luna-tools-5txqxt4l/result.json）。HIR display 检查暴露上一轮 FnModifiers 新字段遗漏一个手工 fixture（/tmp/luna-tools-cj7tamjp/result.json），补齐后 13 项通过（/tmp/luna-tools-5j51a16k/result.json）。全 workspace fmt（/tmp/luna-tools-obhe0jmq/result.json）与 git diff --check 通过。dev 未提交。
+
+
+### 测试模板实例 HIR 与词法上下文
+
+resolver 声明扫描记录显式 contextual 正文接口的端口名字（不是类型证据），实例按选中的 declaration 查找，因此不依赖模板 HIR 的生成顺序。实例使用独立 ItemKind/DefKind，保留模板表达式、fresh 端口 HirId 和 BodyId；Display 输出 test-template-instance/test-template-port。端口加入本实例 rib，只遮蔽本实例中的同名全局，私有模板局部不导入，兄弟实例身份不共享。模板实例使用普通测试的不可调用合成声明名字。端口类型/substitution/CMTT 展开仍未接通；computed/aliased 接口暂无法发现端口，明确拒绝。pending_semantics 保持 NIR 执行门禁。
+
+/home/fin/luna：development/check.py --timeout 240 -- test -p luna --test test_templates --test modules --test source_tests：8+56+6 通过（/tmp/luna-tools-fhjl6tnp/result.json）；HIR display 13 通过（/tmp/luna-tools-37p9rp6w/result.json）。覆盖前向引用、限定路径/导入、实际独立文件模块、端口遮蔽全局函数、两次实例身份、私有局部拒绝、重复端口及非模板目标拒绝。首次独立模块 fixture 误写不存在的 mod 声明形式（/tmp/luna-tools-dkjyaiq2/result.json），按正式源码发现规则改为文件模块和 use 后通过。新增节点初次编译的 DefKind 穷举和 Symbol 非 Ord 问题已修复。全 workspace fmt（/tmp/luna-tools-mnnyo64t/result.json）与 git diff --check 通过。dev 未提交。
+
+
+### 测试模板实例链接原声明接口
+
+新增 ast_lowering/test_templates.rs，在 provider 完成所有文件与模块 owner 组装后链接实例。按已解析模板 declaration 找到唯一正文参数，核对扫描端口数量/次序/名字，再保存正文参数 HirId、原声明的 contextual 类型表达式，以及每个 instance port 对应的 formal HirId。HIR Display 输出 test-template-interface 和 formal 字段。接口表达式直接引用声明侧 HIR，不按调用方同名类型重解析；这只是接口身份链接，不是端口类型检查或 CMTT 展开。pending_semantics 仍阻止执行，后续连接需复用 ExpressionCode 检查和 splice substitution。
+
+/home/fin/luna：development/check.py --timeout 240 -- test -p luna --test test_templates --test modules --test source_tests：9+56+6 项通过（/tmp/luna-tools-8pueag3h/result.json），新增调用方/声明方同名 Shared 类型不重绑定的回归，并核对两个实例均有已链接 interface/formal 身份。HIR display 13 项通过（/tmp/luna-tools-aw6zeuda/result.json）。全 workspace fmt（/tmp/luna-tools-ezh5wk92/result.json）及 git diff --check 通过。dev 未提交。
+
+
+### 测试模板正文 splice 的隐式端口身份
+
+LoweringContext 临时保存当前测试模板正文子句的声明 DefId 与公开端口；直接 splice 该参数时，为没有显式 substitution 的端口取得当前可见 Local/FnParam/ExpandedLocal 身份，并生成现有 CodeSubstitution HIR。显式项优先；同名全局定义、缺失/后续局部不会自动供给。退出 callable lowering 恢复外层映射；普通 code 值和其它 splice 路径不获得该名字匹配行为。这是定义端词法对应，端口类型检查与实际 CMTT 展开仍待接通，pending_semantics 不变。
+
+/home/fin/luna：development/check.py --timeout 240 -- test -p luna --test test_templates --test cmtt --test source_tests 共 11+523+6 项通过（/tmp/luna-tools-vmz0l91c/result.json）。新增隐式两端口、显式覆盖并保留另一隐式项、全局同名及后声明局部拒绝用例。首次编译使用了未直接依赖的 symbol 路径，已改用 resolve::DefId；首轮新增 dump 断言误认为 port 直接输出字符串，已按现有 Ident S-expression 修正（失败 /tmp/luna-tools-d7erelcr/result.json）。全 workspace fmt（/tmp/luna-tools-75sujc64/result.json）及 git diff --check 通过。dev 未提交。
+
+
+### 模板 splice 显式项和词法边界
+
+直接模板正文 splice 在补隐式项前校验显式 substitution：拒绝重复/未知端口以及非 Local/FnParam 身份。声明端无实例时也检查重复上下文名字。新增回归比较实际 HirId，确认嵌套块中的端口取内层而非外层，并验证退出块后不能自动取得已失效名字。字面量/计算调用原本就由 parser 的绑定标识符语法拒绝，测试分别断言解析与 lowering 诊断，没有放宽该语法。类型与展开阶段仍未接通。
+
+/home/fin/luna：development/check.py --timeout 240 -- test -p luna --test test_templates --test cmtt --test source_tests：14+523+6 通过（/tmp/luna-tools-9ddgxcsi/result.json）。首轮把字面量拒绝误期望为 lowering 诊断，已按实际阶段修正（/tmp/luna-tools-jk9pread/result.json）。全 workspace fmt（/tmp/luna-tools-lyk2k_v_/result.json）及 git diff --check 通过。dev 未提交。
+
+
+### 测试模板 CMTT 展开与受检执行
+
+测试模板正文参数接入现有 ExpressionCode；实例在声明 contextual 接口下检查，经端口身份对应和现有受检 substitution 接入 setup，最终 freshen 整个主体并生成普通 runtime 测试函数。保留普通测试与实例的声明顺序，无实例的定义也检查。正文结果遵循接口，最终测试函数返回 void。generator_frame 隔离展开阶段状态；测试运行器沿用已有资源检查、清理及可选内联。当前只支持单正文参数、显式 contextual 接口；附加子句输入/契约、显式应用参数及计算接口明确拒绝，函数模板未完成。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test test_templates --test source_tests --test execution --test resources：20+6+1364+357 项通过，退出 0（/tmp/luna-tools-os3lo6lx/result.json）。覆盖实例初始化与失败隔离、显式端口置换、跨文件模块、bool 正文结果、无实例定义诊断以及受检清理的普通/内联两种路径。CMTT 523 项此前同轮通过（/tmp/luna-tools-7gmeuwjm/stdout.log）；该轮模板组曾因 fixture 使用保留关键字 predicate 失败，已重命名后验证。扩大回归发现旧 execution fixture 使用新关键字 template 作局部名，改为 exemplar；此前失败证据 /tmp/luna-tools-0kcivsxm/result.json。dev 工作区保留，未提交。
+
+### 测试模板可选子句与命名输入
+
+保留唯一锚定正文入口，接通额外 Optional 子句及 `test ... use fixture<.name=value>`：定义检查使用抽象值，实例按声明顺序求取默认值，前项实际输入供后项使用；显式命名值取代默认值且保留使用侧解析身份。Type 输入保持类型身份并实例化 contextual 正文接口。拒绝重复、未知、占用正文入口的命名项以及错误值类型、自引用/后向默认依赖。默认值检查进入 required-comptime 上下文，避免把模块常量误判为需 Splice 的 runtime 读取。变参、子句契约及非显式接口仍待实现。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test test_templates --test cmtt --test source_tests：28+523+6 项通过，退出 0（/tmp/luna-tools-z5lei02m/result.json）。8 个新增测试覆盖计算默认值、后项依赖、Type 输入与接口专化、错误路由、未实例化默认值不调用、显式覆盖不调用被替代默认值、跨模块同名常量的声明侧/调用侧身份。中间失败包括 fixture 遗漏 builtin Type 写法（/tmp/luna-tools-8er1x69m）、Symbol 不支持 BTreeMap 的 Ord（/tmp/luna-tools-zcn7yfie）以及模块常量默认值的阶段处理缺失（/tmp/luna-tools-w5jfborc），均修复后验证。dev 未提交。
+
+### 测试模板契约、提前返回与清理
+
+生成函数保留 ProgramContract 的 requires/ensures；沿现有程序规格路径检查可支持的无副作用谓词。类型 requires 独立分类，在抽象定义检查中作为前提，在实例化时由当前 PTC 能力证明；无法建立时拒绝，不转换成 runtime 程序谓词。可选子句临时注册值域以正确分类值相等与类型相等，检查结束恢复元数据。decreases/outcome、old 入口快照等仍待支持。
+
+抽取现有 quote 表达式检查为共用 helper，普通 quote 不带返回目标，测试实例正文显式带生成函数的 void 返回目标；不捕获外层 loop/resume。return 退出整个测试，正常后置条件检查和受检清理继续生效。正文内嵌普通 quote 仍拒绝非局部 return。生成契约使用既有 NIR ProgramContract/Function 及 Display，不新增私有运行时契约表示。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test test_templates 最终 34 项通过（/tmp/luna-tools-bmqz4g98/result.json）；同轮 cmtt 523、source_tests 6 通过（/tmp/luna-tools-uq178d1k/result.json），execution 1364、resources 357 通过（/tmp/luna-tools-4h8v68c2/stdout.log）。新增 6 项测试覆盖前/后置条件、类型前提、无实例定义拒绝、bool 值相等分类、正常/提前出口后置条件证明、返回目标隔离及普通/内联受检清理。
+
+中间回归证据：/tmp/luna-tools-7ybisrm6 暴露实例正文丢失返回目标，已修复；/tmp/luna-tools-50bu91jf 的 false 后置条件由现有编译期规格检查拒绝，已修正测试预期；/tmp/luna-tools-rotmv11q 的析构用例读取嵌套指针字段触发现有 pointer-slot provenance 限制，未绕过检查，改用直接持有 bool 状态的 Ticket 及 *Ticket 上下文验证本次提前退出清理。后者不代表嵌套指针来源限制已解决。dev 未提交。
+
+### 模板类型前提复用 implementation world
+
+提取普通声明的完成态类型前提证明为 establish_type_requirement，由普通声明和测试模板共用：先 PTC，未建立时沿既有 associated type view 与已检查 implementation world 求证，保留 NotEntailed/Unknown/IllFormed 的不同诊断。程序谓词仍不进入该路径。模板定义的抽象类型前提保留在 context；具体实例证明后不再把实际实现改写成抽象假设，避免参数化证据遮蔽实现的关联类型。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test test_templates 最终 37 项通过（/tmp/luna-tools-2gsucwka/result.json）；同轮 test_templates/cmtt/execution 组合检查中 cmtt 523、execution 1364 通过（/tmp/luna-tools-63c016c_/stdout.log）。新增 3 项覆盖多 trait 合取的正文方法调用、缺失实现拒绝、析取不能授权任一分支的方法及关联类型后续约束。中间修复了 helper 提取的括号错误（/tmp/luna-tools-49e_6lvm）、fixture 误用 type 而非 assoc（/tmp/luna-tools-63c016c_），并根据 /tmp/luna-tools-5sammduf 的真实失败移除具体实例的多余抽象假设，恢复关联类型投影。dev 未提交。
+
+### 模板前提的依赖准备与证据隔离
+
+抽象测试模板检查先收集正向合取 trait 原子，复用 ready_signature_capabilities 的预算、就绪重试和失败回滚机制，使关联类型前提可出现在提供投影权限的 trait 前提之前。模板检查入口保存并恢复临时 capabilities，具体实例不复用抽象证据。析取分支及缺失前提不被提升为投影权限。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test test_templates --test cmtt：39+523 项通过，退出 0（/tmp/luna-tools-icoig6zs/result.json）。新增 2 项测试覆盖分离 requires 和合取中的逆序依赖、连续实例、缺失/析取权限拒绝，以及已成功实例不能为另一关联类型实例提供证据。全 workspace fmt 通过（/tmp/luna-tools-p_rkfgid/result.json），git diff --check 通过。dev 未提交。
+
+### 模板默认值的 trait 前提准备
+
+可选子句默认值检查在每个输入完成后，显式启用签名前提准备的 clause-prefix 检查，按已建立值域准备正向 trait 原子；下一项默认值可以使用前项的关联类型或受约束 comptime 方法。尚未完成的输入仍受 forbidden-default 与 readiness 检查保护，具体实例依然使用实际 implementation，显式覆盖跳过默认调用。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test test_templates --test cmtt：42+523 项通过，退出 0（/tmp/luna-tools-7snfwny8/result.json）。新增 3 项验证关联类型默认值随前项覆盖改变正文接口、错误正文拒绝、后项依赖拒绝、comptime 方法默认值调用与显式覆盖、缺失抽象 trait 前提拒绝。dev 未提交。
+
+### 测试模板 old 后置条件与普通函数共用检查
+
+提取已有 program_postconditions_with_result 中的谓词/old 作用域/快照处理为 program_postcondition_values，普通函数保持原有调用路径，测试模板在所有类型前提建立后通过同一路径检查 ensures。不可变 comptime 子句值已完成替换，不制造 runtime 参数快照；old 作用域在成功和失败时按既有逻辑恢复，不能逃逸到 requires、setup 或实例正文。此项不引入函数模板或可变 runtime 模板参数。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test test_templates --test cmtt --test execution：44+523+1364 项通过，退出 0（/tmp/luna-tools-vjdw7fkr/result.json）。新增 2 项覆盖不可变值 old、正常/提前返回、错误 old 后置条件拒绝、无冗余快照以及三个非法作用域。dev 未提交。
+
+### 模板 return 的接入边界
+
+connect_code 在无当前返回目标或处于闭包捕获帧的接入点，对实际 code body 执行有预算的当前运行时作用域遍历；发现外层 Return 时明确拒绝，防止将模板测试退出静默改写成嵌套闭包退出。遍历不进入正文内部闭包的独立主体，因此内部局部 return 和不含外层 return 的闭包接入继续成立。此项修复错误接入，不代表跨闭包/quote 的非局部返回已实现。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test test_templates 最终 46 项通过（/tmp/luna-tools-wzsow_q2/result.json）；同轮 cmtt 523 项通过（/tmp/luna-tools-nusw0qmw/stdout.log）。新增 2 项覆盖跨闭包、跨 quote 拒绝，以及无外层 return/内部局部 return 的实际执行。初次正例把函数调用直接放入 assumes，被既有无副作用谓词限制拒绝，改为先绑定调用结果再检查（失败证据 /tmp/luna-tools-nusw0qmw）。dev 未提交。
+
+### 模板能力的仓库级 CLI 验收
+
+tests/language 新增 fixtures.fl 的公开测试模板，以及 main.fl 中 6 个实例：跨文件上下文、显式 bool/Type 输入、不可变 old 后置条件、普通/提前退出的真实析构。源套件从 20 扩展到 26 项。frontend_cli 的 repository_language_suite 用真实 CLI 覆盖普通/内联执行、模板过滤及清单、普通谓词失败、两种模式下两个析构失败，以及过滤不能跳过错误模板正文的类型检查；临时项目同时复制所需模块。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test frontend_cli repository_language_suite：1 个集成测试通过，包含上述 8 条 CLI 路径（/tmp/luna-tools-91qr8deg/result.json）。初版正向 CLI 路径也通过（/tmp/luna-tools-_gbb_mrg/result.json）。dev 未提交。
+
+本轮检查 contextual 接口别名路径：resolve scanner、HIR port linker、code_interface 均直接依赖显式 contextual 结构，通用 TypeAlias 求值也尚未承载该接口表示。没有以调用侧重解析或只复制端口名字来假装实现别名；后续需同时完成接口类型表示、声明侧 alias 求值及词法端口发现。此项仍未实现，不因上述 CLI 验收通过而视为完成。
+
+### 测试模板已知元组变参与显式调用输入
+
+单个 Varadic 入口在已建立元组布局下支持位置收集、普通 literal_spreads 展开以及整包命名输入。合成 tuple 输入在声明元素类型上下文下通过 required_typed_expression 检查及求值，保留已有 Tuple 协议；收集结果注册为一个子句值，可依赖前项 Type 并供后项默认值使用。数量、元素类型、溢出及整包/位置混合供应拒绝。meta.List、计算包展开及多变参入口仍明确不支持。
+
+计算整包测试暴露显式输入在 TestTemplateInstance owner 下调用 comptime 函数时 ensure_contract 不接受无自有子句的实例；现将其与 const 初始化一样按空自有声明契约处理，所选模板契约仍在输入完成后检查，不授予提前假设。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test test_templates 最终 49 项通过（/tmp/luna-tools-6_6fp85d/result.json）；同轮 cmtt 523 项通过（/tmp/luna-tools-y45c1ac_/stdout.log）。新增 3 项覆盖元组收集/展开/整包、Type 输入与后续默认值、溢出与错误路由、显式 comptime 调用和 runtime 调用拒绝。中间修复 HIR Tuple 子元素存储类型（/tmp/luna-tools-87haxgen）、fixture 误用 .1 选择语法（/tmp/luna-tools-r91r5ejy）以及实例调用缺失契约问题（/tmp/luna-tools-pb3zrtm8）。dev 未提交。
+
+### 测试模板计算元组包展开
+
+位置收集改为记录显式元素/展开输入，由带预算的 collector 左到右处理。字面量 spread 仍先用普通 literal_spreads 展开取得目标元素上下文；计算 spread 经一次 required_typed_expression 得到完整 tuple 值与布局，再逐项检查类型和总数。最终使用 tuple_value_type 构造普通 Tuple 身份并对原声明域检查，不能直接把布局相同的域贴到值上。整包命名供应仍走原有显式输入路径；meta.List 与多入口未完成。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test test_templates 最终 51 项通过（/tmp/luna-tools-q3an9o9f/result.json）；同轮 cmtt 523 项通过（/tmp/luna-tools-c1y1d0ry/stdout.log）。新增 2 项覆盖计算展开与上下文元素交错、数量/字段类型/非 tuple/runtime producer 拒绝，以及 literal 数字上下文与已完成 u16 字段不能窄化成 u8 的区别。dev 未提交。
+
+### 测试模板 meta.List<Type> 收集
+
+collector 区分已绑定 meta.List<Type> 和元组域。前者以 Type 期望上下文求值每个输入，组装一个 Value::TypeList，支持空收集、字面量/计算列表 spread 和整包命名输入；spread 有元素预算。元组字面量展开推迟到确认元组域之后，防止把 tuple spread 偷换为类型列表收集。未绑定同名 List、非 Type 元素、tuple/list 混用和混合整包供应拒绝。一般 meta.List<T> 值收集与多个入口仍未完成。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test test_templates 最终 54 项通过（/tmp/luna-tools-6iag9c77/result.json）；同轮 cmtt 523 项通过（/tmp/luna-tools-_mt2b9_r/stdout.log）。新增 3 项覆盖上述路由与拒绝场景、索引读取实际类型元素及 normal-form 身份。最后一项最初误用保留字 opaque 作函数名（/tmp/luna-tools-x3j19cgg），并错误期望不透明 Identity<bool> 与 bool 自动满足不等式；现检查同头相等，同时断言后者保持 TypeContractUnresolved（原失败 /tmp/luna-tools-nuk4i22d），不把未知补为负命题。dev 未提交。
+
+### 测试模板多入口显式路由
+
+移除对多个 Varadic 声明的整体拒绝。先根据完整命名供应集合计算未供应入口，再接受位置/展开输入：仅剩一个候选时路由，零候选报重复供应，多候选报歧义。各命名包独立按原域检查，省略的 TypeList 可为空，非空 tuple 仍按数量拒绝；不按实参类型猜测目标，不在路由失败前调用 producer。
+
+/home/fin/luna：python3 -B development/check.py --timeout 240 -- test -p luna --test test_templates 最终 57 项通过（/tmp/luna-tools-v_1d5rbj/result.json）；同轮 cmtt 523 项通过（/tmp/luna-tools-v7j98bzf/stdout.log）。新增 3 项覆盖完整命名、唯一剩余入口、tuple/TypeList 混合与空列表、错误数量/类型、歧义和重复供应必须先于会失败的 comptime 输入调用。多个未供应入口的位置分配及一般 meta.List<T> 收集仍待实现。dev 未提交。
+
+### 真实库语法回归与跨 package 解析状态隔离
+
+重新运行实际 library_check，发现新关键字 template 与 library/std/fmt.fl 的参数名冲突，导致 sysroot 提前停在语法阶段。将参数改为 format_string；新增直接遍历真实 library/*.fl 的词法/文件解析测试，不重写 fixture、不引入占位运行时实现。
+
+同时修复 VfsScanner::parse_file 使用全局 diag_ctx.has_errors() 判断当前文件的错误：Parser::parse 返回该文件的成功标志，scanner 分别检查本文件 lexical errors 和解析结果，先前包的错误不再把后续正常包标记 FileParsingFailed。CLI 回归使用四个显式 package，覆盖词法/语法失败、一个/两个坏包、正常依赖不被连带拒绝以及修复后恢复。单 package 原有首个失败返回行为未改变。
+
+/home/fin/luna：python3 -B development/library_check.py --timeout 240 初始失败证据 /tmp/luna-library-p1jwt1ah/summary.json；修复参数名后的 /tmp/luna-library-1u9wrp3e/summary.json 中 declarations 和 manifest 通过，sysroot 仍失败于真实未实现的 panic/String/分配、集合、I/O 等名称。python3 -B development/check.py --timeout 240 -- test -p luna --test frontend_cli one_malformed_source 通过（/tmp/luna-tools-12363r6j/result.json）；frontend_recovery 与 library_protocols 共 1+3 项通过（/tmp/luna-tools-6spdjxi2/result.json）。测试调整区分了普通 CLI 的摘要诊断与显式包入口的错误列表，也保留单包扫描失败退出规则；未将这些原有行为当成新回归。dev 未提交。
+
+### 空 Tuple 模式按布局匹配
+
+真实 primitives/meta.List/Tuple 源定义的组合测试暴露：`()` 在解析后是 Const pattern，绑定 Tuple<> 上下文下却得到 K::Tuple([])，此前误走通用相等比较。现将已检查的空 tuple 值降为 Pattern::Tuple([])，保留 K::Unit 的原分支；无需新增 tuple equality 协议。覆盖嵌套解构、穷尽 match、comptime 解构、非空/错误类型拒绝，以及真实 meta.List<Type> 计算展开、空/非空 Tuple normal-form 身份。
+
+/home/fin/luna：`python3 -B development/check.py --timeout 300 -- test -p luna --test tuple_type_syntax --test tuple_examples` 退出 0，4+1 项通过，后者编译/执行 60 个迁移示例（/tmp/luna-tools-4zdz0hmt/result.json）；`test -p luna --test library_protocols repository_tuple` 两项通过（/tmp/luna-tools-cppbrzmo/result.json）。格式化与定向 git diff --check 通过。dev 未提交。
+
+扩大 library_protocols 检查未通过：repository_unary_binding_checks_nested_execution_and_materialization_limits 栈溢出（/tmp/luna-tools-m1gapfc5/result.json）。单独带临时阶段标记复现 /tmp/luna-tools-srfi0qf3/result.json：无 Not 绑定、80 层编译及执行成功；140 层编译成功，进入 execution::interpret 后栈溢出，未返回预期深度预算错误。临时标记已移除。此失败尚未定位，不标为既有基线，也不宣称整组通过；后续应修正执行准备/复制深度预算与实际栈开销的衔接，不能靠扩大测试线程栈掩盖。
+
+### Materialization 的一元/二元依赖遍历改用显式工作栈
+
+阶段标记确认上节 140 层 not 崩溃发生在 Builder::expr 的依赖遍历，copy preflight、实例复制、forwarding 与 normalize 均已完成。普通一元/二元子节点现与 block/preparation 共用 heap frontier，保留先序、类型依赖入队顺序、节点 fuel 与 semantic depth；语义层数仍受既有 128 上限约束，copy 的 160 上限未缩小。复杂节点仍走专用路径，不宣称所有遍历无递归。临时阶段标记均已移除。
+
+原 140 层用例改为检查实际 materialization 深度错误（原来的 copy Depth 断言属于旧 128 copy 上限），并在同一包内继续执行 recovery。新增 40/140 层二元 IR 测试：浅树验证真实调用顺序 run/left/right，深树明确拒绝，失败后仍可执行独立入口。深树通过扩展已检查 IR 建立，以独立验证 materializer。
+
+/home/fin/luna：`python3 -B development/check.py --timeout 300 -- test -p luna --test instantiation --test library_protocols --test inline_returns` 退出 0（/tmp/luna-tools-hbgowr5o/result.json）。格式化、定向 git diff --check 通过。dev 未提交。
+
+另有尚未修复的独立前端限制：将 `fn run()->bool {left() and right()` 后直接追加 140 次 ` and true`，在 Rust 测试默认线程栈中调用 frontend::compile_in_package 即栈溢出，尚未进入 instantiate。40 次成功。原始诊断 /tmp/luna-tools-7j8p_qsm/result.json，测试名 binary_dependency_chains_preserve_calls_and_recover_from_depth_exhaustion。当前保留的测试针对生成 IR，不覆盖此源代码前端问题；后续应单独检查解析/lowering/elaboration 的左结合二元链递归。
+
+### 左结合逻辑源码链的 elaboration 栈安全
+
+定位上节源码 and 链失败：lowering 已成功，进入 elaboration 后在递归逻辑前缀/输入事务中栈溢出（/tmp/luna-tools-_aj4odyn/result.json）。logical_expression 现收集左侧 and/or 前缀，最内层仍使用原有 checking_attempt 事务；得到完整前缀后逐层调用共用 logical_expression_step。不能完成的输入回滚并沿用原 peer inference，不改 Bool 的右侧类型前提与短路规则，也不改 BitVec 的双侧求值。未扩大线程栈或类型条件预算。
+
+140 项 and/or、显式返回上下文及无期望类型的 let 初始化现在均返回 `type condition depth exhausted`，不再进程崩溃；并不宣称该深度的类型条件已获支持。40 项实际执行验证短路分支跳过 right、非短路分支恰好调用一次，并保留 first/right 顺序。临时 frontend 阶段标记已移除。
+
+/home/fin/luna：`python3 -B development/check.py --timeout 300 -- test -p luna --test instantiation` 55 项通过（/tmp/luna-tools-ofy9ehh9/result.json）；`test -p luna --test execution boolean` 30 项通过，含 BitVec 双侧求值、类型布尔前提和模式条件（/tmp/luna-tools-km176a5t/result.json）。格式化与定向 git diff --check 通过。dev 未提交。
+
+### 类型命题分类不因深度退回程序谓词
+
+extracted_refinement/is_type_assumption 共用显式 HIR 工作栈分类，同时记录是否存在类型观察。移除 observes_type 的 128 层 false 截断，避免过深的纯类型假设被识别成程序 assumes。纯布尔常量仍不构成类型观察，任意运行时操作数使表达式保持程序语法；遍历保持左到右与首个不支持项的短路行为。
+
+type_predicate 的 not/and/or 构造改用显式后序工作栈，原 trait/equality 原子检查及具体错误保持不变。按 PTC 默认步骤/深度预算在构造阶段明确拒绝，不把求解失败转换为程序验证或执行。此项不扩展 PTC 到程序状态。
+
+/home/fin/luna：`python3 -B development/check.py --timeout 300 -- test -p elaboration --lib` 218 项通过（/tmp/luna-tools-cpx8eesg/result.json），新增 4096 层分类测试；`test -p luna --test execution refinement` 13 项通过（/tmp/luna-tools-t6wirorl/result.json），含深层 and/or 类型 refinement 的明确拒绝、正常嵌套公式和反例。格式化与定向 diff --check 通过。dev 未提交。
+
+### 二元 AST lowering 显式后序遍历
+
+lower_binary_expr 使用 Operand/Finish 工作栈处理所有既有标量二元 AST kind；其余表达式仍进入原 lowering。复用统一 binary_operator 映射，先处理左/右操作数，再按原顺序分配 HIR 子节点与父身份，不改变结合性、词法作用域或源位置。
+
+长逻辑源码回归扩展到 512 项 and/or，覆盖返回上下文与 let 推断，仍正常返回后续 type-condition 深度诊断（并不声称 512 层求解/执行已支持）。新增执行用例检查左结合减法、块内遮蔽、指针布尔写回及 left/right 调用顺序。
+
+/home/fin/luna：`python3 -B development/check.py --timeout 300 -- test -p luna --test instantiation` 原有 55 项通过，新例最初因缺少运算符空格失败（/tmp/luna-tools-hmmdlsab/result.json）。中间 fixture 也触发了机器整数范围证明与 Integer 的 comptime-only 限制；最终用合法布尔写回和有界常量表达式隔离 lowering 行为，`... --test instantiation binary_lowering` 通过（/tmp/luna-tools-j467emhl/result.json）。`... --test execution` 全部 1367 项通过（/tmp/luna-tools-k0552klf/result.json）。格式化与定向 diff --check 通过。dev 未提交。
+
+### quote fn contextual 输入的接入缺口
+
+核对 docs/cmtt/contexts-and-substitution.md 与 quote-functions-and-templates.md：implicit quote 对应的是已建立的 runtime 接口绑定，不能靠同名/同型查找任意局部变量，也不能复制普通形参值槽来模拟对象身份。当前 program::ensure_signature 与 cmtt/functions::validate_quote_function 拒绝该标记；arguments/spreads 的普通 implicit 路由尚无 contextual 对应来源。quote expansion 对所有参数生成 prepared_connections 和 connections 两组新鲜值绑定，不能直接复用这条路径实现 contextual。
+
+后续实现需联动三个边界：一是保留 quote 模板的参数绑定角色及接口身份（不要把它混入 comptime/runtime Sort）；二是调用路由读取已有 CMTT 对应，缺失或歧义不猜测，普通实参仍按原顺序求值一次；三是展开时将 contextual 参数直接对应到实际绑定，并一致替换正文、依赖类型、契约与 old 快照，清理不把借用的调用者对象当作普通形参拥有。多端口同对象、遮蔽、失败候选与别名消费必须有行为测试。仅解除 TPARAM_QUOTE 的拒绝检查是不正确实现。本轮未声称此能力已接通，也未添加猜测的显式供应语法。
+
+/home/fin/luna：`python3 -B development/check.py --timeout 300 -- test -p luna --test quote_functions` 103 项通过（/tmp/luna-tools-b6dp_h0a/result.json），确认当前普通值参数、契约、默认值、trait 展开和深度边界未回归。dev 未提交。
+
+### Retained quote 模板的参数帧完整性
+
+contextual 载体审计先暴露一个现有漏洞：phases::validate 会接受 quote 模板签名与 parameters 数量不一致，后续展开中的 LocalId 映射也不能区分重复参数身份。新增失败回归先确认此错误输入原先被接受（/tmp/luna-tools-ge3cptr6/result.json）。
+
+阶段校验现在要求 quote 模板具有 callable signature、形参槽数量一致、绑定身份唯一，且 defaults 的槽位在界内并且不重复。保留原阶段/声明身份冲突优先诊断，不改变普通参数的求值与清理行为。测试覆盖五类损坏、每次恢复后的再次校验，以及原有 staged/trait/default quote 行为。此项是已有参数帧的完整性修复，尚未添加 contextual 参数角色或接通其源码。
+
+/home/fin/luna：`python3 -B development/check.py --timeout 300 -- test -p nir --test phases` 19 项通过（/tmp/luna-tools-083kpv1s/result.json）；`test -p luna --test quote_functions` 103 项通过（/tmp/luna-tools-b0ttc3zs/result.json）。格式化与定向 diff --check 通过。dev 未提交。
+
+### 普通 callable 参数帧与 quote 共用完整性校验
+
+新增普通 runtime/comptime Function 的损坏输入测试，确认缺少参数绑定原先仍通过阶段校验（/tmp/luna-tools-karltk9b/result.json）。抽取 validate_parameter_frame，共同检查 callable signature、参数数量、绑定身份唯一性、default 槽位范围与唯一性；quote 保留其原诊断文本。仅有声明身份而没有 body/参数数组的 runtime_function_identities 不套用有体函数的检查。
+
+/home/fin/luna：`python3 -B development/check.py --timeout 300 -- test -p nir --test phases` 21 项通过（/tmp/luna-tools-_w3oox8z/result.json）；`test -p luna --test execution --test quote_functions` 1367+103 项通过（/tmp/luna-tools-1vyj17v1/result.json）。格式化与定向 diff --check 通过。contextual 参数角色仍未接通；dev 未提交。
+
+### 元组模式修复后的 workspace 集成验证
+
+Type 受检值上的空模式 `()` 现降为 TypeTuple([])，与非空元组模式共用结构视图，不作为 Type 表达式求值。源码测试覆盖空/非空、嵌套、其他不透明头保持 Unknown、or 绑定对应、guard 失败后候选隔离，以及空元组模式不能覆盖全部 Type。表达式中的括号 tuple 仍不能充当类型。
+
+/home/fin/luna：`python3 -B development/check.py --timeout 900 -- test --workspace` 退出 0（/tmp/luna-tools-v09wonpt/result.json），8120 项测试通过。此轮扩大检查用于前端、NIR 参数帧与解释器改动的阶段性集成，不代表尚未接入的 contextual quote 参数、一般 meta.List<T>、完整 sysroot 或后端已经完成。dev 改动未提交。
+
+### 调用帧与默认实参作用域校验
+
+phases 校验调用槽位的完整性、唯一性、默认值顺序及非空 parameter_bindings 的数量/唯一性；直接 Function/FunctionInstance 还要求绑定表与已保留目标声明一致。runtime 默认实参的自由绑定必须来自此前已准备的调用槽位，不能读取自身或调用者的任意局部变量。声明侧默认值单独按前序形参域检查，内部局部声明和合法闭包捕获不算自由输入。
+
+注意 staged 默认实参在开放定义中可保留已替换的调用者 comptime 符号；不能提前套用 runtime 默认值帧的自由绑定规则。这一过强检查曾使 dependent_type_defaults_and_late_named_inputs_supply_context 和 ordinary_comptime_indices_in_capabilities_use_defaults_and_forwarded_evidence 失败（/tmp/luna-tools-ohfxumvo/result.json），现保留已有 staged 准备/专门化职责。
+
+/home/fin/luna：源码 default 测试 execution/open_functions/quote_functions 共 270 项通过（/tmp/luna-tools-xcrmvne3/result.json）；解释器 --tests 194 项通过（/tmp/luna-tools-1a8k3vps/result.json）；nir phases 24 项通过（/tmp/luna-tools-a8lvwlbp/result.json）。格式化和定向 diff --check 通过，dev 未提交。
+
+### 函数模板的语法与 AST 载体
+
+核对 contextual quote 的文档示例发现，其上游 template fn 仍被解析器明确拒绝；现有 template test 的端口流程不能冒充函数模板实现。已新增 FunctionTemplateDef（包裹带修饰符的普通 Function 声明）、FunctionTemplateInstance（省略参数列表）和 FunctionTemplateInstanceWithParams（显式参数列表，含显式空列表）。后者复用 FunctionDefChildren 的 id/params/template/空clauses/body 布局。模板定义保留签名、子句与可选主体，实例的模板表达式不吞掉使用者主体，quote/inline/pure 等修饰符保持独立 AST 包装。
+
+这一步仅接通语法与 AST；函数模板仍无 HIR 声明/实例载体、词法绑定链接和 elaboration，不能作为可执行功能宣称完成。下一步应保留声明侧签名作用域与实例侧新鲜参数身份，再接入签名复用和有主体模板的 CMTT 端口，而不是把模板作为普通函数降低。comptime 实例资格限制也属于后续语义检查。contextual quote 的绑定角色仍未接通。
+
+/home/fin/luna：`python3 -B development/check.py --timeout 300 -- test -p parse -p ast_lowering` 85 项通过（/tmp/luna-tools-cbzg_b4g/result.json），包含声明修饰符、无主体/块主体/表达式主体、带端口参数、具名/泛型模板表达式、显式空参数区别及错误恢复入口的拒绝例。格式化与定向 diff --check 通过；dev 未提交。
+
+### 函数模板声明的 HIR 身份
+
+FnModifiers 新增 is_function_template，Display 输出 function-template 字段。名称扫描穿透 FunctionTemplateDef 包装，仍用声明侧函数作用域解析参数、类型、默认值和主体；lowering 保留原 owner/节点表并标记模板类别，拒绝 comptime 函数模板。模板声明在 NIR 入口保留 function template expansion pending 诊断，不能提前注册成可执行普通函数。
+
+/home/fin/luna：`test -p luna --test test_templates` 59 项通过（/tmp/luna-tools-b_pq8yfu/result.json），新增声明/修饰符/上下文参数/跨源模块导入和 comptime 拒绝检查；`test -p hir` Display 13 项通过（/tmp/luna-tools-vnuxos_0/result.json，3 个原有 doc 示例 ignored）。中间修正 fixture 误用 mod 文件声明，并补齐 Display 测试的 FnModifiers 字段。check -p luna、格式化与定向 diff --check 通过。
+
+下一步仍是函数模板实例 HIR 和链接：省略参数列表时必须从已扫描模板取得声明接口名字，为实例建立新鲜参数身份，并在声明侧解释类型；不能在使用者作用域重解析模板签名。带主体模板的 contextual 端口和 quote fn contextual 输入也未接通。dev 未提交。
+
+### 函数模板实例 HIR 与声明侧接口链接
+
+新增 FunctionTemplateInstance / FunctionTemplateInput：分别保留模板表达式、声明侧 FnSig、显式参数列表（None 与 Some([]) 不合并）、实例输入与 formal 身份对应、实例修饰符及 BodyId。Display 输出独立的 function-template-instance/input S-expression。resolver 预扫描函数参数名字；省略参数的实例用 ExpandedLocal 建立新鲜身份，显式参数沿用普通参数 lowering。所有文件完成后链接原声明签名，不在实例作用域重解析类型，也不按名字替换声明侧类型身份。
+
+已支持此阶段的静态具名模板头（含 NFApplication 外壳）、跨文件导入、前向声明、显式改名、空参数及 quote/inline/pure 实例修饰符；拒绝普通函数目标、参数数目错误、重复输入、comptime 实例和作用域泄漏。这里只形成和链接 HIR；实例的类型一致性检查、模板实参替换、签名转化为可执行 Fn、带主体模板的 contextual 端口及 quote fn contextual 输入仍未实现，NIR 保持 function template expansion 诊断。
+
+/home/fin/luna：check -p luna 通过（/tmp/luna-tools-zbjt053t/result.json）；test -p hir -p resolve -p ast_lowering 共 30 项通过（/tmp/luna-tools-qq7ewwro/result.json）；test -p luna --test test_templates 共 62 项通过（/tmp/luna-tools-n1wfqa77/result.json），新增实例身份、跨模块类型遮蔽和拒绝例。格式化与定向 diff --check 通过；dev 未提交。
+
+### 签名模板实例接入函数执行
+
+elaboration 在临时 HIR arena/package 视图中实例化无共享主体的函数模板，原始 HIR 的模板声明/实例节点和 Display 保留。继承参数的身份映射同时应用于参数类型、返回类型、默认值、结果绑定及 requires/ensures/decreases；声明引用保持原 DefId，投影权限元数据随新表达式身份复制。实例签名使用独立身份空间，避免与已经 lowering 的主体冲突；普通、inline、quote 类别由实例决定，模板 pure 要求继续保留。模板声明接受抽象接口检查，但不能作为普通函数调用或取得函数值。
+
+支持含普通 comptime 参数的依赖签名以及默认值中的基础表达式/条件控制流，实例走已有函数检查、默认调用、契约、quote 展开和执行路径。泛型子句替换、显式实例参数兼容性、共享 CMTT 正文/上下文端口、尚未覆盖的复杂签名表达式替换仍明确拒绝；不把这些限制写成语言约束。后续应继续扩展同一身份映射，而不是重新解析声明文本或展开 normal-form 类型头。
+
+/home/fin/luna：`python3 -B development/check.py --timeout 300 -- test -p luna --test test_templates --test default_calls --test function_type_dependencies --test quote_functions` 全部通过，证据 `/tmp/luna-tools-h_kt4_40/result.json`。新增执行测试覆盖三种实例类别、独立输入与默认绑定、返回契约拒绝、comptime Type 依赖、跨模块同名类型遮蔽，以及模板自身不能调用/取值。已格式化受影响文件，定向 diff --check 通过；dev 未提交。
+
+### 模板签名中的局部绑定、模式与嵌套正文替换
+
+扩展 function_templates::Rebind：局部 let/var、赋值、循环跳转、模式分支/守卫、结构构造、错误/效应分支和闭包正文使用统一身份映射。pattern helper 保留 tuple/record/enum/optional/error/or/then/bitvec 等模式的绑定及子表达式；嵌套 BodyId 与 BodyParam 同步复制到临时 package。映射以完整 HirId 为键分配新局部编号，避免不同源 owner 的相同 local_id 相撞；投影权限等元数据对全部映射节点复制。表达式、模式、类型参数、块及嵌套正文共享燃料与深度限制。
+
+执行对照覆盖普通函数/模板的解构、局部变更、guard、or 整体绑定、同名遮蔽、捕获和嵌套闭包；调用轨迹验证默认值调用次数/顺序，显式覆盖不执行默认值。结构构造默认值及字段消费通过。循环默认值、写前序输入及局部 nominal 解构目前不能通过普通默认值的 P3 admission；模板保持同样拒绝，未将其改成语言限制。泛型子句、显式实例参数兼容性、共享 CMTT 正文与其它尚未支持的签名节点仍待实现。
+
+/home/fin/luna：最终 `python3 -B development/check.py --timeout 300 -- test -p luna --test test_templates` 70 项通过（/tmp/luna-tools-zx6gxfyy/result.json）；同一实现下 default_calls / function_type_dependencies / quote_functions 分别 33/33/103 项通过（/tmp/luna-tools-636p3qmk/result.json）。该次组合运行另有一个新增 nominal 解构正例失败，确认普通函数基线也因 P3 拒绝后调整为拒绝对照；最终模板组已全部重跑通过。格式化与定向 diff --check 通过；dev 未提交。
+
+### 模板闭包环境签名与资源默认值证据
+
+补充 TyClosure / TyClosureEnvironment 替换：保留环境名字，重绑定字段类型、可选来源表达式及 callable signature。源测试覆盖普通/依赖 comptime Type 的返回闭包、将闭包传入另一模板实例、两份实例独立的可变捕获，以及捕获类型不符的拒绝。
+
+澄清上一节的 nominal 解构限制：无 Drop 协议绑定时观察证明不会擅自接管 nominal owner，并非解构表达式缺失实现。本轮绑定 Copy/Drop、提供空析构后，直接 let 解构、经局部 cell 解构和 match 解构在普通函数/模板中均编译执行；析构写外部指针则仍被 P3 拒绝。不放宽 copy_type，不以字段布局代替资源协议，不修改 PTC 边界。
+
+/home/fin/luna：`python3 -B development/check.py --timeout 300 -- test -p luna --test test_templates --test default_calls --test function_type_dependencies` 72+33+33=138 项通过（/tmp/luna-tools-mfz0dg7l/result.json）。已格式化修改文件；dev 未提交。泛型模板子句、显式实例参数一致性及共享 CMTT 正文仍未完成。
+
+### 签名模板中的 tactic lambda 默认回调
+
+Rebind 接通 TacticParameter 和 TacticArgument：占位参数保存其所属 tactic 边界内的位置，不错误映射成模板声明的 HIR 局部身份；边界正文、其中的普通参数引用与捕获仍通过既有 fresh-id 映射克隆。使默认闭包正文中的高阶调用及嵌套 tactic 可以随签名复用。
+
+新增用例验证两份实例、嵌套 `_0` 的独立边界、默认回调显式覆盖、调用顺序，以及捕获模板 runtime 输入的默认闭包。参考执行与 LLVM O0/O3 均通过。缺失 callable 边界和超出目标 arity 的占位参数继续由普通 tactic 检查拒绝。默认值形成时直接调用未获 P3 证明的高阶函数仍拒绝；最初尝试的诊断证据 `/tmp/luna-tools-9u46pqj5/result.json`，没有为接入模板而降低默认值 admission。
+
+工作目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 300 -- test -p luna --test test_templates --test default_calls --test pure_callbacks --test elaboration` 退出 0（`/tmp/luna-tools-dls2es8d/result.json`）。格式化退出 0（`/tmp/luna-tools-0_lo1v1g/result.json`），git diff --check 通过。docs/functions/templates.md 增加已验证的默认回调与嵌套 tactic 示例。泛型子句替换、显式实例参数兼容性与共享 CMTT 主体未因本改动实现。dev 未提交。
+
+### 签名模板默认值中的 CMTT 结构克隆
+
+Rebind 新增 CodeQuote、CodePatternQuote、CodeSplice、ContextualExprType、ContextualPatternType。substitution 保留端口名并重绑定其表达式，contextual binding 保存名称与词法默认关联，HIR 身份通过同一 fresh-id 映射更新；已有 pattern 重绑定负责 quote 内的 pattern binder 和成功输出。每个子表达式沿原预算/深度检查克隆，未把代码值当作普通 runtime 数据或重新进行按名称捕获。
+
+新增真实源码用例覆盖闭合表达式代码、单洞组合、显式替换、模板参数的隐式关联和 pattern quote。两份实例分别以 true/false 输入执行，默认值显式覆盖保留，参考执行和 LLVM O0/O3 一致。拒绝例确认双 splice 仍违反单洞限制，缺失词法端口不能被实例主体中的同名局部变量补足。docs/functions/templates.md 增加已验证的 contextual 默认值示例。
+
+工作目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 300 -- test -p luna --test test_templates --test cmtt --test default_calls` 退出 0（`/tmp/luna-tools-asxovi1m/result.json`）。格式化退出 0（`/tmp/luna-tools-7nlrpvf_/result.json`），git diff --check 通过。本轮接通签名内代码结构的克隆，不代表带共享 CMTT 主体的 template fn 已完成；其主体端口连接、泛型子句替换和显式实例参数兼容性仍待实现。dev 未提交。

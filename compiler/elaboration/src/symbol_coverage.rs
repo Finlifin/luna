@@ -199,6 +199,18 @@ pub(crate) fn covers_case<'a>(
     ))
 }
 
+/// A complement requires a known result in every equality partition,
+/// including the fresh atoms representing names absent from source literals.
+pub(crate) fn exact(pattern: &Pattern, fuel: &mut usize) -> Result<bool, ()> {
+    for case in cases([pattern], fuel)? {
+        let mut env = snapshot(&case.env, fuel)?;
+        if matches(pattern, Value::Symbol(case.subject), &mut env, fuel, 0)?.is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Atom<'a> {
     Named(&'a str),

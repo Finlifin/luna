@@ -23,6 +23,7 @@ pub enum Head {
     Record(Vec<String>),
     Pointer,
     ComptimeFunction,
+    UnsafeFunction,
     Function(Vec<Sort>),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -101,6 +102,7 @@ impl Key {
                     )
                 }
                 Term::ComptimeFunction(inner) => (Head::ComptimeFunction, vec![inner]),
+                Term::UnsafeFunction(inner) => (Head::UnsafeFunction, vec![inner]),
                 Term::Function { parameters, result } => (
                     Head::Function(parameters.iter().map(|p| p.sort).collect()),
                     parameters
@@ -109,7 +111,8 @@ impl Key {
                         .chain(std::iter::once(result.as_ref()))
                         .collect(),
                 ),
-                Term::NominalValue { .. }
+                Term::ErrorValue { .. }
+                | Term::NominalValue { .. }
                 | Term::NormalForm { .. }
                 | Term::ClosureContextValue(_)
                 | Term::TypeListValue(_)
@@ -152,6 +155,13 @@ impl Key {
                                 }
                                 work.extend(arguments.iter().map(|t| (t, d + 1)))
                             }
+                            Term::ErrorValue { ty, label, value } => {
+                                work.push((ty, d + 1));
+                                if let Some(label) = label {
+                                    work.push((label, d + 1));
+                                }
+                                work.push((value, d + 1));
+                            }
                             Term::NominalValue { ty, fields, .. } => {
                                 if fields.len().saturating_add(1) > *fuel {
                                     return Err(Error::BudgetExhausted);
@@ -170,7 +180,16 @@ impl Key {
                                     work.push((ty, d + 1));
                                 }
                             }
-                            Term::Pointer(t) | Term::ComptimeFunction(t) => work.push((t, d + 1)),
+                            Term::ErrorResult { errors, result } => {
+                                if errors.len().saturating_add(1) > *fuel {
+                                    return Err(Error::BudgetExhausted);
+                                }
+                                work.push((result, d + 1));
+                                work.extend(errors.iter().map(|ty| (ty, d + 1)));
+                            }
+                            Term::Pointer(t)
+                            | Term::ComptimeFunction(t)
+                            | Term::UnsafeFunction(t) => work.push((t, d + 1)),
                             // Dependent function/closure structure is not an
                             // implementation index contract yet. Do not prune it.
                             Term::Function { .. }
@@ -367,6 +386,12 @@ impl Default for Index {
     }
 }
 impl Index {
+    pub fn for_target(target: Option<nir::target::TargetData>) -> Self {
+        let mut index = Self::default();
+        index.nominal_layouts.target = target;
+        index
+    }
+
     /// Replace the immutable declaration layout world. Any change invalidates
     /// selection evidence, including changes to phantom or payload domains.
     pub fn set_nominal_layouts(
@@ -385,12 +410,24 @@ impl Index {
             return;
         }
         self.nominal_layouts = nir::program::Package {
+            target: self.nominal_layouts.target,
+            normal_forms: std::mem::take(&mut self.nominal_layouts.normal_forms),
             structs,
             enums,
             newtypes,
             ..Default::default()
         };
         self.revision += 1;
+    }
+
+    /// Representation contracts are part of argument admission and therefore
+    /// selection identity. Changing or removing a role invalidates old evidence.
+    pub fn set_normal_form_metadata(&mut self, mut heads: Vec<nir::normal_forms::Head>) {
+        heads.sort_by_key(|head| head.declaration);
+        if self.nominal_layouts.normal_forms != heads {
+            self.nominal_layouts.normal_forms = heads;
+            self.revision += 1;
+        }
     }
 
     /// Avoid copying complete layouts on repeated method lookup in an unchanged
@@ -453,6 +490,12 @@ impl Index {
 
     pub(crate) fn fmt_nominal_layouts(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(" (nominal-layouts")?;
+        for head in &self.nominal_layouts.normal_forms {
+            write!(f, " {head}")?;
+        }
+        if let Some(target) = self.nominal_layouts.target {
+            write!(f, " {target}")?;
+        }
         for definition in &self.nominal_layouts.structs {
             write!(f, " {definition}")?;
         }
@@ -507,11 +550,22 @@ impl Index {
         subject: &Term,
         budget: Budget,
     ) -> Result<Candidates, Error> {
-        let mut remaining = budget.steps;
-        let subject = Key::with_fuel(subject, &mut remaining, budget.max_depth)?;
+        self.candidates_metered(interface, arguments, subject, &mut { budget })
+    }
+    /// Return candidate search work even when key construction or scanning fails.
+    pub fn candidates_metered(
+        &self,
+        interface: Option<DeclarationId>,
+        arguments: &[Term],
+        subject: &Term,
+        budget: &mut Budget,
+    ) -> Result<Candidates, Error> {
+        let max_depth = budget.max_depth;
+        let remaining = &mut budget.steps;
+        let subject = Key::with_fuel(subject, remaining, max_depth)?;
         let arguments = arguments
             .iter()
-            .map(|ty| Key::with_fuel(ty, &mut remaining, budget.max_depth))
+            .map(|ty| Key::with_fuel(ty, remaining, max_depth))
             .collect::<Result<Vec<_>, _>>()?;
         let fixed_interface = interface.is_some() && arguments.iter().all(|arg| !arg.is_open());
         let mut candidates = Vec::new();
@@ -524,9 +578,9 @@ impl Index {
         };
         for bucket in buckets {
             for id in bucket {
-                spend(&mut remaining)?;
+                spend(remaining)?;
                 let entry = &self.entries[id];
-                if !entry.key.compatible(&subject, &mut remaining)? {
+                if !entry.key.compatible(&subject, remaining)? {
                     continue;
                 }
                 let mut compatible = true;
@@ -534,7 +588,7 @@ impl Index {
                     compatible = entry.arguments.len() == arguments.len();
                     if compatible {
                         for (a, b) in entry.arguments.iter().zip(&arguments) {
-                            if !a.compatible(b, &mut remaining)? {
+                            if !a.compatible(b, remaining)? {
                                 compatible = false;
                                 break;
                             }
@@ -650,6 +704,7 @@ impl fmt::Display for Key {
                     }
                     Head::Pointer => f.write_str("pointer")?,
                     Head::ComptimeFunction => f.write_str("comptime-function")?,
+                    Head::UnsafeFunction => f.write_str("unsafe-function")?,
                     Head::Function(sorts) => {
                         f.write_str("(function")?;
                         for sort in sorts {

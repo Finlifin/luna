@@ -5,6 +5,7 @@
 //! closed structural constructors and explicitly admitted normal-form
 //! congruence. Abstract satisfiability is never itself a source witness.
 mod effects;
+mod error_results;
 mod traits;
 pub use traits::TraitQuery;
 mod classification;
@@ -15,6 +16,7 @@ pub use integer::{IntLe, IntegerTerm};
 use nir::{DeclarationId, Primitive, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Equality(pub Term, pub Term);
@@ -68,12 +70,14 @@ impl Formula {
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Context {
-    scope: Vec<Vec<Sort>>,
-    assumptions: Vec<Formula>,
-    congruence_heads: BTreeSet<DeclarationId>,
-    nominal_constructors: BTreeSet<DeclarationId>,
+    // Branches share immutable snapshots. Each mutation detaches only its own
+    // component; no candidate may add authority or premises to another branch.
+    scope: Arc<Vec<Vec<Sort>>>,
+    assumptions: Arc<Vec<Formula>>,
+    congruence_heads: Arc<BTreeSet<DeclarationId>>,
+    nominal_constructors: Arc<BTreeSet<DeclarationId>>,
     /// Trusted Tuple classification/layout contracts; never body equations.
-    tuple_heads: BTreeSet<DeclarationId>,
+    tuple_heads: Arc<BTreeSet<DeclarationId>>,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Budget {
@@ -162,7 +166,7 @@ impl Context {
     /// frames and cannot be replayed after changing or removing them.
     pub fn with_scope(scope: Vec<Vec<Sort>>) -> Self {
         Self {
-            scope,
+            scope: Arc::new(scope),
             ..Self::default()
         }
     }
@@ -170,8 +174,8 @@ impl Context {
     /// Local assumptions must be supplied explicitly in that scope.
     pub fn theory_in_scope(&self, scope: Vec<Vec<Sort>>) -> Self {
         Self {
-            scope,
-            assumptions: Vec::new(),
+            scope: Arc::new(scope),
+            assumptions: Arc::default(),
             congruence_heads: self.congruence_heads.clone(),
             nominal_constructors: self.nominal_constructors.clone(),
             tuple_heads: self.tuple_heads.clone(),
@@ -181,7 +185,7 @@ impl Context {
         &self.scope
     }
     pub(crate) fn admit_tuple_head(&mut self, head: DeclarationId) {
-        self.tuple_heads.insert(head);
+        Arc::make_mut(&mut self.tuple_heads).insert(head);
     }
     pub(crate) fn is_tuple_head(&self, head: DeclarationId) -> bool {
         self.tuple_heads.contains(&head)
@@ -234,15 +238,15 @@ impl Context {
                 return Err(ProofError::BudgetExhausted);
             }
         }
-        if proof.scope != self.scope
-            || proof.assumptions != self.assumptions
-            || proof.congruence_heads != self.congruence_heads
-            || proof.nominal_constructors != self.nominal_constructors
-            || proof.tuple_heads != self.tuple_heads
+        if proof.scope != *self.scope
+            || proof.assumptions != *self.assumptions
+            || proof.congruence_heads != *self.congruence_heads
+            || proof.nominal_constructors != *self.nominal_constructors
+            || proof.tuple_heads != *self.tuple_heads
         {
             return Err(ProofError::Invalid);
         }
-        let mut formulas = self.assumptions.clone();
+        let mut formulas = (*self.assumptions).clone();
         formulas.push(proof.goal.clone().negate());
         let formula = Formula::And(formulas);
         let mut atoms = Vec::new();
@@ -257,6 +261,7 @@ impl Context {
             },
         )?;
         let mut search = Search {
+            required_atoms: None,
             context: self,
             formula: &formula,
             atoms: &atoms,
@@ -292,11 +297,11 @@ impl Context {
         if fuel < witness.integers.len() {
             return Err(ProofError::BudgetExhausted);
         }
-        if witness.scope != self.scope
-            || witness.assumptions != self.assumptions
-            || witness.nominal_constructors != self.nominal_constructors
-            || witness.congruence_heads != self.congruence_heads
-            || witness.tuple_heads != self.tuple_heads
+        if witness.scope != *self.scope
+            || witness.assumptions != *self.assumptions
+            || witness.nominal_constructors != *self.nominal_constructors
+            || witness.congruence_heads != *self.congruence_heads
+            || witness.tuple_heads != *self.tuple_heads
         {
             return Err(ProofError::Invalid);
         }
@@ -377,7 +382,7 @@ impl Context {
             if !within_input_limits(Input::Term(ty), depth, &mut fuel) {
                 return Err(UnknownReason::BudgetExhausted);
             }
-            for assumption in &self.assumptions {
+            for assumption in self.assumptions.iter() {
                 if !within_limits(assumption, depth, &mut fuel) {
                     return Err(UnknownReason::BudgetExhausted);
                 }
@@ -447,22 +452,23 @@ impl Context {
     }
 
     pub fn assume(&mut self, fact: Formula) {
-        self.assumptions.push(fact);
+        Arc::make_mut(&mut self.assumptions).push(fact);
     }
     /// The caller supplies the audited head contract, never just a purity flag.
     pub fn admit_congruence(&mut self, head: DeclarationId) {
-        self.congruence_heads.insert(head);
+        Arc::make_mut(&mut self.congruence_heads).insert(head);
     }
     /// Register a generative nominal declaration whose semantic arguments are
     /// part of its identity. This does not admit any normal-form inverse.
     pub fn admit_nominal_constructor(&mut self, declaration: DeclarationId) {
-        self.nominal_constructors.insert(declaration);
+        Arc::make_mut(&mut self.nominal_constructors).insert(declaration);
     }
     pub(crate) fn is_nominal_constructor(&self, declaration: DeclarationId) -> bool {
         self.nominal_constructors.contains(&declaration)
     }
-    /// Branch facts are isolated by ownership. Dropping a fork cannot leave
-    /// assignments, equalities or learned clauses in its parent.
+    /// Branch facts are isolated by copy-on-write ownership. Read-only forks
+    /// do not copy formulas or declaration sets. Dropping a fork cannot leave
+    /// equalities or learned clauses in its parent.
     pub fn fork(&self) -> Self {
         self.clone()
     }
@@ -470,8 +476,8 @@ impl Context {
     /// rely on a particular caller's local premises (even a false premise).
     pub fn theory_context(&self) -> Self {
         Self {
-            scope: Vec::new(),
-            assumptions: Vec::new(),
+            scope: Arc::default(),
+            assumptions: Arc::default(),
             congruence_heads: self.congruence_heads.clone(),
             nominal_constructors: self.nominal_constructors.clone(),
             tuple_heads: self.tuple_heads.clone(),
@@ -524,7 +530,7 @@ impl Context {
         }
         let mut atoms = Vec::new();
         let mut terms = Terms::default();
-        let mut formulas = self.assumptions.clone();
+        let mut formulas = (*self.assumptions).clone();
         formulas.push(goal.clone().negate());
         let residual = Formula::And(formulas);
         if let Err(message) = collect(&residual, &mut atoms, &mut terms, 0, max_depth, &self.scope)
@@ -539,6 +545,7 @@ impl Context {
             };
         }
         let mut search = Search {
+            required_atoms: None,
             context: self,
             formula: &residual,
             atoms: &atoms,
@@ -549,22 +556,22 @@ impl Context {
         let mut assignment = vec![None; atoms.len()];
         let outcome = match search.solve(&mut assignment, 0) {
             SearchResult::Unsat(tree) => Outcome::Entailed(Proof {
-                scope: self.scope.clone(),
-                assumptions: self.assumptions.clone(),
+                scope: (*self.scope).clone(),
+                assumptions: (*self.assumptions).clone(),
                 goal,
-                congruence_heads: self.congruence_heads.clone(),
-                nominal_constructors: self.nominal_constructors.clone(),
-                tuple_heads: self.tuple_heads.clone(),
+                congruence_heads: (*self.congruence_heads).clone(),
+                nominal_constructors: (*self.nominal_constructors).clone(),
+                tuple_heads: (*self.tuple_heads).clone(),
                 tree,
             }),
             SearchResult::Model(model) => Outcome::NotEntailed(Witness {
-                tuple_heads: self.tuple_heads.clone(),
-                scope: self.scope.clone(),
-                nominal_constructors: self.nominal_constructors.clone(),
-                congruence_heads: self.congruence_heads.clone(),
+                tuple_heads: (*self.tuple_heads).clone(),
+                scope: (*self.scope).clone(),
+                nominal_constructors: (*self.nominal_constructors).clone(),
+                congruence_heads: (*self.congruence_heads).clone(),
                 types: model.types,
                 integers: model.integers,
-                assumptions: self.assumptions.clone(),
+                assumptions: (*self.assumptions).clone(),
                 goal,
             }),
             SearchResult::Unknown(reason) => Outcome::Unknown {
@@ -620,6 +627,13 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                 }
             }
             Input::Term(term) => match term {
+                Term::ErrorResult { errors, result } => {
+                    if errors.len().saturating_add(1) > room {
+                        return false;
+                    }
+                    pending.push((Input::Term(result), depth + 1));
+                    pending.extend(errors.iter().map(|ty| (Input::Term(ty), depth + 1)));
+                }
                 Term::Computation { effects, result } => {
                     if effects.len() > *fuel {
                         return false;
@@ -652,8 +666,15 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                         pending.push((Input::Term(argument), depth + 1));
                     }
                 }
-                Term::Pointer(inner) | Term::ComptimeFunction(inner) => {
-                    pending.push((Input::Term(inner), depth + 1))
+                Term::Pointer(inner)
+                | Term::ComptimeFunction(inner)
+                | Term::UnsafeFunction(inner) => pending.push((Input::Term(inner), depth + 1)),
+                Term::ErrorValue { ty, label, value } => {
+                    pending.push((Input::Term(ty), depth + 1));
+                    if let Some(label) = label {
+                        pending.push((Input::Term(label), depth + 1));
+                    }
+                    pending.push((Input::Term(value), depth + 1));
                 }
                 Term::NominalValue { ty, fields, .. } => {
                     if fields.len().saturating_add(1) > room {
@@ -752,6 +773,10 @@ impl Terms {
 }
 fn subterms(term: &Term) -> Vec<&Term> {
     match term {
+        Term::ErrorResult { errors, result } if !has_bound(term) => errors
+            .iter()
+            .chain(std::iter::once(result.as_ref()))
+            .collect(),
         Term::Computation { effects, result } if !has_bound(term) => effects
             .iter()
             .flat_map(|operation| operation.arguments.iter())
@@ -762,6 +787,10 @@ fn subterms(term: &Term) -> Vec<&Term> {
         } => arguments
             .iter()
             .chain(std::iter::once(subject.as_ref()))
+            .collect(),
+        Term::ErrorValue { ty, label, value } => std::iter::once(ty.as_ref())
+            .chain(label.as_deref())
+            .chain(std::iter::once(value.as_ref()))
             .collect(),
         Term::NominalValue { ty, fields, .. } => {
             std::iter::once(ty.as_ref()).chain(fields.iter()).collect()
@@ -780,7 +809,9 @@ fn subterms(term: &Term) -> Vec<&Term> {
         | Term::NormalForm {
             arguments: items, ..
         } => items.iter().collect(),
-        Term::Pointer(inner) | Term::ComptimeFunction(inner) => vec![inner],
+        Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
+            vec![inner]
+        }
         Term::Function { parameters, result } if !has_bound(term) => parameters
             .iter()
             .map(|p| &p.ty)
@@ -801,6 +832,7 @@ fn subterms(term: &Term) -> Vec<&Term> {
 }
 fn has_bound(term: &Term) -> bool {
     match term {
+        Term::ErrorResult { errors, result } => errors.iter().any(has_bound) || has_bound(result),
         Term::Computation { effects, result } => {
             has_bound(result)
                 || effects
@@ -810,6 +842,11 @@ fn has_bound(term: &Term) -> bool {
         Term::AssociatedType {
             arguments, subject, ..
         } => arguments.iter().any(has_bound) || has_bound(subject),
+        Term::ErrorValue { ty, label, value } => {
+            has_bound(ty)
+                || label.as_ref().is_some_and(|label| has_bound(label))
+                || has_bound(value)
+        }
         Term::NominalValue { ty, fields, .. } => has_bound(ty) || fields.iter().any(has_bound),
         Term::Record(fields) | Term::RecordValue(fields) => {
             fields.iter().any(|(_, ty)| has_bound(ty))
@@ -836,7 +873,9 @@ fn has_bound(term: &Term) -> bool {
         | Term::NormalForm {
             arguments: items, ..
         } => items.iter().any(has_bound),
-        Term::Pointer(inner) | Term::ComptimeFunction(inner) => has_bound(inner),
+        Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
+            has_bound(inner)
+        }
         _ => false,
     }
 }
@@ -991,6 +1030,7 @@ enum Head {
     Primitive(Primitive),
     Pointer,
     ComptimeFunction,
+    UnsafeFunction,
     Tuple(usize),
     Function(Vec<Sort>),
     Closure(usize),
@@ -1001,6 +1041,7 @@ fn constructor(term: &Term) -> Option<Head> {
         Term::Primitive(p) if *p != Primitive::Unit => Some(Head::Primitive(*p)),
         Term::Pointer(_) => Some(Head::Pointer),
         Term::ComptimeFunction(_) => Some(Head::ComptimeFunction),
+        Term::UnsafeFunction(_) => Some(Head::UnsafeFunction),
         Term::Tuple(items) => Some(Head::Tuple(items.len())),
         Term::Function { parameters, .. } if !has_bound(term) => {
             Some(Head::Function(parameters.iter().map(|p| p.sort).collect()))
@@ -1034,6 +1075,9 @@ impl Context {
 }
 
 fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
+    if let (Term::ErrorValue { label: a, .. }, Term::ErrorValue { label: b, .. }) = (a, b) {
+        return a.is_some() == b.is_some();
+    }
     if let (Term::Computation { effects: left, .. }, Term::Computation { effects: right, .. }) =
         (a, b)
     {
@@ -1100,6 +1144,9 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
     matches!((a, b), (Term::NormalForm { head: a, sort: sa, arguments: aa }, Term::NormalForm { head: b, sort: sb, arguments: ab }) if a == b && sa == sb && aa.len() == ab.len() && context.congruence_heads.contains(a))
 }
 struct Search<'a> {
+    // Query-local search order only; never shared with another context, goal
+    // or proof check. Contains no assignment facts.
+    required_atoms: Option<Vec<usize>>,
     context: &'a Context,
     formula: &'a Formula,
     atoms: &'a [Atom],
@@ -1194,6 +1241,62 @@ impl Search<'_> {
             Ok(())
         }
     }
+    /// Prefer literals required by the Boolean skeleton before choosing a
+    /// disjunctive branch. This is only a search-order change: both children
+    /// are still represented by the existing, independently checked Split.
+    fn required_atom(&mut self, assignment: &[Option<bool>]) -> Result<Option<usize>, ()> {
+        if self.required_atoms.is_none() {
+            self.steps = self.steps.checked_sub(self.atoms.len()).ok_or(())?;
+            let mut seen = vec![false; self.atoms.len()];
+            let mut order = Vec::new();
+            let mut pending = vec![(self.formula, true)];
+            while let Some((formula, truth)) = pending.pop() {
+                self.tick()?;
+                match formula {
+                    Formula::Not(inner) => pending.push((inner, !truth)),
+                    Formula::And(parts) if truth => {
+                        self.steps = self.steps.checked_sub(parts.len()).ok_or(())?;
+                        pending.extend(parts.iter().rev().map(|part| (part, true)));
+                    }
+                    Formula::Or(parts) if !truth => {
+                        self.steps = self.steps.checked_sub(parts.len()).ok_or(())?;
+                        pending.extend(parts.iter().rev().map(|part| (part, false)));
+                    }
+                    Formula::Equal(_)
+                    | Formula::Kind(_)
+                    | Formula::Trait(_)
+                    | Formula::IntLe(_) => {
+                        for (index, atom) in self.atoms.iter().enumerate() {
+                            self.steps = self.steps.checked_sub(1).ok_or(())?;
+                            let matches = match (formula, atom) {
+                                (Formula::Equal(a), Atom::TypeEqual(b)) => a == b,
+                                (Formula::Kind(a), Atom::Kind(b)) => a == b,
+                                (Formula::Trait(a), Atom::Trait(b)) => a == b,
+                                (Formula::IntLe(a), Atom::IntLe(b)) => a == b,
+                                _ => false,
+                            };
+                            if matches {
+                                if !seen[index] {
+                                    seen[index] = true;
+                                    order.push(index);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            self.required_atoms = Some(order);
+        }
+        for index in self.required_atoms.as_ref().unwrap() {
+            self.steps = self.steps.checked_sub(1).ok_or(())?;
+            if assignment[*index].is_none() {
+                return Ok(Some(*index));
+            }
+        }
+        Ok(None)
+    }
     fn solve(&mut self, assignment: &mut [Option<bool>], depth: usize) -> SearchResult {
         if depth >= self.max_depth || self.tick().is_err() {
             return SearchResult::Unknown(UnknownReason::BudgetExhausted);
@@ -1217,7 +1320,11 @@ impl Search<'_> {
             }
             Err(reason) => return SearchResult::Unknown(reason),
         };
-        if let Some(index) = assignment.iter().position(Option::is_none) {
+        let required = match self.required_atom(assignment) {
+            Ok(index) => index,
+            Err(()) => return SearchResult::Unknown(UnknownReason::BudgetExhausted),
+        };
+        if let Some(index) = required.or_else(|| assignment.iter().position(Option::is_none)) {
             assignment[index] = Some(false);
             let negative = self.solve(assignment, depth + 1);
             assignment[index] = None;
@@ -1275,6 +1382,9 @@ impl Search<'_> {
                         {
                             return Ok(None);
                         }
+                        if self.error_result_distinct(a, b, &classes, assignment)? {
+                            return Ok(None);
+                        }
                         if self.computation_distinct(a, b, &classes, assignment)? {
                             return Ok(None);
                         }
@@ -1326,6 +1436,8 @@ impl Search<'_> {
                             .zip(&self.terms.children[b])
                             .all(|(&a, &b)| classes.root(a) == classes.root(b))
                     {
+                        changed |= classes.merge(a, b);
+                    } else if self.error_result_congruent(a, b, &classes)? {
                         changed |= classes.merge(a, b);
                     } else if self.computation_congruent(a, b, &classes, assignment)? {
                         changed |= classes.merge(a, b);
@@ -1606,6 +1718,7 @@ fn rebuild(
         Term::Primitive(p) => Some(Term::Primitive(*p)),
         Term::Pointer(t) => Some(Term::Pointer(Box::new(child(t)?))),
         Term::ComptimeFunction(t) => Some(Term::ComptimeFunction(Box::new(child(t)?))),
+        Term::UnsafeFunction(t) => Some(Term::UnsafeFunction(Box::new(child(t)?))),
         Term::Tuple(items) => Some(Term::Tuple(
             items.iter().map(&mut *child).collect::<Option<_>>()?,
         )),
@@ -1784,19 +1897,19 @@ impl fmt::Display for Context {
         f.write_str("(type-context")?;
         display_scope(f, &self.scope)?;
         f.write_str(" (assumptions")?;
-        for assumption in &self.assumptions {
+        for assumption in self.assumptions.iter() {
             write!(f, " {assumption}")?;
         }
         f.write_str(") (congruence-heads")?;
-        for declaration in &self.congruence_heads {
+        for declaration in self.congruence_heads.iter() {
             write!(f, " {declaration}")?;
         }
         f.write_str(") (nominal-constructors")?;
-        for declaration in &self.nominal_constructors {
+        for declaration in self.nominal_constructors.iter() {
             write!(f, " {declaration}")?;
         }
         f.write_str(") (tuple-heads")?;
-        for declaration in &self.tuple_heads {
+        for declaration in self.tuple_heads.iter() {
             write!(f, " {declaration}")?;
         }
         f.write_str("))")
@@ -1826,6 +1939,203 @@ impl fmt::Display for Proof {
         f.write_str(")")?;
         display_scope(f, &proof.scope)?;
         write!(f, " (proof {}))", proof.tree)
+    }
+}
+
+#[cfg(test)]
+mod context_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn required_atom_order_is_query_local_and_assignment_independent() {
+        let equal = |local| {
+            Formula::equal(
+                Term::Rigid {
+                    declaration: DeclarationId { package: 91, local },
+                    sort: Sort::Type,
+                },
+                Term::Primitive(Primitive::Bool),
+            )
+        };
+        let formula = Formula::And(vec![
+            equal(0),
+            Formula::Or(vec![equal(1), equal(2)]),
+            Formula::Not(Box::new(Formula::Not(Box::new(equal(3))))),
+        ]);
+        let context = Context::with_scope(vec![]);
+        let mut atoms = Vec::new();
+        let mut terms = Terms::default();
+        collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
+        let mut search = Search {
+            required_atoms: None,
+            context: &context,
+            formula: &formula,
+            atoms: &atoms,
+            terms: &terms,
+            steps: 0,
+            max_depth: 128,
+        };
+        let mut assignment = vec![None; atoms.len()];
+        assert!(search.required_atom(&assignment).is_err());
+        assert!(search.required_atoms.is_none());
+        // Enough to visit the first literal, but not to finish the skeleton:
+        // no partially built priority list may survive this failure either.
+        search.steps = 12;
+        assert!(search.required_atom(&assignment).is_err());
+        assert!(search.required_atoms.is_none());
+        search.steps = 1000;
+        assignment[0] = Some(true);
+        assert_eq!(search.required_atom(&assignment).unwrap(), Some(3));
+        let built = search.steps;
+        // Backtracking must make the earlier atom eligible again. A cached
+        // list of previously unassigned atoms would silently change the order.
+        assignment[0] = None;
+        assert_eq!(search.required_atom(&assignment).unwrap(), Some(0));
+        assert_eq!(built - search.steps, 1);
+        assignment[0] = Some(true);
+        assignment[3] = Some(true);
+        assert_eq!(search.required_atom(&assignment).unwrap(), None);
+        // Atoms beneath a positive disjunction remain ordinary choices.
+        assert_eq!(assignment[1], None);
+        assert_eq!(assignment[2], None);
+        // A fresh search cannot inherit the order of an unrelated query.
+        let other = Formula::Or(vec![equal(0), equal(3)]);
+        let mut fresh = Search {
+            required_atoms: None,
+            context: &context,
+            formula: &other,
+            atoms: &atoms,
+            terms: &terms,
+            steps: 1000,
+            max_depth: 128,
+        };
+        assert_eq!(fresh.required_atom(&vec![None; atoms.len()]).unwrap(), None);
+    }
+
+    #[test]
+    fn required_literals_precede_disjunctions_with_checkable_proofs() {
+        let types: Vec<_> = (0..8)
+            .map(|local| Term::Rigid {
+                declaration: DeclarationId { package: 90, local },
+                sort: Sort::Type,
+            })
+            .collect();
+        let mut context = Context::with_scope(vec![]);
+        for ty in &types {
+            context.assume(Formula::Or(vec![
+                Formula::equal(ty.clone(), Term::Primitive(Primitive::I8)),
+                Formula::equal(ty.clone(), Term::Primitive(Primitive::I16)),
+            ]));
+        }
+        context.assume(Formula::And(
+            types[1..]
+                .iter()
+                .map(|ty| Formula::equal(types[0].clone(), ty.clone()))
+                .collect(),
+        ));
+        let goal = Formula::Not(Box::new(Formula::equal(
+            types[7].clone(),
+            Term::Primitive(Primitive::U8),
+        )));
+        let small = Budget {
+            steps: 4096,
+            ..Default::default()
+        };
+        let Outcome::Entailed(proof) = context.prove(goal.clone(), small) else {
+            panic!("required equality premises must be processed before domain choices");
+        };
+        context.verify_proof(&proof, Budget::default()).unwrap();
+        assert!(matches!(
+            context.prove(
+                goal.clone(),
+                Budget {
+                    steps: 0,
+                    ..Default::default()
+                }
+            ),
+            Outcome::Unknown { .. }
+        ));
+        assert!(matches!(context.prove(goal, small), Outcome::Entailed(_)));
+        let Outcome::NotEntailed(witness) = context.prove(
+            Formula::equal(types[0].clone(), Term::Primitive(Primitive::I8)),
+            Budget::default(),
+        ) else {
+            panic!("the alternatives must not become unconditional premises");
+        };
+        context.verify_witness(&witness, Budget::default()).unwrap();
+
+        let mut negative = Context::with_scope(vec![]);
+        negative.assume(Formula::Not(Box::new(Formula::Or(vec![
+            Formula::Not(Box::new(Formula::equal(
+                types[0].clone(),
+                Term::Primitive(Primitive::I8),
+            ))),
+            Formula::Not(Box::new(Formula::equal(
+                types[1].clone(),
+                Term::Primitive(Primitive::I8),
+            ))),
+        ]))));
+        let Outcome::Entailed(proof) =
+            negative.prove(Formula::equal(types[0].clone(), types[1].clone()), small)
+        else {
+            panic!("negative disjunction must preserve required literal polarity");
+        };
+        negative.verify_proof(&proof, Budget::default()).unwrap();
+    }
+
+    #[test]
+    fn forks_share_support_until_the_affected_component_changes() {
+        let head = DeclarationId {
+            package: 82,
+            local: 101,
+        };
+        let mut parent = Context::with_scope(vec![vec![Sort::Type]]);
+        parent.assume(Formula::And(vec![Formula::True; 256]));
+        let mut child = parent.fork();
+        assert!(Arc::ptr_eq(&parent.scope, &child.scope));
+        assert!(Arc::ptr_eq(&parent.assumptions, &child.assumptions));
+        child.assume(Formula::False);
+        child.admit_congruence(head);
+        child.admit_nominal_constructor(head);
+        child.admit_tuple_head(head);
+        assert!(!Arc::ptr_eq(&parent.assumptions, &child.assumptions));
+        assert!(Arc::ptr_eq(&parent.scope, &child.scope));
+        assert_eq!(parent.assumptions.len(), 1);
+        assert!(!parent.congruence_heads.contains(&head));
+        assert!(!parent.is_nominal_constructor(head));
+        assert!(!parent.is_tuple_head(head));
+        assert!(matches!(
+            parent.prove(Formula::False, Budget::default()),
+            Outcome::NotEntailed(_)
+        ));
+        assert!(matches!(
+            child.prove(Formula::False, Budget::default()),
+            Outcome::Entailed(_)
+        ));
+
+        let theory = child.theory_in_scope(vec![vec![Sort::ComptimeValue]]);
+        assert!(theory.assumptions().is_empty());
+        assert!(Arc::ptr_eq(&theory.tuple_heads, &child.tuple_heads));
+        assert!(Arc::ptr_eq(
+            &theory.nominal_constructors,
+            &child.nominal_constructors
+        ));
+    }
+
+    #[test]
+    fn proof_support_survives_branch_mutation_but_cannot_be_replayed_there() {
+        let parent = Context::default();
+        let mut child = parent.fork();
+        let Outcome::Entailed(proof) = child.prove(Formula::True, Budget::default()) else {
+            panic!("true must be proved");
+        };
+        child.assume(Formula::False);
+        parent.verify_proof(&proof, Budget::default()).unwrap();
+        assert_eq!(
+            child.verify_proof(&proof, Budget::default()),
+            Err(ProofError::Invalid)
+        );
+        assert!(proof.assumptions.is_empty());
     }
 }
 
@@ -1899,7 +2209,7 @@ mod tuple_classification_tests {
             context.verify_witness(witness, Budget::default()).unwrap();
             assert!(outcome.to_string().contains("(tuple-heads"));
             let mut removed = context.fork();
-            removed.tuple_heads.clear();
+            Arc::make_mut(&mut removed.tuple_heads).clear();
             assert!(removed.verify_witness(witness, Budget::default()).is_err());
             let mut altered = witness.clone();
             altered.goal = Formula::kind(tuple.clone(), TypeKind::Tuple);

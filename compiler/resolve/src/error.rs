@@ -32,6 +32,8 @@ pub enum ResolveError {
     },
     /// An `use` path segment could not be resolved.
     UnresolvedImportSegment { segment: String, span: Span },
+    /// Invalid caller-supplied package identities or dependency edges.
+    InvalidPackageGraph(String),
     /// Generic internal error.
     InternalError(String),
 }
@@ -53,7 +55,7 @@ impl ResolveError {
             Self::UnresolvedImportSegment { segment, .. } => {
                 format!("Unresolved import path segment `{}`", segment)
             }
-            Self::InternalError(msg) => msg.clone(),
+            Self::InternalError(msg) | Self::InvalidPackageGraph(msg) => msg.clone(),
         }
     }
 
@@ -67,7 +69,7 @@ impl ResolveError {
             | Self::CyclicImport { span, .. }
             | Self::UnresolvedImportSegment { span, .. } => *span,
             Self::DuplicateDefinition { second_span, .. } => *second_span,
-            Self::InternalError(_) => rustc_span::DUMMY_SP,
+            Self::InternalError(_) | Self::InvalidPackageGraph(_) => rustc_span::DUMMY_SP,
         }
     }
 }
@@ -84,6 +86,7 @@ impl FlurryError for ResolveError {
             Self::DuplicateDefinition { .. } => RESOLVE_ERROR_BASE + 7,
             Self::UnresolvedImportSegment { .. } => RESOLVE_ERROR_BASE + 8,
             Self::InternalError(_) => RESOLVE_ERROR_BASE + 9,
+            Self::InvalidPackageGraph(_) => RESOLVE_ERROR_BASE + 10,
         }
     }
 
@@ -98,6 +101,7 @@ impl FlurryError for ResolveError {
             Self::DuplicateDefinition { .. } => "duplicate_definition",
             Self::UnresolvedImportSegment { .. } => "unresolved_import_segment",
             Self::InternalError(_) => "internal_error",
+            Self::InvalidPackageGraph(_) => "invalid_package_graph",
         }
     }
 

@@ -7,6 +7,9 @@ use crate::verification::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod reads;
+pub use reads::{CleanupReadFootprint, CleanupReader};
+
 #[derive(Clone, Debug)]
 enum Layout<T> {
     Atomic,
@@ -40,6 +43,94 @@ impl AcquiredCleanup {
             }
             check(ty, fuel)
         })
+    }
+
+    /// Inspect only responsibilities retained by a checked ownership tree.
+    /// This is behavior evidence, not permission to execute cleanup or access
+    /// storage. Unrefined values still inspect every possible component.
+    pub(crate) fn visit_remaining_components(
+        &self,
+        tree: &CleanupTree,
+        variants: &[VariantSelection],
+        fuel: &mut usize,
+        check: &mut impl FnMut(&Term, &Resolution, &mut usize) -> Result<(), String>,
+    ) -> Result<(), String> {
+        fn visit(
+            binding: &AcquiredCleanup,
+            tree: &CleanupTree,
+            base: &Place,
+            variants: &[VariantSelection],
+            fuel: &mut usize,
+            depth: usize,
+            check: &mut impl FnMut(&Term, &Resolution, &mut usize) -> Result<(), String>,
+        ) -> Result<(), String> {
+            step(fuel, depth)?;
+            let Some(children) = &tree.children else {
+                return if tree.availability == Availability::Empty {
+                    Ok(())
+                } else {
+                    binding.visit_components(fuel, check)
+                };
+            };
+            if tree.availability != Availability::Empty {
+                check(&binding.ty, &binding.resolution, fuel)?;
+            }
+            if matches!(binding.layout, Layout::Atomic) {
+                return Err("residual cleanup shape disagrees with atomic layout".into());
+            }
+            // An empty list is evidence that every payload field has moved;
+            // the enclosing destructor (if any) was still checked above.
+            if children.is_empty() {
+                return Ok(());
+            }
+            let fields = match &binding.layout {
+                Layout::Fields(fields) => fields,
+                Layout::Variants(layouts) => {
+                    let relative = tree
+                        .place
+                        .fields
+                        .strip_prefix(base.fields.as_slice())
+                        .ok_or("residual cleanup lies outside receiver")?;
+                    let mut selected = None;
+                    for variant in variants {
+                        *fuel = fuel
+                            .checked_sub(variant.fields.len() + 1)
+                            .ok_or("residual cleanup variant budget exhausted")?;
+                        if variant.fields == relative {
+                            if selected.replace(variant.index).is_some() {
+                                return Err("duplicate residual variant premise".into());
+                            }
+                        }
+                    }
+                    layouts
+                        .get(selected.ok_or("decomposed cleanup requires a variant premise")?)
+                        .ok_or("residual variant out of bounds")?
+                }
+                Layout::Atomic => unreachable!(),
+            };
+            for child in children {
+                *fuel = fuel
+                    .checked_sub(child.place.fields.len() + 1)
+                    .ok_or("residual cleanup path budget exhausted")?;
+                let index = *child
+                    .place
+                    .fields
+                    .last()
+                    .ok_or("residual child has no field")?;
+                if child.place.root != tree.place.root
+                    || child.place.fields.len() != tree.place.fields.len() + 1
+                    || !child.place.fields.starts_with(&tree.place.fields)
+                {
+                    return Err("residual child is outside parent".into());
+                }
+                let field = fields
+                    .get(index)
+                    .ok_or("residual field exceeds acquired layout")?;
+                visit(field, child, base, variants, fuel, depth + 1, check)?;
+            }
+            Ok(())
+        }
+        visit(self, tree, &tree.place, variants, fuel, 0, check)
     }
 
     /// Inspect the frozen selection for every possible cleanup component.
@@ -210,6 +301,13 @@ fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>
         return Ok(Layout::Fields(fields.to_vec()));
     }
     match ty {
+        // Cleanup switch tags are local representation positions: success first,
+        // then the retained error-row order. This is not error type identity.
+        Term::ErrorResult { errors, result } => Ok(Layout::Variants(
+            std::iter::once(vec![(**result).clone()])
+                .chain(errors.iter().map(|ty| vec![ty.clone()]))
+                .collect(),
+        )),
         Term::Nominal {
             declaration,
             arguments,
@@ -271,7 +369,11 @@ fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>
             environment: fields,
             ..
         } => Ok(Layout::Fields(fields.clone())),
-        Term::Primitive(_) | Term::Pointer(_) | Term::Function { .. } => Ok(Layout::Atomic),
+        Term::Primitive(_)
+        | Term::Pointer(_)
+        | Term::Function { .. }
+        | Term::UnsafeFunction(_)
+        | Term::ComptimeFunction(_) => Ok(Layout::Atomic),
         _ => Err("cleanup layout is not established; opaque heads are not unfolded".into()),
     }
 }
@@ -877,6 +979,13 @@ pub struct CleanupSession<'a, 'w> {
     budget: Budget,
     bindings: Vec<AcquiredCleanup>,
     rejection_stack: Vec<Term>,
+    memory_inert_stack: Vec<Term>,
+    read_footprint_stack: Vec<Term>,
+    // Completed positive proofs only, in this immutable package/Drop world.
+    // Budget exhaustion and unresolved recursion must never become cache facts.
+    read_footprints: std::collections::HashMap<Term, CleanupReadFootprint>,
+    memory_inert_types: std::collections::HashSet<Term>,
+    nonrejecting_types: std::collections::HashSet<Term>,
 }
 impl<'a, 'w> CleanupSession<'a, 'w> {
     pub fn new(
@@ -892,6 +1001,11 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
             budget,
             bindings: vec![],
             rejection_stack: vec![],
+            memory_inert_stack: vec![],
+            read_footprint_stack: vec![],
+            read_footprints: Default::default(),
+            memory_inert_types: Default::default(),
+            nonrejecting_types: Default::default(),
         }
     }
     fn find<'b>(
@@ -941,8 +1055,87 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
     }
 }
 impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
+    fn is_trivial(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
+        self.acquire(ty, fuel)?;
+        let binding = self.find(ty, fuel)?.ok_or("missing acquired cleanup")?;
+        let mut trivial = true;
+        binding.visit_components(fuel, &mut |_, resolution, _| {
+            trivial &= matches!(resolution, Resolution::NoCustomDrop(_));
+            Ok(())
+        })?;
+        Ok(trivial)
+    }
+    fn is_memory_inert(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
+        crate::verification::memory::bound_type(ty, fuel)?;
+        if self.memory_inert_types.contains(ty) {
+            return Ok(true);
+        }
+        for active in &self.memory_inert_stack {
+            crate::verification::memory::bound_type(active, fuel)?;
+            if active == ty {
+                return Ok(false);
+            }
+        }
+        if self.memory_inert_stack.len() >= 64 {
+            return Err("cleanup memory proof nesting budget exhausted".into());
+        }
+        self.memory_inert_stack.push(ty.clone());
+        let result = (|| {
+            let Some(footprint) = self.read_footprint(ty, fuel)? else {
+                return Ok(false);
+            };
+            for access in footprint.root_accesses(self.package, fuel)? {
+                step(fuel, 0)?;
+                // Only receiver-local reads can omit external caller mapping.
+                // Actual cleanup still checks field availability and Copy.
+                if !access.target.through.is_empty() {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })();
+        self.memory_inert_stack.pop();
+        if matches!(result, Ok(true)) {
+            crate::verification::memory::bound_type(ty, fuel)?;
+            self.memory_inert_types.insert(ty.clone());
+        }
+        result
+    }
+    fn cleanup_reads(
+        &mut self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<Vec<crate::verification::memory::Access>>, String> {
+        self.read_footprint(ty, fuel)?
+            .map(|footprint| footprint.root_accesses(self.package, fuel))
+            .transpose()
+    }
+    fn check_error_embedding(
+        &mut self,
+        source: &Term,
+        target: &Term,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        crate::verification::memory::bound_type(source, fuel)?;
+        crate::verification::memory::bound_type(target, fuel)?;
+        if source == target {
+            return Ok(());
+        }
+        self.acquire(source, fuel)?;
+        let binding = self.find(source, fuel)?.ok_or("missing acquired cleanup")?;
+        // Payload owners survive embedding unchanged. Only the enclosing
+        // result's responsibility would otherwise disappear.
+        if matches!(binding.resolution, Resolution::NoCustomDrop(_)) {
+            Ok(())
+        } else {
+            Err("error embedding requires explicit Drop responsibility transfer for the source result".into())
+        }
+    }
     fn may_reject(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
         crate::verification::memory::bound_type(ty, fuel)?;
+        if self.nonrejecting_types.contains(ty) {
+            return Ok(false);
+        }
         for active in &self.rejection_stack {
             crate::verification::memory::bound_type(active, fuel)?;
             if active == ty {
@@ -1000,6 +1193,10 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
             Ok(false)
         })();
         self.rejection_stack.pop();
+        if matches!(result, Ok(false)) {
+            crate::verification::memory::bound_type(ty, fuel)?;
+            self.nonrejecting_types.insert(ty.clone());
+        }
         result
     }
     fn acquire(&mut self, ty: &Term, fuel: &mut usize) -> Result<(), String> {

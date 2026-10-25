@@ -1,6 +1,9 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Type = .Type'builtin;
 typealias Bool = true'type;
-typealias Pair<T> = (T, T);
+typealias Pair<T> = Tuple<T, T>;
 typealias Ignore<T> = Bool;
 typealias Reader<T> = %{saved: T} fn() -> T;
 typealias Mapper<T> = comptime fn(T) -> T;
@@ -17,7 +20,7 @@ comptime fn NestedType(value: Type) -> Type { Nested<value> }
 comptime fn Twice() -> Type { Pair<InputType()> }
 comptime fn Ignored() -> Type { Ignore<InputType()> }
 typealias ConcretePair = PairType(Bool);
-fn run(value: ConcretePair) -> (Bool, Bool) { value }
+fn run(value: ConcretePair) -> Tuple<Bool, Bool> { value }
 
 typealias Captured<T> = (|| T)();
 comptime fn CapturedType(value: Type) -> Type { Captured<value> }

@@ -1,0 +1,4 @@
+-- Loaded in builtin, the defining package of the resource protocols.
+-- Keep this separate from the independently usable Tuple constructor.
+-- Once transfers the fields; it neither copies them nor replaces their cleanup.
+impl resources.Once for Tuple<...Es> where Es: meta.List<.Type'builtin> {}

@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 trait Read {
     fn read(self) -> true'type;
 }
@@ -19,6 +22,6 @@ impl Flag {
     fn read(self) -> true'type { false }
 }
 
-fn run() -> (true'type, true'type, true'type) {
+fn run() -> Tuple<true'type, true'type, true'type> {
     (Flag {}.as(Child).read(), Flag {}.as(Child).inspect(), Flag {}.read())
 }

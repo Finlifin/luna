@@ -20,6 +20,7 @@ impl Checker<'_, '_> {
         let item = self.package.item(owner).unwrap();
         let sig = match &item.kind {
             ItemKind::Fn(sig, _) => sig,
+            ItemKind::FnDeclaration(sig) if sig.modifiers.is_function_template => sig,
             ItemKind::FnDeclaration(_)
                 if self.self_types.contains_key(&owner)
                     && !self.self_containers.contains_key(&owner) =>
@@ -35,15 +36,25 @@ impl Checker<'_, '_> {
                 ));
             }
         };
-        if sig.clause_params.iter().any(|parameter|!matches!(parameter.kind,
-            hir::clause::ClauseParamKind::Type(_) | hir::clause::ClauseParamKind::TraitBound(..) | hir::clause::ClauseParamKind::Positional(..) | hir::clause::ClauseParamKind::Optional(..)))
-            || sig.params.iter().any(|param|
-                // Ordinary supply/lambda markers use the shared router;
-                // comptime inputs use staged binding before expansion.
-                // Neither grants contextual binding correspondence.
-                param.ty.flags & !(hir::common::TPARAM_IMPLICIT | hir::common::TPARAM_LAMBDA | hir::common::TPARAM_COMPTIME) != 0
-                || !matches!(param.ty.kind,TyParamKind::Positional(_) | TyParamKind::Optional(..) | TyParamKind::Varadic(..) | TyParamKind::Itself {..})) {
-            return Err(error(span,"value-generic or contextual quote fn inputs are not yet implemented"));
+        if sig.clause_params.iter().any(|parameter| {
+            !matches!(
+                parameter.kind,
+                hir::clause::ClauseParamKind::Type(_)
+                    | hir::clause::ClauseParamKind::TraitBound(..)
+                    | hir::clause::ClauseParamKind::Positional(..)
+                    | hir::clause::ClauseParamKind::Optional(..)
+            )
+        }) {
+            return Err(error(span, "unsupported quote fn clause protocol"));
+        }
+        if sig.params.iter().any(|param|
+            // Ordinary supply/lambda markers use the shared router;
+            // comptime inputs use staged binding before expansion.
+            // Neither grants contextual binding correspondence.
+            param.ty.flags & !(hir::common::TPARAM_IMPLICIT | hir::common::TPARAM_LAMBDA | hir::common::TPARAM_COMPTIME) != 0
+                || !matches!(param.ty.kind, TyParamKind::Positional(_) | TyParamKind::Optional(..) | TyParamKind::Varadic(..) | TyParamKind::Itself {..}))
+        {
+            return Err(error(span, "contextual quote fn inputs or dependent parameter protocols are not yet implemented"));
         }
         Ok(())
     }
@@ -491,102 +502,10 @@ impl Expansion<'_> {
             };
             aliases.insert(snapshot.binding, binding);
         }
-        // A weakened implementation domain inherits `not entry_domain or
-        // ensures`. Reconstruct only that exact checked form, using the frozen
-        // parameter snapshots rather than mutable exit values.
-        *self.fuel = self
-            .fuel
-            .checked_sub(
-                template
-                    .parameters
-                    .len()
-                    .saturating_add(template.entry_snapshots.len()) as u64,
-            )
-            .ok_or_else(|| error(at(expression.source), "quote entry guard budget exhausted"))?;
-        let snapshots: BTreeMap<_, _> = template
-            .entry_snapshots
-            .iter()
-            .map(|snapshot| (snapshot.parameter, snapshot.binding))
-            .collect();
-        let entry_bindings = template
-            .parameters
-            .iter()
-            .map(|parameter| {
-                snapshots
-                    .get(parameter)
-                    .map(|binding| (*parameter, *binding))
-            })
-            .collect::<Option<BTreeMap<_, _>>>();
-        let mut entry_guard: Option<n::Expr> = None;
-        if let Some(entry_bindings) = entry_bindings {
-            for predicate in &program.preconditions {
-                self.charge(predicate, at(expression.source))?;
-                let mut condition = predicate.clone();
-                nir::contracts::remap_predicate(&mut condition, &aliases)
-                    .map_err(|reason| error(at(expression.source), reason))?;
-                nir::contracts::remap_predicate(&mut condition, &entry_bindings)
-                    .map_err(|reason| error(at(expression.source), reason))?;
-                entry_guard = Some(match entry_guard {
-                    None => condition,
-                    Some(previous) => n::Expr {
-                        source: previous.source,
-                        ty: p(P::Bool),
-                        kind: K::And(Box::new(previous), Box::new(condition)),
-                    },
-                });
-            }
-        }
-        // Effective implementation contracts already include inherited
-        // interface predicates. Compare in the implementation binding frame
-        // before freshening changes source identities and local bindings.
-        // Distinct implementation predicates and changed interface contracts
-        // must still be checked; declaration identity alone is insufficient.
-        for (incoming, existing, postcondition) in [
-            (&mut program.preconditions, &template.preconditions, false),
-            (&mut program.postconditions, &template.postconditions, true),
-        ] {
-            let mut additional = Vec::new();
-            for predicate in std::mem::take(incoming) {
-                self.charge(&predicate, at(expression.source))?;
-                let mut rebound = predicate.clone();
-                nir::contracts::remap_predicate(&mut rebound, &aliases)
-                    .map_err(|reason| error(at(expression.source), reason))?;
-                let guarded = if postcondition {
-                    if let Some(guard) = &entry_guard {
-                        self.charge(guard, at(expression.source))?;
-                        self.charge(&rebound, at(expression.source))?;
-                        Some(n::Expr {
-                            source: rebound.source,
-                            ty: p(P::Bool),
-                            kind: K::Or(
-                                Box::new(n::Expr {
-                                    source: guard.source,
-                                    ty: guard.ty.clone(),
-                                    kind: K::Not(Box::new(guard.clone())),
-                                }),
-                                Box::new(rebound.clone()),
-                            ),
-                        })
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let mut inherited = false;
-                for existing in existing {
-                    self.charge(existing, at(expression.source))?;
-                    if existing == &rebound || guarded.as_ref() == Some(existing) {
-                        inherited = true;
-                        break;
-                    }
-                }
-                if !inherited {
-                    additional.push(predicate);
-                }
-            }
-            *incoming = additional;
-        }
+        // Interface checks are invocation boundaries, independent of the
+        // implementation's effective contract (including inherited guards).
+        // Preserve both when replacing a method call with its body, just as
+        // ordinary dispatch checks the interface before/after the invocation.
         for predicate in program
             .preconditions
             .iter_mut()
@@ -1180,6 +1099,13 @@ pub(in crate::program) fn expand_retained_quote_functions(
     fuel: &mut u64,
 ) -> Result<(), Error> {
     let mut remaining = usize::try_from(*fuel).unwrap_or(usize::MAX);
+    // Expansion removes the call node, so its responsibility boundary must be
+    // checked while the original caller and callee are still visible.
+    for function in output.functions.iter().chain(&output.quote_templates) {
+        let result = nir::call_safety::validate(function, &mut remaining);
+        *fuel = remaining as u64;
+        result.map_err(|message| error(at(function.body.source), message))?;
+    }
     let sorts = output.declaration_parameter_sorts(&mut remaining);
     *fuel = remaining as u64;
     let sorts = sorts.map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;

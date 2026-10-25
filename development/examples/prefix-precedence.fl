@@ -1,6 +1,9 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Bool = true'type;
 typealias Int = .Integer'builtin;
-comptime fn logical(a: Bool, b: Bool) -> (Bool, Bool, Bool, Bool) {
+comptime fn logical(a: Bool, b: Bool) -> Tuple<Bool, Bool, Bool, Bool> {
     (not a and b, not a or b, not (a and b), not (a or b))
 }
 comptime fn arithmetic(a: Int, b: Int, c: Int) -> Int { -a + b * c }
@@ -8,4 +11,4 @@ struct Flag { value: Bool }
 comptime fn postfix() -> Bool { not Flag { value: false }.value }
 comptime fn condition() -> Bool { if not false { true } else { false } }
 comptime fn pattern(value: Int) -> Bool { value match { < -1 > => true, _ => false } }
-comptime fn run() -> (Bool, Bool, Bool) { (postfix(), condition(), pattern(-1)) }
+comptime fn run() -> Tuple<Bool, Bool, Bool> { (postfix(), condition(), pattern(-1)) }

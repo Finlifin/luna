@@ -1,19 +1,22 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 typealias Bool = true'type;
 typealias Char = 'a''type;
 
 comptime fn IdentityType(value: Type) -> Type { value }
 comptime fn PairType(left: Type, right: Type) -> Type {
-    (left, (right, left))
+    Tuple<left, Tuple<right, left>>
 }
 
 typealias Computed<T> = IdentityType(T);
-typealias Pair<T> = (Computed<T>, Computed<T>);
-typealias Nested<T> = (Pair<T>, Computed<T>);
+typealias Pair<T> = Tuple<Computed<T>, Computed<T>>;
+typealias Nested<T> = Tuple<Pair<T>, Computed<T>>;
 typealias FromFunction<T> = PairType(T, Char);
 
-fn first(value: Nested<Bool>) -> ((Bool, Bool), Bool) { value }
-fn second(value: FromFunction<Bool>) -> (Bool, (Char, Bool)) { value }
-fn run() -> (((Bool, Bool), Bool), (Bool, (Char, Bool))) {
+fn first(value: Nested<Bool>) -> Tuple<Tuple<Bool, Bool>, Bool> { value }
+fn second(value: FromFunction<Bool>) -> Tuple<Bool, Tuple<Char, Bool>> { value }
+fn run() -> Tuple<Tuple<Tuple<Bool, Bool>, Bool>, Tuple<Bool, Tuple<Char, Bool>>> {
     (first(((true, false), true)), second((false, ('z', true))))
 }

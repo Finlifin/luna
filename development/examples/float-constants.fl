@@ -1,11 +1,14 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias F32 = .f32'builtin;
 typealias F64 = .f64'builtin;
 typealias Bool = true'type;
 const StoredType = F32;
 const StoredNaN = F32.NaN;
 const StoredInfinity = F64.Infinity;
-comptime fn single() -> (F32, F32, F32) { (F32.NaN, F32.Infinity, -F32.Infinity) }
-comptime fn double() -> (F64, F64, F64) { (F64.NaN, F64.Infinity, -F64.Infinity) }
+comptime fn single() -> Tuple<F32, F32, F32> { (F32.NaN, F32.Infinity, -F32.Infinity) }
+comptime fn double() -> Tuple<F64, F64, F64> { (F64.NaN, F64.Infinity, -F64.Infinity) }
 comptime fn direct() -> F32 { (.f32'builtin).NaN }
 comptime fn constant_type() -> F32 { StoredType.Infinity }
 comptime fn generic() -> T where T, requires T == F32 { T.Infinity }
@@ -16,7 +19,7 @@ fn default_result() -> F32 { defaults() }
 comptime fn classify(value: F32) -> Bool {
     value match { < F32.Infinity > => true, _ => false }
 }
-comptime fn run() -> (Bool, Bool, Bool, Bool, Bool) {
+comptime fn run() -> Tuple<Bool, Bool, Bool, Bool, Bool> {
     (StoredNaN != StoredNaN, not (F32.NaN >= 0.0),
      1.0 / F32.Infinity == 0.0, classify(F32.Infinity),
      (-F64.Infinity) < StoredInfinity)

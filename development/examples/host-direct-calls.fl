@@ -1,0 +1,36 @@
+-- Each request calls an outlined handler, sharing the installer's captures.
+-- Run with Duplicate/Retire protocols; expected output: (bool true).
+trait Duplicate {}
+trait Retire {fn drop(*self);}
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+
+struct Watch {target:*bool}
+impl Retire for Watch {
+    fn drop(*self) {self.target.*.* = not self.target.*.*;}
+}
+-- Copy is checked for this aggregate; its pointer keeps its original target.
+struct Control {next:bool,target:*bool}
+impl Duplicate for Control {}
+effect read()->bool;
+
+fn subject()->#read bool {
+    let first=read()#;
+    let second=read()#;
+    first and not second
+}
+fn relay()->#read bool {subject()}
+
+fn run()->bool {
+    let cleaned=false;
+    var control=Control {next:true,target:cleaned.ref};
+    let result=relay()# {
+        read()=>do {
+            let owner=Watch {target:control.target};
+            let previous=control.next;
+            control.next=not control.next;
+            resume previous;
+        },
+    };
+    result and control.next and not cleaned
+}

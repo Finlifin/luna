@@ -1,0 +1,16 @@
+-- Regression: expected result (bool true).
+-- The local const belongs to each invocation of the default supplier.
+-- Behavior-witness construction must retain the checked computation without
+-- invoking the const before the enclosing comptime parameter is supplied.
+fn invert(comptime mode: bool, value: bool) -> bool {
+    inline if mode { not value } else { value }
+}
+fn take(comptime mode: bool, value: bool, .next: bool = do {
+    const selected = not mode;
+    invert(selected, value)
+}) -> bool {
+    next
+}
+fn run() -> bool {
+    take(false, false) and not take(true, false)
+}

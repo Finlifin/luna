@@ -1,0 +1,14 @@
+struct Outer {
+    pub struct Inner where T {pub typealias Payload = T;}
+}
+enum Packet {empty, pair(.Type'builtin, bool)}
+comptime fn configured(flag: bool) -> bool {
+    const .pair(Selected, value) = Packet.pair(Outer, flag) else {return false;};
+    let checked: Selected.Inner<bool>.Payload = value;
+    checked
+}
+fn run() -> bool {
+    const yes = configured(true);
+    const no = configured(false);
+    yes and not no
+}

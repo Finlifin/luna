@@ -1,6 +1,7 @@
 use std::fmt::Display;
 
 pub mod ast_visitor;
+pub mod layout;
 use rustc_span::{BytePos, SourceMap, Span};
 
 /// Node index type, for future extensibility
@@ -18,6 +19,8 @@ pub struct Ast {
     pub nodes: Vec<NodeKind>,
     pub spans: Vec<Span>,
     pub children_start: Vec<NodeIndex>,
+    /// Number of direct storage slots for each node (list handles count as one).
+    pub children_len: Vec<NodeIndex>,
 
     pub children: Vec<NodeIndex>,
 
@@ -32,6 +35,7 @@ impl Ast {
             nodes: Vec::new(),
             spans: Vec::new(),
             children_start: Vec::new(),
+            children_len: Vec::new(),
             children: Vec::new(),
             root: 0,
             file_byte_pos,
@@ -40,6 +44,7 @@ impl Ast {
         result.nodes.push(NodeKind::Invalid);
         result.spans.push(Span::default());
         result.children_start.push(0);
+        result.children_len.push(0);
         result.children.push(0); // 添加一个无效的子节点索引
         result
     }
@@ -66,52 +71,47 @@ impl Ast {
         let node_index = self.nodes.len() as NodeIndex;
         let children_start_pos = self.children.len() as NodeIndex;
 
+        let children_len = children_indexes.len() as NodeIndex;
         self.children.extend(children_indexes);
         // 添加节点信息
         self.nodes.push(descriptor.kind);
         self.spans.push(descriptor.span);
         self.children_start.push(children_start_pos);
+        self.children_len.push(children_len);
         node_index
     }
 
-    /// 获取节点的子节点，切片的长度不代表子节点的数量，子节点的真正数量由节点类型决定，
-    /// 检查children长度的行为没有意义。
-    /// 子节点位于切片的前 N 个元素
+    /// Direct storage slots owned by this node. Multi-child slots contain
+    /// handles decoded by get_multi_child_slice; flags remain raw values.
+    /// Later arena allocations never become part of this slice.
     pub fn get_children(&self, node_index: NodeIndex) -> &[NodeIndex] {
-        if node_index == 0 || node_index > self.nodes.len() as NodeIndex {
-            return &[];
-        }
-        let start = self.children_start[node_index as usize] as usize;
-        // 计算结束位置
-        let end = self.children.len();
-        &self.children[start..end]
+        self.child_slots(node_index).unwrap_or(&[])
     }
 
-    /// 获取节点类型
+    fn child_slots(&self, node_index: NodeIndex) -> Option<&[NodeIndex]> {
+        self.get_node_kind(node_index)?;
+        let index = node_index as usize;
+        let start = *self.children_start.get(index)? as usize;
+        let len = *self.children_len.get(index)? as usize;
+        self.children.get(start..start.checked_add(len)?)
+    }
+
+    /// Query a non-sentinel node without indexing outside the arena.
     pub fn get_node_kind(&self, node_index: NodeIndex) -> Option<NodeKind> {
-        if node_index == 0 || node_index > self.nodes.len() as NodeIndex {
-            return None;
-        }
-        Some(self.nodes[node_index as usize])
+        (node_index != 0)
+            .then(|| self.nodes.get(node_index as usize).copied())
+            .flatten()
     }
 
     pub fn get_node(&self, node_index: NodeIndex) -> Option<(NodeKind, Span, &[NodeIndex])> {
-        if node_index == 0 || node_index > self.nodes.len() as NodeIndex {
-            return None;
-        }
-        Some((
-            self.nodes[node_index as usize],
-            self.spans[node_index as usize],
-            self.get_children(node_index),
-        ))
+        let kind = self.get_node_kind(node_index)?;
+        let span = self.get_span(node_index)?;
+        Some((kind, span, self.child_slots(node_index)?))
     }
 
-    /// 获取节点的 span
     pub fn get_span(&self, node_index: NodeIndex) -> Option<Span> {
-        if node_index == 0 || node_index > self.nodes.len() as NodeIndex {
-            return None;
-        }
-        Some(self.spans[node_index as usize])
+        self.get_node_kind(node_index)?;
+        self.spans.get(node_index as usize).copied()
     }
 }
 
@@ -321,7 +321,7 @@ pub enum NodeKind {
     DivAssign, // a, b
     RemAssign, // a, b
     // const pattern (: type)? = expr
-    ConstDecl, // a, b, c
+    ConstDecl, // a, b, c, d
     // let pattern (: type)? = expr
     VarDecl, // pattern, type, init, else
     LetDecl, // pattern, type, init, else
@@ -445,6 +445,16 @@ pub enum NodeKind {
     ModuleDef, // a, b
     // test id? block
     TestDef, // a, b
+    // template test id clauses block
+    TestTemplateDef, // a, N, b
+    // template followed by a function declaration (including its modifiers).
+    FunctionTemplateDef, // a
+    // fn id use expr block (parameter list inherited from the template).
+    FunctionTemplateInstance, // a, b, c
+    // fn id(parameter*) use expr block; keep explicit empty parameters distinct.
+    FunctionTemplateInstanceWithParams, // a, N, b, N(empty), c
+    // test id use expr block
+    TestTemplateInstance, // a, b, c
 
     // imports
     // mod id
@@ -496,6 +506,8 @@ pub enum NodeKind {
     TypeDeclClause,
 
     // parameters
+    // .decl_clause in a function type (no runtime default expression)
+    OptionalTypeParam, // a
     // .id : expr = expr
     OptionalParam, // a, b, c
     // id : expr
@@ -533,7 +545,7 @@ pub enum NodeKind {
     // { (items | statements | ...)* }
     Block, // N
     // atomic(id*) { statement* }
-    AtomicBlock, // N, a
+    AtomicBlock, // a, N (body, resource identifiers)
     // do { statement* }
     DoBlock, // a
     // async { statement* }
@@ -655,6 +667,7 @@ impl NodeKind {
 
             // Single child (a)
             TypeDeclClause
+            | FunctionTemplateDef
             | Defer
             | BoolNot
             | Negative
@@ -691,6 +704,7 @@ impl NodeKind {
             | UnsafeBlock
             | ComptimeBlock
             | ComptimeParam
+            | OptionalTypeParam
             | ErrorParam
             | CatchParam
             | LambdaParam
@@ -759,6 +773,8 @@ impl NodeKind {
             | ConditionArm
             | CatchArm
             | OrPattern
+            | IfGuardPattern
+            | AsBindPattern
             | RangeFromToPattern
             | RangeFromToInclusivePattern
             | PropertyPattern
@@ -794,20 +810,19 @@ impl NodeKind {
             | Ensures => NodeType::DoubleChildren,
 
             // Triple children (a, b, c)
-            ConstDecl
-            | ConstDef
+            ConstDef
+            | TestTemplateInstance
+            | FunctionTemplateInstance
             | IfStatement
             | WhileStatement
-            | IfGuardPattern
             | AndIsPattern
-            | AsBindPattern
             | OptionalDeclClause
             | OptionalParam
             | StructField
             | ClosureEnvironmentBinding => NodeType::TripleChildren,
 
             // Quadruple children (a, b, c, d)
-            LetDecl | VarDecl | IfIsMatch | WhileIsMatch | ForStatement => {
+            LetDecl | VarDecl | ConstDecl | IfIsMatch | WhileIsMatch | ForStatement => {
                 NodeType::QuadrupleChildren
             }
 
@@ -818,6 +833,7 @@ impl NodeKind {
 
             // Single with multi children (a, N)
             ForallType
+            | AtomicBlock
             | ForType
             | BoolForall
             | BoolExists
@@ -836,22 +852,21 @@ impl NodeKind {
             | SubEnumEnumVariant => NodeType::SingleWithMultiChildren,
 
             // Double with multi children (a, b, N)
-            Lambda | AtomicBlock | WhileMatch => NodeType::DoubleWithMultiChildren,
+            Lambda | WhileMatch => NodeType::DoubleWithMultiChildren,
 
             // Complex children patterns
-            Function => NodeType::FunctionDefChildren, // a, N, b, N, c
+            Function | FunctionTemplateInstanceWithParams => NodeType::FunctionDefChildren, // a, N, b, N, c
             NormalFormHeadDef | CaseDef => NodeType::NormalFormHeadDefChildren, // a, N, b, N, c
-            AlgebraicEffect => NodeType::AlgebraicEffectChildren, // a, N, b, N, c
-            StructDef | EnumDef | EffectEnumDef | UnionDef | ImplDef | ExtendDef => {
-                NodeType::TypeDefChildren
-            } // a, N, b
-            TraitDef => NodeType::TraitDefChildren,    // a, b, N, c
-            ImplTraitDef => NodeType::ImplTraitDefChildren, // a, b, N, c
-            ExtendTraitDef => NodeType::ExtendTraitDefChildren, // a, b, N, c
-            DeriveDef => NodeType::DoubleWithMultiChildren, // a, b, N
-            TypealiasDef | NewtypeDef => NodeType::TypeAliasChildren, // a, N, b
-            AssocDecl => NodeType::AssocDeclChildren,  // a, N, b, c, N
-            FnType => NodeType::FnTypeChildren,        // flags_u32, N
+            AlgebraicEffect => NodeType::AlgebraicEffectChildren,               // a, N, b, N, c
+            StructDef | EnumDef | EffectEnumDef | UnionDef | ImplDef | ExtendDef
+            | TestTemplateDef => NodeType::TypeDefChildren, // a, N, b
+            TraitDef => NodeType::TraitDefChildren,                             // a, b, N, c
+            ImplTraitDef => NodeType::ImplTraitDefChildren,                     // a, b, N, c
+            ExtendTraitDef => NodeType::ExtendTraitDefChildren,                 // a, b, N, c
+            DeriveDef => NodeType::DoubleWithMultiChildren,                     // a, b, N
+            TypealiasDef | NewtypeDef => NodeType::TypeAliasChildren,           // a, N, b
+            AssocDecl => NodeType::AssocDeclChildren,                           // a, N, b, c, N
+            FnType => NodeType::FnTypeChildren,                                 // flags_u32, N
             ProjectionMultiPath
             | QuoteExpr
             | QuotePattern
@@ -868,12 +883,14 @@ impl NodeKind {
 
 impl Ast {
     pub fn get_multi_child_slice(&self, slice_len_index: NodeIndex) -> Option<&[NodeIndex]> {
-        if slice_len_index == 0 || slice_len_index >= self.children.len() as NodeIndex {
+        if slice_len_index == 0 {
             return None;
         }
-        let slice_len_index = slice_len_index as usize;
-        let count = self.children[slice_len_index] as usize;
-        Some(&self.children[slice_len_index + 1..slice_len_index + count + 1])
+        let index = slice_len_index as usize;
+        let count = *self.children.get(index)? as usize;
+        let start = index.checked_add(1)?;
+        let end = start.checked_add(count)?;
+        self.children.get(start..end)
     }
 }
 

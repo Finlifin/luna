@@ -372,7 +372,7 @@ impl Interpreter<'_> {
         let result = (|| match &expr.kind {
             K::Call { .. } => self.eval_call_with_effects(expr, environment, Some(selected)),
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                let existing: BTreeSet<_> = environment.keys().copied().collect();
+                let existing = environment.snapshot();
                 let result = (|| {
                     for statement in statements {
                         value!(self.eval(statement, environment));
@@ -419,7 +419,7 @@ impl Interpreter<'_> {
             }
             K::Match { value, arms } => {
                 let value = value!(self.eval(value, environment));
-                let existing: BTreeSet<_> = environment.keys().copied().collect();
+                let existing = environment.snapshot();
                 let result = (|| {
                     for arm in arms {
                         environment.retain(|id, _| existing.contains(id));
@@ -615,14 +615,13 @@ impl Interpreter<'_> {
             .cleanup_frame
             .as_ref()
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
-        let mut matches = 0;
-        for candidate in &schedule.functions {
-            self.effect_charge(work, Some(source))?;
-            matches += usize::from(&candidate.instance == frame && candidate.context == context);
-        }
-        if matches != 1 {
-            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-        }
+        let scan_work = work
+            .checked_mul(schedule.functions.len())
+            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
+        self.effect_charge(scan_work, Some(source))?;
+        schedule
+            .exact_function(frame, &context)
+            .map_err(|_| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
         let suspended_frame = std::mem::replace(&mut self.cleanup_frame, Some(frame.clone()));
         let suspended_context = std::mem::replace(&mut self.cleanup_context, context);
         let suspended_preparation = std::mem::take(&mut self.prepared_frames);
@@ -835,6 +834,8 @@ mod resource_context_tests {
     }
     fn schedule(activation: &Activation) -> Schedule {
         Schedule {
+            closure_definitions: vec![],
+            borrowed_callable_functions: vec![],
             functions: vec![FunctionSchedule {
                 instance: key(1),
                 context: vec![context(activation, 0)],

@@ -1,0 +1,32 @@
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+struct Watch { target: *bool }
+impl Retire for Watch {
+    fn drop(*self) { self.target.*.* = not self.target.*.*; }
+}
+fn leave(watch: Watch) { return; }
+fn run() -> bool {
+    var seen = false;
+    do {
+        let watch = Watch {target: seen.ref};
+    };
+    let scope_finished = seen;
+    leave(Watch {target: seen.ref});
+    let return_finished = not seen;
+    while not seen {
+        let watch = Watch {target: seen.ref};
+        break;
+    };
+    let break_finished = seen;
+    Watch {target: seen.ref};
+    let discard_finished = not seen;
+    var replaced = false;
+    do {
+        var watch = Watch {target: seen.ref};
+        watch = Watch {target: seen.ref};
+        replaced = seen;
+    };
+    scope_finished and return_finished and break_finished
+        and discard_finished and replaced and not seen
+}

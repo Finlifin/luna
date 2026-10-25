@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias F32 = .f32'builtin;
 typealias F64 = .f64'builtin;
 
@@ -11,7 +14,7 @@ comptime fn nan_payload() -> F64 {
     value
 }
 
-fn run() -> (F64, F64, F64, bool) {
+fn run() -> Tuple<F64, F64, F64, bool> {
     -- Instance identity preserves representations; numeric comparisons keep
     -- IEEE semantics, so the NaN does not compare equal to itself.
     (forward(0.0), forward(-0.0), forward(nan_payload()), same(nan_payload()))

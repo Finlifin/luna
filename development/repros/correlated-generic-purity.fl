@@ -1,0 +1,18 @@
+-- Regression: correlated finite domains must be pruned before the case limit
+-- in both program contracts and runtime purity checking.
+pure fn checked(a:A,b:B,c:C,d:D,e:E,f:F,g:G,h:H)->result:bool
+where A,B,C,D,E,F,G,H,
+    requires A == .i8'builtin or A == .i16'builtin,
+    requires B == .i8'builtin or B == .i16'builtin,
+    requires C == .i8'builtin or C == .i16'builtin,
+    requires D == .i8'builtin or D == .i16'builtin,
+    requires E == .i8'builtin or E == .i16'builtin,
+    requires F == .i8'builtin or F == .i16'builtin,
+    requires G == .i8'builtin or G == .i16'builtin,
+    requires H == .i8'builtin or H == .i16'builtin,
+    requires B == A, requires C == A, requires D == A,
+    requires E == A, requires F == A, requires G == A, requires H == A,
+    ensures result {
+    a == a
+}
+fn run()->bool {true}

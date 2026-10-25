@@ -16,6 +16,87 @@ impl Declaration {
     }
 }
 
+/// Admit closed callable declaration inputs using their declared domains.
+/// Body preconditions and type requirements are separate invocation checks.
+pub fn validate_arguments(
+    package: &crate::program::Package,
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<(), String> {
+    let binders =
+        crate::declaration_parameters(parameters, domains).map_err(|error| error.to_string())?;
+    if binders.len() != arguments.len() {
+        return Err("callable argument count mismatch".into());
+    }
+    // Validate the entire input vector before substitution, including captured
+    // inputs whose domains can refer to parameters stored later in the vector.
+    for (binder, argument) in binders.iter().zip(arguments) {
+        crate::type_computations::charge_term(argument, fuel).map_err(|error| error.to_string())?;
+        argument
+            .check_scope(&[])
+            .map_err(|error| error.to_string())?;
+        if binder.sort != argument.sort() {
+            return Err("callable argument sort mismatch".into());
+        }
+    }
+    for (index, (binder, argument)) in binders.iter().zip(arguments).enumerate() {
+        if binder.sort == crate::Sort::Type {
+            continue;
+        }
+        let domain = crate::type_computations::instantiate_parameters_bounded(
+            &domains[index],
+            &binders,
+            arguments,
+            &[],
+            fuel,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Term::TypeListValue(elements) = argument {
+            let Term::NormalForm {
+                head: declaration, ..
+            } = &domain
+            else {
+                return Err("callable type-list domain is not a bound meta.List<Type>".into());
+            };
+            let mut found = None;
+            for head in &package.normal_forms {
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or("callable type-list evidence budget exhausted")?;
+                if head.declaration == *declaration {
+                    if found.is_some() {
+                        return Err("ambiguous callable type-list representation evidence".into());
+                    }
+                    found = Some(head);
+                }
+            }
+            if !found.is_some_and(|head| head.is_type_list_instance(&domain))
+                || elements
+                    .iter()
+                    .any(|element| element.sort() != crate::Sort::Type)
+            {
+                return Err("callable type-list lacks matching meta.List<Type> evidence".into());
+            }
+            continue;
+        }
+        crate::nominal_parameters::validate_symbolic_value_in(
+            argument,
+            &domain,
+            fuel,
+            |ty, variant, fuel| {
+                crate::normal_forms::nominal_value_fields_budgeted(package, ty, variant, fuel)
+                    .ok_or_else(|| "callable input lacks validated layout evidence".into())
+            },
+            |_, _, _| false,
+            package.target,
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 impl fmt::Display for Declaration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

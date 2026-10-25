@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Word = .u16'builtin;
 
 fn overlap() -> Word {
@@ -5,7 +8,7 @@ fn overlap() -> Word {
     word'bitvec[4..12] = word'bitvec[0..8];
     word
 }
-fn snapshot() -> (Word, Word) {
+fn snapshot() -> Tuple<Word, Word> {
     var word: Word = 0x1234;
     let saved = word'bitvec;
     word'bitvec[0..8] = 0xAB;
@@ -17,7 +20,7 @@ fn nested() -> Word {
     word
 }
 struct Packet { word: Word, other: Word }
-fn rhs_update() -> (Word, Word) {
+fn rhs_update() -> Tuple<Word, Word> {
     let packet = Packet { word: 0x1234, other: 0 };
     packet.word'bitvec[0..8] = do {
         packet.word = 0xABCD;

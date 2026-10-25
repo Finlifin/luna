@@ -1,0 +1,137 @@
+-- Affine resource protocols, independent of allocation and formatting.
+
+-- ── Once / Clone / Copy ────────────────────────────────────────────────────
+
+pub trait Once {}
+
+-- #[lang = "clone"]
+pub trait Clone :- Once {
+    fn clone(*self) -> Self;
+}
+
+-- #[lang = "copy"]
+pub trait Copy :- Clone {}
+
+-- ── Drop ───────────────────────────────────────────────────────────────────
+
+-- #[lang = "drop"]
+pub trait Drop {
+    fn drop(*self);
+}
+
+-- Scalar clones read the source value; Copy itself never calls clone.
+
+impl Once for bool {}
+impl Clone for bool {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for bool {}
+
+impl Once for .Symbol'builtin {}
+impl Clone for .Symbol'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .Symbol'builtin {}
+
+impl Once for .char'builtin {}
+impl Clone for .char'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .char'builtin {}
+
+impl Once for .void'builtin {}
+impl Clone for .void'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .void'builtin {}
+
+impl Once for .u8'builtin {}
+impl Clone for .u8'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .u8'builtin {}
+
+impl Once for .u16'builtin {}
+impl Clone for .u16'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .u16'builtin {}
+
+impl Once for .u32'builtin {}
+impl Clone for .u32'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .u32'builtin {}
+
+impl Once for .u64'builtin {}
+impl Clone for .u64'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .u64'builtin {}
+
+impl Once for .u128'builtin {}
+impl Clone for .u128'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .u128'builtin {}
+
+impl Once for .usize'builtin {}
+impl Clone for .usize'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .usize'builtin {}
+
+impl Once for .i8'builtin {}
+impl Clone for .i8'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .i8'builtin {}
+
+impl Once for .i16'builtin {}
+impl Clone for .i16'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .i16'builtin {}
+
+impl Once for .i32'builtin {}
+impl Clone for .i32'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .i32'builtin {}
+
+impl Once for .i64'builtin {}
+impl Clone for .i64'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .i64'builtin {}
+
+impl Once for .i128'builtin {}
+impl Clone for .i128'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .i128'builtin {}
+
+impl Once for .isize'builtin {}
+impl Clone for .isize'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .isize'builtin {}
+
+impl Once for .f32'builtin {}
+impl Clone for .f32'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .f32'builtin {}
+
+impl Once for .f64'builtin {}
+impl Clone for .f64'builtin {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for .f64'builtin {}
+
+-- Cloning a pointer preserves its target dependency, never its ownership.
+impl Once for *T where T {}
+impl Clone for *T where T {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for *T where T {}

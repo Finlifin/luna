@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Byte = .u8'builtin;
 fn packet() -> .u16'builtin { 0xAF3C }
 fn payload() -> Byte {
@@ -6,7 +9,7 @@ fn payload() -> Byte {
         _ => 0,
     }
 }
-fn split() -> (Byte, Byte) {
+fn split() -> Tuple<Byte, Byte> {
     packet()'bitvec match {
         0x(high: Byte) (low: Byte) => (high, low),
     }
@@ -31,7 +34,7 @@ fn letters() -> true'type {
     }
 }
 
-fn binding() -> (Byte, Byte) {
+fn binding() -> Tuple<Byte, Byte> {
     let 0x(high: Byte) (low: Byte) = packet()'bitvec;
     (high, low)
 }

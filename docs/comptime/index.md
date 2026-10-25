@@ -28,7 +28,49 @@ fn configured() -> bool {
 
 comptime 函数中的数据 const 按每次 invocation 的输入建立绑定，不要求在检查函数定义时提前知道实参。runtime 函数中的 Type 常量可以保留当前泛型参数；normal-form 的头保持不透明，局部别名不会使 Identity<T> 等于 T。quoted code 仍走独立的代码值路径，普通数据与代码别名可组合使用。
 
-局部 const 也可保存 runtime 函数声明身份、固定的泛型函数实例，以及包含函数值的元组／记录；保存身份本身不调用该函数。闭包拥有的捕获环境可按当前值重建，包含调用后已更新的环境字段。图内同一闭包的多个引用及嵌套共享引用保持共享；分别构造的按值捕获闭包仍有独立环境。每次常量物化重新分配内部局部身份，并建立独立的环境快照。const initializer 中创建的闭包仍属于 comptime，后续 const 可调用它，但不能直接在 runtime 调用。外部活跃指针捕获与循环闭包对象图仍被拒绝。runtime 正文中的 const guard／else 仍未接通。这些是实现边界，不缩减后文的完整阶段契约。
+局部 const 也可保存 runtime 函数声明身份、固定的泛型函数实例，以及包含函数值的元组／记录；保存身份本身不调用该函数。闭包拥有的捕获环境可按当前值重建，包含调用后已更新的环境字段。图内同一闭包的多个引用及嵌套共享引用保持共享；分别构造的按值捕获闭包仍有独立环境。每次常量物化重新分配内部局部身份，并建立独立的环境快照。const initializer 中创建的闭包仍属于 comptime，后续 const 可调用它，但不能直接在 runtime 调用。外部活跃指针捕获与循环闭包对象图仍被拒绝。runtime 正文中的数据 const 已支持模式和 guard 的编译期选择；失败时进入 runtime 的发散 else 分支。quoted code 绑定仍要求无条件绑定。这些是实现边界，不缩减后文的完整阶段契约。
+
+~~~flurry
+comptime fn enabled(flag: bool) -> bool { flag }
+
+fn configured(comptime flag: bool) -> bool {
+    const found if enabled(found) = flag else { return false; };
+    found
+}
+~~~
+
+initializer、模式中的计算和 guard 均在编译期完成。模式失败时不执行 guard；只有模式及 guard 都成功才导出绑定，guard 对所持闭包环境的合法更新随成功绑定保留。编译期选择不能读取 runtime 参数或调用 runtime 函数。else 在原来的 runtime 控制流位置执行，不能访问当前声明的成功绑定，且必须发散；return、break 和 continue 保留原目标与作用域清理。即使本实例匹配成功，也检查 else 的类型和作用域。带普通 comptime 参数的 runtime 函数先检查定义，再对各实例执行选择。 定义检查保留 initializer 结构中已经存在的 Type 证据，包括 Tuple／record 中的 Type 字段，使成功绑定可用于后续类型注解；这不展开 normal-form 头，也不将缺乏证据的类型相等判断当作 false。
+
+已知的 normal-form 类型也可以直接解构其输入。前一个类型输入为后续值参数提供域，成功导出的类型绑定可用于普通注解：
+
+~~~flurry
+pure comptime fn Descriptor<T, value: T> -> .Type'builtin { T }
+
+fn configured_from_description(comptime flag: bool) -> bool {
+    const Descriptor<T, value> = Descriptor<bool, true> else { return false; };
+    let checked: T = value;
+    checked and flag
+}
+~~~
+
+这里匹配的是 Descriptor 的头和显式参数，不调用其函数体。嵌套 normal-form 和其中的 Tuple 类型模式按同样的已知结构传递候选证据；另一个头或未知结构不能提供这些证据。此实现不补齐任意未知 Type 主语的依赖模式推导。
+
+普通 Type 常量也保留定义端证据，并可作为名义容器的成员访问接收者：
+
+~~~flurry
+struct Settings where T {
+    pub typealias Value = T;
+}
+
+fn configured_from_alias(comptime flag: bool) -> bool {
+    const Container = Settings<bool>;
+    const T = Container.Value;
+    let value: T = flag;
+    value
+}
+~~~
+
+成员仍按使用位置的可见性检查。普通数据字段访问不会因为字段与类型成员同名而改变含义。容器的值参数尚待 invocation 时，定义检查可以保留已检查的构造及其外层阶段输入，供成员选择使用；这不是已经完成的 Type，也不允许把 runtime 参数提升到编译期。
 
 ~~~flurry
 fn invert_runtime(value: bool) -> bool { not value }
@@ -217,3 +259,25 @@ fn select_value(comptime first: bool, left: i32, right: i32) -> i32 {
 检查通过不等于操作已经执行；一个具体值未知也不等于所有下游检查都必须等待。详细的 query 算法与失败处理见[两阶段检查的编译器引导](./normalization-and-instantiation.md#编译器实现引导)。
 
 代码值的完整规则见 [CMTT](../cmtt/index.md)：代码引用与普通值的 Splice 分别检查，quoted expr、pattern 和 arm 保留各自上下文及接入契约。
+
+### 泛型浮点字面量的形成阶段
+
+泛型函数可用类型约束说明字面量的目标域。下面同一份十进制字面量既能形成精确的编译时 Float，也能直接形成指定宽度的机器浮点值：
+
+```flurry
+comptime fn decimal() -> T
+where T, requires T == .Float'builtin or T == .f32'builtin or T == .f64'builtin {
+    1.0000000596046447753906250000000001
+}
+
+fn run() -> bool {
+    const exact = decimal<.Float'builtin>();
+    const rounded = decimal<.f32'builtin>();
+    const precise = exact == 1.0000000596046447753906250000000001;
+    precise and rounded'bitvec == 1065353217
+}
+```
+
+编译器保留精确十进制及符号，直到实参 T 确定后再形成值；f32 不经过 f64 中转，因此避免二次舍入。负零的符号也在形成过程中保留。类型约束必须证明目标属于允许的浮点域；无约束 T、包含 bool 的联合域以及仅凭函数体推测表示的 normal-form 头均不足以接纳字面量。
+
+精确 Float 的阶段限制不因此改变：它可以在 comptime 中形成、比较和返回，不能作为普通 runtime 函数的结果存储。机器浮点实例的范围检查独立进行；某个 f32 实例溢出，不会使同一泛型函数的合法 f64 实例失效。

@@ -1,6 +1,11 @@
 //! Shared preflight for materialized constants and contextual input templates.
 use crate::{Term, program as n, program::ExprKind as K};
 
+// Quote expansion retains preparation, parameter and lexical cleanup scopes.
+// Its supported 32-frame chain can exceed 128 expression nodes in depth.
+// Keep a finite pre-clone bound without conflating this with type term depth.
+pub const MAX_COPY_DEPTH: usize = 160;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CopyBudgetExhausted {
     Steps,
@@ -15,7 +20,7 @@ pub fn charge_pattern_rewrite(
     value: &n::Pattern,
     steps: &mut u64,
 ) -> Result<(), CopyBudgetExhausted> {
-    charge_node(Node::Pattern(value), steps, true)
+    charge_node(Node::Pattern(value), steps, true, None)
 }
 
 /// Type rewriting enters shared closure bodies and may copy them through Arc::make_mut.
@@ -24,16 +29,87 @@ pub fn charge_type_rewrite(value: &n::Expr, steps: &mut u64) -> Result<(), CopyB
 }
 
 fn charge_tree(value: &n::Expr, steps: &mut u64, rewrite: bool) -> Result<(), CopyBudgetExhausted> {
-    charge_node(Node::Expr(value), steps, rewrite)
+    charge_node(Node::Expr(value), steps, rewrite, None)
+}
+
+/// Charge actual declaration occurrences in the expanded copy, including shared
+/// closure bodies. Inputs are inspected once; unused inputs are not multiplied
+/// by expression size. Scope and sort admission remain substitution's duty.
+pub fn charge_substitution(
+    value: &n::Expr,
+    parameters: &[crate::DeclarationParameter],
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<(), CopyBudgetExhausted> {
+    charge_node_substitution(Node::Expr(value), parameters, arguments, fuel)
+}
+
+/// Preflight every copied function payload, including type-only contracts and
+/// signature metadata. Empty substitution inputs also cover staged templates.
+pub fn charge_function_substitution(
+    value: &n::Function,
+    parameters: &[crate::DeclarationParameter],
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<(), CopyBudgetExhausted> {
+    charge_node_substitution(Node::Function(value), parameters, arguments, fuel)
+}
+
+pub fn charge_predicate_substitution(
+    value: &n::TypePredicate,
+    parameters: &[crate::DeclarationParameter],
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<(), CopyBudgetExhausted> {
+    charge_node_substitution(Node::Predicate(value), parameters, arguments, fuel)
+}
+
+pub fn charge_type_substitution(
+    value: &Term,
+    parameters: &[crate::DeclarationParameter],
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<(), CopyBudgetExhausted> {
+    charge_node_substitution(Node::Type(value), parameters, arguments, fuel)
+}
+
+fn charge_node_substitution(
+    root: Node<'_>,
+    parameters: &[crate::DeclarationParameter],
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<(), CopyBudgetExhausted> {
+    if parameters.len() != arguments.len() {
+        return Err(CopyBudgetExhausted::Steps);
+    }
+    *fuel = fuel
+        .checked_sub(parameters.len())
+        .ok_or(CopyBudgetExhausted::Steps)?;
+    for argument in arguments {
+        crate::type_computations::charge_term(argument, fuel)
+            .map_err(|_| CopyBudgetExhausted::Steps)?;
+    }
+    let replacements = parameters
+        .iter()
+        .zip(arguments)
+        .map(|(parameter, argument)| (parameter.declaration, argument))
+        .collect();
+    let mut steps = *fuel as u64;
+    let result = charge_node(root, &mut steps, true, Some(&replacements));
+    *fuel = steps as usize;
+    result
 }
 
 pub fn charge_argument_type_rewrite(
     value: &n::NormalFormArgument,
     steps: &mut u64,
 ) -> Result<(), CopyBudgetExhausted> {
-    charge_node(Node::Argument(value), steps, true)
+    charge_node(Node::Argument(value), steps, true, None)
 }
 enum Node<'a> {
+    Function(&'a n::Function),
+    Predicate(&'a n::TypePredicate),
+    Requirement(&'a n::TraitRequirement),
     Expr(&'a n::Expr),
     Type(&'a Term),
     Argument(&'a n::NormalFormArgument),
@@ -42,7 +118,12 @@ enum Node<'a> {
     Operation(&'a crate::effects::Operation),
 }
 
-fn charge_node(root: Node<'_>, steps: &mut u64, rewrite: bool) -> Result<(), CopyBudgetExhausted> {
+fn charge_node(
+    root: Node<'_>,
+    steps: &mut u64,
+    rewrite: bool,
+    replacements: Option<&std::collections::BTreeMap<crate::DeclarationId, &Term>>,
+) -> Result<(), CopyBudgetExhausted> {
     fn charge_width(steps: &mut u64, width: usize) -> Result<(), CopyBudgetExhausted> {
         *steps = steps
             .checked_sub(width as u64)
@@ -51,6 +132,8 @@ fn charge_node(root: Node<'_>, steps: &mut u64, rewrite: bool) -> Result<(), Cop
     }
     fn literal_size(literal: &n::Literal) -> usize {
         match literal {
+            n::Literal::PendingFloat { spelling, .. }
+            | n::Literal::PendingInteger { spelling, .. } => spelling.len(),
             n::Literal::Symbol(s)
             | n::Literal::String(s)
             | n::Literal::Integer(s)
@@ -61,7 +144,7 @@ fn charge_node(root: Node<'_>, steps: &mut u64, rewrite: bool) -> Result<(), Cop
     }
     let mut work = vec![(root, 0usize)];
     while let Some((node, depth)) = work.pop() {
-        if depth >= 128 {
+        if depth >= MAX_COPY_DEPTH {
             return Err(CopyBudgetExhausted::Depth);
         }
         if *steps == 0 {
@@ -70,14 +153,92 @@ fn charge_node(root: Node<'_>, steps: &mut u64, rewrite: bool) -> Result<(), Cop
         if let Node::Type(ty) = node {
             let mut fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
             let before = fuel;
-            let result =
-                crate::type_computations::charge_term_with_depth(ty, &mut fuel, 128 - depth);
+            let result = if let Some(replacements) = replacements {
+                crate::type_computations::charge_expanded_term(
+                    ty,
+                    &mut fuel,
+                    (MAX_COPY_DEPTH - depth).min(128),
+                    replacements,
+                )
+            } else {
+                crate::type_computations::charge_term_with_depth(
+                    ty,
+                    &mut fuel,
+                    (MAX_COPY_DEPTH - depth).min(128),
+                )
+            };
             *steps -= (before - fuel) as u64;
             result.map_err(|_| CopyBudgetExhausted::Steps)?;
             continue;
         }
         *steps -= 1;
         let size = match node {
+            Node::Function(function) => {
+                for width in [
+                    function.name.len(),
+                    function.parameters.len(),
+                    function.type_parameters.len(),
+                    function.entry_snapshots.len(),
+                    function.preconditions.len(),
+                    function.postconditions.len(),
+                    function.defaults.len(),
+                    function.requirements.len(),
+                    function.capabilities.len(),
+                ] {
+                    charge_width(steps, width)?;
+                }
+                work.push((Node::Type(&function.signature), depth));
+                work.push((Node::Expr(&function.body), depth));
+                work.extend(
+                    function
+                        .preconditions
+                        .iter()
+                        .chain(&function.postconditions)
+                        .chain(function.defaults.iter().map(|(_, expr)| expr))
+                        .map(|expr| (Node::Expr(expr), depth)),
+                );
+                work.extend(
+                    function
+                        .requirements
+                        .iter()
+                        .map(|p| (Node::Predicate(p), depth)),
+                );
+                work.extend(
+                    function
+                        .capabilities
+                        .iter()
+                        .map(|r| (Node::Requirement(r), depth)),
+                );
+                0
+            }
+            Node::Predicate(predicate) => {
+                use n::TypePredicate as P;
+                match predicate {
+                    P::Bool(_) => {}
+                    P::Equal(a, b) => {
+                        work.push((Node::Type(a), depth + 1));
+                        work.push((Node::Type(b), depth + 1));
+                    }
+                    P::Trait(requirement) => work.push((Node::Requirement(requirement), depth + 1)),
+                    P::Not(inner) => work.push((Node::Predicate(inner), depth + 1)),
+                    P::And(items) | P::Or(items) => {
+                        charge_width(steps, items.len())?;
+                        work.extend(items.iter().map(|p| (Node::Predicate(p), depth + 1)));
+                    }
+                }
+                0
+            }
+            Node::Requirement(requirement) => {
+                charge_width(steps, requirement.interface_arguments.len())?;
+                work.push((Node::Type(&requirement.subject), depth + 1));
+                work.extend(
+                    requirement
+                        .interface_arguments
+                        .iter()
+                        .map(|ty| (Node::Type(ty), depth + 1)),
+                );
+                0
+            }
             Node::Expr(expr) => {
                 work.push((Node::Type(&expr.ty), depth + 1));
                 match &expr.kind {
@@ -252,6 +413,7 @@ fn charge_node(root: Node<'_>, steps: &mut u64, rewrite: bool) -> Result<(), Cop
                     }
                     K::TypeList(items)
                     | K::TupleType(items)
+                    | K::Intrinsic { inputs: items, .. }
                     | K::Tuple(items)
                     | K::AnonymousRecord { fields: items }
                     | K::Record { fields: items, .. }
@@ -312,8 +474,10 @@ fn charge_node(root: Node<'_>, steps: &mut u64, rewrite: bool) -> Result<(), Cop
                     | K::RequirePredicate(value)
                     | K::EnsurePredicate(value)
                     | K::CheckPredicate(value)
+                    | K::UnsafeScope(value)
                     | K::Discard(value)
                     | K::BitConvert(value)
+                    | K::ErrorConvert { value: value, .. }
                     | K::NewtypeConvert(value)
                     | K::Snapshot(value)
                     | K::TakeBits(value)
@@ -329,6 +493,7 @@ fn charge_node(root: Node<'_>, steps: &mut u64, rewrite: bool) -> Result<(), Cop
                     }
                     K::TypeListIndex(left, right)
                     | K::TypeEqual(left, right)
+                    | K::TemplateEqual(left, right)
                     | K::ScalarEqual(left, right)
                     | K::ScalarLessEqual(left, right)
                     | K::ScalarLess(left, right)
@@ -537,6 +702,13 @@ fn charge_node(root: Node<'_>, steps: &mut u64, rewrite: bool) -> Result<(), Cop
             Node::Pattern(pattern) => {
                 use n::Pattern as P;
                 match pattern {
+                    P::ErrorResult { label, inner } => {
+                        if let Some(label) = label {
+                            work.push((Node::Type(label), depth + 1));
+                        }
+                        work.push((Node::Pattern(inner), depth + 1));
+                        0
+                    }
                     P::Observe { inner, .. } | P::Binding { inner, .. } => {
                         work.push((Node::Pattern(inner), depth + 1));
                         0

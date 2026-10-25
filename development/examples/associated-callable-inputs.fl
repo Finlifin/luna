@@ -1,15 +1,18 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 trait Choose {
     fn choose(.flag: bool = true) -> bool;
 }
 trait Gather {
-    fn gather(...items: (bool, bool)) -> bool;
+    fn gather(...items: Tuple<bool, bool>) -> bool;
 }
 struct Host {}
 impl Choose for Host {
     fn choose(value: bool) -> bool { value }
 }
 impl Gather for Host {
-    fn gather(packet: (bool, bool)) -> bool {
+    fn gather(packet: Tuple<bool, bool>) -> bool {
         let (first, second) = packet;
         first and not second
     }
@@ -17,7 +20,7 @@ impl Gather for Host {
 
 trait Calls {
     assoc choose: fn(bool) -> bool = Host.as(Choose).choose;
-    assoc gather: fn((bool, bool)) -> bool = Host.as(Gather).gather;
+    assoc gather: fn(Tuple<bool, bool>) -> bool = Host.as(Gather).gather;
 }
 struct Holder {}
 impl Calls for Holder {}

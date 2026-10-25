@@ -76,6 +76,7 @@ impl Facts {
         }
         let mut alternative = self.fork(limits)?;
         alternative.assume_inner(condition, !truth, 0, limits)?;
+        alternative.remember_condition(condition, !truth, limits)?;
         alternative.propagate_retained_conditions(limits)?;
         if alternative.is_reachable() {
             Err(Unknown::InsufficientBounds)
@@ -111,7 +112,7 @@ impl PredicateProof {
         }
         for row in &self.inequalities {
             if !facts.relation_is_current(row, limits)?
-                || !relations::contains_relation(&facts.inequalities, row, limits)?
+                || !facts.inequalities.contains(row, limits)?
             {
                 return Err(Unknown::InsufficientBounds);
             }
@@ -121,6 +122,75 @@ impl PredicateProof {
 }
 
 impl Condition {
+    /// Cheap interval evidence only: never searches retained predicates or
+    /// aliases, so callers may use this before their relational lookup.
+    pub(super) fn truth_by_interval(
+        &self,
+        facts: &Facts,
+        limits: &mut Limits,
+        depth: usize,
+    ) -> Result<Option<bool>, Unknown> {
+        limits.step(1)?;
+        if depth >= 128 {
+            return Err(Unknown::ConditionDepthLimit);
+        }
+        let (difference, relation) = match self {
+            Self::Bool(value) => return Ok(Some(*value)),
+            Self::Not(inner) => {
+                return Ok(inner
+                    .truth_by_interval(facts, limits, depth + 1)?
+                    .map(|v| !v));
+            }
+            Self::And(a, b) | Self::Or(a, b) => {
+                let identity = matches!(self, Self::And(..));
+                let a = a.truth_by_interval(facts, limits, depth + 1)?;
+                if a == Some(!identity) {
+                    return Ok(a);
+                }
+                let b = b.truth_by_interval(facts, limits, depth + 1)?;
+                return Ok(if b == Some(!identity) || a == Some(identity) {
+                    b
+                } else {
+                    None
+                });
+            }
+            Self::Compare {
+                value,
+                relation,
+                constant,
+            } => {
+                let bound = match facts.bound(*value, limits) {
+                    Ok(bound) => bound,
+                    Err(Unknown::MissingBound(_)) => return Ok(None),
+                    Err(error) => return Err(error),
+                };
+                let range = Interval::new(
+                    bound.lower.subtract(constant, &mut limits.arithmetic)?,
+                    bound.upper.subtract(constant, &mut limits.arithmetic)?,
+                    limits,
+                )?;
+                return enclosed_comparison(&range, *relation, limits);
+            }
+            Self::PolynomialCompare {
+                left,
+                relation,
+                right,
+            } => {
+                if !facts.relation_is_current(left, limits)?
+                    || !facts.relation_is_current(right, limits)?
+                {
+                    return Ok(None);
+                }
+                (left.subtract(right, limits)?, *relation)
+            }
+        };
+        match difference.interval_enclosure(facts, limits) {
+            Ok((range, _)) => enclosed_comparison(&range, relation, limits),
+            Err(Unknown::MissingBound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(super) fn truth_by_enclosure(
         &self,
         facts: &Facts,
@@ -189,56 +259,30 @@ impl Condition {
                 (left.subtract(right, limits)?, *relation)
             }
         };
-        let (range, _) = difference.enclosure(facts, limits)?;
-        let low = limits.compare(&range.lower, &Integer::zero())?;
-        let high = limits.compare(&range.upper, &Integer::zero())?;
-        let equality = if low.is_eq() && high.is_eq() {
-            Some(true)
-        } else if low.is_gt() || high.is_lt() {
-            Some(false)
-        } else {
-            None
+        if let Some(truth) = difference.sign_comparison(facts, relation, limits)? {
+            return Ok(Some(truth));
+        }
+        if matches!(relation, Comparison::Equal | Comparison::NotEqual)
+            && difference.excludes_integer_zero(facts, limits)?
+        {
+            return Ok(Some(relation == Comparison::NotEqual));
+        }
+        let (mut range, premises) = match difference.enclosure(facts, limits) {
+            Ok(enclosed) => enclosed,
+            Err(Unknown::MissingBound(_)) => {
+                return difference.global_quadratic_comparison(relation, limits);
+            }
+            Err(failure) => return Err(failure),
         };
-        Ok(match relation {
-            Comparison::Equal => equality,
-            Comparison::NotEqual => equality.map(|v| !v),
-            Comparison::Less => {
-                if high.is_lt() {
-                    Some(true)
-                } else if !low.is_lt() {
-                    Some(false)
-                } else {
-                    None
-                }
-            }
-            Comparison::LessEqual => {
-                if !high.is_gt() {
-                    Some(true)
-                } else if low.is_gt() {
-                    Some(false)
-                } else {
-                    None
-                }
-            }
-            Comparison::Greater => {
-                if low.is_gt() {
-                    Some(true)
-                } else if !high.is_gt() {
-                    Some(false)
-                } else {
-                    None
-                }
-            }
-            Comparison::GreaterEqual => {
-                if !low.is_lt() {
-                    Some(true)
-                } else if high.is_lt() {
-                    Some(false)
-                } else {
-                    None
-                }
-            }
-        })
+        if let Some(truth) = enclosed_comparison(&range, relation, limits)? {
+            return Ok(Some(truth));
+        }
+        difference.refine_monotone_enclosure(&mut range, &premises, facts, limits)?;
+        if let Some(truth) = enclosed_comparison(&range, relation, limits)? {
+            return Ok(Some(truth));
+        }
+        difference.refine_finite_enclosure(&mut range, facts, limits)?;
+        enclosed_comparison(&range, relation, limits)
     }
 
     pub(super) fn copy_bounded(&self, limits: &mut Limits, depth: usize) -> Result<Self, Unknown> {
@@ -295,5 +339,131 @@ impl fmt::Display for PredicateProof {
             write!(f, " (less-equal-zero {row})")?;
         }
         f.write_str("))")
+    }
+}
+
+fn enclosed_comparison(
+    range: &Interval,
+    relation: Comparison,
+    limits: &mut Limits,
+) -> Result<Option<bool>, Unknown> {
+    let low = limits.compare(&range.lower, &Integer::zero())?;
+    let high = limits.compare(&range.upper, &Integer::zero())?;
+    let equality = if low.is_eq() && high.is_eq() {
+        Some(true)
+    } else if low.is_gt() || high.is_lt() {
+        Some(false)
+    } else {
+        None
+    };
+    Ok(match relation {
+        Comparison::Equal => equality,
+        Comparison::NotEqual => equality.map(|v| !v),
+        Comparison::Less => {
+            if high.is_lt() {
+                Some(true)
+            } else if !low.is_lt() {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        Comparison::LessEqual => {
+            if !high.is_gt() {
+                Some(true)
+            } else if low.is_gt() {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        Comparison::Greater => {
+            if low.is_gt() {
+                Some(true)
+            } else if !high.is_gt() {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        Comparison::GreaterEqual => {
+            if !low.is_lt() {
+                Some(true)
+            } else if high.is_lt() {
+                Some(false)
+            } else {
+                None
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod interval_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn settled_comparisons_do_not_search_unrelated_retained_conditions() {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        for local in 0..32 {
+            let id = facts
+                .assign(
+                    PlaceId { owner: 5, local },
+                    Interval::new(Integer::from_u128(1), Integer::from_u128(255), &mut limits)
+                        .unwrap(),
+                )
+                .unwrap();
+            // Valid but unrelated disequalities retained for future joins.
+            facts.conditions.push((
+                Condition::Compare {
+                    value: id,
+                    relation: Comparison::NotEqual,
+                    constant: Integer::zero(),
+                },
+                true,
+            ));
+        }
+        let place = PlaceId {
+            owner: 5,
+            local: 32,
+        };
+        let id = facts
+            .assign(
+                place,
+                Interval::singleton(&Integer::from_u128(1), &mut limits).unwrap(),
+            )
+            .unwrap();
+        for (relation, expected) in [
+            (Comparison::Equal, true),
+            (Comparison::NotEqual, false),
+            (Comparison::Less, false),
+            (Comparison::LessEqual, true),
+            (Comparison::Greater, false),
+            (Comparison::GreaterEqual, true),
+        ] {
+            let condition = Condition::Compare {
+                value: id,
+                relation,
+                constant: Integer::from_u128(1),
+            };
+            let mut limited = Limits::default();
+            limited.arithmetic.steps = 256;
+            assert_eq!(
+                facts.known_condition(&condition, &mut limited).unwrap(),
+                Some(expected)
+            );
+        }
+        let value = Polynomial::variable(id, &mut limits).unwrap();
+        facts.invalidate(place).unwrap();
+        let stale = Condition::PolynomialCompare {
+            left: value.clone(),
+            relation: Comparison::Equal,
+            right: value,
+        };
+        assert_eq!(
+            stale.truth_by_enclosure(&facts, &mut limits, 0),
+            Err(Unknown::StaleValue(id))
+        );
     }
 }

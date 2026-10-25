@@ -9,6 +9,11 @@ fn cleanup_access_export_retains_parameter_and_indirect_origins() {
         struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {self.target.*.* = true;}}
         fn direct(p:*bool) {let watch=Watch {target:p};}
         fn indirect(p:**bool) {let target=p.*;let watch=Watch {target:target};}
+        fn loop_indirect(p:**bool) {var again=true;while again {let target=p.*;let watch=Watch {target:target};again=false;}}
+        fn loop_direct(p:*bool) {var again=true;while again {let watch=Watch {target:p};again=false;}}
+        fn loop_call(p:*bool) {let set=|q:*bool| {let watch=Watch {target:q};};var again=true;while again {set(p);again=false;}}
+        fn loop_indirect_call(p:**bool) {let set=|q:*bool| {let watch=Watch {target:q};};var again=true;while again {let target=p.*;set(target);again=false;}}
+        fn nested_loop_indirect(p:**bool) {var again=true;while again {var inner=true;while inner {let target=p.*;let watch=Watch {target:target};inner=false;}again=false;}}
         struct Link {ready:bool,target:*bool}
         fn field(link:Link) {let watch=Watch {target:link.target};}
         fn local_only() {let flag=false;let watch=Watch {target:flag.ref};}",
@@ -27,6 +32,11 @@ fn cleanup_access_export_retains_parameter_and_indirect_origins() {
         for (name, indirect) in [
             ("direct", false),
             ("indirect", true),
+            ("loop_direct", false),
+            ("loop_indirect", true),
+            ("nested_loop_indirect", true),
+            ("loop_call", false),
+            ("loop_indirect_call", true),
             ("local_only", false),
             ("field", false),
         ] {
@@ -767,7 +777,7 @@ fn candidate_blocks_keep_scalar_locals_private_and_evaluate_in_order() {
 fn candidate_blocks_reject_external_mutation_and_untracked_resources() {
     for body in [
         "outside=not outside;true",
-        "let pointer=outside.ref;true",
+        "let pointer=outside.ref;pointer.* = false;true",
         "consume(item);true",
         "return true;",
     ] {
@@ -818,6 +828,104 @@ fn candidate_blocks_feed_sequential_patterns_without_losing_the_owner() {
             executed_names(&package, &executable, vm.events()),
             ["entry", "check", "drop Held"]
         );
+    }
+}
+
+#[test]
+fn pointer_then_patterns_keep_indirect_borrowed_targets() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (ty, body, argument) in [
+        (
+            "**bool",
+            "let _ and p.* is target = true;target.*",
+            "pointer.ref",
+        ),
+        (
+            "***bool",
+            "let _ and p.* is slot and slot.* is target = true;target.*",
+            "slot.ref",
+        ),
+        (
+            "**bool",
+            "true match {_ and p.* is target if target.* => true, _ => false}",
+            "pointer.ref",
+        ),
+    ] {
+        let package=compile(&format!("trait Duplicate {{}}trait Retire {{fn drop(*self);}}
+            fn selected(p:{ty})->bool {{{body}}}
+            fn entry(value:bool)->bool {{let pointer=value.ref;let slot=pointer.ref;selected({argument})}}"));
+        let executable = source_executable(&package, "entry").unwrap();
+        for value in [false, true] {
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![Value::Bool(value)])
+                    .unwrap(),
+                Value::Bool(value)
+            );
+        }
+    }
+}
+
+#[test]
+fn pointer_then_patterns_transport_composed_results() {
+    use comptime_interpretor::{Interpreter, Value};
+    for expression in [
+        "if flag {p.*} else {q.*}",
+        "do {let selected=if flag {p.*} else {q.*};selected}",
+        "flag match {true => p.*,false => q.*}",
+        "choose(flag,p,q)",
+    ] {
+        let package=compile(&format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}
+             fn choose(flag:bool,p:**bool,q:**bool)->*bool {{if flag {{p.*}} else {{q.*}}}}
+             fn selected(flag:bool,p:**bool,q:**bool)->bool {{let _ and ({expression}) is target = true;target.*}}
+             fn entry(flag:bool)->bool {{let yes=true;let no=false;let p=yes.ref;let q=no.ref;selected(flag,p.ref,q.ref)}}"
+        ));
+        let executable =
+            source_executable(&package, "entry").unwrap_or_else(|e| panic!("{expression}: {e}"));
+        for flag in [false, true] {
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![Value::Bool(flag)])
+                    .unwrap(),
+                Value::Bool(flag),
+                "{expression}"
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "choose")
+                    .count(),
+                usize::from(expression == "choose(flag,p,q)"),
+                "{names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn pointer_then_patterns_reject_mutating_observations_and_retired_targets() {
+    for source in [
+        "fn touch(p:**bool)->**bool {p.*.* = false;p}
+         fn selected(p:**bool)->bool {let _ and touch(p).* is target = true;target.*}
+         fn entry()->bool {let value=true;let pointer=value.ref;selected(pointer.ref)}",
+        "fn selected(p:**bool,flag:bool)->bool {let _ and (if flag {do {let local=true;local.ref}} else {p.*}) is target = true;target.*}
+         fn entry()->bool {let value=true;let pointer=value.ref;selected(pointer.ref,true)}",
+        "fn selected(p:**bool)->bool {let _ and (do {p.*.* = false;p.*}) is target = true;target.*}
+         fn entry()->bool {let value=true;let pointer=value.ref;selected(pointer.ref)}",
+        "struct Held {flag:bool}
+         fn selected(p:**bool)->bool {let _ and p.* is target = true;target.*}
+         fn entry()->bool {let held=Held {flag:true};let pointer=held.flag.ref;let moved=held;selected(pointer.ref)}",
+    ] {
+        let package=compile(&format!("trait Duplicate {{}}trait Retire {{fn drop(*self);}}{source}"));
+        assert!(source_executable(&package,"entry").is_err(),"accepted {source}");
     }
 }
 
@@ -1224,8 +1332,8 @@ fn scalar_call_pattern_guards_reject_transfer_and_contract_failure() {
 #[test]
 fn candidate_order_patterns_keep_copy_choices_inside_whole_bindings() {
     use comptime_interpretor::{Interpreter, Value};
-    let package=compile("trait Duplicate {} trait Retire {fn drop(*self);}
-        struct Held {flags:(bool,bool)} impl Retire for Held {fn drop(*self) {}}
+    let package=finite_default_support::compile_with_tuple("trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {flags:Tuple<bool,bool>} impl Retire for Held {fn drop(*self) {}}
         fn entry(flag:bool,inner:bool)->bool {
             let value=(flag,Held {flags:(inner,not inner)},Held {flags:(inner,not inner)});
             value match {
@@ -2330,13 +2438,14 @@ fn overlapping_copy_patterns_nominal_copy_is_independent_of_whole() {
 #[test]
 fn overlapping_copy_patterns_nested_bindings_copy_each_additional_owner() {
     use comptime_interpretor::{Interpreter, Value};
-    let package=compile("trait Duplicate {} trait Retire {fn drop(*self);}
+    let package=finite_default_support::compile_with_tuple("trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {} impl Retire for Held {fn drop(*self) {}}
-        typealias Pair=(bool,bool);impl Duplicate for Pair {}
+        typealias Pair=Tuple<bool,bool>;impl Duplicate for Pair {}
+        struct Outer {pair:Pair,held:Held}
         fn entry()->bool {
-            let ((left,right) as pair,_) as whole=((true,false),Held {});
+            let {pair:((left,right) as pair)} as whole=Outer {pair:(true,false),held:Held {}};
             let (copy_left,copy_right)=pair;
-            let ((original_left,original_right),_)=whole;
+            let {pair:(original_left,original_right)}=whole;
             left and not right and copy_left and not copy_right and original_left and not original_right
         }");
     let executable = source_executable(&package, "entry").unwrap();
@@ -3293,6 +3402,9 @@ fn compile_with_optional(
             splice_protocol: None,
             meta_list_type: None,
             index_protocol: None,
+            ord_protocol: None,
+            eq_protocol: None,
+            list_pattern_protocol: None,
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             tuple_type: None,
@@ -3695,6 +3807,9 @@ fn trait_implementation_receiver_modes_must_match() {
                 splice_protocol: None,
                 meta_list_type: None,
                 index_protocol: None,
+                ord_protocol: None,
+                eq_protocol: None,
+                list_pattern_protocol: None,
                 literal_into_protocol: None,
                 arithmetic_protocols: Default::default(),
                 tuple_type: None,
@@ -5774,6 +5889,11 @@ fn executed_names(
                             .iter()
                             .find(|e| e.declaration == *declaration)
                             .map(|e| &e.name))
+                        .or_else(|| package
+                            .newtypes
+                            .iter()
+                            .find(|n| n.declaration == *declaration)
+                            .map(|n| &n.name))
                         .expect("nominal destructor receiver")
                 ))
             } else {
@@ -11339,8 +11459,8 @@ fn variadic_cleanup_transfers_packages_and_unwinds_partial_collection_once() {
             vec!["entry", "keep", "drop Right", "drop Left"],
         ),
     ] {
-        let package = compile(&format!(
-            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Left {{}} struct Right {{}} impl Retire for Left {{fn drop(*self) {{}}}} impl Retire for Right {{fn drop(*self) {{}}}} fn take(...items:(Left,Right),.flag:bool=false) {{}} fn keep(...items:T)->T where T {{items}} fn entry() {{{body}}}"
+        let package = finite_default_support::compile_with_tuple(&format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Left {{}} struct Right {{}} impl Retire for Left {{fn drop(*self) {{}}}} impl Retire for Right {{fn drop(*self) {{}}}} fn take(...items:Tuple<Left,Right>,.flag:bool=false) {{}} fn keep(...items:T)->T where T {{items}} fn entry() {{{body}}}"
         ));
         let executable = source_executable(&package, "entry").unwrap();
         let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
@@ -11367,8 +11487,8 @@ fn variadic_collection_preserves_temporary_owner_cleanup_boundaries() {
         "take(make().first,Right {})",
         "take(.items=(make().first,Right {}))",
     ] {
-        let package = compile(&format!(
-            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Left {{}} struct Right {{}} struct Extra {{}} struct Pair {{first:Left,extra:Extra}} impl Retire for Left {{fn drop(*self) {{}}}} impl Retire for Right {{fn drop(*self) {{}}}} impl Retire for Extra {{fn drop(*self) {{}}}} fn make()->Pair {{Pair {{first:Left {{}},extra:Extra {{}}}}}} fn take(...items:(Left,Right)) {{}} fn entry() {{{input};}}"
+        let package = finite_default_support::compile_with_tuple(&format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Left {{}} struct Right {{}} struct Extra {{}} struct Pair {{first:Left,extra:Extra}} impl Retire for Left {{fn drop(*self) {{}}}} impl Retire for Right {{fn drop(*self) {{}}}} impl Retire for Extra {{fn drop(*self) {{}}}} fn make()->Pair {{Pair {{first:Left {{}},extra:Extra {{}}}}}} fn take(...items:Tuple<Left,Right>) {{}} fn entry() {{{input};}}"
         ));
         let executable = source_executable(&package, "entry").unwrap();
         let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
@@ -11404,8 +11524,8 @@ fn variadic_partial_projection_cleanup_matches_direct_package_on_exit_and_reject
                 format!("take(.items=(make().first,{tail}))")
             };
             let predicate = if rejected { "assumes flag;" } else { "" };
-            let package = compile(&format!(
-                "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Left {{}} struct Right {{}} struct Extra {{}} struct Pair {{first:Left,extra:Extra}} impl Retire for Left {{fn drop(*self) {{}}}} impl Retire for Right {{fn drop(*self) {{}}}} impl Retire for Extra {{fn drop(*self) {{}}}} fn make()->Pair {{Pair {{first:Left {{}},extra:Extra {{}}}}}} fn take(...items:(Left,Right),.flag:bool=false) {{{predicate}}} fn entry() {{{input};}}"
+            let package = finite_default_support::compile_with_tuple(&format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Left {{}} struct Right {{}} struct Extra {{}} struct Pair {{first:Left,extra:Extra}} impl Retire for Left {{fn drop(*self) {{}}}} impl Retire for Right {{fn drop(*self) {{}}}} impl Retire for Extra {{fn drop(*self) {{}}}} fn make()->Pair {{Pair {{first:Left {{}},extra:Extra {{}}}}}} fn take(...items:Tuple<Left,Right>,.flag:bool=false) {{{predicate}}} fn entry() {{{input};}}"
             ));
             let executable = source_executable(&package, "entry").unwrap();
             let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
@@ -11456,8 +11576,8 @@ fn tuple_spreads_transfer_affine_packets_and_clean_partial_preparation_once() {
             vec!["entry", "packet", "drop Right", "drop Left"],
         ),
     ] {
-        let package = compile(&format!(
-            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Left {{}} struct Right {{}} impl Retire for Left {{fn drop(*self) {{}}}} impl Retire for Right {{fn drop(*self) {{}}}} fn packet()->(Left,Right) {{(Left {{}},Right {{}})}} fn take(...items:(Left,Right),.flag:bool=false) {{}} fn entry() {{{input};}}"
+        let package = finite_default_support::compile_with_tuple(&format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Left {{}} struct Right {{}} impl Retire for Left {{fn drop(*self) {{}}}} impl Retire for Right {{fn drop(*self) {{}}}} fn packet()->Tuple<Left,Right> {{(Left {{}},Right {{}})}} fn take(...items:Tuple<Left,Right>,.flag:bool=false) {{}} fn entry() {{{input};}}"
         ));
         let executable = source_executable(&package, "entry").unwrap();
         let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
@@ -11648,8 +11768,8 @@ fn extended_calls_preserve_affine_delivery_and_partial_input_cleanup() {
             vec!["entry", "drop Left"],
         ),
     ] {
-        let package = compile(&format!(
-            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Left {{}} struct Right {{}} impl Retire for Left {{fn drop(*self) {{}}}} impl Retire for Right {{fn drop(*self) {{}}}} fn take(...items:(Left,Right)) {{}} fn entry() {{{body}}}"
+        let package = finite_default_support::compile_with_tuple(&format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Left {{}} struct Right {{}} impl Retire for Left {{fn drop(*self) {{}}}} impl Retire for Right {{fn drop(*self) {{}}}} fn take(...items:Tuple<Left,Right>) {{}} fn entry() {{{body}}}"
         ));
         let executable = source_executable(&package, "entry").unwrap();
         let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
@@ -12081,8 +12201,8 @@ fn tuple_and_property_collectors_cleanup_interleaved_partial_inputs() {
             true,
         ),
     ] {
-        let package = compile(&format!(
-            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Head {{}} struct Tail {{}} struct Left {{}} struct Right {{}} impl Retire for Head {{fn drop(*self) {{}}}} impl Retire for Tail {{fn drop(*self) {{}}}} impl Retire for Left {{fn drop(*self) {{}}}} impl Retire for Right {{fn drop(*self) {{}}}} fn head()->Head {{Head {{}}}} fn tail()->Tail {{Tail {{}}}} fn left()->Left {{Left {{}}}} fn right()->Right {{Right {{}}}} fn take(...items:(Head,Tail),...properties:T) where T {{}} fn entry() {{take {{{inputs}}};}}"
+        let package = finite_default_support::compile_with_tuple(&format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Head {{}} struct Tail {{}} struct Left {{}} struct Right {{}} impl Retire for Head {{fn drop(*self) {{}}}} impl Retire for Tail {{fn drop(*self) {{}}}} impl Retire for Left {{fn drop(*self) {{}}}} impl Retire for Right {{fn drop(*self) {{}}}} fn head()->Head {{Head {{}}}} fn tail()->Tail {{Tail {{}}}} fn left()->Left {{Left {{}}}} fn right()->Right {{Right {{}}}} fn take(...items:Tuple<Head,Tail>,...properties:T) where T {{}} fn entry() {{take {{{inputs}}};}}"
         ));
         let executable = source_executable(&package, "entry")
             .unwrap_or_else(|error| panic!("{inputs}: {error}"));
@@ -12364,8 +12484,8 @@ fn spread_callable_leaves_survive_packet_evaluation_and_cleanup() {
         "do {let pack=Pack {pair:(identity,false),other:identity};if choose() {pack.other=negate;} else {pack.other=identity;}(pack.other,false)}",
         "do {let pack=Pack {pair:(identity,false),other:identity};var again=true;while again {pack.other=negate;again=false;}(pack.other,false)}",
     ] {
-        let package = compile(&format!(
-            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Owner {{}} impl Retire for Owner {{fn drop(*self) {{}}}} fn make()->Owner {{Owner {{}}}} struct Pack {{pair:(fn(bool)->bool,bool),other:fn(bool)->bool}} fn choose()->bool {{true}} fn negate(value:bool)->bool {{not value}} fn identity(value:bool)->bool {{value}} fn apply(owner:Owner,action:fn(bool)->bool,value:bool) {{let result=action(value);assumes result;}} fn entry() {{apply(make(),...{packet});}}"
+        let package = finite_default_support::compile_with_tuple(&format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Owner {{}} impl Retire for Owner {{fn drop(*self) {{}}}} fn make()->Owner {{Owner {{}}}} struct Pack {{pair:Tuple<fn(bool)->bool,bool>,other:fn(bool)->bool}} fn choose()->bool {{true}} fn negate(value:bool)->bool {{not value}} fn identity(value:bool)->bool {{value}} fn apply(owner:Owner,action:fn(bool)->bool,value:bool) {{let result=action(value);assumes result;}} fn entry() {{apply(make(),...{packet});}}"
         ));
         let executable = source_executable(&package, "entry")
             .unwrap_or_else(|error| panic!("{packet}: {error}"));
@@ -12581,8 +12701,8 @@ fn aggregate_function_results_preserve_callable_fields() {
 #[test]
 fn returned_tuple_retains_captured_callback_and_owner_cleanup() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
-        "trait Retire {fn drop(*self);} trait Duplicate {} struct Owner {} impl Retire for Owner {fn drop(*self) {}} typealias Callback=%{helper:fn(bool)->bool} fn(bool)->bool; fn negate(value:bool)->bool {not value} fn make()->(Callback,bool,Owner) {let helper=negate;(|value:bool| helper(value),false,Owner {})} fn entry() {let (action,value,owner)=make();let result=action(value);assumes result;}",
+    let package = finite_default_support::compile_with_tuple(
+        "trait Retire {fn drop(*self);} trait Duplicate {} struct Owner {} impl Retire for Owner {fn drop(*self) {}} typealias Callback=%{helper:fn(bool)->bool} fn(bool)->bool; fn negate(value:bool)->bool {not value} fn make()->Tuple<Callback,bool,Owner> {let helper=negate;(|value:bool| helper(value),false,Owner {})} fn entry() {let (action,value,owner)=make();let result=action(value);assumes result;}",
     );
     let executable = source_executable(&package, "entry").unwrap();
     let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
@@ -12634,12 +12754,12 @@ fn aggregate_callable_parameters_cross_function_and_closure_boundaries() {
             vec!["entry", "negate"],
         ),
         (
-            "fn apply(packet:(fn(bool)->bool,bool))->bool {let (action,value)=packet;action(value)}",
+            "fn apply(packet:Tuple<fn(bool)->bool,bool>)->bool {let (action,value)=packet;action(value)}",
             "let result=apply((negate,false));assumes result;",
             vec!["entry", "apply", "negate"],
         ),
     ] {
-        let package = compile(&format!(
+        let package = finite_default_support::compile_with_tuple(&format!(
             "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Operations {{action:fn(bool)->bool,value:bool}} fn negate(value:bool)->bool {{not value}} {declarations} fn entry() {{{body}}}"
         ));
         let executable =
@@ -14953,8 +15073,8 @@ fn captured_callable_fields_supply_memory_footprints_and_track_replacements() {
         "let ops=Ops {action:set};let callback=|pointer:*bool| {let saved=ops;let {action}=saved;action(pointer)};let pointer=callback(value.ref);pointer.*",
         "var action=set;let callback=|pointer:*bool| {let values=(action,do {action=clear;false});let (saved,_)=values;saved(pointer)};let pointer=callback(value.ref);pointer.*",
     ] {
-        let package = compile(&format!(
-            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Ops {{action:fn(*bool)->*bool}} struct Nested {{pair:(fn(*bool)->*bool,bool)}} fn set(pointer:*bool)->*bool {{pointer.* = true;pointer}} fn clear(pointer:*bool)->*bool {{pointer.* = false;pointer}} fn entry()->bool {{let value=false;{body}}}"
+        let package = finite_default_support::compile_with_tuple(&format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Ops {{action:fn(*bool)->*bool}} struct Nested {{pair:Tuple<fn(*bool)->*bool,bool>}} fn set(pointer:*bool)->*bool {{pointer.* = true;pointer}} fn clear(pointer:*bool)->*bool {{pointer.* = false;pointer}} fn entry()->bool {{let value=false;{body}}}"
         ));
         let executable =
             source_executable(&package, "entry").unwrap_or_else(|error| panic!("{body}: {error}"));
@@ -15120,8 +15240,8 @@ fn named_aggregate_factories_supply_memory_callable_results_across_recursion() {
             } else {
                 format!("let ops={factory};ops.action(pointer)")
             };
-            let package = compile(&format!(
-                "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Ops {{action:fn(*bool)->*bool}} fn set(pointer:*bool)->*bool {{pointer.* = true;pointer}} fn clear(pointer:*bool)->*bool {{pointer.* = false;pointer}} fn make(flag:bool)->Ops {{if flag {{return Ops {{action:set}};}}Ops {{action:clear}}}} fn forward(flag:bool)->Ops {{make(flag)}} fn recursive(flag:bool)->Ops {{if flag {{return Ops {{action:set}};}}recursive(true)}} fn tupled(flag:bool)->(fn(*bool)->*bool,bool) {{if flag {{(set,true)}} else {{(clear,false)}}}} fn mutual(flag:bool)->Ops {{if flag {{return Ops {{action:set}};}}other(true)}} fn other(flag:bool)->Ops {{if flag {{return Ops {{action:clear}};}}mutual(true)}} fn left_factory()->Ops {{Ops {{action:set}}}} fn right_factory()->Ops {{Ops {{action:clear}}}} fn selected(flag:bool)->Ops {{let factory=if flag {{left_factory}} else {{right_factory}};factory()}} fn work(flag:bool)->bool {{let value=false;let callback=|pointer:*bool,flag:bool| {{{body}}};let result=callback(value.ref,flag);result.*}} fn entry()->bool {{work({flag})}}"
+            let package = finite_default_support::compile_with_tuple(&format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}} struct Ops {{action:fn(*bool)->*bool}} fn set(pointer:*bool)->*bool {{pointer.* = true;pointer}} fn clear(pointer:*bool)->*bool {{pointer.* = false;pointer}} fn make(flag:bool)->Ops {{if flag {{return Ops {{action:set}};}}Ops {{action:clear}}}} fn forward(flag:bool)->Ops {{make(flag)}} fn recursive(flag:bool)->Ops {{if flag {{return Ops {{action:set}};}}recursive(true)}} fn tupled(flag:bool)->Tuple<fn(*bool)->*bool,bool> {{if flag {{(set,true)}} else {{(clear,false)}}}} fn mutual(flag:bool)->Ops {{if flag {{return Ops {{action:set}};}}other(true)}} fn other(flag:bool)->Ops {{if flag {{return Ops {{action:clear}};}}mutual(true)}} fn left_factory()->Ops {{Ops {{action:set}}}} fn right_factory()->Ops {{Ops {{action:clear}}}} fn selected(flag:bool)->Ops {{let factory=if flag {{left_factory}} else {{right_factory}};factory()}} fn work(flag:bool)->bool {{let value=false;let callback=|pointer:*bool,flag:bool| {{{body}}};let result=callback(value.ref,flag);result.*}} fn entry()->bool {{work({flag})}}"
             ));
             let executable = source_executable(&package, "entry")
                 .unwrap_or_else(|error| panic!("{factory}: {error}"));
@@ -16714,7 +16834,7 @@ fn inline_return_boundary_transfers_owned_results_without_retiring_them() {
 #[test]
 fn quote_function_arguments_and_owned_returns_keep_cleanup_obligations() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
+    let package = finite_default_support::compile_with_tuple(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {} impl Retire for Held {fn drop(*self) {}}
         fn make()->Held {Held {}}
@@ -16755,10 +16875,10 @@ fn quote_function_arguments_and_owned_returns_keep_cleanup_obligations() {
             ]
         );
     }
-    let package = compile(
+    let package = finite_default_support::compile_with_tuple(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {} impl Retire for Held {fn drop(*self) {}}
-        quote fn duplicate(item:Held)->(Held,Held) {(item,item)}
+        quote fn duplicate(item:Held)->Tuple<Held,Held> {(item,item)}
         fn run(item:Held){duplicate(item);}",
     );
     assert!(
@@ -16903,11 +17023,11 @@ fn cmtt_default_code_keeps_affine_identity_without_copying_ownership() {
 #[test]
 fn cmtt_spread_configuration_emits_runtime_resource_scope_once() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
+    let package = finite_default_support::compile_with_tuple(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {} impl Retire for Held {fn drop(*self) {}}
         fn make()->Held {Held {}}
-        pure comptime fn packet()->(true'type,true'type) {(true,false)}
+        pure comptime fn packet()->Tuple<true'type,true'type> {(true,false)}
         pure comptime fn build(first:true'type,second:true'type)->< |- .void'builtin> {
             if first and not second {'(do {let held=make();})} else {'(do {})}
         }
@@ -16960,11 +17080,11 @@ fn cmtt_property_configuration_preserves_generated_resource_cleanup() {
 #[test]
 fn quote_variadic_packets_and_properties_transfer_each_resource_once() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
+    let package = finite_default_support::compile_with_tuple(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {} impl Retire for Held {fn drop(*self) {}}
         fn make()->Held {Held {}}
-        fn packet()->(Held,Held) {(make(),make())}
+        fn packet()->Tuple<Held,Held> {(make(),make())}
         quote fn pack(...items:T)->T where T {return items;}
         fn run(){let values=pack(...packet());let properties=pack {left:make(),right:make()};}",
     );
@@ -16993,10 +17113,10 @@ fn quote_variadic_packets_and_properties_transfer_each_resource_once() {
             "drop Held"
         ]
     );
-    let package = compile(
+    let package = finite_default_support::compile_with_tuple(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {} impl Retire for Held {fn drop(*self) {}}
-        quote fn duplicate(...items:(Held,Held))->(Held,Held) {let ignored=items;items}
+        quote fn duplicate(...items:Tuple<Held,Held>)->Tuple<Held,Held> {let ignored=items;items}
         fn run(first:Held,second:Held){duplicate(first,second);}",
     );
     assert!(
@@ -17796,7 +17916,7 @@ fn scheduled_direct_handler_rejection_unwinds_handler_subject_and_caller_once() 
 }
 
 #[test]
-fn scheduled_direct_handler_keeps_unimplemented_affine_capture_gate() {
+fn scheduled_direct_handler_rejects_consuming_borrowed_affine_capture() {
     for body in ["let local=outer;true"] {
         let package = compile(&format!(
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
@@ -17806,7 +17926,7 @@ fn scheduled_direct_handler_keeps_unimplemented_affine_capture_gate() {
         ));
         let error = source_executable(&package, "entry").unwrap_err();
         assert!(
-            error.contains("lexical") || error.contains("request-time"),
+            error.contains("borrowed handler data capture must remain complete on every exit"),
             "{error}"
         );
     }
@@ -20763,7 +20883,7 @@ fn owned_observation_factories_preserve_values_and_cleanup() {
         ("let held=make_default();held.flag and value", 1, 1),
         ("let held=Box {held:make(value)};held.held.flag", 1, 1),
     ] {
-        let package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+        let package=finite_default_support::compile_with_tuple(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
             struct Held {{flag:bool}} struct Box {{held:Held}} enum Choice {{none,some(Held)}}
             typealias Action=fn(bool)->bool;impl Duplicate for Action {{}} struct Ops {{held:Held,action:Action}}
             fn invert(flag:bool)->bool {{not flag}}
@@ -20773,7 +20893,7 @@ fn owned_observation_factories_preserve_values_and_cleanup() {
             inline fn make(flag:bool)->Held {{created();Held {{flag:flag}}}}
             fn make_default(.selected:bool=true)->Held {{make(selected)}}
             fn make_choice(flag:bool)->Choice {{Choice.some(make(flag))}}
-            fn make_pair(flag:bool)->(Held,Held) {{(make(flag),make(true))}}
+            fn make_pair(flag:bool)->Tuple<Held,Held> {{(make(flag),make(true))}}
             fn make_ops(flag:bool)->Ops {{Ops {{held:make(flag),action:invert}}}}
             fn entry(value:bool)->bool {{value match {{_ if do {{{body}}}=>true,_=>false}}}}"));
         for expanded in [false, true] {
@@ -20886,12 +21006,26 @@ fn owned_observation_factories_reject_unsafe_results_and_inputs() {
         fn entry(factory:Factory)->bool {false match {_ if do {let held=factory();true}=>true,_=>false}}");
     let error = cleanup_report(&package, "entry").unwrap_err().to_string();
     assert!(error.contains("unknown guard callee"), "{error}");
+}
+
+#[test]
+fn owned_observation_factory_preserves_pointer_fields() {
     let package=compile("trait Duplicate {} trait Retire {fn drop(*self);}
         struct Holder {pointer:*bool}
         fn make(pointer:*bool)->Holder {Holder {pointer:pointer}}
-        fn entry(pointer:*bool)->bool {false match {_ if do {let held=make(pointer);true}=>true,_=>false}}");
-    let error = cleanup_report(&package, "entry").unwrap_err().to_string();
-    assert!(error.contains("pointer dependencies"), "{error}");
+        fn selected(pointer:*bool)->bool {false match {_ if do {let held=make(pointer);true}=>true,_=>false}}
+        fn entry()->bool {let value=false;selected(value.ref)}");
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
 }
 
 #[test]
@@ -23495,35 +23629,55 @@ fn scheduled_handler_copy_aggregate_capture_supports_nested_generic_fields_and_r
 }
 
 #[test]
-fn scheduled_handler_copy_aggregate_capture_rejects_hidden_provenance_and_affine_owners() {
-    for (declarations, initializer, body, expected) in [
+fn scheduled_handler_borrows_owned_data_and_known_code_aggregates() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (declarations, initializer, body) in [
         (
             "struct Flags {value:bool}",
             "Flags {value:true}",
             "flags.value",
-            "scalar Copy evidence",
         ),
         (
             "typealias Action=fn()->bool;impl Duplicate for Action {} struct Flags {value:Action} impl Duplicate for Flags {} fn yes()->bool {true}",
             "Flags {value:yes}",
             "flags.value()",
-            "scalar data without pointer or callable fields",
-        ),
-        (
-            "typealias Action=fn()->bool;impl Duplicate for Action {} enum Choice {none,some(Action)} impl Duplicate for Choice {} struct Flags {value:Choice} impl Duplicate for Flags {}",
-            "Flags {value:Choice.none}",
-            "let observed=flags.value;true",
-            "scalar data without pointer or callable fields",
         ),
     ] {
-        let package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+        let package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
             {declarations} effect poll()->bool;fn subject()->#poll bool {{poll()#}}
-            fn entry()->bool {{let other=true;let flags={initializer};subject()# {{poll()=>do {{{body}}},}}}}"));
-        let error = source_executable(&package, "entry")
-            .err()
-            .expect("Copy alone does not establish capture provenance");
-        assert!(error.contains(expected), "{error}");
+            fn entry()->bool {{let flags={initializer};subject()# {{poll()=>do {{{body}}},}}}}"
+        ));
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
     }
+}
+
+#[test]
+fn scheduled_handler_absent_variant_code_capture_uses_tag_evidence() {
+    let package=compile("trait Duplicate {}trait Retire {fn drop(*self);}
+        typealias Action=fn()->bool;impl Duplicate for Action {}
+        enum Choice {none,some(Action)}impl Duplicate for Choice {}
+        struct Flags {value:Choice}impl Duplicate for Flags {}
+        effect poll()->bool;fn subject()->#poll bool {poll()#}
+        fn entry()->bool {let flags=Flags {value:Choice.none};subject()# {poll()=>do {let observed=flags.value;true},}}");
+    use comptime_interpretor::{Interpreter, Value};
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -25193,12 +25347,15 @@ fn generic_inline_effect_methods_preserve_interface_postconditions() {
                         comptime_interpretor::Event::CheckPredicate { .. }
                     ))
                     .count(),
+                // Body assumes, inherited implementation postcondition and
+                // interface postcondition, plus the explicit implementation
+                // clause when present. Invocation boundaries are not deduped.
                 if accepted {
-                    if own_contract { 3 } else { 2 }
+                    if own_contract { 4 } else { 3 }
                 } else {
                     1
                 },
-                "accepted={accepted}, expanded={expanded}"
+                "accepted={accepted}, own_contract={own_contract}, expanded={expanded}"
             );
             let drops = executed_names(&package, &executable, vm.events())
                 .into_iter()
@@ -25207,7 +25364,7 @@ fn generic_inline_effect_methods_preserve_interface_postconditions() {
             assert_eq!(
                 drops,
                 ["drop Ticket", "drop Batch", "drop Caller"],
-                "accepted={accepted}, expanded={expanded}"
+                "accepted={accepted}, own_contract={own_contract}, expanded={expanded}"
             );
         }
     }
@@ -25750,9 +25907,9 @@ fn staged_mixed_packets_preserve_unused_field_cleanup_order() {
             impl Retire for Second {{fn drop(*self) {{}}}}
             comptime fn Boolean()->Type {{bool}}
             fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {{value}}
-            fn forward(comptime config:(comptime fn()->Type,First,Second,bool))->bool {{let (select,first,second,value)=config;{result}}}
+            fn forward(comptime config:Tuple<comptime fn()->Type,First,Second,bool>)->bool {{let (select,first,second,value)=config;{result}}}
             fn run()->bool {{forward((Boolean,First {{}},Second {{}},true))}}");
-        let package = finite_default_support::compile_with_source_bindings(
+        let package = finite_default_support::compile_with_tuple_selectors(
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
@@ -25794,9 +25951,9 @@ fn staged_mixed_packets_retire_wildcard_fields_before_continuation() {
         impl Retire for Second {fn drop(*self) {}}
         comptime fn Boolean()->Type {bool}
         fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {value}
-        fn forward(comptime config:(comptime fn()->Type,First,Second,bool))->bool {let (select,first,_,value)=config;consume(select,value)}
+        fn forward(comptime config:Tuple<comptime fn()->Type,First,Second,bool>)->bool {let (select,first,_,value)=config;consume(select,value)}
         fn run()->bool {forward((Boolean,First {},Second {},true))}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -25830,9 +25987,9 @@ fn staged_mixed_packets_preserve_runtime_parent_cleanup() {
         impl Retire for Payload {fn drop(*self) {assumes self.flag.*;}}
         comptime fn Boolean()->Type {bool}
         fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {value}
-        fn forward(comptime config:(comptime fn()->Type,Payload))->bool {let (select,{flag})=config;consume(select,flag)}
+        fn forward(comptime config:Tuple<comptime fn()->Type,Payload>)->bool {let (select,{flag})=config;consume(select,flag)}
         fn run()->bool {forward((Boolean,Payload {flag:true}))}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -25901,13 +26058,13 @@ fn staged_mixed_runtime_alternatives_preserve_selected_cleanup_order() {
         fn left() {} fn right() {}
         comptime fn Boolean()->Type {bool}
         fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {value}
-        fn forward(comptime config:(comptime fn()->Type,(bool,Held,Held)))->bool {
+        fn forward(comptime config:Tuple<comptime fn()->Type,Tuple<bool,Held,Held>>)->bool {
             let (select,((true,first,second) or (false,second,first)))=config;
             consume(select,true)
         }
         fn yes()->bool {forward((Boolean,(true,Held {tag:true},Held {tag:false})))}
         fn no()->bool {forward((Boolean,(false,Held {tag:true},Held {tag:false})))}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -25950,13 +26107,13 @@ fn staged_mixed_let_else_preserves_failure_exit_cleanup() {
         comptime fn Boolean()->Type {bool}
         fn failure()->bool {false}
         fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {value}
-        fn forward(comptime config:(comptime fn()->Type,bool,Held))->bool {
+        fn forward(comptime config:Tuple<comptime fn()->Type,bool,Held>)->bool {
             let (select,true,item)=config else {return failure();};consume(select,true)
         }
         fn yes()->bool {forward((Boolean,true,Held {}))}
         fn no()->bool {forward((Boolean,false,Held {}))}
         fn ordinary_failure()->bool {let (true,item)=(false,Held {}) else {return failure();};true}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -25999,13 +26156,13 @@ fn staged_mixed_guards_preserve_evaluation_and_cleanup_order() {
         fn accept(value:bool)->bool {let scratch=Scratch {};value}
         fn failure()->bool {false}
         fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {value}
-        fn forward(comptime config:(comptime fn()->Type,bool,Held),ready:bool)->bool {
+        fn forward(comptime config:Tuple<comptime fn()->Type,bool,Held>,ready:bool)->bool {
             let (select,true,item) if accept(ready)=config else {return failure();};consume(select,true)
         }
         fn yes()->bool {forward((Boolean,true,Held {}),true)}
         fn no()->bool {forward((Boolean,true,Held {}),false)}
         fn unmatched()->bool {forward((Boolean,false,Held {}),true)}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -26074,13 +26231,13 @@ fn staged_mixed_pattern_computations_preserve_alternative_order() {
             fn accept(value:bool)->bool {{let scratch=Scratch {{}};value}}
             fn failure()->bool {{false}}
             fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {{value}}
-            fn forward(comptime config:(comptime fn()->Type,bool,Held),ready:bool)->bool {{
+            fn forward(comptime config:Tuple<comptime fn()->Type,bool,Held>,ready:bool)->bool {{
                 let {pattern}=config else {{return failure();}};let first=select;let second=first;consume(second,true)
             }}
             fn yes()->bool {{forward((Boolean,true,Held {{}}),true)}}
             fn second()->bool {{forward((Boolean,false,Held {{}}),true)}}
             fn no()->bool {{forward((Boolean,true,Held {{}}),false)}}");
-        let package = finite_default_support::compile_with_source_bindings(
+        let package = finite_default_support::compile_with_tuple_selectors(
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
@@ -26130,12 +26287,12 @@ fn staged_nested_packet_destructuring_preserves_owned_siblings() {
             impl Retire for Second {{fn drop(*self) {{}}}}
             comptime fn Boolean()->Type {{bool}}
             fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {{value}}
-            fn forward(comptime config:(((comptime fn()->Type,),),First,Second,bool))->bool {{
+            fn forward(comptime config:Tuple<Tuple<Tuple<comptime fn()->Type>>,First,Second,bool>)->bool {{
                 let (nested,first,second,value)=config;
                 let (callbacks,)=nested;let (select,)=callbacks;{continuation}
             }}
             fn run()->bool {{forward((((Boolean,),),First {{}},Second {{}},true))}}");
-        let package = finite_default_support::compile_with_source_bindings(
+        let package = finite_default_support::compile_with_tuple_selectors(
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
@@ -26174,7 +26331,7 @@ fn staged_nested_guarded_packets_preserve_short_circuit_and_cleanup() {
         fn second(value:bool)->bool {let scratch=Scratch {};value}
         fn failure()->bool {false}
         fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {value}
-        fn forward(comptime config:(((comptime fn()->Type,),),Held),a:bool,b:bool)->bool {
+        fn forward(comptime config:Tuple<Tuple<Tuple<comptime fn()->Type>>,Held>,a:bool,b:bool)->bool {
             let (nested,held)=config;
             let (callbacks,) if first(a)=nested else {return failure();};
             let (select,) if second(b)=callbacks else {return failure();};
@@ -26183,7 +26340,7 @@ fn staged_nested_guarded_packets_preserve_short_circuit_and_cleanup() {
         fn yes()->bool {forward((((Boolean,),),Held {}),true,true)}
         fn early()->bool {forward((((Boolean,),),Held {}),false,true)}
         fn late()->bool {forward((((Boolean,),),Held {}),true,false)}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -26258,13 +26415,13 @@ fn staged_alternative_bindings_preserve_runtime_selection_and_cleanup() {
         comptime fn Pick(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
         fn accept(value:bool)->bool {let scratch=Scratch {};value}
         fn consume(comptime select:comptime fn(bool)->Type,comptime flag:bool,value:defer select(flag))->defer select(flag) {value}
-        fn forward(comptime config:(comptime fn(bool)->Type,(bool,bool),Held),ready:bool)->bool {
+        fn forward(comptime config:Tuple<comptime fn(bool)->Type,Tuple<bool,bool>,Held>,ready:bool)->bool {
             let (select,(((flag,other) if accept(ready)) or (other,flag)),held)=config;
             consume(select,flag,other)
         }
         fn yes()->bool {forward((Pick,(true,true),Held {}),true)}
         fn other()->bool {forward((Pick,(true,true),Held {}),false)}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -26309,14 +26466,14 @@ fn staged_alternative_discriminants_preserve_runtime_guards_and_cleanup() {
         fn accept(value:bool)->bool {let scratch=Scratch {};value}
         fn failure()->bool {false}
         fn consume(comptime select:comptime fn(bool)->Type,comptime flag:bool,value:defer select(flag))->defer select(flag) {value}
-        fn forward(comptime config:(comptime fn(bool)->Type,(bool,bool,bool),Held),ready:bool)->bool {
+        fn forward(comptime config:Tuple<comptime fn(bool)->Type,Tuple<bool,bool,bool>,Held>,ready:bool)->bool {
             let (select,(((true,flag,_) if accept(ready)) or (false,_,flag)),held)=config else {return failure();};
             consume(select,flag,true)
         }
         fn first()->bool {forward((Pick,(true,true,false),Held {}),true)}
         fn second()->bool {forward((Pick,(false,false,true),Held {}),false)}
         fn failed()->bool {forward((Pick,(true,true,false),Held {}),false)}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -26380,14 +26537,14 @@ fn staged_enum_payloads_preserve_selected_resource_cleanup() {
         fn accept(value:bool)->bool {value}
         fn failure()->bool {false}
         fn consume(comptime select:comptime fn(bool)->Type,comptime flag:bool,value:defer select(flag))->defer select(flag) {value}
-        fn forward(comptime config:(comptime fn(bool)->Type,Choice<bool>),ready:bool)->bool {
+        fn forward(comptime config:Tuple<comptime fn(bool)->Type,Choice<bool>>,ready:bool)->bool {
             let (select,(.left(flag,held) or .right(held,flag))) if accept(ready)=config else {return failure();};
             consume(select,flag,true)
         }
         fn left()->bool {forward((Pick,Choice<bool>.left(true,Held {})),true)}
         fn right()->bool {forward((Pick,Choice<bool>.right(Held {},true)),true)}
         fn failed()->bool {forward((Pick,Choice<bool>.right(Held {},true)),false)}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -26508,10 +26665,10 @@ fn tuple_enumeration_preserves_iteration_and_unvisited_resource_cleanup() {
             impl Retire for First {{fn drop(*self) {{}}}}
             impl Retire for Second {{fn drop(*self) {{}}}}
             impl Retire for Third {{fn drop(*self) {{}}}}
-            fn source()->(First,Second,Third) {{(First {{}},Second {{}},Third {{}})}}
+            fn source()->Tuple<First,Second,Third> {{(First {{}},Second {{}},Third {{}})}}
             fn visit() {{}} fn after() {{}}
             fn run()->bool {{inline for ({index_pattern},{element_pattern}) {guard} in source()'tuple_enumerate {{{body}}}after();true}}");
-                let package = finite_default_support::compile_with_source_bindings(
+                let package = finite_default_support::compile_with_tuple_selectors(
                     &source,
                     &Default::default(),
                     luna::protocols::type_constructors::Selectors {
@@ -26649,14 +26806,14 @@ fn generic_tuple_iteration_specializes_transferred_and_remaining_cleanup() {
         impl Retire for First {fn drop(*self) {}}
         impl Retire for Second {fn drop(*self) {}}
         fn consume(value:T) where T {}
-        fn walk(values:(A,B)) where A,B {
+        fn walk(values:Tuple<A,B>) where A,B {
             inline for (index,element) in values'tuple_enumerate {
                 consume(element);
                 break;
             }
         }
         fn run()->bool {walk((First {},Second {}));walk((Second {},First {}));true}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -26770,11 +26927,11 @@ fn open_call_tuple_spread_transfers_each_resource_once() {
         struct First {} struct Second {}
         impl Retire for First {fn drop(*self) {}}
         impl Retire for Second {fn drop(*self) {}}
-        fn packet()->(First,Second) {(First {},Second {})}
+        fn packet()->Tuple<First,Second> {(First {},Second {})}
         fn consume(first:First,second:Second) {}
         fn choose(comptime enabled:bool)->bool {inline if enabled {} consume(...packet());true}
         fn run()->bool {choose(true)}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -26812,12 +26969,12 @@ fn open_inline_packet_selection_transfers_only_the_selected_resources() {
         struct First {} struct Second {}
         impl Retire for First {fn drop(*self) {}}
         impl Retire for Second {fn drop(*self) {}}
-        fn yes()->(First,Second) {(First {},Second {})}
-        fn no()->(First,Second) {(First {},Second {})}
+        fn yes()->Tuple<First,Second> {(First {},Second {})}
+        fn no()->Tuple<First,Second> {(First {},Second {})}
         fn consume(first:First,second:Second) {}
         fn choose(comptime flag:bool)->bool {consume(...do {inline if flag {yes()} else {no()}});true}
         fn run()->bool {choose(true)} fn other()->bool {choose(false)}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -26902,11 +27059,11 @@ fn computed_packet_to_open_instance_is_prepared_and_cleaned_once() {
         struct First {} struct Second {}
         impl Retire for First {fn drop(*self) {}}
         impl Retire for Second {fn drop(*self) {}}
-        fn packet()->(First,Second) {(First {},Second {})}
+        fn packet()->Tuple<First,Second> {(First {},Second {})}
         fn consume(comptime flag:bool,first:First,second:Second) {inline if flag {}}
         fn choose(comptime flag:bool)->bool {inline if flag {} consume(true,...packet());true}
         fn run()->bool {choose(true)}";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -27176,10 +27333,10 @@ fn inferred_collection_fields_preserve_owned_cleanup() {
             "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
             struct Owner {{}} impl Retire for Owner {{fn drop(*self) {{}}}}
             fn make()->Owner {{Owner {{}}}} fn bias()->bool {{true}}
-            fn consume(...items:(T,fn(T)->bool),.bias:bool=false)->bool where T {{true}}
+            fn consume(...items:Tuple<T,fn(T)->bool>,.bias:bool=false)->bool where T {{true}}
             fn run()->bool {{consume({arguments})}}"
         );
-        let package = finite_default_support::compile_with_source_bindings(
+        let package = finite_default_support::compile_with_tuple_selectors(
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
@@ -27211,13 +27368,13 @@ fn inferred_collection_fields_reject_duplicate_ownership() {
     let prefix =
         "trait Retire {fn drop(*self);} trait Duplicate {} struct Owner {} impl Retire for Owner {fn drop(*self) {}}
         fn make()->Owner {Owner {}}
-        fn consume(...items:(T,T,fn(T)->bool))->bool where T {true}";
+        fn consume(...items:Tuple<T,T,fn(T)->bool>)->bool where T {true}";
     for body in [
         "let owner=make();consume(owner,owner,|value|true)",
         "let owner=make();consume(owner,make(),|value|true);let again=owner;true",
     ] {
         let source = format!("{prefix} fn run()->bool {{{body}}}");
-        let package = finite_default_support::compile_with_source_bindings(
+        let package = finite_default_support::compile_with_tuple_selectors(
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
@@ -28088,8 +28245,8 @@ fn staged_ordinary_inline_recursion_retains_finite_runtime_fallbacks() {
         "inline fn choose(comptime flag:bool,again:bool)->bool {if again {other(false)} else {flag}} inline fn other(again:bool)->bool {choose(false,again)}",
         "inline fn choose(comptime flag:bool,again:bool)->bool {if again {other(not flag,false)} else {flag}} inline fn other(comptime flag:bool,again:bool)->bool {choose(flag,again)}",
     ] {
-        let package = compile(&format!(
-            "trait Duplicate {{}} trait Retire {{fn drop(*self);}} {definitions} fn entry()->(bool,bool) {{(choose(true,false),choose(true,true))}}"
+        let package = finite_default_support::compile_with_tuple(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}} {definitions} fn entry()->Tuple<bool,bool> {{(choose(true,false),choose(true,true))}}"
         ));
         let executable = source_executable(&package, "entry").unwrap();
         assert!(executable.graph.functions.len() <= 5);
@@ -28617,7 +28774,7 @@ fn materialized_inline_effects_preserve_alias_mutation_during_argument_evaluatio
 #[test]
 fn conditional_staged_calls_preserve_owned_argument_scopes_and_selection_order() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
+    let package = finite_default_support::compile_with_tuple(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Ticket {flag:bool} struct Prepared {} struct Selected {} struct Caller {}
         impl Retire for Ticket {fn drop(*self) {}}
@@ -28631,7 +28788,7 @@ fn conditional_staged_calls_preserve_owned_argument_scopes_and_selection_order()
             let action=if (do {let marker=Selected {};selected=true;flag}) {first} else {second};
             action(prepared(config),do {let marker=Prepared {};let item=Ticket {flag:selected};item})
         }
-        fn entry()->(bool,bool) {(choose(true,true),choose(true,false))}",
+        fn entry()->Tuple<bool,bool> {(choose(true,true),choose(true,false))}",
     );
     let executable = source_executable(&package, "entry").unwrap();
     let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
@@ -28705,7 +28862,7 @@ fn conditional_staged_argument_copies_keep_outer_loop_transfers() {
 #[test]
 fn conditional_staged_argument_copies_preserve_owned_closure_captures() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
+    let package = finite_default_support::compile_with_tuple(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Ticket {flag:bool} struct Prepared {}
         impl Retire for Ticket {fn drop(*self) {}}
@@ -28717,7 +28874,7 @@ fn conditional_staged_argument_copies_preserve_owned_closure_captures() {
             let action=if flag {first} else {second};
             action(true,do {let marker=Prepared {};||consume(item)})
         }
-        fn entry()->(bool,bool) {(choose(true),choose(false))}",
+        fn entry()->Tuple<bool,bool> {(choose(true),choose(false))}",
     );
     let executable = source_executable(&package, "entry").unwrap();
     let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
@@ -28748,7 +28905,7 @@ fn conditional_staged_argument_copies_preserve_owned_closure_captures() {
 #[test]
 fn matched_staged_calls_retire_selector_and_arm_resources_before_arguments() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
+    let package = finite_default_support::compile_with_tuple(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Selector {flag:bool} struct Arm {} struct Ticket {flag:bool} struct Prepared {} struct Selected {} struct Caller {}
         impl Retire for Selector {fn drop(*self) {}} impl Retire for Arm {fn drop(*self) {}} impl Retire for Ticket {fn drop(*self) {}}
@@ -28761,7 +28918,7 @@ fn matched_staged_calls_retire_selector_and_arm_resources_before_arguments() {
             let action=(do {let marker=Selected {};selected=true;Selector {flag:flag}}) match {{flag:true}=>do {let arm=Arm {};first},_=>do {let arm=Arm {};second}};
             action(true,do {let marker=Prepared {};let item=Ticket {flag:selected};item})
         }
-        fn entry()->(bool,bool) {(choose(true),choose(false))}",
+        fn entry()->Tuple<bool,bool> {(choose(true),choose(false))}",
     );
     let executable = source_executable(&package, "entry").unwrap();
     let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
@@ -28800,7 +28957,7 @@ fn matched_staged_calls_retire_selector_and_arm_resources_before_arguments() {
 #[test]
 fn matched_staged_calls_preserve_guard_order_nested_selection_and_single_arguments() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
+    let package = finite_default_support::compile_with_tuple(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Ticket {flag:bool} struct Prepared {} struct Caller {}
         impl Retire for Ticket {fn drop(*self) {}}
@@ -28817,7 +28974,7 @@ fn matched_staged_calls_preserve_guard_order_nested_selection_and_single_argumen
             };
             action(true,do {let marker=Prepared {};Ticket {flag:true}})
         }
-        fn entry()->(bool,bool,bool) {(choose(true,true),choose(true,false),choose(false,true))}",
+        fn entry()->Tuple<bool,bool,bool> {(choose(true,true),choose(true,false),choose(false,true))}",
     );
     let executable = source_executable(&package, "entry").unwrap();
     let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
@@ -28858,7 +29015,7 @@ fn matched_staged_calls_preserve_guard_order_nested_selection_and_single_argumen
 #[test]
 fn matched_staged_callee_return_skips_argument_construction() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
+    let package = finite_default_support::compile_with_tuple(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Ticket {} struct Prepared {} struct Caller {}
         impl Retire for Ticket {fn drop(*self) {}}
@@ -28869,7 +29026,7 @@ fn matched_staged_callee_return_skips_argument_construction() {
             let action=stop match {true=>return false,false=>first};
             action(true,do {let marker=Prepared {};Ticket {}})
         }
-        fn entry()->(bool,bool) {(choose(true),choose(false))}",
+        fn entry()->Tuple<bool,bool> {(choose(true),choose(false))}",
     );
     let executable = source_executable(&package, "entry").unwrap();
     let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
@@ -28901,7 +29058,7 @@ fn scoped_staged_callees_preserve_if_when_and_block_resource_order() {
         "when {flag=>do {let marker=Selected {};selected=true;first},else=>do {let marker=Selected {};selected=true;second}}",
         "do {let marker=Selected {};selected=true;if flag {first} else {second}}",
     ] {
-        let package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+        let package=finite_default_support::compile_with_tuple(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
             struct Ticket {{flag:bool}} struct Selected {{}} struct Prepared {{}} struct Caller {{}}
             impl Retire for Ticket {{fn drop(*self) {{}}}}
             impl Retire for Selected {{fn drop(*self) {{}}}}
@@ -28912,7 +29069,7 @@ fn scoped_staged_callees_preserve_if_when_and_block_resource_order() {
             fn choose(flag:bool)->bool {{let caller=Caller {{}};var selected=false;
                 let action={selector};action(true,do {{let marker=Prepared {{}};Ticket {{flag:selected}}}})
             }}
-            fn entry()->(bool,bool) {{(choose(true),choose(false))}}"));
+            fn entry()->Tuple<bool,bool> {{(choose(true),choose(false))}}"));
         let executable = source_executable(&package, "entry").unwrap();
         let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
             .unwrap()
@@ -28949,7 +29106,7 @@ fn scoped_staged_callees_preserve_if_when_and_block_resource_order() {
 #[test]
 fn scoped_staged_callee_return_skips_argument_construction() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
+    let package = finite_default_support::compile_with_tuple(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Ticket {} struct Prepared {} struct Caller {}
         impl Retire for Ticket {fn drop(*self) {}}
@@ -28960,7 +29117,7 @@ fn scoped_staged_callee_return_skips_argument_construction() {
             let action=if stop {return false;} else {first};
             action(true,do {let marker=Prepared {};Ticket {}})
         }
-        fn entry()->(bool,bool) {(choose(true),choose(false))}",
+        fn entry()->Tuple<bool,bool> {(choose(true),choose(false))}",
     );
     let executable = source_executable(&package, "entry").unwrap();
     let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
@@ -28996,7 +29153,7 @@ fn materialized_inline_effects_expand_runtime_selected_inline_targets() {
         for inline_second in [true, false] {
             for finish in ["resume", "return"] {
                 let second_modifier = if inline_second { "inline " } else { "" };
-                let package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+                let package=finite_default_support::compile_with_tuple(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
             struct Ticket {{flag:bool}} struct Selected {{}} struct Prepared {{}} struct Left {{}} struct Right {{}} struct Producer {{}} struct Sink {{}} struct Caller {{}}
             impl Retire for Ticket {{fn drop(*self) {{}}}}
             impl Retire for Selected {{fn drop(*self) {{}}}}
@@ -29016,7 +29173,7 @@ fn materialized_inline_effects_expand_runtime_selected_inline_targets() {
             fn run(choice:bool)->bool {{let caller=Caller {{}};
                 produce(true,choice)# {{deliver(ticket)=>do {{let sink=Sink {{}};{finish} ticket.flag;}},}}
             }}
-            fn entry()->(bool,bool) {{(run(true),run(false))}}"));
+            fn entry()->Tuple<bool,bool> {{(run(true),run(false))}}"));
                 let executable = source_executable(&package, "entry").unwrap();
                 let run = executable
                     .graph
@@ -29099,7 +29256,7 @@ fn direct_owned_guard_calls_retire_arguments_before_success_or_fallback() {
         "with_seen(Held {flag:value})",
         "inspect_pair((Held {flag:value},true))",
     ] {
-        let package = compile(&format!(
+        let package = finite_default_support::compile_with_tuple(&format!(
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
             struct Held {{flag:bool}} struct Caller {{}}
             fn held_retired() {{}} fn caller_retired() {{}} fn observed() {{}}
@@ -29109,7 +29266,7 @@ fn direct_owned_guard_calls_retire_arguments_before_success_or_fallback() {
             inline fn inspect(held:Held)->bool {{observed();held.flag}}
             inline fn with_default(flag:bool,.held:Held=make(flag))->bool {{observed();held.flag}}
             inline fn with_seen(held:Held,.flag:bool=held.flag)->bool {{observed();flag}}
-            inline fn inspect_pair(pair:(Held,bool))->bool {{let (held,flag)=pair;observed();held.flag and flag}}
+            inline fn inspect_pair(pair:Tuple<Held,bool>)->bool {{let (held,flag)=pair;observed();held.flag and flag}}
             fn selected()->bool {{true}} fn fallback()->bool {{false}}
             fn entry(value:bool)->bool {{let caller=Caller {{}};false match {{
                 _ if {guard}=>selected(),_=>fallback(),
@@ -29173,11 +29330,11 @@ fn direct_owned_guard_calls_cannot_consume_subjects_or_external_owners() {
         "fn entry(outer:Held)->bool {false match {_ if inspect(do {outer})=>true,_=>false}}",
         "fn entry(outer:Held)->bool {false match {_ if inspect_pair((outer,true))=>true,_=>false}}",
     ] {
-        let package = compile(&format!(
+        let package = finite_default_support::compile_with_tuple(&format!(
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
             struct Held {{flag:bool}} impl Retire for Held {{fn drop(*self) {{}}}}
             fn inspect(held:Held)->bool {{held.flag}}
-            fn inspect_pair(pair:(Held,bool))->bool {{let (held,flag)=pair;held.flag and flag}}
+            fn inspect_pair(pair:Tuple<Held,bool>)->bool {{let (held,flag)=pair;held.flag and flag}}
             {source}"
         ));
         let failure = source_executable(&package, "entry").unwrap_err();
@@ -30231,7 +30388,7 @@ fn tuple_runtime_element_filter_preserves_failure_cleanup_order() {
         impl Retire for Second {fn drop(*self) {}}
         impl Retire for Third {fn drop(*self) {}}
         enum Entry {first(First),second(Second),third(Third)}
-        fn source()->(Entry,Entry,Entry) {
+        fn source()->Tuple<Entry,Entry,Entry> {
             (Entry.first(First {}),Entry.second(Second {}),Entry.third(Third {}))
         }
         fn visit() {} fn after() {}
@@ -30239,7 +30396,7 @@ fn tuple_runtime_element_filter_preserves_failure_cleanup_order() {
             inline for (_, ((.first(_) or .third(_)) as element)) in source()'tuple_enumerate {let held=element;visit();}
             after();true
         }";
-    let package = finite_default_support::compile_with_source_bindings(
+    let package = finite_default_support::compile_with_tuple_selectors(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -30270,4 +30427,9151 @@ fn tuple_runtime_element_filter_preserves_failure_cleanup_order() {
             "after"
         ]
     );
+}
+
+#[test]
+fn error_result_cleanup_runs_only_the_active_payload_destructor() {
+    use comptime_interpretor::{Event, Interpreter, Storage, Value};
+    use elaboration::verification::{
+        PlaceId,
+        ownership::{Place, Shape, State},
+    };
+    let package = compile(
+        "trait Retire {fn drop(*self);}
+        struct SuccessHeld {flag:bool} struct ErrorHeld {flag:bool}
+        impl Retire for SuccessHeld {fn drop(*self) {self.flag.* = false;}}
+        impl Retire for ErrorHeld {fn drop(*self) {self.flag.* = false;}}",
+    );
+    let success = nominal(&package, "SuccessHeld", vec![]);
+    let failure = nominal(&package, "ErrorHeld", vec![]);
+    let ty = nir::Term::error_result(vec![failure.clone()], success.clone());
+    world(&package, |world, items| {
+        let acquired = luna::protocols::acquire_cleanup(
+            &package,
+            world,
+            items,
+            &ty,
+            Budget::default(),
+            &mut 100_000,
+        )
+        .unwrap();
+        let receiver = Place {
+            root: PlaceId {
+                owner: 91,
+                local: 1,
+            },
+            fields: vec![],
+        };
+        let mut state = State::default();
+        state
+            .declare(receiver.root, &Shape::Value, true, &mut 1000)
+            .unwrap();
+        let prepared = luna::cleanup::prepare(
+            &package,
+            world,
+            &acquired,
+            &state,
+            &receiver,
+            &[],
+            &mut 100_000,
+            Budget::default(),
+        )
+        .unwrap();
+        assert!(prepared.program.to_string().contains("cleanup-switch"));
+        for (tag, payload_type) in [(None, &success), (Some(0), &failure)] {
+            let nir::Term::Nominal {
+                declaration,
+                arguments,
+            } = payload_type
+            else {
+                panic!("nominal")
+            };
+            let storage = Storage::new(Value::ErrorResult {
+                ty: ty.clone(),
+                error: tag,
+                value: Box::new(Value::Record {
+                    declaration: *declaration,
+                    arguments: arguments.clone(),
+                    fields: vec![Value::Bool(true)],
+                }),
+            });
+            let expected = package
+                .implementations
+                .iter()
+                .find(|i| &i.subject == payload_type)
+                .unwrap()
+                .methods
+                .iter()
+                .find(|(n, _)| n == "drop")
+                .unwrap()
+                .1;
+            let wrong = elaboration::verification::moves::VariantSelection {
+                fields: vec![],
+                index: if tag.is_none() { 1 } else { 0 },
+            };
+            let wrong_plan = luna::cleanup::prepare(
+                &package,
+                world,
+                &acquired,
+                &state,
+                &receiver,
+                &[wrong],
+                &mut 100_000,
+                Budget::default(),
+            )
+            .unwrap();
+            let mut vm = Interpreter::from_iir(&prepared.graph, Default::default()).unwrap();
+            assert!(vm.execute_cleanup(&wrong_plan.program, &storage).is_err());
+            assert!(vm.events().is_empty());
+            vm.execute_cleanup(&prepared.program, &storage).unwrap();
+            assert_eq!(storage.read().unwrap(), Value::Unit);
+            let entered: Vec<_> = vm
+                .events()
+                .iter()
+                .filter_map(|e| {
+                    if let Event::EnterFunction(id) = e {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(entered, vec![expected]);
+            assert!(vm.execute_cleanup(&prepared.program, &storage).is_err());
+        }
+    });
+}
+
+#[test]
+fn error_result_cleanup_failure_preserves_mutation_and_stops_sibling_cleanup() {
+    use comptime_interpretor::{ErrorKind, Event, Interpreter, Storage, Value};
+    use elaboration::verification::{
+        PlaceId,
+        ownership::{Place, Shape, State},
+    };
+    let package = compile(
+        "trait Retire {fn drop(*self);}
+        struct Later {} struct Failing {flag:bool} struct Payload {later:Later,failing:Failing}
+        impl Retire for Later {fn drop(*self) {}}
+        impl Retire for Failing {fn drop(*self) {self.flag.* = false;assumes false;}}",
+    );
+    let record = |name: &str, fields| {
+        let nir::Term::Nominal {
+            declaration,
+            arguments,
+        } = nominal(&package, name, vec![])
+        else {
+            panic!("nominal")
+        };
+        Value::Record {
+            declaration,
+            arguments,
+            fields,
+        }
+    };
+    let ty = nir::Term::error_result(
+        vec![nominal(&package, "Payload", vec![])],
+        nir::Term::Primitive(nir::Primitive::Bool),
+    );
+    world(&package, |world, items| {
+        let acquired = luna::protocols::acquire_cleanup(
+            &package,
+            world,
+            items,
+            &ty,
+            Budget::default(),
+            &mut 100_000,
+        )
+        .unwrap();
+        let receiver = Place {
+            root: PlaceId {
+                owner: 92,
+                local: 1,
+            },
+            fields: vec![],
+        };
+        let mut state = State::default();
+        state
+            .declare(receiver.root, &Shape::Value, true, &mut 1000)
+            .unwrap();
+        let prepared = luna::cleanup::prepare(
+            &package,
+            world,
+            &acquired,
+            &state,
+            &receiver,
+            &[],
+            &mut 100_000,
+            Budget::default(),
+        )
+        .unwrap();
+        let packet = |flag| Value::ErrorResult {
+            ty: ty.clone(),
+            error: Some(0),
+            value: Box::new(record(
+                "Payload",
+                vec![
+                    record("Later", vec![]),
+                    record("Failing", vec![Value::Bool(flag)]),
+                ],
+            )),
+        };
+        let storage = Storage::new(packet(true));
+        let mut vm = Interpreter::from_iir(&prepared.graph, Default::default()).unwrap();
+        assert_eq!(
+            vm.execute_cleanup(&prepared.program, &storage)
+                .unwrap_err()
+                .kind,
+            ErrorKind::ProgramContractRejected
+        );
+        assert_eq!(
+            vm.events()
+                .iter()
+                .filter(|e| matches!(e, Event::EnterFunction(_)))
+                .count(),
+            1
+        );
+        assert_eq!(storage.read().unwrap(), packet(false));
+    });
+}
+
+#[test]
+fn source_error_result_construction_transfers_payload_cleanup_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    for construct in ["error Held {}", "Held {}"] {
+        let package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{}} impl Retire for Held {{fn drop(*self) {{}}}}
+            fn after() {{}}
+            fn run()->bool {{do {{let result: !Held Held = {construct};}};after();true}}"
+        ));
+        let executable = source_executable(&package, "run")
+            .unwrap_or_else(|error| panic!("{construct}: {error}"));
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec!["run", "drop Held", "after"]
+        );
+    }
+}
+
+#[test]
+fn source_error_result_moves_and_reassignment_retire_each_payload_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    let prefix = "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        fn between() {} fn after() {}";
+    for body in [
+        "let payload=Held {}; let first: !Held Held = error payload; let second=first; between();",
+        "var packet: !Held Held = error Held {}; packet = Held {}; between();",
+        "let packet: !Held Held = Held {}; let aggregate=(packet, Held {}); between();",
+    ] {
+        let package = compile(&format!(
+            "{prefix} fn run()->bool {{ do {{{body}}};after();true}}"
+        ));
+        let executable =
+            source_executable(&package, "run").unwrap_or_else(|e| panic!("{body}: {e}"));
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        let expected = if body.contains("var packet") {
+            vec!["run", "drop Held", "between", "drop Held", "after"]
+        } else if body.contains("aggregate") {
+            vec!["run", "between", "drop Held", "drop Held", "after"]
+        } else {
+            vec!["run", "between", "drop Held", "after"]
+        };
+        assert_eq!(names, expected, "{body}");
+    }
+}
+
+#[test]
+fn source_error_result_does_not_restore_consumed_payload() {
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        fn run()->bool {let payload=Held {};let packet: !Held Held = error payload;
+            let reused=payload;true}",
+    );
+    let failure = source_executable(&package, "run").unwrap_err();
+    assert!(
+        failure.contains("consumed")
+            || failure.contains("Moved")
+            || failure.contains("unavailable"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn source_error_result_payload_keeps_pointer_dependency_until_cleanup() {
+    let package = compile("trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {target:*bool} impl Retire for Held {fn drop(*self) {self.target.*.* = true;}}
+        fn run()->bool {var flag=false;do {let packet: !Held bool = error Held {target:flag.ref};};flag}");
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn source_error_result_predicate_failure_cleans_packet_before_outer_owner() {
+    use comptime_interpretor::{ErrorKind, Interpreter};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Outer {} struct Held {}
+        impl Retire for Outer {fn drop(*self) {}}
+        impl Retire for Held {fn drop(*self) {}}
+        fn after() {}
+        fn run()->bool {let outer=Outer {};let packet: !Held bool = error Held {};
+            assumes false;after();true}",
+    );
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![])
+            .unwrap_err()
+            .kind,
+        ErrorKind::ProgramContractRejected
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "drop Held", "drop Outer"]
+    );
+}
+
+#[test]
+fn source_error_result_cannot_hide_an_escaping_stack_pointer() {
+    let package=compile("trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {target:*bool} impl Retire for Held {fn drop(*self) {self.target.*.* = true;}}
+        fn run()->bool {let packet: !Held bool = do {var flag=false;error Held {target:flag.ref}};true}");
+    let failure = source_executable(&package, "run").unwrap_err();
+    assert!(
+        failure.contains("outlive") || failure.contains("escap") || failure.contains("scope"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn source_error_result_row_transport_remaps_active_cleanup_tag() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (payload, retired) in [
+        ("error A {}", Some("drop A")),
+        ("error B {}", Some("drop B")),
+        ("true", None),
+    ] {
+        let package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct A {{}} struct B {{}} struct C {{}}
+            impl Retire for A {{fn drop(*self) {{}}}}
+            impl Retire for B {{fn drop(*self) {{}}}}
+            impl Retire for C {{fn drop(*self) {{}}}}
+            fn after() {{}}
+            fn run()->bool {{do {{let input: ![A,B] bool={payload};
+                let widened: ![C,B,A] bool=input;let reordered: ![A,C,B] bool=widened;}};after();true}}"));
+        let executable =
+            source_executable(&package, "run").unwrap_or_else(|e| panic!("{payload}: {e}"));
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let mut expected = vec!["run"];
+        expected.extend(retired);
+        expected.push("after");
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            expected,
+            "{payload}"
+        );
+    }
+}
+
+#[test]
+fn source_error_result_row_transport_keeps_payload_pointer_guard() {
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct A {target:*bool} struct B {}
+        impl Retire for A {fn drop(*self) {self.target.*.* = true;}}
+        impl Retire for B {fn drop(*self) {}}
+        fn run()->bool {var flag=false;do {
+            let packet: ![A,B] bool = error A {target:flag.ref};
+            let reordered: ![B,A] bool=packet;};flag}",
+    );
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn source_error_result_cross_call_transfer_preserves_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct A {} struct B {}
+        impl Retire for A {fn drop(*self) {}}
+        impl Retire for B {fn drop(*self) {}}
+        fn make()->![A,B] bool {error A {}}
+        fn widen(value:![A,B] bool)->![B,A] bool {value}
+        fn after() {}
+        fn run()->bool {do {let packet=widen(make());};after();true}",
+    );
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "make", "widen", "drop A", "after"]
+    );
+}
+
+#[test]
+fn source_error_result_cross_call_retains_borrowed_payload_dependency() {
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct A {target:*bool} struct B {}
+        impl Retire for A {fn drop(*self) {self.target.*.* = true;}}
+        impl Retire for B {fn drop(*self) {}}
+        fn make(target:*bool)->![A,B] bool {error A {target:target}}
+        fn widen(packet:![A,B] bool)->![B,A] bool {packet}
+        fn run()->bool {var flag=false;do {let packet=widen(make(flag.ref));};flag}",
+    );
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn source_error_result_failed_payload_construction_cleans_prepared_fields() {
+    use comptime_interpretor::{ErrorKind, Interpreter};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Outer {} struct Held {} struct Payload {first:Held,second:Held}
+        impl Retire for Outer {fn drop(*self) {}}
+        impl Retire for Held {fn drop(*self) {}}
+        fn after() {}
+        fn run()->bool {let outer=Outer {};let packet: !Payload bool = error Payload {
+            first:Held {},second:do {assumes false;Held {}}};after();true}",
+    );
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![])
+            .unwrap_err()
+            .kind,
+        ErrorKind::ProgramContractRejected
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "drop Held", "drop Outer"]
+    );
+}
+
+#[test]
+fn source_error_patterns_transfer_payload_cleanup_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    for payload in ["error Held {}", "Held {}"] {
+        let package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{}} impl Retire for Held {{fn drop(*self) {{}}}}
+            fn visit() {{}} fn after() {{}}
+            fn run()->bool {{do {{let packet: !Held Held={payload};
+                packet match {{value! => {{let held=value;visit();}},error value => {{let held=value;visit();}}}};
+            }};after();true}}"));
+        let executable =
+            source_executable(&package, "run").unwrap_or_else(|e| panic!("{payload}: {e}"));
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec!["run", "visit", "drop Held", "after"]
+        );
+    }
+}
+
+#[test]
+fn source_error_pattern_guard_failure_keeps_original_payload() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        fn rejected() {} fn accepted() {}
+        fn run()->bool {let packet: !Held bool=error Held {};
+            packet match {value! => {}, (error held if false) => {rejected();},
+                error held => {accepted();}};true}",
+    );
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "accepted", "drop Held"]
+    );
+}
+
+#[test]
+fn source_error_propagation_retires_locals_and_transfers_error_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} struct Outer {}
+        impl Retire for Held {fn drop(*self) {}}
+        impl Retire for Outer {fn drop(*self) {}}
+        fn fail()->!Held bool {error Held {}}
+        fn skipped() {}
+        fn propagate()->!Held bool {let outer=Outer {};let value=fail()!;skipped();value}
+        fn after() {}
+        fn run()->bool {do {let packet=propagate();};after();true}",
+    );
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec![
+            "run",
+            "propagate",
+            "fail",
+            "drop Outer",
+            "drop Held",
+            "after"
+        ]
+    );
+}
+
+#[test]
+fn source_error_pattern_nested_alternatives_preserve_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    for variant in ["Left", "Right"] {
+        let package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{}} impl Retire for Held {{fn drop(*self) {{}}}}
+            enum Fault {{Left(Held),Right(Held)}} fn visit() {{}}
+            fn run()->bool {{let packet: !Fault bool=error Fault.{variant}(Held {{}});
+                packet match {{value! => {{}},error (.Left(held) or .Right(held)) => {{visit();}}}};true}}"));
+        let executable =
+            source_executable(&package, "run").unwrap_or_else(|e| panic!("{variant}: {e}"));
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec!["run", "visit", "drop Held"]
+        );
+    }
+}
+
+#[test]
+fn source_error_pattern_payload_binding_keeps_pointer_dependency() {
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {target:*bool} impl Retire for Held {fn drop(*self) {self.target.*.* = true;}}
+        fn run()->bool {var flag=false;do {let packet: !Held bool=error Held {target:flag.ref};
+            packet match {_! => {},error held => {let moved=held;}};};flag}",
+    );
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn source_error_handler_consumes_or_reemits_owned_payload_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    for body in ["held => {let owner=held;true}", "held => error held"] {
+        let package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{}} impl Retire for Held {{fn drop(*self) {{}}}}
+            fn after() {{}}
+            fn run()->bool {{do {{let packet: !Held bool=error Held {{}};
+                let result=packet! {{{body}}};}};after();true}}"
+        ));
+        let executable =
+            source_executable(&package, "run").unwrap_or_else(|e| panic!("{body}: {e}"));
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec!["run", "drop Held", "after"]
+        );
+    }
+}
+
+#[test]
+fn source_error_inline_propagation_preserves_return_boundary_and_owners() {
+    use comptime_interpretor::{Interpreter, Value};
+    for failed in ["true", "false"] {
+        let mut package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{}} struct Outer {{}}
+            impl Retire for Held {{fn drop(*self) {{}}}}
+            impl Retire for Outer {{fn drop(*self) {{}}}}
+            fn input(failed:bool)->!Held Held {{if failed {{error Held {{}}}}else{{Held {{}}}}}}
+            inline fn pass(failed:bool)->!Held Held {{let outer=Outer {{}};let held=input(failed)!;held}}
+            fn after() {{}}
+            fn run()->bool {{do {{let packet=pass({failed});}};after();true}}"));
+        let expansion =
+            elaboration::program::inlining::expand(&mut package, &mut 1_000_000).unwrap();
+        assert!(expansion.expanded >= 1);
+        let executable =
+            source_executable(&package, "run").unwrap_or_else(|e| panic!("{failed}: {e}"));
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec!["run", "input", "drop Outer", "drop Held", "after"]
+        );
+    }
+}
+
+#[test]
+fn source_error_pattern_does_not_allow_guard_to_consume_owned_payload() {
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        fn consume(value:Held)->bool {true}
+        fn run()->bool {let packet: !Held bool=error Held {};
+            packet match {_! => {},(error held if consume(held)) => {},error held => {}};true}",
+    );
+    let failure = source_executable(&package, "run").unwrap_err();
+    assert!(
+        failure.contains("guard") || failure.contains("observation") || failure.contains("Copy"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn source_error_multi_label_alternatives_transfer_the_selected_owner() {
+    use comptime_interpretor::{Interpreter, Value};
+    for label in ["A", "B"] {
+        let package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{}} impl Retire for Held {{fn drop(*self) {{}}}}
+            enum A {{Bad(Held)}} enum B {{Bad(Held)}} fn visit() {{}}
+            fn run()->bool {{let packet: ![A,B] bool=error {label}.Bad(Held {{}});
+                packet match {{_! => {{}},((error A.Bad(held)) or (error B.Bad(held))) => {{visit();}}}};true}}"));
+        let executable =
+            source_executable(&package, "run").unwrap_or_else(|e| panic!("{label}: {e}"));
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec!["run", "visit", "drop Held"]
+        );
+    }
+}
+
+#[test]
+fn source_error_multi_label_wildcard_retires_only_active_payload() {
+    use comptime_interpretor::{Interpreter, Value};
+    for label in ["A", "B"] {
+        let package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct A {{}} struct B {{}}
+            impl Retire for A {{fn drop(*self) {{}}}} impl Retire for B {{fn drop(*self) {{}}}}
+            fn run()->bool {{let packet: ![A,B] bool=error {label} {{}};
+                packet match {{_! => {{}},error _ => {{}}}};true}}"
+        ));
+        let executable =
+            source_executable(&package, "run").unwrap_or_else(|e| panic!("{label}: {e}"));
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec!["run", if label == "A" { "drop A" } else { "drop B" }]
+        );
+    }
+}
+
+#[test]
+fn source_error_catches_thread_one_original_owner_and_discard_intermediate_values() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package=compile("trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} struct Before {} struct Middle {}
+        impl Retire for Held {fn drop(*self) {}} impl Retire for Before {fn drop(*self) {}}
+        impl Retire for Middle {fn drop(*self) {}}
+        fn mark() {} fn after() {}
+        fn run()->bool {do {let packet: !Held bool=error Held {};
+            let result=packet! {catch _=>Before {},_=>Middle {},catch original=>{mark();original},};};after();true}");
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec![
+            "run",
+            "drop Before",
+            "drop Middle",
+            "mark",
+            "drop Held",
+            "after"
+        ]
+    );
+}
+
+#[test]
+fn source_error_catch_rejects_consuming_payload_before_whole_delivery() {
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        fn run()->bool {let packet: !Held bool=error Held {};
+            packet! {held=>{let consumed=held;},catch original=>true,}} ",
+    );
+    let failure = source_executable(&package, "run").unwrap_err();
+    assert!(
+        failure.contains("Copy") || failure.contains("copy") || failure.contains("consum"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn source_error_catch_explicit_exits_skip_later_phases_and_clean_owners() {
+    use comptime_interpretor::{Interpreter, Value};
+    for phases in [
+        "catch original=>return true,_=>skipped(),catch _=>{skipped();false}",
+        "catch _=>{},held=>{let owner=held;return true;},catch _=>{skipped();false}",
+    ] {
+        let package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{}} struct Outer {{}}
+            impl Retire for Held {{fn drop(*self) {{}}}} impl Retire for Outer {{fn drop(*self) {{}}}}
+            fn skipped() {{}}
+            fn run()->bool {{let outer=Outer {{}};let packet: !Held bool=error Held {{}};packet! {{{phases}}}}}"));
+        let executable =
+            source_executable(&package, "run").unwrap_or_else(|e| panic!("{phases}: {e}"));
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec!["run", "drop Held", "drop Outer"]
+        );
+    }
+}
+
+#[test]
+fn source_error_catch_can_return_the_original_affine_result() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        fn pass()->!Held bool {let packet: !Held bool=error Held {};
+            packet! {_=>{},catch original=>return original,}}
+        fn run()->bool {let packet=pass();true}",
+    );
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "pass", "drop Held"]
+    );
+}
+
+#[test]
+fn source_error_catch_predicate_failure_retires_original_before_outer_owner() {
+    use comptime_interpretor::{ErrorKind, Interpreter};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} struct Outer {}
+        impl Retire for Held {fn drop(*self) {}} impl Retire for Outer {fn drop(*self) {}}
+        fn skipped() {}
+        fn run()->bool {let outer=Outer {};let packet: !Held bool=error Held {};
+            packet! {catch _=>{assumes false;},_=>skipped(),catch _=>{skipped();true},}}",
+    );
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![])
+            .unwrap_err()
+            .kind,
+        ErrorKind::ProgramContractRejected
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "drop Held", "drop Outer"]
+    );
+}
+
+#[test]
+fn source_error_catch_guard_failure_preserves_whole_owned_result() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package=compile("trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        fn skipped() {}
+        fn run()->bool {let packet: !Held bool=error Held {};
+            let result=packet! {catch (original if false)=>skipped(),_=>{},catch original=>original,};true}");
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "drop Held"]
+    );
+}
+
+#[test]
+fn source_error_catch_continue_retires_each_iteration_before_retry() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} struct Outer {}
+        impl Retire for Held {fn drop(*self) {}} impl Retire for Outer {fn drop(*self) {}}
+        fn run()->bool {var first=true;while :retry true {
+            let outer=Outer {};let packet: !Held bool=if first {error Held {}}else{true};
+            let result=packet! {_=>{},catch _=>{first=false;continue retry;},};return result;
+        }false}",
+    );
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "drop Held", "drop Outer", "drop Outer"]
+    );
+}
+
+#[test]
+fn source_error_catch_inline_return_preserves_owned_result_and_call_boundary() {
+    use comptime_interpretor::{Interpreter, Value};
+    let mut package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        inline fn pass()->!Held bool {let packet: !Held bool=error Held {};
+            packet! {_=>{},catch original=>return original,}}
+        fn after() {}
+        fn run()->bool {do {let packet=pass();};after();true}",
+    );
+    assert!(
+        elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+            .unwrap()
+            .expanded
+            >= 1
+    );
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "drop Held", "after"]
+    );
+}
+
+#[test]
+fn source_error_catch_keeps_borrowed_payload_until_final_delivery() {
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {target:*bool} impl Retire for Held {fn drop(*self) {self.target.*.* = true;}}
+        fn run()->bool {var flag=false;do {let packet: !Held bool=error Held {target:flag.ref};
+            let returned=packet! {catch _=>{},_=>{},catch original=>original,};};flag}",
+    );
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn source_error_trailing_catch_may_destructure_and_consume_affine_payload() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        fn run()->bool {let packet: !Held bool=error Held {};
+            packet! {catch _=>{},_=>{},catch error held=>{let owner=held;true},}}",
+    );
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "drop Held"]
+    );
+}
+
+#[test]
+fn source_error_catch_observes_original_instead_of_ordinary_arm_result() {
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        fn run()->bool {let packet: !bool bool=error true;
+            packet! {value=>not value,catch error original=>original,}}",
+    );
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn source_error_catch_conditional_borrowed_payload_keeps_branch_guards() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {target:*bool} impl Retire for Held {fn drop(*self) {self.target.*.* = true;}}
+        fn run(failed:bool)->bool {var flag=false;do {
+            let packet: !Held bool=if failed {error Held {target:flag.ref}}else{false};
+            let returned=packet! {catch _=>{},_=>{},catch original=>original,};};flag}",
+    );
+    let executable = source_executable(&package, "run").unwrap();
+    for failed in [false, true] {
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![Value::Bool(failed)])
+                .unwrap(),
+            Value::Bool(failed)
+        );
+    }
+}
+
+#[test]
+fn source_error_catch_keeps_distinct_pointer_targets_in_overlapping_payload_slots() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {target:*bool} impl Retire for Held {fn drop(*self) {self.target.*.* = true;}}
+        fn run(failed:bool)->bool {var a=false;var b=false;do {
+            let packet: !Held Held=if failed {error Held {target:a.ref}}else{Held {target:b.ref}};
+            let returned=packet! {_=>{},catch original=>original,};};
+            if failed {a and not b}else{not a and b}}",
+    );
+    let executable = source_executable(&package, "run").unwrap();
+    for failed in [false, true] {
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![Value::Bool(failed)])
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn inferred_error_callback_propagation_cleans_local_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in ["true", "false"] {
+        let source = format!("trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            fn lookup(flag:bool)->!bool bool {{if flag {{true}} else {{error true}}}}
+            fn later()->bool {{true}}
+            fn entry()->bool {{let callback=|flag:bool| {{let item=Item {{}};lookup(flag)!;later()}};
+                callback({flag}) match {{value! => value,error failure=>failure}}}}");
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1
+        );
+        assert_eq!(
+            names.iter().filter(|name| name.as_str() == "later").count(),
+            usize::from(flag == "true")
+        );
+    }
+}
+
+#[test]
+fn inferred_error_effect_callback_cleans_each_exit_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in ["true", "false"] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            effect read()->bool;
+            fn checked(flag:bool)->!bool bool {{if flag {{true}} else {{error true}}}}
+            fn later()->bool {{true}}
+            fn apply(action:fn()->#read T)->#read T where T {{action()}}
+            fn entry()->bool {{let result=apply(|| {{let item=Item {{}};
+                let flag=read()#;checked(flag)!;later()}})# {{read()=>{flag}}};
+                result! {{failure=>failure}}}}"
+        );
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1
+        );
+        assert_eq!(
+            names.iter().filter(|name| name.as_str() == "later").count(),
+            usize::from(flag == "true")
+        );
+    }
+}
+
+#[test]
+fn partial_error_callback_explicit_returns_keep_cleanup_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in ["true", "false"] {
+        let source=format!("trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            enum Failure {{Bad(bool)}}
+            fn apply(action:fn(bool)->!Failure T,flag:bool)->!Failure T where T {{action(flag)}}
+            fn entry()->bool {{apply(|flag| {{let item=Item {{}};
+                if flag {{return error .Bad(true);}}return true;}},{flag})! {{Failure.Bad(value)=>value}}}}");
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn inferred_generic_error_row_conversion_preserves_owned_payload_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Item {} impl Retire for Item {fn drop(*self) {}}
+        enum Failure where T {Bad(T)} enum Other {Bad}
+        fn sample()->![Other,Failure<Item>] bool {error Failure<Item>.Bad(Item {})}
+        fn forward(value:![Failure<T>,Other] bool)->![Other,Failure<T>] bool where T {value}
+        fn entry()->bool {let result=forward(sample());true}";
+    let package = compile(source);
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.as_str() == "drop Item")
+            .count(),
+        1
+    );
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.as_str() == "sample")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn inferred_error_product_conversion_moves_payload_and_cleans_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Item {} impl Retire for Item {fn drop(*self) {}}
+        enum Failure where T {Bad(T)} enum Other {Bad}
+        fn sample()->![Other,Failure<Item>] bool {error Failure<Item>.Bad(Item {})}
+        fn packet()->Tuple<![Other,Failure<Item>] bool,bool> {(sample(),true)}
+        fn forward(value:Tuple<![Failure<T>,Other] bool,bool>)->bool where T {
+            let (result,flag)=value;flag
+        }
+        fn entry()->bool {forward(packet())}";
+    let package = finite_default_support::compile_with_tuple(source);
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.as_str() == "drop Item")
+            .count(),
+        1
+    );
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.as_str() == "sample")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn inferred_error_product_conversion_does_not_add_outer_destructor_calls() {
+    use comptime_interpretor::{Interpreter, Value};
+    for row in ["Failure<bool>,Other", "Other,Failure<bool>"] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            enum Failure where T {{Bad(T)}} enum Other {{Bad}}
+            fn mark() {{}}
+            impl Retire for Tuple<![Failure<bool>,Other] bool,bool> {{fn drop(*self) {{mark();}}}}
+            fn packet()->Tuple<![{row}] bool,bool> {{(error Failure<bool>.Bad(true),true)}}
+            fn forward(value:Tuple<![Failure<T>,Other] bool,bool>)->bool where T {{true}}
+            fn entry()->bool {{forward(packet())}}"
+        );
+        let package = finite_default_support::compile_with_tuple(&source);
+        let executable = source_executable(&package, "entry")
+            .unwrap_or_else(|failure| panic!("{row}: {failure}"));
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names.iter().filter(|name| name.as_str() == "mark").count(),
+            1,
+            "{row}: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn product_error_transport_preserves_pointer_guards_and_aliases() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source="trait Retire {fn drop(*self);} trait Duplicate {}
+        enum Failure where T {Bad(T)} enum Other {Bad}
+        fn forward(value:Tuple<![Failure<T>,Other] bool,bool>)->Tuple<![Failure<T>,Other] bool,bool> where T {value}
+        fn entry()->bool {var flag=true;
+            let input:Tuple<![Other,Failure<*bool>] bool,bool> = (error Failure<*bool>.Bad(flag.ref),true);
+            let (result,enabled)=forward(input);flag=false;
+            result! {Failure<*bool>.Bad(pointer)=>enabled and not pointer.*,Other.Bad=>false}}";
+    let package = finite_default_support::compile_with_tuple(source);
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn generic_error_qualification_moves_owned_payload_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    for body in ["Item {}", "error Failure.Bad(Item {})"] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            enum Failure {{Bad(Item)}} enum Other {{Bad}}
+            fn sample()->!Failure Item {{{body}}}
+            fn wrap(value:T)->!Other T where T {{value}}
+            fn entry()->bool {{let _=wrap(sample());true}}"
+        );
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1,
+            "{names:?}"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "sample")
+                .count(),
+            1,
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn generic_propagation_moves_newly_exposed_payload_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    for body in [
+        "Item {}",
+        "error Failure.Bad(Item {})",
+        "error Other.Bad(Item {})",
+    ] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            enum Failure {{Bad(Item)}} enum Other {{Bad(Item)}}
+            fn sample()->![Other,Failure] Item {{{body}}}
+            fn forward(value:!Other T)->!Other T where T {{let result=value!;result}}
+            fn entry()->bool {{let _=forward<!Failure Item>(sample());true}}"
+        );
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1,
+            "{names:?}"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "sample")
+                .count(),
+            1,
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn generic_error_handler_preserves_ownership_of_payload_and_fallback() {
+    use comptime_interpretor::{Interpreter, Value};
+    for body in [
+        "Item {}",
+        "error Failure.Bad(Item {})",
+        "error Other.Bad(Item {})",
+    ] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            enum Failure {{Bad(Item)}} enum Other {{Bad(Item)}}
+            fn sample()->![Other,Failure] Item {{{body}}}
+            fn fallback()->!Failure Item {{Item {{}}}}
+            fn forward(value:!Other T, fallback:T)->T where T {{value! {{Other.Bad(_)=>fallback}}}}
+            fn entry()->bool {{let _=forward<!Failure Item>(sample(),fallback());true}}"
+        );
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            2,
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn generic_catch_and_reordered_match_transfer_the_owned_result_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    for forward in [
+        "value! {catch _=>before(),catch original=>after(original)}",
+        "value match {error Outer.Bad(item)=>error Outer.Bad(item),result! => result}",
+        "value match {error Outer.Bad(item)=>error Outer.Bad(item),result! => after(result)}",
+        "value match {error Outer.Bad(item)=>error Outer.Bad(item),result! => {let callback=|| {result};after(callback())}}",
+        "value match {error Outer.Bad(item)=>error Outer.Bad(item),result! => {return after(result);}}",
+    ] {
+        for body in [
+            "Item {}",
+            "error Inner.Bad(Item {})",
+            "error Outer.Bad(Item {})",
+        ] {
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+                enum Inner {{Bad(Item)}} enum Outer {{Bad(Item)}}
+                fn sample()->![Outer,Inner] Item {{{body}}}
+                fn before()->bool {{true}}
+                fn after(value:T)->T where T {{value}}
+                fn forward(value:!Outer T)->!Outer T where T {{{forward}}}
+                fn entry()->bool {{let _=forward<!Inner Item>(sample());true}}"
+            );
+            let package = compile(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(true)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "drop Item")
+                    .count(),
+                1,
+                "{forward}: {body}: {names:?}"
+            );
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "sample")
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn generic_success_wildcard_retires_the_completed_payload_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (signature, inspect, argument) in [
+        (
+            "value:!Outer T",
+            "value match {_! => true,error Outer.Bad(_) => false}",
+            "sample()",
+        ),
+        (
+            "value:Tuple<!Outer T,bool>",
+            "value match {(_!,flag)=>flag,_=>false}",
+            "(sample(),true)",
+        ),
+        (
+            "value:!Outer T",
+            "let _! = value else {return false;};true",
+            "sample()",
+        ),
+        (
+            "value:(record {result:expected<T>(),flag:true})'type",
+            "value match {{flag:flag,result:_!}=>flag,_=>false}",
+            "record {result:sample(),flag:true}",
+        ),
+        (
+            "value:Tuple<!Outer T,bool>",
+            "value match {(result!,flag)=>consume(result) and flag,_=>false}",
+            "(sample(),true)",
+        ),
+        (
+            "value:(record {result:expected<T>(),flag:true})'type",
+            "value match {{flag:flag,result:result!}=>consume(result) and flag,_=>false}",
+            "record {result:sample(),flag:true}",
+        ),
+        (
+            "value:!Outer T",
+            "let result! = value else {return false;};consume(result)",
+            "sample()",
+        ),
+        (
+            "value:Tuple<!Outer T,bool>",
+            "let (result!,flag) = value else {return false;};consume(result) and flag",
+            "(sample(),true)",
+        ),
+        (
+            "value:(record {result:expected<T>(),flag:true})'type",
+            "let {flag:flag,result:result!} = value else {return false;};consume(result) and flag",
+            "record {result:sample(),flag:true}",
+        ),
+    ] {
+        for (body, expected) in [
+            ("Item {}", true),
+            ("error Inner.Bad(Item {})", true),
+            ("error Outer.Bad(Item {})", false),
+        ] {
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            enum Inner {{Bad(Item)}} enum Outer {{Bad(Item)}}
+            fn sample()->![Outer,Inner] Item {{{body}}}
+            fn consume(value:T)->bool where T {{true}}
+            fn record(...fields:T)->T where T {{fields}}
+            fn expected()->!Outer T where T {{error Outer.Bad(Item {{}})}}
+            fn inspect({signature})->bool where T {{{inspect}}}
+            fn entry()->bool {{inspect<!Inner Item>({argument})}}"
+            );
+            let package = finite_default_support::compile_with_tuple(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(expected)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "drop Item")
+                    .count(),
+                1,
+                "{signature}, {body}: {names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn generic_success_guard_borrows_without_consuming_the_rejected_payload() {
+    use comptime_interpretor::{Interpreter, Value};
+    for pattern in [
+        "(result! if allowed(result.ref,flag))",
+        "(result if allowed(result.ref,flag))!",
+        "(result and allowed(result.ref,flag) is true)!",
+        "(result! and allowed(result.ref,flag) is true)",
+        "((result if first(result.ref)) or (result if allowed(result.ref,flag)))!",
+        "(result! if first(result.ref)) or (result! if allowed(result.ref,flag))",
+    ] {
+        for flag in [false, true] {
+            for body in [
+                "Item {}",
+                "error Inner.Bad(Item {})",
+                "error Outer.Bad(Item {})",
+            ] {
+                let source = format!(
+                    "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+                enum Inner {{Bad(Item)}} enum Outer {{Bad(Item)}}
+                fn sample()->![Outer,Inner] Item {{{body}}}
+                fn allowed(value:*T,flag:bool)->bool where T {{flag}}
+                fn first(value:*T)->bool where T {{false}}
+                fn accepted(value:T)->T where T {{value}}
+                fn rejected(value:T)->T where T {{value}}
+                fn forward(value:!Outer T,flag:bool)->!Outer T where T {{value match {{
+                    {pattern} => accepted(result),
+                    result! => rejected(result),
+                    error Outer.Bad(item) => error Outer.Bad(item),
+                }}}}
+                fn entry()->bool {{let _=forward<!Inner Item>(sample(),{flag});true}}"
+                );
+                let package = compile(&source);
+                let executable = source_executable(&package, "entry").unwrap();
+                let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                    .unwrap()
+                    .with_cleanup_schedule(&executable.schedule)
+                    .unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                    Value::Bool(true)
+                );
+                let names = executed_names(&package, &executable, vm.events());
+                assert_eq!(
+                    names
+                        .iter()
+                        .filter(|name| name.as_str() == "drop Item")
+                        .count(),
+                    1,
+                    "{body}, {flag}: {names:?}"
+                );
+                assert_eq!(
+                    names
+                        .iter()
+                        .filter(|name| name.as_str() == "sample")
+                        .count(),
+                    1
+                );
+                let success = body != "error Outer.Bad(Item {})";
+                for (name, count) in [
+                    ("first", usize::from(success && pattern.contains("first"))),
+                    ("allowed", usize::from(success)),
+                    ("accepted", usize::from(success && flag)),
+                    ("rejected", usize::from(success && !flag)),
+                ] {
+                    assert_eq!(
+                        names
+                            .iter()
+                            .filter(|actual| actual.as_str() == name)
+                            .count(),
+                        count,
+                        "{names:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn generic_success_guard_completion_does_not_authorize_caller_mutation() {
+    let package = compile(
+        "trait Retire {fn drop(*self);} trait Duplicate {}
+        enum Inner {Bad} enum Outer {Bad}
+        fn sample()->!Inner bool {true}
+        fn mutate(flag:*bool)->bool {flag.* = false;true}
+        fn forward(value:!Outer T)->!Outer T where T {var flag=true;value match {
+            (result! if mutate(flag.ref)) => result,
+            result! => result,
+            error Outer.Bad => error Outer.Bad,
+        }}
+        fn entry()->bool {let _=forward<!Inner bool>(sample());true}",
+    );
+    let failure = source_executable(&package, "entry")
+        .err()
+        .expect("guard must remain an observation");
+    assert!(
+        failure.contains("guard") || failure.contains("observation"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn generic_success_wildcard_guard_retires_only_the_selected_owner() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in [false, true] {
+        for body in [
+            "Item {}",
+            "error Inner.Bad(Item {})",
+            "error Outer.Bad(Item {})",
+        ] {
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+                enum Inner {{Bad(Item)}} enum Outer {{Bad(Item)}}
+                fn sample()->![Outer,Inner] Item {{{body}}}
+                fn inspect(value:!Outer T,flag:bool)->bool where T {{value match {{
+                    (_! if flag) => true,_! => false,error Outer.Bad(_) => false,
+                }}}}
+                fn entry()->bool {{inspect<!Inner Item>(sample(),{flag})}}"
+            );
+            let package = compile(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(flag && body != "error Outer.Bad(Item {})")
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "drop Item")
+                    .count(),
+                1,
+                "{body}, {flag}: {names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn generic_mixed_error_whole_alias_preserves_the_owner_after_guard_rejection() {
+    use comptime_interpretor::{Interpreter, Value};
+    for pattern in [
+        "(_! or _! or error Outer.Bad(_))",
+        "((_ if flag)! or _! or error Outer.Bad(_))",
+        "((_ and flag is true)! or _! or error Outer.Bad(_))",
+    ] {
+        for flag in [false, true] {
+            for body in [
+                "Item {}",
+                "error Inner.Bad(Item {})",
+                "error Outer.Bad(Item {})",
+                "error Other.Bad(Item {})",
+            ] {
+                let source = format!(
+                    "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                    struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+                    enum Inner {{Bad(Item)}} enum Outer {{Bad(Item)}} enum Other {{Bad(Item)}}
+                    fn sample()->![Outer,Other,Inner] Item {{{body}}}
+                    fn allowed(value:*T,flag:bool)->bool where T {{flag}}
+                    fn accepted(value:T)->T where T {{value}}
+                    fn rejected(value:T)->T where T {{value}}
+                    fn forward(value:![Outer,Other] T,flag:bool)->![Outer,Other] T where T {{value match {{
+                        (({pattern} as whole) if allowed(whole.ref,flag)) => accepted(whole),
+                        whole => rejected(whole),
+                    }}}}
+                    fn entry()->bool {{let _=forward<!Inner Item>(sample(),{flag});true}}"
+                );
+                let package = compile(&source);
+                let executable = source_executable(&package, "entry").unwrap();
+                let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                    .unwrap()
+                    .with_cleanup_schedule(&executable.schedule)
+                    .unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                    Value::Bool(true)
+                );
+                let names = executed_names(&package, &executable, vm.events());
+                let matches = body != "error Other.Bad(Item {})";
+                for (name, count) in [
+                    ("drop Item", 1),
+                    ("sample", 1),
+                    ("allowed", usize::from(matches)),
+                    ("accepted", usize::from(matches && flag)),
+                    ("rejected", usize::from(!matches || !flag)),
+                ] {
+                    assert_eq!(
+                        names
+                            .iter()
+                            .filter(|actual| actual.as_str() == name)
+                            .count(),
+                        count,
+                        "{pattern}, {body}, {flag}: {names:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn generic_nested_success_bindings_transfer_only_after_all_fields_accept() {
+    use comptime_interpretor::{Interpreter, Value};
+    for left in [
+        "Item {}",
+        "error Inner.Bad(Item {})",
+        "error Outer.Bad(Item {})",
+    ] {
+        for right in [
+            "Item {}",
+            "error Inner.Bad(Item {})",
+            "error Outer.Bad(Item {})",
+        ] {
+            let accepted = !left.contains("Outer") && !right.contains("Outer");
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+                enum Inner {{Bad(Item)}} enum Outer {{Bad(Item)}}
+                fn left()->![Outer,Inner] Item {{{left}}}
+                fn right()->![Outer,Inner] Item {{{right}}}
+                fn consume(value:T)->bool where T {{true}}
+                fn rejected(value:T)->bool where T {{false}}
+                fn inspect(value:Tuple<!Outer T,!Outer T>)->bool where T {{value match {{
+                    (first!,second!)=>consume(first) and consume(second),
+                    whole=>rejected(whole),
+                }}}}
+                fn entry()->bool {{inspect<!Inner Item>((left(),right()))}}"
+            );
+            let package = finite_default_support::compile_with_tuple(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(accepted)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            for (name, count) in [
+                ("left", 1),
+                ("right", 1),
+                ("drop Item", 2),
+                ("consume", if accepted { 2 } else { 0 }),
+                ("rejected", usize::from(!accepted)),
+            ] {
+                assert_eq!(
+                    names
+                        .iter()
+                        .filter(|actual| actual.as_str() == name)
+                        .count(),
+                    count,
+                    "{left}, {right}: {names:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn generic_guarded_let_observes_before_transfer_and_cleans_rejection_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in [false, true] {
+        for body in [
+            "Item {}",
+            "error Inner.Bad(Item {})",
+            "error Outer.Bad(Item {})",
+        ] {
+            for (pattern, tail) in [
+                ("(result! if allowed(result.ref,flag))", "consume(result)"),
+                ("(result if allowed(result.ref,flag))!", "consume(result)"),
+                (
+                    "((result and allowed(result.ref,flag) is extra) if extra)!",
+                    "consume(result) and extra",
+                ),
+            ] {
+                let source = format!(
+                    "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                    struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+                    enum Inner {{Bad(Item)}} enum Outer {{Bad(Item)}}
+                    fn sample()->![Outer,Inner] Item {{{body}}}
+                    fn allowed(value:*T,flag:bool)->bool where T {{flag}}
+                    fn consume(value:T)->bool where T {{true}}
+                    fn inspect(value:!Outer T,flag:bool)->bool where T {{
+                        let {pattern} = value else {{return false;}};
+                        {tail}
+                    }}
+                    fn entry()->bool {{inspect<!Inner Item>(sample(),{flag})}}"
+                );
+                let package = compile(&source);
+                let executable = source_executable(&package, "entry").unwrap();
+                let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                    .unwrap()
+                    .with_cleanup_schedule(&executable.schedule)
+                    .unwrap();
+                let accepted = flag && !body.contains("Outer");
+                assert_eq!(
+                    vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                    Value::Bool(accepted)
+                );
+                let names = executed_names(&package, &executable, vm.events());
+                for (name, count) in [
+                    ("sample", 1),
+                    ("drop Item", 1),
+                    ("allowed", usize::from(!body.contains("Outer"))),
+                    ("consume", usize::from(accepted)),
+                ] {
+                    assert_eq!(
+                        names
+                            .iter()
+                            .filter(|actual| actual.as_str() == name)
+                            .count(),
+                        count,
+                        "{pattern}, {body}, {flag}: {names:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn generic_guarded_let_does_not_authorize_caller_mutation() {
+    let package = compile(
+        "trait Retire {fn drop(*self);} trait Duplicate {}
+        enum Inner {Bad} enum Outer {Bad}
+        fn sample()->!Inner bool {true}
+        fn mutate(flag:*bool)->bool {flag.* = false;true}
+        fn forward(value:!Outer T)->!Outer T where T {
+            var flag=true;
+            let (result! if mutate(flag.ref)) = value else {return error Outer.Bad;};
+            result
+        }
+        fn entry()->bool {let _=forward<!Inner bool>(sample());true}",
+    );
+    let failure = source_executable(&package, "entry")
+        .err()
+        .expect("guard must remain an observation");
+    assert!(
+        failure.contains("guard") || failure.contains("observation"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn generic_computed_let_keeps_the_independent_owned_result_obligation() {
+    for flag in [false, true] {
+        for body in [
+            "Item {}",
+            "error Inner.Bad(Item {})",
+            "error Outer.Bad(Item {})",
+        ] {
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+                enum Inner {{Bad(Item)}} enum Outer {{Bad(Item)}}
+                fn sample()->![Outer,Inner] Item {{{body}}}
+                fn make(value:*T)->Item where T {{Item {{}}}}
+                fn consume(value:T)->bool where T {{true}}
+                fn inspect(value:!Outer T,flag:bool)->bool where T {{
+                    let ((result and make(result.ref) is extra) if flag)! = value else {{return false;}};
+                    consume(result) and consume(extra)
+                }}
+                fn entry()->bool {{inspect<!Inner Item>(sample(),{flag})}}"
+            );
+            let package = compile(&source);
+            // Owned computed-pattern results still require a separate failure
+            // cleanup protocol. Packing exports must not bypass that obligation.
+            let failure = source_executable(&package, "entry")
+                .err()
+                .expect("owned computed result needs its own transfer protocol");
+            assert!(
+                failure.contains(
+                    "computed pattern value needs independent resource and failure-path transfer"
+                ),
+                "{failure}"
+            );
+        }
+    }
+}
+
+#[test]
+fn discarded_owned_computed_patterns_cleanup_before_continuation() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in [false, true] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            fn make()->Item {{Item {{}}}}
+            fn accepted()->bool {{true}}
+            fn rejected()->bool {{false}}
+            fn entry()->bool {{
+                let (_ and make() is (_ if {flag})) = true else {{return rejected();}};
+                accepted()
+            }}"
+        );
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(flag)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names.iter().filter(|name| name.as_str() == "make").count(),
+            1
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1
+        );
+        let drop = names.iter().position(|name| name == "drop Item").unwrap();
+        let continuation = names
+            .iter()
+            .position(|name| name == if flag { "accepted" } else { "rejected" })
+            .unwrap();
+        assert!(drop < continuation, "{names:?}");
+    }
+}
+
+#[test]
+fn discarded_computed_enum_retires_only_its_actual_payload() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in [false, true] {
+        for live in [false, true] {
+            let body = if live {
+                "Boxed.Live(Item {})"
+            } else {
+                "Boxed.Empty"
+            };
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+                enum Boxed {{Live(Item),Empty}}
+                fn make()->Boxed {{{body}}}
+                fn entry()->bool {{
+                    let (_ and make() is .Live(_ if {flag})) = true else {{return false;}};
+                    true
+                }}"
+            );
+            let package = compile(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(flag && live)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names.iter().filter(|name| name.as_str() == "make").count(),
+                1
+            );
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "drop Item")
+                    .count(),
+                usize::from(live),
+                "{names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn discarded_owned_computation_cannot_mutate_caller_state() {
+    let package = compile(
+        "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Item {} impl Retire for Item {fn drop(*self) {}}
+        fn make(flag:*bool)->Item {flag.* = false;Item {}}
+        fn entry()->bool {
+            var flag=true;
+            let (_ and make(flag.ref) is _) = true else {return false;};
+            flag
+        }",
+    );
+    let failure = source_executable(&package, "entry")
+        .err()
+        .expect("discarding a result cannot authorize caller mutation");
+    assert!(
+        failure.contains("observation") || failure.contains("guard"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn discarded_owned_computation_is_skipped_when_the_first_pattern_rejects() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Item {} impl Retire for Item {fn drop(*self) {}}
+        fn make()->Item {Item {}}
+        fn entry()->bool {
+            let (false and make() is _) = true else {return true;};
+            false
+        }",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    assert!(
+        !names
+            .iter()
+            .any(|name| name == "make" || name == "drop Item"),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn discarded_owned_wildcard_remains_irrefutable() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Item {} impl Retire for Item {fn drop(*self) {}}
+        fn make()->Item {Item {}}
+        fn entry()->bool {let (_ and make() is _) = true;true}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.as_str() == "drop Item")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn discarded_computed_error_result_cleans_its_selected_payload() {
+    use comptime_interpretor::{Interpreter, Value};
+    for failure in [false, true] {
+        let body = if failure {
+            "error Failure.Bad(Item {})"
+        } else {
+            "Item {}"
+        };
+        for (inline, computation) in [("", "make()"), ("inline ", "make()"), ("", "wrap(make())")] {
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+                enum Failure {{Bad(Item)}}
+                {inline}fn make()->!Failure Item {{{body}}}
+                fn wrap(value:!Failure Item)->!Failure Item {{value}}
+                fn entry()->bool {{
+                    let (_ and {computation} is _!) = true else {{return false;}};
+                    true
+                }}"
+            );
+            let package = compile(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(!failure)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "drop Item")
+                    .count(),
+                1,
+                "{inline}, {failure}: {names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn discarded_computed_owner_cannot_hide_external_pointer_cleanup() {
+    let package = compile(
+        "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Item {flag:*bool}
+        impl Retire for Item {fn drop(*self) {self.flag.*.* = false;}}
+        fn make(flag:*bool)->Item {Item {flag:flag}}
+        fn entry()->bool {
+            var flag=true;
+            let (_ and make(flag.ref) is _) = true;
+            flag
+        }",
+    );
+    let failure = source_executable(&package, "entry")
+        .err()
+        .expect("a computed owner cannot hide mutation through its cleanup");
+    assert!(
+        failure.contains("pointer") || failure.contains("guard") || failure.contains("observation"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn discarded_computed_newtype_retires_wrapper_and_representation_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in [false, true] {
+        for inline in ["", "inline "] {
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+                newtype Inner=Item; impl Retire for Inner {{fn drop(*self) {{}}}}
+                newtype Outer=Inner; impl Retire for Outer {{fn drop(*self) {{}}}}
+                {inline}fn make()->Outer {{Item {{}}.as(Inner).as(Outer)}}
+                fn entry()->bool {{
+                    let (_ and make() is (_ if {flag})) = true else {{return false;}};
+                    true
+                }}"
+            );
+            let package = compile(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(flag)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            let drops: Vec<_> = names
+                .iter()
+                .filter(|name| name.starts_with("drop "))
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                drops,
+                ["drop Outer", "drop Inner", "drop Item"],
+                "{inline}, {flag}"
+            );
+        }
+    }
+}
+
+#[test]
+fn computed_newtype_keeps_wrapper_and_payload_rejection_obligations() {
+    for (payload, wrapper) in [("assumes false;", ""), ("", "assumes false;")] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{{payload}}}}}
+            newtype Wrapper=Item; impl Retire for Wrapper {{fn drop(*self) {{{wrapper}}}}}
+            fn make()->Wrapper {{Item {{}}.as(Wrapper)}}
+            fn entry()->bool {{let (_ and make() is _) = true;true}}"
+        );
+        let package = compile(&source);
+        let failure = source_executable(&package, "entry")
+            .err()
+            .expect("conversion must retain both cleanup rejection obligations");
+        assert!(
+            failure.contains("cleanup") || failure.contains("rejecting"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn computed_owner_alternatives_cleanup_before_retry_without_repeating_final_guard() {
+    use comptime_interpretor::{Interpreter, Value};
+    for first in [false, true] {
+        for second in [false, true] {
+            for final_guard in [false, true] {
+                let source = format!(
+                    "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                    struct Subject {{}} impl Retire for Subject {{fn drop(*self) {{}}}}
+                    struct First {{}} impl Retire for First {{fn drop(*self) {{}}}}
+                    struct Second {{}} impl Retire for Second {{fn drop(*self) {{}}}}
+                    fn subject()->Subject {{Subject {{}}}}
+                    fn first()->First {{First {{}}}}
+                    fn second()->Second {{Second {{}}}}
+                    fn allowed(flag:bool)->bool {{flag}}
+                    fn accepted()->bool {{true}} fn rejected()->bool {{false}}
+                    fn entry()->bool {{subject() match {{
+                        (((_ and first() is (_ if {first})) or (_ and second() is (_ if {second}))) if allowed({final_guard})) => accepted(),
+                        _ => rejected(),
+                    }}}}"
+                );
+                let package = compile(&source);
+                let executable = source_executable(&package, "entry").unwrap();
+                let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                    .unwrap()
+                    .with_cleanup_schedule(&executable.schedule)
+                    .unwrap();
+                let matches = first || second;
+                let accepted = matches && final_guard;
+                assert_eq!(
+                    vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                    Value::Bool(accepted)
+                );
+                let names = executed_names(&package, &executable, vm.events());
+                for (name, count) in [
+                    ("subject", 1),
+                    ("first", 1),
+                    ("drop First", 1),
+                    ("second", usize::from(!first)),
+                    ("drop Second", usize::from(!first)),
+                    ("allowed", usize::from(matches)),
+                    ("drop Subject", 1),
+                ] {
+                    assert_eq!(
+                        names
+                            .iter()
+                            .filter(|actual| actual.as_str() == name)
+                            .count(),
+                        count,
+                        "{first}, {second}, {final_guard}: {names:?}"
+                    );
+                }
+                let position = |name: &str| names.iter().position(|actual| actual == name).unwrap();
+                let continuation = position(if accepted { "accepted" } else { "rejected" });
+                assert!(
+                    position("drop First") < continuation
+                        && continuation < position("drop Subject"),
+                    "{names:?}"
+                );
+                if !first {
+                    assert!(
+                        position("drop First") < position("second")
+                            && position("drop Second") < continuation,
+                        "{names:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn computed_generic_factory_preserves_success_boundary_and_owner_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (body, expected) in [
+        ("Item {}", true),
+        ("error Inner.Bad(Item {})", true),
+        ("error Outer.Bad(Item {})", false),
+    ] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            enum Inner {{Bad(Item)}} enum Outer {{Bad(Item)}}
+            typealias Factory=fn()->![Outer,Inner] Item; impl Duplicate for Factory {{}}
+            fn sample()->![Outer,Inner] Item {{{body}}}
+            fn inspect(factory:fn()->!Outer T)->bool where T {{
+                let (_ and factory() is _!) = true else {{return false;}};
+                true
+            }}
+            fn entry()->bool {{inspect<!Inner Item>(sample)}}"
+        );
+        if body == "Item {}" {
+            let without_copy = source.replace("impl Duplicate for Factory {}", "");
+            let unchecked = compile(&without_copy);
+            let failure = source_executable(&unchecked, "entry")
+                .err()
+                .expect("factory observation must retain Copy evidence");
+            assert!(failure.contains("Copy code observation"), "{failure}");
+        }
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(expected),
+            "{body}"
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "sample")
+                .count(),
+            1
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1,
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn owned_computed_pattern_exports_scalar_fields_after_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in [false, true] {
+        let source = format!(
+            "typealias u8=.u8'builtin; trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{flag:bool,number:u8}}
+            impl Retire for Item {{fn drop(*self) {{}}}}
+            fn make(flag:bool)->Item {{Item {{flag:flag,number:7}}}}
+            fn after(flag:bool,number:u8)->bool {{flag and number == 7}}
+            fn entry()->bool {{
+                let (_ and make({flag}) is {{flag:found,number:number}}) = true;
+                after(found,number)
+            }}"
+        );
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(flag)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1
+        );
+        assert!(
+            names.iter().position(|name| name == "drop Item").unwrap()
+                < names.iter().position(|name| name == "after").unwrap(),
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn owned_computed_scalar_exports_are_not_published_after_rejection() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in [false, true] {
+        for live in [false, true] {
+            let body = if live {
+                "Boxed.Live(Item {flag:flag,number:7})"
+            } else {
+                "Boxed.Empty"
+            };
+            let source = format!(
+                "typealias u8=.u8'builtin; trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Item {{flag:bool,number:u8}} impl Retire for Item {{fn drop(*self) {{}}}}
+                enum Boxed {{Live(Item),Empty}}
+                fn make(flag:bool)->Boxed {{{body}}}
+                fn after(flag:bool,number:u8)->bool {{flag and number == 7}}
+                fn entry()->bool {{
+                    let (_ and make({flag}) is .Live({{flag:found,number:number}} if found)) = true else {{return false;}};
+                    after(found,number)
+                }}"
+            );
+            let package = compile(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(flag && live)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "drop Item")
+                    .count(),
+                usize::from(live),
+                "{names:?}"
+            );
+            assert_eq!(
+                names.iter().filter(|name| name.as_str() == "after").count(),
+                usize::from(flag && live),
+                "{names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn owned_computed_export_packet_does_not_admit_pointer_fields() {
+    let package = compile(
+        "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Item {pointer:*bool} impl Retire for Item {fn drop(*self) {}}
+        fn make(pointer:*bool)->Item {Item {pointer:pointer}}
+        fn entry()->bool {
+            var flag=true;
+            let (_ and make(flag.ref) is {pointer:exported}) = true;
+            exported.*
+        }",
+    );
+    let failure = source_executable(&package, "entry")
+        .err()
+        .expect("pointer exports need independent provenance and resource proof");
+    assert!(
+        failure.contains("computed pattern value needs independent resource"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn computed_scalar_alternatives_restore_exports_before_the_shared_guard() {
+    use comptime_interpretor::{Interpreter, Value};
+    for first_matches in [false, true] {
+        for final_guard in [false, true] {
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Item {{flag:bool}} impl Retire for Item {{fn drop(*self) {{}}}}
+                fn first()->Item {{Item {{flag:false}}}}
+                fn second()->Item {{Item {{flag:true}}}}
+                fn allowed(flag:bool,enabled:bool)->bool {{flag and enabled}}
+                fn selected(flag:bool)->bool {{flag}}
+                fn entry()->bool {{true match {{
+                    (((_ and first() is ({{flag:found}} if {first_matches})) or (_ and second() is {{flag:found}})) if allowed(found,{final_guard})) => selected(found),
+                    _ => false,
+                }}}}"
+            );
+            let package = compile(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(!first_matches && final_guard)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            for (name, count) in [
+                ("first", 1),
+                ("second", usize::from(!first_matches)),
+                ("drop Item", 1 + usize::from(!first_matches)),
+                ("allowed", 1),
+            ] {
+                assert_eq!(
+                    names
+                        .iter()
+                        .filter(|actual| actual.as_str() == name)
+                        .count(),
+                    count,
+                    "{first_matches}, {final_guard}: {names:?}"
+                );
+            }
+            let guard = names.iter().position(|name| name == "allowed").unwrap();
+            assert!(
+                names.iter().rposition(|name| name == "drop Item").unwrap() < guard,
+                "{names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn computed_scalar_aggregate_exports_keep_their_own_copy_obligation() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in [false, true] {
+        let source = format!(
+            "typealias u8=.u8'builtin; trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            typealias Pair=Tuple<bool,u8>; impl Duplicate for Pair {{}}
+            struct Item {{pair:Pair}} impl Retire for Item {{fn drop(*self) {{}}}}
+            fn make()->Item {{Item {{pair:(true,7)}}}}
+            fn entry()->bool {{
+                let (_ and make() is ({{pair:pair}} if {flag})) = true else {{return false;}};
+                let (found,number)=pair;
+                found and number == 7
+            }}"
+        );
+        let package = finite_default_support::compile_with_tuple(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(flag)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1,
+            "{names:?}"
+        );
+        if flag {
+            let unchecked = finite_default_support::compile_with_tuple(
+                &source.replace("impl Duplicate for Pair {}", ""),
+            );
+            assert!(
+                source_executable(&unchecked, "entry").is_err(),
+                "a private packet must not supply Copy for Pair"
+            );
+        }
+    }
+}
+
+#[test]
+fn computed_registered_tuple_export_preserves_head_and_copy_obligation() {
+    use comptime_interpretor::{Interpreter, Value};
+    let compile_tuple = |source: &str| {
+        finite_default_support::compile_with_source_bindings(
+            source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                tuple: Some("input::Tuple"),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    for flag in [false, true] {
+        let source = format!(
+            "typealias Type=.Type'builtin; typealias u8=.u8'builtin;
+            pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
+            trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            typealias Pair=Tuple<bool,u8>; impl Duplicate for Pair {{}}
+            struct Item {{pair:Pair}} impl Retire for Item {{fn drop(*self) {{}}}}
+            fn make()->Item {{Item {{pair:(true,7)}}}}
+            fn entry()->bool {{
+                let (_ and make() is ({{pair:pair}} if {flag}))=true else {{return false;}};
+                let (found,number)=pair;
+                found and number == 7
+            }}"
+        );
+        let package = compile_tuple(&source);
+        let tuple = package
+            .normal_forms
+            .iter()
+            .find(|head| head.role == nir::normal_forms::Role::Tuple)
+            .unwrap()
+            .declaration;
+        let packet = package
+            .enums
+            .iter()
+            .find(|item| package.internal_return_packets.contains(&item.declaration))
+            .unwrap();
+        assert!(matches!(&packet.variants[0].fields[0],
+            nir::Term::NormalForm { head, .. } if *head == tuple));
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(flag)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1,
+            "{names:?}"
+        );
+        let unchecked = compile_tuple(&source.replace("impl Duplicate for Pair {}", ""));
+        assert!(
+            source_executable(&unchecked, "entry").is_err(),
+            "Tuple layout must not supply Copy"
+        );
+    }
+}
+
+#[test]
+fn computed_nested_tuple_export_uses_one_constrained_copy_implementation() {
+    use comptime_interpretor::{Interpreter, Value};
+    let compile_tuple = |source: &str| {
+        finite_default_support::compile_with_source_bindings(
+            source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                tuple: Some("input::Tuple"),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    for flag in [false, true] {
+        let source = format!(
+            "typealias Type=.Type'builtin; typealias u8=.u8'builtin;
+            pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
+            trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            typealias Inner=Tuple<bool,u8>; typealias Pair=Tuple<Inner,bool>;
+            impl Duplicate for T where T, requires (T == Inner) or (T == Pair) {{}}
+            struct Item where T {{pair:T}} impl Retire for Item<T> where T {{fn drop(*self) {{}}}}
+            fn make(value:T)->Item<T> where T {{Item<T> {{pair:value}}}}
+            fn entry()->bool {{
+                let (_ and make<Pair>(((true,7),true)) is ({{pair:pair}} if {flag}))=true else {{return false;}};
+                let ((found,number),last)=pair;
+                found and number == 7 and last
+            }}"
+        );
+        let package = compile_tuple(&source);
+        let tuple = package
+            .normal_forms
+            .iter()
+            .find(|head| head.role == nir::normal_forms::Role::Tuple)
+            .unwrap()
+            .declaration;
+        let packet = package
+            .enums
+            .iter()
+            .find(|item| package.internal_return_packets.contains(&item.declaration))
+            .unwrap();
+        assert!(matches!(&packet.variants[0].fields[0],
+            nir::Term::NormalForm { head, .. } if *head == tuple));
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(flag)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1,
+            "{names:?}"
+        );
+        for condition in ["T == Inner", "T == Pair"] {
+            let unchecked =
+                compile_tuple(&source.replace("(T == Inner) or (T == Pair)", condition));
+            let reason = source_executable(&unchecked, "entry").unwrap_err();
+            assert!(
+                reason.contains("Copy")
+                    || reason.contains("independent resource")
+                    || reason.contains("deferred"),
+                "{reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn computed_anonymous_record_export_keeps_copy_and_rejection_boundaries() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in [false, true] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            fn record(...fields:T)->T where T {{fields}}
+            typealias Fields=(record {{left:true,right:false}})'type; impl Duplicate for Fields {{}}
+            struct Item {{fields:Fields}} impl Retire for Item {{fn drop(*self) {{}}}}
+            fn make()->Item {{Item {{fields:record {{left:true,right:true}}}}}}
+            fn entry()->bool {{
+                let (_ and make() is ({{fields:result}} if {flag})) = true else {{return false;}};
+                result.left and result.right
+            }}"
+        );
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(flag)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1,
+            "{names:?}"
+        );
+        if flag {
+            let unchecked = compile(&source.replace("impl Duplicate for Fields {}", ""));
+            assert!(
+                source_executable(&unchecked, "entry").is_err(),
+                "record fields need their own Copy evidence"
+            );
+        }
+    }
+}
+
+#[test]
+fn computed_generic_scalar_exports_use_proved_shape_and_parameterized_packets() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in [false, true] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item where T {{flag:T}}
+            impl Retire for Item<T> where T {{fn drop(*self) {{}}}}
+            fn make(value:T)->Item<T> where T {{Item<T> {{flag:value}}}}
+            fn inspect(value:T)->bool where T, requires T == bool {{
+                let (_ and make(value) is {{flag:found}})=true;
+                found
+            }}
+            fn entry()->bool {{inspect({flag})}}"
+        );
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(flag)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1,
+            "{names:?}"
+        );
+        let packet = package
+            .enums
+            .iter()
+            .find(|item| item.name == "<computed-scalar-packet>")
+            .unwrap();
+        assert_eq!(packet.type_parameters.len(), 1);
+        assert!(
+            matches!(&packet.variants[0].fields[0],nir::Term::Rigid {declaration,..}
+            if *declaration==packet.type_parameters[0])
+        );
+    }
+}
+
+#[test]
+fn computed_generic_nested_tuple_exports_keep_instantiated_copy_checks() {
+    use comptime_interpretor::{Interpreter, Value};
+    let compile_tuple = |source: &str| {
+        finite_default_support::compile_with_source_bindings(
+            source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                tuple: Some("input::Tuple"),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    for flag in [false, true] {
+        let source = format!(
+            "typealias Type=.Type'builtin; typealias u8=.u8'builtin;
+            pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
+            trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            typealias Inner=Tuple<bool,u8>; typealias Pair=Tuple<Inner,bool>;
+            impl Duplicate for T where T, requires (T == Inner) or (T == Pair) {{}}
+            struct Item where T {{pair:T}} impl Retire for Item<T> where T {{fn drop(*self) {{}}}}
+            fn make(value:T)->Item<T> where T {{Item<T> {{pair:value}}}}
+            fn inspect(value:T)->bool where T, requires T == Pair {{
+                let (_ and make(value) is ({{pair:pair}} if {flag}))=true else {{return false;}};
+                let ((found,number),last)=pair;
+                found and number == 7 and last
+            }}
+            fn entry()->bool {{inspect<Pair>(((true,7),true))}}"
+        );
+        let package = compile_tuple(&source);
+        let tuple = package
+            .normal_forms
+            .iter()
+            .find(|head| head.role == nir::normal_forms::Role::Tuple)
+            .unwrap()
+            .declaration;
+        let packet = package
+            .enums
+            .iter()
+            .find(|item| package.internal_return_packets.contains(&item.declaration))
+            .unwrap();
+        assert_eq!(packet.type_parameters.len(), 1);
+        assert!(matches!(&packet.variants[0].fields[0],
+            nir::Term::Rigid { declaration, .. } if *declaration == packet.type_parameters[0]));
+        assert_ne!(packet.declaration, tuple);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(flag)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Item")
+                .count(),
+            1,
+            "{names:?}"
+        );
+        for condition in ["T == Inner", "T == Pair"] {
+            let unchecked =
+                compile_tuple(&source.replace("(T == Inner) or (T == Pair)", condition));
+            let reason = source_executable(&unchecked, "entry").unwrap_err();
+            assert!(
+                reason.contains("Copy")
+                    || reason.contains("independent resource")
+                    || reason.contains("deferred"),
+                "{reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn computed_generic_pointer_exports_do_not_gain_scalar_packet_privileges() {
+    let package = compile(
+        "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Item where T {value:T}
+        impl Retire for Item<T> where T {fn drop(*self) {}}
+        fn make(value:T)->Item<T> where T {Item<T> {value:value}}
+        fn inspect(value:T)->T where T, requires T == *bool {
+            let (_ and make(value) is {value:found})=true;
+            found
+        }
+        fn entry()->bool {let flag=true;inspect(flag.ref).*}",
+    );
+    assert!(
+        !package
+            .enums
+            .iter()
+            .any(|item| item.name == "<computed-scalar-packet>")
+    );
+    let reason = source_executable(&package, "entry").unwrap_err();
+    assert!(
+        reason.contains("computed memory pattern needs independent result provenance"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn computed_generic_multi_exports_remap_before_one_shared_guard() {
+    use comptime_interpretor::{Interpreter, Value};
+    for first_matches in [false, true] {
+        for final_guard in [false, true] {
+            let source = format!(
+                "typealias u8=.u8'builtin; trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Item where N,F {{number:N,flag:F}}
+                impl Retire for Item<N,F> where N,F {{fn drop(*self) {{}}}}
+                fn first()->Item<N,F> where N,F, requires (N == u8) and (F == bool) {{
+                    Item<N,F> {{number:1,flag:false}}
+                }}
+                fn second()->Item<N,F> where N,F, requires (N == u8) and (F == bool) {{
+                    Item<N,F> {{number:7,flag:true}}
+                }}
+                fn allowed(number:N,flag:F,enabled:bool)->bool where N,F,
+                    requires (N == u8) and (F == bool) {{flag and enabled and number == 7}}
+                fn inspect()->bool where N,F, requires (N == u8) and (F == bool) {{
+                    true match {{
+                        (((_ and first<N,F>() is ({{number:number,flag:flag}} if {first_matches}))
+                        or (_ and second<N,F>() is {{flag:flag,number:number}}))
+                        if allowed(number,flag,{final_guard})) => true,
+                        _ => false,
+                    }}
+                }}
+                fn entry()->bool {{inspect<u8,bool>()}}"
+            );
+            let package = compile(&source);
+            let packets = package
+                .enums
+                .iter()
+                .filter(|item| item.name == "<computed-scalar-packet>")
+                .collect::<Vec<_>>();
+            assert_eq!(packets.len(), 2);
+            for packet in packets {
+                assert_eq!(packet.type_parameters.len(), 2);
+                assert_eq!(packet.variants[0].fields.len(), 2);
+            }
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(!first_matches && final_guard)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            for (name, count) in [
+                ("first", 1),
+                ("second", usize::from(!first_matches)),
+                ("drop Item", 1 + usize::from(!first_matches)),
+                ("allowed", 1),
+            ] {
+                assert_eq!(
+                    names
+                        .iter()
+                        .filter(|actual| actual.as_str() == name)
+                        .count(),
+                    count,
+                    "{names:?}"
+                );
+            }
+            let guard = names.iter().position(|name| name == "allowed").unwrap();
+            assert!(
+                names.iter().rposition(|name| name == "drop Item").unwrap() < guard,
+                "{names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn computed_copy_nominal_exports_check_nested_layout_and_copy_evidence() {
+    use comptime_interpretor::{Interpreter, Value};
+    for kind in ["Data", "Choice", "Wrapped"] {
+        for live in [false, true] {
+            let value = match kind {
+                "Data" => format!("Data {{flag:{live}}}"),
+                "Choice" => {
+                    if live {
+                        "Choice.Value(Data {flag:true})".into()
+                    } else {
+                        "Choice.Empty".into()
+                    }
+                }
+                _ => {
+                    if live {
+                        "Choice.Value(Data {flag:true}).as(Wrapped)".into()
+                    } else {
+                        "Choice.Empty.as(Wrapped)".into()
+                    }
+                }
+            };
+            let result = match kind {
+                "Data" => "result.flag",
+                "Choice" => "result match {.Value({flag:flag})=>flag,.Empty=>false}",
+                _ => "result.as(Choice) match {.Value({flag:flag})=>flag,.Empty=>false}",
+            };
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Data {{flag:bool}} impl Duplicate for Data {{}}
+                enum Choice {{Value(Data),Empty}} impl Duplicate for Choice {{}}
+                newtype Wrapped=Choice; impl Duplicate for Wrapped {{}}
+                struct Holder {{data:{kind}}} impl Retire for Holder {{fn drop(*self) {{}}}}
+                fn make()->Holder {{Holder {{data:{value}}}}}
+                fn entry()->bool {{let (_ and make() is {{data:result}})=true;{result}}}"
+            );
+            let package = compile(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(live),
+                "{kind}"
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "drop Holder")
+                    .count(),
+                1,
+                "{names:?}"
+            );
+            for missing_type in ["Data", kind] {
+                let missing = compile(
+                    &source.replace(&format!("impl Duplicate for {missing_type} {{}}"), ""),
+                );
+                assert!(
+                    source_executable(&missing, "entry").is_err(),
+                    "complete Copy is required: {missing_type}"
+                );
+            }
+            let rejected = compile(&source.replace(
+                "is {data:result})=true;",
+                "is ({data:result} if false))=true else {return false;};",
+            ));
+            let executable = source_executable(&rejected, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(false)
+            );
+            let names = executed_names(&rejected, &executable, vm.events());
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "drop Holder")
+                    .count(),
+                1,
+                "{names:?}"
+            );
+            if kind == "Choice" {
+                let hidden = compile(
+                    &source
+                        .replace("Value(Data),Empty}", "Value(Data),Empty,Hidden(*bool)}")
+                        .replace(".Empty=>false}", ".Empty=>false,_=>false}"),
+                );
+                assert!(
+                    !hidden
+                        .enums
+                        .iter()
+                        .any(|item| item.name == "<computed-scalar-packet>")
+                );
+                assert!(
+                    source_executable(&hidden, "entry").is_err(),
+                    "inactive pointer variant must not escape"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn computed_copy_error_exports_preserve_complete_labels_and_copy_obligations() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (body, answer) in [
+        ("true", true),
+        ("false", false),
+        ("error Failure<bool>.Bad(true)", true),
+        ("error Failure<u8>.Bad(7)", true),
+    ] {
+        for accepted in [false, true] {
+            let source=format!(
+                "typealias u8=.u8'builtin; trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                enum Failure where T {{Bad(T)}}
+                impl Duplicate for Failure<bool> {{}} impl Duplicate for Failure<u8> {{}}
+                typealias Outcome=![Failure<bool>,Failure<u8>] bool;
+                impl Duplicate for Outcome {{}}
+                struct Holder {{result:Outcome}} impl Retire for Holder {{fn drop(*self) {{}}}}
+                fn result()->Outcome {{{body}}}
+                fn make()->Holder {{Holder {{result:result()}}}}
+                fn entry()->bool {{
+                    let (_ and make() is ({{result:result}} if {accepted}))=true else {{return false;}};
+                    result! {{Failure<bool>.Bad(flag)=>flag,Failure<u8>.Bad(number)=>number == 7}}
+                }}"
+            );
+            let package = compile(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(accepted && answer),
+                "{body}"
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "drop Holder")
+                    .count(),
+                1,
+                "{names:?}"
+            );
+            if body == "true" && accepted {
+                let hidden_source = source
+                    .replace("Failure<u8>] bool", "Failure<u8>,Failure<*bool>] bool")
+                    .replace(
+                        "impl Duplicate for Outcome {}",
+                        "impl Duplicate for Failure<*bool> {} impl Duplicate for Outcome {}",
+                    )
+                    .replace(
+                        "Failure<u8>.Bad(number)=>number == 7",
+                        "Failure<u8>.Bad(number)=>number == 7,Failure<*bool>.Bad(_)=>false",
+                    );
+                let hidden = compile(&hidden_source);
+                assert!(
+                    !hidden
+                        .enums
+                        .iter()
+                        .any(|item| item.name == "<computed-scalar-packet>")
+                );
+                assert!(
+                    source_executable(&hidden, "entry").is_err(),
+                    "inactive pointer error label must not escape"
+                );
+            }
+            for evidence in [
+                "impl Duplicate for Outcome {}",
+                "impl Duplicate for Failure<u8> {}",
+            ] {
+                let missing = compile(&source.replace(evidence, ""));
+                assert!(
+                    source_executable(&missing, "entry").is_err(),
+                    "missing {evidence}: {body}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn error_result_custom_drop_precedes_only_the_active_payload_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    for subject in ["Outcome", "!Failure T where T"] {
+        for failed in [false, true] {
+            let body = if failed {
+                "error Failure.Bad(Detail {})"
+            } else {
+                "Good {}"
+            };
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Good {{}} impl Retire for Good {{fn drop(*self) {{}}}}
+                struct Detail {{}} impl Retire for Detail {{fn drop(*self) {{}}}}
+                enum Failure {{Bad(Detail)}} impl Retire for Failure {{fn drop(*self) {{}}}}
+                typealias Outcome=!Failure Good;
+                impl Retire for {subject} {{fn drop(*self) {{}}}}
+                fn make()->Outcome {{{body}}}
+                fn entry() {{let result=make();}}"
+            );
+            let package = compile(&source);
+            let executable = source_executable(&package, "entry")
+                .unwrap_or_else(|reason| panic!("{subject}: {reason}"));
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Unit
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            let drops = names
+                .iter()
+                .filter(|name| name.starts_with("drop"))
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                drops,
+                if failed {
+                    vec!["drop", "drop Failure", "drop Detail"]
+                } else {
+                    vec!["drop", "drop Good"]
+                },
+                "{subject}: {names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn copy_error_result_cannot_hide_its_own_custom_drop() {
+    for body in ["true", "error Failure.Bad"] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            enum Failure {{Bad}} impl Duplicate for Failure {{}}
+            typealias Outcome=!Failure bool; impl Duplicate for Outcome {{}}
+            impl Retire for Outcome {{fn drop(*self) {{}}}}
+            fn make()->Outcome {{{body}}}
+            fn entry() {{let result=make();let first=result;let second=result;}}"
+        );
+        let package = compile(&source);
+        let reason = source_executable(&package, "entry").unwrap_err();
+        assert!(
+            reason.contains("Drop responsibility prevents trivial cleanup"),
+            "{body}: {reason}"
+        );
+    }
+}
+
+#[test]
+fn generic_error_drop_does_not_block_registered_tuple_payload_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    for failed in [false, true] {
+        let body = if failed {
+            "error Failure.Bad"
+        } else {
+            "(true,false)"
+        };
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
+            trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            enum Failure {{Bad}} impl Retire for Failure {{fn drop(*self) {{}}}}
+            impl Retire for !Failure T where T {{fn drop(*self) {{}}}}
+            typealias Pair=Tuple<bool,bool>;
+            fn make()->!Failure Pair {{{body}}}
+            fn entry() {{let result=make();}}"
+        );
+        let package = finite_default_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                tuple: Some("input::Tuple"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let make = package
+            .functions
+            .iter()
+            .find(|item| item.name == "make")
+            .unwrap();
+        let nir::Term::Function { result, .. } = &make.signature else {
+            panic!("function signature")
+        };
+        let nir::Term::ErrorResult { result, .. } = result.as_ref() else {
+            panic!("error result")
+        };
+        assert!(matches!(result.as_ref(), nir::Term::NormalForm { .. }));
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Unit
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop"))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            if failed {
+                vec!["drop", "drop Failure"]
+            } else {
+                vec!["drop"]
+            },
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn generic_error_drop_preserves_nested_tuple_error_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    for failed in [false, true] {
+        for inner_failed in [false, true] {
+            let inner = if inner_failed {
+                "error Inner.Bad"
+            } else {
+                "true"
+            };
+            let body = if failed {
+                "error Failure.Bad"
+            } else {
+                "(payload(),false)"
+            };
+            let source = format!(
+                "typealias Type=.Type'builtin;
+            pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
+            trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            enum Failure {{Bad}} impl Retire for Failure {{fn drop(*self) {{}}}}
+            impl Retire for !Failure T where T {{fn drop(*self) {{}}}}
+            enum Inner {{Bad}} impl Retire for Inner {{fn drop(*self) {{}}}}
+            fn payload()->!Inner bool {{{inner}}}
+            typealias Pair=Tuple<!Inner bool,bool>;
+            fn make()->!Failure Pair {{{body}}}
+            fn entry() {{let result=make();}}"
+            );
+            let package = finite_default_support::compile_with_source_bindings(
+                &source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    meta_list: Some("input::List"),
+                    tuple: Some("input::Tuple"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let make = package
+                .functions
+                .iter()
+                .find(|item| item.name == "make")
+                .unwrap();
+            let nir::Term::Function { result, .. } = &make.signature else {
+                panic!("function signature")
+            };
+            let nir::Term::ErrorResult { result, .. } = result.as_ref() else {
+                panic!("error result")
+            };
+            assert!(matches!(result.as_ref(), nir::Term::NormalForm { .. }));
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Unit
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            let drops = names
+                .iter()
+                .filter(|name| name.starts_with("drop"))
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                drops,
+                if failed {
+                    vec!["drop", "drop Failure"]
+                } else {
+                    if inner_failed {
+                        vec!["drop", "drop Inner"]
+                    } else {
+                        vec!["drop"]
+                    }
+                },
+                "{names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn reordered_error_rows_keep_one_whole_result_drop_and_active_payload() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (body, payload) in [
+        ("Item {}", "drop Item"),
+        ("error First.Bad", "drop First"),
+        ("error Second.Bad", "drop Second"),
+    ] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            enum First {{Bad}} impl Retire for First {{fn drop(*self) {{}}}}
+            enum Second {{Bad}} impl Retire for Second {{fn drop(*self) {{}}}}
+            typealias Incoming=![First,Second] Item;
+            typealias Outgoing=![Second,First] Item;
+            impl Retire for Incoming {{fn drop(*self) {{}}}}
+            fn make()->Incoming {{{body}}}
+            fn forward(value:Incoming)->Outgoing {{value}}
+            fn entry() {{let result=forward(make());}}"
+        );
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Unit
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop"))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(drops, vec!["drop", payload], "{body}: {names:?}");
+        assert_eq!(
+            names.iter().filter(|name| name.as_str() == "make").count(),
+            1
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "forward")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn error_row_widening_cannot_discard_a_whole_result_destructor() {
+    for body in ["Item {}", "error Failure.Bad"] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            enum Failure {{Bad}} enum Other {{Bad}}
+            typealias Narrow=!Failure Item;
+            typealias Wide=![Failure,Other] Item;
+            impl Retire for Narrow {{fn drop(*self) {{}}}}
+            fn make()->Narrow {{{body}}}
+            fn widen(value:Narrow)->Wide {{value}}
+            fn entry() {{let result=widen(make());}}"
+        );
+        let package = compile(&source);
+        let reason = source_executable(&package, "entry")
+            .err()
+            .expect("widening must not silently erase Narrow's destructor");
+        assert!(reason.contains("responsibility transfer"), "{reason}");
+    }
+}
+
+#[test]
+fn error_row_widening_preserves_active_payload_destructors() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (body, expected) in [
+        ("Item {}", "drop Item"),
+        ("error Failure.Bad", "drop Failure"),
+    ] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            enum Failure {{Bad}} impl Retire for Failure {{fn drop(*self) {{}}}}
+            enum Other {{Bad}}
+            typealias Narrow=!Failure Item;
+            typealias Wide=![Failure,Other] Item;
+            fn make()->Narrow {{{body}}}
+            fn widen(value:Narrow)->Wide {{value}}
+            fn entry() {{let result=widen(make());}}"
+        );
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Unit
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop"))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(drops, vec![expected], "{body}: {names:?}");
+    }
+}
+
+#[test]
+fn error_propagation_preserves_source_whole_result_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    for forward in [
+        "make()!",
+        "make()! {}",
+        "let packet=make(); packet!",
+        "if true {make()!} else {Item {}}",
+    ] {
+        for body in ["Item {}", "error Failure.Bad"] {
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Item {{}} impl Retire for Item {{fn drop(*self) {{}}}}
+            enum Failure {{Bad}} impl Retire for Failure {{fn drop(*self) {{}}}}
+            typealias Packet=!Failure Item;
+            impl Retire for Packet {{fn drop(*self) {{}}}}
+            fn make()->Packet {{{body}}}
+            fn forward()->Packet {{{forward}}}
+            fn entry() {{let result=forward();}}"
+            );
+            let package = compile(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Unit
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            let drops = names
+                .iter()
+                .filter(|name| name.starts_with("drop"))
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let payload = if body.starts_with("error") {
+                "drop Failure"
+            } else {
+                "drop Item"
+            };
+            assert_eq!(
+                drops,
+                vec!["drop", "drop", payload],
+                "{forward}: {body}: {names:?}"
+            );
+            assert_eq!(
+                names.iter().filter(|name| name.as_str() == "make").count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn error_propagation_retains_payload_memory_and_cleanup_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    for forward in ["make(flag)", "make(flag)!", "make(flag)! {}"] {
+        for body in ["Item {flag:flag}", "error Failure {flag:flag}"] {
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+                struct Item {{flag:*bool}} struct Failure {{flag:*bool}}
+                fn payload() {{}} fn whole() {{}} fn after() {{}}
+                impl Retire for Item {{fn drop(*self) {{self.flag.*.* = true;payload();}}}}
+                impl Retire for Failure {{fn drop(*self) {{self.flag.*.* = true;payload();}}}}
+                typealias Packet=!Failure Item;
+                impl Retire for Packet {{fn drop(*self) {{whole();}}}}
+                fn make(flag:*bool)->Packet {{{body}}}
+                fn forward(flag:*bool)->Packet {{{forward}}}
+                fn entry()->bool {{var flag=false;do {{let result=forward(flag.ref);}};after();flag}}"
+            );
+            let package = compile(&source);
+            let executable = source_executable(&package, "entry").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(true)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            let events = names
+                .iter()
+                .filter(|name| matches!(name.as_str(), "whole" | "payload" | "after"))
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let expected = if forward == "make(flag)" {
+                vec!["whole", "payload", "after"]
+            } else {
+                vec!["whole", "whole", "payload", "after"]
+            };
+            assert_eq!(events, expected, "{forward}: {body}: {names:?}");
+            let escaping = source.replace(
+                "fn entry()->bool {var flag=false;do {let result=forward(flag.ref);};after();flag}",
+                "fn entry()->Packet {var flag=false;forward(flag.ref)}",
+            );
+            assert_ne!(source, escaping);
+            let escaped_package = compile(&escaping);
+            let reason = source_executable(&escaped_package, "entry").unwrap_err();
+            assert!(
+                reason.contains("outlive") || reason.contains("escap") || reason.contains("scope"),
+                "{reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn copy_error_result_pointer_reads_preserve_tags_and_original_owner() {
+    use comptime_interpretor::Value;
+    for (body, expected) in [
+        ("true", true),
+        ("false", false),
+        ("error Failure.Bad", false),
+    ] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            enum Failure {{Bad}} impl Duplicate for Failure {{}}
+            typealias Packet=!Failure bool; impl Duplicate for Packet {{}}
+            fn inspect(value:*Packet)->bool {{value.* match {{flag! => flag,error _=>false}}}}
+            fn entry()->bool {{let packet:Packet={body};let first=inspect(packet.ref);let second=inspect(packet.ref);first == second and second}}"
+        );
+        let package = compile(&source);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            Value::Bool(expected)
+        );
+        let missing = compile(&source.replace("impl Duplicate for Packet {}", ""));
+        assert!(
+            source_executable(&missing, "entry").is_err(),
+            "missing whole-result Copy must reject"
+        );
+        let missing_label = compile(&source.replace("impl Duplicate for Failure {}", ""));
+        assert!(
+            source_executable(&missing_label, "entry").is_err(),
+            "a Copy result cannot hide a non-Copy error label"
+        );
+        let custom = compile(&source.replace(
+            "impl Duplicate for Packet {}",
+            "impl Duplicate for Packet {} impl Retire for Packet {fn drop(*self) {}}",
+        ));
+        let reason = source_executable(&custom, "entry").unwrap_err();
+        assert!(
+            reason.contains("Drop responsibility prevents trivial cleanup"),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn copy_error_result_pointer_reads_keep_nested_pointer_origins() {
+    use comptime_interpretor::Value;
+    for body in ["flag.ref", "error Failure {flag:flag.ref}"] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Failure {{flag:*bool}} impl Duplicate for Failure {{}}
+            typealias Packet=!Failure *bool; impl Duplicate for Packet {{}}
+            fn read(value:*Packet)->Packet {{value.*}}
+            fn entry()->bool {{let flag=true;let packet:Packet={body};let copied=read(packet.ref);
+                copied match {{pointer! => pointer.*,error {{flag:pointer}}=>pointer.*}}}}"
+        );
+        let package = compile(&source);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+        let escaped = source
+            .replace("fn entry()->bool", "fn entry()->*bool")
+            .replace("pointer! => pointer.*", "pointer! => pointer")
+            .replace(
+                "error {flag:pointer}=>pointer.*",
+                "error {flag:pointer}=>pointer",
+            );
+        let package = compile(&escaped);
+        let reason = source_executable(&package, "entry").unwrap_err();
+        assert!(
+            reason.contains("outlive") || reason.contains("escap") || reason.contains("scope"),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn copy_error_result_pointer_replacement_updates_the_selected_branch() {
+    use comptime_interpretor::Value;
+    for replacement in ["true", "error Failure.Bad"] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            enum Failure {{Bad}} impl Duplicate for Failure {{}}
+            typealias Packet=!Failure bool; impl Duplicate for Packet {{}}
+            fn replace(value:*Packet) {{value.* = {replacement};}}
+            fn entry()->bool {{var packet:Packet=false;replace(packet.ref);
+                packet match {{flag! => flag,error _=>false}}}}"
+        );
+        let package = compile(&source);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            Value::Bool(replacement == "true")
+        );
+        let custom = compile(&source.replace(
+            "impl Duplicate for Packet {}",
+            "impl Duplicate for Packet {} impl Retire for Packet {fn drop(*self) {}}",
+        ));
+        assert!(
+            source_executable(&custom, "entry").is_err(),
+            "replacement cannot erase a custom destructor"
+        );
+    }
+}
+
+#[test]
+fn copy_error_result_pointer_reads_preserve_callable_payloads() {
+    use comptime_interpretor::Value;
+    for (body, expected) in [
+        ("yes", true),
+        ("no", false),
+        ("error Failure {callback:yes}", true),
+        ("error Failure {callback:no}", false),
+    ] {
+        for read in ["packet.ref.*", "read(packet.ref)"] {
+            let source = format!(
+                "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            typealias Action=fn()->bool; impl Duplicate for Action {{}}
+            struct Failure {{callback:Action}} impl Duplicate for Failure {{}}
+            typealias Packet=!Failure Action; impl Duplicate for Packet {{}}
+            fn yes()->bool {{true}} fn no()->bool {{false}}
+            quote fn read(value:*Packet)->Packet {{value.*}}
+            fn entry()->bool {{var packet:Packet={body};let copied={read};packet = no;
+                copied match {{callback! => callback(),error {{callback:callback}}=>callback()}}}}"
+            );
+            let package = compile(&source);
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{body}: {read}: {e}")),
+                Value::Bool(expected)
+            );
+            if read == "read(packet.ref)" {
+                for modifier in ["fn read", "inline fn read"] {
+                    let forwarded = compile(&source.replace("quote fn read", modifier));
+                    assert_eq!(
+                        luna::execution::interpret_with_protocols(
+                            &forwarded,
+                            "entry",
+                            "Duplicate",
+                            "Retire",
+                            1_000_000
+                        )
+                        .unwrap_or_else(|e| panic!("{body}: {modifier}: {e}")),
+                        Value::Bool(expected)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn borrowed_callable_results_join_aliases_and_snapshot_after_arguments() {
+    use comptime_interpretor::Value;
+    let prefix = "trait Retire {fn drop(*self);} trait Duplicate {}
+        typealias Action=fn()->bool; impl Duplicate for Action {}
+        fn yes()->bool {true} fn no()->bool {false}
+        fn load(value:*Action,ignored:bool)->Action {value.*}
+        fn forward(value:*Action)->Action {load(value,true)}";
+    let source = format!(
+        "{prefix}
+        fn choose(flag:bool)->bool {{let first:Action=yes;let second:Action=no;
+            let action=forward(if flag {{first.ref}} else {{second.ref}});action()}}
+        fn first()->bool {{choose(true)}} fn second()->bool {{choose(false)}}"
+    );
+    let package = compile(&source);
+    for (entry, flag) in [("first", true), ("second", false)] {
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                entry,
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            Value::Bool(flag)
+        );
+    }
+    let source = format!("{prefix}
+        struct Failure {{callback:Action}} impl Duplicate for Failure {{}}
+        typealias Packet=!Failure Action; impl Duplicate for Packet {{}}
+        fn load_packet(value:*Packet)->Packet {{value.*}}
+        fn choose(flag:bool)->bool {{let first:Packet=yes;let second:Packet=error Failure {{callback:no}};
+            let result=load_packet(if flag {{first.ref}} else {{second.ref}});
+            result match {{action! => action(),error {{callback:action}}=>action()}}}}
+        fn first()->bool {{choose(true)}} fn second()->bool {{choose(false)}}");
+    let package = compile(&source);
+    for (entry, expected) in [("first", true), ("second", false)] {
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                entry,
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            Value::Bool(expected)
+        );
+    }
+    let source = format!("{prefix}
+        fn entry()->bool {{var slot:Action=yes;let action=load(slot.ref,do {{slot=no;true}});action()}}");
+    let package = compile(&source);
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        Value::Bool(false)
+    );
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        typealias Action=fn()->bool; impl Duplicate for Action {}
+        fn yes()->bool {true}
+        fn load(value:*Action,flag:*bool)->Action {flag.* = true;value.*}
+        fn entry()->bool {let slot:Action=yes;var flag=false;let action=load(slot.ref,flag.ref);action()}";
+    let package = compile(source);
+    let reason = source_executable(&package, "entry").unwrap_err();
+    assert!(reason.contains("memory contract"), "{reason}");
+}
+
+#[test]
+fn borrowed_callable_results_follow_aggregate_pointer_fields() {
+    use comptime_interpretor::Value;
+    for (body, expected) in [("true", true), ("false", false)] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            typealias Action=fn()->bool; impl Duplicate for Action {{}}
+            struct View {{first:*Action,second:*Action}}
+            fn yes()->bool {{true}} fn no()->bool {{false}}
+            fn load(view:View,first:bool)->Action {{if first {{view.first.*}} else {{view.second.*}}}}
+            fn entry()->bool {{let first:Action=yes;let second:Action=no;
+                let action=load(View {{first:first.ref,second:second.ref}},{body});action()}}"
+        );
+        let package = compile(&source);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            Value::Bool(expected)
+        );
+    }
+    for (body, expected) in [("yes.ref", true), ("error Failure {action:no.ref}", false)] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            typealias Action=fn()->bool; impl Duplicate for Action {{}}
+            struct Failure {{action:*Action}}
+            typealias View=!Failure *Action;
+            fn yes_fn()->bool {{true}} fn no_fn()->bool {{false}}
+            fn load(view:View)->Action {{view match {{pointer! => pointer.*,error {{action:pointer}}=>pointer.*}}}}
+            fn entry()->bool {{let yes:Action=yes_fn;let no:Action=no_fn;let view:View={body};
+                let action=load(view);action()}}"
+        );
+        let package = compile(&source);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            Value::Bool(expected)
+        );
+    }
+}
+
+#[test]
+fn borrowed_callable_fields_keep_dynamic_error_guards() {
+    use comptime_interpretor::Value;
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        typealias Action=fn()->bool; impl Duplicate for Action {}
+        struct Failure {action:*Action} typealias View=!Failure *Action;
+        fn yes_fn()->bool {true} fn no_fn()->bool {false}
+        fn load(view:View)->Action {view match {pointer! => pointer.*,error {action:pointer}=>pointer.*}}
+        fn choose(flag:bool)->bool {let yes:Action=yes_fn;let no:Action=no_fn;
+            let view:View=if flag {yes.ref} else {error Failure {action:no.ref}};
+            let action=load(view);action()}
+        fn first()->bool {choose(true)} fn second()->bool {choose(false)}";
+    let package = compile(source);
+    for (entry, expected) in [("first", true), ("second", false)] {
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                entry,
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            Value::Bool(expected)
+        );
+    }
+}
+
+#[test]
+fn borrowed_callable_context_does_not_hide_implicit_cleanup_writes() {
+    use comptime_interpretor::Value;
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        typealias Action=fn(*bool)->bool; impl Duplicate for Action {}
+        struct Watch {flag:*bool}
+        impl Retire for Watch {fn drop(*self) {self.flag.*.* = true;}}
+        fn read(flag:*bool)->bool {flag.*}
+        quote fn load(value:*Action,flag:*bool)->Action {let watch=Watch {flag:flag};value.*}
+        fn entry()->bool {var flag=false;let slot:Action=read;let action=load(slot.ref,flag.ref);action(flag.ref)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    for modifier in ["fn load", "inline fn load"] {
+        let package = compile(&source.replace("quote fn load", modifier));
+        let reason = source_executable(&package, "entry").unwrap_err();
+        assert!(reason.contains("memory contract"), "{reason}");
+    }
+    let nested = source
+        .replace(
+            "let watch=Watch {flag:flag};value.*",
+            "hidden(flag);value.*",
+        )
+        .replace(
+            "fn read(flag:",
+            "fn hidden(flag:*bool) {let watch=Watch {flag:flag};} fn read(flag:",
+        );
+    let recursive = nested.replace(
+        "fn hidden(flag:*bool) {let watch=Watch {flag:flag};}",
+        "fn hidden(flag:*bool,again:bool) {if again {hidden(flag,false);} else {let watch=Watch {flag:flag};}}",
+    ).replace("hidden(flag);value.*", "hidden(flag,true);value.*");
+    for variant in [&nested, &recursive] {
+        let package = compile(variant);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+        for modifier in ["fn load", "inline fn load"] {
+            let package = compile(&variant.replace("quote fn load", modifier));
+            let reason = source_executable(&package, "entry").unwrap_err();
+            assert!(reason.contains("memory contract"), "{reason}");
+        }
+    }
+    let defaulted = nested
+        .replace(
+            "fn hidden(flag:*bool) {let watch=Watch {flag:flag};}",
+            "fn hidden(flag:*bool,.ready:bool=do {let resource=Local {};true}) {}",
+        )
+        .replace(
+            "struct Watch",
+            "struct Local {} impl Retire for Local {fn drop(*self) {}} struct Watch",
+        );
+    assert_ne!(nested, defaulted);
+    // Default expressions still require their own P3 proof. The borrowed-code
+    // refinement must not become an alternative authorization for cleanup.
+    let reason = finite_default_support::compile_with_protocols(&defaulted, &Default::default())
+        .unwrap_err();
+    assert!(
+        reason.contains("P3 stability/termination evidence"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn borrowed_callable_copy_results_ignore_unrelated_drop_implementations() {
+    use comptime_interpretor::Value;
+    for body in ["yes", "error Failure {action:yes}"] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Unrelated {{}} impl Retire for Unrelated {{fn drop(*self) {{}}}}
+            typealias Action=fn()->bool; impl Duplicate for Action {{}}
+            struct Failure {{action:Action}} impl Duplicate for Failure {{}}
+            typealias Packet=!Failure Action; impl Duplicate for Packet {{}}
+            fn yes()->bool {{true}}
+            fn load(value:*Packet)->Packet {{let copy=value.*;copy}}
+            fn observe(value:*Packet,again:bool)->bool {{let copy=value.*;if again {{observe(value,false)}} else {{true}}}}
+            fn forward(value:*Packet)->Packet {{observe(value,true);load(value)}}
+            fn again(value:*Packet)->Packet {{forward(value)}}
+            fn entry()->bool {{let packet:Packet={body};let copy=again(packet.ref);
+                copy match {{action! => action(),error {{action:action}}=>action()}}}}"
+        );
+        let package = compile(&source);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn borrowed_callable_cleanup_evidence_does_not_require_copy() {
+    use comptime_interpretor::Value;
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Unrelated {} impl Retire for Unrelated {fn drop(*self) {}}
+        typealias Action=fn()->bool; impl Duplicate for Action {}
+        struct View {slot:*Action}
+        fn yes()->bool {true}
+        fn load(view:View)->Action {view.slot.*}
+        fn forward(view:View)->Action {load(view)}
+        fn entry()->bool {let slot:Action=yes;let view=View {slot:slot.ref};let action=forward(view);action()}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    let doubled = compile(&source.replace(
+        "let action=forward(view);action()",
+        "let action=forward(view);let second=forward(view);action()",
+    ));
+    let reason = source_executable(&doubled, "entry").unwrap_err();
+    assert!(
+        reason.contains("unavailable") || reason.contains("move"),
+        "{reason}"
+    );
+    for owned in [
+        source.replace(
+            "fn yes()",
+            "impl Retire for View {fn drop(*self) {}} fn yes()",
+        ),
+        source
+            .replace(
+                "struct View {slot:*Action}",
+                "struct View {slot:*Action,held:Unrelated}",
+            )
+            .replace(
+                "View {slot:slot.ref}",
+                "View {slot:slot.ref,held:Unrelated {}}",
+            ),
+    ] {
+        let package = compile(&owned);
+        let reason = source_executable(&package, "entry").unwrap_err();
+        assert!(reason.contains("memory contract"), "{reason}");
+    }
+}
+
+#[test]
+fn borrowed_callable_affine_error_views_use_drop_evidence_without_copy() {
+    use comptime_interpretor::Value;
+    for body in ["slot.ref", "error Failure {slot:slot.ref}"] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Unrelated {{}} impl Retire for Unrelated {{fn drop(*self) {{}}}}
+            typealias Action=fn()->bool; impl Duplicate for Action {{}}
+            struct Failure {{slot:*Action}} typealias View=!Failure *Action;
+            fn yes()->bool {{true}}
+            fn load(view:View)->Action {{view match {{pointer! => pointer.*,error {{slot:pointer}}=>pointer.*}}}}
+            fn forward(view:View)->Action {{load(view)}}
+            fn entry()->bool {{let slot:Action=yes;let view:View={body};let action=forward(view);action()}}"
+        );
+        let package = compile(&source);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+        let owned = source.replace(
+            "fn yes()",
+            "impl Retire for Failure {fn drop(*self) {}} fn yes()",
+        );
+        let package = compile(&owned);
+        assert!(
+            source_executable(&package, "entry").is_err(),
+            "an error label's Drop must remain part of the complete responsibility"
+        );
+    }
+}
+
+#[test]
+fn borrowed_callable_candidates_preserve_cleanup_in_every_order() {
+    use comptime_interpretor::Value;
+    for (left, right) in [("clean", "other"), ("other", "clean")] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            typealias Action=fn(*bool)->bool; impl Duplicate for Action {{}}
+            struct Watch {{flag:*bool}}
+            impl Retire for Watch {{fn drop(*self) {{self.flag.*.* = true;}}}}
+            fn read(flag:*bool)->bool {{flag.*}}
+            fn clean(value:*Action,flag:*bool)->Action {{value.*}}
+            fn other(value:*Action,flag:*bool)->Action {{value.*}}
+            fn choose(select:bool)->bool {{var flag=false;let slot:Action=read;
+                let load=if select {{{left}}} else {{{right}}};
+                let action=load(slot.ref,flag.ref);action(flag.ref)}}
+            fn first()->bool {{choose(true)}} fn second()->bool {{choose(false)}}"
+        );
+        let package = compile(&source);
+        for entry in ["first", "second"] {
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    entry,
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap(),
+                Value::Bool(false)
+            );
+        }
+        // A coarse cleanup flag from an affine but trivially cleaned local
+        // must be refined for every candidate, without requiring Copy.
+        let trivial = source.replace(
+            "fn other(value:*Action,flag:*bool)->Action {value.*}",
+            "struct View {slot:*Action} fn other(value:*Action,flag:*bool)->Action {let view=View {slot:value};view.slot.*}",
+        );
+        let package = compile(&trivial);
+        for entry in ["first", "second"] {
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    entry,
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap(),
+                Value::Bool(false)
+            );
+        }
+        let owned = source.replace(
+            "fn other(value:*Action,flag:*bool)->Action {value.*}",
+            "fn other(value:*Action,flag:*bool)->Action {let watch=Watch {flag:flag};value.*}",
+        );
+        let package = compile(&owned);
+        for (name, may_clean) in [("clean", false), ("other", true)] {
+            let function = package.functions.iter().find(|f| f.name == name).unwrap();
+            let summary = elaboration::verification::memory::infer_in_package(
+                &package,
+                function.declaration,
+                &[],
+                &mut 100_000,
+            )
+            .unwrap();
+            assert_eq!(summary.may_run_cleanup, may_clean, "{name}");
+            assert!(summary.accesses.iter().all(|access| !access.write));
+        }
+        for entry in ["first", "second"] {
+            let reason = source_executable(&package, entry).unwrap_err();
+            assert!(
+                reason.contains("memory contract"),
+                "{left}/{right}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn borrowed_callable_memory_premises_validate_paths_and_track_invocations() {
+    use elaboration::verification::memory::{self, CallableInput, CallableResult};
+    use std::collections::BTreeMap;
+    let package = compile(
+        "typealias Action=fn(*bool)->bool;
+        struct Holder {slot:*Action} struct Payload {flag:bool,action:Action}
+        fn read(p:*bool)->bool {p.*}
+        fn other(p:*bool)->bool {p.*}
+        fn wrong()->bool {true}
+        fn apply(action:Action,p:*bool)->bool {action(p)}
+        fn direct(value:*Action,p:*bool)->bool {let action=value.*;action(p)}
+        fn forward(value:*Action,p:*bool)->bool {direct(value,p)}
+        fn nested(value:*Action,p:*bool)->bool {let action=value.*;apply(action,p)}
+        fn field(holder:Holder,p:*bool)->bool {let action=holder.slot.*;action(p)}
+        fn payload(value:*Payload,p:*bool)->bool {let data=value.*;data.action(p)}
+        fn before(value:*Action,p:*bool)->bool {p.* = false;let action=value.*;action(p)}
+        fn after(value:*Action,p:*bool)->bool {let action=value.*;let result=action(p);p.* = false;result}
+        fn alias(value:*Action,alias:*Action,p:*bool)->bool {alias.* = other;let action=value.*;action(p)}",
+    );
+    let id = |name: &str| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    let known = |name| {
+        CallableResult::Known(iir::InstanceKey {
+            declaration: id(name),
+            arguments: vec![],
+        })
+    };
+    for (name, input_path, code_path) in [
+        ("direct", vec![], vec![]),
+        ("forward", vec![], vec![]),
+        ("nested", vec![], vec![]),
+        ("field", vec![0], vec![]),
+        ("payload", vec![], vec![1]),
+    ] {
+        let borrowed = BTreeMap::from([(
+            CallableInput {
+                parameter: 0,
+                fields: input_path.clone(),
+            },
+            BTreeMap::from([(code_path.clone(), known("read").into())]),
+        )]);
+        let summary = memory::infer_with_borrowed_callable_inputs(
+            &package,
+            id(name),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+            &borrowed,
+            &mut 100_000,
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(summary.borrowed_inputs, borrowed);
+        assert!(summary.accesses.iter().all(|access| !access.write));
+        assert!(
+            summary
+                .accesses
+                .iter()
+                .any(|access| access.target.parameter == 0
+                    && access.target.input_fields == input_path)
+        );
+        assert!(
+            summary
+                .accesses
+                .iter()
+                .any(|access| access.target.parameter == 1 && access.read_value)
+        );
+        assert!(summary.to_string().contains("(borrowed-inputs (premise"));
+        assert!(
+            memory::infer_in_package(&package, id(name), &[], &mut 100_000).is_err(),
+            "premises must not leak into unconditional queries"
+        );
+        assert!(
+            memory::infer_with_borrowed_callable_inputs(
+                &package,
+                id(name),
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                &borrowed,
+                &mut 0,
+            )
+            .is_err()
+        );
+    }
+    let input = CallableInput {
+        parameter: 0,
+        fields: vec![],
+    };
+    let borrowed = BTreeMap::from([(
+        input.clone(),
+        BTreeMap::from([(vec![], known("read").into())]),
+    )]);
+    for name in ["before", "after", "alias"] {
+        let reason = memory::infer_with_borrowed_callable_inputs(
+            &package,
+            id(name),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+            &borrowed,
+            &mut 100_000,
+        )
+        .unwrap_err();
+        assert!(
+            reason.contains(if name == "alias" {
+                "callable transition contract"
+            } else {
+                "stable read-only"
+            }),
+            "{name}: {reason}"
+        );
+    }
+    for value in [
+        known("wrong"),
+        CallableResult::Unknown,
+        CallableResult::NoReturn,
+        CallableResult::Candidates(vec![]),
+    ] {
+        let invalid = BTreeMap::from([(input.clone(), BTreeMap::from([(vec![], value.into())]))]);
+        assert!(
+            memory::infer_with_borrowed_callable_inputs(
+                &package,
+                id("direct"),
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                &invalid,
+                &mut 100_000,
+            )
+            .is_err()
+        );
+    }
+    for (parameter, input_path, code_path) in [
+        (5, vec![], vec![]),
+        (1, vec![], vec![]),
+        (0, vec![9], vec![]),
+        (0, vec![], vec![8]),
+    ] {
+        let invalid = BTreeMap::from([(
+            CallableInput {
+                parameter,
+                fields: input_path,
+            },
+            BTreeMap::from([(code_path, known("read").into())]),
+        )]);
+        assert!(
+            memory::infer_with_borrowed_callable_inputs(
+                &package,
+                id("direct"),
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                &invalid,
+                &mut 100_000,
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn borrowed_callable_memory_contexts_do_not_share_code_or_hide_cleanup() {
+    use elaboration::verification::memory::{self, CallableInput, CallableResult};
+    use std::collections::BTreeMap;
+    let package = compile(
+        "trait Retire {fn drop(*self);}
+        typealias Action=fn(*bool)->bool;
+        struct Watch {flag:*bool}
+        impl Retire for Watch {fn drop(*self) {self.flag.*.* = true;}}
+        fn read(p:*bool)->bool {p.*}
+        fn ignore(p:*bool)->bool {true}
+        fn writer(p:*bool)->bool {p.* = true;true}
+        fn cleanup(p:*bool)->bool {let watch=Watch {flag:p};true}
+        fn direct(value:*Action,p:*bool)->bool {let action=value.*;action(p)}
+        fn both(first:*Action,second:*Action,p:*bool)->bool {direct(first,p) and direct(second,p)}",
+    );
+    let id = |name: &str| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    let key = |name: &str| iir::InstanceKey {
+        declaration: id(name),
+        arguments: vec![],
+    };
+    let input = |parameter, names: &[&str]| {
+        (
+            CallableInput {
+                parameter,
+                fields: vec![],
+            },
+            BTreeMap::from([(
+                vec![],
+                CallableResult::Candidates(names.iter().map(|name| key(name)).collect()).into(),
+            )]),
+        )
+    };
+    // The same helper has different borrowed identities in one fixed point.
+    // An ignored pointer in the first instance cannot erase the second read.
+    for (left, right) in [("ignore", "read"), ("read", "ignore")] {
+        let borrowed = BTreeMap::from([input(0, &[left]), input(1, &[right])]);
+        let summary = memory::infer_with_borrowed_callable_inputs(
+            &package,
+            id("both"),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+            &borrowed,
+            &mut 100_000,
+        )
+        .unwrap();
+        assert!(
+            summary
+                .accesses
+                .iter()
+                .any(|access| access.target.parameter == 2 && access.read_value)
+        );
+    }
+    for destructive in ["writer", "cleanup"] {
+        for (left, right) in [("ignore", destructive), (destructive, "ignore")] {
+            let borrowed = BTreeMap::from([input(0, &[left]), input(1, &[right])]);
+            let reason = memory::infer_with_borrowed_callable_inputs(
+                &package,
+                id("both"),
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                &borrowed,
+                &mut 100_000,
+            )
+            .unwrap_err();
+            assert!(
+                reason.contains("stable read-only"),
+                "{left}/{right}: {reason}"
+            );
+        }
+        for names in [["read", destructive], [destructive, "read"]] {
+            let borrowed = BTreeMap::from([input(0, &names)]);
+            let reason = memory::infer_with_borrowed_callable_inputs(
+                &package,
+                id("direct"),
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                &borrowed,
+                &mut 100_000,
+            )
+            .unwrap_err();
+            assert!(reason.contains("stable read-only"), "{names:?}: {reason}");
+        }
+    }
+}
+
+#[test]
+fn borrowed_callable_invocations_execute_with_resource_context() {
+    use comptime_interpretor::Value;
+    let prefix = "trait Retire {fn drop(*self);} trait Duplicate {}
+        typealias Action=fn(*bool)->bool; impl Duplicate for Action {}
+        struct Holder {slot:*Action}
+        struct Payload {flag:bool,action:Action} impl Duplicate for Payload {}
+        fn read(p:*bool)->bool {p.*} fn no(p:*bool)->bool {false}
+        fn apply(action:Action,p:*bool)->bool {action(p)}
+        fn direct(value:*Action,p:*bool)->bool {let action=value.*;action(p)}
+        fn forward(value:*Action,p:*bool)->bool {direct(value,p)}
+        fn nested(value:*Action,p:*bool)->bool {let action=value.*;apply(action,p)}
+        fn field(holder:Holder,p:*bool)->bool {let action=holder.slot.*;action(p)}
+        fn payload(value:*Payload,p:*bool)->bool {let data=value.*;data.action(p)}";
+    for expression in [
+        "direct(slot.ref,flag.ref)",
+        "forward(slot.ref,flag.ref)",
+        "nested(slot.ref,flag.ref)",
+        "field(Holder {slot:slot.ref},flag.ref)",
+        "payload(data.ref,flag.ref)",
+    ] {
+        for (callback, expected) in [("read", true), ("no", false)] {
+            let source = format!(
+                "{prefix}
+                fn entry()->bool {{let flag=true;let slot:Action={callback};
+                    let data=Payload {{flag:false,action:{callback}}};{expression}}}"
+            );
+            let package = compile(&source);
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{expression}/{callback}: {e}")),
+                Value::Bool(expected)
+            );
+        }
+    }
+    let source = format!(
+        "{prefix} fn entry()->bool {{let flag=true;let slot:Action=read;direct(slot.ref,flag.ref)}}"
+    );
+    let package = compile(&source.replace("impl Duplicate for Action {}", ""));
+    assert!(
+        source_executable(&package, "entry").is_err(),
+        "code identity cannot grant Copy"
+    );
+}
+
+#[test]
+fn borrowed_callable_invocations_snapshot_arguments_and_keep_contexts_separate() {
+    use comptime_interpretor::Value;
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        typealias Action=fn(*bool)->bool; impl Duplicate for Action {}
+        fn read(p:*bool)->bool {p.*} fn no(p:*bool)->bool {false}
+        fn direct(value:*Action,p:*bool)->bool {let action=value.*;action(p)}
+        fn ignored(value:*Action,ready:bool,p:*bool)->bool {let action=value.*;action(p)}
+        fn changed()->bool {let flag=true;var slot:Action=read;
+            ignored(slot.ref,do {slot=no;true},flag.ref)}
+        fn distinct()->bool {let flag=true;let a:Action=read;let b:Action=no;
+            let first=direct(a.ref,flag.ref);let second=direct(b.ref,flag.ref);first and not second}
+        fn recursive(value:*Action,p:*bool,again:bool)->bool {
+            if again {recursive(value,p,false)} else {direct(value,p)}}
+        fn recursed()->bool {let flag=true;let slot:Action=read;recursive(slot.ref,flag.ref,true)}";
+    let package = compile(source);
+    for (entry, expected) in [("changed", false), ("distinct", true), ("recursed", true)] {
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                entry,
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap_or_else(|e| panic!("{entry}: {e}")),
+            Value::Bool(expected)
+        );
+    }
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        typealias Action=fn(*bool)->bool; impl Duplicate for Action {}
+        struct Watch {flag:*bool}
+        impl Retire for Watch {fn drop(*self) {self.flag.*.* = true;}}
+        fn read(p:*bool)->bool {p.*}
+        fn writer(p:*bool)->bool {p.* = true;true}
+        fn cleanup(p:*bool)->bool {let watch=Watch {flag:p};true}
+        fn direct(value:*Action,p:*bool)->bool {let action=value.*;action(p)}
+        fn choose(select:bool)->bool {var flag=false;let slot:Action=if select {read} else {writer};direct(slot.ref,flag.ref)}
+        fn entry()->bool {choose(false)}";
+    for owned in [
+        source.to_owned(),
+        source.replace("else {writer}", "else {cleanup}"),
+    ] {
+        let package = compile(&owned);
+        let reason = source_executable(&package, "entry").unwrap_err();
+        assert!(reason.contains("stable read-only"), "{reason}");
+    }
+}
+
+#[test]
+fn borrowed_callable_cleanup_schedule_requires_its_invocation_context() {
+    use comptime_interpretor::{ErrorKind, Interpreter};
+    let package = compile(
+        "trait Retire {fn drop(*self);} trait Duplicate {}
+        typealias Action=fn()->bool;impl Duplicate for Action {}
+        fn yes()->bool {true}
+        fn direct(value:*Action)->bool {let action=value.*;action()}
+        fn entry()->bool {let slot:Action=yes;direct(slot.ref)}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    assert_eq!(executable.schedule.borrowed_callable_functions.len(), 1);
+    assert!(
+        executable
+            .schedule
+            .to_string()
+            .contains("(borrowed-callable-functions (instance")
+    );
+    let mut missing = executable.schedule.clone();
+    missing.borrowed_callable_functions.clear();
+    assert_eq!(
+        Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&missing)
+            .err()
+            .unwrap()
+            .kind,
+        ErrorKind::InvalidCallPlan
+    );
+    let mut duplicate = executable.schedule.clone();
+    duplicate
+        .borrowed_callable_functions
+        .push(duplicate.borrowed_callable_functions[0].clone());
+    assert_eq!(
+        Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&duplicate)
+            .err()
+            .unwrap()
+            .kind,
+        ErrorKind::InvalidCallPlan
+    );
+    let mut missing_context = executable.schedule.clone();
+    missing_context
+        .functions
+        .retain(|scope| scope.context.is_empty());
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&missing_context)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![])
+            .unwrap_err()
+            .kind,
+        ErrorKind::InvalidCallPlan
+    );
+}
+
+#[test]
+fn borrowed_callable_invocations_join_runtime_targets_and_loop_updates() {
+    use comptime_interpretor::Value;
+    let package = compile(
+        "trait Retire {fn drop(*self);} trait Duplicate {}
+        typealias Action=fn()->bool;impl Duplicate for Action {}
+        fn yes()->bool {true} fn no()->bool {false}
+        fn invoke(value:*Action)->bool {let action=value.*;action()}
+        fn choose(select:bool)->bool {let a:Action=yes;let b:Action=no;
+            invoke(if select {a.ref} else {b.ref})}
+        fn first()->bool {choose(true)} fn second()->bool {choose(false)}
+        fn updated()->bool {var slot:Action=yes;var again=true;var result=false;
+            while again {result=invoke(slot.ref);again=result;slot=no;}result}
+        fn unchanged()->bool {let slot:Action=yes;var again=true;var result=false;
+            while again {result=invoke(slot.ref);again=false;}result}",
+    );
+    for (entry, expected) in [
+        ("first", true),
+        ("second", false),
+        ("updated", false),
+        ("unchanged", true),
+    ] {
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                entry,
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap_or_else(|e| panic!("{entry}: {e}")),
+            Value::Bool(expected)
+        );
+    }
+}
+
+#[test]
+fn loop_cleanup_accesses_publish_without_replaying_speculative_rounds() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Watch {target:*bool}
+        impl Retire for Watch {fn drop(*self) {self.target.*.* = true;}}
+        fn helper(p:**bool) {
+            let retire=|target:*bool| {let watch=Watch {target:target};};
+            var remaining:.u8'builtin=2;
+            while remaining > 0 {let target=p.*;retire(target);remaining -= 1;}
+        }
+        fn entry()->bool {var flag=false;let pointer=flag.ref;helper(pointer.ref);flag}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.as_str() == "drop Watch")
+            .count(),
+        2,
+        "{names:?}"
+    );
+}
+
+#[test]
+fn borrowed_callable_error_views_invoke_each_branch() {
+    use comptime_interpretor::Value;
+    let prefix="trait Retire {fn drop(*self);}trait Duplicate {}
+        typealias Action=fn()->bool;impl Duplicate for Action {}
+        struct Failure {slot:*Action}typealias View=!Failure *Action;
+        fn yes()->bool {true}fn no()->bool {false}
+        fn invoke(view:View)->bool {view match {p! => do {let action=p.*;action()},error {slot:p}=>do {let action=p.*;action()}}}";
+    for via_helper in [false, true] {
+        let prefix = if via_helper {
+            format!(
+                "{} fn direct(p:*Action)->bool {{let action=p.*;action()}}",
+                prefix.replace("let action=p.*;action()", "direct(p)")
+            )
+        } else {
+            prefix.to_owned()
+        };
+        for (body, expected) in [("a.ref", true), ("error Failure {slot:b.ref}", false)] {
+            let source = format!(
+                "{prefix} fn entry()->bool {{let a:Action=yes;let b:Action=no;let view:View={body};invoke(view)}}"
+            );
+            let package = compile(&source);
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{body}: {e}")),
+                Value::Bool(expected)
+            );
+        }
+    }
+}
+
+#[test]
+fn borrowed_callable_error_payloads_invoke_known_and_dynamic_variants() {
+    use comptime_interpretor::Value;
+    let prefix="trait Retire {fn drop(*self);}trait Duplicate {}
+        typealias Action=fn()->bool;impl Duplicate for Action {}
+        struct Failure {action:Action}impl Duplicate for Failure {}
+        typealias Packet=!Failure Action;impl Duplicate for Packet {}
+        fn yes()->bool {true}fn no()->bool {false}
+        fn invoke(value:*Packet)->bool {let packet=value.*;packet match {action! => action(),error {action:action}=>action()}}
+        fn forward(value:*Packet)->bool {invoke(value)}";
+    for (body, expected) in [("yes", true), ("error Failure {action:no}", false)] {
+        let package = compile(&format!(
+            "{prefix} fn entry()->bool {{let packet:Packet={body};forward(packet.ref)}}"
+        ));
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap_or_else(|e| panic!("{body}: {e}")),
+            Value::Bool(expected)
+        );
+    }
+    let package=compile(&format!("{prefix}
+        fn choose(flag:bool)->bool {{let packet:Packet=if flag {{yes}} else {{error Failure {{action:no}}}};forward(packet.ref)}}
+        fn first()->bool {{choose(true)}}fn second()->bool {{choose(false)}}"));
+    for (entry, expected) in [("first", true), ("second", false)] {
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                entry,
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap_or_else(|e| panic!("{entry}: {e}")),
+            Value::Bool(expected)
+        );
+    }
+}
+
+#[test]
+fn borrowed_callable_absence_requires_a_checked_variant_path() {
+    use elaboration::verification::memory::{self, BorrowedCallableValue, CallableInput};
+    use std::collections::BTreeMap;
+    let package=compile("typealias Action=fn()->bool;typealias Maybe=!bool Action;
+        struct Payload {flag:bool,action:Action}
+        fn scalar(value:*Action)->bool {let action=value.*;action()}
+        fn field(value:*Payload)->bool {let payload=value.*;payload.action()}
+        fn packet(value:*Maybe)->bool {let packet=value.*;packet match {action! => action(),error _=>false}}");
+    let id = |name: &str| {
+        package
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap()
+            .declaration
+    };
+    for (name, path) in [
+        ("scalar", vec![]),
+        ("field", vec![1]),
+        ("packet", vec![usize::MAX, 1, 0]),
+        ("packet", vec![usize::MAX, 9, 0]),
+    ] {
+        let inputs = BTreeMap::from([(
+            CallableInput {
+                parameter: 0,
+                fields: vec![],
+            },
+            BTreeMap::from([(path, BorrowedCallableValue::Absent)]),
+        )]);
+        assert!(
+            memory::infer_with_borrowed_callable_inputs(
+                &package,
+                id(name),
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                &inputs,
+                &mut 100_000
+            )
+            .is_err(),
+            "{name}: forged absence"
+        );
+    }
+    let inputs = BTreeMap::from([(
+        CallableInput {
+            parameter: 0,
+            fields: vec![],
+        },
+        BTreeMap::from([(vec![usize::MAX, 0, 0], BorrowedCallableValue::Absent)]),
+    )]);
+    let summary = memory::infer_with_borrowed_callable_inputs(
+        &package,
+        id("packet"),
+        &[],
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &[],
+        &inputs,
+        &mut 100_000,
+    )
+    .unwrap();
+    assert_eq!(summary.borrowed_inputs, inputs);
+    assert!(summary.to_string().contains("(absent-code)"));
+    assert!(
+        memory::infer_in_package(&package, id("packet"), &[], &mut 100_000).is_err(),
+        "missing evidence is not absence"
+    );
+}
+
+#[test]
+fn borrowed_callable_error_payloads_do_not_hide_a_writing_variant() {
+    use comptime_interpretor::Value;
+    let prefix="trait Retire {fn drop(*self);}trait Duplicate {}
+        typealias Action=fn(*bool)->bool;impl Duplicate for Action {}
+        struct Failure {action:Action}impl Duplicate for Failure {}
+        typealias Packet=!Failure Action;impl Duplicate for Packet {}
+        fn read(p:*bool)->bool {p.*}fn write(p:*bool)->bool {p.* = true;true}
+        fn invoke(value:*Packet,p:*bool)->bool {let packet=value.*;packet match {action! => action(p),error {action:action}=>action(p)}}";
+    let package = compile(&format!(
+        "{prefix} fn entry()->bool {{let flag=false;let packet:Packet=read;invoke(packet.ref,flag.ref)}}"
+    ));
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        Value::Bool(false)
+    );
+    for body in [
+        "error Failure {action:write}",
+        "if choose {read} else {error Failure {action:write}}",
+    ] {
+        let package = compile(&format!(
+            "{prefix} fn branch(choose:bool)->bool {{var flag=false;let packet:Packet={body};invoke(packet.ref,flag.ref)}}fn entry()->bool {{branch(false)}}"
+        ));
+        let reason = source_executable(&package, "entry").unwrap_err();
+        assert!(reason.contains("stable read-only"), "{body}: {reason}");
+    }
+}
+
+#[test]
+fn guard_direct_reads_acquire_indirect_borrowed_pointer_premises() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (ty, observation, argument) in [
+        ("*bool", "p.*", "pointer"),
+        ("**bool", "p.*.*", "pointer.ref"),
+        ("***bool", "p.*.*.*", "slot.ref"),
+    ] {
+        let source = format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}
+             struct Held {{}}impl Retire for Held {{fn drop(*self) {{}}}}
+             fn selected(p:{ty})->bool {{let held=Held {{}};false match {{_ if {observation} => true, _ => false}}}}
+             fn entry(value:bool)->bool {{let pointer=value.ref;let slot=pointer.ref;selected({argument})}}"
+        );
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        for value in [false, true] {
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![Value::Bool(value)])
+                    .unwrap(),
+                Value::Bool(value)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "drop Held")
+                    .count(),
+                1,
+                "{names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_observations_follow_borrowed_pointer_slots() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Held {}impl Retire for Held {fn drop(*self) {}}
+        fn read(p:*bool)->bool {p.*}
+        fn selected(p:**bool)->bool {let held=Held {};false match {_ if read(p.*)=>true,_=>false}}
+        fn entry(value:bool)->bool {let pointer=value.ref;selected(pointer.ref)}";
+    for (ty, read, entry) in [
+        ("*bool", "p", "selected(pointer)"),
+        ("**bool", "p.*", "selected(pointer.ref)"),
+        (
+            "***bool",
+            "p.*.*",
+            "do {let slot=pointer.ref;selected(slot.ref)}",
+        ),
+    ] {
+        let source = source
+            .replace("p:**bool", &format!("p:{ty}"))
+            .replace("read(p.*)", &format!("read({read})"))
+            .replace("selected(pointer.ref)", entry);
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        for value in [false, true] {
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![Value::Bool(value)])
+                    .unwrap(),
+                Value::Bool(value)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names.iter().filter(|name| name.as_str() == "read").count(),
+                1,
+                "{names:?}"
+            );
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "drop Held")
+                    .count(),
+                1,
+                "{names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_pointer_arguments_do_not_authorize_writes_rejection_or_dangling_targets() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        fn read(p:*bool)->bool {p.*}
+        fn selected(p:**bool)->bool {false match {_ if read(p.*)=>true,_=>false}}
+        fn entry()->bool {let value=true;let pointer=value.ref;selected(pointer.ref)}";
+    for body in ["p.* = false;true", "assumes p.*;true"] {
+        let package = compile(&prefix.replace("{p.*}", &format!("{{{body}}}")));
+        let reason = source_executable(&package, "entry").unwrap_err();
+        assert!(
+            reason.contains("guard") || reason.contains("observation"),
+            "{body}: {reason}"
+        );
+    }
+    let source = prefix.replace(
+        "let value=true;let pointer=value.ref;",
+        "let pointer=do {let value=true;value.ref};",
+    );
+    let package = compile(&source);
+    assert!(
+        source_executable(&package, "entry").is_err(),
+        "deferred provenance checks must reject a dead pointee"
+    );
+}
+
+#[test]
+fn borrowed_callable_memory_keeps_nominal_scalar_cleanup() {
+    use elaboration::verification::memory::{self, CallableInput, CallableResult};
+    use std::collections::BTreeMap;
+    for (representation, value) in [("bool", "true"), ("*bool", "p"), ("Action", "read")] {
+        let package = compile(&format!(
+            "trait Retire {{fn drop(*self);}}
+            typealias Action=fn(*bool)->bool;
+            newtype Owned={representation};
+            impl Retire for Owned {{fn drop(*self) {{assumes false;}}}}
+            fn read(p:*bool)->bool {{p.*}}
+            fn cleanup(p:*bool)->bool {{let owned=({value}).as(Owned);true}}
+            fn invoke(action:*Action,p:*bool)->bool {{action.*(p)}}"
+        ));
+        let id = |name: &str| {
+            package
+                .functions
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .declaration
+        };
+        let summary = memory::infer_in_package(&package, id("cleanup"), &[], &mut 100_000).unwrap();
+        assert!(summary.may_run_cleanup, "{representation}: {summary}");
+        let borrowed = BTreeMap::from([(
+            CallableInput {
+                parameter: 0,
+                fields: vec![],
+            },
+            BTreeMap::from([(
+                vec![],
+                CallableResult::Known(iir::InstanceKey {
+                    declaration: id("cleanup"),
+                    arguments: vec![],
+                })
+                .into(),
+            )]),
+        )]);
+        let reason = memory::infer_with_borrowed_callable_inputs(
+            &package,
+            id("invoke"),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+            &borrowed,
+            &mut 100_000,
+        )
+        .unwrap_err();
+        assert!(
+            reason.contains("stable read-only"),
+            "{representation}: {reason}"
+        );
+    }
+}
+
+#[test]
+fn memory_cleanup_protocol_discovery_scales_with_package_declarations() {
+    use elaboration::verification::memory;
+    let mut source = String::from(
+        "trait Retire {fn drop(*self);}struct Owned {}fn inspect(value:Owned)->bool {step0(value)}",
+    );
+    for index in 0..96 {
+        source.push_str(&format!(
+            "trait Marker{index} {{}}impl Marker{index} for bool {{}}"
+        ));
+    }
+    for index in 0..8 {
+        let body = if index == 7 {
+            "true".to_owned()
+        } else {
+            format!("step{}(value)", index + 1)
+        };
+        source.push_str(&format!("fn step{index}(value:Owned)->bool {{{body}}}"));
+    }
+    for implemented in [false, true] {
+        let source = if implemented {
+            format!("{source}impl Retire for Owned {{fn drop(*self) {{}}}}")
+        } else {
+            source.clone()
+        };
+        let package = compile(&source);
+        let function = package
+            .functions
+            .iter()
+            .find(|f| f.name == "inspect")
+            .unwrap();
+        let summary =
+            memory::infer_in_package(&package, function.declaration, &[], &mut 8192).unwrap();
+        assert_eq!(summary.may_run_cleanup, implemented, "{summary}");
+    }
+}
+
+#[test]
+fn borrowed_callable_invocations_prove_complete_trivial_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    let prefix="trait Duplicate {}trait Retire {fn drop(*self);}
+        typealias Action=fn(*bool)->bool;impl Duplicate for Action {}
+        struct Unrelated {}impl Retire for Unrelated {fn drop(*self) {}}
+        struct Plain {flag:bool}struct Pair {left:Plain,right:Plain}
+        fn read(p:*bool)->bool {let local=Pair {left:Plain {flag:true},right:Plain {flag:false}};p.*}
+        fn no(p:*bool)->bool {let local=Plain {flag:true};false}
+        fn invoke(action:*Action,p:*bool)->bool {action.*(p)}
+        fn forward(action:*Action,p:*bool)->bool {let local=Plain {flag:true};invoke(action,p)}";
+    for call in [
+        "invoke(action.ref,flag.ref)",
+        "forward(action.ref,flag.ref)",
+    ] {
+        let package = compile(&format!(
+            "{prefix}fn entry(choose:bool)->bool {{let action=if choose {{read}} else {{no}};let flag=true;{call}}}"
+        ));
+        let executable = source_executable(&package, "entry").unwrap();
+        world(&package, |world, _| {
+            let copy = package
+                .traits
+                .iter()
+                .find(|t| t.name == "Duplicate")
+                .unwrap()
+                .declaration;
+            let retire = package
+                .traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration;
+            let pointer_copy = |ty: &nir::Term| {
+                elaboration::verification::copy::acquire(
+                    &package,
+                    world,
+                    copy,
+                    retire,
+                    ty,
+                    Budget::default(),
+                    &mut 100_000,
+                )
+                .is_ok()
+            };
+            for choose in [false, true] {
+                let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                    .unwrap()
+                    .with_pointer_copy_permission(&pointer_copy)
+                    .with_cleanup_schedule(&executable.schedule)
+                    .unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&executable.entry, vec![Value::Bool(choose)])
+                        .unwrap(),
+                    Value::Bool(choose)
+                );
+                let names = executed_names(&package, &executable, vm.events());
+                assert_eq!(
+                    names
+                        .iter()
+                        .filter(|name| name.as_str() == if choose { "read" } else { "no" })
+                        .count(),
+                    1,
+                    "{names:?}"
+                );
+                assert!(
+                    !names.iter().any(|name| name.starts_with("drop ")),
+                    "{names:?}"
+                );
+            }
+        });
+    }
+    for addition in [
+        "impl Retire for Plain {fn drop(*self) {assumes false;}}",
+        "impl Retire for Pair {fn drop(*self) {assumes false;}}",
+    ] {
+        let package = compile(&format!(
+            "{prefix}{addition}fn entry()->bool {{let action=read;let flag=true;forward(action.ref,flag.ref)}}"
+        ));
+        let reason = source_executable(&package, "entry").unwrap_err();
+        assert!(reason.contains("stable read-only"), "{addition}: {reason}");
+    }
+}
+
+#[test]
+fn borrowed_callable_cleanup_proofs_are_scoped_to_the_selected_protocol() {
+    use elaboration::verification::{
+        drop::CleanupSession,
+        memory::{self, CallableInput, CallableResult},
+    };
+    use std::collections::BTreeMap;
+    let package = compile(
+        "trait Retire {fn drop(*self);}trait OtherDrop {fn drop(*self);}
+        typealias Action=fn(*bool)->bool;
+        struct Plain {flag:bool}impl OtherDrop for Plain {fn drop(*self) {assumes false;}}
+        fn read(p:*bool)->bool {let local=Plain {flag:true};p.*}
+        fn invoke(action:*Action,p:*bool)->bool {action.*(p)}",
+    );
+    let id = |name: &str| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    let borrowed = BTreeMap::from([(
+        CallableInput {
+            parameter: 0,
+            fields: vec![],
+        },
+        BTreeMap::from([(
+            vec![],
+            CallableResult::Known(iir::InstanceKey {
+                declaration: id("read"),
+                arguments: vec![],
+            })
+            .into(),
+        )]),
+    )]);
+    world(&package, |world, _| {
+        for protocol in ["Retire", "OtherDrop", "Retire"] {
+            let protocol_id = package
+                .traits
+                .iter()
+                .find(|t| t.name == protocol)
+                .unwrap()
+                .declaration;
+            let mut cleanup = CleanupSession::new(&package, world, protocol_id, Budget::default());
+            let result = memory::infer_with_borrowed_callable_inputs_and_cleanup(
+                &package,
+                id("invoke"),
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                &borrowed,
+                Some(&mut cleanup),
+                &mut 100_000,
+            );
+            if protocol == "Retire" {
+                assert!(!result.unwrap().may_run_cleanup);
+            } else {
+                assert!(result.unwrap_err().contains("stable read-only"));
+            }
+            assert!(
+                memory::infer_with_borrowed_callable_inputs(
+                    &package,
+                    id("invoke"),
+                    &[],
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &[],
+                    &borrowed,
+                    &mut 100_000
+                )
+                .unwrap_err()
+                .contains("stable read-only"),
+                "query-local proof must not change the conservative API"
+            );
+        }
+    });
+}
+
+#[test]
+fn borrowed_callable_trivial_cleanup_survives_higher_order_calls_and_defaults() {
+    use comptime_interpretor::Value;
+    let prefix="trait Duplicate {}trait Retire {fn drop(*self);}
+        typealias Action=fn(*bool)->bool;impl Duplicate for Action {}
+        struct Plain {flag:bool}struct Unrelated {}
+        impl Retire for Unrelated {fn drop(*self) {}}
+        fn read(p:*bool)->bool {let plain=Plain {flag:true};p.*}
+        fn apply(action:Action,p:*bool)->bool {let plain=Plain {flag:false};action(p)}
+        fn direct(action:*Action,p:*bool)->bool {let code=action.*;code(p)}
+        fn higher(action:*Action,p:*bool)->bool {apply(action.*,p)}
+        fn closure(action:*Action,p:*bool)->bool {let code=action.*;let call=|q:*bool| {let plain=Plain {flag:true};code(q)};call(p)}
+        fn defaulted(action:*Action,p:*bool,.answer:bool=read(p))->bool {direct(action,p) == answer}
+        fn recursive(action:*Action,p:*bool,again:bool)->bool {let plain=Plain {flag:true};if again {recursive(action,p,false)} else {direct(action,p)}}";
+    let unbound =
+        finite_default_support::compile_with_protocols(prefix, &Default::default()).unwrap_err();
+    assert!(
+        unbound.contains("P3 stability/termination evidence"),
+        "{unbound}"
+    );
+    for call in [
+        "higher(action.ref,p.ref)",
+        "closure(action.ref,p.ref)",
+        "defaulted(action.ref,p.ref)",
+        "recursive(action.ref,p.ref,true)",
+    ] {
+        for flag in [false, true] {
+            let package = finite_default_support::compile_with_source_bindings(
+                &format!("{prefix}fn entry()->bool {{let action:Action=read;let p={flag};{call}}}"),
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    copy: Some("input::Duplicate"),
+                    drop: Some("input::Retire"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{call}/{flag}: {e}")),
+                Value::Bool(if call.starts_with("defaulted") {
+                    true
+                } else {
+                    flag
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn borrowed_callable_cleanup_proof_does_not_duplicate_affine_locals() {
+    let package = compile(
+        "trait Duplicate {}trait Retire {fn drop(*self);}
+        typealias Action=fn(*bool)->bool;impl Duplicate for Action {}
+        struct Plain {}impl Retire for Plain {fn drop(*self) {}}struct Unrelated {}impl Retire for Unrelated {fn drop(*self) {}}
+        fn consume(value:Plain) {}
+        fn read(p:*bool)->bool {let plain=Plain {};consume(plain);consume(plain);p.*}
+        fn invoke(action:*Action,p:*bool)->bool {let code=action.*;code(p)}
+        fn entry()->bool {let p=true;let action:Action=read;invoke(action.ref,p.ref)}",
+    );
+    let reason = source_executable(&package, "entry").unwrap_err();
+    assert!(
+        reason.contains("unavailable") || reason.contains("Moved"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn borrowed_callable_memory_inert_destructors_still_execute() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {}trait Retire {fn drop(*self);}
+        typealias Action=fn(*bool)->bool;impl Duplicate for Action {}
+        struct Inner {}struct Temporary {}struct Outer {inner:Inner}
+        impl Retire for Inner {fn drop(*self) {}}
+        impl Retire for Temporary {fn drop(*self) {}}
+        fn empty() {}
+        impl Retire for Outer {fn drop(*self) {let temporary=Temporary {};empty();}}
+        fn read(p:*bool)->bool {let outer=Outer {inner:Inner {}};p.*}
+        fn invoke(action:*Action,p:*bool)->bool {let code=action.*;code(p)}
+        fn entry(flag:bool)->bool {let action:Action=read;invoke(action.ref,flag.ref)}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    world(&package, |world, _| {
+        let copy = package
+            .traits
+            .iter()
+            .find(|t| t.name == "Duplicate")
+            .unwrap()
+            .declaration;
+        let retire = package
+            .traits
+            .iter()
+            .find(|t| t.name == "Retire")
+            .unwrap()
+            .declaration;
+        let permission = |ty: &nir::Term| {
+            elaboration::verification::copy::acquire(
+                &package,
+                world,
+                copy,
+                retire,
+                ty,
+                Budget::default(),
+                &mut 100_000,
+            )
+            .is_ok()
+        };
+        for flag in [false, true] {
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_pointer_copy_permission(&permission)
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![Value::Bool(flag)])
+                    .unwrap(),
+                Value::Bool(flag)
+            );
+            let names = executed_names(&package, &executable, vm.events());
+            assert_eq!(
+                names,
+                [
+                    "entry",
+                    "invoke",
+                    "read",
+                    "drop Outer",
+                    "empty",
+                    "drop Temporary",
+                    "drop Inner"
+                ]
+            );
+        }
+    });
+}
+
+#[test]
+fn borrowed_callable_memory_inert_proof_rejects_destructor_accesses_and_failure() {
+    for body in [
+        "self.flag.*.* = true;",
+        "self.flag.* = self.flag.*;",
+        "assumes false;",
+    ] {
+        let source = format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}
+            typealias Action=fn(*bool)->bool;impl Duplicate for Action {{}}
+            struct Owned {{flag:*bool}}impl Retire for Owned {{fn drop(*self) {{{body}}}}}
+            fn read(p:*bool)->bool {{let owned=Owned {{flag:p}};p.*}}
+            fn invoke(action:*Action,p:*bool)->bool {{let code=action.*;code(p)}}
+            fn entry()->bool {{let flag=false;let action:Action=read;invoke(action.ref,flag.ref)}}"
+        );
+        let package = compile(&source);
+        let reason = source_executable(&package, "entry").unwrap_err();
+        assert!(
+            reason.contains("stable read-only")
+                || body == "self.flag.* = self.flag.*;"
+                    && reason.contains("pointer store or owned write requires a richer contract"),
+            "{body}: {reason}"
+        );
+    }
+}
+
+#[test]
+fn borrowed_callable_memory_inert_proof_does_not_assume_recursive_cleanup() {
+    for destructors in [
+        "impl Retire for Again {fn drop(*self) {let next=Again {};}}",
+        "struct Other {}impl Retire for Again {fn drop(*self) {let next=Other {};}}impl Retire for Other {fn drop(*self) {let next=Again {};}}",
+    ] {
+        let package = compile(&format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}
+            typealias Action=fn(*bool)->bool;impl Duplicate for Action {{}}
+            struct Again {{}}{destructors}
+            fn read(p:*bool)->bool {{let local=Again {{}};p.*}}
+            fn invoke(action:*Action,p:*bool)->bool {{let code=action.*;code(p)}}
+            fn entry()->bool {{let flag=false;let action:Action=read;invoke(action.ref,flag.ref)}}"
+        ));
+        let reason = source_executable(&package, "entry").unwrap_err();
+        assert!(
+            reason.contains("stable read-only"),
+            "{destructors}: {reason}"
+        );
+    }
+}
+
+#[test]
+fn borrowed_callable_destructor_receiver_reads_execute_without_losing_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package=compile("trait Duplicate {}trait Retire {fn drop(*self);}
+        typealias Action=fn(*bool)->bool;impl Duplicate for Action {}
+        struct Owned {flag:bool,target:*bool}
+        fn peek(p:*bool)->bool {p.*}
+        impl Retire for Owned {fn drop(*self) {let flag=self.flag.*;let target=self.target.*;peek(self.flag);}}
+        fn read(p:*bool)->bool {let owned=Owned {flag:p.*,target:p};p.*}
+        fn invoke(action:*Action,p:*bool)->bool {let code=action.*;code(p)}
+        fn entry(flag:bool)->bool {let action:Action=read;invoke(action.ref,flag.ref)}");
+    let executable = source_executable(&package, "entry").unwrap();
+    world(&package, |world, _| {
+        let copy = package
+            .traits
+            .iter()
+            .find(|t| t.name == "Duplicate")
+            .unwrap()
+            .declaration;
+        let retire = package
+            .traits
+            .iter()
+            .find(|t| t.name == "Retire")
+            .unwrap()
+            .declaration;
+        let permission = |ty: &nir::Term| {
+            elaboration::verification::copy::acquire(
+                &package,
+                world,
+                copy,
+                retire,
+                ty,
+                Budget::default(),
+                &mut 100_000,
+            )
+            .is_ok()
+        };
+        for flag in [false, true] {
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_pointer_copy_permission(&permission)
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![Value::Bool(flag)])
+                    .unwrap(),
+                Value::Bool(flag)
+            );
+            assert_eq!(
+                executed_names(&package, &executable, vm.events()),
+                ["entry", "invoke", "read", "drop Owned", "peek"]
+            );
+        }
+    });
+}
+
+#[test]
+fn borrowed_callable_destructor_receiver_reads_require_remaining_fields() {
+    let prefix="trait Duplicate {}trait Retire {fn drop(*self);}
+        typealias Action=fn(*bool)->bool;impl Duplicate for Action {}
+        struct Token {value:bool}struct Owned {token:Token,other:bool}
+        impl Retire for Owned {fn drop(*self) {let value=self.token.value.*;}}
+        fn read(p:*bool)->bool {let owned=Owned {token:Token {value:true},other:false};let taken=owned.token;p.*}
+        fn invoke(action:*Action,p:*bool)->bool {let code=action.*;code(p)}
+        fn entry()->bool {let flag=true;let action:Action=read;invoke(action.ref,flag.ref)}";
+    let package = compile(prefix);
+    let reason = source_executable(&package, "entry").unwrap_err();
+    assert!(
+        reason.contains("unavailable") || reason.contains("Moved"),
+        "{reason}"
+    );
+    let noncopy = prefix
+        .replace("let taken=owned.token;", "")
+        .replace("self.token.value.*", "self.token.*");
+    let reason = source_executable(&compile(&noncopy), "entry").unwrap_err();
+    assert!(
+        reason.contains("Copy") || reason.contains("copy"),
+        "{reason}"
+    );
+    let package = compile(&prefix.replace("self.token.value.*", "self.other.*"));
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn cleanup_behavior_proofs_reuse_shared_dependencies_without_caching_failure() {
+    use elaboration::verification::{drop::CleanupSession, moves::CleanupPolicy};
+    let mut source = String::from(
+        "trait Retire {fn drop(*self);}struct Layer0 {}impl Retire for Layer0 {fn drop(*self) {}}",
+    );
+    for level in 1..12 {
+        source.push_str(&format!("struct Layer{level} {{}}impl Retire for Layer{level} {{fn drop(*self) {{let first=Layer{} {{}};let second=Layer{} {{}};}}}}",level-1,level-1));
+    }
+    source.push_str("struct Reject {}impl Retire for Reject {fn drop(*self) {assumes false;}}fn root(value:Layer11) {}fn rejecting(value:Reject) {}");
+    let package = compile(&source);
+    let input = |name: &str| {
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        let nir::Term::Function { parameters, .. } = function.signature.callable_signature() else {
+            panic!("signature")
+        };
+        parameters[0].ty.clone()
+    };
+    world(&package, |world, _| {
+        let protocol = package
+            .traits
+            .iter()
+            .find(|t| t.name == "Retire")
+            .unwrap()
+            .declaration;
+        let mut session = CleanupSession::new(&package, world, protocol, Budget::default());
+        let root = input("root");
+        assert!(session.is_memory_inert(&root, &mut 0).is_err());
+        assert!(
+            !matches!(session.is_memory_inert(&root, &mut 256), Ok(true)),
+            "an incomplete query must not establish a proof"
+        );
+        assert!(session.is_memory_inert(&root, &mut 50_000).unwrap());
+        assert!(session.is_memory_inert(&root, &mut 64).unwrap());
+        assert!(!session.may_reject(&root, &mut 50_000).unwrap());
+        assert!(!session.may_reject(&root, &mut 64).unwrap());
+        assert!(
+            session.is_memory_inert(&root, &mut 0).is_err(),
+            "cached proofs still charge their type key"
+        );
+        assert!(
+            !session
+                .is_memory_inert(&input("rejecting"), &mut 50_000)
+                .unwrap()
+        );
+        assert!(
+            session
+                .may_reject(&input("rejecting"), &mut 50_000)
+                .unwrap()
+        );
+    });
+}
+
+#[test]
+fn cleanup_read_footprints_keep_guarded_indirect_targets() {
+    use elaboration::verification::memory;
+    let package=compile("trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}
+        struct Link {left:*bool,right:*bool}
+        enum Choice {left(*bool),right(*bool)}impl Duplicate for Choice {}
+        fn fields(link:*Link,choose:bool) {let target=if choose {link.left.*} else {link.right.*};let watch=Watch {target:target};}
+        fn variants(value:*Choice) {let choice=value.*;choice match {.left(p)=>do {let watch=Watch {target:p};},.right(p)=>do {let watch=Watch {target:p};}}}");
+    world(&package, |world, items| {
+        let mut items = items.clone();
+        let copy = package
+            .traits
+            .iter()
+            .find(|t| t.name == "Duplicate")
+            .unwrap()
+            .declaration;
+        items
+            .bind_source_traits(&package, &[(LangItem::Copy, copy)])
+            .unwrap();
+        for name in ["fields", "variants"] {
+            let function = package.functions.iter().find(|f| f.name == name).unwrap();
+            let nir::Term::Function { parameters, .. } = function.signature.callable_signature()
+            else {
+                panic!("signature")
+            };
+            let nir::Term::Pointer(subject) = &parameters[0].ty else {
+                panic!("pointer")
+            };
+            let report = luna::protocols::analyze_cleanup_with_field_context(
+                &package,
+                world,
+                &items,
+                function,
+                100_000,
+                Default::default(),
+                &[(0, (**subject).clone())],
+                &[],
+                &[],
+                vec![],
+                &[],
+            )
+            .unwrap();
+            let accesses = report
+                .cleanup_memory_accesses(&package, &mut 10000)
+                .unwrap();
+            assert_eq!(accesses.len(), 2, "{name}: {accesses:?}");
+            for access in &accesses {
+                assert!(!access.write && access.read_value, "{name}: {access:?}");
+                assert_eq!(access.ty, nir::Term::Primitive(nir::Primitive::Bool));
+                assert_eq!(access.target.parameter, 0);
+                assert!(access.target.input_fields.is_empty() && access.target.fields.is_empty());
+                assert_eq!(access.target.through.len(), 1, "{name}: {access:?}");
+            }
+            if name == "fields" {
+                let indices = accesses
+                    .iter()
+                    .map(|a| a.target.through[0][0].1)
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(indices, std::collections::BTreeSet::from([0, 1]));
+                assert!(accesses.iter().all(|a| a.target.conditions.is_empty()));
+            } else {
+                let tags = accesses
+                    .iter()
+                    .flat_map(|a| a.target.conditions.values().flatten().map(|(_, tag)| *tag))
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    tags,
+                    std::collections::BTreeSet::from([0, 1]),
+                    "{accesses:?}"
+                );
+            }
+            let mut overlaid = package.clone();
+            overlaid
+                .runtime_instances
+                .push(nir::program::RuntimeInstance {
+                    declaration: function.declaration,
+                    arguments: vec![],
+                    function: function.clone(),
+                    cleanup_accesses: accesses
+                        .iter()
+                        .map(|access| nir::program::RuntimeCleanupAccess {
+                            parameter: access.target.parameter,
+                            input_fields: access.target.input_fields.clone(),
+                            through: access.target.through.clone(),
+                            conditions: access.target.conditions.clone(),
+                            fields: access.target.fields.clone(),
+                            ty: access.ty.clone(),
+                            write: access.write,
+                            read_value: access.read_value,
+                        })
+                        .collect(),
+                });
+            let summary =
+                memory::infer_in_package(&overlaid, function.declaration, &[], &mut 100_000)
+                    .unwrap();
+            for access in &accesses {
+                assert!(summary.accesses.contains(access), "{name}: {summary}");
+            }
+            let dump = overlaid.runtime_instances[0].to_string();
+            assert!(
+                dump.contains("(cleanup-accesses") && dump.contains("(read-value true)"),
+                "{dump}"
+            );
+            overlaid.runtime_instances[0].cleanup_accesses[0].ty =
+                nir::Term::Primitive(nir::Primitive::Char);
+            assert!(
+                memory::infer_in_package(&overlaid, function.declaration, &[], &mut 100_000)
+                    .is_err(),
+                "forged read type must fail import"
+            );
+        }
+    });
+}
+
+#[test]
+fn published_cleanup_reads_recheck_caller_lifetimes_through_fields_and_variants() {
+    let prefix="trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Token {value:bool}
+        struct Watch {target:*Token}impl Retire for Watch {fn drop(*self) {let target=self.target.*;let seen=target.value.*;}}
+        struct Link {target:*Token}enum Choice {left(*Token),right(*Token)}impl Duplicate for Choice {}
+        fn observe(p:*Token) {let watch=Watch {target:p};}
+        fn field(link:*Link) {observe(link.target.*);}
+        fn variant(choice:*Choice) {let value=choice.*;value match {.left(p)=>observe(p),.right(p)=>observe(p)}}";
+    for call in ["observe(pointer)", "field(link.ref)", "variant(choice.ref)"] {
+        for variant in ["left", "right"] {
+            let source = format!(
+                "{prefix}fn entry()->bool {{let token=Token {{value:true}};let pointer=token.ref;let link=Link {{target:pointer}};let choice=Choice.{variant}(pointer);{call};true}}"
+            );
+            let package = compile(&source);
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{call}/{variant}: {e}")),
+                comptime_interpretor::Value::Bool(true)
+            );
+            let source = source.replace(
+                &format!("{call};true"),
+                &format!("let moved=token;{call};true"),
+            );
+            let package = compile(&source);
+            let reason = source_executable(&package, "entry").unwrap_err();
+            assert!(
+                reason.contains("unavailable") || reason.contains("Moved"),
+                "{call}/{variant}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cleanup_type_read_footprints_preserve_component_and_variant_paths() {
+    use elaboration::verification::{drop::CleanupSession, memory};
+    let package=compile("trait Retire {fn drop(*self);}
+        struct Reader {target:*bool}impl Retire for Reader {fn drop(*self) {let seen=self.target.*.*;}}
+        struct Pair {left:Reader,right:Reader}enum Either {left(Reader),right(Reader)}
+        struct Nested {choice:Either}newtype Wrapped=Reader;
+        struct Generic where T {value:T}typealias Packet=!Reader Reader;
+        struct Empty {}
+        fn single(value:Reader) {}fn pair(value:Pair) {}fn either(value:Either) {}
+        fn nested(value:Nested) {}fn wrapped(value:Wrapped) {}fn generic(value:Generic<Reader>) {}
+        fn packet(value:Packet) {}fn empty(value:Empty) {}");
+    world(&package, |world, _| {
+        let protocol = package
+            .traits
+            .iter()
+            .find(|t| t.name == "Retire")
+            .unwrap()
+            .declaration;
+        let mut session = CleanupSession::new(&package, world, protocol, Budget::default());
+        for (name, paths) in [
+            ("single", vec![vec![]]),
+            ("pair", vec![vec![0], vec![1]]),
+            (
+                "either",
+                vec![vec![usize::MAX, 0, 0], vec![usize::MAX, 1, 0]],
+            ),
+            (
+                "nested",
+                vec![vec![0, usize::MAX, 0, 0], vec![0, usize::MAX, 1, 0]],
+            ),
+            ("wrapped", vec![vec![0]]),
+            ("generic", vec![vec![0]]),
+            (
+                "packet",
+                vec![vec![usize::MAX, 0, 0], vec![usize::MAX, 1, 0]],
+            ),
+            ("empty", vec![]),
+        ] {
+            let function = package.functions.iter().find(|f| f.name == name).unwrap();
+            let nir::Term::Function { parameters, .. } = function.signature.callable_signature()
+            else {
+                panic!("signature")
+            };
+            let ty = &parameters[0].ty;
+            assert!(session.read_footprint(ty, &mut 0).is_err());
+            let footprint = session.read_footprint(ty, &mut 100_000).unwrap().unwrap();
+            assert_eq!(footprint.subject(), ty);
+            assert_eq!(footprint.protocol(), protocol);
+            assert_eq!(
+                footprint
+                    .readers()
+                    .iter()
+                    .map(|r| r.receiver_path().to_vec())
+                    .collect::<Vec<_>>(),
+                paths,
+                "{name}: {footprint}"
+            );
+            for reader in footprint.readers() {
+                let projection = memory::project_owned_storage(
+                    Some(&package),
+                    ty,
+                    reader.receiver_path(),
+                    &mut 10000,
+                )
+                .unwrap();
+                assert_eq!(&projection.ty, reader.receiver_type());
+                assert!(
+                    reader.accesses().iter().any(|a| a.target.through.len() == 1
+                        && a.read_value
+                        && a.ty == nir::Term::Primitive(nir::Primitive::Bool)),
+                    "{name}: {footprint}"
+                );
+                assert!(reader.accesses().iter().all(|a| !a.write));
+            }
+            let dump = footprint.to_string();
+            assert!(
+                dump.starts_with("(cleanup-read-footprint (protocol "),
+                "{dump}"
+            );
+            assert_eq!(
+                dump,
+                session
+                    .read_footprint(ty, &mut 100_000)
+                    .unwrap()
+                    .unwrap()
+                    .to_string()
+            );
+        }
+    });
+}
+
+#[test]
+fn cleanup_type_read_footprints_reject_writes_failure_and_unknown_calls() {
+    use elaboration::verification::drop::CleanupSession;
+    for body in [
+        "self.target.*.* = true;",
+        "assumes false;",
+        "let callback=self.action.*;callback();",
+    ] {
+        let package = compile(&format!(
+            "trait Retire {{fn drop(*self);}}
+            struct Subject {{target:*bool,action:fn()->bool}}
+            impl Retire for Subject {{fn drop(*self) {{{body}}}}}
+            fn inspect(value:Subject) {{}}"
+        ));
+        world(&package, |world, _| {
+            let protocol = package
+                .traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration;
+            let function = package
+                .functions
+                .iter()
+                .find(|f| f.name == "inspect")
+                .unwrap();
+            let nir::Term::Function { parameters, .. } = function.signature.callable_signature()
+            else {
+                panic!("signature")
+            };
+            let mut session = CleanupSession::new(&package, world, protocol, Budget::default());
+            assert!(
+                session
+                    .read_footprint(&parameters[0].ty, &mut 100_000)
+                    .unwrap()
+                    .is_none(),
+                "{body}"
+            );
+        });
+    }
+}
+
+#[test]
+fn cleanup_reads_rebase_outer_and_loaded_variant_guards_at_their_own_stages() {
+    use elaboration::verification::{drop::CleanupSession, memory};
+    for indirect in [false, true] {
+        let (target, load) = if indirect {
+            ("**Payload", "let slot=self.target.*;let payload=slot.*;")
+        } else {
+            ("*Payload", "let payload=self.target.*;")
+        };
+        let package=compile(&format!("trait Retire {{fn drop(*self);}}
+            enum Payload {{left(*bool),right(*bool)}}
+            struct Reader {{target:{target}}}
+            impl Retire for Reader {{fn drop(*self) {{{load}let value=payload.*;value match {{.left(p)=>do {{let seen=p.*;}},.right(p)=>do {{let seen=p.*;}}}}}}}}
+            enum Choice {{left(Reader),right(Reader)}}struct Envelope {{padding:bool,choice:Choice}}
+            fn owned(value:Choice) {{}}fn imported(root:*Envelope) {{}}"));
+        world(&package, |world, _| {
+            let protocol = package
+                .traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration;
+            let subject = package
+                .functions
+                .iter()
+                .find(|f| f.name == "owned")
+                .unwrap();
+            let nir::Term::Function { parameters, .. } = subject.signature.callable_signature()
+            else {
+                panic!("signature")
+            };
+            let subject = &parameters[0].ty;
+            let imported = package
+                .functions
+                .iter()
+                .find(|f| f.name == "imported")
+                .unwrap();
+            let nir::Term::Function { parameters, .. } = imported.signature.callable_signature()
+            else {
+                panic!("signature")
+            };
+            let nir::Term::Pointer(root) = &parameters[0].ty else {
+                panic!("pointer")
+            };
+            let mut session = CleanupSession::new(&package, world, protocol, Budget::default());
+            let footprint = session
+                .read_footprint(subject, &mut 100_000)
+                .unwrap()
+                .unwrap();
+            assert!(footprint.accesses_at(&package, root, &[1], &mut 0).is_err());
+            assert!(
+                footprint
+                    .accesses_at(&package, root, &[], &mut 100_000)
+                    .is_err()
+            );
+            assert!(
+                footprint
+                    .accesses_at(&package, root, &[0], &mut 100_000)
+                    .is_err()
+            );
+            let accesses = footprint
+                .accesses_at(&package, root, &[1], &mut 100_000)
+                .unwrap();
+            let stage = if indirect { 2 } else { 1 };
+            let reads = accesses
+                .iter()
+                .filter(|a| {
+                    a.ty == nir::Term::Primitive(nir::Primitive::Bool)
+                        && a.target.through.len() == stage + 1
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(reads.len(), 4, "{accesses:?}");
+            let mut tags = std::collections::BTreeSet::new();
+            for read in reads {
+                assert!(read.read_value && !read.write);
+                assert_eq!(
+                    read.target.through[0]
+                        .iter()
+                        .map(|(_, i)| *i)
+                        .collect::<Vec<_>>(),
+                    vec![1, 0, 0]
+                );
+                let outer = &read.target.conditions[&0];
+                let inner = &read.target.conditions[&stage];
+                assert_eq!(outer.len(), 1);
+                assert_eq!(inner.len(), 1);
+                assert_eq!(outer[0].0, vec![1]);
+                assert!(inner[0].0.is_empty());
+                assert_eq!(read.target.conditions.len(), 2);
+                tags.insert((outer[0].1, inner[0].1));
+            }
+            assert_eq!(
+                tags,
+                std::collections::BTreeSet::from([(0, 0), (0, 1), (1, 0), (1, 1)])
+            );
+            let mut overlaid = package.clone();
+            overlaid
+                .runtime_instances
+                .push(nir::program::RuntimeInstance {
+                    declaration: imported.declaration,
+                    arguments: vec![],
+                    function: imported.clone(),
+                    cleanup_accesses: accesses
+                        .iter()
+                        .map(|a| nir::program::RuntimeCleanupAccess {
+                            parameter: a.target.parameter,
+                            input_fields: a.target.input_fields.clone(),
+                            through: a.target.through.clone(),
+                            conditions: a.target.conditions.clone(),
+                            fields: a.target.fields.clone(),
+                            ty: a.ty.clone(),
+                            write: a.write,
+                            read_value: a.read_value,
+                        })
+                        .collect(),
+                });
+            let summary =
+                memory::infer_in_package(&overlaid, imported.declaration, &[], &mut 100_000)
+                    .unwrap();
+            assert_eq!(summary.accesses.len(), accesses.len());
+            assert!(accesses.iter().all(|a| summary.accesses.contains(a)));
+            assert_eq!(
+                accesses,
+                footprint
+                    .accesses_at(&package, root, &[1], &mut 100_000)
+                    .unwrap()
+            );
+        });
+    }
+}
+
+#[test]
+fn borrowed_callable_external_cleanup_reads_use_current_value_origins() {
+    let prefix="trait Duplicate {}trait Retire {fn drop(*self);}
+        typealias Action=fn(*bool)->bool;impl Duplicate for Action {}
+        struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}
+        struct Pair {left:Watch,right:Watch}enum Choice {left(Watch),right(Watch)}
+        fn pair(p:*bool)->bool {let value=Pair {left:Watch {target:p},right:Watch {target:p}};true}
+        fn variant(p:*bool)->bool {let value=if p.* {Choice.left(Watch {target:p})} else {Choice.right(Watch {target:p})};true}
+        fn consume(watch:Watch)->bool {true}
+        fn read(p:*bool)->bool {let watch=Watch {target:p};true}
+        fn delivered(p:*bool)->bool {consume(Watch {target:p})}
+        fn nested(p:*bool)->bool {let run=|| {let watch=Watch {target:p};true};run()}
+        fn invoke(action:*Action,p:*bool)->bool {let code=action.*;code(p)}
+        struct Token {value:bool}";
+    for (action, flag) in ["read", "delivered", "nested", "pair", "variant"]
+        .into_iter()
+        .flat_map(|action| [false, true].map(|flag| (action, flag)))
+    {
+        let source = format!(
+            "{prefix}fn entry()->bool {{let token=Token {{value:{flag}}};let p=token.value.ref;let action:Action={action};invoke(action.ref,p)}}"
+        );
+        let package = compile(&source);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap_or_else(|e| panic!("{action}: {e}")),
+            comptime_interpretor::Value::Bool(true)
+        );
+        if action == "pair" {
+            let executable = source_executable(&package, "entry").unwrap();
+            world(&package, |world, _| {
+                let copy = package
+                    .traits
+                    .iter()
+                    .find(|t| t.name == "Duplicate")
+                    .unwrap()
+                    .declaration;
+                let retire = package
+                    .traits
+                    .iter()
+                    .find(|t| t.name == "Retire")
+                    .unwrap()
+                    .declaration;
+                let permission = |ty: &nir::Term| {
+                    elaboration::verification::copy::acquire(
+                        &package,
+                        world,
+                        copy,
+                        retire,
+                        ty,
+                        Budget::default(),
+                        &mut 100_000,
+                    )
+                    .is_ok()
+                };
+                let mut vm = comptime_interpretor::Interpreter::from_iir(
+                    &executable.graph,
+                    Default::default(),
+                )
+                .unwrap()
+                .with_pointer_copy_permission(&permission)
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+                vm.invoke_instance(&executable.entry, vec![]).unwrap();
+                let names = executed_names(&package, &executable, vm.events());
+                assert_eq!(
+                    names.iter().filter(|n| n.as_str() == "drop Watch").count(),
+                    2,
+                    "{names:?}"
+                );
+            });
+        }
+        let source = source.replace(
+            "invoke(action.ref,p)",
+            "do {let moved=token;invoke(action.ref,p)}",
+        );
+        let reason = source_executable(&compile(&source), "entry").unwrap_err();
+        assert!(
+            reason.contains("unavailable") || reason.contains("Moved"),
+            "{action}: {reason}"
+        );
+    }
+    for mutation in [
+        "watch.target=other.ref",
+        "replace(watch.target.ref,other.ref)",
+    ] {
+        let prefix = format!("{prefix}fn replace(slot:**bool,value:*bool) {{slot.* = value;}}");
+        let source = prefix.replace(
+            "let watch=Watch {target:p};true",
+            &format!("var watch=Watch {{target:p}};let other=true;{mutation};true"),
+        );
+        let package = compile(&format!(
+            "{source}fn entry()->bool {{let p=false;let action:Action=read;invoke(action.ref,p.ref)}}"
+        ));
+        let reason = source_executable(&package, "entry").unwrap_err();
+        if mutation == "watch.target=other.ref" {
+            // `other` is retired before `watch`: the direct update now has a
+            // footprint, and ordinary cleanup must reject its expired target.
+            assert!(reason.contains("unavailable"), "{reason}");
+        } else {
+            assert!(
+                reason.contains("stable read-only")
+                    || reason.contains("pointer store or owned write requires a richer contract"),
+                "aliased pointer-slot transitions need separate proof: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn borrowed_callable_cleanup_reads_compose_nested_resources_and_indirection() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        typealias Action=fn(*bool)->bool;impl Duplicate for Action {}
+        struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}
+        struct Generic where T {value:T}
+        struct Outer {target:*bool}impl Retire for Outer {fn drop(*self) {let child=Watch {target:self.target.*};}}
+        struct Indirect {target:**bool}impl Retire for Indirect {fn drop(*self) {let seen=self.target.*.*.*;}}
+        fn consume(value:Generic<Watch>) {}
+        fn invoke(action:*Action,p:*bool)->bool {let code=action.*;code(p)}
+        struct Token {value:bool}";
+    for body in [
+        "let value=Generic<Watch> {value:Watch {target:p}};true",
+        "consume(Generic<Watch> {value:Watch {target:p}});true",
+        "let value=Outer {target:p};true",
+        "let value=Indirect {target:p.ref};true",
+    ] {
+        let source = format!(
+            "{prefix}fn read(p:*bool)->bool {{{body}}}fn entry()->bool {{let token=Token {{value:false}};let p=token.value.ref;let action:Action=read;invoke(action.ref,p)}}"
+        );
+        let package = compile(&source);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap_or_else(|e| panic!("{body}: {e}")),
+            comptime_interpretor::Value::Bool(true)
+        );
+        let source = source.replace(
+            "invoke(action.ref,p)",
+            "do {let moved=token;invoke(action.ref,p)}",
+        );
+        let reason = source_executable(&compile(&source), "entry").unwrap_err();
+        assert!(
+            reason.contains("unavailable") || reason.contains("Moved"),
+            "{body}: {reason}"
+        );
+    }
+}
+
+#[test]
+fn cleanup_external_read_proofs_share_dependencies_and_recover_after_exhaustion() {
+    use elaboration::verification::drop::CleanupSession;
+    let mut source = String::from(
+        "trait Retire {fn drop(*self);}struct Layer0 {target:*bool}impl Retire for Layer0 {fn drop(*self) {let seen=self.target.*.*;}}",
+    );
+    for level in 1..12 {
+        source.push_str(&format!("struct Layer{level} {{target:*bool}}impl Retire for Layer{level} {{fn drop(*self) {{let first=Layer{} {{target:self.target.*}};let second=Layer{} {{target:self.target.*}};}}}}",level-1,level-1));
+    }
+    source.push_str("fn root(value:Layer11) {}struct Reject {target:*bool}impl Retire for Reject {fn drop(*self) {assumes false;}}fn rejected(value:Reject) {}");
+    let package = compile(&source);
+    let input = |name: &str| {
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        let nir::Term::Function { parameters, .. } = function.signature.callable_signature() else {
+            panic!("signature")
+        };
+        parameters[0].ty.clone()
+    };
+    world(&package, |world, _| {
+        let protocol = package
+            .traits
+            .iter()
+            .find(|t| t.name == "Retire")
+            .unwrap()
+            .declaration;
+        let mut session = CleanupSession::new(&package, world, protocol, Budget::default());
+        let ty = input("root");
+        assert!(!matches!(
+            session.read_footprint(&ty, &mut 256),
+            Ok(Some(_))
+        ));
+        let footprint = session
+            .read_footprint(&ty, &mut 100_000)
+            .unwrap()
+            .expect("shared external read proof must fit the query budget");
+        assert_eq!(
+            session.read_footprint(&ty, &mut 256).unwrap(),
+            Some(footprint.clone())
+        );
+        assert!(session.read_footprint(&ty, &mut 0).is_err());
+        assert!(
+            session
+                .read_footprint(&input("rejected"), &mut 100_000)
+                .unwrap()
+                .is_none()
+        );
+        let accesses = footprint.root_accesses(&package, &mut 10_000).unwrap();
+        assert!(
+            accesses
+                .iter()
+                .any(|access| !access.target.through.is_empty() && access.read_value)
+        );
+        assert!(accesses.iter().all(|access| !access.write));
+    });
+}
+
+#[test]
+fn borrowed_callable_cleanup_reads_keep_loaded_variant_dependencies() {
+    let prefix="trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Token {value:bool}enum Choice {left(*Token),right(*Token)}impl Duplicate for Choice {}
+        struct Watch {target:*Choice}impl Retire for Watch {fn drop(*self) {let choice=self.target.*.*;choice match {.left(p)=>do {let seen=p.value.*;},.right(p)=>do {let seen=p.value.*;}}}}
+        typealias Action=fn(*Choice)->bool;impl Duplicate for Action {}
+        fn make(p:*Choice)->Watch {Watch {target:p}}
+        fn invoke(action:*Action,p:*Choice)->bool {let code=action.*;code(p)}";
+    for body in [
+        "let watch=Watch {target:p};true",
+        "let watch=make(p);true",
+        "Watch {target:p};true",
+        "make(p);true",
+    ] {
+        for variant in ["left", "right"] {
+            let source = format!(
+                "{prefix}fn read(p:*Choice)->bool {{{body}}}fn entry()->bool {{let token=Token {{value:true}};let choice=Choice.{variant}(token.ref);let action:Action=read;invoke(action.ref,choice.ref)}}"
+            );
+            let package = compile(&source);
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{body}/{variant}: {e}")),
+                comptime_interpretor::Value::Bool(true)
+            );
+            if variant == "left" && body == "let watch=Watch {target:p};true" {
+                world(&package, |world, items| {
+                    let mut items = items.clone();
+                    let copy = package
+                        .traits
+                        .iter()
+                        .find(|t| t.name == "Duplicate")
+                        .unwrap()
+                        .declaration;
+                    items
+                        .bind_source_traits(&package, &[(LangItem::Copy, copy)])
+                        .unwrap();
+                    let function = package.functions.iter().find(|f| f.name == "read").unwrap();
+                    let nir::Term::Function { parameters, .. } =
+                        function.signature.callable_signature()
+                    else {
+                        panic!("signature")
+                    };
+                    let nir::Term::Pointer(subject) = &parameters[0].ty else {
+                        panic!("pointer")
+                    };
+                    let report = luna::protocols::analyze_cleanup_with_field_context(
+                        &package,
+                        world,
+                        &items,
+                        function,
+                        100_000,
+                        Default::default(),
+                        &[(0, (**subject).clone())],
+                        &[],
+                        &[],
+                        vec![],
+                        &[],
+                    )
+                    .unwrap();
+                    let accesses = report
+                        .cleanup_memory_accesses(&package, &mut 100_000)
+                        .unwrap();
+                    for terminal_pointer in [true, false] {
+                        let matching: Vec<_> = accesses
+                            .iter()
+                            .filter(|access| {
+                                if terminal_pointer {
+                                    matches!(access.ty, nir::Term::Pointer(_))
+                                        && access.target.through.is_empty()
+                                } else {
+                                    access.ty == nir::Term::Primitive(nir::Primitive::Bool)
+                                        && access.target.through.len() == 1
+                                }
+                            })
+                            .collect();
+                        let tags = matching
+                            .iter()
+                            .flat_map(|access| {
+                                access.target.conditions.get(&0).into_iter().flatten().map(
+                                    move |(path, tag)| {
+                                        assert!(path.is_empty(), "{access:?}");
+                                        *tag
+                                    },
+                                )
+                            })
+                            .collect::<std::collections::BTreeSet<_>>();
+                        assert_eq!(
+                            tags,
+                            std::collections::BTreeSet::from([0, 1]),
+                            "terminal={terminal_pointer}: {accesses:?}"
+                        );
+                    }
+                });
+            }
+            let source = source.replace(
+                "invoke(action.ref,choice.ref)",
+                "do {let moved=token;invoke(action.ref,choice.ref)}",
+            );
+            let reason = source_executable(&compile(&source), "entry").unwrap_err();
+            assert!(
+                reason.contains("unavailable") || reason.contains("Moved"),
+                "{body}/{variant}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_observations_preserve_conditional_pointer_knowledge() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        enum Choice {left(*bool),right(*bool)}impl Duplicate for Choice {}
+        fn choose(p:*Choice)->*bool {let value=p.*;value match {.left(p)=>p,.right(p)=>p}}
+        fn read(p:*bool)->bool {p.*}
+        fn selected(p:*Choice)->bool {false match {_ if read(choose(p))=>true,_=>false}}";
+    for variant in ["left", "right"] {
+        for value in [false, true] {
+            let source = format!(
+                "{prefix}fn entry()->bool {{let value={value};let choice=Choice.{variant}(value.ref);selected(choice.ref)}}"
+            );
+            let package = compile(&source);
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{variant}/{value}: {e}")),
+                comptime_interpretor::Value::Bool(value)
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_pointer_results_still_check_effects_and_lifetimes() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        enum Choice {left(*bool),right(*bool)}impl Duplicate for Choice {}
+        fn choose(p:*Choice)->*bool {let value=p.*;value match {.left(p)=>p,.right(p)=>p}}
+        fn read(p:*bool)->bool {p.*}
+        fn selected(p:*Choice)->bool {false match {_ if read(choose(p))=>true,_=>false}}
+        fn entry()->bool {let value=true;let choice=Choice.left(value.ref);selected(choice.ref)}";
+    for action in ["p.* = false;p", "assumes false;p"] {
+        let source = prefix.replace(
+            ".left(p)=>p,.right(p)=>p",
+            &format!(".left(p)=>do {{{action}}},.right(p)=>do {{{action}}}"),
+        );
+        let reason = source_executable(&compile(&source), "entry").unwrap_err();
+        assert!(
+            reason.contains("guard") || reason.contains("observation"),
+            "{action}: {reason}"
+        );
+    }
+    let source = prefix.replace(
+        "let value=p.*;value match {.left(p)=>p,.right(p)=>p}",
+        "let local=true;local.ref",
+    );
+    assert!(
+        source_executable(&compile(&source), "entry").is_err(),
+        "a pointer result cannot escape a dead local"
+    );
+    let source = prefix.replace(
+        "let value=true;let choice=Choice.left(value.ref);",
+        "let choice=do {let value=true;Choice.left(value.ref)};",
+    );
+    assert!(
+        source_executable(&compile(&source), "entry").is_err(),
+        "conditional origins cannot make a dead payload target live"
+    );
+}
+
+#[test]
+fn guard_copy_aggregate_arguments_preserve_pointer_dependencies() {
+    for (definition, body, constructor) in [
+        (
+            "struct View {target:*bool}impl Duplicate for View {}",
+            "value.target.*",
+            "View {target:flag.ref}",
+        ),
+        (
+            "struct Inner {target:*bool}impl Duplicate for Inner {}struct View {inner:Inner}impl Duplicate for View {}",
+            "value.inner.target.*",
+            "View {inner:Inner {target:flag.ref}}",
+        ),
+        (
+            "enum View {left(*bool),right(*bool)}impl Duplicate for View {}",
+            "value match {.left(p)=>p.*,.right(p)=>p.*}",
+            "View.left(flag.ref)",
+        ),
+        (
+            "enum View {left(*bool),right(*bool)}impl Duplicate for View {}",
+            "value match {.left(p)=>p.*,.right(p)=>p.*}",
+            "View.right(flag.ref)",
+        ),
+    ] {
+        let prefix = format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}{definition}fn read(value:View)->bool {{{body}}}fn selected(p:*View)->bool {{false match {{_ if read(p.*)=>true,_=>false}}}}"
+        );
+        for (flag, borrowed) in [false, true]
+            .into_iter()
+            .flat_map(|flag| [false, true].map(|borrowed| (flag, borrowed)))
+        {
+            let source = format!(
+                "{prefix}fn entry()->bool {{let flag={flag};let value={constructor};selected(value.ref)}}"
+            );
+            let source = if borrowed {
+                source
+            } else {
+                source
+                    .replace("selected(p:*View)", "selected(p:View)")
+                    .replace("read(p.*)", "read(p)")
+                    .replace("selected(value.ref)", "selected(value)")
+            };
+            let package = compile(&source);
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{constructor}/{flag}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_aggregate_arguments_do_not_hide_copy_effect_or_lifetime_obligations() {
+    let prefix="trait Duplicate {}trait Retire {fn drop(*self);}
+        struct View {target:*bool}impl Duplicate for View {}
+        struct Token {value:bool}
+        fn read(value:View)->bool {value.target.*}
+        fn selected(p:*View)->bool {false match {_ if read(p.*)=>true,_=>false}}
+        fn entry()->bool {let token=Token {value:true};let value=View {target:token.value.ref};selected(value.ref)}";
+    let reason = source_executable(
+        &compile(&prefix.replace("impl Duplicate for View {}", "")),
+        "entry",
+    )
+    .unwrap_err();
+    assert!(
+        reason.contains("Copy") || reason.contains("copy"),
+        "{reason}"
+    );
+    for body in ["value.target.* = false;true", "assumes value.target.*;true"] {
+        let source = prefix.replace("{value.target.*}", &format!("{{{body}}}"));
+        let reason = source_executable(&compile(&source), "entry").unwrap_err();
+        assert!(
+            reason.contains("guard") || reason.contains("observation"),
+            "{body}: {reason}"
+        );
+    }
+    let source = prefix.replace(
+        "selected(value.ref)",
+        "do {let moved=token;selected(value.ref)}",
+    );
+    let reason = source_executable(&compile(&source), "entry").unwrap_err();
+    assert!(
+        reason.contains("unavailable") || reason.contains("Moved"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn guard_constructed_pointer_aggregates_preserve_observation_dependencies() {
+    for (definition, body, construction) in [
+        (
+            "struct View {target:*bool}impl Duplicate for View {}",
+            "value.target.*",
+            "View {target:p}",
+        ),
+        (
+            "enum View {left(*bool),right(*bool)}impl Duplicate for View {}",
+            "value match {.left(p)=>p.*,.right(p)=>p.*}",
+            "View.left(p)",
+        ),
+        (
+            "enum View {left(*bool),right(*bool)}impl Duplicate for View {}",
+            "value match {.left(p)=>p.*,.right(p)=>p.*}",
+            "View.right(p)",
+        ),
+    ] {
+        for condition in [
+            format!("read({construction})"),
+            format!("do {{let view={construction};read(view)}}"),
+        ] {
+            for flag in [false, true] {
+                let source = format!(
+                    "trait Duplicate {{}}trait Retire {{fn drop(*self);}}{definition}fn read(value:View)->bool {{{body}}}fn selected(p:*bool)->bool {{false match {{_ if {condition}=>true,_=>false}}}}fn entry()->bool {{let flag={flag};selected(flag.ref)}}"
+                );
+                let package = compile(&source);
+                assert_eq!(
+                    luna::execution::interpret_with_protocols(
+                        &package,
+                        "entry",
+                        "Duplicate",
+                        "Retire",
+                        1_000_000
+                    )
+                    .unwrap_or_else(|e| panic!("{condition}/{flag}: {e}")),
+                    comptime_interpretor::Value::Bool(flag)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn guard_constructed_pointer_owners_require_readonly_cleanup() {
+    let prefix="trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}
+        fn make(p:*bool)->Watch {Watch {target:p}}
+        fn read(watch:Watch)->bool {watch.target.*}
+        fn selected(p:*bool)->bool {false match {_ if do {let watch=Watch {target:p};p.*}=>true,_=>false}}";
+    for (flag, condition) in [false, true].into_iter().flat_map(|flag| {
+        [
+            "do {let watch=Watch {target:p};p.*}",
+            "read(Watch {target:p})",
+            "read(make(p))",
+            "do {let watch=make(p);read(watch)}",
+        ]
+        .map(|condition| (flag, condition))
+    }) {
+        let source = format!("{prefix}fn entry()->bool {{let flag={flag};selected(flag.ref)}}")
+            .replace("do {let watch=Watch {target:p};p.*}", condition);
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm =
+            comptime_interpretor::Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            comptime_interpretor::Value::Bool(flag)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events())
+                .iter()
+                .filter(|name| name.as_str() == "drop Watch")
+                .count(),
+            1
+        );
+    }
+    for cleanup in ["self.target.*.* = false;", "assumes false;"] {
+        let source = prefix.replace("let seen=self.target.*.*;", cleanup);
+        let package = compile(&format!(
+            "{source}fn entry()->bool {{let flag=true;selected(flag.ref)}}"
+        ));
+        let reason = source_executable(&package, "entry").unwrap_err();
+        assert!(
+            reason.contains("observation") || reason.contains("guard"),
+            "{cleanup}: {reason}"
+        );
+    }
+    for source in [
+        prefix
+            .replace(
+                "fn selected(p:*bool)->bool {false match",
+                "fn selected(p:*bool)->bool {let watch=Watch {target:p};false match",
+            )
+            .replace("do {let watch=Watch {target:p};p.*}", "read(watch)"),
+        prefix
+            .replace(
+                "fn make(p:*bool)->Watch {Watch {target:p}}",
+                "fn make(p:*bool)->Watch {p.* = false;Watch {target:p}}",
+            )
+            .replace("do {let watch=Watch {target:p};p.*}", "read(make(p))"),
+    ] {
+        let package = compile(&format!(
+            "{source}fn entry()->bool {{let flag=true;selected(flag.ref)}}"
+        ));
+        let reason = source_executable(&package, "entry").unwrap_err();
+        assert!(
+            reason.contains("guard") || reason.contains("observation"),
+            "{reason}"
+        );
+    }
+    let source = format!(
+        "{prefix}struct Token {{value:bool}}fn entry()->bool {{let token=Token {{value:true}};let p=token.value.ref;let moved=token;selected(p)}}"
+    );
+    assert!(source_executable(&compile(&source), "entry").is_err());
+}
+
+#[test]
+fn guard_defaults_read_prior_pointer_aggregate_arguments() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct View {target:*bool}impl Duplicate for View {}
+        fn observe(p:*bool)->bool {p.*}
+        fn read(view:View,.answer:bool=view.target.*,.again:bool=answer)->bool {again}
+        fn selected(p:*View)->bool {false match {_ if read(p.*)=>true,_=>false}}";
+    for expression in ["view.target.*", "observe(view.target)"] {
+        for flag in [false, true] {
+            for explicit in [false, true] {
+                let prefix = prefix.replace(
+                    ".answer:bool=view.target.*",
+                    &format!(".answer:bool={expression}"),
+                );
+                let source = format!(
+                    "{prefix}fn entry()->bool {{let flag={flag};let view=View {{target:flag.ref}};selected(view.ref)}}"
+                );
+                let source = if explicit {
+                    source.replace("read(p.*)", "read(p.*,.answer=false)")
+                } else {
+                    source
+                };
+                let package = compile(&source);
+                assert_eq!(
+                    luna::execution::interpret_with_protocols(
+                        &package,
+                        "entry",
+                        "Duplicate",
+                        "Retire",
+                        1_000_000
+                    )
+                    .unwrap_or_else(|e| panic!("{expression}/{flag}/{explicit}: {e}")),
+                    comptime_interpretor::Value::Bool(flag && !explicit)
+                );
+            }
+        }
+    }
+    let source = format!(
+        "{prefix}struct Token {{value:bool}}fn entry()->bool {{let token=Token {{value:true}};let view=View {{target:token.value.ref}};let moved=token;selected(view.ref)}}"
+    );
+    let reason = source_executable(&compile(&source), "entry").unwrap_err();
+    assert!(
+        reason.contains("unavailable") || reason.contains("Moved"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn guard_defaults_read_prior_pointer_arguments() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        fn read(p:*bool,.answer:bool=p.*)->bool {answer}
+        fn selected(p:*bool)->bool {false match {_ if read(p)=>true,_=>false}}";
+    for flag in [false, true] {
+        let package = compile(&format!(
+            "{prefix}fn entry()->bool {{let flag={flag};selected(flag.ref)}}"
+        ));
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(flag)
+        );
+    }
+}
+
+#[test]
+fn guard_defaults_preserve_enum_payload_pointer_premises() {
+    for variant in ["left", "right"] {
+        for flag in [false, true] {
+            let source=format!("trait Copy {{}}trait Drop {{fn drop(*self);}}
+                enum View {{left(*bool),right(*bool)}}impl Copy for View {{}}
+                fn observe(view:View)->bool {{view match {{.left(p)=>p.*,.right(p)=>p.*}}}}
+                fn read(view:View,.answer:bool=observe(view))->bool {{answer}}
+                fn selected(p:*View)->bool {{false match {{_ if read(p.*)=>true,_=>false}}}}
+                fn entry()->bool {{let flag={flag};let view=View.{variant}(flag.ref);selected(view.ref)}}");
+            let package = finite_default_support::compile_with_source_bindings(
+                &source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    copy: Some("input::Copy"),
+                    drop: Some("input::Drop"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                luna::execution::interpret_with_protocols_in_package(
+                    &package, 0, "entry", "Copy", "Drop", 1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{variant}/{flag}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+            if flag {
+                let bad = source.replace(".left(p)=>p.*", ".left(p)=>do {p.* = false;true}");
+                let reason = finite_default_support::compile_with_source_bindings(
+                    &bad,
+                    &Default::default(),
+                    luna::protocols::type_constructors::Selectors {
+                        copy: Some("input::Copy"),
+                        drop: Some("input::Drop"),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+                assert!(
+                    reason.contains("P3 stability/termination evidence"),
+                    "{reason}"
+                );
+                let bad = source
+                    .replace(
+                        "fn entry()->bool {let flag=true;",
+                        "struct Token {value:bool}fn entry()->bool {let token=Token {value:true};",
+                    )
+                    .replace(
+                        "(flag.ref);selected(view.ref)",
+                        "(token.value.ref);let moved=token;selected(view.ref)",
+                    );
+                let package = finite_default_support::compile_with_source_bindings(
+                    &bad,
+                    &Default::default(),
+                    luna::protocols::type_constructors::Selectors {
+                        copy: Some("input::Copy"),
+                        drop: Some("input::Drop"),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let reason = luna::execution::interpret_with_protocols_in_package(
+                    &package, 0, "entry", "Copy", "Drop", 1_000_000,
+                )
+                .unwrap_err();
+                assert!(
+                    reason.contains("unavailable") || reason.contains("Moved"),
+                    "{reason}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn guard_default_pointer_results_feed_later_defaults() {
+    for defaults in [
+        ".target:*bool=p,.answer:bool=target.*",
+        ".target:*bool=choose(p),.answer:bool=target.*",
+        ".target:*bool=do {let observed=p.*;p},.answer:bool=target.*",
+        ".target:*bool=do {let target=choose(p);target},.answer:bool=target.*",
+    ] {
+        for flag in [false, true] {
+            let source = format!(
+                "trait Duplicate {{}}trait Retire {{fn drop(*self);}}fn choose(p:*bool)->*bool {{p}}fn read(p:*bool,{defaults})->bool {{answer}}fn selected(p:*bool)->bool {{false match {{_ if read(p)=>true,_=>false}}}}fn entry()->bool {{let flag={flag};selected(flag.ref)}}"
+            );
+            let package = compile(&source);
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{defaults}/{flag}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_default_aggregate_results_feed_later_defaults() {
+    for default in ["View {target:p}", "make(p)"] {
+        for flag in [false, true] {
+            let source = format!(
+                "trait Copy {{}}trait Drop {{fn drop(*self);}}struct View {{target:*bool}}impl Copy for View {{}}fn make(p:*bool)->View {{View {{target:p}}}}fn read(p:*bool,.view:View={default},.answer:bool=view.target.*)->bool {{answer}}fn selected(p:*bool)->bool {{false match {{_ if read(p)=>true,_=>false}}}}fn entry()->bool {{let flag={flag};selected(flag.ref)}}"
+            );
+            let package = finite_default_support::compile_with_source_bindings(
+                &source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    copy: Some("input::Copy"),
+                    drop: Some("input::Drop"),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{default}/{flag}: {e}"));
+            assert_eq!(
+                luna::execution::interpret_with_protocols_in_package(
+                    &package, 0, "entry", "Copy", "Drop", 1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{default}/{flag}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_constructed_views_can_borrow_available_values() {
+    for condition in [
+        "read_pointer(flag.ref)",
+        "read(View {target:holder.flag.ref})",
+        "read(View {target:flag.ref})",
+        "do {let local=flag;read(View {target:local.ref})}",
+    ] {
+        for flag in [false, true] {
+            let source = format!(
+                "trait Duplicate {{}}trait Retire {{fn drop(*self);}}struct Holder {{flag:bool}}struct View {{target:*bool}}impl Duplicate for View {{}}fn read_pointer(p:*bool)->bool {{p.*}}fn read(view:View)->bool {{view.target.*}}fn entry()->bool {{let flag={flag};let holder=Holder {{flag:flag}};false match {{_ if {condition}=>true,_=>false}}}}"
+            );
+            let package = compile(&source);
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{condition}/{flag}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_address_construction_does_not_restore_dead_storage_or_allow_writes() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Holder {flag:bool}struct View {target:*bool}impl Duplicate for View {}
+        fn read(view:View)->bool {view.target.*}";
+    for condition in [
+        "read(do {let local=true;View {target:local.ref}})",
+        "do {let moved=holder;read(View {target:holder.flag.ref})}",
+    ] {
+        let source = format!(
+            "{prefix}fn entry()->bool {{let holder=Holder {{flag:true}};false match {{_ if {condition}=>true,_=>false}}}}"
+        );
+        assert!(
+            source_executable(&compile(&source), "entry").is_err(),
+            "{condition}"
+        );
+    }
+    let source=format!("{prefix}fn entry()->bool {{let holder=Holder {{flag:true}};false match {{_ if read(View {{target:holder.flag.ref}})=>true,_=>false}}}}").replace("{view.target.*}","{view.target.* = false;true}");
+    let reason = source_executable(&compile(&source), "entry").unwrap_err();
+    assert!(
+        reason.contains("guard") || reason.contains("observation"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn guard_pointer_blocks_preserve_outer_lifetimes() {
+    for flag in [false, true] {
+        for pointer in [
+            "do {let seen=flag;flag.ref}",
+            "do {var repeat=true;while repeat {repeat=false;}flag.ref}",
+            "do {let seen=flag;do {let other=seen;flag.ref}}",
+            "do {let seen=flag;if seen {flag.ref} else {holder.flag.ref}}",
+            "do {let seen=flag;holder.flag.ref}",
+            "do {let target=flag.ref;target}",
+            "do {var target=other.ref;target=flag.ref;target}",
+        ] {
+            let source = format!(
+                "trait Duplicate {{}}trait Retire {{fn drop(*self);}}fn read(p:*bool)->bool {{p.*}}struct Holder {{flag:bool}}fn entry()->bool {{let flag={flag};let other=not flag;let holder=Holder {{flag:flag}};false match {{_ if read({pointer})=>true,_=>false}}}}"
+            );
+            let package = compile(&source);
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{pointer}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+    let package = compile(
+        "trait Duplicate {}trait Retire {fn drop(*self);}fn read(p:*bool)->bool {p.*}fn entry()->bool {false match {_ if read(do {let local=true;local.ref})=>true,_=>false}}",
+    );
+    assert!(source_executable(&package, "entry").is_err());
+}
+
+#[test]
+fn guard_pointer_locals_preserve_escape_move_and_write_checks() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Holder {flag:bool}fn read(p:*bool)->bool {p.*}";
+    for body in [
+        "let holder=Holder {flag:true};false match {_ if read(do {let local=true;let target=local.ref;target})=>true,_=>false}",
+        "let holder=Holder {flag:true};false match {_ if read(do {var target=holder.flag.ref;let local=true;target=local.ref;target})=>true,_=>false}",
+        "let holder=Holder {flag:true};let target=holder.flag.ref;let moved=holder;false match {_ if read(do {let alias=target;alias})=>true,_=>false}",
+        "var holder=Holder {flag:true};false match {_ if read(do {let target=holder.flag.ref;target.* = false;target})=>true,_=>false}",
+        "let holder=Holder {flag:true};var target=holder.flag.ref;false match {_ if read(do {target=holder.flag.ref;target})=>true,_=>false}",
+    ] {
+        let package = compile(&format!("{prefix}fn entry()->bool {{{body}}}"));
+        assert!(
+            source_executable(&package, "entry").is_err(),
+            "accepted {body}"
+        );
+    }
+}
+
+#[test]
+fn guard_pointer_match_results_preserve_selection() {
+    for flag in [false, true] {
+        for expression in [
+            "flag match {true=>yes.ref,false=>no.ref}",
+            "flag match {value if value=>yes.ref,_=>no.ref}",
+            "flag match {true=>do {let target=yes.ref;target},false=>do {let target=no.ref;target}}",
+        ] {
+            let package = compile(&format!(
+                "trait Duplicate {{}}trait Retire {{fn drop(*self);}}fn read(p:*bool)->bool {{p.*}}fn entry()->bool {{let flag={flag};let yes=true;let no=false;false match {{_ if read({expression})=>true,_=>false}}}}"
+            ));
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{expression}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_pointer_matches_preserve_payload_origins() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}enum Choice {left(*bool),right(*bool)}impl Duplicate for Choice {}fn read(p:*bool)->bool {p.*}fn selected(p:*Choice)->bool {false match {_ if read(p.* match {.left(target)=>target,.right(target)=>target})=>true,_=>false}}";
+    for variant in ["left", "right"] {
+        for flag in [false, true] {
+            let package = compile(&format!(
+                "{prefix}fn entry()->bool {{let flag={flag};let choice=Choice.{variant}(flag.ref);selected(choice.ref)}}"
+            ));
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{variant}/{flag}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+    let package = compile(&format!(
+        "{prefix}struct Token {{flag:bool}}fn entry()->bool {{let token=Token {{flag:true}};let choice=Choice.left(token.flag.ref);let moved=token;selected(choice.ref)}}"
+    ));
+    assert!(source_executable(&package, "entry").is_err());
+}
+
+#[test]
+fn guard_pointer_matches_reject_escapes_and_external_mutation() {
+    for expression in [
+        "flag match {true=>do {let local=true;local.ref},false=>outside.ref}",
+        "flag match {true=>do {outside=false;outside.ref},false=>outside.ref}",
+        "flag match {value if do {outside=false;value}=>outside.ref,_=>outside.ref}",
+    ] {
+        let package = compile(&format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}fn read(p:*bool)->bool {{p.*}}fn entry(flag:bool)->bool {{var outside=true;false match {{_ if read({expression})=>true,_=>false}}}}"
+        ));
+        assert!(
+            source_executable(&package, "entry").is_err(),
+            "accepted {expression}"
+        );
+    }
+}
+
+#[test]
+fn guard_pointer_matches_distinguish_private_and_caller_owned_inputs() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}enum Choice {left(*bool),right(*bool)}fn read(p:*bool)->bool {p.*}";
+    for variant in ["left", "right"] {
+        for flag in [false, true] {
+            let source = format!(
+                "{prefix}fn entry()->bool {{let flag={flag};false match {{_ if read(Choice.{variant}(flag.ref) match {{.left(target)=>target,.right(target)=>target}})=>true,_=>false}}}}"
+            );
+            let package = compile(&source);
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{variant}/{flag}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+            let source = format!(
+                "{prefix}fn entry()->bool {{let flag={flag};let choice=Choice.{variant}(flag.ref);false match {{_ if read(choice match {{.left(target)=>target,.right(target)=>target}})=>true,_=>false}}}}"
+            );
+            assert!(
+                source_executable(&compile(&source), "entry").is_err(),
+                "guard consumed caller-owned Choice"
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_pointer_newtypes_preserve_borrowed_targets() {
+    for flag in [false, true] {
+        for pointer in [
+            "wrapped.as(*bool)",
+            "flag.ref.as(Ref).as(*bool)",
+            "do {let copy=wrapped;copy.as(*bool)}",
+        ] {
+            let package = compile(&format!(
+                "trait Duplicate {{}}trait Retire {{fn drop(*self);}}newtype Ref=*bool;impl Duplicate for Ref {{}}fn read(p:*bool)->bool {{p.*}}fn entry()->bool {{let flag={flag};let wrapped=flag.ref.as(Ref);false match {{_ if read({pointer})=>true,_=>false}}}}"
+            ));
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{pointer}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_newtype_conversions_require_copy_for_external_owners() {
+    for repr in ["bool", "*bool"] {
+        let value = if repr == "bool" { "flag" } else { "flag.ref" };
+        let predicate = if repr == "bool" {
+            "wrapped.as(bool)"
+        } else {
+            "read(wrapped.as(*bool))"
+        };
+        let prefix = format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}newtype Wrapped={repr};fn read(p:*bool)->bool {{p.*}}"
+        );
+        for flag in [false, true] {
+            let source = format!(
+                "{prefix}impl Duplicate for Wrapped {{}}fn entry()->bool {{let flag={flag};let wrapped={value}.as(Wrapped);false match {{_ if {predicate}=>true,_=>false}}}}"
+            );
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &compile(&source),
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{repr}/{flag}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+            let source = source.replace("impl Duplicate for Wrapped {}", "");
+            assert!(
+                source_executable(&compile(&source), "entry").is_err(),
+                "conversion consumed external {repr} owner"
+            );
+            let private = source.replace(
+                predicate,
+                &predicate.replace("wrapped", &format!("{value}.as(Wrapped)")),
+            );
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &compile(&private),
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("private {repr}/{flag}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_pointer_newtypes_reject_invalid_targets_and_writes() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}newtype Ref=*bool;impl Duplicate for Ref {}struct Token {value:bool}fn read(p:*bool)->bool {p.*}";
+    for body in [
+        "let wrapped=do {let local=true;local.ref.as(Ref)};false match {_ if read(wrapped.as(*bool))=>true,_=>false}",
+        "let token=Token {value:true};let wrapped=token.value.ref.as(Ref);let moved=token;false match {_ if read(wrapped.as(*bool))=>true,_=>false}",
+        "let flag=true;let wrapped=flag.ref.as(Ref);false match {_ if do {let p=wrapped.as(*bool);p.* = false;true}=>true,_=>false}",
+    ] {
+        assert!(
+            source_executable(
+                &compile(&format!("{prefix}fn entry()->bool {{{body}}}")),
+                "entry"
+            )
+            .is_err(),
+            "accepted {body}"
+        );
+    }
+}
+
+#[test]
+fn guard_newtype_code_conversions_preserve_callable_identity() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn()->bool;impl Duplicate for Action {}newtype Wrapped=Action;impl Duplicate for Wrapped {}fn yes()->bool {true}fn no()->bool {false}";
+    for (name, expected) in [("yes", true), ("no", false)] {
+        for call in [
+            "wrapped.as(Action)()",
+            "do {let copy=wrapped;copy.as(Action)()}",
+        ] {
+            let source = format!(
+                "{prefix}fn entry()->bool {{let wrapped={name}.as(Wrapped);false match {{_ if {call}=>true,_=>false}}}}"
+            );
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &compile(&source),
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{name}/{call}: {e}")),
+                comptime_interpretor::Value::Bool(expected)
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_newtype_code_conversions_keep_call_obligations() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn()->bool;impl Duplicate for Action {}newtype Wrapped=Action;impl Duplicate for Wrapped {}fn rejected()->bool {assumes false;true}fn yes()->bool {true}";
+    let rejected = format!(
+        "{prefix}fn entry()->bool {{let wrapped=rejected.as(Wrapped);false match {{_ if wrapped.as(Action)()=>true,_=>false}}}}"
+    );
+    assert!(source_executable(&compile(&rejected), "entry").is_err());
+    let missing_copy = rejected
+        .replace("impl Duplicate for Action {}", "")
+        .replace("let wrapped=rejected", "let wrapped=yes");
+    assert!(source_executable(&compile(&missing_copy), "entry").is_err());
+}
+
+#[test]
+fn guard_pointer_selection_preserves_call_and_cleanup_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Watch {target:*bool}
+        fn picked() {} fn retired() {} fn reading() {}
+        impl Retire for Watch {fn drop(*self) {let observed=self.target.*.*;retired();}}
+        inline fn choose(flag:bool,p:*bool)->*bool {
+            let watch=Watch {target:p};picked();
+            flag match {true=>p,false=>p}
+        }
+        fn read(p:*bool)->bool {reading();p.*}
+        fn selected()->bool {true} fn fallback()->bool {false}
+        fn entry(flag:bool)->bool {
+            let yes=true;
+            false match {
+                _ if read(choose(flag,flag.ref)) or read(choose(true,yes.ref))=>selected(),
+                _=>fallback(),
+            }
+        }";
+    for early_return in [false, true] {
+        let source = if early_return {
+            source.replace("flag match {true=>p,false=>p}", "if flag {return p;}p")
+        } else {
+            source.to_string()
+        };
+        for short_circuit in [false, true] {
+            let source = if short_circuit {
+                source.to_string()
+            } else {
+                source.replace(" or read(choose(true,yes.ref))", "")
+            };
+            let original = compile(&source);
+            for expanded in [false, true] {
+                let mut package = original.clone();
+                if expanded {
+                    assert!(
+                        elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                            .unwrap()
+                            .expanded
+                            > 0
+                    );
+                }
+                let executable = source_executable(&package, "entry")
+                    .unwrap_or_else(|e| panic!("expanded={expanded}: {e}"));
+                for flag in [false, true] {
+                    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                        .unwrap()
+                        .with_cleanup_schedule(&executable.schedule)
+                        .unwrap();
+                    assert_eq!(
+                        vm.invoke_instance(&executable.entry, vec![Value::Bool(flag)])
+                            .unwrap(),
+                        Value::Bool(flag || short_circuit)
+                    );
+                    let names = executed_names(&package, &executable, vm.events());
+                    let actual: Vec<_> = names
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|name| {
+                            matches!(
+                                *name,
+                                "picked" | "retired" | "reading" | "selected" | "fallback"
+                            )
+                        })
+                        .collect();
+                    let mut expected = vec!["picked", "retired", "reading"];
+                    if short_circuit && !flag {
+                        expected.extend(["picked", "retired", "reading"]);
+                    }
+                    expected.push(if flag || short_circuit {
+                        "selected"
+                    } else {
+                        "fallback"
+                    });
+                    assert_eq!(
+                        actual, expected,
+                        "expanded={expanded},flag={flag},short_circuit={short_circuit}: {names:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn inline_guard_pointer_returns_keep_cleanup_and_escape_obligations() {
+    let source = "trait Duplicate {}trait Retire {fn drop(*self);}struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}inline fn choose(flag:bool,p:*bool)->*bool {let watch=Watch {target:p};if flag {return p;}p}fn read(p:*bool)->bool {p.*}fn entry(flag:bool)->bool {false match {_ if read(choose(flag,flag.ref))=>true,_=>false}}";
+    for invalid in [
+        source.replace("let seen=self.target.*.*;", "self.target.*.* = false;"),
+        source.replace("let seen=self.target.*.*;", "assumes false;"),
+        source.replace("return p;", "let local=true;return local.ref;"),
+    ] {
+        let original = compile(&invalid);
+        for expanded in [false, true] {
+            let mut package = original.clone();
+            if expanded {
+                assert!(
+                    elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                        .unwrap()
+                        .expanded
+                        > 0
+                );
+            }
+            assert!(
+                source_executable(&package, "entry").is_err(),
+                "accepted expanded={expanded}: {invalid}"
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_private_record_fields_can_be_updated() {
+    for flag in [false, true] {
+        for body in [
+            "var view=View {value:not flag};view.value=flag;view.value",
+            "var outer=Outer {view:View {value:not flag}};outer.view.value=flag;outer.view.value",
+        ] {
+            let package = compile(&format!(
+                "trait Duplicate {{}}trait Retire {{fn drop(*self);}}struct View {{value:bool}}struct Outer {{view:View}}fn entry()->bool {{let flag={flag};false match {{_ if do {{{body}}}=>true,_=>false}}}}"
+            ));
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{body}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_private_pointer_field_updates_preserve_provenance() {
+    for flag in [false, true] {
+        for body in [
+            "var view=View {target:other.ref};view.target=flag.ref;view.target.*",
+            "var view=View {target:other.ref};let saved=view.target;view.target=flag.ref;saved.*",
+        ] {
+            let package = compile(&format!(
+                "trait Duplicate {{}}trait Retire {{fn drop(*self);}}struct View {{target:*bool}}fn entry()->bool {{let flag={flag};let other=not flag;false match {{_ if do {{{body}}}=>true,_=>false}}}}"
+            ));
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{body}: {e}")),
+                comptime_interpretor::Value::Bool(if body.contains("saved") {
+                    !flag
+                } else {
+                    flag
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_private_field_updates_do_not_authorize_external_writes() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct View {target:*bool}struct Owned {value:bool}";
+    for body in [
+        "var outside=Owned {value:true};false match {_ if do {outside.value=false;true}=>true,_=>false}",
+        "let flag=true;false match {_ if do {let view=View {target:flag.ref};view.target.* = false;true}=>true,_=>false}",
+        "let owned=Owned {value:true};let target=owned.value.ref;let moved=owned;false match {_ if do {var view=View {target:target};view.target=target;view.target.*}=>true,_=>false}",
+    ] {
+        assert!(
+            source_executable(
+                &compile(&format!("{prefix}fn entry()->bool {{{body}}}")),
+                "entry"
+            )
+            .is_err(),
+            "accepted {body}"
+        );
+    }
+}
+
+#[test]
+fn guard_private_field_replacement_retires_each_owner_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {}trait Retire {fn drop(*self);}struct Held {value:bool}struct Container {item:Held}fn retired() {}fn inspected() {}fn selected()->bool {true}fn fallback()->bool {false}impl Retire for Held {fn drop(*self) {retired();}}fn inspect(value:bool)->bool {inspected();value}fn entry(flag:bool)->bool {false match {_ if do {var container=Container {item:Held {value:not flag}};container.item=Held {value:flag};inspect(container.item.value)}=>selected(),_=>fallback()}}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    for flag in [false, true] {
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![Value::Bool(flag)])
+                .unwrap(),
+            Value::Bool(flag)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        let actual: Vec<_> = names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| matches!(*name, "retired" | "inspected" | "selected" | "fallback"))
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                "retired",
+                "inspected",
+                "retired",
+                if flag { "selected" } else { "fallback" }
+            ],
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn guard_private_callback_field_updates_use_current_identity() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn()->bool;impl Duplicate for Action {}struct View {action:Action}fn yes()->bool {true}fn no()->bool {false}";
+    for (before, after, expected) in [("yes", "no", false), ("no", "yes", true)] {
+        for body in ["view.action()", "saved()"] {
+            let source = format!(
+                "{prefix}fn entry()->bool {{false match {{_ if do {{var view=View {{action:{before}}};let saved=view.action;view.action={after};{body}}}=>true,_=>false}}}}"
+            );
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &compile(&source),
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{before}/{after}/{body}: {e}")),
+                comptime_interpretor::Value::Bool(if body == "saved()" {
+                    !expected
+                } else {
+                    expected
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_private_callback_updates_preserve_rejection_evidence() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn()->bool;impl Duplicate for Action {}struct View {action:Action}fn yes()->bool {true}fn rejected()->bool {assumes false;true}";
+    let safe = format!(
+        "{prefix}fn entry()->bool {{false match {{_ if do {{var view=View {{action:rejected}};view.action=yes;view.action()}}=>true,_=>false}}}}"
+    );
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &compile(&safe),
+            "entry",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    for body in [
+        "var view=View {action:yes};view.action=rejected;view.action()",
+        "var view=View {action:rejected};let saved=view.action;view.action=yes;saved()",
+    ] {
+        let source = format!(
+            "{prefix}fn entry()->bool {{false match {{_ if do {{{body}}}=>true,_=>false}}}}"
+        );
+        assert!(
+            source_executable(&compile(&source), "entry").is_err(),
+            "accepted {body}"
+        );
+    }
+}
+
+#[test]
+fn guard_cleanup_reads_follow_private_pointer_rebinding() {
+    for flag in [false, true] {
+        let package = compile(&format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}struct Watch {{target:*bool}}impl Retire for Watch {{fn drop(*self) {{let seen=self.target.*.*;}}}}fn observe(first:*bool,last:*bool)->bool {{var target=first;target=last;let watch=Watch {{target:target}};target.*}}fn entry()->bool {{let first={};let last={flag};false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}",
+            !flag
+        ));
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(flag)
+        );
+    }
+}
+
+#[test]
+fn guard_rebinding_preserves_prior_cleanup_targets() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}fn observe(first:*bool,last:*bool)->bool {var target=first;let old=Watch {target:target};target=last;let new=Watch {target:target};target.*}";
+    for flag in [false, true] {
+        let source = format!(
+            "{prefix}fn entry()->bool {{let first={};let last={flag};false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}",
+            !flag
+        );
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &compile(&source),
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(flag)
+        );
+    }
+    for argument in ["first", "last"] {
+        let source = format!(
+            "{prefix}struct Token {{value:bool}}fn entry()->bool {{let first=Token {{value:false}};let last=Token {{value:true}};let a=first.value.ref;let b=last.value.ref;let moved={argument};false match {{_ if observe(a,b)=>true,_=>false}}}}"
+        );
+        assert!(
+            source_executable(&compile(&source), "entry").is_err(),
+            "lost cleanup dependency on {argument}"
+        );
+    }
+}
+
+#[test]
+fn guard_cleanup_rebinding_keeps_aliased_slots_conservative() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}";
+    for body in [
+        "var target=first;let slot=target.ref;target=last;let watch=Watch {target:target};slot.*.*",
+        "var target=first;target=last;let slot=target.ref;let watch=Watch {target:target};slot.*.*",
+    ] {
+        let source = format!(
+            "{prefix}fn observe(first:*bool,last:*bool)->bool {{{body}}}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}"
+        );
+        assert!(
+            source_executable(&compile(&source), "entry").is_err(),
+            "aliased pointer slot lacks transition proof: {body}"
+        );
+    }
+}
+
+#[test]
+fn guard_cleanup_reads_follow_private_pointer_field_updates() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}fn observe(first:*bool,last:*bool)->bool {var watch=Watch {target:first};watch.target=last;true}";
+    let source = format!(
+        "{prefix}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}"
+    );
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &compile(&source),
+            "entry",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn private_field_updates_publish_new_cleanup_reads() {
+    use elaboration::verification::{drop::CleanupSession, memory};
+    use std::collections::BTreeMap;
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Watch {target:*bool}struct Outer {watch:Watch}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}";
+    for body in [
+        "var watch=Watch {target:first};watch.target=last;true",
+        "var outer=Outer {watch:Watch {target:first}};outer.watch.target=last;true",
+        "var outer=Outer {watch:Watch {target:first}};outer.watch=Watch {target:last};true",
+        "var watch=Watch {target:first};if first.* {watch.target=last;}true",
+        "var watch=Watch {target:first};var repeat=true;while repeat {watch.target=last;repeat=false;}true",
+        "var watch=Watch {target:first};while first.* {watch.target=last;break;}true",
+        "var watch=Watch {target:first};let slot=watch.target.ref;slot.* = last;true",
+        "var target=first;let slot=target.ref;slot.* = last;let watch=Watch {target:target};true",
+    ] {
+        let source = format!("{prefix}fn observe(first:*bool,last:*bool)->bool {{{body}}}");
+        let package = compile(&source);
+        world(&package, |world, _| {
+            let protocol = package
+                .traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration;
+            let function = package
+                .functions
+                .iter()
+                .find(|f| f.name == "observe")
+                .unwrap()
+                .declaration;
+            let mut cleanup = CleanupSession::new(&package, world, protocol, Budget::default());
+            let summary = memory::infer_with_borrowed_callable_inputs_and_cleanup(
+                &package,
+                function,
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                &BTreeMap::new(),
+                Some(&mut cleanup),
+                &mut 100_000,
+            )
+            .unwrap_or_else(|e| panic!("{body}: {e}"));
+            assert!(!summary.may_run_cleanup, "{summary}");
+            assert!(summary.accesses.iter().all(|a| !a.write), "{summary}");
+            assert!(
+                summary.accesses.iter().any(|a| a.target.parameter == 1
+                    && a.target.through.is_empty()
+                    && a.read_value
+                    && a.ty == nir::Term::Primitive(nir::Primitive::Bool)),
+                "new target missing from cleanup footprint: {summary}"
+            );
+        });
+        for first in [false, true] {
+            let valid = format!(
+                "{source}fn entry()->bool {{let first={first};let last=not first;false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}"
+            );
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &compile(&valid),
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{body}/{first}: {e}")),
+                comptime_interpretor::Value::Bool(true)
+            );
+        }
+        let invalid = format!(
+            "{source}struct Token {{value:bool}}fn entry()->bool {{let first=false;let token=Token {{value:true}};let target=token.value.ref;let moved=token;false match {{_ if observe(first.ref,target)=>true,_=>false}}}}"
+        );
+        assert!(
+            source_executable(&compile(&invalid), "entry").is_err(),
+            "accepted stale new target: {body}"
+        );
+    }
+}
+
+#[test]
+fn private_cleanup_field_updates_keep_addressed_roots_conservative() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}";
+    for body in [
+        "var watch=Watch {target:first};let alias=watch.target.ref;watch.target=last;alias.*.*",
+        "var watch=Watch {target:first};watch.target=last;let alias=watch.target.ref;alias.*.*",
+    ] {
+        let source = format!(
+            "{prefix}fn observe(first:*bool,last:*bool)->bool {{{body}}}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}"
+        );
+        assert!(
+            source_executable(&compile(&source), "entry").is_err(),
+            "addressed root lacks transition proof: {body}"
+        );
+    }
+}
+
+#[test]
+fn destructured_private_pointer_updates_compose_cleanup_reads() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}";
+    for body in [
+        "var (target,flag)=(first,false);target=last;let watch=Watch {target:target};target.*",
+        "var (watch,flag)=(Watch {target:first},false);watch.target=last;watch.target.*",
+        "var ((true,target) or (false,target))=(first.*,first);target=last;let watch=Watch {target:target};target.*",
+    ] {
+        for flag in [false, true] {
+            let source = format!(
+                "{prefix}fn observe(first:*bool,last:*bool)->bool {{{body}}}fn entry()->bool {{let first={};let last={flag};false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}",
+                !flag
+            );
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &compile(&source),
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{body}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn destructured_private_pointer_updates_keep_address_and_lifetime_checks() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}";
+    for body in [
+        "var (target,flag)=(first,false);let slot=target.ref;target=last;let watch=Watch {target:target};slot.*.*",
+        "var (watch,flag)=(Watch {target:first},false);let slot=watch.target.ref;watch.target=last;slot.*.*",
+    ] {
+        let source = format!(
+            "{prefix}fn observe(first:*bool,last:*bool)->bool {{{body}}}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}"
+        );
+        assert!(
+            source_executable(&compile(&source), "entry").is_err(),
+            "addressed destructured storage: {body}"
+        );
+    }
+    let source = format!(
+        "{prefix}struct Token {{value:bool}}fn observe(first:*bool,last:*bool)->bool {{var (watch,flag)=(Watch {{target:first}},false);watch.target=last;true}}fn entry()->bool {{let first=false;let token=Token {{value:true}};let last=token.value.ref;let moved=token;false match {{_ if observe(first.ref,last)=>true,_=>false}}}}"
+    );
+    assert!(source_executable(&compile(&source), "entry").is_err());
+}
+
+#[test]
+fn local_pointer_slot_writes_preserve_cleanup_dependencies() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}fn observe(first:*bool,last:*bool)->bool {var watch=Watch {target:first};let slot=watch.target.ref;slot.* = last;true}";
+    let source = format!(
+        "{prefix}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}"
+    );
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &compile(&source),
+            "entry",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn local_pointer_slot_writes_keep_saved_values_and_reject_external_targets() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}";
+    for flag in [false, true] {
+        let source = format!(
+            "{prefix}fn observe(first:*bool,last:*bool)->bool {{var watch=Watch {{target:first}};let saved=watch.target;let slot=watch.target.ref;slot.* = last;let old=Watch {{target:saved}};saved.*}}fn entry()->bool {{let first={flag};let last=not first;false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}"
+        );
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &compile(&source),
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(flag)
+        );
+    }
+    for body in [
+        "slot.* = last;let watch=Watch {target:last};true",
+        "var a=last;let chosen=if flag {a.ref} else {slot};chosen.* = last;let watch=Watch {target:a};true",
+    ] {
+        let source = format!(
+            "{prefix}fn observe(slot:**bool,last:*bool,flag:bool)->bool {{{body}}}fn entry(flag:bool)->bool {{let first=false;let last=true;var target=first.ref;false match {{_ if observe(target.ref,last.ref,flag)=>true,_=>false}}}}"
+        );
+        assert!(
+            source_executable(&compile(&source), "entry").is_err(),
+            "accepted unproved slot: {body}"
+        );
+    }
+}
+
+#[test]
+fn local_pointer_store_freezes_destination_before_rhs() {
+    for flag in [false, true] {
+        let source = format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}struct Watch {{target:*bool}}impl Retire for Watch {{fn drop(*self) {{let seen=self.target.*.*;}}}}fn observe(first:*bool,last:*bool)->bool {{var a=first;var b=first;var selected=a.ref;let destination=selected.ref;destination.*.* = do {{destination.* = b.ref;last}};let watch=Watch {{target:a}};a.*}}fn entry()->bool {{let first={};let last={flag};false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}",
+            !flag
+        );
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &compile(&source),
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(flag)
+        );
+    }
+}
+
+#[test]
+fn local_pointer_store_alternatives_preserve_unselected_values() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.*;}}";
+    for body in [
+        "var a=first;var b=first;let slot=if flag {a.ref} else {b.ref};slot.* = last;let wa=Watch {target:a};let wb=Watch {target:b};a.*",
+        "var a=Watch {target:first};var b=Watch {target:first};let slot=if flag {a.target.ref} else {b.target.ref};slot.* = last;a.target.*",
+    ] {
+        for flag in [false, true] {
+            let source = format!(
+                "{prefix}fn observe(first:*bool,last:*bool,flag:bool)->bool {{{body}}}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref,{flag})=>true,_=>false}}}}"
+            );
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &compile(&source),
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{body}/{flag}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn local_pointer_store_alternative_summaries_retain_old_and_new_origins() {
+    use elaboration::verification::{drop::CleanupSession, memory};
+    use std::collections::{BTreeMap, BTreeSet};
+    for body in [
+        "var a=first;var b=first;let slot=if flag {a.ref} else {b.ref};slot.* = last;a",
+        "var a=Cell {target:first};var b=Cell {target:first};let slot=if flag {a.target.ref} else {b.target.ref};slot.* = last;a.target",
+    ] {
+        let package = compile(&format!(
+            "trait Retire {{fn drop(*self);}}struct Cell {{target:*bool}}fn observe(first:*bool,last:*bool,flag:bool)->*bool {{{body}}}"
+        ));
+        world(&package, |world, _| {
+            let protocol = package
+                .traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration;
+            let function = package
+                .functions
+                .iter()
+                .find(|f| f.name == "observe")
+                .unwrap()
+                .declaration;
+            let mut cleanup = CleanupSession::new(&package, world, protocol, Budget::default());
+            let summary = memory::infer_with_borrowed_callable_inputs_and_cleanup(
+                &package,
+                function,
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                &BTreeMap::new(),
+                Some(&mut cleanup),
+                &mut 100_000,
+            )
+            .unwrap_or_else(|e| panic!("{body}: {e}"));
+            let parameters: BTreeSet<_> = summary
+                .result_targets
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|p| p.parameter)
+                .collect();
+            assert_eq!(parameters, BTreeSet::from([0, 1]), "{summary}");
+        });
+    }
+}
+
+#[test]
+fn guard_calls_support_private_bit_field_writeback() {
+    for nested in [false, true] {
+        for flag in [false, true] {
+            for write in [
+                "packet.word'bitvec[4..8]=0b1010",
+                "let i:.u8'builtin=4;packet.word'bitvec[i..(i + 4)]=0b1010",
+            ] {
+                let source = format!(
+                    "trait Duplicate {{}}trait Retire {{fn drop(*self);}}typealias Word=.u16'builtin;struct Packet {{word:Word}}fn observe(p:*bool)->bool {{var packet=Packet {{word:0x1234}};{write};packet.word == 0x12A4 and p.*}}fn entry()->bool {{let flag={flag};false match {{_ if observe(flag.ref)=>true,_=>false}}}}"
+                );
+                let source = if nested {
+                    source
+                        .replace(
+                            "struct Packet {word:Word}",
+                            "struct Packet {word:Word}struct Outer {packet:Packet}",
+                        )
+                        .replace(
+                            "var packet=Packet {word:0x1234}",
+                            "var outer=Outer {packet:Packet {word:0x1234}}",
+                        )
+                        .replace("packet.word", "outer.packet.word")
+                } else {
+                    source
+                };
+                for expanded in [false, true] {
+                    let mut package = compile(&source.replace("fn observe", "inline fn observe"));
+                    if expanded {
+                        assert!(
+                            elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                                .unwrap()
+                                .expanded
+                                > 0
+                        );
+                    }
+                    assert_eq!(
+                        luna::execution::interpret_with_protocols(
+                            &package,
+                            "entry",
+                            "Duplicate",
+                            "Retire",
+                            1_000_000
+                        )
+                        .unwrap_or_else(|e| panic!("{write}: {e}")),
+                        comptime_interpretor::Value::Bool(flag)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn guard_bit_field_writeback_keeps_operand_effect_checks() {
+    for write in [
+        "packet.word'bitvec[4..8]=do {p.* = false;0b1010}",
+        "packet.word'bitvec[do {p.* = false;let i:.u8'builtin=4;i}]=1",
+        "let i:.u8'builtin=4;packet.word'bitvec[i..(i + 4)]=do {assumes p.*;0b1010}",
+        "packet.word'bitvec[do {assumes p.*;let i:.u8'builtin=4;i}]=1",
+    ] {
+        let source = format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}typealias Word=.u16'builtin;struct Packet {{word:Word}}fn observe(p:*bool)->bool {{var packet=Packet {{word:0x1234}};{write};true}}fn entry()->bool {{let flag=true;false match {{_ if observe(flag.ref)=>true,_=>false}}}}"
+        );
+        let reason = source_executable(&compile(&source), "entry").unwrap_err();
+        assert!(
+            reason.contains("guard") || reason.contains("observation"),
+            "{write}: {reason}"
+        );
+    }
+}
+
+#[test]
+fn guard_dynamic_bit_reads_keep_range_verification() {
+    for read in [
+        "let i:.u8'builtin=4;let part=bits[i..(i + 4)];part == 0b1010",
+        "let i:.u8'builtin=7;let part=bits[i];part == 1",
+    ] {
+        for flag in [false, true] {
+            let source = format!(
+                "trait Duplicate {{}}trait Retire {{fn drop(*self);}}fn observe(p:*bool)->bool {{let bits:.BitVec'builtin<16> = 0x12A4;let selected=do {{{read}}};selected and p.*}}fn entry()->bool {{let flag={flag};false match {{_ if observe(flag.ref)=>true,_=>false}}}}"
+            );
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &compile(&source),
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{read}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_private_pointer_writes_survive_inline_expansion() {
+    for body in [
+        "var local=false;let slot=local.ref;slot.* = flag;local",
+        "var a=false;var b=false;let slot=if flag {a.ref} else {b.ref};slot.* = true;a",
+        "var packet=Packet {flag:false};let slot=packet.flag.ref;slot.* = flag;packet.flag",
+        "let first=false;let last=flag;var target=first.ref;let slot=target.ref;slot.* = last.ref;target.*",
+        "var word:.u16'builtin=0;let slot=word.ref;slot.*'bitvec[4..8]=0b1010;word == 160 and flag",
+    ] {
+        for flag in [false, true] {
+            let source = format!(
+                "trait Duplicate {{}}trait Retire {{fn drop(*self);}}struct Packet {{flag:bool}}inline fn observe(flag:bool)->bool {{{body}}}fn entry()->bool {{false match {{_ if observe({flag})=>true,_=>false}}}}"
+            );
+            let original = compile(&source);
+            for expanded in [false, true] {
+                let mut package = original.clone();
+                if expanded {
+                    assert!(
+                        elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                            .unwrap()
+                            .expanded
+                            > 0
+                    );
+                }
+                assert_eq!(
+                    luna::execution::interpret_with_protocols(
+                        &package,
+                        "entry",
+                        "Duplicate",
+                        "Retire",
+                        1_000_000
+                    )
+                    .unwrap_or_else(|e| panic!("{body}, expanded={expanded}: {e}")),
+                    comptime_interpretor::Value::Bool(flag)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn guard_pointer_writes_reject_external_and_mixed_targets() {
+    for body in [
+        "let slot=external.ref;slot.* = false;true",
+        "var local=false;let slot=if flag {local.ref} else {external.ref};slot.* = false;true",
+        "let slot=external.ref;slot.* = true;slot.* = false;true",
+    ] {
+        let source = format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}fn entry(flag:bool)->bool {{var external=false;false match {{_ if do {{{body}}}=>true,_=>false}}}}"
+        );
+        let error = source_executable(&compile(&source), "entry").unwrap_err();
+        assert!(
+            error.contains("observation region pointer write requires private local targets"),
+            "{body}: {error}"
+        );
+    }
+    for destination in ["external.ref", "if flag {local.ref} else {external.ref}"] {
+        let source = format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}fn entry(flag:bool)->bool {{var external:.u16'builtin=0;false match {{_ if do {{var local:.u16'builtin=0;let slot={destination};slot.*'bitvec[4..8]=0b1010;true}}=>true,_=>false}}}}"
+        );
+        let error = source_executable(&compile(&source), "entry").unwrap_err();
+        assert!(
+            error.contains("observation region pointer write requires private local targets"),
+            "{destination}: {error}"
+        );
+    }
+}
+
+#[test]
+fn memory_write_destinations_are_frozen_before_operand_mutations() {
+    use elaboration::verification::memory;
+    use std::collections::BTreeSet;
+    for operation in [
+        "destination.*.* = do {destination.* = last;7}",
+        "destination.*.*'bitvec[4..8] = do {destination.* = last;0b1010}",
+        "destination.*.*'bitvec[do {destination.* = last;4}] = 1",
+    ] {
+        let package = compile(&format!(
+            "typealias Word=.u16'builtin;fn change(first:*Word,last:*Word) {{var selected=first;let destination=selected.ref;{operation};}}"
+        ));
+        let function = package
+            .functions
+            .iter()
+            .find(|f| f.name == "change")
+            .unwrap();
+        let summary =
+            memory::infer_in_package(&package, function.declaration, &[], &mut 100_000).unwrap();
+        let writes: BTreeSet<_> = summary
+            .accesses
+            .iter()
+            .filter(|a| a.write)
+            .map(|a| a.target.parameter)
+            .collect();
+        assert_eq!(writes, BTreeSet::from([0]), "{operation}: {summary}");
+    }
+}
+
+#[test]
+fn local_code_pointer_writes_update_current_and_saved_call_targets() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn()->bool;impl Duplicate for Action {}struct View {action:Action}fn yes()->bool {true}fn no()->bool {false}";
+    for (body, expected) in [
+        (
+            "var action=no;let slot=action.ref;slot.* = yes;action()",
+            true,
+        ),
+        (
+            "var view=View {action:no};let saved=view.action;let slot=view.action.ref;slot.* = yes;view.action()",
+            true,
+        ),
+        (
+            "var view=View {action:no};let saved=view.action;let slot=view.action.ref;slot.* = yes;saved()",
+            false,
+        ),
+    ] {
+        let source = format!(
+            "{prefix}inline fn observe()->bool {{{body}}}fn entry()->bool {{false match {{_ if observe()=>true,_=>false}}}}"
+        );
+        let original = compile(&source);
+        world(&original, |world, _| {
+            use elaboration::verification::{drop::CleanupSession, memory};
+            use std::collections::BTreeMap;
+            let protocol = original
+                .traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration;
+            let function = original
+                .functions
+                .iter()
+                .find(|f| f.name == "observe")
+                .unwrap()
+                .declaration;
+            let mut cleanup = CleanupSession::new(&original, world, protocol, Budget::default());
+            let summary = memory::infer_with_borrowed_callable_inputs_and_cleanup(
+                &original,
+                function,
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                &BTreeMap::new(),
+                Some(&mut cleanup),
+                &mut 100_000,
+            )
+            .unwrap_or_else(|e| panic!("{body}: {e}"));
+            assert!(
+                !summary.may_reject && !summary.may_run_cleanup,
+                "{body}: {summary}"
+            );
+        });
+        for expanded in [false, true] {
+            let mut package = original.clone();
+            if expanded {
+                assert!(
+                    elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                        .unwrap()
+                        .expanded
+                        > 0
+                );
+            }
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{body}, expanded={expanded}: {e}")),
+                comptime_interpretor::Value::Bool(expected)
+            );
+        }
+    }
+}
+
+#[test]
+fn local_code_pointer_writes_merge_candidates_and_reject_unsafe_calls() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn()->bool;impl Duplicate for Action {}fn yes()->bool {true}fn no()->bool {false}fn rejected()->bool {assumes false;true}";
+    for flag in [false, true] {
+        let source = format!(
+            "{prefix}fn observe(flag:bool)->bool {{var a=no;var b=no;let slot=if flag {{a.ref}} else {{b.ref}};slot.* = yes;a()}}fn entry()->bool {{false match {{_ if observe({flag})=>true,_=>false}}}}"
+        );
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &compile(&source),
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(flag)
+        );
+    }
+    for body in [
+        "var action=yes;let slot=action.ref;slot.* = rejected;action()",
+        "var action=rejected;let saved=action;let slot=action.ref;slot.* = yes;saved()",
+        "var a=rejected;var b=yes;let slot=if flag {a.ref} else {b.ref};slot.* = yes;a()",
+    ] {
+        let source = format!(
+            "{prefix}fn observe(flag:bool)->bool {{{body}}}fn entry(flag:bool)->bool {{false match {{_ if observe(flag)=>true,_=>false}}}}"
+        );
+        assert!(
+            source_executable(&compile(&source), "entry").is_err(),
+            "{body}"
+        );
+    }
+    let source = format!(
+        "{prefix}fn observe(slot:*Action)->bool {{slot.* = yes;true}}fn entry()->bool {{var action=no;false match {{_ if observe(action.ref)=>true,_=>false}}}}"
+    );
+    assert!(source_executable(&compile(&source), "entry").is_err());
+}
+
+#[test]
+fn local_code_store_guard_refinement_keeps_cleanup_obligations() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn()->bool;impl Duplicate for Action {}fn yes()->bool {true}fn no()->bool {false}struct Holder {action:Action}";
+    for (cleanup, accepted) in [
+        ("", true),
+        ("let done=true;", true),
+        ("assumes false;", false),
+    ] {
+        let source = format!(
+            "{prefix}impl Retire for Holder {{fn drop(*self) {{{cleanup}}}}}inline fn observe()->bool {{var holder=Holder {{action:no}};let slot=holder.action.ref;slot.* = yes;holder.action()}}fn entry()->bool {{false match {{_ if observe()=>true,_=>false}}}}"
+        );
+        let original = compile(&source);
+        for expanded in [false, true] {
+            let mut package = original.clone();
+            if expanded {
+                assert!(
+                    elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                        .unwrap()
+                        .expanded
+                        > 0
+                );
+            }
+            if accepted {
+                assert_eq!(
+                    luna::execution::interpret_with_protocols(
+                        &package,
+                        "entry",
+                        "Duplicate",
+                        "Retire",
+                        1_000_000
+                    )
+                    .unwrap(),
+                    comptime_interpretor::Value::Bool(true)
+                );
+            } else {
+                assert!(
+                    source_executable(&package, "entry").is_err(),
+                    "{cleanup}, expanded={expanded}"
+                );
+            }
+        }
+    }
+    let source = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn()->bool;impl Duplicate for Action {}fn yes()->bool {true}fn no()->bool {false}struct Holder {action:Action,flag:*bool}impl Retire for Holder {fn drop(*self) {self.flag.*.* = true;}}fn observe(flag:*bool)->bool {var holder=Holder {action:no,flag:flag};let slot=holder.action.ref;slot.* = yes;holder.action()}fn entry()->bool {let flag=false;false match {_ if observe(flag.ref)=>true,_=>false}}";
+    assert!(source_executable(&compile(source), "entry").is_err());
+}
+
+#[test]
+fn local_callback_table_pointer_replacement_preserves_field_identities() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn()->bool;impl Duplicate for Action {}struct Table {left:Action,right:Action}impl Duplicate for Table {}fn yes()->bool {true}fn no()->bool {false}";
+    for (result, expected) in [
+        ("table.left()", true),
+        ("table.right()", false),
+        ("saved.left()", false),
+        ("saved.right()", true),
+    ] {
+        let source = format!(
+            "{prefix}inline fn observe()->bool {{var table=Table {{left:no,right:yes}};let saved=table;let slot=table.ref;slot.* = Table {{left:yes,right:no}};{result}}}fn entry()->bool {{false match {{_ if observe()=>true,_=>false}}}}"
+        );
+        let original = compile(&source);
+        for expanded in [false, true] {
+            let mut package = original.clone();
+            if expanded {
+                assert!(
+                    elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                        .unwrap()
+                        .expanded
+                        > 0
+                );
+            }
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{result}/{expanded}: {e}")),
+                comptime_interpretor::Value::Bool(expected)
+            );
+        }
+    }
+}
+
+#[test]
+fn local_callback_table_replacement_keeps_weak_updates_and_permissions() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn()->bool;impl Duplicate for Action {}struct Table {left:Action,right:Action}impl Duplicate for Table {}struct Outer {table:Table}fn yes()->bool {true}fn no()->bool {false}fn rejected()->bool {assumes false;true}";
+    for flag in [false, true] {
+        for body in [
+            "var a=Table {left:no,right:yes};var b=Table {left:no,right:yes};let slot=if flag {a.ref} else {b.ref};slot.* = Table {left:yes,right:no};a.left()",
+            "var outer=Outer {table:Table {left:no,right:no}};let slot=outer.table.ref;slot.* = Table {left:yes,right:no};outer.table.left() and flag",
+        ] {
+            let source = format!(
+                "{prefix}fn observe(flag:bool)->bool {{{body}}}fn entry()->bool {{false match {{_ if observe({flag})=>true,_=>false}}}}"
+            );
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &compile(&source),
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{body}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+    for body in [
+        "var a=Table {left:yes,right:yes};let slot=a.ref;slot.* = Table {left:rejected,right:yes};a.left()",
+        "var a=Table {left:rejected,right:yes};var b=Table {left:yes,right:yes};let slot=if flag {a.ref} else {b.ref};slot.* = Table {left:yes,right:yes};a.left()",
+    ] {
+        let source = format!(
+            "{prefix}fn observe(flag:bool)->bool {{{body}}}fn entry(flag:bool)->bool {{false match {{_ if observe(flag)=>true,_=>false}}}}"
+        );
+        assert!(
+            source_executable(&compile(&source), "entry").is_err(),
+            "{body}"
+        );
+    }
+    let source=format!("{prefix}fn entry()->bool {{var table=Table {{left:no,right:no}};let slot=table.ref;slot.* = Table {{left:yes,right:no}};table.left()}}").replace("impl Duplicate for Table {}","");
+    let reason = source_executable(&compile(&source), "entry").unwrap_err();
+    assert!(reason.contains("Copy"), "{reason}");
+}
+
+#[test]
+fn mixed_callback_view_pointer_replacement_updates_code_and_data() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn(*bool)->bool;impl Duplicate for Action {}struct View {action:Action,target:*bool}impl Duplicate for View {}fn read(p:*bool)->bool {p.*}fn invert(p:*bool)->bool {not p.*}";
+    for (result, expected) in [
+        ("view.action(view.target)", false),
+        ("saved.action(saved.target)", false),
+        ("view.target.*", true),
+        ("view.action(first)", true),
+    ] {
+        let source = format!(
+            "{prefix}inline fn observe(first:*bool,last:*bool)->bool {{var view=View {{action:read,target:first}};let saved=view;let slot=view.ref;slot.* = View {{action:invert,target:last}};{result}}}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}"
+        );
+        let original = compile(&source);
+        for expanded in [false, true] {
+            let mut package = original.clone();
+            if expanded {
+                assert!(
+                    elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                        .unwrap()
+                        .expanded
+                        > 0
+                );
+            }
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{result}/{expanded}: {e}")),
+                comptime_interpretor::Value::Bool(expected)
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_callback_view_replacement_preserves_target_lifetimes() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Item {flag:bool}typealias Action=fn(*Item)->bool;impl Duplicate for Action {}struct View {action:Action,target:*Item}impl Duplicate for View {}fn read(p:*Item)->bool {p.flag.*}";
+    for (tail, accepted) in [
+        ("let moved=first;view.action(view.target)", true),
+        ("let moved=last;view.action(view.target)", false),
+        ("let moved=first;saved.action(saved.target)", false),
+    ] {
+        let source = format!(
+            "{prefix}fn entry()->bool {{let first=Item {{flag:false}};let last=Item {{flag:true}};var view=View {{action:read,target:first.ref}};let saved=view;let slot=view.ref;slot.* = View {{action:read,target:last.ref}};{tail}}}"
+        );
+        let package = compile(&source);
+        if accepted {
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap(),
+                comptime_interpretor::Value::Bool(true)
+            );
+        } else {
+            assert!(source_executable(&package, "entry").is_err(), "{tail}");
+        }
+    }
+}
+
+#[test]
+fn mixed_callback_view_replacement_weakly_updates_each_candidate() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn(*bool)->bool;impl Duplicate for Action {}struct View {action:Action,target:*bool}impl Duplicate for View {}fn read(p:*bool)->bool {p.*}fn invert(p:*bool)->bool {not p.*}";
+    for flag in [false, true] {
+        for result in ["a.target.*", "a.action(first)"] {
+            let source = format!(
+                "{prefix}fn observe(first:*bool,last:*bool,flag:bool)->bool {{var a=View {{action:read,target:first}};var b=View {{action:read,target:first}};let slot=if flag {{a.ref}} else {{b.ref}};slot.* = View {{action:invert,target:last}};{result}}}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref,{flag})=>true,_=>false}}}}"
+            );
+            let package = compile(&source);
+            if result == "a.target.*" {
+                let function = package
+                    .functions
+                    .iter()
+                    .find(|f| f.name == "observe")
+                    .unwrap();
+                let summary = elaboration::verification::memory::infer_in_package(
+                    &package,
+                    function.declaration,
+                    &[],
+                    &mut 100_000,
+                )
+                .unwrap();
+                let reads: std::collections::BTreeSet<_> = summary
+                    .accesses
+                    .iter()
+                    .filter(|access| access.read_value)
+                    .map(|access| access.target.parameter)
+                    .collect();
+                assert_eq!(reads, std::collections::BTreeSet::from([0, 1]), "{summary}");
+            }
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{flag}/{result}: {e}")),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn pointer_only_view_replacement_updates_all_origins() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct View {left:*bool,right:*bool}impl Duplicate for View {}";
+    for (result, expected) in [
+        ("view.left.*", true),
+        ("view.right.*", false),
+        ("saved.left.*", false),
+        ("saved.right.*", true),
+    ] {
+        let source = format!(
+            "{prefix}inline fn observe(first:*bool,last:*bool)->bool {{var view=View {{left:first,right:last}};let saved=view;let slot=view.ref;slot.* = View {{left:last,right:first}};{result}}}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}"
+        );
+        let original = compile(&source);
+        for expanded in [false, true] {
+            let mut package = original.clone();
+            if expanded {
+                assert!(
+                    elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                        .unwrap()
+                        .expanded
+                        > 0
+                );
+            }
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{result}/{expanded}: {e}")),
+                comptime_interpretor::Value::Bool(expected)
+            );
+        }
+    }
+}
+
+#[test]
+fn pointer_only_view_replacement_merges_candidates_and_cleanup_reads() {
+    use elaboration::verification::{drop::CleanupSession, memory};
+    use std::collections::{BTreeMap, BTreeSet};
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct View {target:*bool}impl Duplicate for View {}struct Outer {view:View}impl Retire for Outer {fn drop(*self) {let seen=self.view.target.*.*;}}";
+    for (body, expected_reads) in [
+        (
+            "var a=View {target:first};var b=View {target:first};let slot=if flag {a.ref} else {b.ref};slot.* = View {target:last};a.target.*",
+            BTreeSet::from([0, 1]),
+        ),
+        (
+            "var outer=Outer {view:View {target:first}};let slot=outer.view.ref;slot.* = View {target:last};true",
+            BTreeSet::from([0, 1]),
+        ),
+    ] {
+        for flag in [false, true] {
+            let source = format!(
+                "{prefix}fn observe(first:*bool,last:*bool,flag:bool)->bool {{{body}}}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref,{flag})=>true,_=>false}}}}"
+            );
+            let package = compile(&source);
+            world(&package, |world, _| {
+                let protocol = package
+                    .traits
+                    .iter()
+                    .find(|t| t.name == "Retire")
+                    .unwrap()
+                    .declaration;
+                let function = package
+                    .functions
+                    .iter()
+                    .find(|f| f.name == "observe")
+                    .unwrap()
+                    .declaration;
+                let mut cleanup = CleanupSession::new(&package, world, protocol, Budget::default());
+                let summary = memory::infer_with_borrowed_callable_inputs_and_cleanup(
+                    &package,
+                    function,
+                    &[],
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &[],
+                    &BTreeMap::new(),
+                    Some(&mut cleanup),
+                    &mut 100_000,
+                )
+                .unwrap();
+                let reads: BTreeSet<_> = summary
+                    .accesses
+                    .iter()
+                    .filter(|a| a.read_value)
+                    .map(|a| a.target.parameter)
+                    .collect();
+                assert_eq!(reads, expected_reads, "{body}: {summary}");
+                assert!(
+                    !summary.may_run_cleanup && !summary.accesses.iter().any(|a| a.write),
+                    "{summary}"
+                );
+            });
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap(),
+                comptime_interpretor::Value::Bool(if body.ends_with("true") { true } else { flag })
+            );
+        }
+    }
+}
+
+#[test]
+fn pointer_only_view_replacement_keeps_copy_and_lifetime_checks() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Item {flag:bool}struct View {target:*Item}impl Duplicate for View {}";
+    for tail in [
+        "let moved=last;view.target.flag.*",
+        "let moved=first;saved.target.flag.*",
+    ] {
+        let source = format!(
+            "{prefix}fn entry()->bool {{let first=Item {{flag:false}};let last=Item {{flag:true}};var view=View {{target:first.ref}};let saved=view;let slot=view.ref;slot.* = View {{target:last.ref}};{tail}}}"
+        );
+        assert!(
+            source_executable(&compile(&source), "entry").is_err(),
+            "{tail}"
+        );
+    }
+    let source=format!("{prefix}fn entry()->bool {{let first=Item {{flag:false}};var view=View {{target:first.ref}};let slot=view.ref;slot.* = View {{target:first.ref}};true}}").replace("impl Duplicate for View {}","");
+    let reason = source_executable(&compile(&source), "entry").unwrap_err();
+    assert!(reason.contains("Copy"), "{reason}");
+    let source = format!(
+        "{prefix}fn observe(slot:*View,target:*Item)->bool {{slot.* = View {{target:target}};true}}fn entry()->bool {{let first=Item {{flag:false}};var view=View {{target:first.ref}};false match {{_ if observe(view.ref,first.ref)=>true,_=>false}}}}"
+    );
+    assert!(source_executable(&compile(&source), "entry").is_err());
+}
+
+#[test]
+fn newtype_pointer_slot_replacement_keeps_nominal_copy_and_origins() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}newtype Pointer=*bool;impl Duplicate for Pointer {}newtype Wrapped=Pointer;impl Duplicate for Wrapped {}";
+    for (wrap, unwrap) in [
+        (".as(Pointer)", ".as(*bool)"),
+        (".as(Pointer).as(Wrapped)", ".as(Pointer).as(*bool)"),
+    ] {
+        for (selected, expected) in [("current", true), ("saved", false)] {
+            let source = format!(
+                "{prefix}inline fn observe(first:*bool,last:*bool)->bool {{var current=first{wrap};let saved=current;let slot=current.ref;slot.* = last{wrap};{selected}{unwrap}.*}}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}"
+            );
+            let original = compile(&source);
+            for expanded in [false, true] {
+                let mut package = original.clone();
+                if expanded {
+                    assert!(
+                        elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                            .unwrap()
+                            .expanded
+                            > 0
+                    );
+                }
+                assert_eq!(
+                    luna::execution::interpret_with_protocols(
+                        &package,
+                        "entry",
+                        "Duplicate",
+                        "Retire",
+                        1_000_000
+                    )
+                    .unwrap_or_else(|e| panic!("{wrap}/{selected}/{expanded}: {e}")),
+                    comptime_interpretor::Value::Bool(expected)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn newtype_pointer_slot_candidates_keep_old_origins_and_require_copy() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}newtype Pointer=*bool;impl Duplicate for Pointer {}struct Cell {pointer:Pointer}";
+    for body in [
+        "var a=first.as(Pointer);var b=first.as(Pointer);let slot=if flag {a.ref} else {b.ref};slot.* = last.as(Pointer);a.as(*bool).*",
+        "var a=Cell {pointer:first.as(Pointer)};var b=Cell {pointer:first.as(Pointer)};let slot=if flag {a.pointer.ref} else {b.pointer.ref};slot.* = last.as(Pointer);a.pointer.as(*bool).*",
+    ] {
+        for flag in [false, true] {
+            let source = format!(
+                "{prefix}fn observe(first:*bool,last:*bool,flag:bool)->bool {{{body}}}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref,{flag})=>true,_=>false}}}}"
+            );
+            let package = compile(&source);
+            let function = package
+                .functions
+                .iter()
+                .find(|f| f.name == "observe")
+                .unwrap();
+            let summary = elaboration::verification::memory::infer_in_package(
+                &package,
+                function.declaration,
+                &[],
+                &mut 100_000,
+            )
+            .unwrap();
+            let reads: std::collections::BTreeSet<_> = summary
+                .accesses
+                .iter()
+                .filter(|a| a.read_value)
+                .map(|a| a.target.parameter)
+                .collect();
+            assert_eq!(reads, std::collections::BTreeSet::from([0, 1]), "{summary}");
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap(),
+                comptime_interpretor::Value::Bool(flag)
+            );
+        }
+    }
+    let source=format!("{prefix}fn entry()->bool {{let first=false;let last=true;var current=first.ref.as(Pointer);let slot=current.ref;slot.* = last.ref.as(Pointer);current.as(*bool).*}}").replace("impl Duplicate for Pointer {}","");
+    let error = source_executable(&compile(&source), "entry").unwrap_err();
+    assert!(error.contains("Copy"), "{error}");
+}
+
+#[test]
+fn newtype_pointer_slot_replacement_does_not_extend_target_lifetimes() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Item {flag:bool}newtype Pointer=*Item;impl Duplicate for Pointer {}";
+    for (tail, accepted) in [
+        ("let moved=first;current.as(*Item).flag.*", true),
+        ("let moved=last;current.as(*Item).flag.*", false),
+        ("let moved=first;saved.as(*Item).flag.*", false),
+    ] {
+        let source = format!(
+            "{prefix}fn entry()->bool {{let first=Item {{flag:false}};let last=Item {{flag:true}};var current=first.ref.as(Pointer);let saved=current;let slot=current.ref;slot.* = last.ref.as(Pointer);{tail}}}"
+        );
+        let package = compile(&source);
+        if accepted {
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap(),
+                comptime_interpretor::Value::Bool(true)
+            );
+        } else {
+            assert!(source_executable(&package, "entry").is_err(), "{tail}");
+        }
+    }
+}
+
+#[test]
+fn newtype_pointer_field_replacement_refreshes_enclosing_cleanup_reads() {
+    use elaboration::verification::{drop::CleanupSession, memory};
+    use std::collections::{BTreeMap, BTreeSet};
+    for (pointer, wrap, unwrap) in [
+        ("Pointer", ".as(Pointer)", ".as(*bool)"),
+        (
+            "Wrapped",
+            ".as(Pointer).as(Wrapped)",
+            ".as(Pointer).as(*bool)",
+        ),
+    ] {
+        let prefix = format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}newtype Pointer=*bool;impl Duplicate for Pointer {{}}newtype Wrapped=Pointer;impl Duplicate for Wrapped {{}}struct Watch {{target:{pointer}}}impl Retire for Watch {{fn drop(*self) {{let seen=self.target.*{unwrap}.*;}}}}"
+        );
+        let source = format!(
+            "{prefix}fn observe(first:*bool,last:*bool)->bool {{var watch=Watch {{target:first{wrap}}};let slot=watch.target.ref;slot.* = last{wrap};true}}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref)=>true,_=>false}}}}"
+        );
+        let package = compile(&source);
+        world(&package, |world, _| {
+            let protocol = package
+                .traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration;
+            let function = package
+                .functions
+                .iter()
+                .find(|f| f.name == "observe")
+                .unwrap()
+                .declaration;
+            let mut cleanup = CleanupSession::new(&package, world, protocol, Budget::default());
+            let summary = memory::infer_with_borrowed_callable_inputs_and_cleanup(
+                &package,
+                function,
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                &BTreeMap::new(),
+                Some(&mut cleanup),
+                &mut 100_000,
+            )
+            .unwrap();
+            let reads: BTreeSet<_> = summary
+                .accesses
+                .iter()
+                .filter(|a| a.read_value)
+                .map(|a| a.target.parameter)
+                .collect();
+            assert_eq!(reads, BTreeSet::from([0, 1]), "{pointer}: {summary}");
+            assert!(
+                !summary.may_run_cleanup && !summary.accesses.iter().any(|a| a.write),
+                "{summary}"
+            );
+        });
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn newtype_pointer_cleanup_reads_require_the_current_target() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Item {flag:bool}newtype Pointer=*Item;impl Duplicate for Pointer {}struct Watch {target:Pointer}impl Retire for Watch {fn drop(*self) {let seen=self.target.*.as(*Item).flag.*;}}";
+    for (moved, accepted) in [("first", true), ("last", false)] {
+        let source = format!(
+            "{prefix}fn entry()->bool {{let first=Item {{flag:false}};let last=Item {{flag:true}};var watch=Watch {{target:first.ref.as(Pointer)}};let slot=watch.target.ref;slot.* = last.ref.as(Pointer);let retired={moved};true}}"
+        );
+        let package = compile(&source);
+        if accepted {
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap(),
+                comptime_interpretor::Value::Bool(true)
+            );
+        } else {
+            assert!(
+                source_executable(&package, "entry").is_err(),
+                "accepted expired destructor target"
+            );
+        }
+    }
+}
+
+#[test]
+fn enum_pointer_replacement_preserves_tags_saved_values_and_alternatives() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}enum View {empty,left(*bool),right(*bool)}impl Duplicate for View {}fn read(view:View)->bool {view match {.empty=>false,.left(p)=>p.*,.right(p)=>p.*}}";
+    for (initial, replacement) in [
+        ("View.left(first)", "View.right(last)"),
+        ("View.empty", "View.left(last)"),
+        ("View.right(first)", "View.empty"),
+        (
+            "View.left(first)",
+            "if flag {View.right(last)} else {View.empty}",
+        ),
+    ] {
+        for weak in [false, true] {
+            for saved in [false, true] {
+                for flag in [false, true] {
+                    let destination = if weak {
+                        "if flag {a.ref} else {b.ref}"
+                    } else {
+                        "a.ref"
+                    };
+                    let result = if saved { "saved" } else { "a" };
+                    let source = format!(
+                        "{prefix}inline fn observe(first:*bool,last:*bool,flag:bool)->bool {{var a={initial};var b=View.empty;let saved=a;let slot={destination};slot.* = {replacement};read({result})}}fn entry()->bool {{let first=false;let last=true;false match {{_ if observe(first.ref,last.ref,{flag})=>true,_=>false}}}}"
+                    );
+                    let original = compile(&source);
+                    for expanded in [false, true] {
+                        let mut package = original.clone();
+                        if expanded {
+                            elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                                .unwrap();
+                        }
+                        let expected = !saved
+                            && (!weak || flag)
+                            && replacement != "View.empty"
+                            && (!replacement.starts_with("if") || flag);
+                        assert_eq!(
+                            luna::execution::interpret_with_protocols(
+                                &package,
+                                "entry",
+                                "Duplicate",
+                                "Retire",
+                                1_000_000
+                            )
+                            .unwrap_or_else(|e| panic!(
+                                "{initial}/{replacement}/{weak}/{saved}/{flag}/{expanded}: {e}"
+                            )),
+                            comptime_interpretor::Value::Bool(expected)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn enum_pointer_replacement_keeps_lifetime_and_copy_obligations() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Item {flag:bool}enum View {empty,left(*Item),right(*Item)}impl Duplicate for View {}";
+    for (replacement, tail, accepted) in [
+        (
+            "View.right(last.ref)",
+            "let moved=first;view match {.empty=>false,.left(p)=>p.flag.*,.right(p)=>p.flag.*}",
+            true,
+        ),
+        (
+            "View.empty",
+            "let moved=first;view match {.empty=>true,.left(p)=>p.flag.*,.right(p)=>p.flag.*}",
+            true,
+        ),
+        (
+            "View.right(last.ref)",
+            "let moved=last;view match {.empty=>false,.left(p)=>p.flag.*,.right(p)=>p.flag.*}",
+            false,
+        ),
+        (
+            "View.right(last.ref)",
+            "let moved=first;saved match {.empty=>false,.left(p)=>p.flag.*,.right(p)=>p.flag.*}",
+            false,
+        ),
+    ] {
+        let source = format!(
+            "{prefix}fn entry()->bool {{let first=Item {{flag:false}};let last=Item {{flag:true}};var view=View.left(first.ref);let saved=view;let slot=view.ref;slot.* = {replacement};{tail}}}"
+        );
+        let result = source_executable(&compile(&source), "entry");
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{replacement}/{tail}: {}",
+            result.err().unwrap_or_default()
+        );
+    }
+    // The unselected destination retains its old target even when the new
+    // payload belongs to a different variant or has no pointer at all.
+    for replacement in ["View.right(last.ref)", "View.empty"] {
+        let source = format!(
+            "{prefix}fn entry(flag:bool)->bool {{let first=Item {{flag:false}};let last=Item {{flag:true}};var a=View.left(first.ref);var b=View.empty;let slot=if flag {{a.ref}} else {{b.ref}};slot.* = {replacement};let moved=first;a match {{.empty=>true,.left(p)=>p.flag.*,.right(p)=>p.flag.*}}}}"
+        );
+        assert!(
+            source_executable(&compile(&source), "entry").is_err(),
+            "{replacement}"
+        );
+    }
+    let source = format!("{prefix}fn entry()->bool {{let first=Item {{flag:false}};var view=View.left(first.ref);let slot=view.ref;slot.* = View.empty;true}}").replace("impl Duplicate for View {}", "");
+    let reason = source_executable(&compile(&source), "entry").unwrap_err();
+    assert!(reason.contains("Copy"), "{reason}");
+}
+
+#[test]
+fn enum_pointer_replacement_keeps_payload_code_candidates() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn(*bool)->bool;impl Duplicate for Action {}enum View {empty,left(Action,*bool),right(Action,*bool)}impl Duplicate for View {}fn read(p:*bool)->bool {p.*}fn invert(p:*bool)->bool {not p.*}";
+    for weak in [false, true] {
+        for flag in [false, true] {
+            let destination = if weak {
+                "if flag {a.ref} else {b.ref}"
+            } else {
+                "a.ref"
+            };
+            let source = format!(
+                "{prefix}fn observe(first:*bool,last:*bool,flag:bool)->bool {{var a=View.left(read,first);var b=View.empty;let slot={destination};slot.* = View.right(invert,last);a match {{.empty=>false,.left(f,p)=>f(p),.right(f,p)=>f(p)}}}}fn entry()->bool {{let first=true;let last=true;false match {{_ if observe(first.ref,last.ref,{flag})=>true,_=>false}}}}"
+            );
+            let package = compile(&source);
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "entry",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000
+                )
+                .unwrap_or_else(|e| panic!("{weak}/{flag}: {e}")),
+                comptime_interpretor::Value::Bool(weak && !flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn enum_callback_arguments_preserve_absent_and_present_payloads() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn(*bool)->bool;impl Duplicate for Action {}enum View {empty,left(Action,*bool),right(Action,*bool)}impl Duplicate for View {}fn read(p:*bool)->bool {p.*}fn invert(p:*bool)->bool {not p.*}fn get(v:View)->bool {v match {.empty=>false,.left(f,p)=>f(p),.right(f,p)=>f(p)}}";
+    for replacement in [
+        "View.empty",
+        "View.right(invert,last)",
+        "if flag {View.right(invert,last)} else {View.empty}",
+    ] {
+        for weak in [false, true] {
+            for flag in [false, true] {
+                let slot = if weak {
+                    "if flag {a.ref} else {b.ref}"
+                } else {
+                    "a.ref"
+                };
+                let source = format!(
+                    "{prefix}inline fn observe(first:*bool,last:*bool,flag:bool)->bool {{var a=View.left(read,first);var b=View.empty;let slot={slot};slot.* = {replacement};get(a)}}fn entry()->bool {{let first=true;let last=true;false match {{_ if observe(first.ref,last.ref,{flag})=>true,_=>false}}}}"
+                );
+                let original = compile(&source);
+                for expanded in [false, true] {
+                    let mut package = original.clone();
+                    if expanded {
+                        elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                            .unwrap();
+                    }
+                    assert_eq!(
+                        luna::execution::interpret_with_protocols(
+                            &package,
+                            "entry",
+                            "Duplicate",
+                            "Retire",
+                            1_000_000
+                        )
+                        .unwrap_or_else(|e| panic!("{replacement}/{weak}/{flag}/{expanded}: {e}")),
+                        comptime_interpretor::Value::Bool(weak && !flag)
+                    );
+                }
+            }
+        }
+    }
+    for (body, accepted) in [
+        ("not p.*", true),
+        ("assumes false;true", false),
+        ("p.* = false;true", false),
+    ] {
+        let bad = prefix.replace("not p.*", body);
+        let source = format!(
+            "{bad}fn entry()->bool {{let value=true;false match {{_ if get(View.right(invert,value.ref))=>true,_=>false}}}}"
+        );
+        let result = source_executable(&compile(&source), "entry");
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{body}: {}",
+            result.err().unwrap_or_default()
+        );
+    }
+}
+
+#[test]
+fn enum_callback_results_keep_code_and_pointer_premises_across_forwarding() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}typealias Action=fn(*bool)->bool;impl Duplicate for Action {}enum View {empty,left(Action,*bool),right(Action,*bool)}impl Duplicate for View {}fn read(p:*bool)->bool {p.*}fn invert(p:*bool)->bool {not p.*}fn forward(v:View)->View {v}fn get(v:View)->bool {v match {.empty=>false,.left(f,p)=>f(p),.right(f,p)=>f(p)}}";
+    for value in [false, true] {
+        for flag in [false, true] {
+            for result in [
+                "forward(View.left(read,p))",
+                "forward(if flag {View.right(invert,p)} else {View.empty})",
+                "if flag {return forward(View.right(invert,p));}forward(View.empty)",
+            ] {
+                let source = format!(
+                    "{prefix}fn make(p:*bool,flag:bool)->View {{{result}}}inline fn observe(p:*bool,flag:bool)->bool {{get(forward(make(p,flag)))}}fn entry()->bool {{let value={value};false match {{_ if observe(value.ref,{flag})=>true,_=>false}}}}"
+                );
+                let original = compile(&source);
+                for expanded in [false, true] {
+                    let mut package = original.clone();
+                    if expanded {
+                        elaboration::program::inlining::expand(&mut package, &mut 1_000_000)
+                            .unwrap();
+                    }
+                    assert_eq!(
+                        luna::execution::interpret_with_protocols(
+                            &package,
+                            "entry",
+                            "Duplicate",
+                            "Retire",
+                            1_000_000
+                        )
+                        .unwrap_or_else(|e| panic!("{result}/{flag}/{expanded}: {e}")),
+                        comptime_interpretor::Value::Bool(if result.contains("View.left") {
+                            value
+                        } else {
+                            flag && !value
+                        })
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn enum_callback_results_do_not_extend_pointee_lifetimes() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}struct Item {flag:bool}typealias Action=fn(*Item)->bool;impl Duplicate for Action {}enum View {empty,some(Action,*Item)}impl Duplicate for View {}fn read(p:*Item)->bool {p.flag.*}fn forward(v:View)->View {v}fn get(v:View)->bool {v match {.empty=>false,.some(f,p)=>f(p)}}";
+    for (setup, accepted) in [
+        (
+            "let item=Item {flag:true};let view=forward(View.some(read,item.ref));",
+            true,
+        ),
+        (
+            "let item=Item {flag:true};let view=forward(View.some(read,item.ref));let moved=item;",
+            false,
+        ),
+        (
+            "let view=do {let item=Item {flag:true};forward(View.some(read,item.ref))};",
+            false,
+        ),
+    ] {
+        let source = format!("{prefix}fn entry()->bool {{{setup}get(forward(view))}}");
+        let result = source_executable(&compile(&source), "entry");
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{setup}: {}",
+            result.err().unwrap_or_default()
+        );
+    }
+}
+
+#[test]
+fn error_callback_views_preserve_memory_through_propagation_and_handlers() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}enum Failure {Bad}impl Duplicate for Failure {}typealias Action=fn(*bool)->bool;impl Duplicate for Action {}struct View {action:Action,target:*bool}impl Duplicate for View {}fn read(p:*bool)->bool {p.*}fn make(p:*bool,flag:bool)->!Failure View {if flag {error Failure.Bad} else {View {action:read,target:p}}}fn forward(value:!Failure View)->!Failure View {value!}";
+    for value in [false, true] {
+        for flag in [false, true] {
+            let source = format!(
+                "{prefix}inline fn observe(p:*bool,flag:bool)->bool {{let view=forward(make(p,flag))! {{Failure.Bad=>return false}};view.action(view.target)}}fn entry()->bool {{let value={value};false match {{_ if observe(value.ref,{flag})=>true,_=>false}}}}"
+            );
+            let original = compile(&source);
+            for expanded in [false, true] {
+                let mut package = original.clone();
+                if expanded {
+                    elaboration::program::inlining::expand(&mut package, &mut 1_000_000).unwrap();
+                }
+                assert_eq!(
+                    luna::execution::interpret_with_protocols(
+                        &package,
+                        "entry",
+                        "Duplicate",
+                        "Retire",
+                        1_000_000
+                    )
+                    .unwrap_or_else(|e| panic!("{value}/{flag}/{expanded}: {e}")),
+                    comptime_interpretor::Value::Bool(value && !flag)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn pointer_pattern_alternatives_retry_observations_and_retire_each_owner_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(include_str!(
+        "../../../development/examples/host-pattern-pointer-cleanup.fl"
+    ));
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.as_str() == "inspect")
+            .count(),
+        6,
+        "{names:?}"
+    );
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.as_str() == "drop Ticket")
+            .count(),
+        8,
+        "{names:?}"
+    );
+}
+
+#[test]
+fn scheduled_handler_restored_owner_cleanup_matches_exit() {
+    use comptime_interpretor::{ErrorKind, Interpreter, Value};
+    let original = include_str!("../../../development/repros/host-handler-restored-owner.fl");
+    for (completion, expected_drops, failure) in [
+        ("resume state.flag;", 3, false),
+        ("state.flag", 3, false),
+        ("return state.flag;", 2, false),
+        ("assumes false;resume state.flag;", 2, true),
+    ] {
+        let package = compile(&original.replace("resume state.flag;", completion));
+        let executable = source_executable(&package, "run").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        let result = vm.invoke_instance(&executable.entry, vec![]);
+        if failure {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+        } else {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        }
+        let mut expected = vec!["run".to_owned(), "subject".to_owned()];
+        expected.extend(std::iter::repeat_n("drop State".to_owned(), expected_drops));
+        assert_eq!(executed_names(&package, &executable, vm.events()), expected);
+    }
 }

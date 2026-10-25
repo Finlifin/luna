@@ -257,10 +257,12 @@ fn staged_callback_specialization_preserves_target_and_wrapper_contracts() {
     ] {
         let failure = match support::compile_with_protocols(&source, &Default::default()) {
             Err(error) => error,
-            Ok(package) => luna::instantiation::instantiate(&package, "run", 100_000).unwrap_err(),
+            Ok(package) => luna::execution::interpret(&package, "run", 100_000).unwrap_err(),
         };
         assert!(
-            failure.contains("precondition") || failure.contains("contract"),
+            failure.contains("precondition")
+                || failure.contains("contract")
+                || failure.contains("ProgramContractRejected"),
             "{failure}"
         );
     }
@@ -393,10 +395,16 @@ fn staged_trait_callback_does_not_erase_interface_preconditions() {
             let callback=Host.as(Select).select;
             callback(true,false)
         }";
-    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    let package = support::compile(source);
+    let failure = luna::execution::interpret(&package, "run", 100_000).unwrap_err();
     assert!(
-        failure.contains("program contracts") || failure.contains("preconditions"),
+        failure.contains("precondition") || failure.contains("ProgramContractRejected"),
         "{failure}"
+    );
+    let accepted = source.replace("callback(true,false)", "callback(true,true)");
+    assert_eq!(
+        support::run_iir(&accepted, "run", vec![]),
+        Value::Bool(true)
     );
 }
 
@@ -1017,18 +1025,18 @@ fn recursive_factory_can_store_and_use_recursive_results_before_returning() {
 
 #[test]
 fn unreachable_template_sequences_after_loop_transfers_do_not_materialize() {
-    let source = "fn template(comptime flag:bool)->bool {flag}
+    let source = "fn staged_value(comptime flag:bool)->bool {flag}
         fn run()->bool {
             var again=true;
             while again {
                 again=false;
                 continue;
-                let unused=template;
+                let unused=staged_value;
                 unused;
             }
             while true {
                 break;
-                let unused=template;
+                let unused=staged_value;
                 unused;
             }
             not again
@@ -1038,13 +1046,13 @@ fn unreachable_template_sequences_after_loop_transfers_do_not_materialize() {
 
 #[test]
 fn only_definitely_terminated_sequence_suffixes_are_removed() {
-    let source = "fn template(comptime flag:bool)->bool {flag}
+    let source = "fn staged_value(comptime flag:bool)->bool {flag}
         fn run(early:bool,state:*bool)->bool {
             if early {return true;}
             state.* = true;
             return false;
             state.* = false;
-            let unused=template;
+            let unused=staged_value;
             unused;
             false
         }
@@ -1207,11 +1215,11 @@ fn recursive_factory_can_forward_saved_choice_to_higher_order_wrapper() {
 
 #[test]
 fn discarded_template_choices_keep_selection_effects_and_early_returns() {
-    let source = "fn template(comptime flag:bool)->bool {flag}
+    let source = "fn staged_value(comptime flag:bool)->bool {flag}
         fn choose(early:bool,state:*bool)->bool {
-            let saved=template;
+            let saved=staged_value;
             saved;
-            (if early {return false;} else {state.* = true;template});
+            (if early {return false;} else {state.* = true;staged_value});
             true
         }
         fn run(early:bool)->bool {

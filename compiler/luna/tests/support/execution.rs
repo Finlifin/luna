@@ -62,6 +62,9 @@ pub(crate) fn compile_with_source_bindings(
             tuple_type: selectors.tuple.map(str::to_owned),
             optional_type: selectors.optional.map(str::to_owned),
             index_protocol: selectors.index.map(str::to_owned),
+            ord_protocol: selectors.ordering.map(str::to_owned),
+            eq_protocol: selectors.equality.map(str::to_owned),
+            list_pattern_protocol: selectors.list_pattern.map(str::to_owned),
             literal_into_protocol: selectors.literal_into.map(str::to_owned),
             arithmetic_protocols: selectors.arithmetic.map(|value| value.map(str::to_owned)),
         },
@@ -100,4 +103,66 @@ pub(crate) fn calls(package: &Package, interpreter: &Interpreter<'_>) -> Vec<Str
             _ => None,
         })
         .collect()
+}
+
+/// Compile the shared splice fixture with its explicit Tuple declarations.
+pub(crate) fn compile_splice_fixture(
+    source: &str,
+    protocols: &elaboration::program::Protocols,
+    splice: Option<&str>,
+) -> Result<nir::program::Package, String> {
+    compile_with_source_bindings(
+        source,
+        protocols,
+        luna::protocols::type_constructors::Selectors {
+            splice,
+            meta_list: Some("input::TupleElements"),
+            tuple: Some("input::Tuple"),
+            ..Default::default()
+        },
+    )
+}
+
+// Explicit source declarations and protocol identities for this suite. The
+// fixture text is compiled as written; no legacy tuple syntax is rewritten.
+pub(crate) fn compile_with_tuple_protocols(
+    source: &str,
+    protocols: &elaboration::program::Protocols,
+) -> Result<nir::program::Package, String> {
+    compile_with_tuple_selectors(source, protocols, Default::default())
+}
+
+pub(crate) fn compile_with_tuple_selectors(
+    source: &str,
+    protocols: &elaboration::program::Protocols,
+    mut selectors: luna::protocols::type_constructors::Selectors<'_>,
+) -> Result<nir::program::Package, String> {
+    assert!(selectors.meta_list.is_none() && selectors.tuple.is_none());
+    selectors.meta_list = Some("input::TupleElements");
+    selectors.tuple = Some("input::Tuple");
+    compile_with_source_bindings(
+        &format!(
+            "pure comptime fn TupleElements<T>->.Type'builtin {{T}}
+            pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>>->.Type'builtin {{bool}}
+            {source}"
+        ),
+        protocols,
+        selectors,
+    )
+}
+
+pub(crate) fn compile_with_tuple(source: &str) -> nir::program::Package {
+    compile_with_tuple_protocols(source, &Default::default()).unwrap()
+}
+
+/// Execute a fixture using explicit Tuple and meta.List type constructors.
+pub(crate) fn run_iir_with_tuple(
+    source: &str,
+    entry: &str,
+    inputs: Vec<comptime_interpretor::Value>,
+) -> comptime_interpretor::Value {
+    let package = compile_with_tuple(source);
+    let graph = luna::instantiation::instantiate(&package, entry, 100_000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    vm.invoke_instance(&graph.roots[0], inputs).unwrap()
 }

@@ -954,3 +954,161 @@ fn symbolic_nominal_payloads_require_independent_field_domains() {
         .is_err()
     );
 }
+
+#[test]
+fn record_trait_indices_admit_nested_error_and_tuple_values_with_domains() {
+    let boolean = Term::Primitive(Primitive::Bool);
+    let error = Term::error_result(vec![Term::Primitive(Primitive::Char)], boolean.clone());
+    let mut contract = declaration();
+    contract.type_parameters.truncate(1);
+    contract.parameter_types = vec![Term::Record(vec![(
+        "result".into(),
+        Term::Tuple(vec![error.clone(), boolean.clone()]),
+    )])];
+    let input = |label, payload| {
+        Term::RecordValue(vec![(
+            "result".into(),
+            Term::TupleValue(vec![
+                Term::ErrorValue {
+                    ty: Box::new(error.clone()),
+                    label,
+                    value: Box::new(payload),
+                },
+                Term::Bool(true),
+            ]),
+        )])
+    };
+    for value in [
+        input(None, Term::Bool(true)),
+        input(
+            Some(Box::new(Term::Primitive(Primitive::Char))),
+            Term::Char('a'),
+        ),
+    ] {
+        contract
+            .validate_arguments(std::slice::from_ref(&value), &[], &mut 10000)
+            .unwrap();
+        assert!(
+            contract
+                .validate_arguments(std::slice::from_ref(&value), &[], &mut 1)
+                .is_err()
+        );
+    }
+    for value in [
+        input(None, Term::Char('a')),
+        input(Some(Box::new(boolean)), Term::Bool(true)),
+        input(
+            Some(Box::new(Term::Primitive(Primitive::Char))),
+            Term::Bool(true),
+        ),
+    ] {
+        assert!(
+            contract
+                .validate_arguments(&[value], &[], &mut 10000)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn record_error_nominal_payloads_require_layouts_and_reject_forged_fields() {
+    let config_id = DeclarationId {
+        package: 1,
+        local: 201,
+    };
+    let nominal = Term::Nominal {
+        declaration: config_id,
+        arguments: vec![],
+    };
+    let result = Term::error_result(vec![nominal.clone()], Term::Primitive(Primitive::Bool));
+    let mut contract = declaration();
+    contract.type_parameters.truncate(1);
+    contract.parameter_types = vec![Term::Record(vec![("result".into(), result.clone())])];
+    let input = |payload| {
+        Term::RecordValue(vec![(
+            "result".into(),
+            Term::ErrorValue {
+                ty: Box::new(result.clone()),
+                label: Some(Box::new(nominal.clone())),
+                value: Box::new(Term::NominalValue {
+                    ty: Box::new(nominal.clone()),
+                    variant: None,
+                    fields: vec![payload],
+                }),
+            },
+        )])
+    };
+    let mut package = nir::program::Package::default();
+    package.structs.push(nir::program::Struct {
+        declaration: config_id,
+        name: "Config".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
+        requirements: vec![],
+        capabilities: vec![],
+    });
+    let valid = input(Term::Bool(true));
+    assert!(
+        contract
+            .validate_arguments(std::slice::from_ref(&valid), &[], &mut 10000)
+            .is_err()
+    );
+    let validate = |value: &Term, fuel: &mut usize| {
+        contract.validate_arguments_with_layouts(
+            &Term::Primitive(Primitive::Bool),
+            std::slice::from_ref(value),
+            &[],
+            &[],
+            &Default::default(),
+            fuel,
+            |_, _, _| false,
+            Some(&package),
+        )
+    };
+    validate(&valid, &mut 10000).unwrap();
+    assert!(validate(&input(Term::Char('a')), &mut 10000).is_err());
+    assert!(validate(&valid, &mut 1).is_err());
+    validate(&valid, &mut 10000).unwrap();
+}
+
+#[test]
+fn platform_trait_indices_use_layout_target_for_scalar_and_record_leaves() {
+    use std::collections::BTreeMap;
+    let mut contract = declaration();
+    contract.type_parameters.truncate(1);
+    let scalar = Term::Integer(comptime_runtime::Integer::from_u128(1u128 << 32));
+    for nested in [false, true] {
+        let domain = Term::Primitive(Primitive::Usize);
+        contract.parameter_types = vec![if nested {
+            Term::Record(vec![("count".into(), domain)])
+        } else {
+            domain
+        }];
+        let argument = if nested {
+            Term::RecordValue(vec![("count".into(), scalar.clone())])
+        } else {
+            scalar.clone()
+        };
+        for (width, accepted) in [(None, false), (Some(32), false), (Some(64), true)] {
+            let package = nir::program::Package {
+                target: width.map(|width| nir::target::TargetData::new(width).unwrap()),
+                ..Default::default()
+            };
+            let validate = |fuel: &mut usize| {
+                contract.validate_arguments_with_layouts(
+                    &Term::Primitive(Primitive::Bool),
+                    std::slice::from_ref(&argument),
+                    &[],
+                    &[],
+                    &BTreeMap::new(),
+                    fuel,
+                    |_, _, _| false,
+                    Some(&package),
+                )
+            };
+            assert!(validate(&mut 0).is_err());
+            assert_eq!(validate(&mut 10000).is_ok(), accepted);
+        }
+    }
+}

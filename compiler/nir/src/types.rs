@@ -78,6 +78,17 @@ impl Primitive {
         }
     }
 
+    /// Representation width with explicit target facts; never guesses a host width.
+    pub fn unrestricted_scalar_width_in(
+        self,
+        target: Option<crate::target::TargetData>,
+    ) -> Option<u32> {
+        match self {
+            Self::Isize | Self::Usize => target.map(|target| target.pointer_bits()),
+            _ => self.unrestricted_scalar_width(),
+        }
+    }
+
     /// Fixed-width integer proxies only. Pointer-sized proxies require target
     /// data and must never silently use the compiler host's pointer width.
     pub fn fixed_integer_layout(self) -> Option<(bool, u32)> {
@@ -219,9 +230,18 @@ pub enum Term {
         variant: Option<u32>,
         fields: Vec<Term>,
     },
+    /// Frozen error result. Branch identity is its full label, never a layout tag.
+    ErrorValue {
+        ty: Box<Term>,
+        label: Option<Box<Term>>,
+        value: Box<Term>,
+    },
     Pointer(Box<Term>),
     /// A comptime callable. Its inner signature must be an ordinary Function.
     ComptimeFunction(Box<Term>),
+    /// Caller responsibility, independent of phase. Canonically wraps an ordinary
+    /// Function or ComptimeFunction; closure environments remain outside it.
+    UnsafeFunction(Box<Term>),
     Function {
         parameters: Vec<Parameter>,
         result: Box<Term>,
@@ -253,7 +273,9 @@ pub enum Term {
     /// Immutable UTF-8 contents, compared by value rather than allocation identity.
     String(Arc<str>),
     Symbol(Arc<str>),
-    /// Identity of a comptime function declaration and its explicit instance inputs.
+    /// Immutable identity of a named callable declaration and its instance inputs.
+    /// Execution phase and responsibility come from the declaration and value domain;
+    /// freezing an identity never grants permission to invoke it.
     /// This is a value, not its callable type or an unfolded normal-form head.
     FunctionValue {
         declaration: DeclarationId,
@@ -278,7 +300,9 @@ pub enum Term {
 
 impl Term {
     /// Coalesce exact repeated labels and nested qualifiers without unfolding
-    /// opaque heads. Semantic label equality is resolved by elaboration.
+    /// opaque heads. Canonical label order gives equal closed rows one receiver
+    /// representation, including after substitution. Semantic label equality is
+    /// resolved by elaboration; sorting does not assert new type equations.
     pub fn error_result(mut errors: Vec<Term>, mut result: Term) -> Self {
         while let Self::ErrorResult {
             errors: inner,
@@ -290,6 +314,7 @@ impl Term {
         }
         let mut seen = std::collections::HashSet::new();
         errors.retain(|label| seen.insert(label.clone()));
+        errors.sort_by_cached_key(ToString::to_string);
         if errors.is_empty() {
             result
         } else {
@@ -298,6 +323,128 @@ impl Term {
                 result: Box::new(result),
             }
         }
+    }
+
+    /// Rebuild a frozen result after substituting or resolving its components.
+    /// An exposed inner result may flatten only with matching domain evidence.
+    /// Callers meter component traversal before invoking this constructor.
+    pub fn error_value(
+        errors: Vec<Term>,
+        result: Term,
+        mut label: Option<Box<Term>>,
+        mut value: Term,
+    ) -> Result<Self, TypeError> {
+        if errors.is_empty()
+            || errors.iter().any(|ty| ty.sort() != Sort::Type)
+            || result.sort() != Sort::Type
+            || label.as_ref().is_some_and(|label| !errors.contains(label))
+            || value.sort() == Sort::Runtime
+        {
+            return Err(TypeError::InvalidErrorValue);
+        }
+        let mut domain = result.clone();
+        let mut depth = 0;
+        while label.is_none() {
+            if value.has_pending_error_branch() {
+                let Self::ErrorValue { ty, .. } = &value else {
+                    unreachable!()
+                };
+                let same_domain = ty.as_ref() == &domain
+                    || match (ty.as_ref(), &domain) {
+                        (
+                            Self::ErrorResult {
+                                errors: a,
+                                result: ar,
+                            },
+                            Self::ErrorResult {
+                                errors: b,
+                                result: br,
+                            },
+                        ) => {
+                            Self::error_result(a.clone(), ar.as_ref().clone())
+                                == Self::error_result(b.clone(), br.as_ref().clone())
+                        }
+                        _ => false,
+                    };
+                if !same_domain {
+                    return Err(TypeError::InvalidErrorValue);
+                }
+                break;
+            }
+            let Self::ErrorValue {
+                ty,
+                label: inner_label,
+                value: inner_value,
+            } = value
+            else {
+                break;
+            };
+            depth += 1;
+            if depth >= 128 || *ty != domain {
+                return Err(TypeError::InvalidErrorValue);
+            }
+            let Self::ErrorResult { errors, result } = *ty else {
+                return Err(TypeError::InvalidErrorValue);
+            };
+            if errors.is_empty()
+                || inner_label
+                    .as_ref()
+                    .is_some_and(|label| !errors.contains(label))
+            {
+                return Err(TypeError::InvalidErrorValue);
+            }
+            domain = *result;
+            label = inner_label;
+            value = *inner_value;
+        }
+        // A symbolic inner result has no selected branch yet. Retain its
+        // original success domain until substitution exposes the value; an
+        // eager flatten would reinterpret that whole result as a success leaf.
+        let ty = if label.is_none() && matches!(domain, Self::ErrorResult { .. }) {
+            Self::ErrorResult {
+                errors,
+                result: Box::new(result),
+            }
+        } else {
+            Self::error_result(errors, result)
+        };
+        Ok(Self::ErrorValue {
+            ty: Box::new(ty),
+            label,
+            value: Box::new(value),
+        })
+    }
+
+    /// The outer success contains a whole result whose branch is not yet
+    /// available. Consumers must not treat this residual as a selected success.
+    pub fn has_pending_error_branch(&self) -> bool {
+        let Self::ErrorValue {
+            ty,
+            label: None,
+            value,
+        } = self
+        else {
+            return false;
+        };
+        let Self::ErrorResult { result, .. } = ty.as_ref() else {
+            return false;
+        };
+        matches!(result.as_ref(), Self::ErrorResult { .. })
+            || (matches!(
+                result.as_ref(),
+                Self::Rigid { .. }
+                    | Self::Bound { .. }
+                    | Self::Hole { .. }
+                    | Self::AssociatedType { .. }
+                    | Self::NormalForm { .. }
+            ) && matches!(
+                value.as_ref(),
+                Self::Rigid { .. }
+                    | Self::Bound { .. }
+                    | Self::Hole { .. }
+                    | Self::Value { .. }
+                    | Self::NormalForm { .. }
+            ))
     }
 
     /// Free runtime object identities retained by this type expression.
@@ -343,6 +490,11 @@ impl Term {
                 Self::Record(fields) | Self::RecordValue(fields) => {
                     pending.extend(fields.into_iter().map(|(_, field)| field))
                 }
+                Self::ErrorValue { ty, label, value } => {
+                    pending.push(*ty);
+                    pending.extend(label.map(|label| *label));
+                    pending.push(*value);
+                }
                 Self::NominalValue { ty, fields, .. } => {
                     pending.push(*ty);
                     pending.extend(fields);
@@ -354,7 +506,9 @@ impl Term {
                     pending.push(*signature);
                     pending.extend(environment);
                 }
-                Self::Pointer(inner) | Self::ComptimeFunction(inner) => pending.push(*inner),
+                Self::Pointer(inner)
+                | Self::ComptimeFunction(inner)
+                | Self::UnsafeFunction(inner) => pending.push(*inner),
                 Self::Function { parameters, result } => {
                     pending.push(*result);
                     pending.extend(parameters.into_iter().map(|parameter| parameter.ty));
@@ -453,7 +607,9 @@ impl Term {
     /// The parameter/result binder, without erasing the identity of this type.
     pub fn callable_signature(&self) -> &Term {
         match self {
-            Self::ComptimeFunction(signature) => signature,
+            Self::ComptimeFunction(signature) | Self::UnsafeFunction(signature) => {
+                signature.callable_signature()
+            }
             Self::Closure { signature, .. } | Self::ContextualClosure { signature, .. } => {
                 signature.callable_signature()
             }
@@ -463,15 +619,38 @@ impl Term {
     pub fn is_comptime_callable(&self) -> bool {
         match self {
             Self::ComptimeFunction(_) => true,
+            Self::UnsafeFunction(signature) => signature.is_comptime_callable(),
             Self::Closure { signature, .. } | Self::ContextualClosure { signature, .. } => {
-                matches!(signature.as_ref(), Self::ComptimeFunction(_))
+                signature.is_comptime_callable()
+            }
+            _ => false,
+        }
+    }
+    pub fn is_unsafe_callable(&self) -> bool {
+        match self {
+            Self::UnsafeFunction(_) => true,
+            Self::Closure { signature, .. } | Self::ContextualClosure { signature, .. } => {
+                signature.is_unsafe_callable()
             }
             _ => false,
         }
     }
     pub fn with_comptime_phase(self, comptime: bool) -> Term {
+        if let Self::UnsafeFunction(signature) = self {
+            return Self::UnsafeFunction(Box::new(signature.with_comptime_phase(comptime)));
+        }
         if comptime {
             Self::ComptimeFunction(Box::new(self))
+        } else {
+            self
+        }
+    }
+
+    /// Add caller responsibility after phase qualification. A false request
+    /// never strips an existing responsibility from an already formed type.
+    pub fn with_unsafe_call_requirement(self, required: bool) -> Term {
+        if required && !matches!(self, Self::UnsafeFunction(_)) {
+            Self::UnsafeFunction(Box::new(self))
         } else {
             self
         }
@@ -491,7 +670,8 @@ impl Term {
                 }
                 Self::Closure { signature, .. }
                 | Self::ContextualClosure { signature, .. }
-                | Self::ComptimeFunction(signature) => {
+                | Self::ComptimeFunction(signature)
+                | Self::UnsafeFunction(signature) => {
                     current = signature;
                 }
                 _ => return None,
@@ -587,7 +767,8 @@ impl Term {
             | Self::Rigid { sort, .. }
             | Self::NormalForm { sort, .. } => *sort,
             Self::Runtime(_) => Sort::Runtime,
-            Self::NominalValue { .. }
+            Self::ErrorValue { .. }
+            | Self::NominalValue { .. }
             | Self::TupleValue(_)
             | Self::ClosureContextValue(_)
             | Self::TypeListValue(_)
@@ -613,7 +794,10 @@ impl Term {
     /// Complete structural context qualification without evaluating any
     /// normal-form head or changing capture order / runtime identities.
     pub fn contextual_closure(context: Term, signature: Term) -> Result<Term, TypeError> {
-        if !matches!(signature, Term::Function { .. } | Term::ComptimeFunction(_)) {
+        if !matches!(
+            signature,
+            Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+        ) {
             return Err(TypeError::InvalidClosureSignature);
         }
         match context {
@@ -1027,6 +1211,20 @@ impl Term {
                     .map(|(name, ty)| Ok((name.clone(), ty.rewrite(nesting, leaf)?)))
                     .collect::<Result<_, TypeError>>()?,
             ),
+            Self::ErrorValue { ty, label, value } => {
+                let Self::ErrorResult { errors, result } = ty.as_ref() else {
+                    return Err(TypeError::InvalidErrorValue);
+                };
+                Self::error_value(
+                    many(errors, leaf)?,
+                    result.rewrite(nesting, leaf)?,
+                    label
+                        .as_ref()
+                        .map(|label| label.rewrite(nesting, leaf).map(Box::new))
+                        .transpose()?,
+                    value.rewrite(nesting, leaf)?,
+                )?
+            }
             Self::NominalValue {
                 ty,
                 variant,
@@ -1053,6 +1251,9 @@ impl Term {
             }
             Self::ComptimeFunction(inner) => {
                 Self::ComptimeFunction(Box::new(inner.rewrite(nesting, leaf)?))
+            }
+            Self::UnsafeFunction(inner) => {
+                Self::UnsafeFunction(Box::new(inner.rewrite(nesting, leaf)?))
             }
             Self::Pointer(inner) => Self::Pointer(Box::new(inner.rewrite(nesting, leaf)?)),
             Self::Function { parameters, result } => {
@@ -1121,7 +1322,9 @@ pub enum TypeError {
     InvalidClosureContext,
     DuplicateRecordField(String),
     InvalidNominalValueType,
+    InvalidErrorValue,
     InvalidComptimeFunctionSignature,
+    InvalidUnsafeFunctionSignature,
     InvalidFunctionSignature,
     InvalidTypeListComponent,
 }
@@ -1156,11 +1359,13 @@ impl fmt::Display for TypeError {
                 "runtime identity {id} is unavailable in this environment"
             ),
             Self::DuplicateRecordField(name) => write!(f, "duplicate record field {name:?}"),
+            Self::InvalidErrorValue => f.write_str("invalid frozen error result"),
             Self::InvalidNominalValueType => {
                 f.write_str("nominal value requires an explicit nominal type")
             }
             Self::BinderDepthOverflow => f.write_str("binder depth overflow"),
             Self::InvalidFunctionSignature => f.write_str("expected a function signature"),
+            Self::InvalidUnsafeFunctionSignature => write!(f, "unsafe function requires an ordinary or comptime function signature"),
             Self::InvalidComptimeFunctionSignature => {
                 f.write_str("comptime callable signature must be a function type")
             }
@@ -1427,6 +1632,13 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
                 collect_runtime_dependencies(argument, result);
             }
         }
+        Term::ErrorValue { ty, label, value } => {
+            collect_runtime_dependencies(ty, result);
+            if let Some(label) = label {
+                collect_runtime_dependencies(label, result);
+            }
+            collect_runtime_dependencies(value, result);
+        }
         Term::NominalValue { ty, fields, .. } => {
             collect_runtime_dependencies(ty, result);
             for field in fields {
@@ -1451,7 +1663,7 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
             }
             collect_runtime_dependencies(signature, result);
         }
-        Term::Pointer(inner) | Term::ComptimeFunction(inner) => {
+        Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
             collect_runtime_dependencies(inner, result)
         }
         Term::Function {
@@ -1556,6 +1768,15 @@ fn validate(
                 });
             }
         }
+        Term::UnsafeFunction(signature) => {
+            if !matches!(
+                signature.as_ref(),
+                Term::Function { .. } | Term::ComptimeFunction(_)
+            ) {
+                return Err(TypeError::InvalidUnsafeFunctionSignature);
+            }
+            validate(signature, holes, frames, allow_free, core)?;
+        }
         Term::ComptimeFunction(signature) => {
             if !matches!(signature.as_ref(), Term::Function { .. }) {
                 return Err(TypeError::InvalidComptimeFunctionSignature);
@@ -1586,7 +1807,7 @@ fn validate(
         Term::ContextualClosure { context, signature } => {
             if !matches!(
                 signature.as_ref(),
-                Term::Function { .. } | Term::ComptimeFunction(_)
+                Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
             ) {
                 return Err(TypeError::InvalidClosureSignature);
             }
@@ -1621,7 +1842,7 @@ fn validate(
         } => {
             if !matches!(
                 signature.as_ref(),
-                Term::Function { .. } | Term::ComptimeFunction(_)
+                Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
             ) {
                 return Err(TypeError::InvalidClosureSignature);
             }
@@ -1659,6 +1880,24 @@ fn validate(
         Term::Pointer(inner) => {
             require_sort(inner, Sort::Type)?;
             validate(inner, holes, frames, allow_free, core)?;
+        }
+        Term::ErrorValue { ty, label, value } => {
+            require_sort(ty, Sort::Type)?;
+            let Term::ErrorResult { errors, .. } = ty.as_ref() else {
+                return Err(TypeError::InvalidErrorValue);
+            };
+            if errors.is_empty() || label.as_ref().is_some_and(|label| !errors.contains(label)) {
+                return Err(TypeError::InvalidErrorValue);
+            }
+            validate(ty, holes, frames, allow_free, core)?;
+            if let Some(label) = label {
+                require_sort(label, Sort::Type)?;
+                validate(label, holes, frames, allow_free, core)?;
+            }
+            if value.sort() == Sort::Runtime {
+                return Err(TypeError::InvalidErrorValue);
+            }
+            validate(value, holes, frames, allow_free, core)?;
         }
         Term::NominalValue { ty, fields, .. } => {
             require_sort(ty, Sort::Type)?;
@@ -1879,6 +2118,15 @@ impl fmt::Display for Term {
                 }
                 f.write_str("))")
             }
+            Self::ErrorValue { ty, label, value } => {
+                write!(f, "(error-value (type {ty}) (branch ")?;
+                match label {
+                    Some(label) => write!(f, "(error {label})")?,
+                    None if self.has_pending_error_branch() => f.write_str("pending-inner")?,
+                    None => f.write_str("success")?,
+                }
+                write!(f, ") (payload {value}))")
+            }
             Self::NominalValue {
                 ty,
                 variant,
@@ -1923,6 +2171,7 @@ impl fmt::Display for Term {
                 f.write_str(")")
             }
             Self::ComptimeFunction(inner) => write!(f, "(comptime-function {inner})"),
+            Self::UnsafeFunction(inner) => write!(f, "(unsafe-function {inner})"),
             Self::Pointer(inner) => write!(f, "(pointer {inner})"),
             Self::Function { parameters, result } => {
                 f.write_str("(function (parameters ")?;

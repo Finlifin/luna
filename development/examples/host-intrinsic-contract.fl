@@ -1,0 +1,20 @@
+-- Bind ctlz=input::Ops::leading_zeros; enable Duplicate/Retire.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for .u32'builtin {}
+typealias Word = .u32'builtin;
+
+^intrinsic_enum
+enum Ops { leading_zeros }
+
+fn leading_zeros(value: Word) -> result: Word
+where requires value > 0, ensures result < 32 {
+    unsafe { Ops.leading_zeros'intrinsic(value).as(Word) }
+}
+
+fn run() -> bool {
+    let count = leading_zeros(1);
+    assumes count == 31;
+    count < 32
+}

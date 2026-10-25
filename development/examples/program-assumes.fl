@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Bool = true'type;
 typealias Int = .Integer'builtin;
 
@@ -32,7 +35,7 @@ comptime fn Select(accepted: Bool) -> .Type'builtin {
 }
 typealias Selected = Select(true);
 
-comptime fn run() -> (Selected, Bool, Bool) {
+comptime fn run() -> Tuple<Selected, Bool, Bool> {
     assumes true or false;
     (checked_value(true, true), count_checks() == 0, captured(true))
 }

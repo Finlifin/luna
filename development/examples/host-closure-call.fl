@@ -1,0 +1,23 @@
+-- luna host-closure-call.fl --build run --copy-protocol Duplicate --drop-protocol Retire --output /tmp/flurry-closure-call
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+
+struct Watch { target: *bool }
+impl Retire for Watch {
+    fn drop(*self) { self.target.*.* = not self.target.*.*; }
+}
+
+fn run() -> bool {
+    let seen = false;
+    let target = seen.ref;
+    let action = |early: bool| {
+        let watch = Watch {target: target};
+        if early { return; }
+    };
+    -- Each call constructs and destroys its own Watch.
+    action(true);
+    let first_finished = seen;
+    action(false);
+    first_finished and not seen
+}

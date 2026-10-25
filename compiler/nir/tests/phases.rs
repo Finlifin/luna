@@ -18,6 +18,7 @@ fn function(local: u32, phase: Phase, inputs: &[Sort]) -> Function {
         phase,
         inline: false,
         pure: false,
+        is_unsafe: false,
         signature: Term::Function {
             parameters: inputs
                 .iter()
@@ -51,10 +52,7 @@ fn call(target: &Function, arguments: Vec<(usize, Expr)>) -> Expr {
     flag(K::Call {
         callee: Box::new(Expr {
             kind: K::Function(target.declaration),
-            ty: target
-                .signature
-                .clone()
-                .with_comptime_phase(target.phase == Phase::Comptime),
+            ty: target.callable_type(),
             source: target.body.source,
         }),
         arguments: arguments
@@ -67,6 +65,346 @@ fn call(target: &Function, arguments: Vec<(usize, Expr)>) -> Expr {
             .collect(),
         parameter_bindings: target.parameters.clone(),
     })
+}
+
+#[test]
+fn generic_integer_operations_defer_only_owned_matching_domains() {
+    let parameter = DeclarationId {
+        package: 1,
+        local: 501,
+    };
+    let open = Term::Rigid {
+        declaration: parameter,
+        sort: Sort::Type,
+    };
+    let make = |operand: Term, result: Term, owned: bool| {
+        let mut target = function(500, Phase::Runtime, &[Sort::Runtime]);
+        target.type_parameters = if owned { vec![parameter] } else { vec![] };
+        target.signature = Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Runtime,
+                ty: operand.clone(),
+            }],
+            result: Box::new(result.clone()),
+        };
+        target.body = Expr {
+            ty: result,
+            source: target.body.source,
+            kind: K::IntegerNegate(Box::new(Expr {
+                ty: operand,
+                source: target.body.source,
+                kind: K::Local(target.parameters[0]),
+            })),
+        };
+        Package {
+            functions: vec![target],
+            ..Default::default()
+        }
+    };
+    let package = make(open.clone(), open.clone(), true);
+    let obligations = nir::phases::machine_arithmetic_functions(&package).unwrap();
+    assert!(obligations.contains(&package.functions[0].declaration));
+    let mut diverging = package.clone();
+    let function = &mut diverging.functions[0];
+    let K::IntegerNegate(value) = function.body.kind.clone() else {
+        unreachable!()
+    };
+    let right = Expr {
+        ty: Term::Primitive(Primitive::Never),
+        source: function.body.source,
+        kind: K::Return(Some(value.clone())),
+    };
+    function.body.ty = Term::Primitive(Primitive::Never);
+    function.body.kind = K::IntegerBinary {
+        op: nir::program::IntegerOp::Add,
+        left: value.clone(),
+        right: Box::new(right),
+    };
+    assert!(nir::phases::validate(&diverging).is_ok());
+    let K::IntegerBinary { right, .. } = &mut diverging.functions[0].body.kind else {
+        unreachable!()
+    };
+    *right = value;
+    assert!(
+        nir::phases::validate(&diverging).is_err(),
+        "Never cannot hide a returning generic operation"
+    );
+    assert!(
+        nir::phases::validate(&make(open.clone(), Term::Primitive(Primitive::Never), true))
+            .is_err()
+    );
+    assert!(nir::phases::validate(&make(open.clone(), open.clone(), false)).is_err());
+    assert!(nir::phases::validate(&make(Term::Primitive(Primitive::Bool), open, true)).is_err());
+    for primitive in [Primitive::Bool, Primitive::Integer] {
+        let ty = Term::Primitive(primitive);
+        assert!(nir::phases::validate(&make(ty.clone(), ty, false)).is_err());
+    }
+    let machine = Term::Primitive(Primitive::I8);
+    assert!(nir::phases::validate(&make(machine.clone(), machine, false)).is_ok());
+}
+
+#[test]
+fn default_expressions_only_read_available_parameter_bindings() {
+    for quote in [false, true] {
+        let mut target = function(90, Phase::Runtime, &[Sort::Runtime; 3]);
+        target.defaults = vec![(1, flag(K::Local(target.parameters[0])))];
+        let package = |target: Function| {
+            if quote {
+                Package {
+                    quote_templates: vec![target],
+                    ..Default::default()
+                }
+            } else {
+                Package {
+                    functions: vec![target],
+                    ..Default::default()
+                }
+            }
+        };
+        nir::phases::validate(&package(target.clone())).unwrap();
+        let temporary = LocalId {
+            owner: 90,
+            index: 99,
+        };
+        target.defaults[0].1 = flag(K::Block {
+            statements: vec![Expr {
+                kind: K::Let {
+                    binding: temporary,
+                    value: Box::new(flag(K::Local(target.parameters[0]))),
+                },
+                ty: Term::Primitive(Primitive::Void),
+                source: target.body.source,
+            }],
+            result: Some(Box::new(flag(K::Local(temporary)))),
+        });
+        nir::phases::validate(&package(target.clone())).unwrap();
+        for unavailable in [
+            target.parameters[1],
+            target.parameters[2],
+            LocalId {
+                owner: 999,
+                index: 0,
+            },
+        ] {
+            let mut invalid = target.clone();
+            invalid.defaults[0].1 = flag(K::Local(unavailable));
+            let error = nir::phases::validate(&package(invalid)).unwrap_err();
+            assert!(error.message.contains("default"), "{error:?}");
+            nir::phases::validate(&package(target.clone())).unwrap();
+        }
+    }
+}
+
+#[test]
+fn default_closure_captures_require_explicit_available_bindings() {
+    use nir::program::Capture;
+    let mut target = function(91, Phase::Runtime, &[Sort::Runtime; 2]);
+    let captured = target.parameters[0];
+    let signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    let ty = Term::Closure {
+        environment: vec![Term::Primitive(Primitive::Bool)],
+        signature: Box::new(signature),
+    };
+    let Term::Function { parameters, .. } = &mut target.signature else {
+        unreachable!()
+    };
+    parameters[1].ty = ty.clone();
+    target.defaults = vec![(
+        1,
+        Expr {
+            ty,
+            source: target.body.source,
+            kind: K::Closure {
+                captures: vec![Capture {
+                    binding: captured,
+                    ty: Term::Primitive(Primitive::Bool),
+                    value: None,
+                }],
+                parameters: vec![],
+                body: std::sync::Arc::new(flag(K::Local(captured))),
+            },
+        },
+    )];
+    let mut package = Package {
+        functions: vec![target],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    let original = package.functions[0].defaults[0].1.clone();
+    let K::Closure { body, .. } = &mut package.functions[0].defaults[0].1.kind else {
+        unreachable!()
+    };
+    *body = std::sync::Arc::new(flag(K::Local(LocalId {
+        owner: 999,
+        index: 0,
+    })));
+    let error = nir::phases::validate(&package).unwrap_err();
+    assert_eq!(error.message, "invalid function default binding scope");
+    package.functions[0].defaults[0].1 = original;
+    nir::phases::validate(&package).unwrap();
+}
+
+#[test]
+fn call_plans_reject_duplicate_missing_and_misordered_slots() {
+    let target = function(92, Phase::Runtime, &[Sort::Runtime; 3]);
+    let valid = call(
+        &target,
+        vec![
+            (2, flag(K::Literal(Literal::Bool(true)))),
+            (0, flag(K::Literal(Literal::Bool(false)))),
+            (1, flag(K::Literal(Literal::Bool(true)))),
+        ],
+    );
+    let mut root = function(93, Phase::Runtime, &[]);
+    root.body = valid.clone();
+    let mut package = Package {
+        functions: vec![target, root],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    for mutation in 0..9 {
+        let K::Call {
+            arguments,
+            parameter_bindings,
+            ..
+        } = &mut package.functions[1].body.kind
+        else {
+            unreachable!()
+        };
+        match mutation {
+            0 => arguments[1].parameter = arguments[0].parameter,
+            1 => {
+                arguments.pop();
+            }
+            2 => {
+                parameter_bindings.pop();
+            }
+            3 => parameter_bindings[1] = parameter_bindings[0],
+            4 => arguments[0].is_default = true,
+            5 => {
+                arguments[1].is_default = true;
+                arguments[2].is_default = true;
+                arguments.swap(1, 2);
+            }
+            6 => {
+                arguments[2].is_default = true;
+                parameter_bindings.clear();
+            }
+            7 => parameter_bindings.swap(0, 1),
+            8 => {
+                arguments[2].is_default = true;
+                arguments[2].value = flag(K::Local(parameter_bindings[1]));
+            }
+            _ => unreachable!(),
+        }
+        let error = nir::phases::validate(&package).unwrap_err();
+        assert!(error.message.contains("call"), "{error:?}");
+        package.functions[1].body = valid.clone();
+        nir::phases::validate(&package).unwrap();
+    }
+    let K::Call {
+        arguments,
+        parameter_bindings,
+        ..
+    } = &mut package.functions[1].body.kind
+    else {
+        unreachable!()
+    };
+    arguments[2].is_default = true;
+    arguments[2].value = flag(K::Local(parameter_bindings[0]));
+    nir::phases::validate(&package).unwrap();
+    package.functions[1].body = valid;
+    let K::Call {
+        parameter_bindings, ..
+    } = &mut package.functions[1].body.kind
+    else {
+        unreachable!()
+    };
+    parameter_bindings.clear();
+    nir::phases::validate(&package).unwrap();
+}
+
+#[test]
+fn closure_frames_reject_ambiguous_bindings_and_environment_arity() {
+    for phase in [Phase::Runtime, Phase::Comptime] {
+        let first = LocalId {
+            owner: 95,
+            index: 0,
+        };
+        let second = LocalId {
+            owner: 95,
+            index: 1,
+        };
+        let captured = LocalId {
+            owner: 95,
+            index: 2,
+        };
+        let signature = function(95, phase, &[Sort::Runtime; 2])
+            .signature
+            .with_comptime_phase(phase == Phase::Comptime);
+        let body = Expr {
+            source: SourceRange { start: 10, end: 20 },
+            ty: Term::Closure {
+                environment: vec![Term::Primitive(Primitive::Bool)],
+                signature: Box::new(signature),
+            },
+            kind: K::Closure {
+                captures: vec![nir::program::Capture {
+                    binding: captured,
+                    ty: Term::Primitive(Primitive::Bool),
+                    value: Some(Box::new(flag(K::Literal(Literal::Bool(true))))),
+                }],
+                parameters: vec![first, second],
+                body: std::sync::Arc::new(flag(K::Local(first))),
+            },
+        };
+        let mut root = function(94, phase, &[]);
+        let Term::Function { result, .. } = &mut root.signature else {
+            unreachable!()
+        };
+        *result = Box::new(body.ty.clone());
+        root.body = body.clone();
+        let mut package = Package {
+            functions: vec![root],
+            ..Default::default()
+        };
+        nir::phases::validate(&package).unwrap();
+        for mutation in 0..7 {
+            let expression = &mut package.functions[0].body;
+            let K::Closure {
+                captures,
+                parameters,
+                ..
+            } = &mut expression.kind
+            else {
+                unreachable!()
+            };
+            match mutation {
+                0 => {
+                    parameters.pop();
+                }
+                1 => parameters[1] = parameters[0],
+                2 => captures[0].binding = parameters[0],
+                3 => captures.push(captures[0].clone()),
+                4 => expression.ty = Term::Primitive(Primitive::Bool),
+                5 => captures.clear(),
+                6 => {
+                    let Term::Closure { signature, .. } = &expression.ty else {
+                        unreachable!()
+                    };
+                    expression.ty = *signature.clone();
+                }
+                _ => unreachable!(),
+            }
+            let error = nir::phases::validate(&package).unwrap_err();
+            assert!(error.message.contains("closure"), "{error:?}");
+            package.functions[0].body = body.clone();
+            nir::phases::validate(&package).unwrap();
+        }
+    }
 }
 
 #[test]
@@ -374,6 +712,121 @@ fn retained_quote_templates_are_checked_without_becoming_runtime_entries() {
             .message
             .contains("cannot escape")
     );
+}
+
+#[test]
+fn ordinary_function_frames_reject_inconsistent_bindings_and_defaults() {
+    for phase in [Phase::Runtime, Phase::Comptime] {
+        let mut original = function(90, phase, &[Sort::Runtime, Sort::Runtime]);
+        original
+            .defaults
+            .push((1, flag(K::Literal(Literal::Bool(true)))));
+        let mut package = Package {
+            functions: vec![original.clone()],
+            ..Default::default()
+        };
+        nir::phases::validate(&package).unwrap();
+        for mutation in 0..5 {
+            let mut invalid = original.clone();
+            match mutation {
+                0 => {
+                    invalid.parameters.pop();
+                }
+                1 => invalid.parameters[1] = invalid.parameters[0],
+                2 => invalid.signature = Term::Primitive(Primitive::Bool),
+                3 => invalid.defaults.push(invalid.defaults[0].clone()),
+                4 => invalid.defaults[0].0 = 2,
+                _ => unreachable!(),
+            }
+            package.functions[0] = invalid;
+            let error = nir::phases::validate(&package).expect_err("invalid callable frame");
+            assert!(error.message.contains("function parameter"), "{error:?}");
+            package.functions[0] = original.clone();
+            nir::phases::validate(&package).unwrap();
+        }
+    }
+}
+
+#[test]
+fn retained_quote_templates_validate_parameter_frame_identity() {
+    let mut template = function(80, Phase::Runtime, &[Sort::Runtime, Sort::Runtime]);
+    template
+        .defaults
+        .push((1, flag(K::Literal(Literal::Bool(true)))));
+    let mut package = Package {
+        quote_templates: vec![template.clone()],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    for mutation in 0..5 {
+        let mut invalid = template.clone();
+        match mutation {
+            0 => {
+                invalid.parameters.pop();
+            }
+            1 => invalid.parameters[1] = invalid.parameters[0],
+            2 => invalid.signature = Term::Primitive(Primitive::Bool),
+            3 => invalid.defaults.push(invalid.defaults[0].clone()),
+            4 => invalid.defaults[0].0 = 2,
+            _ => unreachable!(),
+        }
+        package.quote_templates[0] = invalid;
+        let error = nir::phases::validate(&package).expect_err("malformed quote parameter frame");
+        assert!(
+            error.message.contains("quote template parameter"),
+            "{error:?}"
+        );
+        package.quote_templates[0] = template.clone();
+        nir::phases::validate(&package).unwrap();
+    }
+}
+
+#[test]
+fn retained_quote_contract_bindings_cannot_alias_inputs_or_each_other() {
+    let mut template = function(81, Phase::Runtime, &[Sort::Runtime]);
+    let result = LocalId {
+        owner: 81,
+        index: 1,
+    };
+    let frozen = LocalId {
+        owner: 81,
+        index: 2,
+    };
+    template.result_binding = Some(result);
+    template.entry_snapshots.push(nir::program::EntrySnapshot {
+        parameter: template.parameters[0],
+        binding: frozen,
+    });
+    let mut package = Package {
+        quote_templates: vec![template.clone()],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    for mutation in 0..5 {
+        let mut invalid = template.clone();
+        match mutation {
+            0 => invalid.result_binding = Some(invalid.parameters[0]),
+            1 => invalid.entry_snapshots[0].parameter = result,
+            2 => invalid.entry_snapshots[0].binding = invalid.parameters[0],
+            3 => invalid.entry_snapshots[0].binding = result,
+            4 => invalid
+                .entry_snapshots
+                .push(invalid.entry_snapshots[0].clone()),
+            _ => unreachable!(),
+        }
+        package.quote_templates[0] = invalid;
+        let error = nir::phases::validate(&package).expect_err("invalid quote contract identity");
+        assert!(
+            matches!(
+                error.message,
+                "result binding aliases an input parameter" | "invalid entry snapshot binding"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(error.source, template.body.source);
+        package.quote_templates[0] = template.clone();
+        nir::phases::validate(&package).unwrap();
+    }
 }
 
 #[test]
@@ -739,5 +1192,160 @@ fn unresolved_pattern_code_evidence_never_enters_executable_packages() {
         };
         let error = nir::phases::validate(&package).unwrap_err();
         assert_eq!(error.message, "unresolved pattern-code evidence");
+    }
+}
+
+#[test]
+fn computation_result_storage_retains_its_execution_phase() {
+    for (result, accepted) in [
+        (Primitive::Bool, true),
+        (Primitive::Type, false),
+        (Primitive::Integer, false),
+    ] {
+        let mut root = function(1, Phase::Runtime, &[Sort::Runtime]);
+        let Term::Function { parameters, .. } = &mut root.signature else {
+            unreachable!()
+        };
+        parameters[0].ty = Term::Computation {
+            effects: vec![],
+            result: Box::new(Term::Primitive(result)),
+        };
+        let package = Package {
+            functions: vec![root],
+            ..Default::default()
+        };
+        let checked = nir::phases::validate(&package);
+        if accepted {
+            checked.unwrap();
+        } else {
+            assert!(checked.unwrap_err().message.contains("comptime-only"));
+        }
+    }
+}
+
+#[test]
+fn concrete_storage_layout_inspection_spends_shared_budget_and_recovers() {
+    let nominal = Term::Nominal {
+        declaration: DeclarationId {
+            package: 9,
+            local: 1,
+        },
+        arguments: vec![],
+    };
+    let metadata = Package::default();
+    let resolve = |ty: &Term, fuel: &mut usize| -> Option<Vec<Term>> {
+        if ty != &nominal {
+            return None;
+        }
+        (0..256)
+            .map(|_| {
+                let field = Term::Primitive(Primitive::Bool);
+                nir::type_computations::charge_term(&field, fuel).ok()?;
+                Some(field)
+            })
+            .collect()
+    };
+    let mut small = 16;
+    assert!(
+        nir::phases::validate_runtime_storage_with_nominals(
+            &nominal,
+            &metadata,
+            &[],
+            &resolve,
+            &mut small
+        )
+        .is_err()
+    );
+    assert!(small < 16);
+    let mut enough = 4096;
+    nir::phases::validate_runtime_storage_with_nominals(
+        &nominal,
+        &metadata,
+        &[],
+        &resolve,
+        &mut enough,
+    )
+    .unwrap();
+    assert!(enough < 4096 - 256);
+    let mut empty = 0;
+    assert!(
+        nir::phases::validate_runtime_storage_with_nominals(
+            &nominal,
+            &metadata,
+            &[],
+            &resolve,
+            &mut empty
+        )
+        .is_err()
+    );
+    nir::phases::validate_runtime_storage_with_nominals(
+        &nominal,
+        &metadata,
+        &[],
+        &resolve,
+        &mut enough,
+    )
+    .unwrap();
+    assert!(
+        nir::phases::validate_runtime_storage_with_nominals(
+            &nominal,
+            &metadata,
+            &[],
+            &|_, _| None,
+            &mut enough
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn unsafe_callable_calls_are_checked_against_lexical_scope_and_target_identity() {
+    let mut target = function(901, Phase::Runtime, &[]);
+    target.is_unsafe = true;
+    let mut caller = function(902, Phase::Runtime, &[]);
+    caller.body = call(&target, vec![]);
+    let package = |caller| Package {
+        functions: vec![caller, target.clone()],
+        ..Default::default()
+    };
+    let error = nir::phases::validate(&package(caller.clone())).unwrap_err();
+    assert!(error.message.contains("unsafe boundary"), "{error:?}");
+    caller.body = flag(K::UnsafeScope(Box::new(caller.body)));
+    nir::phases::validate(&package(caller.clone())).unwrap();
+    nir::visit::expression_mut(&mut caller.body, &mut 1000, |expr, _| {
+        if let K::Function(_) = expr.kind {
+            expr.ty = target.signature.clone();
+        }
+        Ok(())
+    })
+    .unwrap();
+    let error = nir::phases::validate(&package(caller)).unwrap_err();
+    assert!(
+        error.message.contains("declaration responsibility"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn declaration_responsibility_survives_specialization_without_wrapping_its_telescope() {
+    for phase in [Phase::Runtime, Phase::Comptime] {
+        let mut original = function(903, phase, &[Sort::Runtime]);
+        original.is_unsafe = true;
+        let specialized = original.instantiate_parameters(&[], &[]).unwrap();
+        assert!(specialized.is_unsafe);
+        assert_eq!(specialized.phase, phase);
+        assert_eq!(specialized.signature, original.signature);
+        assert!(matches!(specialized.signature, Term::Function { .. }));
+        let value_type = specialized.callable_type();
+        value_type.check_scope(&[]).unwrap();
+        assert!(value_type.is_unsafe_callable());
+        assert_eq!(value_type.is_comptime_callable(), phase == Phase::Comptime);
+        assert_eq!(value_type.callable_signature(), &original.signature);
+        assert!(specialized.to_string().contains("(unsafe true)"));
+        nir::phases::validate(&Package {
+            functions: vec![specialized],
+            ..Default::default()
+        })
+        .unwrap();
     }
 }

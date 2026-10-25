@@ -40,7 +40,7 @@ impl World<'_> {
             projection,
             budget,
             &mut |interface, subject, allowance| {
-                self.resolve_projected_instance(interface, subject, allowance)
+                self.resolve_projected_instance_metered(interface, subject, allowance)
             },
         )
     }
@@ -52,7 +52,7 @@ impl World<'_> {
         resolve: &mut dyn FnMut(
             &InterfaceInstance,
             &Term,
-            Budget,
+            &mut Budget,
         ) -> Result<crate::capabilities::Resolution, String>,
     ) -> Result<(AssociatedTypeResolution, usize), String> {
         let mut fuel = budget.steps;
@@ -83,7 +83,7 @@ impl World<'_> {
         let inputs: Vec<_> = std::iter::once(subject.as_ref().clone())
             .chain(arguments.iter().cloned())
             .collect();
-        charge_projection_copy(&member.ty, &mut fuel)?;
+        charge_projection_substitution(&member.ty, &parameters, &inputs, &mut fuel)?;
         let member_type = member
             .ty
             .instantiate_parameters(&parameters, &inputs)
@@ -120,14 +120,24 @@ impl World<'_> {
                     .ok_or("associated Type query budget exhausted")?;
                 match requirement {
                     nir::program::TypePredicate::Trait(requirement) => {
-                        charge_projection_copy(&requirement.subject, &mut fuel)?;
+                        charge_projection_substitution(
+                            &requirement.subject,
+                            &parameters,
+                            &inputs,
+                            &mut fuel,
+                        )?;
                         for argument in &requirement.interface_arguments {
-                            charge_projection_copy(argument, &mut fuel)?;
+                            charge_projection_substitution(
+                                argument,
+                                &parameters,
+                                &inputs,
+                                &mut fuel,
+                            )?;
                         }
                     }
                     nir::program::TypePredicate::Equal(a, b) => {
-                        charge_projection_copy(a, &mut fuel)?;
-                        charge_projection_copy(b, &mut fuel)?;
+                        charge_projection_substitution(a, &parameters, &inputs, &mut fuel)?;
+                        charge_projection_substitution(b, &parameters, &inputs, &mut fuel)?;
                     }
                     nir::program::TypePredicate::And(items)
                     | nir::program::TypePredicate::Or(items) => {
@@ -152,9 +162,9 @@ impl World<'_> {
             }
         }
         for capability in &contract.capabilities {
-            charge_projection_copy(&capability.subject, &mut fuel)?;
+            charge_projection_substitution(&capability.subject, &parameters, &inputs, &mut fuel)?;
             for argument in &capability.interface_arguments {
-                charge_projection_copy(argument, &mut fuel)?;
+                charge_projection_substitution(argument, &parameters, &inputs, &mut fuel)?;
             }
             let capability = capability
                 .instantiate_parameters(&parameters, &inputs)
@@ -162,11 +172,13 @@ impl World<'_> {
             if self.given(&capability, query_budget).is_some() {
                 continue;
             }
+            let mut allowance = query_budget;
             let resolved = resolve(
                 &capability.interface_instance(),
                 &capability.subject,
-                query_budget,
+                &mut allowance,
             )?;
+            fuel += allowance.steps;
             if !matches!(resolved.types.selection, Selection::Selected(_)) {
                 return Err("associated Type interface capability is not established".into());
             }
@@ -175,7 +187,11 @@ impl World<'_> {
             declaration: origin.interface,
             arguments: arguments.clone(),
         };
-        let resolution = resolve(&interface, subject, query_budget)?;
+        let mut allowance = query_budget;
+        let resolution = resolve(&interface, subject, &mut allowance)?;
+        // The query allowance was reserved above, not spent. Keep unused
+        // work available to later projections in the same normalization.
+        fuel += allowance.steps;
         let Selection::Selected(selected) = resolution.types.selection else {
             return Err(format!(
                 "associated Type implementation selection is unresolved: {}",
@@ -213,17 +229,12 @@ impl World<'_> {
         let ExprKind::TypeValue(value) = &value.kind else {
             return Err("selected associated value is not a completed Type template".into());
         };
-        charge_projection_copy(value, &mut fuel)?;
-        for argument in &evidence.type_arguments {
-            charge_projection_copy(argument, &mut fuel)?;
-        }
+        let binders = implementation
+            .parameter_binders()
+            .map_err(|e| e.to_string())?;
+        charge_projection_substitution(value, &binders, &evidence.type_arguments, &mut fuel)?;
         let value = value
-            .instantiate_parameters(
-                &implementation
-                    .parameter_binders()
-                    .map_err(|e| e.to_string())?,
-                &evidence.type_arguments,
-            )
+            .instantiate_parameters(&binders, &evidence.type_arguments)
             .map_err(|e| e.to_string())?;
         charge_projection_copy(&value, &mut fuel)?;
         value.check_scope(&[]).map_err(|e| e.to_string())?;
@@ -336,7 +347,7 @@ impl World<'_> {
         resolve: &mut dyn FnMut(
             &InterfaceInstance,
             &Term,
-            Budget,
+            &mut Budget,
         ) -> Result<crate::capabilities::Resolution, String>,
     ) -> Result<(Term, usize), String> {
         self.normalize_associated_types_mode(ty, budget, true, None, Some(resolve))
@@ -353,7 +364,7 @@ impl World<'_> {
             &mut dyn FnMut(
                 &InterfaceInstance,
                 &Term,
-                Budget,
+                &mut Budget,
             ) -> Result<crate::capabilities::Resolution, String>,
         >,
     ) -> Result<
@@ -406,7 +417,7 @@ struct Normalizer<'a, 'w, 'r> {
         &'r mut dyn FnMut(
             &InterfaceInstance,
             &Term,
-            Budget,
+            &mut Budget,
         ) -> Result<crate::capabilities::Resolution, String>,
     >,
     world: &'a World<'w>,
@@ -512,13 +523,16 @@ impl Normalizer<'_, '_, '_> {
                     let inputs = std::iter::once(subject.as_ref().clone())
                         .chain(arguments.iter().cloned())
                         .collect::<Vec<_>>();
+                    let binders = contract.binders_with_self(&mut self.remaining)?;
+                    charge_projection_substitution(
+                        &member.ty,
+                        &binders,
+                        &inputs,
+                        &mut self.remaining,
+                    )?;
                     let ty = member
                         .ty
-                        .instantiate_parameters_in_scope(
-                            &contract.binders_with_self(&mut self.remaining)?,
-                            &inputs,
-                            &self.frames,
-                        )
+                        .instantiate_parameters_in_scope(&binders, &inputs, &self.frames)
                         .map_err(|e| e.to_string())?;
                     if ty != Term::Primitive(Primitive::Type) {
                         return Err("associated projection member is not Type-valued".into());
@@ -588,12 +602,16 @@ impl Normalizer<'_, '_, '_> {
                         let inputs: Vec<_> = std::iter::once(subject.as_ref().clone())
                             .chain(arguments.iter().cloned())
                             .collect();
+                        let binders = contract.binders_with_self(&mut self.remaining)?;
+                        charge_projection_substitution(
+                            &member.ty,
+                            &binders,
+                            &inputs,
+                            &mut self.remaining,
+                        )?;
                         let ty = member
                             .ty
-                            .instantiate_parameters(
-                                &contract.binders_with_self(&mut self.remaining)?,
-                                &inputs,
-                            )
+                            .instantiate_parameters(&binders, &inputs)
                             .map_err(|e| e.to_string())?;
                         if ty != Term::Primitive(Primitive::Type) {
                             return Err("associated projection member is not Type-valued".into());
@@ -656,6 +674,21 @@ impl Normalizer<'_, '_, '_> {
             Term::TupleValue(items) => Term::TupleValue(self.many(items, depth + 1)?),
             Term::TypeListValue(items) => Term::TypeListValue(self.many(items, depth + 1)?),
             Term::TypeListConcat(items) => Term::type_list_concat(self.many(items, depth + 1)?),
+            Term::ErrorValue { ty, label, value } => {
+                let Term::ErrorResult { errors, result } = ty.as_ref() else {
+                    return Err("invalid frozen error result domain".into());
+                };
+                Term::error_value(
+                    self.many(errors, depth + 1)?,
+                    self.normalize(result, depth + 1)?,
+                    match label {
+                        Some(label) => Some(Box::new(self.normalize(label, depth + 1)?)),
+                        None => None,
+                    },
+                    self.normalize(value, depth + 1)?,
+                )
+                .map_err(|error| error.to_string())?
+            }
             Term::NominalValue {
                 ty,
                 variant,
@@ -683,6 +716,9 @@ impl Normalizer<'_, '_, '_> {
             Term::Pointer(inner) => Term::Pointer(Box::new(self.normalize(inner, depth + 1)?)),
             Term::ComptimeFunction(inner) => {
                 Term::ComptimeFunction(Box::new(self.normalize(inner, depth + 1)?))
+            }
+            Term::UnsafeFunction(inner) => {
+                Term::UnsafeFunction(Box::new(self.normalize(inner, depth + 1)?))
             }
             Term::Function { parameters, result } => {
                 if parameters.len() > self.remaining {
@@ -765,6 +801,16 @@ impl fmt::Display for AssociatedTypeNormalization {
 
 // Cache hits must pay for payload copying too, not only the node count. The
 // preliminary shape walk bounds recursive clone depth before visiting payloads.
+fn charge_projection_substitution(
+    term: &Term,
+    parameters: &[nir::DeclarationParameter],
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<(), String> {
+    nir::type_computations::charge_parameter_substitution(term, parameters, arguments, fuel)
+        .map_err(|e| e.to_string())
+}
+
 pub(crate) fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<(), String> {
     crate::verification::memory::bound_type(term, fuel)?;
     let mut pending = vec![term];
@@ -802,6 +848,14 @@ pub(crate) fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<()
                 pending.extend(items);
                 0
             }
+            Term::ErrorValue { ty, label, value } => {
+                pending.push(ty);
+                if let Some(label) = label {
+                    pending.push(label);
+                }
+                pending.push(value);
+                0
+            }
             Term::NominalValue { ty, fields, .. } => {
                 pending.push(ty);
                 pending.extend(fields);
@@ -817,7 +871,7 @@ pub(crate) fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<()
                 }
                 cost
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) => {
+            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
                 pending.push(inner);
                 0
             }
@@ -1269,7 +1323,7 @@ impl World<'_> {
         let inputs: Vec<_> = std::iter::once(subject.clone())
             .chain(interface.arguments.iter().cloned())
             .collect();
-        charge_projection_copy(&member.ty, &mut fuel)?;
+        charge_projection_substitution(&member.ty, &parameters, &inputs, &mut fuel)?;
         let member_type = member
             .ty
             .instantiate_parameters(&parameters, &inputs)
@@ -1303,14 +1357,24 @@ impl World<'_> {
                     .ok_or("associated value query budget exhausted")?;
                 match requirement {
                     nir::program::TypePredicate::Trait(requirement) => {
-                        charge_projection_copy(&requirement.subject, &mut fuel)?;
+                        charge_projection_substitution(
+                            &requirement.subject,
+                            &parameters,
+                            &inputs,
+                            &mut fuel,
+                        )?;
                         for argument in &requirement.interface_arguments {
-                            charge_projection_copy(argument, &mut fuel)?;
+                            charge_projection_substitution(
+                                argument,
+                                &parameters,
+                                &inputs,
+                                &mut fuel,
+                            )?;
                         }
                     }
                     nir::program::TypePredicate::Equal(a, b) => {
-                        charge_projection_copy(a, &mut fuel)?;
-                        charge_projection_copy(b, &mut fuel)?;
+                        charge_projection_substitution(a, &parameters, &inputs, &mut fuel)?;
+                        charge_projection_substitution(b, &parameters, &inputs, &mut fuel)?;
                     }
                     nir::program::TypePredicate::And(items)
                     | nir::program::TypePredicate::Or(items) => {
@@ -1335,9 +1399,9 @@ impl World<'_> {
             }
         }
         for capability in &contract.capabilities {
-            charge_projection_copy(&capability.subject, &mut fuel)?;
+            charge_projection_substitution(&capability.subject, &parameters, &inputs, &mut fuel)?;
             for argument in &capability.interface_arguments {
-                charge_projection_copy(argument, &mut fuel)?;
+                charge_projection_substitution(argument, &parameters, &inputs, &mut fuel)?;
             }
             let capability = capability
                 .instantiate_parameters(&parameters, &inputs)
@@ -1354,11 +1418,16 @@ impl World<'_> {
                 return Err("associated value interface capability is not established".into());
             }
         }
-        let resolution = self.resolve_projected_instance(interface, subject, query_budget)?;
+        let mut selection_budget = query_budget;
+        let resolution =
+            self.resolve_projected_instance_metered(interface, subject, &mut selection_budget)?;
+        // This allowance was reserved above. Return only the solver's unused
+        // work, including prerequisite normalization, to the enclosing query.
+        fuel += selection_budget.steps;
         let Selection::Selected(selected) = resolution.types.selection else {
             return Err(format!(
                 "associated value implementation selection is unresolved: {}",
-                resolution.types.selection
+                resolution.types
             ));
         };
         let Some(TypeAssessment::Applicable(evidence)) =
@@ -1393,21 +1462,16 @@ impl World<'_> {
         if values.next().is_some() {
             return Err("selected implementation has duplicate associated values".into());
         }
-        if requires_invocation {
-            let mut steps = fuel as u64;
-            let copied = nir::copy_budget::charge_type_rewrite(value, &mut steps);
-            fuel = steps as usize;
-            copied.map_err(|_| "associated initializer copy budget exhausted")?;
-        } else {
-            charge_completed_value(value, &mut fuel)?;
+        if !requires_invocation {
+            charge_completed_value(value, &self.index.nominal_layouts, self.context, &mut fuel)?;
         }
+        let binders = implementation
+            .parameter_binders()
+            .map_err(|e| e.to_string())?;
+        nir::copy_budget::charge_substitution(value, &binders, &evidence.type_arguments, &mut fuel)
+            .map_err(|_| "associated value substitution budget exhausted")?;
         let mut value = value
-            .instantiate_parameters(
-                &implementation
-                    .parameter_binders()
-                    .map_err(|e| e.to_string())?,
-                &evidence.type_arguments,
-            )
+            .instantiate_parameters(&binders, &evidence.type_arguments)
             .map_err(|e| e.to_string())?;
         // Compare completed type views without unfolding opaque normal-form heads.
         let mut cache = std::collections::HashMap::new();
@@ -1439,7 +1503,7 @@ impl World<'_> {
             value = nir::associated_initializers::AssociatedInitializer::new(value, &mut fuel)?
                 .into_expression();
         } else {
-            charge_completed_value(&value, &mut fuel)?;
+            charge_completed_value(&value, &self.index.nominal_layouts, self.context, &mut fuel)?;
         }
         Ok((
             AssociatedValueResolution {
@@ -1454,6 +1518,18 @@ impl World<'_> {
 }
 
 /// Bound both payload copying and structural depth before recursive substitution.
-fn charge_completed_value(value: &nir::program::Expr, fuel: &mut usize) -> Result<(), String> {
-    nir::completed_values::validate(value, fuel).map_err(str::to_owned)
+fn charge_completed_value(
+    value: &nir::program::Expr,
+    layouts: &nir::program::Package,
+    context: &crate::ptc::Context,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    nir::completed_values::validate_with_declarations(
+        value,
+        layouts.newtypes.iter(),
+        &|head| context.is_tuple_head(head),
+        &|id, fuel| nir::completed_values::lookup_nominal(layouts, id, fuel),
+        fuel,
+    )
+    .map_err(str::to_owned)
 }

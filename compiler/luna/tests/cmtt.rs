@@ -47,25 +47,32 @@ fn pattern_success_output_types_contextualize_generic_producers() {
 
 #[test]
 fn partial_pattern_subjects_flow_through_nested_and_property_producers() {
-    let source = "comptime fn pair(seed:B,...fields:Options)-><(A,B) -| left:A,right:B> where A,B,Options {'<(left,right)>}
-        comptime fn forward(code:<(bool,T) -| left:bool,right:T>)-><(bool,T) -| left:bool,right:T> where T {code}
+    let source = "comptime fn pair(seed:B,...fields:Options)-><Tuple<A,B> -| left:A,right:B> where A,B,Options {'<(left,right)>}
+        comptime fn forward(code:<Tuple<bool,T> -| left:bool,right:T>)-><Tuple<bool,T> -| left:bool,right:T> where T {code}
         fn run()->bool {const p=forward(pair {'a',enabled:true});let ~<p> = (true,'b');left and right == 'b'}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let invalid = source.replace("'<(left,right)>", "'<(left if left == 'a',right)>");
-    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
 }
 
 #[test]
 fn pattern_producers_receive_partial_subject_structure_from_outer_inputs() {
-    let source = "comptime fn pair(seed:B)-><(A,B) -| left:A,right:B> where A,B {'<(left,right)>}
-        comptime fn accepts(code:<(bool,T) -| left:bool,right:T>)-><|-bool> where T {'(true)}
+    let source =
+        "comptime fn pair(seed:B)-><Tuple<A,B> -| left:A,right:B> where A,B {'<(left,right)>}
+        comptime fn accepts(code:<Tuple<bool,T> -| left:bool,right:T>)-><|-bool> where T {'(true)}
         fn run()->bool {~<accepts(pair('a'))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let invalid = source.replace(
         "accepts(pair('a'))",
         "accepts(pair<.char'builtin,.char'builtin>('a'))",
     );
-    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    let failure = support::compile_with_tuple_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(!failure.contains("parsing failed"), "{failure}");
 }
 
@@ -113,24 +120,33 @@ fn nested_generator_callback_inputs_keep_comptime_phase_inside_quotes() {
 #[test]
 fn pattern_collections_retain_future_type_evidence_after_each_element() {
     let source = "comptime fn byte()->.u8'builtin {19}
-        comptime fn selected(...items:(bool,U,U))-><bool -| value:bool> where U {'<value>}
+        comptime fn selected(...items:Tuple<bool,U,U>)-><bool -| value:bool> where U {'<value>}
         fn run()->bool {const p=selected(true,17,byte());let ~<p> = true;value}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let partial = "comptime fn byte()->.u8'builtin {19}
-        comptime fn selected(...items:(bool,comptime fn(U)->V,U))-><bool -| value:bool> where U,V {'<value>}
+        comptime fn selected(...items:Tuple<bool,comptime fn(U)->V,U>)-><bool -| value:bool> where U,V {'<value>}
         fn run()->bool {const p=selected(true,|input| true,byte());let ~<p> = true;value}";
-    assert_eq!(run(partial, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(partial, "run", vec![]),
+        Value::Bool(true)
+    );
     let effectful = "typealias Count=.Integer'builtin;
         comptime fn byte(count:*Count)->.u8'builtin {count.*+=1;19}
-        comptime fn selected(...items:(bool,comptime fn(U)->V,U))-><bool -| value:bool> where U,V {'<value>}
+        comptime fn selected(...items:Tuple<bool,comptime fn(U)->V,U>)-><bool -| value:bool> where U,V {'<value>}
         comptime fn emit()-><|-bool> {var count:Count=0;
             const p=selected(do {count+=1;true},|input| true,byte(count.ref));
             let twice=count == 2;'(twice and (true match {~<p> => value}))
         }
         fn run()->bool {~<emit()>}";
-    assert_eq!(run(effectful, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(effectful, "run", vec![]),
+        Value::Bool(true)
+    );
     let invalid = source.replace("true,17,byte()", "true,256,byte()");
-    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
 }
 
 #[test]
@@ -139,12 +155,18 @@ fn pattern_lambda_inputs_feed_later_literals_and_collected_fields() {
             let chosen=action(true);'<value>
         }
         fn run()->bool {const p=selected(if _0 {{let byte:.u8'builtin=200;byte}} else {{let byte:.u8'builtin=201;byte}},201);let byte:.u8'builtin=202;let ~<p> = byte;value == 202}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
-    let collected = "comptime fn selected(...items:(comptime fn(bool)->U,U))-><U -| value:U> where U {
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    let collected = "comptime fn selected(...items:Tuple<comptime fn(bool)->U,U>)-><U -| value:U> where U {
             let (action,input)=items;let chosen=action(true);'<value>
         }
         fn run()->bool {const p=selected(|flag| {let byte:.u8'builtin=200;byte},201);let byte:.u8'builtin=202;let ~<p> = byte;value == 202}";
-    assert_eq!(run(collected, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(collected, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -361,7 +383,7 @@ fn pattern_value_clause_defaults_skip_overrides_and_check_unused_definitions() {
 fn pattern_sibling_input_types_contextualize_earlier_numeric_literals() {
     for (parameters, call) in [
         ("first:T,second:T", "select(17,number())"),
-        ("...items:(T,T)", "select(17,number())"),
+        ("...items:Tuple<T,T>", "select(17,number())"),
         ("first:T,implicit second:T", "select(17,.second=number())"),
     ] {
         let source = format!(
@@ -369,9 +391,12 @@ fn pattern_sibling_input_types_contextualize_earlier_numeric_literals() {
             comptime fn select({parameters})-><bool -| value:bool> where T {{'<value>}}
             fn run()->bool {{const p={call};let ~<p> = true;value}}"
         );
-        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true)
+        );
         let invalid = source.replace("select(17", "select(256");
-        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+        assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
     }
 }
 
@@ -443,15 +468,21 @@ fn pattern_subject_context_reaches_collections_packets_and_nested_generators() {
         "binding(.items=(17,42))",
     ] {
         let source = format!(
-            "comptime fn binding(...items:(T,T))-><T -| value:T> where T {{'<value>}}
+            "comptime fn binding(...items:Tuple<T,T>)-><T -| value:T> where T {{'<value>}}
             fn run()->bool {{let input:.u8'builtin=17;let ~<{call}> = input;value == 17}}"
         );
-        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true)
+        );
     }
     let source = "comptime fn binding(input:T)-><T -| value:T> where T {'<value>}
         comptime fn forward()-><.u8'builtin -| value:.u8'builtin> {binding(17)}
         fn run()->bool {let input:.u8'builtin=17;let ~<forward()> = input;value == 17}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -498,14 +529,20 @@ fn pattern_property_calls_use_explicit_collector_types_and_field_context() {
         comptime fn select(...first:A,...props:B)-><B -| value:B> where A,B {'<value>}
         comptime fn data(...props:T)-><|-T> where T {'(props)}
         fn run()->bool {
-            const p=select<(bool,bool),Options> {true,false,size:17,enabled:true};
+            const p=select<Tuple<bool,bool>,Options> {true,false,size:17,enabled:true};
             let ~<p> = ~<data<Options> {size:17,enabled:true}>;value.size == 17 and value.enabled
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let expanded = source.replace("{true,false,size:17", "{...do {(true,false)},size:17");
-    assert_eq!(run(&expanded, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&expanded, "run", vec![]),
+        Value::Bool(true)
+    );
     let invalid = source.replace("size:17,enabled:true", "missing:17,enabled:true");
-    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
 }
 
 #[test]
@@ -541,19 +578,25 @@ fn pattern_property_calls_reject_duplicates_and_ambiguous_collectors() {
 #[test]
 fn pattern_variadic_defaults_and_forwarding_use_the_completed_collection() {
     let source =
-        "comptime fn select(...items:(bool,bool),.copy:(bool,bool)=items)-><bool -| value:bool> {
+        "comptime fn select(...items:Tuple<bool,bool>,.copy:Tuple<bool,bool> = items)-><bool -| value:bool> {
             let (first,second)=copy;let wanted=first and not second;'<value if value == wanted>
         }
-        comptime fn forward(items:(bool,bool))-><bool -| value:bool> {select(...items)}
+        comptime fn forward(items:Tuple<bool,bool>)-><bool -| value:bool> {select(...items)}
         fn run()->bool {const p=forward((true,false));true match {~<p> => value,_ => false}}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let overridden = source
         .replace("select(...items)", "select(...items,.copy=(false,true))")
         .replace(
             "true match {~<p> => value",
             "false match {~<p> => not value",
         );
-    assert_eq!(run(&overridden, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&overridden, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -580,7 +623,7 @@ fn pattern_variadic_collections_preserve_the_registered_tuple_head() {
 
 #[test]
 fn pattern_variadic_inputs_collect_generic_fixed_and_empty_tuples() {
-    let source = "comptime fn select(...items:(bool,.u8'builtin))-><bool -| value:bool> {
+    let source = "comptime fn select(...items:Tuple<bool,.u8'builtin>)-><bool -| value:bool> {
             let (flag,count)=items;let wanted=flag and count == 17;'<value if value == wanted>
         }
         fn run()->bool {const p=select(true,17);true match {~<p> => value,_ => false}}";
@@ -591,26 +634,36 @@ fn pattern_variadic_inputs_collect_generic_fixed_and_empty_tuples() {
         "select(...do {(true,17)})",
     ] {
         assert_eq!(
-            run(&source.replace("select(true,17)", call), "run", vec![]),
+            support::run_iir_with_tuple(&source.replace("select(true,17)", call), "run", vec![]),
             Value::Bool(true)
         );
     }
     let source = "comptime fn select(...items:T)-><T -| value:T> where T {'<value>}
         fn run()->bool {const p=select(true,'a');let ~<p> = (true,'a');let (flag,letter)=value;flag and letter == 'a'}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let empty = "comptime fn select(...items:T)-><bool -| value:bool> where T {'<value>}
         fn run()->bool {let ~<select()> = true;value}";
-    assert_eq!(run(empty, "run", vec![]), Value::Bool(true));
-    let partial = "comptime fn select(...items:(T,.u8'builtin))-><T -| value:T> where T {'<value>}
+    assert_eq!(
+        support::run_iir_with_tuple(empty, "run", vec![]),
+        Value::Bool(true)
+    );
+    let partial =
+        "comptime fn select(...items:Tuple<T,.u8'builtin>)-><T -| value:T> where T {'<value>}
         fn run()->bool {let ~<select(true,17)> = true;value}";
-    assert_eq!(run(partial, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(partial, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn pattern_variadic_inputs_preserve_source_order_defaults_and_live_aliases() {
     let source = "typealias Count=.Integer'builtin;
         comptime fn bump(count:*Count)->bool {count.*+=1;count.* == 2}
-        comptime fn select(...items:(*Count,bool,bool),.before:bool=false,.after:bool=false)-><bool -| value:bool> {
+        comptime fn select(...items:Tuple<*Count,bool,bool>,.before:bool=false,.after:bool=false)-><bool -| value:bool> {
             let (count,first,second)=items;let wanted=not before and first and not second and not after and count.* == 4;
             count.*+=1;'<value if value == wanted>
         }
@@ -620,7 +673,10 @@ fn pattern_variadic_inputs_preserve_source_order_defaults_and_live_aliases() {
             let complete=count == 5;'(complete and (true match {~<p> => value,_ => false}))
         }
         fn run()->bool {~<emit()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -632,16 +688,16 @@ fn pattern_variadic_inputs_reject_wrong_shapes_and_code_collections() {
         "select(true,false,.items=(true,false))",
     ] {
         let source = format!(
-            "comptime fn select(...items:(bool,bool))-><bool -| value:bool> {{'<value>}}
+            "comptime fn select(...items:Tuple<bool,bool>)-><bool -| value:bool> {{'<value>}}
             fn run()->bool {{let ~<{call}> = true;value}}"
         );
         assert!(
-            support::compile_with_protocols(&source, &Default::default()).is_err(),
+            support::compile_with_tuple_protocols(&source, &Default::default()).is_err(),
             "{source}"
         );
     }
     let invalid = "comptime fn select(...items:<bool -| value:bool>)-><bool -| value:bool> {items}";
-    assert!(support::compile_with_protocols(invalid, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(invalid, &Default::default()).is_err());
 }
 
 #[test]
@@ -674,7 +730,7 @@ fn generator_pointer_range_snapshots_refresh_after_alias_writes() {
 fn pattern_generator_live_aggregates_keep_comptime_callbacks_and_pointer_identity() {
     let source = "typealias Count=.Integer'builtin;
         comptime fn bump(count:*Count)->bool {count.*+=1;count.* == 1}
-        comptime fn select(input:(*Count,comptime fn(*Count)->bool))-><bool -| value:bool> {
+        comptime fn select(input:Tuple<*Count,comptime fn(*Count)->bool>)-><bool -| value:bool> {
             let (count,action)=input;let wanted=action(count);'<value if value == wanted>
         }
         comptime fn emit()-><|-bool> {
@@ -682,11 +738,14 @@ fn pattern_generator_live_aggregates_keep_comptime_callbacks_and_pointer_identit
             let complete=count == 1;'(complete and (true match {~<p> => value,_ => false}))
         }
         fn run()->bool {~<emit()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let invalid = source
         .replace("comptime fn bump", "fn bump")
         .replace("comptime fn(*Count)->bool", "fn(*Count)->bool");
-    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    let failure = support::compile_with_tuple_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(!failure.contains("parsing failed"), "{failure}");
 }
 
@@ -762,15 +821,15 @@ fn pattern_generator_live_inputs_cannot_escape_into_runtime_guards() {
 #[test]
 fn pattern_spreads_preserve_phase_and_code_evidence_boundaries() {
     for source in [
-        "fn packet()->(bool,bool) {(true,false)}
+        "fn packet()->Tuple<bool,bool> {(true,false)}
          comptime fn select(first:bool,second:bool)-><bool -| value:bool> {'<value>}
          fn run()->bool {let ~<select(...packet())> = true;value}",
-        "comptime fn packet()->(bool,bool) {(true,false)}
+        "comptime fn packet()->Tuple<bool,bool> {(true,false)}
          comptime fn select(first:<bool -| value:bool>,second:bool)-><bool -| value:bool> {first}
          fn run()->bool {let ~<select(...packet())> = true;value}",
     ] {
         assert!(
-            support::compile_with_protocols(source, &Default::default()).is_err(),
+            support::compile_with_tuple_protocols(source, &Default::default()).is_err(),
             "{source}"
         );
     }
@@ -780,15 +839,21 @@ fn pattern_spreads_preserve_phase_and_code_evidence_boundaries() {
 fn pattern_generator_spreads_accept_literal_code_and_completed_data_packets() {
     for packet in ["(true,false)", "packet()", "do {let p=packet();p}"] {
         let source = format!(
-            "comptime fn packet()->(bool,bool) {{(true,false)}}
+            "comptime fn packet()->Tuple<bool,bool> {{(true,false)}}
             comptime fn select(first:T,second:T,.copy:T=first)-><T -| value:T> where T {{'<value>}}
             fn run()->bool {{const p=select(...{packet});let ~<p> = true;value}}"
         );
-        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true)
+        );
     }
     let source = "comptime fn choose(p:<bool -| value:bool>,flag:bool)-><bool -| value:bool> {p}
         fn run()->bool {const p=choose(...('<value>,true));let ~<p> = true;value}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -796,7 +861,7 @@ fn pattern_generator_spread_packets_execute_once_in_source_order_including_empty
     let source = "comptime fn bump(count:*.u8'builtin)->bool {
             assumes count.* < 255;count.*+=1;count.* == 2
         }
-        comptime fn packet(count:*.u8'builtin)->(bool,bool) {(bump(count),bump(count))}
+        comptime fn packet(count:*.u8'builtin)->Tuple<bool,bool> {(bump(count),bump(count))}
         pure comptime fn collect(...items:T)->T where T {items}
         comptime fn select(first:bool,second:bool,.before:bool=false,.after:bool=false)-><bool -| value:bool>
             where requires not before and not first and not second and not after {'<value>}
@@ -808,7 +873,10 @@ fn pattern_generator_spread_packets_execute_once_in_source_order_including_empty
             '(total and (true match {~<p> => value}))
         }
         fn run()->bool {~<emit()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -907,7 +975,7 @@ fn pattern_generator_output_names_do_not_depend_on_declaration_order() {
         "fn run()->bool {const p=binding<bool>();const alias=p;let ~<alias> = true;value}
          comptime fn binding()-><T -| value:T> where T {'<value>}",
         "fn run()->bool {let ~[left=first]<pair()> = (true,false);first and not right}
-         comptime fn pair()-><(bool,bool) -| left:bool,right:bool> {'<(left,right)>}",
+         comptime fn pair()-><Tuple<bool,bool> -| left:bool,right:bool> {'<(left,right)>}",
         "fn run()->bool {let ~<forward()> = true;value}
          comptime fn forward()-><bool -| value:bool> {'<~<binding()>>}
          comptime fn binding()-><bool -| value:bool> {'<value>}",
@@ -917,7 +985,11 @@ fn pattern_generator_output_names_do_not_depend_on_declaration_order() {
          fn run()->bool {let ~<binding()> = true;value}
          mod later {pub comptime fn binding()-><bool -| value:bool> {'<value>}}",
     ] {
-        assert_eq!(run(source, "run", vec![]), Value::Bool(true), "{source}");
+        assert_eq!(
+            support::run_iir_with_tuple(source, "run", vec![]),
+            Value::Bool(true),
+            "{source}"
+        );
     }
 }
 
@@ -929,10 +1001,10 @@ fn forward_pattern_output_metadata_does_not_bypass_interface_checks() {
         "fn run()->bool {let ~<binding()> = true;value}
          comptime fn binding()-><bool -| value:char> {'<value>}",
         "fn run()->bool {let ~[left=right]<pair()> = (true,false);right}
-         comptime fn pair()-><(bool,bool) -| left:bool,right:bool> {'<(left,right)>}",
+         comptime fn pair()-><Tuple<bool,bool> -| left:bool,right:bool> {'<(left,right)>}",
     ] {
         assert!(
-            support::compile_with_protocols(source, &Default::default()).is_err(),
+            support::compile_with_tuple_protocols(source, &Default::default()).is_err(),
             "{source}"
         );
     }
@@ -1035,12 +1107,18 @@ fn pattern_generator_subject_context_infers_missing_type_arguments() {
             let ~<p> = false;
             a and not value
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
-    let tuple = "comptime fn pair()-><(T,bool) -| value:T,flag:bool> where T {'<(value,flag)>}
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    let tuple = "comptime fn pair()-><Tuple<T,bool> -| value:T,flag:bool> where T {'<(value,flag)>}
         fn run()->bool {let ~<pair()> = (true,false);value and not flag}";
-    assert_eq!(run(tuple, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(tuple, "run", vec![]),
+        Value::Bool(true)
+    );
     let invalid = source.replace("~<binding()>", "~<binding<.char'builtin>()>");
-    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
 }
 
 #[test]
@@ -1068,30 +1146,40 @@ fn generic_pattern_generators_enforce_bounds_and_opaque_heads() {
 fn generic_pattern_generators_infer_subject_and_preserve_type_identity() {
     let source = "comptime fn binding()-><T -| value:T> where T {'<value>}
         comptime fn keep(p:<T -| value:T>)-><T -| value:T> where T {p}
-        comptime fn pair(p:<T -| value:T>)-><(T,bool) -| value:T,flag:bool> where T {'<(~<p>,flag)>}
+        comptime fn pair(p:<T -| value:T>)-><Tuple<T,bool> -| value:T,flag:bool> where T {'<(~<p>,flag)>}
         fn run()->bool {
             const base=binding<bool>();const copied=keep(base);const pair=pair(copied);
             let ~<pair> = (true,false);
             value and not flag
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let explicit = source
         .replace("keep(base)", "keep<bool>(base)")
         .replace("pair(copied)", "pair<bool>(copied)");
-    assert_eq!(run(&explicit, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&explicit, "run", vec![]),
+        Value::Bool(true)
+    );
     let nested = source
         .replace(
             "fn run()",
             "comptime fn forward(p:<T -| value:T>)-><T -| value:T> where T {keep(p)} fn run()",
         )
         .replace("const copied=keep(base)", "const copied=forward(base)");
-    assert_eq!(run(&nested, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&nested, "run", vec![]),
+        Value::Bool(true)
+    );
     for invalid in [
         source.replace("keep(base)", "keep<.char'builtin>(base)"),
         source.replace("binding<bool>()", "binding<bool,bool>()"),
         source.replace("binding<bool>()", "binding()"),
     ] {
-        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        let failure =
+            support::compile_with_tuple_protocols(&invalid, &Default::default()).unwrap_err();
         assert!(!failure.contains("parsing failed"), "{failure}");
     }
 }
@@ -1224,15 +1312,15 @@ fn pattern_parameter_output_names_enter_scope_only_after_splice() {
 
 #[test]
 fn pattern_parameter_default_outputs_survive_aliases_and_partial_connections() {
-    let source="comptime fn guarded(p:<(bool,bool) -| left:bool,right:bool>)-><(bool,bool) -| left:bool,right:bool> {
+    let source="comptime fn guarded(p:<Tuple<bool,bool> -| left:bool,right:bool>)-><Tuple<bool,bool> -| left:bool,right:bool> {
         const alias=p;
         '<~<alias> if left != right>
     }
-    comptime fn renamed(p:<(bool,bool) -| left:bool,right:bool>)-><(bool,bool) -| first:bool,right:bool> {
+    comptime fn renamed(p:<Tuple<bool,bool> -| left:bool,right:bool>)-><Tuple<bool,bool> -| first:bool,right:bool> {
         '<~[left=first]<p>>
     }
     fn run()->bool {
-        const base:<(bool,bool) -| left:bool,right:bool> = '<(left,right)>;
+        const base:<Tuple<bool,bool> -| left:bool,right:bool> = '<(left,right)>;
         const p=guarded(base);const q=renamed(base);
         let left=false;let right=true;
         let a=(true,false) match {~<p> => left and not right,_ => false};
@@ -1241,11 +1329,18 @@ fn pattern_parameter_default_outputs_survive_aliases_and_partial_connections() {
         let ~<q> = (true,false);
         a and b and not c and first and not right and not left
     }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let direct = source.replace("~<alias>", "~<p>");
-    assert_eq!(run(&direct, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&direct, "run", vec![]),
+        Value::Bool(true)
+    );
     let duplicate = source.replace("~[left=first]<p>", "~[left=right]<p>");
-    let failure = support::compile_with_protocols(&duplicate, &Default::default()).unwrap_err();
+    let failure =
+        support::compile_with_tuple_protocols(&duplicate, &Default::default()).unwrap_err();
     assert!(failure.contains("duplicate pattern binding"), "{failure}");
 }
 
@@ -1309,10 +1404,10 @@ fn pattern_code_composition_preserves_nested_nominal_matching() {
 fn abstract_pattern_arguments_compose_inside_pattern_quotes() {
     let source =
         "comptime fn matching(expected:bool)-><bool -| value:bool> {'<value if value == expected>}
-        comptime fn pair(p:<bool -| value:bool>)-><(bool,bool) -| left:bool,right:bool> {
+        comptime fn pair(p:<bool -| value:bool>)-><Tuple<bool,bool> -| left:bool,right:bool> {
             '<(~[value=left]<p>,right)>
         }
-        comptime fn choose(expected:bool)-><(bool,bool) -| left:bool,right:bool> {
+        comptime fn choose(expected:bool)-><Tuple<bool,bool> -| left:bool,right:bool> {
             pair(matching(expected))
         }
         fn run()->bool {
@@ -1322,28 +1417,38 @@ fn abstract_pattern_arguments_compose_inside_pattern_quotes() {
             let c=(false,true) match {~<yes> => true,_ => false};
             a and b and not c
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let guarded = source.replace(
         "'<(~[value=left]<p>,right)>",
         "'<(~[value=left]<p>,right) if left != right>",
     );
-    assert_eq!(run(&guarded, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&guarded, "run", vec![]),
+        Value::Bool(true)
+    );
     let renamed = source.replace(
         "'<(~[value=left]<p>,right)>",
         "'[left=first,right=second]<(~[value=first]<p>,second)>",
     );
-    assert_eq!(run(&renamed, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&renamed, "run", vec![]),
+        Value::Bool(true)
+    );
     let two = source.replace(
         "'<(~[value=left]<p>,right)>",
         "'<(~[value=left]<p>,~[value=right]<p>)>",
     );
-    let failure = support::compile_with_protocols(&two, &Default::default()).unwrap_err();
+    let failure = support::compile_with_tuple_protocols(&two, &Default::default()).unwrap_err();
     assert!(failure.contains("at most one splice"), "{failure}");
     for invalid in [
         source.replace("~[value=left]<p>", "~[missing=left]<p>"),
         source.replace("left:bool,right:bool", "left:.char'builtin,right:bool"),
     ] {
-        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        let failure =
+            support::compile_with_tuple_protocols(&invalid, &Default::default()).unwrap_err();
         assert!(!failure.contains("parsing failed"), "{failure}");
     }
 }
@@ -1970,14 +2075,17 @@ fn pattern_splice_cannot_execute_runtime_code_in_comptime() {
 #[test]
 fn local_pattern_code_default_outputs_preserve_binding_identity() {
     let source = "fn run()->bool {
-        const pattern:<(bool,bool) -| left:bool,right:bool> = '<(left,right)>;
+        const pattern:<Tuple<bool,bool> -| left:bool,right:bool> = '<(left,right)>;
         let ~<pattern> = (true,false);
         const original='(left and not right);
         let inner=do {let ~<pattern> = (false,true);not left and right};
         let ~[left=other]<pattern> = (false,true);
         ~<original> and inner and left and not other and right
     }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let aliases = "fn run()->bool {
         const original:<bool -| flag:bool> = '[flag=value]<value>;
         const alias=original;
@@ -1986,7 +2094,10 @@ fn local_pattern_code_default_outputs_preserve_binding_identity() {
         const read:<flag:bool |-bool> = '(flag);
         ~<read>
     }";
-    assert_eq!(run(aliases, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(aliases, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -1997,38 +2108,50 @@ fn local_pattern_code_default_outputs_follow_match_success_scopes() {
             value match {~<pattern> if flag => flag,_ => false}
         }
         fn run()->bool {choose(Choice.yes(true)) and not choose(Choice.yes(false)) and not choose(Choice.no)}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let alternative = "fn run()->bool {
         const pattern:<bool -| flag:bool> = '<flag>;
         true match {~<pattern> or flag => flag}
     }";
-    assert_eq!(run(alternative, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(alternative, "run", vec![]),
+        Value::Bool(true)
+    );
     let let_else = "fn run()->bool {
         const pattern:<bool -| flag:bool> = '<true as flag>;
         let flag=false;
         let ~<pattern> = false else {return not flag;};
         flag
     }";
-    assert_eq!(run(let_else, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(let_else, "run", vec![]),
+        Value::Bool(true)
+    );
     for invalid in [
         source.replace("_ => false", "_ => flag"),
         "fn run()->bool {const p:<bool -| flag:bool> = '<flag>;do {let ~<p> = true;};flag}".into(),
-        "fn run() {const p:<(bool,bool) -| a:bool,b:bool> = '<(a,b)>;let ~[a=b]<p> = (true,true);}"
+        "fn run() {const p:<Tuple<bool,bool> -| a:bool,b:bool> = '<(a,b)>;let ~[a=b]<p> = (true,true);}"
             .into(),
     ] {
-        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+        assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
     }
 }
 
 #[test]
 fn local_pattern_code_splices_fresh_success_bindings() {
     let source = "fn run()->bool {
-        const pattern:<(bool,bool) -| left:bool,right:bool> = '<(left,right)>;
+        const pattern:<Tuple<bool,bool> -| left:bool,right:bool> = '<(left,right)>;
         let ~[left=a,right=b]<pattern> = (true,false);
         let ~[left=c,right=d]<pattern> = (false,true);
         a and not b and not c and d
     }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let aliases = "fn run()->bool {
         const first:<bool -| flag:bool> = '[flag=value]<value>;
         const second=first;
@@ -2036,19 +2159,28 @@ fn local_pattern_code_splices_fresh_success_bindings() {
         let ~[result=answer]<nested> = true;
         answer
     }";
-    assert_eq!(run(aliases, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(aliases, "run", vec![]),
+        Value::Bool(true)
+    );
     let generated = "fn run()->bool {
         const pattern:<bool -| flag:bool> = '<flag>;
         const code='(do {let ~[flag=found]<pattern> = true;found});
         ~<code> and ~<code>
     }";
-    assert_eq!(run(generated, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(generated, "run", vec![]),
+        Value::Bool(true)
+    );
     let quoted_function = "quote fn choose(value:bool)->bool {
         const pattern:<bool -| flag:bool> = '<flag>;
         let ~[flag=found]<pattern> = value;found
     }
     fn run()->bool {choose(true) and not choose(false)}";
-    assert_eq!(run(quoted_function, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(quoted_function, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -2060,24 +2192,36 @@ fn local_pattern_code_preserves_matching_guards_and_coverage() {
             value match {~[flag=found]<pattern> => found,_ => false}
         }
         fn run()->bool {choose(Choice.yes(true)) and not choose(Choice.yes(false)) and not choose(Choice.no)}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let or = "fn run()->bool {
-        const pattern:<(bool,bool) -| flag:bool> = '<(true,flag) or (flag,true)>;
+        const pattern:<Tuple<bool,bool> -| flag:bool> = '<(true,flag) or (flag,true)>;
         (false,true) match {~[flag=found]<pattern> => not found,_ => false}
     }";
-    assert_eq!(run(or, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(or, "run", vec![]),
+        Value::Bool(true)
+    );
     let guarded = "fn mark(counter:*bool)->bool {counter.* = not counter.*;counter.*}
         fn run()->bool {
-            const pattern:<(bool,*bool) -| flag:bool> = '<(flag,counter) if mark(counter)>;
+            const pattern:<Tuple<bool,*bool> -| flag:bool> = '<(flag,counter) if mark(counter)>;
             let counter=false;
             let first=(true,counter.ref) match {~[flag=found]<pattern> => found,_ => false};
             let second=(true,counter.ref) match {~[flag=found]<pattern> => found,_ => false};
             first and not second and not counter
         }";
-    assert_eq!(run(guarded, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(guarded, "run", vec![]),
+        Value::Bool(true)
+    );
     let unused = "fn never()->bool {while true {} false}
         fn run()->bool {const pattern:<bool -| flag:bool> = '<flag if never()>;true}";
-    assert_eq!(run(unused, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(unused, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -2134,7 +2278,7 @@ fn generator_match_skips_unmatched_guards_and_keeps_candidate_order() {
                 _ => '(false),
             }
         }
-        pure comptime fn choice(pair:(bool,bool))->< |- bool> {
+        pure comptime fn choice(pair:Tuple<bool,bool>)->< |- bool> {
             pair match {
                 (chosen,false) or (true,chosen) if chosen => '(chosen),
                 (left,right) => '(left or right),
@@ -2142,7 +2286,10 @@ fn generator_match_skips_unmatched_guards_and_keeps_candidate_order() {
         }
         fn run()->bool {~<build(Mode.off)> and ~<choice((true,true))>
             and ~<choice((false,true))> and not ~<choice((false,false))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -2533,7 +2680,7 @@ fn generator_assignment_rejects_immutable_stage_and_interface_violations() {
 
 #[test]
 fn generator_let_patterns_unpack_nested_data_and_keep_bindings_private() {
-    let source = "struct Options {flags:(bool,bool)}
+    let source = "struct Options {flags:Tuple<bool,bool>}
         pure comptime fn selected(options:Options)-><x:bool |- bool> {
             let _=options;
             let {flags:(enabled,inverted)}=options;
@@ -2548,28 +2695,31 @@ fn generator_let_patterns_unpack_nested_data_and_keep_bindings_private() {
             ~[x=value]<code> and not inverted
         }";
     assert_eq!(
-        run(source, "run", vec![Value::Bool(true)]),
+        support::run_iir_with_tuple(source, "run", vec![Value::Bool(true)]),
         Value::Bool(true)
     );
 }
 
 #[test]
 fn generator_patterns_reuse_alternative_remapping_and_sequential_computation() {
-    let source = "pure comptime fn selected(pair:(bool,bool))->< |- bool> {
+    let source = "pure comptime fn selected(pair:Tuple<bool,bool>)->< |- bool> {
             let (chosen,true) or (false,chosen) or (chosen,false)=pair;
             let first and not first is opposite=chosen;
             '(first and not opposite)
         }
         fn run()->bool {~<selected((true,true))> and ~<selected((true,false))>
             and not ~<selected((false,true))> and not ~<selected((false,false))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generator_destructuring_rejects_refutable_and_ill_typed_unused_definitions() {
     for (source, anchor) in [
         (
-            "pure comptime fn build(pair:(bool,bool))->< |- bool> {let (true,flag)=pair;'(flag)}",
+            "pure comptime fn build(pair:Tuple<bool,bool>)->< |- bool> {let (true,flag)=pair;'(flag)}",
             "refutable generator let",
         ),
         (
@@ -2577,16 +2727,17 @@ fn generator_destructuring_rejects_refutable_and_ill_typed_unused_definitions() 
             "field",
         ),
         (
-            "pure comptime fn build(pair:(bool,'x''type))->< |- bool> {let (flag,_) or (_,flag)=pair;'(true)}",
+            "pure comptime fn build(pair:Tuple<bool,'x''type>)->< |- bool> {let (flag,_) or (_,flag)=pair;'(true)}",
             "type",
         ),
     ] {
-        let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        let failure =
+            support::compile_with_tuple_protocols(source, &Default::default()).unwrap_err();
         assert!(failure.contains(anchor), "{source}: {failure}");
     }
     assert_eq!(
-        run(
-            "pure comptime fn build(pair:(bool,bool))->< |- bool> {let (left,right)=pair;'(left and right)} fn run()->bool {~<build((true,true))>}",
+        support::run_iir_with_tuple(
+            "pure comptime fn build(pair:Tuple<bool,bool>)->< |- bool> {let (left,right)=pair;'(left and right)} fn run()->bool {~<build((true,true))>}",
             "run",
             vec![]
         ),
@@ -2684,12 +2835,15 @@ fn generator_enum_data_can_be_inspected_and_returned_as_runtime_payload() {
 
 #[test]
 fn generator_tuple_data_preserves_heterogeneous_fields() {
-    let source = "pure comptime fn selected(config:(bool,'x''type))->< |- bool> {
+    let source = "pure comptime fn selected(config:Tuple<bool,'x''type>)->< |- bool> {
             let enabled=config match {(flag,'x')=>flag,_=>false,};
             '(enabled)
         }
         fn run()->bool {~<selected((true,'x'))> and not ~<selected((true,'y'))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -3296,13 +3450,16 @@ fn generator_let_else_checks_failure_even_when_unused() {
 
 #[test]
 fn generator_let_else_keeps_guard_candidates_and_outer_bindings_separate() {
-    let source="pure comptime fn build(pair:(bool,bool))-><|-bool> {
+    let source="pure comptime fn build(pair:Tuple<bool,bool>)-><|-bool> {
             let outer=true;
             let (chosen,false) or (true,chosen) if chosen = pair else {return '(outer);};
             '(chosen)
         }
         fn run()->bool {~<build((true,true))> and ~<build((false,false))> and ~<build((false,true))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     for (source, anchor) in [
         (
             "pure comptime fn bad(input:bool)-><|-bool> {let true:.char'builtin=input else {return '(false);};'(true)}",
@@ -3313,7 +3470,8 @@ fn generator_let_else_keeps_guard_candidates_and_outer_bindings_separate() {
             "runtime context",
         ),
     ] {
-        let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        let failure =
+            support::compile_with_tuple_protocols(source, &Default::default()).unwrap_err();
         assert!(failure.contains(anchor), "{failure}");
     }
 }
@@ -3595,7 +3753,7 @@ fn generator_variadic_data_collects_heterogeneous_and_empty_packets() {
 #[test]
 fn generator_variadic_elements_observe_interleaved_code_arguments_in_source_order() {
     let source =
-        "pure comptime fn consume(...items:(bool,bool),.unused:< |- bool> = '(false))->< |- bool> {
+        "pure comptime fn consume(...items:Tuple<bool,bool>,.unused:< |- bool> = '(false))->< |- bool> {
             let (first,second)=items;'(not first and second)
         }
         pure comptime fn build()->< |- bool> {
@@ -3603,7 +3761,10 @@ fn generator_variadic_elements_observe_interleaved_code_arguments_in_source_orde
             consume(state,.unused=do {state=true;'(false)},state)
         }
         fn run()->bool {const code=build();~<code>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -3611,12 +3772,12 @@ fn generator_variadic_domains_remain_whole_packet_types() {
     for source in [
         "pure comptime fn build(...items:bool)->< |- bool> {'(true)} fn run()->bool {const code=build(true);~<code>}",
         "pure comptime fn build(...items:.Type'builtin)->< |- bool> {'(true)} fn run()->bool {const code=build(bool);~<code>}",
-        "pure comptime fn build(...items:(bool,bool))->< |- bool> {'(true)} fn run()->bool {const code=build(true);~<code>}",
+        "pure comptime fn build(...items:Tuple<bool,bool>)->< |- bool> {'(true)} fn run()->bool {const code=build(true);~<code>}",
         "pure comptime fn build(...items:< |- bool>)->< |- bool> {items}",
-        "pure comptime fn build(...items:(bool,bool))->< |- bool> {'(true)} fn run()->bool {const code=build(.items=(true,false),.items=(false,true));~<code>}",
+        "pure comptime fn build(...items:Tuple<bool,bool>)->< |- bool> {'(true)} fn run()->bool {const code=build(.items=(true,false),.items=(false,true));~<code>}",
     ] {
         assert!(
-            support::compile_with_protocols(source, &Default::default()).is_err(),
+            support::compile_with_tuple_protocols(source, &Default::default()).is_err(),
             "{source}"
         );
     }
@@ -3705,7 +3866,7 @@ fn generator_literal_spreads_keep_destination_contexts_and_defaults() {
 
 #[test]
 fn generator_literal_spreads_join_variadic_collection_in_source_order() {
-    let source="pure comptime fn build(...items:(bool,.char'builtin,bool),.unused:< |- bool> = '(false))->< |- bool> {
+    let source="pure comptime fn build(...items:Tuple<bool,.char'builtin,bool>,.unused:< |- bool> = '(false))->< |- bool> {
             let (first,letter,last)=items;'(not first and letter == 'a' and last)
         }
         pure comptime fn generate()->< |- bool> {
@@ -3713,7 +3874,10 @@ fn generator_literal_spreads_join_variadic_collection_in_source_order() {
             build(...(state,'a'),.unused=do {state=true;'(false)},state)
         }
         fn run()->bool {const code=generate();~<code>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -3732,30 +3896,39 @@ fn generator_literal_spreads_do_not_silently_discard_elements() {
 
 #[test]
 fn generator_spreads_completed_and_computed_packets() {
-    let source="pure comptime fn packet()->(bool,.char'builtin) {(true,'a')}
+    let source="pure comptime fn packet()->Tuple<bool,.char'builtin> {(true,'a')}
         pure comptime fn select(flag:bool,letter:.char'builtin)->< |- bool> {'(flag and letter == 'a')}
         pure comptime fn build()->< |- bool> {let pair=packet();select(...pair)}
         fn run()->bool {const first=select(...packet());const second=build();~<first> and ~<second>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generator_spread_packet_reads_state_at_its_original_source_position() {
-    let source="pure comptime fn select(...items:(bool,bool),.unused:< |- bool> = '(false))->< |- bool> {let (a,b)=items;'(a and b)}
+    let source="pure comptime fn select(...items:Tuple<bool,bool>,.unused:< |- bool> = '(false))->< |- bool> {let (a,b)=items;'(a and b)}
         pure comptime fn build()->< |- bool> {
             var state=false;
             select(.unused=do {state=true;'(false)},...do {(state,state)})
         }
         fn run()->bool {const code=build();~<code>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generator_packet_spreads_preserve_generic_whole_collection_inference() {
-    let source="pure comptime fn packet()->(bool,.char'builtin) {(true,'a')}
+    let source="pure comptime fn packet()->Tuple<bool,.char'builtin> {(true,'a')}
         pure comptime fn pack(...items:T)->< |- T> where T {'(items)}
         fn run()->bool {const code=pack(...packet(),false);let (a,b,c)=~<code>;a and b == 'a' and not c}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -3780,12 +3953,12 @@ fn generator_empty_spread_packets_still_execute_checks() {
 #[test]
 fn generator_spread_rejects_runtime_producers_and_missing_code_evidence() {
     for source in [
-        "fn packet()->(bool,bool) {(true,false)} pure comptime fn select(a:bool,b:bool)->< |- bool> {'(a)} fn run()->bool {const code=select(...packet());~<code>}",
-        "pure comptime fn packet()->(bool,bool) {(true,false)} pure comptime fn select(a:< |- bool>,b:bool)->< |- bool> {a} fn run()->bool {const code=select(...packet());~<code>}",
-        "pure comptime fn packet()->(bool,bool) {(true,false)} pure comptime fn select(a:bool)->< |- bool> {'(a)} fn run()->bool {const code=select(...packet());~<code>}",
+        "fn packet()->Tuple<bool,bool> {(true,false)} pure comptime fn select(a:bool,b:bool)->< |- bool> {'(a)} fn run()->bool {const code=select(...packet());~<code>}",
+        "pure comptime fn packet()->Tuple<bool,bool> {(true,false)} pure comptime fn select(a:< |- bool>,b:bool)->< |- bool> {a} fn run()->bool {const code=select(...packet());~<code>}",
+        "pure comptime fn packet()->Tuple<bool,bool> {(true,false)} pure comptime fn select(a:bool)->< |- bool> {'(a)} fn run()->bool {const code=select(...packet());~<code>}",
     ] {
         assert!(
-            support::compile_with_protocols(source, &Default::default()).is_err(),
+            support::compile_with_tuple_protocols(source, &Default::default()).is_err(),
             "{source}"
         );
     }
@@ -3819,55 +3992,83 @@ fn generator_multiple_type_preserving_packets_determine_layout() {
 
 #[test]
 fn generator_multiple_result_inferred_packets_use_required_type_equalities() {
-    let source="pure comptime fn packet()->T where T, requires T == (bool,bool) {(true,false)}
+    let source="pure comptime fn packet()->T where T, requires T == Tuple<bool,bool> {(true,false)}
         pure comptime fn select(a:bool,b:bool,c:bool,d:bool)->< |- bool> {'(a and not b and c and not d)}
         fn run()->bool {const code=select(...packet(),...packet());~<code>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
-    let reversed = source.replace("T == (bool,bool)", "(bool,bool) == T");
-    assert_eq!(run(&reversed, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    let reversed = source.replace("T == Tuple<bool,bool>", "Tuple<bool,bool> == T");
+    assert_eq!(
+        support::run_iir_with_tuple(&reversed, "run", vec![]),
+        Value::Bool(true)
+    );
     let chained = source
         .replace(
-            "packet()->T where T, requires T == (bool,bool) {(true,false)}",
-            "packet(value:U)->T where T,U, requires T == U and U == (bool,bool) {value}",
+            "packet()->T where T, requires T == Tuple<bool,bool> {(true,false)}",
+            "packet(value:U)->T where T,U, requires T == U and U == Tuple<bool,bool> {value}",
         )
         .replace("...packet()", "...packet((true,false))");
-    assert_eq!(run(&chained, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&chained, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generator_spread_does_not_choose_a_disjunctive_packet_width() {
-    let source="pure comptime fn packet()->T where T, requires T == (bool,bool) or T == (bool,bool,bool) {packet<T>()}
+    let source="pure comptime fn packet()->T where T, requires T == Tuple<bool,bool> or T == Tuple<bool,bool,bool> {packet<T>()}
         pure comptime fn select(a:bool,b:bool,c:bool,d:bool)->< |- bool> {'(true)}
         fn run()->bool {const code=select(...packet(),...packet());~<code>}";
-    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    let error = support::compile_with_tuple_protocols(source, &Default::default()).unwrap_err();
     assert!(error.contains("width"), "{error}");
 }
 
 #[test]
 fn generator_explicit_result_types_determine_packet_layout() {
     for (declaration, call) in [
-        ("T", "packet<(bool,bool)>"),
-        ("T", "packet<...((bool,bool),)>"),
-        (".T:.Type'builtin=(bool,bool)", "packet<.T=(bool,bool)>"),
+        ("T", "packet<Tuple<bool,bool>>"),
+        ("T", "packet<...(Tuple<bool,bool>,)>"),
+        (
+            ".T:.Type'builtin=Tuple<bool,bool>",
+            "packet<.T=Tuple<bool,bool>>",
+        ),
     ] {
         let source = format!(
             "pure comptime fn packet(value:T)->T where {declaration} {{value}}
             pure comptime fn select(a:bool,b:bool,c:bool,d:bool)->< |- bool> {{'(a and not b and c and not d)}}
             fn run()->bool {{const code=select(...{call}(do {{let pair=(true,false);pair}}),...{call}(do {{let pair=(true,false);pair}}));~<code>}}"
         );
-        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true)
+        );
         for invalid in [
             source.replace("(true,false)", "(true,'a')"),
-            source.replace("(bool,bool)", "(bool,)"),
+            source.replace("Tuple<bool,bool>", "Tuple<bool>"),
         ] {
-            assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+            assert_ne!(
+                invalid, source,
+                "negative fixture replacement must change the source"
+            );
+            assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
         }
         if call.contains(".T=") {
             for invalid in [
                 source.replace("<.T=", "<.unknown="),
-                source.replace("<.T=(bool,bool)>", "<.T=(bool,bool),.T=(bool,bool)>"),
+                source.replace(
+                    "<.T=Tuple<bool,bool>>",
+                    "<.T=Tuple<bool,bool>,.T=Tuple<bool,bool>>",
+                ),
             ] {
-                assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+                assert_ne!(
+                    invalid, source,
+                    "negative fixture replacement must change the source"
+                );
+                assert!(
+                    support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err()
+                );
             }
         }
     }
@@ -3960,10 +4161,13 @@ fn generator_property_collection_builds_anonymous_record_values() {
 
 #[test]
 fn generator_property_collection_combines_with_positional_tuple_spreads() {
-    let source="pure comptime fn pair()->(bool,bool) {(true,false)}
-        pure comptime fn pack(...items:(bool,bool),...properties:T)->< |- T> where T {'(properties)}
+    let source="pure comptime fn pair()->Tuple<bool,bool> {(true,false)}
+        pure comptime fn pack(...items:Tuple<bool,bool>,...properties:T)->< |- T> where T {'(properties)}
         fn run()->bool {const code=pack {...pair(),enabled:true,letter:'a'};let config=~<code>;config.enabled and config.letter == 'a'}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -3998,8 +4202,11 @@ fn generator_property_collector_uses_explicit_type_arguments_without_replaying_t
     let source="pure comptime fn schema(...fields:T)->T where T {fields}
         const SAMPLE=schema {enabled:true};typealias Options=SAMPLE'type;
         pure comptime fn pack(...first:A,...props:B)->< |- B> where A,B {'(props)}
-        fn run()->bool {const code=pack<(bool,bool),Options> {true,false,enabled:true};let data=~<code>;data.enabled}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+        fn run()->bool {const code=pack<Tuple<bool,bool>,Options> {true,false,enabled:true};let data=~<code>;data.enabled}";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -4054,9 +4261,13 @@ fn local_data_constants_evaluate_and_feed_runtime_values_and_quotes() {
 
 #[test]
 fn local_type_constants_and_aggregate_patterns_are_completed_before_runtime() {
-    let source = "fn run()->bool {const T=bool;const (flag,letter):(T,.char'builtin)=(true,'a');
+    let source =
+        "fn run()->bool {const T=bool;const (flag,letter):Tuple<T,.char'builtin> = (true,'a');
             let value:T=flag;value and letter == 'a'}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -4380,10 +4591,10 @@ fn generator_contracts_keep_enum_identity_and_default_record_snapshots() {
 #[test]
 fn generic_generator_contracts_follow_variadic_collection_and_packet_forwarding() {
     let prefix = "pure comptime fn build(...items:T,.copy:T=items)-><|-bool> where T,
-        requires T == (bool,bool),
+        requires T == Tuple<bool,bool>,
         requires do {let (first,second)=items;first and second},
         ensures do {let (first,second)=copy'old;first and second} {'(true)}
-        pure comptime fn forward(items:(bool,bool))-><|-bool> {build(...items)}";
+        pure comptime fn forward(items:Tuple<bool,bool>)-><|-bool> {build(...items)}";
     for call in [
         "build(true,true)",
         "build(...(true,true))",
@@ -4391,8 +4602,12 @@ fn generic_generator_contracts_follow_variadic_collection_and_packet_forwarding(
         "forward((true,true))",
     ] {
         let source = format!("{prefix} fn run()->bool {{~<{call}>}}");
-        assert_eq!(run(&source, "run", vec![]), Value::Bool(true), "{call}");
-        let error = support::compile_with_protocols(
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true),
+            "{call}"
+        );
+        let error = support::compile_with_tuple_protocols(
             &source.replace("true,true", "true,false"),
             &Default::default(),
         )
@@ -4400,21 +4615,24 @@ fn generic_generator_contracts_follow_variadic_collection_and_packet_forwarding(
         assert!(error.contains("precondition rejected"), "{call}: {error}");
     }
     let source = format!("{prefix} fn run()->bool {{~<build(true,true,.copy=(true,false))>}}");
-    let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+    let error = support::compile_with_tuple_protocols(&source, &Default::default()).unwrap_err();
     assert!(error.contains("postcondition rejected"), "{error}");
 }
 
 #[test]
 fn generator_contracts_run_after_interleaved_argument_collection() {
     let source =
-        "pure comptime fn collect(...items:(bool,bool),.code:<|-bool> = '(false))-><|-bool>
+        "pure comptime fn collect(...items:Tuple<bool,bool>,.code:<|-bool> = '(false))-><|-bool>
         where requires do {let (first,second)=items;not first and second} {code}
         pure comptime fn build()-><|-bool> {
             var state=false;
             collect(state,.code=do {state=true;'(true)},state)
         }
         fn run()->bool {~<build()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -4898,7 +5116,7 @@ fn generator_range_flow_does_not_invoke_endpoints_and_preserves_outer_exits() {
 
 #[test]
 fn generator_tuple_enumeration_builds_code_from_completed_fields() {
-    let source = "pure comptime fn build(values:(bool,bool,bool))-><|-bool> {
+    let source = "pure comptime fn build(values:Tuple<bool,bool,bool>)-><|-bool> {
         var code='(true);
         inline for (index,element) in values'tuple_enumerate {
             if element {code='(not ~<code>);}
@@ -4906,13 +5124,16 @@ fn generator_tuple_enumeration_builds_code_from_completed_fields() {
         code
     }
     fn run()->bool {~<build((true,false,true))> and not ~<build((false,true,false))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generator_tuple_enumeration_preserves_each_element_type() {
     let source = "typealias Word=.u32'builtin;
-        pure comptime fn build(values:(bool,Word))-><|-bool> {
+        pure comptime fn build(values:Tuple<bool,Word>)-><|-bool> {
             var code='(false);
             inline for (index,element) in values'tuple_enumerate {
                 if element'type == Word {code='(true);}
@@ -4920,12 +5141,15 @@ fn generator_tuple_enumeration_preserves_each_element_type() {
             code
         }
         fn run()->bool {~<build((false,9))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generator_tuple_enumeration_filters_and_transfers_control() {
-    let source = "pure comptime fn build(values:(bool,bool,bool))-><|-bool> {
+    let source = "pure comptime fn build(values:Tuple<bool,bool,bool>)-><|-bool> {
         var code='(false);
         inline for (index,element) if index != 0 in values'tuple_enumerate {
             if not element {continue;}
@@ -4934,19 +5158,28 @@ fn generator_tuple_enumeration_filters_and_transfers_control() {
         }
         code
     } fn run()->bool {~<build((true,false,true))> and not ~<build((true,false,false))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
-    let source = "pure comptime fn build(values:(bool,bool))-><|-bool> {
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    let source = "pure comptime fn build(values:Tuple<bool,bool>)-><|-bool> {
         inline for (index,element) in values'tuple_enumerate {return '(true);}
     } fn run()->bool {~<build((false,false))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
-    let source = "pure comptime fn build(values:(bool,bool))-><|-bool> {
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    let source = "pure comptime fn build(values:Tuple<bool,bool>)-><|-bool> {
         inline for:outer i in 0..2 {
             inline for (index,element) in values'tuple_enumerate {break outer;}
             return '(false);
         }
         '(true)
     } fn run()->bool {~<build((false,false))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -4962,9 +5195,10 @@ fn generator_tuple_enumeration_checks_filtered_and_unreachable_elements() {
         let source = format!(
             "typealias Word=.u32'builtin;
             fn runtime()->bool {{true}}
-            pure comptime fn unused(values:(bool,Word))-><|-bool> {{{body} '(true)}}"
+            pure comptime fn unused(values:Tuple<bool,Word>)-><|-bool> {{{body} '(true)}}"
         );
-        let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        let error =
+            support::compile_with_tuple_protocols(&source, &Default::default()).unwrap_err();
         assert!(error.contains("elaboration failed"), "{body}: {error}");
     }
     for body in [
@@ -4972,9 +5206,11 @@ fn generator_tuple_enumeration_checks_filtered_and_unreachable_elements() {
         "inline for (index,element) in values'tuple_enumerate {continue;}",
         "inline for (index,element) if flag in values'tuple_enumerate {return '(true);}",
     ] {
-        let source =
-            format!("pure comptime fn unused(flag:bool,values:(bool,bool))-><|-bool> {{{body}}}");
-        let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        let source = format!(
+            "pure comptime fn unused(flag:bool,values:Tuple<bool,bool>)-><|-bool> {{{body}}}"
+        );
+        let error =
+            support::compile_with_tuple_protocols(&source, &Default::default()).unwrap_err();
         assert!(
             error.contains("without returning a code result"),
             "{body}: {error}"
@@ -5783,17 +6019,20 @@ fn generator_callback_context_can_come_from_a_later_expanded_literal() {
 
 #[test]
 fn generator_generic_callback_uses_later_packet_signature_without_invoking_it() {
-    let source = "comptime fn packet()->(bool,) {(false,)}
+    let source = "comptime fn packet()->Tuple<bool> {(false,)}
         comptime fn build(lambda action:comptime fn(T)->T,value:T)-><|-T> where T {
             let result=action(value);'(result)
         } fn run()->bool {const code=build(not _0,...packet());~<code>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generator_packet_signature_hints_preserve_argument_order_and_state() {
     let source = "typealias Byte=.u8'builtin;
-        comptime fn packet(count:*Byte)->(bool,) where requires count.* == 1 {
+        comptime fn packet(count:*Byte)->Tuple<bool> where requires count.* == 1 {
             count.* += 1;(false,)
         }
         comptime fn build(action:comptime fn(T)->T,value:T)-><|-T> where T {
@@ -5804,19 +6043,22 @@ fn generator_packet_signature_hints_preserve_argument_order_and_state() {
             let code=build(do {count+=1;|value| not value},...packet(count.ref));
             if count == 2 {code} else {'(false)}
         } fn run()->bool {~<outer()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generator_packet_type_hints_do_not_execute_unused_producers_or_hide_phase_errors() {
-    let source = "comptime fn packet()->(bool,) {while true {} (false,)}
+    let source = "comptime fn packet()->Tuple<bool> {while true {} (false,)}
         comptime fn build(lambda action:comptime fn(T)->T,value:T)-><|-T> where T {
             let result=action(value);'(result)
         }
         comptime fn unused()-><|-bool> {build(not _0,...packet())}";
-    support::compile_with_protocols(source, &Default::default()).unwrap();
+    support::compile_with_tuple_protocols(source, &Default::default()).unwrap();
     let runtime = source.replace("comptime fn packet()", "fn packet()");
-    let failure = support::compile_with_protocols(&runtime, &Default::default()).unwrap_err();
+    let failure = support::compile_with_tuple_protocols(&runtime, &Default::default()).unwrap_err();
     assert!(failure.contains("wrong execution phase"), "{failure}");
 }
 
@@ -5890,7 +6132,7 @@ fn generator_callback_inference_uses_callable_parameter_results() {
 #[test]
 fn generator_callback_inference_uses_fixed_results_of_generic_producers() {
     let source = "comptime fn input(ignored:U)->bool where U {false}
-        comptime fn packet(ignored:U)->(bool,) where U {(false,)}
+        comptime fn packet(ignored:U)->Tuple<bool> where U {(false,)}
         comptime fn build(lambda action:comptime fn(T)->T,value:T)-><|-T> where T {
             let result=action(value);'(result)
         }
@@ -5899,7 +6141,10 @@ fn generator_callback_inference_uses_fixed_results_of_generic_producers() {
             const second=build(not _0,...packet('x'));
             ~<first> and ~<second>
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -5928,10 +6173,10 @@ fn generator_callback_context_flows_through_data_control_branches() {
 #[test]
 fn generator_branch_packet_evidence_does_not_execute_selectors_or_unselected_arms() {
     let source = "typealias Byte=.u8'builtin;
-        comptime fn packet(count:*Byte)->(bool,) where requires count.* == 2 {
+        comptime fn packet(count:*Byte)->Tuple<bool> where requires count.* == 2 {
             count.* += 1;(false,)
         }
-        comptime fn never()->(bool,) {while true {} (true,)}
+        comptime fn never()->Tuple<bool> {while true {} (true,)}
         comptime fn build(action:comptime fn(T)->T,value:T)-><|-T> where T {
             let result=action(value);'(result)
         }
@@ -5941,7 +6186,10 @@ fn generator_branch_packet_evidence_does_not_execute_selectors_or_unselected_arm
                 ...if do {count+=1;true} {packet(count.ref)} else {never()});
             if count == 3 {code} else {'(false)}
         } fn run()->bool {~<outer()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -5969,7 +6217,7 @@ fn generator_branch_type_evidence_does_not_hide_invalid_selectors_or_missing_cov
 #[test]
 fn generator_callbacks_use_explicit_static_producer_type_arguments() {
     let source = "comptime fn identity(value:T)->T where T {value}
-        comptime fn packet(value:T)->(T,) where T {(value,)}
+        comptime fn packet(value:T)->Tuple<T> where T {(value,)}
         comptime fn build(lambda action:comptime fn(T)->T,value:T)-><|-T> where T {
             let result=action(value);'(result)
         }
@@ -5978,7 +6226,10 @@ fn generator_callbacks_use_explicit_static_producer_type_arguments() {
             const spread=build(not _0,...packet<bool>(false));
             ~<direct> and ~<spread>
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -6003,10 +6254,13 @@ fn generator_explicit_producer_hints_support_named_and_tuple_types() {
         }
         fn run()->bool {
             const direct=build(not _0,identity<.T=bool>(false));
-            const spread=build(not _0,...identity<.T=(bool,)>((false,)));
+            const spread=build(not _0,...identity<.T=Tuple<bool>>((false,)));
             ~<direct> and ~<spread>
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -6049,7 +6303,7 @@ fn generator_explicit_producer_hints_keep_argument_order_and_single_evaluation()
 #[test]
 fn generator_callbacks_infer_nested_generic_producer_results() {
     let source = "comptime fn identity(value:T)->T where T {value}
-        comptime fn packet(value:T)->(T,) where T {(value,)}
+        comptime fn packet(value:T)->Tuple<T> where T {(value,)}
         comptime fn build(lambda action:comptime fn(T)->T,value:T)-><|-T> where T {
             let result=action(value);'(result)
         }
@@ -6058,7 +6312,10 @@ fn generator_callbacks_infer_nested_generic_producer_results() {
             const spread=build(not _0,...packet(identity(false)));
             ~<direct> and ~<spread>
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -6291,19 +6548,22 @@ fn generator_producer_type_override_skips_divergent_default() {
 
 #[test]
 fn generic_producer_inference_uses_computed_spread_packet_types() {
-    let source = "comptime fn packet()->(bool,) {(false,)}
+    let source = "comptime fn packet()->Tuple<bool> {(false,)}
         comptime fn identity(value:T)->T where T {value}
         comptime fn build(lambda action:comptime fn(T)->T,value:T)-><|-T> where T {
             let result=action(value);'(result)
         }
         fn run()->bool {const code=build(not _0,identity(...packet()));~<code>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generic_collection_inference_combines_computed_spread_packets() {
-    let source="comptime fn first()->(bool,) {(false,)}
-        comptime fn second()->(.char'builtin,) {('x',)}
+    let source="comptime fn first()->Tuple<bool> {(false,)}
+        comptime fn second()->Tuple<.char'builtin> {('x',)}
         comptime fn pack(...items:T)->T where T {items}
         comptime fn build(lambda action:comptime fn(T)->bool,value:T)-><|-bool> where T {
             let result=action(value);'(result)
@@ -6312,13 +6572,16 @@ fn generic_collection_inference_combines_computed_spread_packets() {
             const code=build(do {let (flag,letter)=_0;not flag and letter == 'x'},pack(...first(),...second()));
             ~<code>
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn computed_packet_type_evidence_keeps_nested_producer_evaluation_order() {
     let source = "typealias Count=.Integer'builtin;
-        comptime fn packet(count:*Count)->(bool,) {
+        comptime fn packet(count:*Count)->Tuple<bool> {
             let first=count.* == 1;count.* += 1;(first,)
         }
         comptime fn identity(value:T)->T where T {value}
@@ -6330,20 +6593,23 @@ fn computed_packet_type_evidence_keeps_nested_producer_evaluation_order() {
             let code=build(do {count+=1;|value| value},identity(...packet(count.ref)));
             if count == 2 {code} else {'(false)}
         } fn run()->bool {~<outer()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn nested_packet_type_evidence_does_not_execute_unused_producers_or_hide_phase() {
-    let source = "comptime fn packet()->(bool,) {while true {} (false,)}
+    let source = "comptime fn packet()->Tuple<bool> {while true {} (false,)}
         comptime fn identity(value:T)->T where T {value}
         comptime fn build(lambda action:comptime fn(T)->T,value:T)-><|-T> where T {
             let result=action(value);'(result)
         }
         comptime fn unused()-><|-bool> {let code=build(not _0,identity(...packet()));code}";
-    support::compile_with_protocols(source, &Default::default()).unwrap();
+    support::compile_with_tuple_protocols(source, &Default::default()).unwrap();
     let runtime = source.replace("comptime fn packet()", "fn packet()");
-    let failure = support::compile_with_protocols(&runtime, &Default::default()).unwrap_err();
+    let failure = support::compile_with_tuple_protocols(&runtime, &Default::default()).unwrap_err();
     assert!(failure.contains("wrong execution phase"), "{failure}");
 }
 
@@ -6706,12 +6972,12 @@ fn generator_value_clauses_select_code_without_runtime_capture() {
     let source = "comptime fn choose()-><x:bool |- bool> where flag:bool {
         if flag {'(x)} else {'(not x)}
     }
-    fn run(value:bool)->(bool,bool) {
+    fn run(value:bool)->Tuple<bool,bool> {
         const yes=choose<true>();const no=choose<false>();
         (~[x=value]<yes>,~[x=value]<no>)
     }";
     assert_eq!(
-        run(source, "run", vec![Value::Bool(true)]),
+        support::run_iir_with_tuple(source, "run", vec![Value::Bool(true)]),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
     );
 }
@@ -6724,14 +6990,14 @@ fn generator_value_clauses_mix_types_defaults_and_nested_calls() {
         comptime fn configured()-><x:bool |- bool> where .flag:bool=true,.copy:bool=flag {
             '(x and copy)
         }
-        fn run(value:bool)->(bool,bool,bool) {
+        fn run(value:bool)->Tuple<bool,bool,bool> {
             const input:<x:bool |- bool> = '(x);
             const identity=forward<bool,false>(input);
             const enabled=configured();const disabled=configured<.flag=false>();
             (~[x=value]<identity>,~[x=value]<enabled>,~[x=value]<disabled>)
         }";
     assert_eq!(
-        run(source, "run", vec![Value::Bool(true)]),
+        support::run_iir_with_tuple(source, "run", vec![Value::Bool(true)]),
         Value::Tuple(vec![
             Value::Bool(true),
             Value::Bool(true),
@@ -6777,12 +7043,12 @@ fn generator_value_clauses_compute_defaults_and_check_contracts() {
             where .flag:bool=true,.opposite:bool=invert(flag),ensures opposite != flag {
             '(x and opposite)
         }
-        fn run(value:bool)->(bool,bool) {
+        fn run(value:bool)->Tuple<bool,bool> {
             const first=configured();const second=configured<.flag=false>();
             (~[x=value]<first>,~[x=value]<second>)
         }";
     assert_eq!(
-        run(source, "run", vec![Value::Bool(true)]),
+        support::run_iir_with_tuple(source, "run", vec![Value::Bool(true)]),
         Value::Tuple(vec![Value::Bool(false), Value::Bool(true)])
     );
 }
@@ -6800,14 +7066,14 @@ fn recursive_generator_value_defaults_use_the_new_call_frame() {
 #[test]
 fn generator_value_clauses_substitute_dependent_domains() {
     let source = "comptime fn constant()-><x:T |- T> where T,value:T {'(value)}
-        fn run(value:bool)->(bool,.u8'builtin) {
+        fn run(value:bool)->Tuple<bool,.u8'builtin> {
             const flag=constant<bool,false>();
             const byte=constant<.u8'builtin,200>();
             let zero:.u8'builtin=0;
             (~[x=value]<flag>,~[x=zero]<byte>)
         }";
     assert_eq!(
-        run(source, "run", vec![Value::Bool(true)]),
+        support::run_iir_with_tuple(source, "run", vec![Value::Bool(true)]),
         Value::Tuple(vec![Value::Bool(false), Value::UnsignedInteger(200)])
     );
 }
@@ -6853,9 +7119,9 @@ fn generator_value_defaults_wait_for_inferred_types_and_previous_defaults() {
         comptime fn configured(value:T)->< |- bool>
             where T,.flag:bool=is_bool(T),.opposite:bool=not flag {'(opposite)}
         comptime fn forward(value:T)->< |- bool> where T {configured(value)}
-        fn run()->(bool,bool) {const flag=forward(true);const character=forward('a');(~<flag>,~<character>)}";
+        fn run()->Tuple<bool,bool> {const flag=forward(true);const character=forward('a');(~<flag>,~<character>)}";
     assert_eq!(
-        run(source, "run", vec![]),
+        support::run_iir_with_tuple(source, "run", vec![]),
         Value::Tuple(vec![Value::Bool(false), Value::Bool(true)])
     );
 }
@@ -6867,13 +7133,13 @@ fn generator_dependent_value_defaults_dispatch_after_target_type_inference() {
         impl Initial for .char'builtin {comptime fn initial()->.char'builtin {'a'}}
         comptime fn build()->< |- T>
             where T :- Initial,.value:T=T.as(Initial).initial() {'(value)}
-        fn run()->(bool,.char'builtin) {
+        fn run()->Tuple<bool,.char'builtin> {
             const flag:< |- bool> = build();
             const character:< |- .char'builtin> = build();
             (~<flag>,~<character>)
         }";
     assert_eq!(
-        run(source, "run", vec![]),
+        support::run_iir_with_tuple(source, "run", vec![]),
         Value::Tuple(vec![Value::Bool(true), Value::Char('a')])
     );
 }
@@ -6898,9 +7164,9 @@ fn generator_deferred_defaults_keep_type_and_value_declaration_order() {
         comptime fn SelectType(flag:bool)->Type {if flag {bool} else {.char'builtin}}
         comptime fn configured(value:T)->< |- bool>
             where T,.flag:bool=is_bool(T),.U:Type=SelectType(flag),.result:bool=is_bool(U) {'(result)}
-        fn run()->(bool,bool) {const first=configured(true);const second=configured('a');(~<first>,~<second>)}";
+        fn run()->Tuple<bool,bool> {const first=configured(true);const second=configured('a');(~<first>,~<second>)}";
     assert_eq!(
-        run(source, "run", vec![]),
+        support::run_iir_with_tuple(source, "run", vec![]),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
     );
 }
@@ -6961,7 +7227,7 @@ fn generator_ready_defaults_supply_narrow_literal_contexts_before_arguments() {
         comptime fn Width(flag:bool)->Type {if flag {.u8'builtin} else {.u16'builtin}}
         comptime fn choose(first:T,second:U)->< |- U>
             where T,.flag:bool=is_bool(T),.U:Type=Width(flag) {'(second)}
-        fn run()->(.u8'builtin,.u16'builtin) {
+        fn run()->Tuple<.u8'builtin,.u16'builtin> {
             const narrow=choose(true,200);const wide=choose('a',500);
             (~<narrow>,~<wide>)
         }";
@@ -6972,7 +7238,7 @@ fn generator_ready_defaults_supply_narrow_literal_contexts_before_arguments() {
             .replace("choose('a',500)", "choose(...('a',500))"),
     ] {
         assert_eq!(
-            run(&source, "run", vec![]),
+            support::run_iir_with_tuple(&source, "run", vec![]),
             Value::Tuple(vec![
                 Value::UnsignedInteger(200),
                 Value::UnsignedInteger(500)
@@ -6988,12 +7254,12 @@ fn generator_ready_defaults_contextualize_code_before_later_type_evidence() {
         comptime fn Width(flag:bool)->Type {if flag {.u8'builtin} else {.u16'builtin}}
         comptime fn choose(code:< |- U>,first:T)->< |- U>
             where T,.flag:bool=is_bool(T),.U:Type=Width(flag) {code}
-        fn run()->(.u8'builtin,.u16'builtin) {
+        fn run()->Tuple<.u8'builtin,.u16'builtin> {
             const narrow=choose('(200),true);const wide=choose('(500),'a');
             (~<narrow>,~<wide>)
         }";
     assert_eq!(
-        run(source, "run", vec![]),
+        support::run_iir_with_tuple(source, "run", vec![]),
         Value::Tuple(vec![
             Value::UnsignedInteger(200),
             Value::UnsignedInteger(500)
@@ -7039,7 +7305,7 @@ fn generator_collections_supply_context_to_earlier_callbacks() {
 fn generator_collection_evidence_keeps_producer_order_and_packet_evaluation_once() {
     let prefix = "typealias Count=.Integer'builtin;
         comptime fn next(count:*Count)->bool {let first=count.* == 1;count.* += 1;first}
-        comptime fn packet(count:*Count)->(bool,bool) {(next(count),next(count))}
+        comptime fn packet(count:*Count)->Tuple<bool,bool> {(next(count),next(count))}
         comptime fn build(action:comptime fn(T)->bool,...items:T)-><|-bool> where T {
             let result=action(items);'(result)
         }";
@@ -7050,7 +7316,10 @@ fn generator_collection_evidence_keeps_producer_order_and_packet_evaluation_once
                 let code=build(do {{count+=1;|value| {{let (first,second)=value;first and not second}}}},{inputs});
                 if count == 3 {{code}} else {{'(false)}}
             }} fn run()->bool {{~<outer()>}}");
-        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true)
+        );
     }
 }
 
@@ -7075,11 +7344,11 @@ fn generator_collection_evidence_preserves_numeric_destination_contexts() {
     let source = "comptime fn build(lambda action:comptime fn(T)->T,...items:T)-><|-T> where T {
             let result=action(items);'(result)
         }
-        fn run()->(.u8'builtin,.u16'builtin) {
-            const code:<|-(.u8'builtin,.u16'builtin)> = build(_0,200,500);~<code>
+        fn run()->Tuple<.u8'builtin,.u16'builtin> {
+            const code:<|-Tuple<.u8'builtin,.u16'builtin>> = build(_0,200,500);~<code>
         }";
     assert_eq!(
-        run(source, "run", vec![]),
+        support::run_iir_with_tuple(source, "run", vec![]),
         Value::Tuple(vec![
             Value::UnsignedInteger(200),
             Value::UnsignedInteger(500)
@@ -7123,13 +7392,16 @@ fn generator_collection_evidence_supports_empty_and_property_collections() {
 
 #[test]
 fn generator_partial_collections_infer_types_without_defaulting_numeric_fields() {
-    let source="comptime fn build(lambda action:comptime fn(T)->bool,...items:(T,.u8'builtin))-><|-bool> where T {
+    let source="comptime fn build(lambda action:comptime fn(T)->bool,...items:Tuple<T,.u8'builtin>)-><|-bool> where T {
             let (flag,number)=items;let result=action(flag) and number == 200;'(result)
         }
         fn run()->bool {const code=build(not _0,false,200);~<code>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
     assert_eq!(
-        run(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        support::run_iir_with_tuple(
             &source.replace("false,200", ".items=(false,200)"),
             "run",
             vec![]
@@ -7143,17 +7415,12 @@ fn generator_partial_collections_propagate_nested_evidence_and_keep_tuple_heads(
     let source="typealias Type=.Type'builtin;
         pure comptime fn List<T>->Type {T}
         pure comptime fn Tuple<...Es:List<Type>>->Type {bool}
-        comptime fn build(lambda action:comptime fn(T)->bool,...items:((T,.u8'builtin),.u16'builtin))-><|-bool> where T {
+        comptime fn build(lambda action:comptime fn(T)->bool,...items:Tuple<Tuple<T,.u8'builtin>,.u16'builtin>)-><|-bool> where T {
             let ((flag,small),large)=items;
             let result=action(flag) and small == 200 and large == 500;'(result)
         }
         fn run()->bool {const code=build(not _0,(false,200),500);~<code>}";
     for registered in [false, true] {
-        let source = if registered {
-            source.to_owned()
-        } else {
-            source.replace("pure comptime fn Tuple<...Es:List<Type>>->Type {bool}", "")
-        };
         let package = support::compile_with_source_bindings(
             &source,
             &Default::default(),
@@ -7162,8 +7429,16 @@ fn generator_partial_collections_propagate_nested_evidence_and_keep_tuple_heads(
                 tuple: registered.then_some("input::Tuple"),
                 ..Default::default()
             },
-        )
-        .unwrap();
+        );
+        if !registered {
+            let error = package.unwrap_err();
+            assert!(
+                error.contains("unresolved") || error.contains("bound"),
+                "{error}"
+            );
+            continue;
+        }
+        let package = package.unwrap();
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Bool(true)
@@ -7176,14 +7451,14 @@ fn generator_partial_collections_unlock_default_computation_before_code_inputs()
     let source = "typealias Type=.Type'builtin;
         comptime fn is_bool(kind:Type)->bool {kind == bool}
         comptime fn Width(flag:bool)->Type {if flag {.u8'builtin} else {.u16'builtin}}
-        comptime fn build(code:<|-U>,...items:(T,.u8'builtin))-><|-U>
+        comptime fn build(code:<|-U>,...items:Tuple<T,.u8'builtin>)-><|-U>
             where T,.flag:bool=is_bool(T),.U:Type=Width(flag) {code}
-        fn run()->(.u8'builtin,.u16'builtin) {
+        fn run()->Tuple<.u8'builtin,.u16'builtin> {
             const narrow=build('(200),false,100);const wide=build('(500),'a',200);
             (~<narrow>,~<wide>)
         }";
     assert_eq!(
-        run(source, "run", vec![]),
+        support::run_iir_with_tuple(source, "run", vec![]),
         Value::Tuple(vec![
             Value::UnsignedInteger(200),
             Value::UnsignedInteger(500)
@@ -7193,7 +7468,7 @@ fn generator_partial_collections_unlock_default_computation_before_code_inputs()
 
 #[test]
 fn generator_partial_collections_keep_shape_range_and_callback_rejections() {
-    let prefix="comptime fn build(lambda action:comptime fn(T)->bool,...items:(T,.u8'builtin))-><|-bool> where T {
+    let prefix="comptime fn build(lambda action:comptime fn(T)->bool,...items:Tuple<T,.u8'builtin>)-><|-bool> where T {
         let (value,number)=items;let result=action(value);'(result)
     }";
     for arguments in [
@@ -7203,7 +7478,7 @@ fn generator_partial_collections_keep_shape_range_and_callback_rejections() {
     ] {
         let source = format!("{prefix} fn run()->bool {{const code=build({arguments});~<code>}}");
         assert!(
-            support::compile_with_protocols(&source, &Default::default()).is_err(),
+            support::compile_with_tuple_protocols(&source, &Default::default()).is_err(),
             "{source}"
         );
     }
@@ -7222,15 +7497,18 @@ fn generator_callbacks_infer_results_from_partial_function_contexts() {
 
 #[test]
 fn generator_collected_callbacks_use_partial_function_contexts() {
-    let source = "comptime fn transform(...items:(comptime fn(bool)->U,bool))-><|-U> where U {
+    let source = "comptime fn transform(...items:Tuple<comptime fn(bool)->U,bool>)-><|-U> where U {
         let (action,value)=items;let result=action(value);'(result)
     }
     fn run()->.char'builtin {
         const code=transform(|value| if value {'a'} else {'b'},true);~<code>
     }";
-    assert_eq!(run(source, "run", vec![]), Value::Char('a'));
     assert_eq!(
-        run(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Char('a')
+    );
+    assert_eq!(
+        support::run_iir_with_tuple(
             &source.replace(
                 "transform(|value| if value {'a'} else {'b'},true)",
                 "transform(.items=(|value| if value {'a'} else {'b'},true))"
@@ -7284,7 +7562,7 @@ fn generator_partial_callbacks_check_unused_bodies_and_execution_phase() {
 
 #[test]
 fn generator_callback_containers_reject_captured_graphs() {
-    let prefix = "comptime fn transform(...items:(comptime fn(bool)->bool,bool))-><|-bool> {
+    let prefix = "comptime fn transform(...items:Tuple<comptime fn(bool)->bool,bool>)-><|-bool> {
         let (action,value)=items;let result=action(value);'(result)
     }";
     for callback in [
@@ -7293,7 +7571,8 @@ fn generator_callback_containers_reject_captured_graphs() {
     ] {
         let source =
             format!("{prefix} fn run()->bool {{const code=transform({callback},true);~<code>}}");
-        let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        let error =
+            support::compile_with_tuple_protocols(&source, &Default::default()).unwrap_err();
         assert!(
             error.contains("cannot be frozen")
                 || (error.contains("type mismatch") && error.contains("closure (environment")),
@@ -7304,54 +7583,64 @@ fn generator_callback_containers_reject_captured_graphs() {
 
 #[test]
 fn generator_callback_containers_support_nested_captureless_values() {
-    let source = "comptime fn transform(...items:((comptime fn(bool)->U,),bool))-><|-U> where U {
+    let source =
+        "comptime fn transform(...items:Tuple<Tuple<comptime fn(bool)->U>,bool>)-><|-U> where U {
         let ((action,),value)=items;let result=action(value);'(result)
     }
     fn run()->.char'builtin {
         const code=transform((|value| if value {'a'} else {'b'},),true);~<code>
     }";
-    assert_eq!(run(source, "run", vec![]), Value::Char('a'));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Char('a')
+    );
 }
 
 #[test]
 fn generator_collection_fields_propagate_callback_results_to_later_literals() {
     let source = "comptime fn narrow(value:bool)->.u8'builtin {if value {200} else {0}}
-        comptime fn build(...items:(comptime fn(bool)->U,U))-><|-U> where U {
+        comptime fn build(...items:Tuple<comptime fn(bool)->U,U>)-><|-U> where U {
             let (action,value)=items;let result=action(true);'(value)
         }
         fn run()->.u8'builtin {const code=build(|value| narrow(value),200);~<code>}";
-    assert_eq!(run(source, "run", vec![]), Value::UnsignedInteger(200));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::UnsignedInteger(200)
+    );
 }
 
 #[test]
 fn generator_collection_fields_unlock_type_defaults_between_elements() {
     let source = "typealias Type=.Type'builtin;
         comptime fn Width(kind:Type)->Type {if kind == bool {.u8'builtin} else {.u16'builtin}}
-        comptime fn build(...items:(comptime fn(bool)->T,U))-><|-U> where T,.U:Type=Width(T) {
+        comptime fn build(...items:Tuple<comptime fn(bool)->T,U>)-><|-U> where T,.U:Type=Width(T) {
             let (action,value)=items;let result=action(true);'(value)
         }
-        fn run()->(.u8'builtin,.u16'builtin) {
+        fn run()->Tuple<.u8'builtin,.u16'builtin> {
             const small=build(|value| not value,200);
             const large=build(|value| 'a',500);
             (~<small>,~<large>)
         }";
     assert_eq!(
-        run(source, "run", vec![]),
+        support::run_iir_with_tuple(source, "run", vec![]),
         Value::Tuple(vec![
             Value::UnsignedInteger(200),
             Value::UnsignedInteger(500)
         ])
     );
     let invalid = source.replace("not value,200", "not value,256");
-    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
 }
 
 #[test]
 fn generator_collection_fields_update_interleaved_code_contexts() {
     let source = "comptime fn narrow(value:bool)->.u8'builtin {if value {200} else {0}}
-        comptime fn build(...items:(comptime fn(bool)->U,U),implicit code:<|-U>)-><|-U> where U {code}
+        comptime fn build(...items:Tuple<comptime fn(bool)->U,U>,implicit code:<|-U>)-><|-U> where U {code}
         fn run()->.u8'builtin {const code=build(|value| narrow(value),.code='(200),200);~<code>}";
-    assert_eq!(run(source, "run", vec![]), Value::UnsignedInteger(200));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::UnsignedInteger(200)
+    );
 }
 
 #[test]
@@ -7361,7 +7650,7 @@ fn generator_collection_fields_preserve_source_order_and_registered_tuple_heads(
         pure comptime fn List<T>->Type {T}
         pure comptime fn Tuple<...Es:List<Type>>->Type {bool}
         comptime fn narrow(value:bool)->.u8'builtin {if value {200} else {0}}
-        comptime fn build(...items:(comptime fn(bool)->U,U))-><|-U> where U {
+        comptime fn build(...items:Tuple<comptime fn(bool)->U,U>)-><|-U> where U {
             let (action,value)=items;let result=action(true);'(value)
         }
         comptime fn outer()-><|-.u8'builtin> {
@@ -7389,33 +7678,36 @@ fn generator_collection_fields_preserve_source_order_and_registered_tuple_heads(
 #[test]
 fn generator_named_literal_packets_propagate_types_between_fields() {
     let source = "comptime fn narrow(value:bool)->.u8'builtin {if value {200} else {0}}
-        comptime fn build(...items:(comptime fn(bool)->U,U))-><|-U> where U {
+        comptime fn build(...items:Tuple<comptime fn(bool)->U,U>)-><|-U> where U {
             let (action,value)=items;let result=action(true);'(value)
         }
         fn run()->.u8'builtin {const code=build(.items=(|value| narrow(value),200));~<code>}";
-    assert_eq!(run(source, "run", vec![]), Value::UnsignedInteger(200));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::UnsignedInteger(200)
+    );
 }
 
 #[test]
 fn generator_named_literal_packets_advance_defaults_and_reject_overflow() {
     let source = "typealias Type=.Type'builtin;
         comptime fn Width(kind:Type)->Type {if kind == bool {.u8'builtin} else {.u16'builtin}}
-        comptime fn build(...items:(comptime fn(bool)->T,U))-><|-U> where T,.U:Type=Width(T) {
+        comptime fn build(...items:Tuple<comptime fn(bool)->T,U>)-><|-U> where T,.U:Type=Width(T) {
             let (action,value)=items;let result=action(true);'(value)
         }
-        fn run()->(.u8'builtin,.u16'builtin) {
+        fn run()->Tuple<.u8'builtin,.u16'builtin> {
             const small=build(.items=(|value| not value,200));
             const large=build(.items=(|value| 'a',500));(~<small>,~<large>)
         }";
     assert_eq!(
-        run(source, "run", vec![]),
+        support::run_iir_with_tuple(source, "run", vec![]),
         Value::Tuple(vec![
             Value::UnsignedInteger(200),
             Value::UnsignedInteger(500)
         ])
     );
     let invalid = source.replace("not value,200", "not value,256");
-    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
 }
 
 #[test]
@@ -7425,7 +7717,7 @@ fn generator_named_literal_packets_keep_order_and_tuple_identity() {
         pure comptime fn List<T>->Type {T}
         pure comptime fn Tuple<...Es:List<Type>>->Type {bool}
         comptime fn narrow(value:bool)->.u8'builtin {if value {200} else {0}}
-        comptime fn build(...items:(comptime fn(bool)->U,U))-><|-U> where U {
+        comptime fn build(...items:Tuple<comptime fn(bool)->U,U>)-><|-U> where U {
             let (action,value)=items;let result=action(true);'(value)
         }
         comptime fn outer()-><|-.u8'builtin> {
@@ -7453,13 +7745,16 @@ fn generator_named_literal_packets_keep_order_and_tuple_identity() {
 #[test]
 fn generator_named_computed_packets_keep_their_single_invocation_boundary() {
     let prefix="typealias Count=.Integer'builtin;
-        comptime fn packet(count:*Count)->(bool,bool) {count.*+=1;(true,true)}
-        comptime fn build(...items:(bool,bool))-><|-bool> {let (first,second)=items;'(first and second)}";
+        comptime fn packet(count:*Count)->Tuple<bool,bool> {count.*+=1;(true,true)}
+        comptime fn build(...items:Tuple<bool,bool>)-><|-bool> {let (first,second)=items;'(first and second)}";
     for input in ["packet(count.ref)", "do {count+=1;(true,true)}"] {
         let source=format!("{prefix}
             comptime fn outer()-><|-bool> {{var count:Count=0;let code=build(.items={input});if count == 1 {{code}} else {{'(false)}}}}
             fn run()->bool {{~<outer()>}}");
-        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true)
+        );
     }
 }
 
@@ -7556,7 +7851,7 @@ fn generator_readonly_captures_preserve_nested_callbacks_and_nominal_wrappers() 
 #[test]
 fn generator_readonly_captures_keep_creation_snapshots() {
     let source = "typealias Reader=%{flag:bool} comptime fn()->bool;
-        comptime fn build(...actions:(Reader,Reader))-><|-bool> {
+        comptime fn build(...actions:Tuple<Reader,Reader>)-><|-bool> {
             let (first,second)=actions;let a=first();let b=second();'(a and not b)
         }
         comptime fn outer()-><|-bool> {
@@ -7564,7 +7859,10 @@ fn generator_readonly_captures_keep_creation_snapshots() {
             build(first,second)
         }
         fn run()->bool {~<outer()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -7697,12 +7995,12 @@ fn generator_named_function_value_evidence_does_not_invoke_bodies_or_skipped_def
         comptime fn never(value:.u8'builtin)->.u8'builtin {while true {} value}
         comptime fn defaulted(value:T)->T where .T:Type=Never() {value}
         comptime fn build(code:<|-T>,action:comptime fn(T)->T)-><|-T> where T {code}
-        fn run()->(.u8'builtin,.u8'builtin) {
+        fn run()->Tuple<.u8'builtin,.u8'builtin> {
             const first=build('(200),never);const second=build('(201),defaulted<.T=.u8'builtin>);
             (~<first>,~<second>)
         }";
     assert_eq!(
-        run(source, "run", vec![]),
+        support::run_iir_with_tuple(source, "run", vec![]),
         Value::Tuple(vec![
             Value::UnsignedInteger(200),
             Value::UnsignedInteger(201)
@@ -7763,7 +8061,7 @@ fn generator_field_type_evidence_instantiates_generic_and_anonymous_records() {
 #[test]
 fn generator_field_type_evidence_keeps_packet_and_callback_source_order() {
     let source="typealias Count=.Integer'builtin;
-        struct Config {packet:(bool,)}
+        struct Config {packet:Tuple<bool>}
         comptime fn config(count:*Count)->Config {let flag=count.* == 1;count.*+=1;Config {packet:(flag,)}}
         comptime fn build(action:comptime fn(T)->T,value:T)-><|-T> where T {let result=action(value);'(result)}
         comptime fn outer()-><|-bool> {
@@ -7772,7 +8070,10 @@ fn generator_field_type_evidence_keeps_packet_and_callback_source_order() {
             if count == 2 {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -7810,14 +8111,17 @@ fn generator_callback_call_results_supply_earlier_lambda_contexts() {
 fn generator_callback_call_results_cover_factories_and_packets() {
     let source="typealias Reader=%{flag:bool} comptime fn()->bool;
         comptime fn reader(flag:bool)->Reader {|| flag}
-        comptime fn packet()->(bool,) {(false,)}
-        comptime fn factory()->comptime fn()->(bool,) {packet}
+        comptime fn packet()->Tuple<bool> {(false,)}
+        comptime fn factory()->comptime fn()->Tuple<bool> {packet}
         comptime fn build(lambda action:comptime fn(T)->T,value:T)-><|-T> where T {let result=action(value);'(result)}
         fn run()->bool {
             const first=build(not _0,reader(false)());
             const second=build(not _0,...factory()());~<first> and ~<second>
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -7884,14 +8188,14 @@ fn generator_block_binding_evidence_handles_annotations_and_shadowing() {
         comptime fn wide(value:.u16'builtin)->.u16'builtin {value}
         comptime fn build(code:<|-T>,action:comptime fn(T)->T)-><|-T> where T {code}
         comptime fn data(lambda action:comptime fn(T)->T,value:T)-><|-T> where T {let result=action(value);'(result)}
-        fn run()->(.u8'builtin,.u16'builtin,.u8'builtin) {
+        fn run()->Tuple<.u8'builtin,.u16'builtin,.u8'builtin> {
             const first=build('(200),do {let action=narrow;action});
             const second=build('(500),do {let action=narrow;do {let action=wide;action}});
             const third=data(_0,do {let value:.u8'builtin=201;value});
             (~<first>,~<second>,~<third>)
         }";
     assert_eq!(
-        run(source, "run", vec![]),
+        support::run_iir_with_tuple(source, "run", vec![]),
         Value::Tuple(vec![
             Value::UnsignedInteger(200),
             Value::UnsignedInteger(500),
@@ -7903,7 +8207,7 @@ fn generator_block_binding_evidence_handles_annotations_and_shadowing() {
 #[test]
 fn generator_block_binding_evidence_keeps_destructuring_producer_order() {
     let source="typealias Count=.Integer'builtin;
-        comptime fn packet(count:*Count)->(bool,.char'builtin) {let ready=count.* == 1;count.*+=1;(ready,'a')}
+        comptime fn packet(count:*Count)->Tuple<bool,.char'builtin> {let ready=count.* == 1;count.*+=1;(ready,'a')}
         comptime fn build(action:comptime fn(T)->T,value:T)-><|-T> where T {let result=action(value);'(result)}
         comptime fn outer()-><|-bool> {
             var count:Count=0;
@@ -7911,7 +8215,10 @@ fn generator_block_binding_evidence_keeps_destructuring_producer_order() {
             if count == 2 {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -7947,13 +8254,13 @@ fn generator_record_binding_evidence_preserves_callback_context() {
         comptime fn config()->Config<.u8'builtin> {Config<.u8'builtin>{action:narrow}}
         comptime fn schema(...fields:T)->T where T {fields}
         comptime fn build(code:<|-T>,action:comptime fn(T)->T)-><|-T> where T {code}
-        fn run()->(.u8'builtin,.u8'builtin) {
+        fn run()->Tuple<.u8'builtin,.u8'builtin> {
             const first=build('(200),do {let {action}=config();action});
             const second=build('(201),do {let {action:selected}=schema {action:narrow};selected});
             (~<first>,~<second>)
         }";
     assert_eq!(
-        run(source, "run", vec![]),
+        support::run_iir_with_tuple(source, "run", vec![]),
         Value::Tuple(vec![
             Value::UnsignedInteger(200),
             Value::UnsignedInteger(201)
@@ -7966,7 +8273,7 @@ fn generator_record_binding_evidence_keeps_nested_producer_order() {
     let source="typealias Count=.Integer'builtin;
         struct Config {action:comptime fn(.u8'builtin)->.u8'builtin}
         comptime fn narrow(value:.u8'builtin)->.u8'builtin {value}
-        comptime fn bundle(count:*Count)->(Config,bool) {count.* = count.* * 10 + 2;(Config {action:narrow},true)}
+        comptime fn bundle(count:*Count)->Tuple<Config,bool> {count.* = count.* * 10 + 2;(Config {action:narrow},true)}
         comptime fn build(code:<|-T>,action:comptime fn(T)->T)-><|-T> where T {code}
         comptime fn outer()-><|-.u8'builtin> {
             var count:Count=0;
@@ -7974,7 +8281,10 @@ fn generator_record_binding_evidence_keeps_nested_producer_order() {
             if count == 12 {code} else {'(0)}
         }
         fn run()->.u8'builtin {~<outer()>}";
-    assert_eq!(run(source, "run", vec![]), Value::UnsignedInteger(200));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::UnsignedInteger(200)
+    );
 }
 
 #[test]
@@ -8005,10 +8315,13 @@ fn generator_record_binding_evidence_retains_pattern_and_phase_validation() {
 #[test]
 fn generator_match_binding_evidence_preserves_callback_types() {
     let source="comptime fn narrow(value:.u8'builtin)->.u8'builtin {value}
-        comptime fn pair()->(comptime fn(.u8'builtin)->.u8'builtin,bool) {(narrow,true)}
+        comptime fn pair()->Tuple<comptime fn(.u8'builtin)->.u8'builtin,bool> {(narrow,true)}
         comptime fn build(code:<|-T>,action:comptime fn(T)->T)-><|-T> where T {code}
         fn run()->.u8'builtin {const code=build('(200),pair() match {(action,true)=>action,(action,false)=>action});~<code>}";
-    assert_eq!(run(source, "run", vec![]), Value::UnsignedInteger(200));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::UnsignedInteger(200)
+    );
 }
 
 #[test]
@@ -8026,7 +8339,7 @@ fn generator_match_binding_evidence_keeps_subject_and_guard_order() {
     let source="typealias Count=.Integer'builtin;
         comptime fn narrow()->.u8'builtin {200}
         comptime fn wrong()->.u8'builtin {0}
-        comptime fn pair(count:*Count)->(comptime fn()->.u8'builtin,bool) {count.*+=1;(narrow,true)}
+        comptime fn pair(count:*Count)->Tuple<comptime fn()->.u8'builtin,bool> {count.*+=1;(narrow,true)}
         comptime fn build(transform:comptime fn(T)->bool,action:comptime fn()->T)-><|-bool> where T {let value=action();let result=transform(value);'(result)}
         comptime fn outer()-><|-bool> {
             var count:Count=0;
@@ -8037,14 +8350,17 @@ fn generator_match_binding_evidence_keeps_subject_and_guard_order() {
             if count == 2 {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn generator_match_binding_evidence_retains_coverage_and_branch_validation() {
     let prefix = "comptime fn narrow(value:.u8'builtin)->.u8'builtin {value}
         comptime fn wide(value:.u16'builtin)->.u16'builtin {value}
-        comptime fn pair()->(comptime fn(.u8'builtin)->.u8'builtin,bool) {(narrow,true)}
+        comptime fn pair()->Tuple<comptime fn(.u8'builtin)->.u8'builtin,bool> {(narrow,true)}
         comptime fn build(code:<|-T>,action:comptime fn(T)->T)-><|-T> where T {code}";
     for arms in [
         "(action,true)=>action",
@@ -8055,7 +8371,7 @@ fn generator_match_binding_evidence_retains_coverage_and_branch_validation() {
             "{prefix} fn run()->.u8'builtin {{const code=build('(200),pair() match {{{arms}}});~<code>}}"
         );
         assert!(
-            support::compile_with_protocols(&source, &Default::default()).is_err(),
+            support::compile_with_tuple_protocols(&source, &Default::default()).is_err(),
             "{source}"
         );
     }
@@ -8063,7 +8379,7 @@ fn generator_match_binding_evidence_retains_coverage_and_branch_validation() {
         "{} comptime fn unused()-><|-.u8'builtin> {{let code=build('(200),pair() match {{(action,_)=>action}});code}}",
         prefix.replace("{(narrow,true)}", "{while true {} (narrow,true)}")
     );
-    support::compile_with_protocols(&source, &Default::default()).unwrap();
+    support::compile_with_tuple_protocols(&source, &Default::default()).unwrap();
 }
 
 #[test]
@@ -8190,17 +8506,20 @@ fn generator_combined_pattern_evidence_checks_alternatives() {
 #[test]
 fn generator_whole_binding_evidence_preserves_inner_and_whole_types() {
     let source="comptime fn narrow(value:.u8'builtin)->.u8'builtin {value}
-        comptime fn pair()->(comptime fn(.u8'builtin)->.u8'builtin,bool) {(narrow,true)}
+        comptime fn pair()->Tuple<comptime fn(.u8'builtin)->.u8'builtin,bool> {(narrow,true)}
         comptime fn build(code:<|-T>,action:comptime fn(T)->T)-><|-T> where T {code}
         fn run()->.u8'builtin {const code=build('(200),do {let (action,_) as whole=pair();let (selected,_)=whole;selected});~<code>}";
-    assert_eq!(run(source, "run", vec![]), Value::UnsignedInteger(200));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::UnsignedInteger(200)
+    );
 }
 
 #[test]
 fn generator_guarded_pattern_evidence_preserves_runtime_selection() {
     let prefix="comptime fn narrow()->.u8'builtin {200}
         comptime fn wrong()->.u8'builtin {0}
-        comptime fn pair()->(comptime fn()->.u8'builtin,bool) {(narrow,true)}
+        comptime fn pair()->Tuple<comptime fn()->.u8'builtin,bool> {(narrow,true)}
         comptime fn build(transform:comptime fn(T)->bool,action:comptime fn()->T)-><|-bool> where T {let value=action();let result=transform(value);'(result)}";
     let source = format!(
         "{prefix} comptime fn outer()-><|-bool> {{
@@ -8211,14 +8530,17 @@ fn generator_guarded_pattern_evidence_preserves_runtime_selection() {
         }})
     }} fn run()->bool {{~<outer()>}}"
     );
-    assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&source, "run", vec![]),
+        Value::Bool(true)
+    );
     let invalid = format!(
         "{prefix} fn runtime()->bool {{true}}
         fn run()->bool {{~<build(|value| value == 200,pair() match {{
             ((action if runtime()),_)=>action,(_,_)=>wrong
         }})>}}"
     );
-    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
 }
 
 #[test]
@@ -8414,14 +8736,20 @@ fn generator_value_clauses_infer_from_generic_data_producers() {
         comptime fn enabled(value:Flag<flag>)-><|-bool> where flag:bool {if flag {'(true)} else {'(false)}}
         fn run()->bool {const yes=enabled(make(Flag<true>{}));
             const no=enabled(make(Flag<false>{}));~<yes> and not ~<no>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let spread = source
         .replace(
             "->Flag<flag> where flag:bool {value}",
-            "->(Flag<flag>,) where flag:bool {(value,)}",
+            "->Tuple<Flag<flag>> where flag:bool {(value,)}",
         )
         .replace("enabled(make(", "enabled(...make(");
-    assert_eq!(run(&spread, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&spread, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -8536,12 +8864,18 @@ fn inferred_producer_value_defaults_preserve_prior_inference_variables() {
             const byte=build(_0.value == 7,identity(Key<.u8'builtin,7>{value:7}));
             ~<yes> and not ~<no> and ~<byte>
         }";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let spread = source
-        .replace("->Key<T,tag>", "->(Key<T,tag>,)")
+        .replace("->Key<T,tag>", "->Tuple<Key<T,tag>>")
         .replace(".mirror:T=tag {value}", ".mirror:T=tag {(value,)}")
         .replace(",identity(", ",...identity(");
-    assert_eq!(run(&spread, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&spread, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -9032,24 +9366,31 @@ fn partial_pattern_input_context_survives_control_flow() {
         "true match {true=>pair('a'),false=>pair('b')}",
         "do {return pair('a');}",
     ] {
-        let source=format!("comptime fn pair(seed:B)-><(A,B) -| left:A,right:B> where A,B {{'<(left,right)>}}
-            comptime fn forward(code:<(bool,T) -| left:bool,right:T>)-><(bool,T) -| left:bool,right:T> where T {{code}}
+        let source=format!("comptime fn pair(seed:B)-><Tuple<A,B> -| left:A,right:B> where A,B {{'<(left,right)>}}
+            comptime fn forward(code:<Tuple<bool,T> -| left:bool,right:T>)-><Tuple<bool,T> -| left:bool,right:T> where T {{code}}
             fn run()->bool {{const p=forward({argument});let ~<p> = (true,'b');left and right == 'b'}}");
-        assert_eq!(run(&source, "run", vec![]), Value::Bool(true), "{argument}");
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true),
+            "{argument}"
+        );
     }
 }
 
 #[test]
 fn partial_pattern_control_context_reaches_properties_and_symbolic_branches() {
-    let source="comptime fn pair(seed:B,...fields:Options)-><(A,B) -| left:A,right:B> where A,B,Options {'<(left,right)>}
-        comptime fn accepts(code:<(bool,T) -| left:bool,right:T>)-><|-bool> where T {'(true)}
+    let source="comptime fn pair(seed:B,...fields:Options)-><Tuple<A,B> -| left:A,right:B> where A,B,Options {'<(left,right)>}
+        comptime fn accepts(code:<Tuple<bool,T> -| left:bool,right:T>)-><|-bool> where T {'(true)}
         comptime fn choose(flag:bool)-><|-bool> {
             accepts(if flag {pair {'a',enabled:true}} else {do {return pair {'b',enabled:false};}})
         }
         fn run()->bool {~<choose(true)> and ~<choose(false)>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let invalid = source.replace("pair {'b',enabled:false}", "pair {true,enabled:false}");
-    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
 }
 
 #[test]
@@ -9120,14 +9461,17 @@ fn discarded_pattern_results_still_check_contracts_and_runtime_phase() {
 #[test]
 fn discarded_pattern_branches_need_no_shared_result_interface() {
     let source = "comptime fn scalar()-><bool -| value:bool> {'<value>}
-        comptime fn pair()-><(bool,bool) -| left:bool,right:bool> {'<(left,right)>}
+        comptime fn pair()-><Tuple<bool,bool> -| left:bool,right:bool> {'<(left,right)>}
         comptime fn emit(flag:bool)-><|-bool> {
             if flag {scalar();} else {pair();}
             flag match {true=>scalar(),false=>pair()};
             '(true)
         }
         fn run()->bool {~<emit(true)> and ~<emit(false)>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -9138,11 +9482,15 @@ fn expression_code_inputs_preserve_partial_result_context() {
         "do {return pair('a');}",
     ] {
         let source = format!(
-            "comptime fn pair(seed:B)-><x:A |-(A,B)> where A,B {{'((x,seed))}}
-            comptime fn accepts(code:<x:bool |-(bool,T)>)-><|-bool> where T {{'(true)}}
+            "comptime fn pair(seed:B)-><x:A |-Tuple<A,B>> where A,B {{'((x,seed))}}
+            comptime fn accepts(code:<x:bool |-Tuple<bool,T>>)-><|-bool> where T {{'(true)}}
             fn run()->bool {{~<accepts({argument})>}}"
         );
-        assert_eq!(run(&source, "run", vec![]), Value::Bool(true), "{argument}");
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true),
+            "{argument}"
+        );
     }
 }
 
@@ -9154,16 +9502,23 @@ fn expression_partial_context_reaches_quotes_properties_and_spreads() {
         "when {true=>pair('a'),else=>pair('b')}",
         "true match {true=>pair('a'),false=>pair('b')}",
     ] {
-        let source=format!("comptime fn pair(seed:B,...options:Options)-><x:A |-(A,B)> where A,B,Options {{'((x,seed))}}
-            comptime fn accepts(code:<x:bool |-(bool,T)>)-><|-bool> where T {{'(true)}}
+        let source=format!("comptime fn pair(seed:B,...options:Options)-><x:A |-Tuple<A,B>> where A,B,Options {{'((x,seed))}}
+            comptime fn accepts(code:<x:bool |-Tuple<bool,T>>)-><|-bool> where T {{'(true)}}
             fn run()->bool {{~<accepts({argument})>}}");
-        assert_eq!(run(&source, "run", vec![]), Value::Bool(true), "{argument}");
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true),
+            "{argument}"
+        );
     }
-    let source = "comptime fn accepts(code:<|-(.u8'builtin,T)>)-><|-bool> where T {'(true)}
+    let source = "comptime fn accepts(code:<|-Tuple<.u8'builtin,T>>)-><|-bool> where T {'(true)}
         fn run()->bool {~<accepts('((1,'a')))>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     assert!(
-        support::compile_with_protocols(
+        support::compile_with_tuple_protocols(
             &source.replace("(1,'a')", "(256,'a')"),
             &Default::default()
         )
@@ -9173,24 +9528,30 @@ fn expression_partial_context_reaches_quotes_properties_and_spreads() {
 
 #[test]
 fn pattern_generators_supply_partial_expression_result_context() {
-    let source="comptime fn pair(seed:B)-><x:A |-(A,B)> where A,B {'((x,seed))}
-        comptime fn accepts(code:<x:bool |-(bool,T)>)-><bool -| value:bool> where T {'<value>}
+    let source="comptime fn pair(seed:B)-><x:A |-Tuple<A,B>> where A,B {'((x,seed))}
+        comptime fn accepts(code:<x:bool |-Tuple<bool,T>>)-><bool -| value:bool> where T {'<value>}
         fn run()->bool {const p=accepts(if true {pair('a')} else {pair('b')});true match {~<p> => value,_=>false}}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let invalid = source.replace("pair('a')", "pair<.char'builtin,.char'builtin>('a')");
-    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
 }
 
 #[test]
 fn partially_contextualized_expression_code_executes_with_runtime_connections() {
-    let source = "comptime fn pair(seed:B)-><x:A |-(A,B)> where A,B {'((x,seed))}
-        comptime fn accepts(code:<x:bool |-(bool,T)>)-><|-bool> where T {
+    let source = "comptime fn pair(seed:B)-><x:A |-Tuple<A,B>> where A,B {'((x,seed))}
+        comptime fn accepts(code:<x:bool |-Tuple<bool,T>>)-><|-bool> where T {
             '(do {let input=true;let (first,other)=~[x=input]<code>;first})
         }
         fn run()->bool {~<accepts(if true {pair('a')} else {pair('b')})>}";
-    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
     assert_eq!(
-        run(&source.replace("input=true", "input=false"), "run", vec![]),
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        support::run_iir_with_tuple(&source.replace("input=true", "input=false"), "run", vec![]),
         Value::Bool(false)
     );
 }
@@ -9372,4 +9733,138 @@ fn local_const_pattern_computations_keep_runtime_state_out_of_invocation() {
         result
     }";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn error_generator_data_materializes_success_and_failure() {
+    let source = "pure comptime fn build(data:!bool bool)->< |- !bool bool> {'(data)}
+        fn run()->bool {
+            (~<build(true)> match {value! => value,error failure=>failure})
+            and (~<build(error true)> match {value! => value,error failure=>failure})
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn error_generator_data_transports_runtime_callable_payload() {
+    let source = "enum Failure {Run(fn()->bool)} fn action()->bool {true}
+        pure comptime fn build(data:!Failure bool)->< |- bool> {
+            '(data match {value! => value,error Failure.Run(callback)=>callback()})
+        }
+        fn run()->bool {~<build(error Failure.Run(action))>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn error_generator_data_preserves_reordered_labels_in_nested_containers() {
+    let source = "enum A {Bad(bool)} enum B {Bad(bool)} struct Packet {data:![B,A] bool}
+        pure comptime fn build(data:![A,B] bool)->< |- bool> {
+            let packet=Packet {data:data};
+            '(packet.data match {value! => value,error A.Bad(v)=>v,error B.Bad(v)=>v})
+        }
+        fn run()->bool {~<build(error A.Bad(true))> and ~<build(error B.Bad(true))>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn error_generator_data_survives_comptime_closure_snapshots() {
+    let source = "typealias Reader=%{data:!bool bool} comptime fn()->bool;
+        comptime fn make(data:!bool bool)->Reader {
+            || {data match {value! => value,error failure=>failure}}
+        }
+        comptime fn emit(read:Reader)->< |- bool> {let value=read();'(value)}
+        fn run()->bool {~<emit(make(true))> and ~<emit(make(error true))>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn error_generator_data_cannot_hide_pointer_escape_or_runtime_execution() {
+    for source in [
+        "comptime fn build(data:!*bool bool)->< |- !*bool bool> {'(data)}
+            comptime fn outer()->< |- !*bool bool> {let flag=true;build(error flag.ref)}
+            fn run()->!*bool bool {~<outer()>}",
+        "enum Failure {Run(fn()->bool)} fn action()->bool {true}
+            comptime fn build(data:!Failure bool)->< |- bool> {
+                let flag=data match {value! => value,error Failure.Run(callback)=>callback()};'(flag)
+            }
+            fn run()->bool {~<build(error Failure.Run(action))>}",
+        "typealias Reader=%{data:!*bool bool} comptime fn()->bool;
+            comptime fn make()->Reader {let flag=true;let data:!*bool bool=error flag.ref;
+                || {data match {value! => value,error pointer=>pointer.*}}}
+            comptime fn emit(read:Reader)->< |- bool> {let value=read();'(value)}
+            fn run()->bool {~<emit(make())>}",
+    ] {
+        let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn error_generator_data_live_pointer_payload_preserves_aliases() {
+    let source = "comptime fn build(data:!*bool bool)->< |- bool> {
+            let flag=data match {value! => value,error pointer=>{pointer.* = true;pointer.*}};
+            '(flag)
+        }
+        comptime fn outer()->< |- bool> {var flag=false;let code=build(error flag.ref);
+            let observed=flag;'(observed and ~<code>)}
+        fn run()->bool {~<outer()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn error_generator_data_preserves_generic_label_instances() {
+    let source = "enum Failure where T {Bad(T)}
+        comptime fn build(data:!Failure<T> bool)->< |- bool> where T {
+            '(data match {value! => value,error Failure<T>.Bad(_)=>true})
+        }
+        fn run()->bool {~<build<bool>(error Failure<bool>.Bad(true))>
+            and ~<build<.char'builtin>(error Failure<.char'builtin>.Bad('x'))>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn error_generator_data_quotes_snapshot_before_later_assignment() {
+    let source = "comptime fn build()->< |- bool> {
+            var data:!bool bool=true;
+            let before='(data match {value! => value,error failure=>failure});
+            data=error false;
+            '(~<before> and (data match {value! => value,error failure=>not failure}))
+        }
+        fn run()->bool {~<build()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn error_generator_data_cannot_conceal_mixed_live_callback_graph() {
+    let source = "struct Packet {data:!*bool bool,callback:fn()->bool}
+        fn action()->bool {true}
+        comptime fn build()->< |- bool> {var flag=false;
+            let packet=Packet {data:error flag.ref,callback:action};'(true)}
+        fn run()->bool {~<build()>}";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("live generator aggregate contains a runtime callback"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn generic_code_signatures_substitute_repeated_nested_types_without_losing_context() {
+    let source = "pure comptime fn identity(code:<x:Tuple<T,T,T,T> |- Tuple<T,T,T,T>>)-><x:Tuple<T,T,T,T> |- Tuple<T,T,T,T>> where T {code}
+        pure comptime fn forward(code:<x:Tuple<T,T,T,T> |- Tuple<T,T,T,T>>)-><x:Tuple<T,T,T,T> |- Tuple<T,T,T,T>> where T {identity<T>(code)}
+        fn run(value:bool)->bool {
+            let pair=(value,false);
+            let input=(pair,pair,pair,pair);
+            const code=forward<Tuple<bool,bool>>('[x=input](input));
+            let ((first,_),_,_,_)=~<code>;
+            first
+        }";
+    for value in [true, false] {
+        assert_eq!(
+            support::run_iir_with_tuple(source, "run", vec![Value::Bool(value)]),
+            Value::Bool(value)
+        );
+    }
+    let wrong = source.replace("forward<Tuple<bool,bool>>", "forward<bool>");
+    assert!(support::compile_with_tuple_protocols(&wrong, &Default::default()).is_err());
 }

@@ -12,6 +12,7 @@ one lock; use this entrypoint instead of concurrent direct Cargo commands.
 from __future__ import annotations
 
 import fcntl
+import errno
 import os
 from pathlib import Path
 import shutil
@@ -25,6 +26,15 @@ MAX_CACHE = 2 * 1024**3
 MIN_FREE = 2 * 1024**3
 REBUILDABLE_PACKAGES = ("elaboration", "luna")
 SPACE_ERRORS = ("quota exceeded", "no space left on device", "os error 122", "os error 28")
+SPACE_ERRNOS = (errno.EDQUOT, errno.ENOSPC)
+
+
+def diagnostic(message: str) -> None:
+    # Cache recovery must still run when the evidence destination is full.
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except OSError:
+        pass
 
 
 def cargo_arguments(arguments: list[str], target: Path) -> list[str]:
@@ -64,8 +74,13 @@ class Runner:
         if not full:
             for package in packages:
                 command += ["-p", package]
-        print("cargo-cache: cleaning " + ("the target directory" if full else "/".join(packages) + " outputs"), file=sys.stderr, flush=True)
+        diagnostic("cargo-cache: cleaning " + ("the target directory" if full else "/".join(packages) + " outputs"))
         subprocess.run(command, cwd=self.root, env=self.env, check=True)
+        if not full:
+            # Package-scoped clean may select only the default profile. The
+            # managed cache also serves release builds; remove those package
+            # outputs before considering a full dependency-cache purge.
+            subprocess.run([*command, "--release"], cwd=self.root, env=self.env, check=True)
 
     def reclaim(self, *, force: bool = False) -> None:
         if force:
@@ -89,17 +104,33 @@ class Runner:
         process = subprocess.Popen(command, cwd=self.root, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert process.stdout is not None and process.stderr is not None
         quota_failure = threading.Event()
+        forwarding_errors = []
         # Stream all evidence to the caller's log; retain no unbounded transcript.
         # Preserve stdout/stderr separation, particularly for `run -- --emit nir`.
-        def pump(source, destination):
-            for line in source:
-                destination.write(line)
-                destination.flush()
-                text = line.decode(errors="replace").lower()
-                if any(marker in text for marker in SPACE_ERRORS):
+        def pump(source, destination, label):
+            markers = tuple(marker.encode() for marker in SPACE_ERRORS)
+            overlap = max(map(len, markers)) - 1
+            tail = b''
+            failed = False
+            # A diagnostic (or a generated artifact) need not contain newlines.
+            # read1 bounds memory and forwards currently available pipe bytes.
+            while chunk := source.read1(64 * 1024):
+                text = tail + chunk.lower()
+                if any(marker in text for marker in markers):
                     quota_failure.set()
-        readers = [threading.Thread(target=pump, args=(process.stdout, sys.stdout.buffer)),
-                   threading.Thread(target=pump, args=(process.stderr, sys.stderr.buffer))]
+                tail = text[-overlap:]
+                if failed:
+                    continue
+                try:
+                    destination.write(chunk)
+                    destination.flush()
+                except OSError as error:
+                    # Keep draining both pipes: otherwise Cargo can block on a
+                    # full pipe while the main thread waits for it to exit.
+                    forwarding_errors.append((label, error))
+                    failed = True
+        readers = [threading.Thread(target=pump, args=(process.stdout, sys.stdout.buffer, 'stdout')),
+                   threading.Thread(target=pump, args=(process.stderr, sys.stderr.buffer, 'stderr'))]
         for reader in readers:
             reader.start()
         status = process.wait()
@@ -107,9 +138,15 @@ class Runner:
             reader.join()
         process.stdout.close()
         process.stderr.close()
+        if forwarding_errors:
+            label, error = next(
+                (item for item in forwarding_errors if item[1].errno in SPACE_ERRNOS),
+                forwarding_errors[0],
+            )
+            raise OSError(error.errno, f"cannot forward Cargo {label}: {error}") from error
         return status, quota_failure.is_set()
 
-    def run(self, arguments: list[str]) -> int:
+    def run(self, arguments: list[str], *, on_success=None) -> int:
         command = cargo_arguments(arguments, self.target)
         self.target.parent.mkdir(parents=True, exist_ok=True)
         with (self.target.parent / "cargo-maintenance.lock").open("a") as lock:
@@ -121,11 +158,21 @@ class Runner:
                     # This process is already inside the sandbox: recovery does
                     # not need another sandbox mount when the quota is full.
                     self.reclaim(force=True)
-                    print("cargo-cache: retrying once after a storage failure", file=sys.stderr, flush=True)
+                    diagnostic("cargo-cache: retrying once after a storage failure")
                     status, quota_failure = self.execute(command)
                 if status and quota_failure:
                     self.reclaim(force=True)
+                if status == 0 and on_success is not None:
+                    # Publish required artifacts while still holding the cache
+                    # lock, before either this or another process reclaims them.
+                    on_success()
                 return status
+            except OSError as error:
+                if error.errno in SPACE_ERRNOS:
+                    # Evidence delivery failure is not permission to repeat a
+                    # program/test that may already have completed successfully.
+                    self.reclaim(force=True)
+                raise
             finally:
                 # Leave enough headroom for the next sandbox/tool invocation.
                 self.reclaim()
@@ -135,5 +182,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(Runner(ROOT, TARGET).run(sys.argv[1:]))
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
-        print(f"cargo-cache: {error}", file=sys.stderr)
+        diagnostic(f"cargo-cache: {error}")
         raise SystemExit(1)

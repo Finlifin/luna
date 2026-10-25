@@ -1,0 +1,18 @@
+-- LLVM integer exponentiation. Rounding order is target-defined, not pow's.
+fn run() -> bool {
+    var base_seen = false;
+    var exponent_seen = false;
+    let ordered = math.powi<.f64'builtin>(
+        do { assumes not base_seen; base_seen = true; let base: .f64'builtin = -2.0; base },
+        do { assumes base_seen and not exponent_seen; exponent_seen = true; let exponent: .i32'builtin = 3; exponent });
+    base_seen and exponent_seen and ordered == -8.0
+        and math.powi<.f32'builtin>(2.0, -3) == 0.125
+        and math.powi<.f64'builtin>(1.0, -2147483648) == 1.0
+        and math.powi<.f32'builtin>(3.0, 0) == 1.0
+        and math.powi<.f32'builtin>(-0.0, 3)'bitvec == 2147483648
+}
+
+test integer_power {
+    let passed = run();
+    assumes passed;
+}

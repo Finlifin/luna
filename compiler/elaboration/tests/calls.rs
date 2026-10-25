@@ -2001,3 +2001,150 @@ fn open_environment_preserves_partially_known_fixed_capture_fields() {
     assert_eq!(context.result, Some(primitive(P::Bool)));
     assert!(candidate.finish().is_err());
 }
+
+#[test]
+fn error_success_inference_preserves_row_equality_obligations() {
+    let boolean = primitive(P::Bool);
+    let character = primitive(P::Char);
+    let s = scheme(
+        vec![Term::error_result(
+            vec![boolean.clone(), character.clone()],
+            generic(0),
+        )],
+        generic(0),
+        1,
+    );
+    let actual = Term::error_result(
+        vec![character.clone(), boolean.clone(), boolean.clone()],
+        character.clone(),
+    );
+    let instance = s
+        .infer_types(&[actual], None, Budget::default())
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(instance.type_arguments, vec![character.clone()]);
+    for labels in [
+        vec![boolean.clone()],
+        vec![character.clone()],
+        vec![boolean.clone(), primitive(P::Void)],
+    ] {
+        let actual = Term::error_result(labels, character.clone());
+        assert!(
+            s.infer_types(&[actual], None, Budget::default())
+                .and_then(|candidate| candidate.finish())
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn error_success_inference_does_not_guess_unknown_label_parameters() {
+    let s = scheme(
+        vec![Term::error_result(vec![generic(0)], generic(1))],
+        generic(1),
+        2,
+    );
+    let actual = Term::error_result(
+        vec![primitive(P::Char), primitive(P::Bool)],
+        primitive(P::Bool),
+    );
+    assert!(
+        s.infer_types(&[actual], None, Budget::default())
+            .and_then(|candidate| candidate.finish())
+            .is_err()
+    );
+}
+
+#[test]
+fn singleton_error_row_infers_label_and_success_independently() {
+    let s = scheme(
+        vec![Term::error_result(vec![generic(0)], generic(1))],
+        generic(0),
+        2,
+    );
+    let actual = Term::error_result(vec![primitive(P::Char)], primitive(P::Bool));
+    let instance = s
+        .infer_types(&[actual], None, Budget::default())
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(
+        instance.type_arguments,
+        vec![primitive(P::Char), primitive(P::Bool)]
+    );
+}
+
+#[test]
+fn error_label_set_inference_handles_coalescing_and_unique_uncovered_label() {
+    let boolean = primitive(P::Bool);
+    let character = primitive(P::Char);
+    for (labels, expected) in [
+        (vec![boolean.clone()], boolean.clone()),
+        (vec![boolean.clone(), character.clone()], character.clone()),
+        (
+            vec![character.clone(), boolean.clone(), character.clone()],
+            character.clone(),
+        ),
+    ] {
+        let s = scheme(
+            vec![Term::error_result(
+                vec![generic(0), boolean.clone()],
+                boolean.clone(),
+            )],
+            generic(0),
+            1,
+        );
+        let actual = Term::error_result(labels, boolean.clone());
+        let instance = s
+            .infer_types(&[actual], None, Budget::default())
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert_eq!(instance.type_arguments, vec![expected]);
+    }
+}
+
+#[test]
+fn error_label_inference_keeps_permutation_ambiguity_and_budget_failure() {
+    let s = scheme(
+        vec![Term::error_result(
+            vec![generic(0), generic(1)],
+            primitive(P::Bool),
+        )],
+        generic(0),
+        2,
+    );
+    for labels in [
+        vec![primitive(P::Char), primitive(P::Bool)],
+        vec![primitive(P::Bool), primitive(P::Char)],
+    ] {
+        let actual = Term::error_result(labels, primitive(P::Bool));
+        assert!(
+            s.infer_types(&[actual], None, Budget::default())
+                .and_then(|candidate| candidate.finish())
+                .is_err()
+        );
+    }
+    let actual = Term::error_result(vec![primitive(P::Char)], primitive(P::Bool));
+    assert!(
+        s.infer_types(
+            &[actual.clone()],
+            None,
+            Budget {
+                steps: 1,
+                ..Budget::default()
+            }
+        )
+        .is_err()
+    );
+    let instance = s
+        .infer_types(&[actual], None, Budget::default())
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(
+        instance.type_arguments,
+        vec![primitive(P::Char), primitive(P::Char)]
+    );
+}

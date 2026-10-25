@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 fn selected(comptime value: bool) -> bool { value }
 
 fn independent(comptime flag: bool) -> bool {
@@ -13,6 +16,6 @@ fn independent(comptime flag: bool) -> bool {
     })
 }
 
-fn run() -> (bool, bool) {
+fn run() -> Tuple<bool, bool> {
     (independent(false), independent(true))
 }

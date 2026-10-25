@@ -1,0 +1,23 @@
+-- python3 -B development/host_examples.py bitwise --release-driver --compare-optimization
+-- Replace only selected bits. Platform integers use the selected target width.
+pure fn replace_bits(original: T, mask: T, replacement: T) -> T
+where T, requires T == .u8'builtin or T == .u16'builtin or T == .u32'builtin
+    or T == .u64'builtin or T == .u128'builtin or T == .usize'builtin {
+    let selected = math.bit_and(original, mask);
+    let preserved = math.bit_xor(original, selected);
+    math.bit_or(preserved, math.bit_and(replacement, mask))
+}
+
+fn run() -> bool {
+    replace_bits<.u8'builtin>(240, 60, 170) == 232
+        and replace_bits<.u32'builtin>(240, 0, 170) == 240
+        and replace_bits<.u128'builtin>(0, 340282366920938463463374607431768211455, 42) == 42
+        and math.bit_xor<.i8'builtin>(-128, -1) == 127
+        and replace_bits<.usize'builtin>(240, 60, 170) == 232
+        and math.bit_xor<.isize'builtin>(-1, 0) == -1
+        and math.count_ones<.usize'builtin>(240) == 4
+        and math.trailing_zeros<.usize'builtin>(240) == 4
+        and math.bit_reverse(math.bit_reverse<.usize'builtin>(42)) == 42
+        and math.byte_swap(math.byte_swap<.usize'builtin>(258)) == 258
+        and math.rotate_right(math.rotate_left<.usize'builtin>(42, 7), 7) == 42
+}

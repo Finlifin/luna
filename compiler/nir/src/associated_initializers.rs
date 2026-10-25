@@ -33,14 +33,8 @@ impl AssociatedInitializer {
         arguments: &[Term],
         fuel: &mut usize,
     ) -> Result<Self, String> {
-        for argument in arguments {
-            crate::type_computations::charge_term(argument, fuel)
-                .map_err(|_| "associated initializer substitution budget exhausted")?;
-        }
-        let mut copy_fuel = *fuel as u64;
-        let result = crate::copy_budget::charge_type_rewrite(&self.expression, &mut copy_fuel);
-        *fuel = copy_fuel as usize;
-        result.map_err(|_| "associated initializer substitution budget exhausted")?;
+        crate::copy_budget::charge_substitution(&self.expression, parameters, arguments, fuel)
+            .map_err(|_| "associated initializer substitution budget exhausted")?;
         let expression = self
             .expression
             .instantiate_parameters(parameters, arguments)

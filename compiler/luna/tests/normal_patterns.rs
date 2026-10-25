@@ -267,18 +267,18 @@ fn tuple_type_patterns_preserve_observed_dependent_domains() {
         pure comptime fn Box<T,value:T>->Type {T}
         pure comptime fn Wrap<T>->Type {T}
         comptime fn Direct()->bool {
-            Wrap<(Box<bool,true>,bool)> match {
+            Wrap<Tuple<Box<bool,true>,bool>> match {
                 Wrap<(Box<Kind,item>,_)> => Kind == bool and item,
                 _ => false
             }
         }
         comptime fn Nested()->bool {
-            Wrap<((bool,Box<bool,true>),bool)> match {
+            Wrap<Tuple<Tuple<bool,Box<bool,true>>,bool>> match {
                 Wrap<((_,Box<Kind,item>),_)> => Kind == bool and item,
                 _ => false
             }
         }";
-    let structural = compile(source);
+    let fixture_bound = execution_support::compile_with_tuple(source);
     let bound = execution_support::compile_with_source_bindings(
         &format!("{source} pure comptime fn List<T>->Type {{T}} pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}"),
         &Default::default(),
@@ -288,7 +288,7 @@ fn tuple_type_patterns_preserve_observed_dependent_domains() {
             ..Default::default()
         },
     ).unwrap();
-    for package in [&structural, &bound] {
+    for package in [&fixture_bound, &bound] {
         for entry in ["Direct", "Nested"] {
             assert_eq!(
                 luna::invocation::invoke(package, entry, 100_000).unwrap(),
@@ -296,7 +296,7 @@ fn tuple_type_patterns_preserve_observed_dependent_domains() {
             );
         }
     }
-    let failure=compile_with_protocols("typealias Type=.Type'builtin; pure comptime fn Box<T,value:T>->Type {T} pure comptime fn Wrap<T>->Type {T} comptime fn Bad()->bool {Wrap<(Box<bool,true>,bool)> match {Wrap<(Box<Kind,item>,_,_)> => item,_ => false}}", &Default::default()).unwrap_err();
+    let failure=execution_support::compile_with_tuple_protocols("typealias Type=.Type'builtin; pure comptime fn Box<T,value:T>->Type {T} pure comptime fn Wrap<T>->Type {T} comptime fn Bad()->bool {Wrap<Tuple<Box<bool,true>,bool>> match {Wrap<(Box<Kind,item>,_,_)> => item,_ => false}}", &Default::default()).unwrap_err();
     assert!(
         failure.contains("dependent normal-form value patterns"),
         "{failure}"
@@ -1034,7 +1034,7 @@ fn normal_form_failed_guard_effects_reach_the_fallback_proof() {
 
 #[test]
 fn tuple_type_patterns_support_checked_arm_arithmetic() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
         comptime fn inspect(input:Type, count:Byte)->Byte {
             input match {
@@ -1042,14 +1042,303 @@ fn tuple_type_patterns_support_checked_arm_arithmetic() {
                 _=>0
             }
         }
-        comptime fn Hit()->Byte {inspect(((bool,bool),bool),254)}
-        comptime fn Boundary()->Byte {inspect(((bool,bool),bool),255)}
+        comptime fn Hit()->Byte {inspect(Tuple<Tuple<bool,bool>,bool>,254)}
+        comptime fn Boundary()->Byte {inspect(Tuple<Tuple<bool,bool>,bool>,255)}
         comptime fn Other()->Byte {inspect(bool,254)}",
     );
     for (entry, expected) in [("Hit", 255), ("Boundary", 0), ("Other", 0)] {
         assert_eq!(
             luna::invocation::invoke(&package, entry, 100_000).unwrap(),
             Value::UnsignedInteger(expected)
+        );
+    }
+}
+
+#[test]
+fn negated_wildcard_is_empty_for_generic_and_pointer_subjects() {
+    let package = execution_support::compile_with_tuple("fn rejects(value:T)->bool where T {value match {not _=>true,_=>false}}
+        fn accepts(value:T)->bool where T {value match {not (not _)=>true,_=>false}}
+        fn entry()->Tuple<bool,bool,bool> {let flag=true;(rejects(flag),rejects(flag.ref),accepts(flag.ref))}");
+    assert_eq!(
+        luna::execution::interpret(&package, "entry", 100_000).unwrap(),
+        Value::Tuple(vec![
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(true)
+        ])
+    );
+}
+
+#[test]
+fn wildcard_complement_preserves_subject_effects_and_cleanup() {
+    let package = execution_support::compile_with_tuple("trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Ticket {flag:*bool}
+        impl Retire for Ticket {fn drop(*self) {self.flag.*.* = true;}}
+        fn rejects(value:T)->bool where T {value match {not _=>true,_=>false}}
+        fn produce(created:*bool,cleaned:*bool)->Ticket {created.* = true;Ticket {flag:cleaned}}
+        fn entry()->Tuple<bool,bool,bool> {let created=false;let cleaned=false;let matched=rejects(produce(created.ref,cleaned.ref));(matched,created,cleaned)}");
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            100_000
+        )
+        .unwrap(),
+        Value::Tuple(vec![
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true)
+        ])
+    );
+}
+
+#[test]
+fn generic_negation_checks_binding_scope_before_constant_complement() {
+    let source = "fn rejects(value:T)->bool where T {value match {not captured=>true,_=>false}}
+        fn accepts(value:T)->bool where T {value match {not (not captured)=>true,_=>false}}
+        fn entry()->Tuple<bool,bool> {let flag=true;(rejects(flag.ref),accepts(flag.ref))}";
+    let package = execution_support::compile_with_tuple(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "entry", 100_000).unwrap(),
+        Value::Tuple(vec![Value::Bool(false), Value::Bool(true)])
+    );
+    assert!(
+        execution_support::compile_with_tuple_protocols(
+            &source.replace("not captured=>true", "not captured=>captured"),
+            &Default::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn negated_string_patterns_execute_without_bypassing_resource_layout_checks() {
+    let package = execution_support::compile_with_tuple(
+        r#"typealias str=.str'builtin; trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for str {}
+        fn inspect(value:str)->bool {value match {not "blocked"=>true,_=>false}}
+        fn unicode(value:str)->bool {value match {not ("禁止" or "")=>true,_=>false}}
+        fn entry()->Tuple<bool,bool,bool,bool,bool> {(inspect("allowed"),inspect("blocked"),inspect(""),unicode("禁止"),unicode("允许"))}
+        comptime fn check()->bool {inspect_comptime("allowed")}
+        comptime fn inspect_comptime(value:str)->bool {value match {not "blocked"=>true,_=>false}}
+    "#,
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "entry", 100_000).unwrap(),
+        Value::Tuple(vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true)
+        ])
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "check", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let error = luna::execution::interpret_with_protocols(
+        &package,
+        "entry",
+        "Duplicate",
+        "Retire",
+        100_000,
+    )
+    .unwrap_err();
+    assert!(error.contains("string-view memory provenance"), "{error}");
+}
+
+#[test]
+fn computed_tuple_type_patterns_keep_evidence_through_wrappers() {
+    for (pattern, expected) in [
+        ("( < Tuple<bool,bool> > as Kind)", true),
+        ("( < Tuple<bool,bool> > if true)", true),
+        ("( < Tuple<bool,bool> > if false)", false),
+        ("( < Tuple<bool,bool> > or < Tuple<bool,bool> > )", true),
+        ("( < Tuple<bool,bool> > and false is true)", false),
+        ("(Kind and Kind is < Tuple<bool,bool> > )", true),
+    ] {
+        let package = execution_support::compile_with_tuple(&format!(
+            "typealias Type=.Type'builtin;
+            pure comptime fn Box<T,value:T>->Type {{T}}
+            comptime fn Inspect(value:Type)->bool {{value match {{
+                Box<{pattern},(first,second)> => first and not second,_=>false
+            }}}}
+            comptime fn Run()->bool {{Inspect(Box<Tuple<bool,bool>,(true,false)>)}}
+            comptime fn Miss()->bool {{Inspect(bool)}}"
+        ));
+        for (entry, value) in [("Run", expected), ("Miss", false)] {
+            assert_eq!(
+                luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+                Value::Bool(value),
+                "{pattern}: {entry}"
+            );
+        }
+    }
+}
+
+#[test]
+fn computed_tuple_type_evidence_preserves_candidate_effects_and_fallbacks() {
+    let package=execution_support::compile_with_tuple(
+        "typealias Type=.Type'builtin;typealias Int=.Integer'builtin;
+        pure comptime fn Box<T,value:T>->Type {T}
+        comptime fn Tick(count:*Int,result:bool)->bool {count.* = count.* + 1;result}
+        comptime fn Probe(value:Type)->Int {
+            var count:Int=0;
+            let matched:Int=value match {
+                Box<( < Tuple<bool,bool> > if Tick(count.ref,false)),(a,b)> => 100,
+                Box<( < Tuple<bool,bool> > and Tick(count.ref,true) is true),(a,b)> => if a and not b {10} else {20},
+                _=>30,
+            };
+            count + matched
+        }
+        comptime fn Hit()->Int {Probe(Box<Tuple<bool,bool>,(true,false)>)}
+        comptime fn Other()->Int {Probe(Box<Tuple<bool,bool>,(false,true)>)}
+        comptime fn Miss()->Int {Probe(bool)}"
+    );
+    for (entry, expected) in [("Hit", 12), ("Other", 22), ("Miss", 30), ("Hit", 12)] {
+        assert_eq!(
+            luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+            Value::Integer(comptime_runtime::Integer::from_u128(expected))
+        );
+    }
+}
+
+#[test]
+fn computed_tuple_type_evidence_does_not_leak_between_candidates_or_subjects() {
+    for pattern in [
+        "( < Tuple<bool,bool> > or < Tuple<bool,.u8'builtin> > )",
+        "( < Tuple<bool,bool> > or _)",
+        "(_ and Tuple<bool,bool> is < Tuple<bool,bool> > )",
+        "(Kind and Tuple<bool,bool> is < Tuple<bool,bool> > )",
+    ] {
+        let error=execution_support::compile_with_tuple_protocols(&format!(
+            "typealias Type=.Type'builtin;pure comptime fn Box<T,value:T>->Type {{T}}
+            comptime fn Bad(value:Type)->bool {{value match {{Box<{pattern},(a,b)> => a and b,_=>false}}}}"
+        ),&Default::default()).unwrap_err();
+        assert!(
+            error.contains("dependent normal-form value patterns"),
+            "{pattern}: {error}"
+        );
+    }
+    let error = execution_support::compile_with_tuple_protocols(
+        "typealias Type=.Type'builtin;pure comptime fn Box<T,value:T>->Type {T}
+        comptime fn Bad(value:Type)->bool {value match {
+            Box<( < Tuple<bool,bool> > if false),(a,b)> => a and b,
+            Box<T,(a,b)> => a and b,_=>false
+        }}",
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("dependent normal-form value patterns"),
+        "{error}"
+    );
+}
+
+#[test]
+fn computed_type_guards_combine_only_stable_identity_evidence() {
+    for (condition, expected, disabled) in [
+        ("Kind == Tuple<bool,bool>", true, true),
+        ("Tuple<bool,bool> == Kind", true, true),
+        ("Kind == Tuple<bool,bool> and enabled", true, false),
+        ("enabled and Kind == Tuple<bool,bool>", true, false),
+        ("Kind == Tuple<bool,bool> or false", true, true),
+        ("not (Kind != Tuple<bool,bool>)", true, true),
+        ("(Kind == Tuple<bool,bool>) == true", true, true),
+        (
+            "if enabled {Kind == Tuple<bool,bool>} else {false}",
+            true,
+            false,
+        ),
+        ("Kind == Tuple<bool,bool> and not enabled", false, true),
+    ] {
+        let package = execution_support::compile_with_tuple(&format!(
+            "typealias Type=.Type'builtin;pure comptime fn Box<T,value:T>->Type {{T}}
+            comptime fn Inspect(value:Type,enabled:bool)->bool {{value match {{
+                Box<(Kind if {condition}),(a,b)> => a and not b,_=>false
+            }}}}
+            comptime fn Run()->bool {{Inspect(Box<Tuple<bool,bool>,(true,false)>,true)}}
+            comptime fn Disabled()->bool {{Inspect(Box<Tuple<bool,bool>,(true,false)>,false)}}"
+        ));
+        for (entry, result) in [("Run", expected), ("Disabled", disabled)] {
+            assert_eq!(
+                luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+                Value::Bool(result),
+                "{condition}: {entry}"
+            );
+        }
+    }
+}
+
+#[test]
+fn computed_type_guards_do_not_treat_negative_or_conditional_identity_as_exact() {
+    for condition in [
+        "Kind != Tuple<bool,bool>",
+        "Kind == Tuple<bool,bool> or enabled",
+        "Kind == Tuple<bool,bool> or Kind == Tuple<bool,.u8'builtin>",
+        "if enabled {Kind == Tuple<bool,bool>} else {true}",
+        "Tuple<bool,bool> == Tuple<bool,bool>",
+    ] {
+        let error = execution_support::compile_with_tuple_protocols(
+            &format!(
+                "typealias Type=.Type'builtin;pure comptime fn Box<T,value:T>->Type {{T}}
+            comptime fn Bad(value:Type,enabled:bool)->bool {{value match {{
+                Box<(Kind if {condition}),(a,b)> => a and b,_=>false
+            }}}}"
+            ),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("dependent normal-form value patterns"),
+            "{condition}: {error}"
+        );
+    }
+}
+
+#[test]
+fn deep_type_guard_reports_resource_failure_without_stack_overflow() {
+    let source = |depth, unary| {
+        let mut guard = String::from("Kind == Tuple<bool,bool>");
+        if unary {
+            guard = format!("{}({guard})", "not ".repeat(depth));
+        } else {
+            for _ in 0..depth {
+                guard.push_str(" and true");
+            }
+        }
+        format!("typealias Type=.Type'builtin;pure comptime fn Box<T,value:T>->Type {{T}}
+            comptime fn Inspect(value:Type)->bool {{value match {{Box<(Kind if {guard}),(a,b)> =>a and not b,_=>false}}}}
+            comptime fn Run()->bool {{Inspect(Box<Tuple<bool,bool>,(true,false)>)}}")
+    };
+    for (optional, unary) in [
+        (None, false),
+        (Some("input::Maybe"), false),
+        (None, true),
+        (Some("input::Maybe"), true),
+    ] {
+        let compile = |depth| {
+            execution_support::compile_with_tuple_selectors(
+                &format!(
+                    "enum Maybe where T {{Absent,Present(T)}} {}",
+                    source(depth, unary)
+                ),
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    optional,
+                    ..Default::default()
+                },
+            )
+        };
+        let error = compile(140).unwrap_err();
+        assert!(error.contains("depth exhausted"), "{error}");
+        let package = compile(8).unwrap();
+        assert_eq!(
+            luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
+            Value::Bool(true)
         );
     }
 }

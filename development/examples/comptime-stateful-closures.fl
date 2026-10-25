@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 -- Mutable comptime closures freeze their current state and internal sharing.
 typealias Int = .Integer'builtin;
 typealias Counter = %{value: Int} comptime fn() -> Int;
@@ -31,19 +34,19 @@ const REPLACED = do {
 };
 const WIDTH = SNAPSHOT();
 typealias Bits = .BitVec'builtin<WIDTH>;
-comptime fn run() -> (Int, Int, Int) {
+comptime fn run() -> Tuple<Int, Int, Int> {
     let next = SNAPSHOT;
     let first = next();
     let second = next();
     let fresh = SNAPSHOT;
     (first, second, fresh())
 }
-comptime fn shared() -> (Int, Int) { SHARED() }
-comptime fn distinct() -> (Int, Int) { DISTINCT() }
-comptime fn nested() -> (Int, Int) { NESTED() }
+comptime fn shared() -> Tuple<Int, Int> { SHARED() }
+comptime fn distinct() -> Tuple<Int, Int> { DISTINCT() }
+comptime fn nested() -> Tuple<Int, Int> { NESTED() }
 comptime fn replaced() -> bool { REPLACED() }
 fn width(value: Bits) -> Bits {value}
-comptime fn defaulted(.next: Counter = SNAPSHOT) -> (Int, Int) {
+comptime fn defaulted(.next: Counter = SNAPSHOT) -> Tuple<Int, Int> {
     (next(), next())
 }
 struct State { value: Int, }
@@ -54,4 +57,4 @@ const RECORD = do {
     next
 };
 comptime fn record() -> Int { RECORD() }
-comptime fn with_default() -> (Int, Int) { defaulted() }
+comptime fn with_default() -> Tuple<Int, Int> { defaulted() }

@@ -1,0 +1,61 @@
+-- The same callback runs twice. Only the second request can leave forward.
+-- Each arm and invocation retires once, followed by wrapper, installer, caller.
+typealias Stage = .u8'builtin;
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for Stage {}
+impl Duplicate for *T where T {}
+
+struct Step { counter: *Stage, expected: Stage, next: Stage }
+impl Retire for Step {
+    fn drop(*self) {
+        assumes self.counter.*.* == self.expected.*;
+        self.counter.*.* = self.next.*;
+    }
+}
+
+effect select(pointer: *bool) -> *bool;
+typealias Action = %{counter:*Stage,pointer:*bool} fn()->#select *bool;
+fn apply(action: Action, counter: *Stage) -> #select *bool {
+    let wrapper = Step {counter: counter, expected: 4, next: 5};
+    action();
+    action()
+}
+fn subject(pointer: *bool, counter: *Stage) -> #select *bool {
+    -- The closure keeps the request's pointer and cleanup state in its environment.
+    let action: Action = || {
+        let called = Step {counter: counter, expected: if counter.* == 0 {1} else {3}, next: if counter.* == 0 {2} else {4}};
+        select(pointer)#
+    };
+    apply(action, counter)
+}
+
+fn forward(first: *bool, second: *bool, counter: *Stage, early: bool) -> *bool {
+    let installer = Step {counter: counter, expected: 5, next: 6};
+    (subject(first, counter)# {
+        select(value) if early and counter.* == 2 => do {
+            let arm = Step {counter: counter, expected: if counter.* == 0 {0} else {2}, next: if counter.* == 0 {1} else {3}};
+            return second;
+        },
+    })# {
+        select(value) => do {
+            let arm = Step {counter: counter, expected: if counter.* == 0 {0} else {2}, next: if counter.* == 0 {1} else {3}};
+            value
+        },
+    }
+}
+
+fn trial(early: bool) -> bool {
+    var stage: Stage = 0;
+    var first = false;
+    var second = false;
+    do {
+        let caller = Step {counter: stage.ref, expected: 6, next: 7};
+        let selected = forward(first.ref, second.ref, stage.ref, early);
+        selected.* = true;
+    };
+    stage == 7 and first == not early and second == early
+}
+
+fn run() -> bool { trial(false) and trial(true) }

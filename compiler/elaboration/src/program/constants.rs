@@ -21,6 +21,103 @@ pub(super) struct StagedPatternSnapshot {
     staged: BTreeSet<n::LocalId>,
 }
 
+// Immutable analysis evidence, not a runtime value or a serialized interpreter
+// environment. Unknown fields have no replacement expression. Shared snapshots
+// avoid copying nested aggregate aliases, while depth and traversal stay bounded.
+// Equality compares evidence only: two Unknown leaves do not prove equal values.
+#[derive(Debug, PartialEq)]
+pub(super) struct PartialStagedValue {
+    depth: usize,
+    data: PartialStagedData,
+}
+#[derive(Debug, PartialEq)]
+enum PartialStagedData {
+    Unknown,
+    Known(Term),
+    Aggregate(PartialStagedShape, Vec<std::sync::Arc<PartialStagedValue>>),
+}
+#[derive(Debug, PartialEq)]
+enum PartialStagedShape {
+    Tuple,
+    Record(DeclarationId),
+    Variant(DeclarationId, usize),
+    AnonymousRecord(Vec<String>),
+}
+impl PartialStagedValue {
+    fn unknown() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            depth: 0,
+            data: PartialStagedData::Unknown,
+        })
+    }
+    fn known(value: Term) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            depth: 0,
+            data: PartialStagedData::Known(value),
+        })
+    }
+    fn charge(&self, fuel: &mut usize) -> Result<(), String> {
+        let mut pending = vec![self];
+        while let Some(value) = pending.pop() {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("partial pattern evidence budget exhausted")?;
+            match &value.data {
+                PartialStagedData::Known(value) => {
+                    nir::type_computations::charge_term(value, fuel).map_err(|e| e.to_string())?;
+                }
+                PartialStagedData::Aggregate(shape, fields) => {
+                    *fuel = fuel
+                        .checked_sub(fields.len())
+                        .ok_or("partial pattern evidence budget exhausted")?;
+                    if let PartialStagedShape::AnonymousRecord(names) = shape {
+                        for name in names {
+                            *fuel = fuel
+                                .checked_sub(name.len())
+                                .ok_or("partial pattern evidence budget exhausted")?;
+                        }
+                    }
+                    pending.extend(fields.iter().map(|field| field.as_ref()));
+                }
+                PartialStagedData::Unknown => {}
+            }
+        }
+        Ok(())
+    }
+}
+impl std::fmt::Display for PartialStagedValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.data {
+            PartialStagedData::Unknown => write!(f, "(unknown)"),
+            PartialStagedData::Known(value) => write!(f, "(known {value})"),
+            PartialStagedData::Aggregate(shape, fields) => {
+                match shape {
+                    PartialStagedShape::Tuple => write!(f, "(tuple")?,
+                    PartialStagedShape::Record(id) => {
+                        write!(f, "(record (declaration {} {})", id.package, id.local)?
+                    }
+                    PartialStagedShape::Variant(id, index) => write!(
+                        f,
+                        "(variant (declaration {} {}) (index {index})",
+                        id.package, id.local
+                    )?,
+                    PartialStagedShape::AnonymousRecord(names) => {
+                        write!(f, "(anonymous-record (names")?;
+                        for name in names {
+                            write!(f, " {:?}", name)?;
+                        }
+                        write!(f, ")")?;
+                    }
+                }
+                for field in fields {
+                    write!(f, " {field}")?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
 // Patterns have already been resolved and checked. Collect their private local
 // identities, but check every embedded computation with the same availability
 // rules as the surrounding staged argument. Matching itself stays in the VM.
@@ -40,6 +137,7 @@ fn staged_pattern_inputs<'a>(
             n::Pattern::CodeEvidence { .. } => {
                 return Err(error(span, "unresolved pattern-code evidence"));
             }
+            n::Pattern::ErrorResult { inner, .. } => pending.push(inner),
             n::Pattern::Wild | n::Pattern::Unit | n::Pattern::Literal(_) => {}
             n::Pattern::Tuple(fields)
             | n::Pattern::TypeTuple(fields)
@@ -130,6 +228,14 @@ fn completed_subject_bindings(
     symbol: &Term,
     fuel: &mut usize,
 ) -> Result<BTreeMap<n::LocalId, Term>, String> {
+    completed_subject_evidence(pattern, symbol, fuel).map(|(_, bindings)| bindings)
+}
+
+fn completed_subject_evidence(
+    pattern: &n::Pattern,
+    symbol: &Term,
+    fuel: &mut usize,
+) -> Result<(bool, BTreeMap<n::LocalId, Term>), String> {
     enum Work<'a> {
         Visit(&'a n::Pattern, &'a Term),
         Bind(n::LocalId, &'a Term),
@@ -330,7 +436,7 @@ fn completed_subject_bindings(
             }
         }
     }
-    Ok(values.pop().map(|(_, values)| values).unwrap_or_default())
+    Ok(values.pop().unwrap_or((true, BTreeMap::new())))
 }
 
 impl Checker<'_, '_> {
@@ -466,7 +572,10 @@ impl Checker<'_, '_> {
         }
         if matches!(
             value,
-            Value::Record { .. } | Value::Variant { .. } | Value::Newtype { .. }
+            Value::Record { .. }
+                | Value::Variant { .. }
+                | Value::Newtype { .. }
+                | Value::ErrorResult { .. }
         ) {
             let mut snapshot = Materialization {
                 generator_fields: true,
@@ -651,6 +760,7 @@ impl Checker<'_, '_> {
                 phase: n::FunctionPhase::Comptime,
                 inline: false,
                 pure: false,
+                is_unsafe: false,
                 signature: Term::Function {
                     parameters: vec![],
                     result: Box::new(ty),
@@ -806,7 +916,7 @@ impl Checker<'_, '_> {
                 }
                 Ok(())
             }
-            Value::Newtype { ty, value } => {
+            Value::Newtype { ty, value } | Value::ErrorResult { ty, value, .. } => {
                 let ty = self.copy_alias_type(ty, span)?;
                 self.validate_closure_snapshot(
                     &Value::Type(ty),
@@ -1157,6 +1267,447 @@ impl Checker<'_, '_> {
         result
     }
 
+    fn partial_staged_value(
+        &self,
+        value: &n::Expr,
+        depth: usize,
+        fuel: &mut usize,
+    ) -> Result<std::sync::Arc<PartialStagedValue>, String> {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("partial pattern evidence budget exhausted")?;
+        if depth >= 128 {
+            return Ok(PartialStagedValue::unknown());
+        }
+        if let K::Local(binding) = value.kind {
+            if self.locals.contains_key(&binding)
+                && let Some(value) = self.partial_staged_bindings.get(&binding)
+            {
+                return Ok(value.clone());
+            }
+        }
+        // Follow the already checked field route. This inspects a snapshot,
+        // never a pointer or a replay of the initializer that produced it.
+        if let K::Field { value: base, .. } | K::AnonymousField { value: base, .. } = &value.kind {
+            let base = self.partial_staged_value(base, depth + 1, fuel)?;
+            let known = match (&value.kind, &base.data) {
+                (
+                    K::Field {
+                        declaration, index, ..
+                    },
+                    PartialStagedData::Aggregate(PartialStagedShape::Record(actual), fields),
+                ) if declaration == actual => {
+                    return Ok(fields
+                        .get(*index)
+                        .cloned()
+                        .unwrap_or_else(PartialStagedValue::unknown));
+                }
+                (
+                    K::AnonymousField { name, index, .. },
+                    PartialStagedData::Aggregate(
+                        PartialStagedShape::AnonymousRecord(names),
+                        fields,
+                    ),
+                ) => {
+                    if let Some(actual) = names.get(*index) {
+                        *fuel = fuel
+                            .checked_sub(name.len().saturating_add(actual.len()))
+                            .ok_or("partial field observation budget exhausted")?;
+                        if name == actual {
+                            return Ok(fields
+                                .get(*index)
+                                .cloned()
+                                .unwrap_or_else(PartialStagedValue::unknown));
+                        }
+                    }
+                    None
+                }
+                (
+                    K::Field {
+                        declaration, index, ..
+                    },
+                    PartialStagedData::Known(Term::NominalValue {
+                        ty,
+                        variant: None,
+                        fields,
+                    }),
+                ) if matches!(ty.as_ref(), Term::Nominal { declaration: actual, .. } if declaration == actual) => {
+                    fields.get(*index)
+                }
+                (
+                    K::AnonymousField { name, index, .. },
+                    PartialStagedData::Known(Term::RecordValue(fields)),
+                ) => {
+                    if let Some((actual, value)) = fields.get(*index) {
+                        *fuel = fuel
+                            .checked_sub(name.len().saturating_add(actual.len()))
+                            .ok_or("partial field observation budget exhausted")?;
+                        (name == actual).then_some(value)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            return match known {
+                Some(value) => {
+                    nir::type_computations::charge_term(value, fuel).map_err(|e| e.to_string())?;
+                    Ok(PartialStagedValue::known(value.clone()))
+                }
+                None => Ok(PartialStagedValue::unknown()),
+            };
+        }
+        let mut budget = comptime_runtime::Budget {
+            steps: *fuel,
+            max_limbs: 4096,
+        };
+        let symbol = self.known_normal_input(value, 0, &mut budget);
+        *fuel = budget.steps;
+        if let Some(symbol) = symbol {
+            return Ok(PartialStagedValue::known(symbol));
+        }
+        let (shape, fields) = match (&value.kind, &value.ty) {
+            (K::Tuple(fields), _) => (PartialStagedShape::Tuple, fields),
+            (
+                K::Record {
+                    declaration,
+                    fields,
+                },
+                Term::Nominal {
+                    declaration: actual,
+                    ..
+                },
+            ) if declaration == actual => (PartialStagedShape::Record(*declaration), fields),
+            (
+                K::Variant {
+                    declaration,
+                    index,
+                    fields,
+                },
+                Term::Nominal {
+                    declaration: actual,
+                    ..
+                },
+            ) if declaration == actual => {
+                (PartialStagedShape::Variant(*declaration, *index), fields)
+            }
+            (K::AnonymousRecord { fields }, Term::Record(types)) if fields.len() == types.len() => {
+                let mut names = Vec::new();
+                for (name, _) in types {
+                    *fuel = fuel
+                        .checked_sub(name.len().saturating_add(1))
+                        .ok_or("partial pattern evidence budget exhausted")?;
+                    names.push(name.clone());
+                }
+                (PartialStagedShape::AnonymousRecord(names), fields)
+            }
+            _ => return Ok(PartialStagedValue::unknown()),
+        };
+        let mut children = Vec::new();
+        let mut height = 1;
+        for field in fields {
+            let child = self.partial_staged_value(field, depth + 1, fuel)?;
+            height = height.max(child.depth + 1);
+            children.push(child);
+        }
+        if height >= 128 {
+            return Ok(PartialStagedValue::unknown());
+        }
+        Ok(std::sync::Arc::new(PartialStagedValue {
+            depth: height,
+            data: PartialStagedData::Aggregate(shape, children),
+        }))
+    }
+
+    /// Keep possibility separate from binding evidence. A failed structural
+    /// sibling does not erase the facts used to check a successful continuation.
+    fn known_staged_pattern_bindings(
+        &self,
+        pattern: &n::Pattern,
+        value: &std::sync::Arc<PartialStagedValue>,
+        depth: usize,
+        fuel: &mut usize,
+    ) -> Result<
+        (
+            bool,
+            BTreeMap<n::LocalId, std::sync::Arc<PartialStagedValue>>,
+        ),
+        String,
+    > {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("partial pattern evidence budget exhausted")?;
+        if depth >= 128 {
+            return Ok((true, BTreeMap::new()));
+        }
+        if let PartialStagedData::Known(symbol) = &value.data {
+            let (possible, bindings) = completed_subject_evidence(pattern, symbol, fuel)?;
+            return Ok((
+                possible,
+                bindings
+                    .into_iter()
+                    .map(|(id, symbol)| (id, PartialStagedValue::known(symbol)))
+                    .collect(),
+            ));
+        }
+        match pattern {
+            n::Pattern::Binding { binding, inner } => {
+                let (possible, mut bindings) =
+                    self.known_staged_pattern_bindings(inner, value, depth + 1, fuel)?;
+                bindings.insert(*binding, value.clone());
+                Ok((possible, bindings))
+            }
+            n::Pattern::Guard { pattern: inner, .. } | n::Pattern::Then { first: inner, .. } => {
+                self.known_staged_pattern_bindings(inner, value, depth + 1, fuel)
+            }
+            n::Pattern::Remap { pattern, bindings } => {
+                let (possible, mut result) =
+                    self.known_staged_pattern_bindings(pattern, value, depth + 1, fuel)?;
+                *fuel = fuel
+                    .checked_sub(bindings.len())
+                    .ok_or("partial pattern evidence budget exhausted")?;
+                let moved: Vec<_> = bindings
+                    .iter()
+                    .filter_map(|(from, to)| result.get(from).map(|value| (*to, value.clone())))
+                    .collect();
+                for (from, to) in bindings {
+                    result.remove(from);
+                    result.remove(to);
+                }
+                result.extend(moved);
+                Ok((possible, result))
+            }
+            n::Pattern::Or(patterns) => {
+                let mut result: Option<BTreeMap<n::LocalId, std::sync::Arc<PartialStagedValue>>> =
+                    None;
+                for pattern in patterns {
+                    let (possible, candidate) =
+                        self.known_staged_pattern_bindings(pattern, value, depth + 1, fuel)?;
+                    if !possible {
+                        continue;
+                    }
+                    if let Some(current) = &mut result {
+                        *fuel = fuel
+                            .checked_sub(current.len() + candidate.len())
+                            .ok_or("partial pattern evidence budget exhausted")?;
+                        for value in current.values().chain(candidate.values()) {
+                            value.charge(fuel)?;
+                        }
+                        current.retain(|binding, value| candidate.get(binding) == Some(value));
+                    } else {
+                        result = Some(candidate);
+                    }
+                }
+                Ok((result.is_some(), result.unwrap_or_default()))
+            }
+            pattern => {
+                let PartialStagedData::Aggregate(shape, fields) = &value.data else {
+                    return Ok((true, BTreeMap::new()));
+                };
+                let patterns = match (pattern, shape) {
+                    (n::Pattern::Tuple(patterns), PartialStagedShape::Tuple) => patterns,
+                    (
+                        n::Pattern::Record {
+                            declaration,
+                            fields,
+                        },
+                        PartialStagedShape::Record(actual),
+                    ) if declaration == actual => fields,
+                    (
+                        n::Pattern::Variant {
+                            declaration,
+                            index,
+                            fields,
+                        },
+                        PartialStagedShape::Variant(actual, selected),
+                    ) if declaration == actual && index == selected => fields,
+                    (
+                        n::Pattern::Variant {
+                            declaration, index, ..
+                        },
+                        PartialStagedShape::Variant(actual, selected),
+                    ) if declaration != actual || index != selected => {
+                        return Ok((false, BTreeMap::new()));
+                    }
+                    (
+                        n::Pattern::AnonymousRecord { names, fields },
+                        PartialStagedShape::AnonymousRecord(actual),
+                    ) => {
+                        for name in names.iter().chain(actual) {
+                            *fuel = fuel
+                                .checked_sub(name.len().saturating_add(1))
+                                .ok_or("partial pattern evidence budget exhausted")?;
+                        }
+                        if names != actual {
+                            return Ok((true, BTreeMap::new()));
+                        }
+                        fields
+                    }
+                    _ => return Ok((true, BTreeMap::new())),
+                };
+                if patterns.len() != fields.len() {
+                    return Ok((true, BTreeMap::new()));
+                }
+                let mut result = BTreeMap::new();
+                let mut possible = true;
+                for (pattern, field) in patterns.iter().zip(fields) {
+                    let (child_possible, bindings) =
+                        self.known_staged_pattern_bindings(pattern, field, depth + 1, fuel)?;
+                    possible &= child_possible;
+                    result.extend(bindings);
+                }
+                Ok((possible, result))
+            }
+        }
+    }
+
+    /// Snapshot only structural evidence before the iterator input is delivered.
+    /// The original expression remains in the loop's once-only input binding.
+    pub(super) fn observed_tuple_elements(
+        &mut self,
+        value: &n::Expr,
+        count: usize,
+        span: Span,
+    ) -> Result<Option<Vec<std::sync::Arc<PartialStagedValue>>>, Error> {
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let result = (|| {
+            let value = self.partial_staged_value(value, 0, &mut fuel)?;
+            match &value.data {
+                PartialStagedData::Known(Term::TupleValue(fields)) if fields.len() == count => {
+                    let mut result = Vec::new();
+                    for field in fields {
+                        nir::type_computations::charge_term(field, &mut fuel)
+                            .map_err(|e| e.to_string())?;
+                        result.push(PartialStagedValue::known(field.clone()));
+                    }
+                    Ok(Some(result))
+                }
+                PartialStagedData::Aggregate(PartialStagedShape::Tuple, fields)
+                    if fields.len() == count =>
+                {
+                    fuel = fuel
+                        .checked_sub(count)
+                        .ok_or("tuple observation budget exhausted")?;
+                    Ok(Some(fields.clone()))
+                }
+                _ => Ok(None),
+            }
+        })();
+        self.required_steps -= (before - fuel) as u64;
+        result.map_err(|message: String| error(span, message))
+    }
+
+    /// Ordinary iteration bindings still own storage and capture by the usual
+    /// rules. Do not publish these facts as specialization inputs or substitute
+    /// their executable local reads with constant expressions.
+    pub(super) fn record_observed_pattern(
+        &mut self,
+        pattern: &n::Pattern,
+        value: &std::sync::Arc<PartialStagedValue>,
+        span: Span,
+    ) -> Result<(), Error> {
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let result = self.known_staged_pattern_bindings(pattern, value, 0, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        self.partial_staged_bindings
+            .extend(result.map_err(|e| error(span, e))?.1);
+        Ok(())
+    }
+
+    pub(super) fn observed_expression_type(
+        &mut self,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        if value.ty != p(P::Type) {
+            return Ok(None);
+        }
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let result = (|| {
+            let value = self.partial_staged_value(value, 0, &mut fuel)?;
+            let PartialStagedData::Known(ty) = &value.data else {
+                return Ok(None);
+            };
+            if ty.sort() != Sort::Type {
+                return Ok(None);
+            }
+            nir::type_computations::charge_term(ty, &mut fuel).map_err(|e| e.to_string())?;
+            Ok(Some(ty.clone()))
+        })();
+        self.required_steps -= (before - fuel) as u64;
+        result.map_err(|e: String| error(span, e))
+    }
+
+    pub(super) fn observed_local_type(
+        &mut self,
+        binding: n::LocalId,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        if self.locals.get(&binding) != Some(&p(P::Type)) {
+            return Ok(None);
+        }
+        let Some(value) = self.partial_staged_bindings.get(&binding) else {
+            return Ok(None);
+        };
+        let PartialStagedData::Known(ty) = &value.data else {
+            return Ok(None);
+        };
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let result = nir::type_computations::charge_term(ty, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        result.map_err(|e| error(span, e.to_string()))?;
+        Ok(Some(ty.clone()))
+    }
+
+    /// Retain known const outputs without replacing ordinary let storage.
+    /// Unknown siblings stay unknown; construction, matching and all calls
+    /// still execute in the original initializer at invocation time.
+    pub(super) fn record_known_staged_pattern(
+        &mut self,
+        pattern: &n::Pattern,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<(), Error> {
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let bindings = self
+            .partial_staged_value(value, 0, &mut fuel)
+            .and_then(|value| self.known_staged_pattern_bindings(pattern, &value, 0, &mut fuel));
+        self.required_steps -= (before - fuel) as u64;
+        for (binding, value) in bindings.map_err(|e| error(span, e))?.1 {
+            self.partial_staged_bindings.insert(binding, value.clone());
+            let PartialStagedData::Known(symbol) = &value.data else {
+                continue;
+            };
+            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let before = fuel;
+            let charged = nir::type_computations::charge_term(symbol, &mut fuel);
+            self.required_steps -= (before - fuel) as u64;
+            charged.map_err(|e| error(span, e.to_string()))?;
+            let symbol = symbol.clone();
+            let ty = self
+                .locals
+                .get(&binding)
+                .cloned()
+                .ok_or_else(|| error(span, "staged alias binding has no domain"))?;
+            if ty == p(P::Type) {
+                self.type_input_bindings.insert(binding, symbol.clone());
+            } else {
+                self.value_input_bindings
+                    .insert(binding, (symbol.clone(), ty.clone()));
+            }
+            self.derived_staged_bindings.insert(binding);
+            self.specialization_inputs
+                .retain(|(id, _, _)| *id != binding);
+            self.specialization_inputs.push((binding, ty, symbol));
+        }
+        Ok(())
+    }
+
     pub(super) fn record_staged_pattern(
         &mut self,
         pattern: &n::Pattern,
@@ -1178,7 +1729,8 @@ impl Checker<'_, '_> {
         } else {
             let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
             let before = fuel;
-            let result = iir::staging::structural_boolean_dependencies(value, &mut fuel);
+            let result =
+                iir::staging::structural_boolean_dependencies_in(value, self.target, &mut fuel);
             self.required_steps -= (before - fuel) as u64;
             let Some(dependencies) = result.map_err(|e| error(span, e))? else {
                 return Ok(());
@@ -1310,6 +1862,7 @@ impl Checker<'_, '_> {
                 }.ok_or("staged pattern projection layout mismatch")?;
             }
             let metadata = n::Package {
+                target: self.target,
                 structs: self.structs.values().cloned().collect(),
                 enums: self.enums.values().cloned().collect(),
                 newtypes: self.newtypes.values().cloned().collect(),
@@ -1768,6 +2321,7 @@ impl Checker<'_, '_> {
                             true
                         } else {
                             let metadata = metadata.get_or_insert_with(|| n::Package {
+                                target: self.target,
                                 structs: self.structs.values().cloned().collect(),
                                 enums: self.enums.values().cloned().collect(),
                                 newtypes: self.newtypes.values().cloned().collect(),
@@ -1798,12 +2352,13 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn check_failure_branch(&mut self, body: &Expr<'_>) -> Result<n::Expr, Error> {
-        if self.specialization_inputs.is_empty() {
+        if self.specialization_inputs.is_empty() && self.partial_staged_bindings.is_empty() {
             return self.expr(body, None);
         }
         let saved = (
             self.specialization_inputs.clone(),
             self.type_input_bindings.clone(),
+            self.partial_staged_bindings.clone(),
             self.value_input_bindings.clone(),
         );
         let checked = self.expr(body, None);
@@ -1842,6 +2397,7 @@ impl Checker<'_, '_> {
             (
                 self.specialization_inputs,
                 self.type_input_bindings,
+                self.partial_staged_bindings,
                 self.value_input_bindings,
             ) = saved;
         }
@@ -1856,7 +2412,9 @@ impl Checker<'_, '_> {
     ) -> Result<(), Error> {
         // Comptime execution owns its live store; symbolic declaration inputs
         // are provenance, not cached runtime storage values.
-        if self.in_required_comptime || self.specialization_inputs.is_empty() {
+        if self.partial_staged_bindings.is_empty()
+            && (self.in_required_comptime || self.specialization_inputs.is_empty())
+        {
             return Ok(());
         }
         let mut invalidated = BTreeSet::new();
@@ -1903,7 +2461,15 @@ impl Checker<'_, '_> {
             self.specialization_inputs
                 .iter()
                 .any(|(id, _, _)| id == binding)
+                || self.partial_staged_bindings.contains_key(binding)
         });
+        self.partial_staged_bindings
+            .retain(|binding, _| !invalidated.contains(binding));
+        // Invocation-time observations are invalidated even during required
+        // computation; symbolic declaration inputs keep their existing rules.
+        if self.in_required_comptime {
+            return Ok(());
+        }
         self.specialization_inputs
             .retain(|(binding, _, _)| !invalidated.contains(binding));
         self.value_input_bindings
@@ -1945,7 +2511,7 @@ impl Checker<'_, '_> {
         if !parameters.iter().any(|p| p.sort != Sort::Runtime) {
             return Ok(call);
         }
-        let staged_bindings: BTreeSet<_> = self
+        let mut staged_bindings: BTreeSet<_> = self
             .signature_owner
             .and_then(|owner| self.package.item(owner))
             .map(|item| match &item.kind {
@@ -1958,6 +2524,13 @@ impl Checker<'_, '_> {
                 _ => BTreeSet::new(),
             })
             .unwrap_or_default();
+        if self.describing_open_call || self.checking_open_behavior {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(self.open_staged_locals.len() as u64)
+                .ok_or_else(|| error(source.span, "staged local dependency budget exhausted"))?;
+            staged_bindings.extend(self.open_staged_locals.iter().copied());
+        }
         let type_bindings = self
             .signature_owner
             .and_then(|owner| self.type_parameters.get(&owner))
@@ -1974,7 +2547,8 @@ impl Checker<'_, '_> {
                 let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                 let before = fuel;
                 let replaced = iir::staging::prepare_input_with_layouts(
-                    iir::staging::Layouts::from_index(&self.normal_form_metadata(), &self.newtypes),
+                    iir::staging::Layouts::from_index(&self.normal_form_metadata(), &self.newtypes)
+                        .with_target(self.target),
                     &argument.value,
                     &prepared,
                     &mut fuel,
@@ -2140,6 +2714,7 @@ impl Checker<'_, '_> {
                 | K::AnonymousRecord { fields: values }
                 | K::Variant { fields: values, .. } => pending.extend(values),
                 K::Not(value)
+                | K::UnsafeScope(value)
                 | K::Discard(value)
                 | K::RequirePredicate(value)
                 | K::EnsurePredicate(value)
@@ -2149,6 +2724,7 @@ impl Checker<'_, '_> {
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::BitConvert(value)
+                | K::ErrorConvert { value: value, .. }
                 | K::NewtypeConvert(value)
                 | K::BitSlice { value, .. }
                 | K::Field { value, .. }
@@ -2189,6 +2765,7 @@ impl Checker<'_, '_> {
                 K::Break(identity) | K::Continue(identity) if local_loops.contains(identity) => {}
                 K::And(left, right)
                 | K::Or(left, right)
+                | K::TemplateEqual(left, right)
                 | K::ScalarEqual(left, right)
                 | K::ScalarLess(left, right)
                 | K::ScalarLessEqual(left, right)
@@ -2344,7 +2921,8 @@ impl Checker<'_, '_> {
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = fuel;
         let plan = iir::staging::preparation_with_layouts(
-            iir::staging::Layouts::from_index(&self.normal_form_metadata(), &self.newtypes),
+            iir::staging::Layouts::from_index(&self.normal_form_metadata(), &self.newtypes)
+                .with_target(self.target),
             &expression,
             &mut fuel,
         );
@@ -2393,7 +2971,8 @@ impl Checker<'_, '_> {
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = fuel;
         let result = plan.apply_with_layouts(
-            iir::staging::Layouts::from_index(&self.normal_form_metadata(), &self.newtypes),
+            iir::staging::Layouts::from_index(&self.normal_form_metadata(), &self.newtypes)
+                .with_target(self.target),
             &mut expression,
             completed,
             &mut fuel,
@@ -2436,6 +3015,37 @@ impl Checker<'_, '_> {
                     span,
                     "abstract comptime value is not a completed constant",
                 ));
+            }
+            Value::ErrorResult {
+                ty: actual,
+                error: branch,
+                value,
+            } => {
+                if actual != ty {
+                    return Err(error(span, "constant error result identity mismatch"));
+                }
+                let Term::ErrorResult { errors, result } = &ty else {
+                    return Err(error(span, "constant error result type missing"));
+                };
+                let (conversion, payload) = match branch {
+                    None => (nir::error_results::Conversion::Success, result.as_ref()),
+                    Some(index) => (
+                        nir::error_results::Conversion::Failure,
+                        errors
+                            .get(index)
+                            .ok_or_else(|| error(span, "constant error result tag invalid"))?,
+                    ),
+                };
+                K::ErrorConvert {
+                    conversion,
+                    value: Box::new(self.constant_nominal_field(
+                        *value,
+                        payload.clone(),
+                        span,
+                        depth + 1,
+                        snapshot,
+                    )?),
+                }
             }
             Value::Newtype { ty: actual, value } => {
                 if actual != ty {
@@ -2840,6 +3450,33 @@ pub(super) fn charge_copy(value: &n::Expr, steps: &mut u64, span: Span) -> Resul
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn partial_snapshot_dump_and_budget_preserve_unknown_fields() {
+        let unknown = super::PartialStagedValue::unknown();
+        let value = super::PartialStagedValue {
+            depth: 1,
+            data: super::PartialStagedData::Aggregate(
+                super::PartialStagedShape::AnonymousRecord(vec![
+                    "label\"\n".into(),
+                    "pending".into(),
+                ]),
+                vec![
+                    super::PartialStagedValue::known(nir::Term::Bool(true)),
+                    unknown.clone(),
+                ],
+            ),
+        };
+        let dump = value.to_string();
+        assert_eq!(
+            dump,
+            "(anonymous-record (names \"label\\\"\\n\" \"pending\") (known (bool true)) (unknown))"
+        );
+        assert!(value.charge(&mut 1).is_err());
+        value.charge(&mut 128).unwrap();
+        assert_eq!(unknown.to_string(), "(unknown)");
+        assert_eq!(value.to_string(), dump);
+    }
     use super::*;
     #[test]
     fn cached_value_copies_are_bounded() {
@@ -3044,7 +3681,7 @@ mod tests {
         assert!(charge_copy(&wide, &mut 64, span).is_err());
         charge_copy(&wide, &mut 4096, span).unwrap();
         let mut deep = A::Unit { source: location };
-        for _ in 0..129 {
+        for _ in 0..nir::copy_budget::MAX_COPY_DEPTH + 1 {
             deep = A::Block {
                 source: location,
                 statements: vec![],

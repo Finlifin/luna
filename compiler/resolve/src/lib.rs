@@ -34,6 +34,7 @@
 //! [`Resolver::new`].
 
 pub mod binding;
+pub mod deferred;
 pub mod error;
 pub mod ids;
 pub mod impl_directive;
@@ -53,8 +54,22 @@ pub use import::{ImportDirective, ImportKind};
 pub use item_scope::ItemScope;
 pub use module_builder::{
     DependencyEdge, ModuleTree, PackageSetTree, build_module_tree, build_package_set,
-    build_package_set_with_builtin,
+    build_package_set_with_builtin, validate_package_dependencies,
 };
 pub use resolver::Resolver;
 pub use rib::{Rib, RibKind, RibStack};
 pub use scope::Scope;
+
+/// Unspellable source name: test labels do not enter the ordinary value namespace.
+pub fn test_definition_name(
+    file: vfs::FileId,
+    node: ast::NodeIndex,
+    label: Option<symbol::Symbol>,
+) -> symbol::Symbol {
+    symbol::Symbol::intern(&format!(
+        "$test${}${}${}",
+        file.raw(),
+        node,
+        label.map(|s| s.as_str().to_owned()).unwrap_or_default()
+    ))
+}

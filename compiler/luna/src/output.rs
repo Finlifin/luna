@@ -12,11 +12,26 @@ pub fn write_stdout(dump: &str) -> Result<(), String> {
 
 /// Publish only a complete dump, leaving an existing output intact on failure.
 pub fn write_file(input: &Path, output: &Path, dump: &str) -> Result<(), String> {
-    write_file_inner(input, output, dump)
+    let mut bytes = dump.as_bytes().to_vec();
+    if !dump.ends_with('\n') {
+        bytes.push(b'\n');
+    }
+    write_file_inner(input, output, &bytes, false)
         .map_err(|error| format!("cannot write output '{}': {error}", output.display()))
 }
 
-fn write_file_inner(input: &Path, output: &Path, dump: &str) -> io::Result<()> {
+pub fn write_executable(input: &Path, output: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_file_inner(input, output, bytes, true)
+        .map_err(|error| format!("cannot publish executable '{}': {error}", output.display()))
+}
+
+/// Publish a binary object without text normalization or executable permissions.
+pub fn write_object(input: &Path, output: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_file_inner(input, output, bytes, false)
+        .map_err(|error| format!("cannot publish object '{}': {error}", output.display()))
+}
+
+fn write_file_inner(input: &Path, output: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
     let input_path = input.canonicalize()?;
     let input_metadata = fs::metadata(&input_path)?;
     let (destination, permissions) = match output.canonicalize() {
@@ -68,10 +83,18 @@ fn write_file_inner(input: &Path, output: &Path, dump: &str) -> io::Result<()> {
         )
     })?;
     let (temporary, mut file) = TemporaryOutput::create(parent, &destination)?;
-    write_dump(&mut file, dump)?;
+    file.write_all(bytes)?;
     if let Some(permissions) = permissions {
         file.set_permissions(permissions)?;
     }
+    #[cfg(unix)]
+    if executable {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = file.metadata()?.permissions().mode();
+        file.set_permissions(fs::Permissions::from_mode((mode & 0o777) | 0o111))?;
+    }
+    #[cfg(not(unix))]
+    let _ = executable;
     file.sync_all()?;
     drop(file);
     temporary.publish(&destination)

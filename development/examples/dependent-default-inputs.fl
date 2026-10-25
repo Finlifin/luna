@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 typealias Char = 'x''type;
 
@@ -17,7 +20,7 @@ fn chained(comptime .T: Type = bool, comptime .U: Type = T, value: U) -> U {
     value
 }
 
-fn run() -> (bool, Char, Char) {
+fn run() -> Tuple<bool, Char, Char> {
     -- Type checking prepares flag/T before checking value. Runtime values keep
     -- their source evaluation order, even with a trailing named Type input.
     (configured(true), configured('x', .flag = false), chained('z', .T = Char))

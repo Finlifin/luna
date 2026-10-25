@@ -43,6 +43,30 @@ fn dependency(requester: u32, alias: &str, provider: u32) -> DependencyEdge {
     }
 }
 
+// These fixtures declare Tuple in the provider package. Bind its identity
+// explicitly alongside Splice, so imports cannot create local lookalike heads.
+fn compile_provider_tuple(
+    inputs: &[SourcePackage],
+    dependencies: &[DependencyEdge],
+    primary: u32,
+    protocols: &elaboration::program::Protocols,
+    splice: Option<&str>,
+) -> Result<Artifact, String> {
+    packages::compile_with_source_protocols(
+        inputs,
+        dependencies,
+        primary,
+        None,
+        protocols,
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("library::List"),
+            tuple: Some("library::Tuple"),
+            splice,
+            ..Default::default()
+        },
+    )
+}
+
 #[test]
 fn dynamic_alias_contracts_keep_provider_identity_and_recover_after_failure() {
     use comptime_interpretor::{ErrorKind, Interpreter, Value};
@@ -455,15 +479,17 @@ fn nested_member_constants_splice_all_parent_inputs_without_cross_instance_reuse
 fn automatic_splice_uses_provider_identity_across_package_boundaries() {
     let input = Inputs::new();
     let app = input.package(7, "app",
-        "use support.{FLAG, Conversion}; fn entry()->(bool,bool) {bool.as(Conversion).splice(FLAG)}");
+        "use support.{FLAG, Conversion, Tuple}; fn entry()->Tuple<bool,bool> {bool.as(Conversion).splice(FLAG)}");
     let library = input.package(9, "library",
-        "typealias Type=.Type'builtin;
+        "typealias Type=.Type'builtin;pub pure comptime fn List<T>->Type {T} pub pure comptime fn Tuple<...Es:List<Type>>->Type {bool}
          pub trait Conversion {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}
-         impl Conversion for bool {assoc RuntimeTarget:Type=(bool,bool);fn splice(comptime data:bool)->(bool,bool) {(data,not data)}}
+         impl Conversion for bool {assoc RuntimeTarget:Type=Tuple<bool,bool>;fn splice(comptime data:bool)->Tuple<bool,bool> {(data,not data)}}
          pub const FLAG=true;");
     let inputs = [app, library];
     let dependencies = [dependency(7, "support", 9)];
-    let Artifact::Nir(baseline) = packages::compile(&inputs, &dependencies, 7).unwrap() else {
+    let Artifact::Nir(baseline) =
+        compile_provider_tuple(&inputs, &dependencies, 7, &Default::default(), None).unwrap()
+    else {
         panic!("NIR")
     };
     let id = baseline
@@ -475,13 +501,17 @@ fn automatic_splice_uses_provider_identity_across_package_boundaries() {
     assert_eq!(id.package, 1009);
     std::fs::write(
         &inputs[0].entry,
-        "use support.FLAG; fn entry()->(bool,bool) {FLAG}",
+        "use support.{FLAG, Tuple}; fn entry()->Tuple<bool,bool> {FLAG}",
     )
     .unwrap();
-    let Artifact::Nir(named) =
-        packages::compile_with_splice(&inputs, &dependencies, 7, None, "library::Conversion")
-            .unwrap()
-    else {
+    let Artifact::Nir(named) = compile_provider_tuple(
+        &inputs,
+        &dependencies,
+        7,
+        &Default::default(),
+        Some("library::Conversion"),
+    )
+    .unwrap() else {
         panic!("NIR")
     };
     assert_eq!(
@@ -496,7 +526,7 @@ fn automatic_splice_uses_provider_identity_across_package_boundaries() {
         ..Default::default()
     };
     let Artifact::Nir(program) =
-        packages::compile_with_protocols(&inputs, &dependencies, 7, None, &protocols).unwrap()
+        compile_provider_tuple(&inputs, &dependencies, 7, &protocols, None).unwrap()
     else {
         panic!("NIR")
     };
@@ -514,7 +544,7 @@ fn automatic_splice_uses_provider_identity_across_package_boundaries() {
         }),
         ..Default::default()
     };
-    assert!(packages::compile_with_protocols(&inputs, &dependencies, 7, None, &foreign).is_err());
+    assert!(compile_provider_tuple(&inputs, &dependencies, 7, &foreign, None).is_err());
 }
 #[test]
 fn imported_generic_function_executes_from_its_provider_package() {
@@ -1427,22 +1457,26 @@ fn source_tuple_selectors_walk_directory_only_modules() {
 #[test]
 fn module_qualified_splice_binding_selects_the_declared_provider_trait() {
     let input = Inputs::new();
-    let app = input.package(7, "app", "use support.FLAG; fn entry()->(bool,bool) {FLAG}");
-    let library=input.package(9,"library","typealias Type=.Type'builtin;
+    let app = input.package(
+        7,
+        "app",
+        "use support.{FLAG, Tuple}; fn entry()->Tuple<bool,bool> {FLAG}",
+    );
+    let library=input.package(9,"library","typealias Type=.Type'builtin;pub pure comptime fn List<T>->Type {T} pub pure comptime fn Tuple<...Es:List<Type>>->Type {bool}
         pub mod conversion {
             pub trait Splice {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}
-            impl Splice for bool {assoc RuntimeTarget:Type=(bool,bool);fn splice(comptime data:bool)->(bool,bool) {(data,not data)}}
+            impl Splice for bool {assoc RuntimeTarget:Type=Tuple<bool,bool>;fn splice(comptime data:bool)->Tuple<bool,bool> {(data,not data)}}
         }
         mod decoy {trait Splice {}}
         pub const FLAG=true;");
     let inputs = [app, library];
     let dependencies = [dependency(7, "support", 9)];
-    let Artifact::Nir(program) = packages::compile_with_splice(
+    let Artifact::Nir(program) = compile_provider_tuple(
         &inputs,
         &dependencies,
         7,
-        None,
-        "library::conversion::Splice",
+        &Default::default(),
+        Some("library::conversion::Splice"),
     )
     .unwrap() else {
         panic!("NIR")
@@ -1463,7 +1497,8 @@ fn module_qualified_splice_binding_selects_the_declared_provider_trait() {
         "library::conversion::Splice::nested",
     ] {
         assert!(
-            packages::compile_with_splice(&inputs, &dependencies, 7, None, wrong).is_err(),
+            compile_provider_tuple(&inputs, &dependencies, 7, &Default::default(), Some(wrong))
+                .is_err(),
             "accepted {wrong}"
         );
     }
@@ -1473,9 +1508,14 @@ fn module_qualified_splice_binding_selects_the_declared_provider_trait() {
         source.replace("mod decoy {trait Splice {}}", ""),
     )
     .unwrap();
-    let Artifact::Nir(unique) =
-        packages::compile_with_splice(&inputs, &dependencies, 7, None, "Splice").unwrap()
-    else {
+    let Artifact::Nir(unique) = compile_provider_tuple(
+        &inputs,
+        &dependencies,
+        7,
+        &Default::default(),
+        Some("Splice"),
+    )
+    .unwrap() else {
         panic!("NIR")
     };
     assert_eq!(
@@ -1620,4 +1660,364 @@ fn parameterized_member_projection_obeys_provider_visibility() {
             );
         }
     }
+}
+
+#[test]
+fn compilation_inputs_preserve_consumed_text_and_single_file_scope() {
+    let files = Inputs::new();
+    let package = files.package(7, "entry", "fn run()->bool {true}");
+    std::fs::write(files.0.join("unrelated.fl"), "invalid source").unwrap();
+    let (artifact, inputs) = packages::compile_with_inputs(
+        std::slice::from_ref(&package),
+        &[],
+        7,
+        None,
+        &Default::default(),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(matches!(artifact, Artifact::Nir(_)));
+    assert_eq!(inputs.sources.len(), 1);
+    assert!(inputs.directories.is_empty());
+    assert_eq!(inputs.sources[0].resolution_id, 7);
+    assert_eq!(inputs.sources[0].identity, 1007);
+    assert_eq!(inputs.sources[0].path, package.entry);
+    assert_eq!(&*inputs.sources[0].text, "fn run()->bool {true}");
+    let before = inputs.to_string();
+    std::fs::write(&package.entry, "fn run()->bool {false}").unwrap();
+    assert_eq!(inputs.to_string(), before);
+    let (_, fresh) = packages::compile_with_inputs(
+        std::slice::from_ref(&package),
+        &[],
+        7,
+        None,
+        &Default::default(),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(&*fresh.sources[0].text, "fn run()->bool {false}");
+    assert_ne!(fresh.to_string(), before);
+    std::fs::write(&package.entry, "fn invalid()->bool {missing}").unwrap();
+    assert!(
+        packages::compile_with_inputs(
+            std::slice::from_ref(&package),
+            &[],
+            7,
+            None,
+            &Default::default(),
+            Default::default(),
+        )
+        .is_err()
+    );
+    std::fs::write(&package.entry, "fn run()->bool {true}").unwrap();
+    let (_, recovered) = packages::compile_with_inputs(
+        &[package],
+        &[],
+        7,
+        None,
+        &Default::default(),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(recovered.to_string(), before);
+}
+
+#[test]
+fn compilation_inputs_track_directory_membership_and_package_boundaries() {
+    let files = Inputs::new();
+    let dependency = files.0.join("dependency");
+    let empty = files.0.join("empty");
+    std::fs::create_dir(&dependency).unwrap();
+    std::fs::create_dir(&empty).unwrap();
+    std::fs::write(files.0.join("lib.fl"), "fn run()->bool {true}").unwrap();
+    std::fs::write(files.0.join("extra.fl"), "fn extra()->bool {false}").unwrap();
+    std::fs::write(dependency.join("lib.fl"), "pub fn helper()->bool {true}").unwrap();
+    let packages = [
+        SourcePackage {
+            resolution_id: 1,
+            identity: 101,
+            name: "client".into(),
+            entry: files.0.join("lib.fl"),
+        },
+        SourcePackage {
+            resolution_id: 2,
+            identity: 202,
+            name: "dependency".into(),
+            entry: dependency.join("lib.fl"),
+        },
+    ];
+    let compile = || {
+        packages::compile_with_inputs(
+            &packages,
+            &[],
+            1,
+            None,
+            &Default::default(),
+            Default::default(),
+        )
+        .unwrap()
+        .1
+    };
+    let inputs = compile();
+    assert!(inputs.changed_discovery().unwrap().is_empty());
+    assert_eq!(
+        inputs
+            .sources
+            .iter()
+            .map(|source| (source.resolution_id, source.path.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, files.0.join("lib.fl")),
+            (1, files.0.join("extra.fl")),
+            (2, dependency.join("lib.fl")),
+        ]
+    );
+    assert_eq!(
+        inputs.directories,
+        vec![
+            (1, files.0.clone()),
+            (1, empty.clone()),
+            (2, dependency.clone())
+        ]
+    );
+    assert_eq!(inputs.to_string(), compile().to_string());
+    std::fs::write(empty.join("new.fl"), "fn new_value()->bool {true}").unwrap();
+    let after = compile();
+    assert_eq!(after.sources.len(), 4);
+    assert!(
+        after
+            .sources
+            .iter()
+            .any(|source| source.resolution_id == 1 && source.path == empty.join("new.fl"))
+    );
+    let changes = inputs.changed_discovery().unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].resolution_id, 1);
+    assert!(
+        changes[0]
+            .to_string()
+            .starts_with("(discovery-change (resolution-id 1) (added-files (path-bytes ")
+    );
+    assert!(
+        changes[0]
+            .to_string()
+            .contains("(removed-files) (added-directories) (removed-directories)")
+    );
+    assert_eq!(changes[0].added_files, vec![empty.join("new.fl")]);
+    assert!(changes[0].removed_files.is_empty());
+    std::fs::write(files.0.join("notes.txt"), "unrelated").unwrap();
+    assert!(after.changed_discovery().unwrap().is_empty());
+    std::fs::write(dependency.join("spare.fl"), "pub fn spare()->bool {true}").unwrap();
+    let changes = after.changed_discovery().unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].resolution_id, 2);
+    assert_eq!(changes[0].added_files, vec![dependency.join("spare.fl")]);
+    std::fs::remove_file(dependency.join("spare.fl")).unwrap();
+    std::fs::remove_file(empty.join("new.fl")).unwrap();
+    assert!(inputs.changed_discovery().unwrap().is_empty());
+    std::fs::remove_dir(&empty).unwrap();
+    let changes = inputs.changed_discovery().unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].removed_directories, vec![empty.clone()]);
+    std::fs::create_dir(&empty).unwrap();
+    assert!(inputs.changed_discovery().unwrap().is_empty());
+    std::fs::rename(&dependency, files.0.join("moved")).unwrap();
+    let changes = inputs.changed_discovery().unwrap();
+    let removed = changes
+        .iter()
+        .find(|change| change.resolution_id == 2)
+        .unwrap();
+    assert_eq!(removed.removed_files, vec![dependency.join("lib.fl")]);
+    std::fs::rename(files.0.join("moved"), &dependency).unwrap();
+    assert!(inputs.changed_discovery().unwrap().is_empty());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("missing", files.0.join("broken")).unwrap();
+        assert!(inputs.changed_discovery().is_err());
+        std::fs::remove_file(files.0.join("broken")).unwrap();
+        assert!(inputs.changed_discovery().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn compilation_input_dump_escapes_text_and_preserves_native_path_bytes() {
+    let path = PathBuf::from("quoted \" name.fl");
+    let inputs = packages::CompilationInputs {
+        sources: vec![packages::SourceInput {
+            resolution_id: 3,
+            identity: 303,
+            path: path.clone(),
+            text: "line\n\"quoted\"\\tail".into(),
+            raw_text: "line\n\"quoted\"\\tail".into(),
+        }],
+        directories: vec![],
+        discovery: vec![],
+    };
+    let encoded: String = path
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(
+        inputs.to_string(),
+        format!(
+            "(compilation-inputs (version 1) (sources (source (resolution-id 3) (identity 303) (path-bytes \"{encoded}\") (text (string \"line\\n\\\"quoted\\\"\\\\tail\")))) (directories) (discovery))"
+        )
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut inputs = inputs;
+        inputs.sources[0].path = std::ffi::OsString::from_vec(vec![b'a', 255, b'b']).into();
+        assert!(inputs.to_string().contains("(path-bytes \"61ff62\")"));
+    }
+}
+
+#[test]
+fn compilation_inputs_keep_raw_bytes_before_source_map_normalization() {
+    let files = Inputs::new();
+    let raw = "\u{feff}fn run()->bool {\r\ntrue\r\n}\r\n";
+    let normalized = "fn run()->bool {\ntrue\n}\n";
+    let package = files.package(8, "entry", raw);
+    let compile = || {
+        packages::compile_with_inputs(
+            std::slice::from_ref(&package),
+            &[],
+            8,
+            None,
+            &Default::default(),
+            Default::default(),
+        )
+        .unwrap()
+        .1
+    };
+    let before = compile();
+    assert!(before.changed_sources().unwrap().is_empty());
+    assert_eq!(&*before.sources[0].text, normalized);
+    assert_eq!(&*before.sources[0].raw_text, raw);
+    assert_eq!(
+        before.sources[0].raw_text.as_bytes(),
+        std::fs::read(&package.entry).unwrap()
+    );
+    assert!(before.to_string().contains("(raw-text (string "));
+    std::fs::write(&package.entry, normalized).unwrap();
+    let after = compile();
+    assert_eq!(before.changed_sources().unwrap().len(), 1);
+    assert!(after.changed_sources().unwrap().is_empty());
+    assert_eq!(before.sources[0].text, after.sources[0].text);
+    assert_ne!(before.sources[0].raw_text, after.sources[0].raw_text);
+    assert!(!after.to_string().contains("(raw-text "));
+    assert_eq!(&*before.sources[0].raw_text, raw);
+    std::fs::write(&package.entry, raw).unwrap();
+    assert!(before.changed_sources().unwrap().is_empty());
+    std::fs::remove_file(&package.entry).unwrap();
+    assert_eq!(before.changed_sources().unwrap().len(), 1);
+    std::fs::write(&package.entry, [255, 254]).unwrap();
+    assert_eq!(before.changed_sources().unwrap().len(), 1);
+    std::fs::remove_file(&package.entry).unwrap();
+    std::fs::create_dir(&package.entry).unwrap();
+    assert!(before.changed_sources().is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn compilation_discovery_rejects_retargeted_package_roots() {
+    let files = Inputs::new();
+    for name in ["first", "second"] {
+        std::fs::create_dir(files.0.join(name)).unwrap();
+        std::fs::write(files.0.join(name).join("lib.fl"), "fn run()->bool {true}").unwrap();
+    }
+    let root = files.0.join("current");
+    std::os::unix::fs::symlink(files.0.join("first"), &root).unwrap();
+    let package = SourcePackage {
+        resolution_id: 1,
+        identity: 101,
+        name: "client".into(),
+        entry: root.join("lib.fl"),
+    };
+    let (_, inputs) = packages::compile_with_inputs(
+        &[package],
+        &[],
+        1,
+        None,
+        &Default::default(),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(inputs.changed_discovery().unwrap().is_empty());
+    std::fs::remove_file(&root).unwrap();
+    std::os::unix::fs::symlink(files.0.join("second"), &root).unwrap();
+    assert!(inputs.changed_sources().unwrap().is_empty());
+    assert!(
+        inputs
+            .changed_discovery()
+            .unwrap_err()
+            .contains("changed identity")
+    );
+    std::fs::remove_file(&root).unwrap();
+    std::os::unix::fs::symlink(files.0.join("first"), &root).unwrap();
+    assert!(inputs.changed_discovery().unwrap().is_empty());
+}
+
+#[test]
+fn invalid_dependency_graph_is_rejected_before_reading_sources_and_can_recover() {
+    let inputs = Inputs::new();
+    let app = SourcePackage {
+        resolution_id: 1,
+        identity: 101,
+        name: "app".into(),
+        entry: inputs.0.join("not-yet-written.fl"),
+    };
+    let error = packages::compile(&[app.clone()], &[dependency(1, "missing", 9)], 1)
+        .err()
+        .unwrap();
+    assert!(error.contains("invalid package graph"), "{error}");
+    assert!(
+        error.contains("from package 1 via alias \"missing\" to package 9"),
+        "{error}"
+    );
+    assert!(error.contains("provider package 9 is absent"), "{error}");
+    assert!(!error.contains("InternalError"), "{error}");
+    std::fs::write(&app.entry, "fn run()->bool {true}").unwrap();
+    assert!(packages::compile(&[app], &[], 1).is_ok());
+}
+
+#[test]
+fn invalid_package_metadata_identifies_resolution_and_semantic_ids_separately() {
+    let inputs = Inputs::new();
+    let first = SourcePackage {
+        resolution_id: 7,
+        identity: 107,
+        name: "first".into(),
+        entry: inputs.0.join("missing.fl"),
+    };
+    let mut second = first.clone();
+    second.name = "second".into();
+    let error = packages::compile(&[first.clone(), second.clone()], &[], 7)
+        .err()
+        .unwrap();
+    assert!(
+        error.contains("resolution id 7") && error.contains("second"),
+        "{error}"
+    );
+    second.resolution_id = 9;
+    let error = packages::compile(&[first.clone(), second.clone()], &[], 7)
+        .err()
+        .unwrap();
+    assert!(
+        error.contains("semantic identity 107") && error.contains("resolution id 9"),
+        "{error}"
+    );
+    second.identity = 109;
+    second.name.clear();
+    let error = packages::compile(&[first.clone(), second], &[], 7)
+        .err()
+        .unwrap();
+    assert!(error.contains("package 9 has an empty name"), "{error}");
+    let error = packages::compile(&[first], &[], 99).err().unwrap();
+    assert!(
+        error.contains("primary source package 99 is absent"),
+        "{error}"
+    );
 }

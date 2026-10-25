@@ -2019,6 +2019,7 @@ fn function_specialization_covers_contracts_defaults_and_preserves_local_identit
         phase: FunctionPhase::Runtime,
         inline: false,
         pure: true,
+        is_unsafe: false,
         declaration: IDENTITY,
         name: "template".into(),
         type_parameters: vec![],

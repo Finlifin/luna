@@ -5,70 +5,70 @@
 -- Operator protocol declarations. Compiler language-item binding is explicit;
 -- these names alone do not enable operator elaboration.
 
-pub trait Add where .Rhs: Type = Self {
-    assoc Output: Type;
+pub trait Add where .Rhs: .Type'builtin = Self {
+    assoc Output: .Type'builtin;
     fn add(self, rhs: Rhs) -> Output;
 }
 
-pub trait Sub where .Rhs: Type = Self {
-    assoc Output: Type;
+pub trait Sub where .Rhs: .Type'builtin = Self {
+    assoc Output: .Type'builtin;
     fn sub(self, rhs: Rhs) -> Output;
 }
 
-pub trait Mul where .Rhs: Type = Self {
-    assoc Output: Type;
+pub trait Mul where .Rhs: .Type'builtin = Self {
+    assoc Output: .Type'builtin;
     fn mul(self, rhs: Rhs) -> Output;
 }
 
-pub trait Div where .Rhs: Type = Self {
-    assoc Output: Type;
+pub trait Div where .Rhs: .Type'builtin = Self {
+    assoc Output: .Type'builtin;
     fn div(self, rhs: Rhs) -> Output;
 }
 
-pub trait Rem where .Rhs: Type = Self {
-    assoc Output: Type;
+pub trait Rem where .Rhs: .Type'builtin = Self {
+    assoc Output: .Type'builtin;
     fn rem(self, rhs: Rhs) -> Output;
 }
 
 pub trait Neg {
-    assoc Output: Type;
+    assoc Output: .Type'builtin;
     fn neg(self) -> Output;
 }
 
 pub trait Not {
-    assoc Output: Type;
+    assoc Output: .Type'builtin;
     fn invert(self) -> Output;
 }
 
-pub trait BitAnd where .Rhs: Type = Self {
-    assoc Output: Type;
+pub trait BitAnd where .Rhs: .Type'builtin = Self {
+    assoc Output: .Type'builtin;
     fn bit_and(self, rhs: Rhs) -> Output;
 }
 
-pub trait BitOr where .Rhs: Type = Self {
-    assoc Output: Type;
+pub trait BitOr where .Rhs: .Type'builtin = Self {
+    assoc Output: .Type'builtin;
     fn bit_or(self, rhs: Rhs) -> Output;
 }
 
-pub trait BitXor where .Rhs: Type = Self {
-    assoc Output: Type;
+pub trait BitXor where .Rhs: .Type'builtin = Self {
+    assoc Output: .Type'builtin;
     fn bit_xor(self, rhs: Rhs) -> Output;
 }
 
-pub trait Shl where .Rhs: Type = Self {
-    assoc Output: Type;
+pub trait Shl where .Rhs: .Type'builtin = Self {
+    assoc Output: .Type'builtin;
     fn shl(self, rhs: Rhs) -> Output;
 }
 
-pub trait Shr where .Rhs: Type = Self {
-    assoc Output: Type;
+pub trait Shr where .Rhs: .Type'builtin = Self {
+    assoc Output: .Type'builtin;
     fn shr(self, rhs: Rhs) -> Output;
 }
 
 -- ── Index ──────────────────────────────────────────────────────────────────
 
 pub trait Index where Idx {
-    assoc Output: Type;
+    assoc Output: .Type'builtin;
     fn index(self, idx: Idx) -> *Output;
 }
 

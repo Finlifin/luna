@@ -225,7 +225,7 @@ fn separate_packets() -> bool {
 fn collect(comptime flag: bool, ...items: Args, tail: bool) -> Args where Args {
     items
 }
-fn forward(comptime flag: bool) -> (bool, bool) {
+fn forward(comptime flag: bool) -> Tuple<bool, bool> {
     collect(flag, ...do { (true, false) }, true)
 }
 ```
@@ -238,7 +238,7 @@ fn forward(comptime flag: bool) -> (bool, bool) {
 fn first() -> bool { true }
 fn last() -> bool { false }
 fn bias() -> bool { true }
-fn choose(comptime flag: bool, ...items: (bool, bool), .bias: bool = false) -> bool {
+fn choose(comptime flag: bool, ...items: Tuple<bool, bool>, .bias: bool = false) -> bool {
     let (a, b) = items;
     inline if flag { a and bias } else { b }
 }
@@ -475,7 +475,7 @@ elaboration 产物应是普通调用、闭包构造或受检代码接入。运�
 ```flurry
 typealias Byte = .u8'builtin;
 fn seed() -> Byte { 9 }
-fn accept(comptime flag: bool, ...items: (T, T)) -> bool where T { true }
+fn accept(comptime flag: bool, ...items: Tuple<T, T>) -> bool where T { true }
 fn forward(comptime flag: bool) -> bool {
     accept(flag, seed(), ...do { (7,) })
 }
@@ -484,14 +484,14 @@ fn forward(comptime flag: bool) -> bool {
 `seed()` 的 `Byte` 域约束 `T`，于是包中的 `7` 按 `Byte` 检查；把包写在 `seed()` 前面也能使用这份类型依据。预推导保留已经检查的输入，运行时仍只求值一次，并按源码顺序执行。若前面的包提前返回，后面的 `seed()` 不执行。部分收集域只保存在当前推导候选中，不把未解变量写入完成后的 IR。
 
 
-这份证据还会传到最终泛型调用推导：展开包形成的字段绑定，以及显式局部绑定，均可约束同一收集值中的未标注闭包。例如 `...items: (T, fn(T) -> U)` 中，第一个字段已知为 `bool`、调用结果要求 `U = bool` 时，第二个字段 `|value| not value` 按 `fn(bool) -> bool` 检查。开放定义检查与实际调用采用相同的字段证据规则；改成返回整数的闭包仍被拒绝。 如果 `U` 不受外层结果约束，也可由已获得参数上下文的闭包体推导。若闭包参数域是 `T.as(Source).Element`，收集元素确定 `T` 后先按已成立的 trait 实现化简关联类型，再检查闭包体；缺少实现或化简后的参数域不满足闭包操作时仍拒绝。
+这份证据还会传到最终泛型调用推导：展开包形成的字段绑定，以及显式局部绑定，均可约束同一收集值中的未标注闭包。例如 `...items: Tuple<T, fn(T) -> U>` 中，第一个字段已知为 `bool`、调用结果要求 `U = bool` 时，第二个字段 `|value| not value` 按 `fn(bool) -> bool` 检查。开放定义检查与实际调用采用相同的字段证据规则；改成返回整数的闭包仍被拒绝。 如果 `U` 不受外层结果约束，也可由已获得参数上下文的闭包体推导。若闭包参数域是 `T.as(Source).Element`，收集元素确定 `T` 后先按已成立的 trait 实现化简关联类型，再检查闭包体；缺少实现或化简后的参数域不满足闭包操作时仍拒绝。
 
 
 普通泛型调用也逐元素推导收集值，不要求调用者先把生产表达式写成局部变量：
 
 ```flurry
 fn seed() -> bool { false }
-fn apply(...items: (T, fn(T) -> U)) -> U where T, U {
+fn apply(...items: Tuple<T, fn(T) -> U>) -> U where T, U {
     let (value, action) = items;
     action(value)
 }
@@ -507,4 +507,4 @@ fn run() -> bool { apply(seed(), |value| not value) }
 开放函数的冒号属性先按收集入口路由，再参与定义侧调用检查。依赖扫描区分属性名与具名形参，登记转发到 comptime 参数的绑定依赖；单个属性入口，或可由已形成的 tuple/record 域唯一确定的属性入口，都不需要执行 producer 才能确定这份路由。位置收集与属性收集并存时，前置依赖扫描采用同一入口选择规则；多个仍可能接收属性的入口保持歧义，不能按声明先后任意选择。返回域仍依赖未知 comptime 输入时，保留该依赖，不为推导属性中闭包的类型而提前调用返回域计算。runtime 属性字段仍逐项提供候选证据，实际实例化才取得完成的签名。
 
 
-混合收集域若由显式泛型实参确定，先应用该组实参再选择属性入口。例如位置入口的域为 `T`、属性入口为 `U` 时，`apply<(bool, bool), Options> { ... }` 在本次类型替换范围内区分 tuple 与 record。前置依赖扫描不为此执行类型实参；即使入口尚未分类，收集区前后的固定锚点仍可提供确定的 comptime 转发依赖。显式调用的阶段检查不变，runtime 绑定不能供应 comptime 锚点。
+混合收集域若由显式泛型实参确定，先应用该组实参再选择属性入口。例如位置入口的域为 `T`、属性入口为 `U` 时，`apply<Tuple<bool, bool>, Options> { ... }` 在本次类型替换范围内区分 tuple 与 record。前置依赖扫描不为此执行类型实参；即使入口尚未分类，收集区前后的固定锚点仍可提供确定的 comptime 转发依赖。显式调用的阶段检查不变，runtime 绑定不能供应 comptime 锚点。

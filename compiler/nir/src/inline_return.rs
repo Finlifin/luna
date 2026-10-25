@@ -26,6 +26,10 @@ pub fn simplify_tail_returns(
             .ok_or("inline tail return budget exhausted")?;
         crate::type_computations::charge_term(result, fuel).map_err(|error| error.to_string())?;
         match &mut expr.kind {
+            K::UnsafeScope(body) => {
+                simplify(body, result, fuel, depth + 1)?;
+                expr.ty = body.ty.clone();
+            }
             K::Return(value) => {
                 let value = value.take().map(|value| *value).unwrap_or(Expr {
                     ty: Term::Primitive(P::Void),
@@ -432,6 +436,7 @@ fn lower_inner(
         ],
         groups: vec![],
         encoding: None,
+        is_intrinsic: false,
         symbol_encoding: None,
     };
     let mut lower = Lower {

@@ -510,26 +510,27 @@ fn project(
     fields: &[(nir::program::FieldOwner, usize)],
     fuel: &mut usize,
 ) -> Result<(), String> {
-    for (owner, index) in fields {
-        match (&*ty, owner) {
-            (Term::Record(_), nir::program::FieldOwner::Anonymous) => (),
-            (Term::Nominal { declaration, .. }, nir::program::FieldOwner::Nominal(expected))
-                if declaration == expected =>
-            {
-                ()
-            }
-            _ => return Err("Drop field declaration disagrees with receiver layout".into()),
-        }
-        *ty = field_type(package, ty, *index, fuel)?;
-        let mut next = BTreeSet::new();
-        for target in targets.iter() {
-            charge(fuel, target.fields.len().saturating_add(1))?;
-            let mut target = target.clone();
-            target.fields.push(*index);
-            next.insert(target);
-        }
-        *targets = next;
+    // These are internal storage paths exported by memory analysis, including
+    // explicit newtype conversion representation steps. Source field lookup
+    // remains a separate frontend check.
+    let mut traversal = memory::StorageTraversal::new(Some(package), ty, &[], fuel)?;
+    traversal.then_guarded(Some(package), fields, &[], fuel)?;
+    let mut next = BTreeSet::new();
+    for target in targets.iter() {
+        charge(
+            fuel,
+            target
+                .fields
+                .len()
+                .saturating_add(fields.len())
+                .saturating_add(1),
+        )?;
+        let mut target = target.clone();
+        target.fields.extend(fields.iter().map(|(_, index)| *index));
+        next.insert(target);
     }
+    *targets = next;
+    *ty = traversal.target.ty;
     Ok(())
 }
 

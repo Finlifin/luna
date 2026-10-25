@@ -1,0 +1,12 @@
+-- Repeated calls must mutate the same environment stored in the record.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+fn pack(...fields:T)->T where T {fields}
+fn run()->bool {
+    var bit=false;
+    let actions=pack {call:|| {bit=not bit;bit}};
+    let first=actions.call();
+    let second=actions.call();
+    first and not second
+}

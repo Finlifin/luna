@@ -1,6 +1,9 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 pure comptime fn Tagged<T: Type, value: T> -> Type { T }
-pure comptime fn Pair<A: Type, first: A, B: Type, last: B> -> Type { (A, B) }
+pure comptime fn Pair<A: Type, first: A, B: Type, last: B> -> Type { Tuple<A, B> }
 comptime fn Choice(ty: Type, flag: true'type) -> Type {
     Tagged<ty, if flag { 1 } else { 2 }>
 }

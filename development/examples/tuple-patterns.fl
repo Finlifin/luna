@@ -1,9 +1,12 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Flag = true'type;
 typealias Letter = 'x''type;
 
 enum Message where T {
     empty,
-    payload((T, Flag)),
+    payload(Tuple<T, Flag>),
 }
 
 fn select(message: Message<T>, fallback: T) -> T where T {
@@ -13,12 +16,12 @@ fn select(message: Message<T>, fallback: T) -> T where T {
     }
 }
 
-fn swap(pair: (T, U)) -> (U, T) where T, U {
+fn swap(pair: Tuple<T, U>) -> Tuple<U, T> where T, U {
     let (left, right) = pair;
     (right, left)
 }
 
-fn run() -> (Letter, Flag) {
+fn run() -> Tuple<Letter, Flag> {
     let selected = select(Message<Letter>.payload(('y', true)), 'n');
     swap((true, selected))
 }

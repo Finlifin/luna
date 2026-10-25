@@ -1,7 +1,13 @@
 //! Body-derived pointer footprints. This is separate from type propositions.
 //! A summary preserves initialization and transfers no pointee ownership. It is
 //! not a certificate for termination, functional specifications, or escape safety.
+mod cleanup;
+mod method_contracts;
 use super::pattern_facts::{constant_bool, known_pattern, outer_guards};
+pub use method_contracts::{
+    MethodInvocation, MethodSummary, infer_method_in_package, infer_method_with_code_inputs,
+    prepare_method_invocation,
+};
 use nir::normal_forms::tuple_fields;
 use nir::program::{
     Expr, ExprKind as K, Function, FunctionPhase, LocalId, Package, Pattern,
@@ -31,7 +37,7 @@ pub struct ParameterPlace {
     pub conditions: BTreeMap<usize, Vec<(Vec<usize>, usize)>>,
 }
 impl ParameterPlace {
-    fn path_cost(&self) -> usize {
+    pub(super) fn path_cost(&self) -> usize {
         self.through.iter().fold(
             condition_cost(&self.conditions).saturating_add(
                 self.fields
@@ -368,13 +374,21 @@ impl fmt::Display for CallableResult {
         }
     }
 }
+mod borrowed_code;
+pub use borrowed_code::{
+    BorrowedCallableInputs, BorrowedCallableValue, infer_with_borrowed_callable_inputs,
+    infer_with_borrowed_callable_inputs_and_cleanup,
+};
 mod effects;
 pub(crate) use effects::effect_transfer_layout;
 pub use effects::{
     ConditionalClosureSummary, EffectInput, EffectParameterAccess, HandlerParameterSummary,
     infer_closure_with_effect_inputs, infer_handler_arm_memory, infer_with_effect_inputs,
 };
-pub(crate) use effects::{direct_handler_accesses, effect_data_layout};
+pub(crate) use effects::{
+    data_passing_signature, direct_handler_accesses, direct_handler_accesses_with_code,
+    effect_borrowed_code_layout, effect_data_layout,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Summary {
@@ -384,6 +398,8 @@ pub struct Summary {
     /// Concrete code premises on which this footprint is conditional.
     pub callable_inputs: BTreeMap<CallableInput, CallableResult>,
     pub prepared_inputs: PreparedCodeInputs,
+    /// Stable code identities reached through delivered pointers; conditional evidence.
+    pub borrowed_inputs: BorrowedCallableInputs,
     /// Handler safety premises; accesses alone are not an unconditional footprint.
     pub effect_inputs: Vec<EffectInput>,
     pub accesses: Vec<Access>,
@@ -463,6 +479,16 @@ impl fmt::Display for Summary {
             write!(f, " (premise {input} (candidates")?;
             for value in values {
                 write!(f, " {value}")?;
+            }
+            f.write_str("))")?;
+        }
+        f.write_str(") (borrowed-inputs")?;
+        for (input, fields) in &self.borrowed_inputs {
+            write!(f, " (premise {input} (fields")?;
+            for (path, value) in fields {
+                f.write_str(" (field (path")?;
+                display_owned_path(path, f)?;
+                write!(f, ") {value})")?;
             }
             f.write_str("))")?;
         }
@@ -585,6 +611,12 @@ fn owned_fields(
         }
     }
     match ty {
+        // `str` is a borrowed character view, not pointer-free scalar data.
+        // Until its backing-region provenance is represented, neither a Copy
+        // implementation nor a trivial destructor authorizes forgetting it.
+        Term::Primitive(Primitive::Str) => Err(
+            "string-view memory provenance is not implemented; str requires its backing character storage to remain valid".into(),
+        ),
         Term::Record(fields) => Ok(fields.iter().map(|(_, ty)| ty.clone()).collect()),
         Term::Nominal {
             declaration,
@@ -677,7 +709,9 @@ pub fn pointer_input_layout(
         if intrinsic_pointer_value(ty)
             || matches!(
                 ty,
-                Term::Function { .. } | Term::Primitive(Primitive::Void | Primitive::Never)
+                Term::Function { .. }
+                    | Term::UnsafeFunction(_)
+                    | Term::Primitive(Primitive::Void | Primitive::Never)
             )
         {
             return Ok(());
@@ -692,7 +726,8 @@ pub fn pointer_input_layout(
             }
             return Ok(());
         }
-        if matches!(ty,Term::Nominal {declaration,..} if package.is_some_and(|p|p.enums.iter().any(|e|e.declaration==*declaration)))
+        if matches!(ty, Term::ErrorResult { .. })
+            || matches!(ty,Term::Nominal {declaration,..} if package.is_some_and(|p|p.enums.iter().any(|e|e.declaration==*declaration)))
         {
             for (tag, variant) in owned_variants(package, ty, fuel)?.into_iter().enumerate() {
                 *fuel = fuel
@@ -796,12 +831,163 @@ fn display_owned_path(path: &[usize], f: &mut fmt::Formatter<'_>) -> fmt::Result
     Ok(())
 }
 
+pub(crate) fn error_tag_mapping(
+    expr: &Expr,
+    package: Option<&Package>,
+    fuel: &mut usize,
+) -> Result<nir::error_results::RepresentationTransport, String> {
+    let K::ErrorConvert { conversion, value } = &expr.kind else {
+        return Err("expected error transport".into());
+    };
+    if !matches!(
+        conversion,
+        nir::error_results::Conversion::Embed | nir::error_results::Conversion::Product
+    ) {
+        return Err("expected error transport".into());
+    }
+    nir::error_results::transport_plan(
+        &value.ty,
+        &expr.ty,
+        *conversion == nir::error_results::Conversion::Product,
+        fuel,
+        &mut |a, b| a == b,
+        &|head| {
+            package.is_some_and(|p| {
+                p.normal_forms
+                    .iter()
+                    .any(|m| m.declaration == head && m.role == nir::normal_forms::Role::Tuple)
+            })
+        },
+    )
+    .map_err(|failure| failure.to_string())
+}
+pub(crate) fn remap_error_path(
+    path: &mut [usize],
+    mapping: &nir::error_results::RepresentationTransport,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    mapping
+        .remap_path(path, fuel)
+        .map_err(|failure| failure.to_string())
+}
+
+// Cleanup uses success tag zero and error row index plus one. This is a
+// private storage layout, not an enum type or an effect continuation.
+pub(crate) fn owned_constructor<'a>(
+    expr: &'a Expr,
+    fuel: &mut usize,
+) -> Result<(&'a [Expr], Option<usize>), String> {
+    match &expr.kind {
+        K::Tuple(fields) | K::AnonymousRecord { fields } | K::Record { fields, .. } => {
+            Ok((fields, None))
+        }
+        K::Variant { fields, index, .. } => Ok((fields, Some(*index))),
+        K::ErrorConvert { conversion, value } => {
+            use nir::error_results::Conversion;
+            if matches!(conversion, Conversion::Embed | Conversion::Product) {
+                return Err("error transport is not an owned constructor".into());
+            }
+            nir::error_results::validate_conversion(
+                *conversion,
+                &value.ty,
+                &expr.ty,
+                fuel,
+                &mut |a, b| a == b,
+            )
+            .map_err(|e| e.to_string())?;
+            let Term::ErrorResult { errors, .. } = &expr.ty else {
+                unreachable!()
+            };
+            let tag = match conversion {
+                Conversion::Success => 0,
+                Conversion::Failure => {
+                    errors
+                        .iter()
+                        .position(|ty| ty == &value.ty)
+                        .ok_or("error payload label has no concrete layout")?
+                        + 1
+                }
+                Conversion::Embed | Conversion::Product => {
+                    return Err("error row transport requires resource provenance remapping".into());
+                }
+            };
+            Ok((std::slice::from_ref(value.as_ref()), Some(tag)))
+        }
+        _ => Err("expected owned constructor".into()),
+    }
+}
+
+pub(crate) fn owned_variant_pattern<'p>(
+    package: Option<&Package>,
+    pattern: &'p Pattern,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<(usize, &'p [Pattern], Vec<Term>), String> {
+    bound_type(ty, fuel)?;
+    let (tag, patterns) = match pattern {
+        Pattern::Variant {
+            declaration,
+            index,
+            fields,
+        } => {
+            if !matches!(ty,Term::Nominal {declaration:actual,..} if actual==declaration) {
+                return Err("variant pattern declaration mismatch".into());
+            }
+            (*index, fields.as_slice())
+        }
+        Pattern::ErrorResult { label, inner } => {
+            let Term::ErrorResult { errors, .. } = ty else {
+                return Err("error pattern requires an error result".into());
+            };
+            let tag = match label {
+                None => 0,
+                Some(label) => {
+                    bound_type(label, fuel)?;
+                    let mut selected = None;
+                    for (index, candidate) in errors.iter().enumerate() {
+                        bound_type(candidate, fuel)?;
+                        if candidate == label {
+                            selected = Some(index + 1);
+                            break;
+                        }
+                    }
+                    selected.ok_or("error pattern label is absent from input row")?
+                }
+            };
+            (tag, std::slice::from_ref(inner.as_ref()))
+        }
+        _ => return Err("expected variant or error pattern".into()),
+    };
+    let mut variants = owned_variants(package, ty, fuel)?;
+    let fields = std::mem::take(
+        &mut variants
+            .get_mut(tag)
+            .ok_or("pattern branch out of bounds")?
+            .fields,
+    );
+    if fields.len() != patterns.len() {
+        return Err("pattern payload arity mismatch".into());
+    }
+    Ok((tag, patterns, fields))
+}
+
 pub(crate) fn owned_variants(
     package: Option<&Package>,
     ty: &Term,
     fuel: &mut usize,
 ) -> Result<Vec<nir::program::Variant>, String> {
     bound_type(ty, fuel)?;
+    if let Term::ErrorResult { errors, result } = ty {
+        return Ok(std::iter::once(result.as_ref())
+            .chain(errors.iter())
+            .enumerate()
+            .map(|(tag, ty)| nir::program::Variant {
+                name: tag.to_string(),
+                shape: nir::program::VariantShape::Tuple,
+                fields: vec![ty.clone()],
+            })
+            .collect());
+    }
     let Term::Nominal {
         declaration,
         arguments,
@@ -1161,10 +1347,13 @@ fn extend_storage_projection(
             let tail = path
                 .get(cursor + 1..cursor + 3)
                 .ok_or("incomplete storage variant path")?;
-            let Term::Nominal { declaration, .. } = &result.ty else {
-                return Err("storage variant owner is not nominal".into());
+            let owner = match &result.ty {
+                Term::Nominal { declaration, .. } => {
+                    nir::program::FieldOwner::Nominal(*declaration)
+                }
+                Term::ErrorResult { .. } => nir::program::FieldOwner::Anonymous,
+                _ => return Err("storage variant owner has no variant layout".into()),
             };
-            let owner = nir::program::FieldOwner::Nominal(*declaration);
             let selected = owned_variants(package, &result.ty, fuel)?
                 .get(tail[0])
                 .and_then(|variant| variant.fields.get(tail[1]))
@@ -1179,7 +1368,7 @@ fn extend_storage_projection(
             cursor += 3;
         } else {
             let owner = if tuple_fields(package, &result.ty).is_some()
-                || matches!(result.ty, Term::Record(_))
+                || matches!(result.ty, Term::Record(_) | Term::Closure { .. })
             {
                 nir::program::FieldOwner::Anonymous
             } else if let Term::Nominal { declaration, .. } = &result.ty {
@@ -1224,13 +1413,14 @@ fn owned_callable_bottom(
         if path.len() >= 64 {
             return Err("memory callable result layout depth exhausted".into());
         }
-        if matches!(ty, Term::Function { .. })
+        if matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_))
             || include_closures && matches!(ty, Term::Closure { .. })
         {
             leaves.insert(path, CallableResult::NoReturn);
             continue;
         }
-        if matches!(&ty,Term::Nominal {declaration,..} if package.is_some_and(|p|p.enums.iter().any(|e|e.declaration==*declaration)))
+        if matches!(&ty, Term::ErrorResult { .. })
+            || matches!(&ty,Term::Nominal {declaration,..} if package.is_some_and(|p|p.enums.iter().any(|e|e.declaration==*declaration)))
         {
             for (variant, definition) in owned_variants(package, &ty, fuel)?.into_iter().enumerate()
             {
@@ -1657,7 +1847,10 @@ fn charge_pointer_captures(values: &BorrowedCaptures, fuel: &mut usize) -> Resul
     }
     Ok(())
 }
-struct Infer<'a> {
+struct Infer<'a, 'cleanup> {
+    // Complete current runtime scope for stable handler code-capture checks.
+    scope: &'a Expr,
+    borrowed_callable_slots: BTreeMap<PointerPlace, CallableResult>,
     local_code: Vec<LocalCode>,
     // Invocation-local origins never escape in reusable PreparedCode evidence.
     borrowed_code_pointers: BTreeMap<usize, std::sync::Arc<BorrowedCaptures>>,
@@ -1676,17 +1869,18 @@ struct Infer<'a> {
     parameters: &'a [DeclarationId],
     declarations: Vec<nir::DeclarationParameter>,
     arguments: &'a [Term],
-    round: &'a mut Round,
+    round: &'a mut Round<'cleanup>,
     effect_row: Vec<nir::effects::Operation>,
     environment: Environment,
     locals: BTreeMap<LocalId, Term>,
+    // Local bindings whose storage is neither addressed nor captured.
+    private_storage_roots: BTreeSet<LocalId>,
     // Stable layout evidence survives temporary default-parameter environments.
     local_storage: Vec<(LocalId, Term)>,
     loop_states: Vec<Environment>,
     accesses: Vec<Access>,
     may_reject: bool,
     may_run_cleanup: bool,
-    cleanup_protocol_present: Option<bool>,
     // Ephemeral node identity within this immutable body traversal only.
     expression_results: HashMap<usize, Targets>,
     callable_results: HashMap<usize, CallableResult>,
@@ -1823,10 +2017,17 @@ fn storage_representation(
             }
             return Ok(true);
         }
-        if matches!(ty, Term::Function { .. }) {
+        if matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_)) {
             return Ok(code);
         }
         let fields = match ty {
+            Term::ErrorResult { errors, result } => {
+                let mut fields = errors.clone();
+                if !matches!(result.as_ref(), Term::Primitive(nir::Primitive::Never)) {
+                    fields.push((**result).clone());
+                }
+                fields
+            }
             Term::Record(fields) => fields.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>(),
             Term::Nominal {
                 declaration,
@@ -1912,7 +2113,9 @@ pub(crate) fn require_pointer_free_owned(
     // Their parameter/result types describe invocation, not stored dependencies.
     if matches!(
         ty,
-        Term::Function { .. } | Term::Primitive(Primitive::Void | Primitive::Never)
+        Term::Function { .. }
+            | Term::UnsafeFunction(_)
+            | Term::Primitive(Primitive::Void | Primitive::Never)
     ) || intrinsic_pointer_value(ty) && !matches!(ty, Term::Pointer(_))
     {
         return Ok(());
@@ -1926,6 +2129,11 @@ pub(crate) fn require_pointer_free_owned(
                 ..
             } => fields.clone(),
             Term::Record(fields) => fields.iter().map(|(_, ty)| ty.clone()).collect(),
+            Term::ErrorResult { errors, result } => {
+                let mut fields = errors.clone();
+                fields.push((**result).clone());
+                fields
+            }
             Term::Nominal {
                 declaration,
                 arguments,
@@ -1978,7 +2186,7 @@ pub(crate) fn require_pointer_free_owned(
     Ok(())
 }
 
-impl<'a> Infer<'a> {
+impl<'a> Infer<'a, '_> {
     fn install_input_pointer_fields(
         &mut self,
         binding: LocalId,
@@ -2029,6 +2237,7 @@ impl<'a> Infer<'a> {
                 return Ok(fields.clone());
             }
             match &expr.kind {
+                K::UnsafeScope(body) => expr = body,
                 K::Block {
                     result: Some(result),
                     ..
@@ -2205,7 +2414,10 @@ impl<'a> Infer<'a> {
                 .get(input.parameter)
                 .ok_or("prepared code parameter is missing")?;
             let expected = owned_path_type(self.package, &parameter.ty, &input.fields, self.fuel)?;
-            if !matches!(expected, Term::Function { .. } | Term::Closure { .. }) {
+            if !matches!(
+                expected,
+                Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+            ) {
                 return Err("prepared code field is not callable".into());
             }
             let mut ids = BTreeSet::new();
@@ -2646,6 +2858,9 @@ impl<'a> Infer<'a> {
     }
     fn local_candidates_for(&mut self, expr: &Expr) -> Result<Option<BTreeSet<usize>>, String> {
         self.step(0)?;
+        if let K::UnsafeScope(body) = &expr.kind {
+            return self.local_candidates_for(body);
+        }
         let place = self.callable_place(expr)?;
         let keys = place
             .as_ref()
@@ -3027,6 +3242,7 @@ impl<'a> Infer<'a> {
                 result: Some(value),
                 ..
             } => self.stable_code_source(value, path, depth + 1),
+            K::UnsafeScope(value) => self.stable_code_source(value, path, depth + 1),
             K::If {
                 condition,
                 then_branch,
@@ -3192,7 +3408,7 @@ impl<'a> Infer<'a> {
     fn local_fields_for(&mut self, expr: &Expr) -> Result<LocalCodeFields, String> {
         if matches!(
             self.ty(&expr.ty)?,
-            Term::Function { .. } | Term::Closure { .. }
+            Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
         ) {
             return Ok(self
                 .local_candidates_for(expr)?
@@ -3306,6 +3522,9 @@ impl<'a> Infer<'a> {
     }
     fn callee_key(&mut self, expr: &Expr) -> Result<CallableResult, String> {
         self.step(0)?;
+        if let K::UnsafeScope(body) = &expr.kind {
+            return self.callee_key(body);
+        }
         match &expr.kind {
             K::TraitMethod {
                 interface,
@@ -3450,7 +3669,14 @@ impl<'a> Infer<'a> {
         &mut self,
         expr: &Expr,
     ) -> Result<BTreeMap<Vec<usize>, CallableResult>, String> {
-        if matches!(self.ty(&expr.ty)?, Term::Function { .. }) {
+        if let K::UnsafeScope(body) = &expr.kind {
+            self.step(0)?;
+            return self.value_callees(body);
+        }
+        if matches!(
+            self.ty(&expr.ty)?,
+            Term::Function { .. } | Term::UnsafeFunction(_)
+        ) {
             return Ok(BTreeMap::from([(vec![], self.callee_key(expr)?)]));
         }
         if let Some(place) = self.callable_place(expr)? {
@@ -3552,7 +3778,12 @@ impl<'a> Infer<'a> {
                         let leaf =
                             owned_path_type(self.package, &self.ty(&expr.ty)?, path, self.fuel)?;
                         if !path.contains(&VARIANT_FIELD)
-                            || !matches!(leaf, Term::Function { .. } | Term::Closure { .. })
+                            || !matches!(
+                                leaf,
+                                Term::Function { .. }
+                                    | Term::UnsafeFunction(_)
+                                    | Term::Closure { .. }
+                            )
                         {
                             return Err(
                                 "empty returned code candidate set requires an absent variant leaf"
@@ -3784,7 +4015,7 @@ impl<'a> Infer<'a> {
                         return Err("memory record pattern declaration mismatch".into());
                     }
                 }
-                for (index, (pattern, ty)) in patterns.iter().zip(fields).enumerate() {
+                for (index, (pattern, ty)) in patterns.iter().zip(&fields).enumerate() {
                     let mut nested = BTreeMap::new();
                     for (path, key) in values {
                         self.step(path.len())?;
@@ -3812,23 +4043,11 @@ impl<'a> Infer<'a> {
                 }
                 Ok(())
             }
-            Pattern::Variant {
-                declaration,
-                index,
-                fields: patterns,
-            } => {
-                if !matches!(ty,Term::Nominal {declaration:actual,..} if actual==declaration) {
-                    return Err("memory callable variant declaration mismatch".into());
-                }
-                let variants = owned_variants(self.package, ty, self.fuel)?;
-                let fields = &variants
-                    .get(*index)
-                    .ok_or("memory callable variant index out of bounds")?
-                    .fields;
-                if fields.len() != patterns.len() {
-                    return Err("memory callable variant arity mismatch".into());
-                }
-                for (field, (pattern, ty)) in patterns.iter().zip(fields).enumerate() {
+            Pattern::Variant { .. } | Pattern::ErrorResult { .. } => {
+                let (tag, patterns, fields) =
+                    owned_variant_pattern(self.package, pattern, ty, self.fuel)?;
+                let index = &tag;
+                for (field, (pattern, ty)) in patterns.iter().zip(&fields).enumerate() {
                     let prefix = [VARIANT_FIELD, *index, field];
                     charge_callee_fields(values, self.fuel)?;
                     self.charge_local_fields(local_fields)?;
@@ -3878,7 +4097,9 @@ impl<'a> Infer<'a> {
                     depth + 1,
                 )?;
                 let computed = self.ty(&value.ty)?;
-                if !matches!(computed, Term::Pointer(_)) && !Self::guard_value_type(&computed) {
+                if !matches!(computed, Term::Pointer(_))
+                    && !Self::guard_value_type(self.package, &computed)
+                {
                     return Err(
                         "computed memory pattern needs independent result provenance".into(),
                     );
@@ -4332,6 +4553,7 @@ impl<'a> Infer<'a> {
             return Ok(Some(BTreeSet::new()));
         }
         match &expr.kind {
+            K::UnsafeScope(body) => self.optional_target(body, depth + 1),
             K::Field { .. } | K::AnonymousField { .. } => {
                 if let Some(fields) = self.aggregate_pointers.get(&(expr as *const Expr as usize)) {
                     if let Some(Some(targets)) = fields.get(&vec![]) {
@@ -4493,8 +4715,8 @@ impl<'a> Infer<'a> {
             .ok_or("unknown memory target".into())
     }
     /// Resolve owned pointer slots at the current evaluation point. Pointer
-    /// stores through aliases still require a richer contract and are rejected
-    /// elsewhere; ordinary binding/field replacements update this environment.
+    /// stores update known local slots, retaining old targets for alternatives;
+    /// external or conditional stores need a richer transition contract.
     fn resolve_local_loads(
         &mut self,
         targets: BTreeSet<PointerPlace>,
@@ -4581,6 +4803,13 @@ impl<'a> Infer<'a> {
         read_value: bool,
         ty: Term,
     ) -> Result<(), String> {
+        // Imported call/effect footprints can write a private pointer slot even
+        // when no assignment node occurs in this body. Such writes also need
+        // cleanup-time transition evidence before value snapshots may suffice.
+        if write && self.round.cleanup.is_some() && !self.round.mutates_pointer_storage {
+            self.round.mutates_pointer_storage = pointer_input_layout(self.package, &ty, self.fuel)
+                .map_or(true, |leaves| !leaves.is_empty());
+        }
         let targets = self.resolve_local_loads(targets)?;
         self.target_work(&targets)?;
         for target in targets {
@@ -4658,7 +4887,7 @@ impl<'a> Infer<'a> {
         }
         if matches!(
             ty,
-            Term::Primitive(_) | Term::Pointer(_) | Term::Function { .. }
+            Term::Primitive(_) | Term::Pointer(_) | Term::Function { .. } | Term::UnsafeFunction(_)
         ) {
             return Ok(());
         }
@@ -4933,8 +5162,9 @@ impl<'a> Infer<'a> {
             _ => Err("memory match pattern requires a richer subject contract".into()),
         }
     }
-    fn guard_value_type(ty: &Term) -> bool {
-        nir::program::scalar_observation_shape(ty) || matches!(ty, Term::Function { .. })
+    fn guard_value_type(package: Option<&Package>, ty: &Term) -> bool {
+        nir::program::scalar_observation_shape_in_package(package, ty)
+            || matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_))
     }
     fn walk_guard(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         // Validation does not execute or install code evidence. The normal
@@ -4950,6 +5180,9 @@ impl<'a> Infer<'a> {
     ) -> Result<(), String> {
         self.step(depth)?;
         match pattern {
+            Pattern::ErrorResult { inner, .. } => {
+                self.check_guard_pattern(inner, bindings, depth + 1)
+            }
             Pattern::CodeEvidence { .. } => Err("unresolved pattern-code evidence".into()),
             Pattern::Observe { binding, inner } => {
                 let fresh = bindings.insert(*binding);
@@ -4966,7 +5199,7 @@ impl<'a> Infer<'a> {
             }
             Pattern::Then { first, value, next } => {
                 self.check_guard_pattern(first, bindings, depth + 1)?;
-                if !Self::guard_value_type(&self.ty(&value.ty)?) {
+                if !Self::guard_value_type(self.package, &self.ty(&value.ty)?) {
                     return Err("memory computed observation needs scalar or code result".into());
                 }
                 self.check_guard(value, depth + 1)?;
@@ -5013,14 +5246,28 @@ impl<'a> Infer<'a> {
                 if constructed || matches!(node.kind, K::Closure { .. }) {
                     return Ok(false);
                 }
+                let owned = |ty: &Term| {
+                    matches!(
+                        ty,
+                        Term::Nominal { .. }
+                            | Term::Record(_)
+                            | Term::Tuple(_)
+                            | Term::NormalForm { .. }
+                            | Term::ErrorResult { .. }
+                    )
+                };
                 constructed = matches!(
                     node.kind,
                     K::Tuple(_) | K::AnonymousRecord { .. } | K::Record { .. } | K::Variant { .. }
-                );
+                ) || matches!(&node.kind, K::Call { arguments, .. } if owned(&node.ty) || arguments.iter().any(|argument| owned(&argument.value.ty)));
                 Ok(!constructed)
             })?;
         }
-        if (matches!(expr.kind, K::Block { .. }) || constructed) && self.package.is_some() {
+        let pointer_match =
+            matches!(expr.kind, K::Match { .. }) && matches!(expr.ty, Term::Pointer(_));
+        if (matches!(expr.kind, K::Block { .. }) || pointer_match || constructed)
+            && self.package.is_some()
+        {
             super::observation_region::check(expr, self.package.unwrap(), self.fuel).map_err(
                 |reason| format!("memory guard requires read-only observation: {reason}"),
             )?;
@@ -5037,6 +5284,15 @@ impl<'a> Infer<'a> {
                 if self.known_bool(condition, 0)? == Some(true) =>
             {
                 self.check_guard(condition, depth + 1)
+            }
+            K::AddressOf(place) => {
+                if let Some(reason) = nir::program::pointer_operation_error_in(
+                    expr,
+                    self.package.and_then(|package| package.target),
+                ) {
+                    return Err(reason.into());
+                }
+                self.check_guard(place, depth + 1)
             }
             K::PointerAnonymousField { pointer, .. }
             | K::PointerField { pointer, .. }
@@ -5079,7 +5335,8 @@ impl<'a> Infer<'a> {
                 }
                 Ok(())
             }
-            K::ScalarEqual(left, right)
+            K::TemplateEqual(left, right)
+            | K::ScalarEqual(left, right)
             | K::ScalarLess(left, right)
             | K::ScalarLessEqual(left, right)
             | K::ScalarGreater(left, right)
@@ -5096,22 +5353,35 @@ impl<'a> Infer<'a> {
                 callee, arguments, ..
             } => {
                 self.check_guard(callee, depth + 1)?;
-                let scalar = Self::guard_value_type;
-                if !scalar(&self.ty(&expr.ty)?) {
-                    return Err("memory guard call requires a scalar or code result".into());
+                let package = self.package;
+                let scalar = |ty: &Term| Self::guard_value_type(package, ty);
+                let result = self.ty(&expr.ty)?;
+                if !scalar(&result) && !matches!(result, Term::Pointer(_)) {
+                    return Err(
+                        "memory guard call requires a scalar, code or pointer result".into(),
+                    );
                 }
                 for argument in arguments {
                     self.step(depth)?;
-                    if !scalar(&self.ty(&argument.value.ty)?) {
-                        return Err("memory guard call requires scalar or code arguments".into());
+                    let ty = self.ty(&argument.value.ty)?;
+                    if !scalar(&ty)
+                        && !matches!(ty, Term::Pointer(_))
+                        && !copy_readable_representation(self.package, &ty, self.fuel)?
+                    {
+                        return Err(
+                            "memory guard argument requires a known readable representation".into(),
+                        );
                     }
+                    // This checks layout and effects only. The resource pass
+                    // must establish Copy or private ownership for delivery.
                     self.check_guard(&argument.value, depth + 1)?;
                 }
                 Ok(())
             }
             K::Block { statements, result } => {
                 let mut bindings = BTreeSet::new();
-                let scalar = Self::guard_value_type;
+                let package = self.package;
+                let scalar = |ty: &Term| Self::guard_value_type(package, ty);
                 for statement in statements {
                     self.step(depth)?;
                     let statement = match &statement.kind {
@@ -5156,8 +5426,8 @@ impl<'a> Infer<'a> {
                 Ok(())
             }
             K::Match { value, arms } => {
-                if !Self::guard_value_type(&self.ty(&value.ty)?)
-                    || !Self::guard_value_type(&self.ty(&expr.ty)?)
+                if !Self::guard_value_type(self.package, &self.ty(&value.ty)?)
+                    || !Self::guard_value_type(self.package, &self.ty(&expr.ty)?)
                 {
                     return Err("memory observed match needs scalar or code values".into());
                 }
@@ -5241,7 +5511,7 @@ impl<'a> Infer<'a> {
         let pointer_result = self.local_pointer_value(&expr.ty)?;
         let callable_result = matches!(
             self.ty(&expr.ty)?,
-            Term::Function { .. } | Term::Closure { .. }
+            Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
         );
         let mut callable = CallableResult::NoReturn;
         let mut closures = Some(BTreeSet::new());
@@ -5363,41 +5633,83 @@ impl<'a> Infer<'a> {
         if self.may_run_cleanup
             || matches!(
                 ty,
-                Term::Primitive(_) | Term::Pointer(_) | Term::Function { .. }
+                Term::Primitive(_)
+                    | Term::Pointer(_)
+                    | Term::Function { .. }
+                    | Term::UnsafeFunction(_)
             )
         {
             return Ok(());
         }
-        let possible = if let Some(possible) = self.cleanup_protocol_present {
+        let possible = if let Some(possible) = self.round.cleanup_protocol_present {
             possible
         } else {
             let mut possible = self.package.is_none();
             if let Some(package) = self.package {
                 // Lang-item identity is unavailable here. Every implemented
                 // protocol with a drop member is a potential destructor.
-                for implementation in &package.implementations {
+                let mut cleanup_interfaces = BTreeSet::new();
+                for interface in &package.traits {
                     self.step(0)?;
-                    for interface in &package.traits {
+                    for method in &interface.methods {
                         self.step(0)?;
-                        if implementation.interface == Some(interface.declaration) {
-                            for method in &interface.methods {
-                                self.step(0)?;
-                                possible |= method.name == "drop";
-                            }
+                        if method.name == "drop" {
+                            cleanup_interfaces.insert(interface.declaration);
+                            break;
                         }
                     }
                 }
+                for implementation in &package.implementations {
+                    self.step(0)?;
+                    if implementation
+                        .interface
+                        .is_some_and(|interface| cleanup_interfaces.contains(&interface))
+                    {
+                        possible = true;
+                        break;
+                    }
+                }
             }
-            self.cleanup_protocol_present = Some(possible);
+            self.round.cleanup_protocol_present = Some(possible);
             possible
         };
         if possible {
             let ty = self.ty(ty)?;
             let ty = self.type_view(&ty)?;
-            self.may_run_cleanup |= !matches!(
+            if !matches!(
                 ty,
-                Term::Primitive(_) | Term::Pointer(_) | Term::Function { .. }
-            );
+                Term::Primitive(_)
+                    | Term::Pointer(_)
+                    | Term::Function { .. }
+                    | Term::UnsafeFunction(_)
+            ) {
+                bound_type(&ty, self.fuel)?;
+                if self.round.memory_inert_cleanup_types.contains(&ty)
+                    || self.round.cleanup_reads.contains_key(&ty)
+                {
+                    return Ok(());
+                }
+                if let Some(cleanup) = self.round.cleanup.as_deref_mut() {
+                    if cleanup.is_memory_inert(&ty, self.fuel)? {
+                        self.round.memory_inert_cleanup_types.insert(ty);
+                        return Ok(());
+                    }
+                    if let Some(reads) = cleanup.cleanup_reads(&ty, self.fuel)? {
+                        for read in &reads {
+                            cleanup::charge_read(read, self.fuel)?;
+                            if read.write
+                                || read.target.parameter != 0
+                                || !read.target.input_fields.is_empty()
+                            {
+                                return Err("cleanup proof requires receiver-relative reads".into());
+                            }
+                        }
+                        self.round.cleanup_reads.insert(ty, reads);
+                        return Ok(());
+                    }
+                }
+                self.may_run_cleanup = true;
+            }
         }
         Ok(())
     }
@@ -5515,6 +5827,16 @@ impl<'a> Infer<'a> {
                         }
                     }
                 }
+                if matches!(target.root, PointerRoot::Parameter(_)) {
+                    for path in owned_callable_bottom(self.package, &ty, self.fuel, true)?.keys() {
+                        let projection = project_owned_storage(self.package, &ty, path, self.fuel)?;
+                        let slot = borrowed_code::project_slot(target, &projection);
+                        if let Some(value) = self.borrowed_callable_slots.get(&slot) {
+                            value.charge(self.fuel)?;
+                            named_fields.insert(path.clone(), value.clone());
+                        }
+                    }
+                }
                 code = Some(match code {
                     Some(previous) => self.join_local_fields(previous, local_fields)?,
                     None => local_fields,
@@ -5538,10 +5860,75 @@ impl<'a> Infer<'a> {
         self.record_access(targets, false, true, ty)?;
         Ok(())
     }
+    #[inline(never)]
+    fn walk_error_transport(
+        &mut self,
+        expr: &'a Expr,
+        value: &'a Expr,
+        depth: usize,
+    ) -> Result<(), String> {
+        let mapping = error_tag_mapping(expr, self.package, self.fuel)?;
+        self.walk(value, depth + 1)?;
+        fn remap<T>(
+            values: BTreeMap<Vec<usize>, T>,
+            mapping: &nir::error_results::RepresentationTransport,
+            fuel: &mut usize,
+        ) -> Result<BTreeMap<Vec<usize>, T>, String> {
+            let mut output = BTreeMap::new();
+            for (mut path, value) in values {
+                remap_error_path(&mut path, mapping, fuel)?;
+                output.insert(path, value);
+            }
+            Ok(output)
+        }
+        let ty = self.ty(&expr.ty)?;
+        let mut pointers = symbolic_pointer_fields(self.package, &ty, self.fuel)?
+            .into_keys()
+            .map(|path| (path, Some(BTreeSet::new())))
+            .collect::<BTreeMap<_, _>>();
+        let source_ty = self.ty(&value.ty)?;
+        for mut path in symbolic_pointer_fields(self.package, &source_ty, self.fuel)?.into_keys() {
+            remap_error_path(&mut path, &mapping, self.fuel)?;
+            pointers.insert(path, None);
+        }
+        pointers.extend(remap(self.pointer_fields_for(value)?, &mapping, self.fuel)?);
+        let mut callees = result_callable_bottom(self.package, &ty, self.fuel)?;
+        for (mut path, _) in result_callable_bottom(self.package, &source_ty, self.fuel)? {
+            remap_error_path(&mut path, &mapping, self.fuel)?;
+            callees.insert(path, CallableResult::Unknown);
+        }
+        callees.extend(remap(self.value_callees(value)?, &mapping, self.fuel)?);
+        let mut local: LocalCodeFields = owned_callable_bottom(self.package, &ty, self.fuel, true)?
+            .into_keys()
+            .map(|path| (path, BTreeSet::new()))
+            .collect();
+        // Unknown active source leaves must stay absent, not bottom.
+        for (mut path, _) in owned_callable_bottom(self.package, &source_ty, self.fuel, true)? {
+            remap_error_path(&mut path, &mapping, self.fuel)?;
+            local.remove(&path);
+        }
+        local.extend(remap(self.local_fields_for(value)?, &mapping, self.fuel)?);
+        self.aggregate_pointers
+            .insert(expr as *const Expr as usize, pointers);
+        self.aggregate_callees
+            .insert(expr as *const Expr as usize, callees);
+        self.local_code_fields
+            .insert(expr as *const Expr as usize, local);
+        Ok(())
+    }
+
     fn walk(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
+        self.note_cleanup_pointer_mutation(expr)?;
+        self.walk_inner(expr, depth)?;
+        self.record_value_cleanup_reads(expr)
+    }
+    fn walk_inner(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         self.step(depth)?;
         self.note_owned_cleanup(&expr.ty)?;
-        if let Some(error) = nir::program::pointer_operation_error(expr) {
+        if let Some(error) = nir::program::pointer_operation_error_in(
+            expr,
+            self.package.and_then(|package| package.target),
+        ) {
             return Err(error.into());
         }
         match &expr.kind {
@@ -5572,7 +5959,10 @@ impl<'a> Infer<'a> {
                 };
                 if let Some(result) = result.as_ref().filter(|_| live) {
                     self.walk(result, depth + 1)?;
-                    if matches!(self.ty(&expr.ty)?, Term::Function { .. }) {
+                    if matches!(
+                        self.ty(&expr.ty)?,
+                        Term::Function { .. } | Term::UnsafeFunction(_)
+                    ) {
                         key = self.callee_key(result)?;
                     }
                     let values = self.value_callees(result)?;
@@ -5599,7 +5989,7 @@ impl<'a> Infer<'a> {
                 let pointer_result = self.local_pointer_value(&expr.ty)?;
                 let callable_result = matches!(
                     self.ty(&expr.ty)?,
-                    Term::Function { .. } | Term::Closure { .. }
+                    Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
                 );
                 let mut callable = CallableResult::NoReturn;
                 let mut closures = Some(BTreeSet::new());
@@ -5707,6 +6097,13 @@ impl<'a> Infer<'a> {
             K::AddressOf(value) => {
                 self.local_address(value, depth + 1)?;
             }
+            K::Intrinsic { inputs, .. } => {
+                nir::intrinsics::checked(expr)
+                    .map_err(|_| "intrinsic memory behavior requires a valid target protocol")?;
+                for input in inputs {
+                    self.walk(input, depth + 1)?;
+                }
+            }
             K::EffectRequest { .. }
             | K::EffectComputation { .. }
             | K::EffectRun { .. }
@@ -5721,7 +6118,7 @@ impl<'a> Infer<'a> {
                 let mut pointer_captures = BTreeMap::new();
                 let environment = match &ty {
                     Term::Closure { environment, .. } => environment.as_slice(),
-                    Term::Function { .. } => &[][..],
+                    Term::Function { .. } | Term::UnsafeFunction(_) => &[][..],
                     _ => return Err("closure construction requires a callable type".into()),
                 };
                 if environment.len() != captures.len() {
@@ -5850,10 +6247,19 @@ impl<'a> Infer<'a> {
                 self.local_code_fields
                     .insert(expr as *const Expr as usize, locals);
             }
-            K::AnonymousRecord { fields }
-            | K::Record { fields, .. }
-            | K::Variant { fields, .. }
-            | K::Tuple(fields) => {
+            K::ErrorConvert {
+                conversion:
+                    nir::error_results::Conversion::Embed | nir::error_results::Conversion::Product,
+                value,
+            } => {
+                self.walk_error_transport(expr, value, depth)?;
+            }
+            K::AnonymousRecord { .. }
+            | K::Record { .. }
+            | K::Variant { .. }
+            | K::Tuple(_)
+            | K::ErrorConvert { .. } => {
+                let (fields, variant) = owned_constructor(expr, self.fuel)?;
                 let ty = self.ty(&expr.ty)?;
                 let view = self.type_view(&ty)?;
                 let mut pointers = symbolic_pointer_fields(self.package, &view, self.fuel)?
@@ -5861,7 +6267,7 @@ impl<'a> Infer<'a> {
                     .map(|path| {
                         (
                             path,
-                            if matches!(expr.kind, K::Variant { .. }) {
+                            if variant.is_some() {
                                 Some(BTreeSet::new())
                             } else {
                                 None
@@ -5876,8 +6282,8 @@ impl<'a> Infer<'a> {
                         .map(|path| (path, BTreeSet::new()))
                         .collect();
                 for (index, field) in fields.iter().enumerate() {
-                    let prefix = if let K::Variant { index: variant, .. } = &expr.kind {
-                        vec![VARIANT_FIELD, *variant, index]
+                    let prefix = if let Some(variant) = variant {
+                        vec![VARIANT_FIELD, variant, index]
                     } else {
                         vec![index]
                     };
@@ -5939,7 +6345,15 @@ impl<'a> Infer<'a> {
                                     )
                             })
                         });
-                self.may_reject |= !scalar_packet;
+                if !scalar_packet {
+                    // Payload evaluation was checked above. For ordinary owned
+                    // aggregates, retirement is the remaining rejection source;
+                    // use the captured cleanup selection when one is available.
+                    self.may_reject |= match self.round.cleanup.as_deref_mut() {
+                        Some(cleanup) => cleanup.may_reject(&ty, self.fuel)?,
+                        None => true,
+                    };
+                }
             }
             K::Field { value, index, .. } | K::AnonymousField { value, index, .. } => {
                 self.walk(value, depth + 1)?;
@@ -6001,11 +6415,12 @@ impl<'a> Infer<'a> {
                     .fuel
                     .checked_sub(selections.len())
                     .ok_or("bit selection memory budget exhausted")?;
-                if let Some(reason) = nir::program::bit_update_error(
+                if let Some(reason) = nir::program::bit_update_error_in(
                     &storage,
                     selections,
                     &self.ty(&value.ty)?,
                     &self.ty(&expr.ty)?,
+                    self.package.and_then(|package| package.target),
                 ) {
                     return Err(reason.into());
                 }
@@ -6022,10 +6437,45 @@ impl<'a> Infer<'a> {
             }
             K::WritePointer { pointer, value } => {
                 let ty = self.ty(&value.ty)?;
-                if !owned_callable_bottom(self.package, &ty, self.fuel, true)?.is_empty() {
-                    return Err(
-                        "code pointer replacement requires a callable transition contract".into(),
-                    );
+                let code_storage =
+                    !owned_callable_bottom(self.package, &ty, self.fuel, true)?.is_empty();
+                let pointer_layout = pointer_input_layout(self.package, &ty, self.fuel)?;
+                let aggregate_pointers =
+                    !pointer_layout.is_empty() && !self.local_pointer_value(&ty)?;
+                if code_storage || aggregate_pointers {
+                    if !copy_readable_representation(self.package, &ty, self.fuel)? {
+                        return Err(
+                            "code pointer replacement requires a callable transition contract"
+                                .into(),
+                        );
+                    }
+                    self.walk(pointer, depth + 1)?;
+                    let targets = self.target(pointer, depth + 1)?;
+                    let targets = self.resolve_local_loads(targets)?;
+                    self.walk(value, depth + 1)?;
+                    let code = self.value_callees(value)?;
+                    let local_code = self.local_fields_for(value)?;
+                    let pointers = self.pointer_fields_for(value)?;
+                    self.write_local_value_slots(
+                        targets,
+                        code,
+                        local_code,
+                        pointers,
+                        ty,
+                        expr.source,
+                    )?;
+                    return Ok(());
+                }
+                if self.local_pointer_value(&ty)? {
+                    self.walk(pointer, depth + 1)?;
+                    let targets = self.target(pointer, depth + 1)?;
+                    // The destination is evaluated before the RHS, which may
+                    // itself change pointer slots used to compute this address.
+                    let targets = self.resolve_local_loads(targets)?;
+                    self.walk(value, depth + 1)?;
+                    let values = self.optional_target(value, depth + 1)?;
+                    self.write_local_pointer_slot(targets, values, ty, expr.source)?;
+                    return Ok(());
                 }
                 if !readable_representation(self.package, &ty, self.fuel)?
                     || self.local_pointer_value(&ty)?
@@ -6064,6 +6514,9 @@ impl<'a> Infer<'a> {
                     .package
                     .ok_or("nested call requires a package memory context")?;
                 self.walk(callee, depth + 1)?;
+                if super::pattern_facts::cannot_complete(callee, self.fuel, 0)? {
+                    return Ok(());
+                }
                 let mut closures = Vec::new();
                 let mut named = Vec::new();
                 let candidates = self.local_candidates_for(callee)?;
@@ -6209,6 +6662,9 @@ impl<'a> Infer<'a> {
                     };
                     let result = (|| {
                         self.walk(&argument.value, depth + 1)?;
+                        if super::pattern_facts::cannot_complete(&argument.value, self.fuel, 0)? {
+                            return Ok(None);
+                        }
                         let target = if self.local_pointer_value(&argument.value.ty)? {
                             self.optional_target(&argument.value, depth + 1)?
                         } else {
@@ -6217,14 +6673,18 @@ impl<'a> Infer<'a> {
                         let values = self.value_callees(&argument.value)?;
                         let local_fields = self.local_fields_for(&argument.value)?;
                         let fields = self.pointer_fields_for(&argument.value)?;
-                        Ok::<_, String>((target, values, local_fields, fields))
+                        Ok::<_, String>(Some((target, values, local_fields, fields)))
                     })();
                     if let Some((locals, environment, loops)) = saved {
                         self.locals = locals;
                         self.environment = environment;
                         self.loop_states = loops;
                     }
-                    let (target, values, local_fields, mut fields) = result?;
+                    // Argument effects are retained, but an escaping argument never
+                    // enters the callee or evaluates the remaining arguments.
+                    let Some((target, values, local_fields, mut fields)) = result? else {
+                        return Ok(());
+                    };
                     for (path, targets) in &fields {
                         self.step(path.len())?;
                         if let Some(targets) = targets {
@@ -6518,14 +6978,16 @@ impl<'a> Infer<'a> {
                         },
                     )?;
                 }
+                let borrowed = self.forward_borrowed_callables(parameters, &targets)?;
                 for key in keys {
                     self.step(depth)?;
-                    let next = derive(
+                    let next = derive_with_borrowed(
                         package,
                         key.declaration,
                         &key.arguments,
                         &inputs,
                         &prepared,
+                        &borrowed,
                         self.fuel,
                         self.round,
                     )?;
@@ -6715,15 +7177,26 @@ impl<'a> Infer<'a> {
                 let value_ty = self.ty(&value.ty)?;
                 let result_ty = self.ty(&expr.ty)?;
                 let reason = match &expr.kind {
-                    K::BitAssign { start, end, .. } => nir::program::bit_writeback_error(
-                        &storage, *start, *end, &value_ty, &result_ty,
+                    K::BitAssign { start, end, .. } => nir::program::bit_writeback_error_in(
+                        &storage,
+                        *start,
+                        *end,
+                        &value_ty,
+                        &result_ty,
+                        self.package.and_then(|package| package.target),
                     ),
                     K::BitUpdate { selections, .. } => {
                         *self.fuel = self
                             .fuel
                             .checked_sub(selections.len())
                             .ok_or("bit selection memory budget exhausted")?;
-                        nir::program::bit_update_error(&storage, selections, &value_ty, &result_ty)
+                        nir::program::bit_update_error_in(
+                            &storage,
+                            selections,
+                            &value_ty,
+                            &result_ty,
+                            self.package.and_then(|package| package.target),
+                        )
                     }
                     _ => unreachable!(),
                 };
@@ -6738,14 +7211,18 @@ impl<'a> Infer<'a> {
                         self.walk(input, depth + 1)?;
                     }
                 }
-                if !place.fields.is_empty() {
-                    return Err("memory bit writeback field requires an ownership contract".into());
-                }
-                if self.locals.get(&place.root) != Some(&storage) {
+                let root = self
+                    .locals
+                    .get(&place.root)
+                    .ok_or("memory bit writeback root is missing")?;
+                let mut traversal = StorageTraversal::new(self.package, root, &[], self.fuel)?;
+                traversal.then_guarded(self.package, &place.fields, &[], self.fuel)?;
+                if traversal.target.ty != storage {
                     return Err("memory bit writeback local storage type mismatch".into());
                 }
-                // Only a by-value scalar local is modified. Its initialization
-                // follows the binding; the RHS may still access caller memory.
+                // Only scalar storage owned by a local is modified, including
+                // direct nested fields. Positions and the RHS can still access
+                // caller memory and retain their ordinary footprint checks.
                 self.walk(value, depth + 1)?;
             }
             K::Assign { place, value } => {
@@ -6756,7 +7233,8 @@ impl<'a> Infer<'a> {
                     .get(&place.root)
                     .ok_or("memory assignment root is missing")?
                     .clone();
-                let mut expected = root_ty;
+                bound_type(&root_ty, self.fuel)?;
+                let mut expected = root_ty.clone();
                 for (owner, index) in &place.fields {
                     let valid = match (&expected, owner) {
                         (
@@ -6814,6 +7292,16 @@ impl<'a> Infer<'a> {
                     let targets = self.optional_target(value, depth + 1)?;
                     self.set_pointer(place.root, targets)?;
                 }
+                if self.private_storage_roots.contains(&place.root) {
+                    // A field update can change any enclosing destructor's
+                    // pointer dependencies. Keep previous accesses and add the
+                    // complete root's reads using its new pointer environment.
+                    self.record_value_cleanup_reads(&Expr {
+                        source: expr.source,
+                        ty: root_ty,
+                        kind: K::Local(place.root),
+                    })?;
+                }
             }
             K::Block { .. } | K::CallPreparation { .. } | K::If { .. } => {
                 unreachable!("control dispatcher")
@@ -6826,7 +7314,10 @@ impl<'a> Infer<'a> {
                     if self.local_pointer_value(&value.ty)? {
                         let targets = self.optional_target(value, depth + 1)?;
                         self.merge_return(targets)?;
-                    } else if matches!(self.ty(&value.ty)?, Term::Function { .. }) {
+                    } else if matches!(
+                        self.ty(&value.ty)?,
+                        Term::Function { .. } | Term::UnsafeFunction(_)
+                    ) {
                         let key = self.callee_key(value)?;
                         self.callable_returns.join(&key, self.fuel)?;
                     }
@@ -6866,7 +7357,8 @@ impl<'a> Infer<'a> {
                 // The footprint is conservative over the successful path. No
                 // ownership or memory-state facts are inferred from the check.
             }
-            K::Discard(value)
+            K::UnsafeScope(value)
+            | K::Discard(value)
             | K::Not(value)
             | K::IntegerNegate(value)
             | K::FloatNegate(value)
@@ -6904,6 +7396,7 @@ impl<'a> Infer<'a> {
             | K::BitConcat(a, b)
             | K::BitIndex(a, b)
             | K::ScalarEqual(a, b)
+            | K::TemplateEqual(a, b)
             | K::ScalarLess(a, b)
             | K::ScalarLessEqual(a, b)
             | K::ScalarGreater(a, b)
@@ -6928,9 +7421,19 @@ struct MemoryInstance {
     instance: iir::InstanceKey,
     inputs: BTreeMap<CallableInput, CallableResult>,
     prepared: BTreeMap<CallableInput, Vec<usize>>,
+    borrowed: BorrowedCallableInputs,
 }
 #[derive(Default)]
-struct Round {
+struct Round<'cleanup> {
+    // Independent complete-layout evidence in this query's immutable Drop world.
+    cleanup: Option<&'cleanup mut dyn super::moves::CleanupPolicy>,
+    memory_inert_cleanup_types: HashSet<Term>,
+    cleanup_reads: HashMap<Term, Vec<Access>>,
+    used_external_cleanup: bool,
+    mutates_pointer_storage: bool,
+    // All instances in one fixed point belong to the same immutable package.
+    // This is declaration metadata, independent of code inputs or call state.
+    cleanup_protocol_present: Option<bool>,
     effects: Vec<EffectInput>,
     complete_calls: bool,
     code: Vec<PreparedCode>,
@@ -6973,6 +7476,7 @@ pub fn infer(function: &Function, fuel: &mut usize) -> Result<Summary, String> {
     infer_body(
         function,
         &[],
+        &BTreeMap::new(),
         &BTreeMap::new(),
         &BTreeMap::new(),
         None,
@@ -7259,16 +7763,62 @@ fn infer_context(
     effects: &[EffectInput],
     fuel: &mut usize,
 ) -> Result<Summary, String> {
-    let mut round = Round {
-        effects: effects::copy_inputs(effects, fuel)?,
-        ..Round::default()
-    };
-    derive(
+    infer_borrowed_context(
         package,
         declaration,
         arguments,
         inputs,
         prepared,
+        effects,
+        &BTreeMap::new(),
+        fuel,
+    )
+}
+fn infer_borrowed_context(
+    package: &Package,
+    declaration: DeclarationId,
+    arguments: &[Term],
+    inputs: &BTreeMap<CallableInput, CallableResult>,
+    prepared: &PreparedCodeInputs,
+    effects: &[EffectInput],
+    borrowed: &BorrowedCallableInputs,
+    fuel: &mut usize,
+) -> Result<Summary, String> {
+    infer_borrowed_context_with_cleanup(
+        package,
+        declaration,
+        arguments,
+        inputs,
+        prepared,
+        effects,
+        borrowed,
+        None,
+        fuel,
+    )
+}
+fn infer_borrowed_context_with_cleanup(
+    package: &Package,
+    declaration: DeclarationId,
+    arguments: &[Term],
+    inputs: &BTreeMap<CallableInput, CallableResult>,
+    prepared: &PreparedCodeInputs,
+    effects: &[EffectInput],
+    borrowed: &BorrowedCallableInputs,
+    cleanup: Option<&mut dyn super::moves::CleanupPolicy>,
+    fuel: &mut usize,
+) -> Result<Summary, String> {
+    let mut round = Round {
+        cleanup,
+        effects: effects::copy_inputs(effects, fuel)?,
+        ..Round::default()
+    };
+    derive_with_borrowed(
+        package,
+        declaration,
+        arguments,
+        inputs,
+        prepared,
+        borrowed,
         fuel,
         &mut round,
     )?;
@@ -7276,6 +7826,7 @@ fn infer_context(
         round.scheduled.remove(&index);
         round.active = Some(index);
         effects::charge_inputs(&round.queue[index].effects, fuel)?;
+        borrowed_code::charge(&round.queue[index].borrowed, fuel)?;
         let key = round.queue[index].clone();
         let (function, body_arguments) = package
             .runtime_body(key.instance.declaration, &key.instance.arguments)
@@ -7295,52 +7846,41 @@ fn infer_context(
             body_arguments,
             &key.inputs,
             &prepared,
+            &key.borrowed,
             Some(package),
             fuel,
             &mut round,
         );
         round.effects = previous_effects;
-        let mut summary = result?;
-        summary.arguments = key.instance.arguments.clone();
-        if let Some(instance) = package.runtime_instances.iter().find(|instance| {
-            instance.declaration == key.instance.declaration
-                && instance.arguments == key.instance.arguments
-        }) {
-            for access in &instance.cleanup_accesses {
-                let cost = access.through.iter().fold(
-                    access
-                        .input_fields
-                        .len()
-                        .saturating_add(access.fields.len())
-                        .saturating_add(1),
-                    |cost, path| cost.saturating_add(path.len()).saturating_add(1),
-                );
-                *fuel = fuel
-                    .checked_sub(cost)
-                    .ok_or("cleanup footprint import budget exhausted")?;
-                bound_type(&access.ty, fuel)?;
-                validate_cleanup_access(package, &summary.signature, access, fuel)?;
-                summary.accesses.push(Access {
-                    target: ParameterPlace {
-                        parameter: access.parameter,
-                        input_fields: access.input_fields.clone(),
-                        through: access.through.clone(),
-                        conditions: access.conditions.clone(),
-                        fields: access.fields.clone(),
-                    },
-                    ty: access.ty.clone(),
-                    write: access.write,
-                    read_value: access.read_value,
-                });
+        // Budget failures otherwise surface at an unrelated caller with only
+        // an internal collection name. Report the active instance without
+        // publishing its provisional footprint or claiming non-convergence.
+        let failure = |reason: String| {
+            if reason.contains("exhausted") {
+                format!(
+                    "{reason}; while inferring memory contract for {:?} ({}) [discovered instances: {}, pending instances: {}, previous accesses: {}]",
+                    function.name,
+                    key.instance,
+                    round.queue.len(),
+                    round.pending.len(),
+                    round
+                        .previous
+                        .get(&key)
+                        .map_or(0, |summary| summary.accesses.len()),
+                )
+            } else {
+                reason
             }
-        }
-
-        if summary.accesses.len() > *fuel {
-            return Err("memory summary budget exhausted".into());
-        }
-        *fuel -= summary.accesses.len();
-        summary.accesses.sort_by_cached_key(ToString::to_string);
-        summary.accesses.dedup();
+        };
+        let mut summary = result.map_err(failure)?;
+        finish_instance_summary(
+            package,
+            key.instance.declaration,
+            &key.instance.arguments,
+            &mut summary,
+            fuel,
+        )
+        .map_err(failure)?;
         round.active = None;
         if round.previous.get(&key) != Some(&summary) {
             round.previous.insert(key, summary);
@@ -7356,11 +7896,72 @@ fn infer_context(
             }
         }
     }
-    round
+    let mut summary = round
         .previous
         .remove(&round.queue[0])
-        .ok_or("missing root memory summary".into())
+        .ok_or("missing root memory summary")?;
+    // Value snapshots cover construction and delivery. Pointer-slot mutation
+    // needs a cleanup-time storage transition proof before these reads suffice.
+    summary.may_run_cleanup |= round.used_external_cleanup && round.mutates_pointer_storage;
+    if !borrowed.is_empty()
+        && (summary.may_run_cleanup || summary.accesses.iter().any(|access| access.write))
+    {
+        return Err("borrowed callable premises require a stable read-only memory contract".into());
+    }
+    Ok(summary)
 }
+// Import the same completed cleanup footprint for ordinary and composed calls.
+fn finish_instance_summary(
+    package: &Package,
+    declaration: DeclarationId,
+    arguments: &[Term],
+    summary: &mut Summary,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    summary.arguments = arguments.to_vec();
+    if let Some(instance) = package
+        .runtime_instances
+        .iter()
+        .find(|instance| instance.declaration == declaration && instance.arguments == arguments)
+    {
+        for access in &instance.cleanup_accesses {
+            let cost = access.through.iter().fold(
+                access
+                    .input_fields
+                    .len()
+                    .saturating_add(access.fields.len())
+                    .saturating_add(1),
+                |cost, path| cost.saturating_add(path.len()).saturating_add(1),
+            );
+            *fuel = fuel
+                .checked_sub(cost)
+                .ok_or("cleanup footprint import budget exhausted")?;
+            bound_type(&access.ty, fuel)?;
+            validate_cleanup_access(package, &summary.signature, access, fuel)?;
+            summary.accesses.push(Access {
+                target: ParameterPlace {
+                    parameter: access.parameter,
+                    input_fields: access.input_fields.clone(),
+                    through: access.through.clone(),
+                    conditions: access.conditions.clone(),
+                    fields: access.fields.clone(),
+                },
+                ty: access.ty.clone(),
+                write: access.write,
+                read_value: access.read_value,
+            });
+        }
+    }
+
+    if summary.accesses.len() > *fuel {
+        return Err("memory summary budget exhausted".into());
+    }
+    *fuel -= summary.accesses.len();
+    summary.accesses.sort_by_cached_key(ToString::to_string);
+    summary.accesses.dedup();
+    Ok(())
+}
+
 // Type keys are walked iteratively before recursive cloning/substitution. This
 // is a structural work limit, not a type proposition or normalization step.
 pub(crate) fn bound_type(ty: &Term, fuel: &mut usize) -> Result<(), String> {
@@ -7399,8 +8000,15 @@ pub(crate) fn bound_type(ty: &Term, fuel: &mut usize) -> Result<(), String> {
                 pending.push((subject, depth + 1));
                 pending.extend(arguments.iter().map(|ty| (ty, depth + 1)));
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) => {
+            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
                 pending.push((inner, depth + 1))
+            }
+            Term::ErrorValue { ty, label, value } => {
+                pending.push((ty, depth + 1));
+                if let Some(label) = label {
+                    pending.push((label, depth + 1));
+                }
+                pending.push((value, depth + 1));
             }
             Term::NominalValue { ty, fields, .. } => {
                 pending.push((ty, depth + 1));
@@ -7439,23 +8047,25 @@ pub(crate) fn bound_type(ty: &Term, fuel: &mut usize) -> Result<(), String> {
     }
     Ok(())
 }
-fn derive(
+fn derive_with_borrowed(
     package: &Package,
     declaration: DeclarationId,
     arguments: &[Term],
     inputs: &BTreeMap<CallableInput, CallableResult>,
     prepared: &PreparedCodeInputs,
+    borrowed: &BorrowedCallableInputs,
     fuel: &mut usize,
     round: &mut Round,
 ) -> Result<Summary, String> {
     if round.complete_calls {
-        return infer_context(
+        return infer_borrowed_context(
             package,
             declaration,
             arguments,
             inputs,
             prepared,
             &round.effects,
+            borrowed,
             fuel,
         );
     }
@@ -7499,7 +8109,9 @@ fn derive(
         ids.dedup();
         prepared_ids.insert(input.clone(), ids);
     }
+    borrowed_code::charge(borrowed, fuel)?;
     let key = MemoryInstance {
+        borrowed: borrowed.clone(),
         effects: effects::copy_inputs(&round.effects, fuel)?,
         instance: iir::InstanceKey {
             declaration,
@@ -7561,7 +8173,6 @@ fn derive(
         return Err("memory summary needs a concrete runtime body".into());
     }
     bound_type(&function.signature, fuel)?;
-    bound_type(&function.signature, fuel)?;
     let signature = function
         .signature
         .instantiate_parameters(
@@ -7587,6 +8198,7 @@ fn derive(
             | Term::Nominal { .. }
             | Term::NormalForm { .. }
             | Term::Closure { .. }
+            | Term::ErrorResult { .. }
     ) && pointer_representation(Some(package), result_value, fuel)?
         .is_none()
     {
@@ -7605,6 +8217,7 @@ fn derive(
         signature,
         callable_inputs: inputs.clone(),
         prepared_inputs: prepared.clone(),
+        borrowed_inputs: borrowed.clone(),
         effect_inputs: effects::copy_inputs(&round.effects, fuel)?,
         accesses: vec![],
         may_reject: false,
@@ -7625,11 +8238,14 @@ fn validate_code_premise(
     // NoReturn is private worklist bottom for both named and environment-
     // bearing code. It grants no callable identity or successful invocation.
     if matches!(value, CallableResult::NoReturn)
-        && matches!(expected, Term::Function { .. } | Term::Closure { .. })
+        && matches!(
+            expected,
+            Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+        )
     {
         return Ok(());
     }
-    if !matches!(expected, Term::Function { .. }) {
+    if !matches!(expected, Term::Function { .. } | Term::UnsafeFunction(_)) {
         return Err("memory callable premise path is not a function".into());
     }
     if !matches!(
@@ -7664,6 +8280,7 @@ fn validate_code_premise(
                 body_arguments,
             )
             .map_err(|error| error.to_string())?;
+        let signature = signature.with_unsafe_call_requirement(function.is_unsafe);
         if &signature != expected {
             return Err("memory callable signature disagrees with parameter".into());
         }
@@ -7675,6 +8292,7 @@ fn infer_body(
     arguments: &[Term],
     inputs: &BTreeMap<CallableInput, CallableResult>,
     prepared: &PreparedCodeInputs,
+    borrowed: &BorrowedCallableInputs,
     package: Option<&Package>,
     fuel: &mut usize,
     round: &mut Round,
@@ -7727,6 +8345,8 @@ fn infer_body(
     }
     let code_inputs = borrow_code_inputs(prepared);
     let mut infer = Infer {
+        scope: &function.body,
+        borrowed_callable_slots: BTreeMap::new(),
         local_code: vec![],
         borrowed_code_pointers: BTreeMap::new(),
         stable_capture_roots: BTreeSet::new(),
@@ -7746,12 +8366,12 @@ fn infer_body(
         effect_row: vec![],
         environment: Environment::default(),
         locals: BTreeMap::new(),
+        private_storage_roots: BTreeSet::new(),
         local_storage: vec![],
         loop_states: vec![],
         accesses: vec![],
         may_reject: false,
         may_run_cleanup: false,
-        cleanup_protocol_present: None,
         expression_results: HashMap::new(),
         callable_results: HashMap::new(),
         aggregate_callees: HashMap::new(),
@@ -7766,6 +8386,8 @@ fn infer_body(
         callable_field_returns: BTreeMap::new(),
         code_field_returns: BTreeMap::new(),
     };
+    infer.borrowed_callable_slots =
+        borrowed_code::validate(package, parameters, borrowed, infer.fuel)?;
     let result_view = infer.effect_completion(result)?;
     if let Term::Computation { effects, .. } = result.as_ref() {
         infer.effect_row = effects.clone();
@@ -7830,6 +8452,7 @@ fn infer_body(
         }
     }
     infer.install_code_inputs(&function.parameters, parameters, inputs, &code_inputs)?;
+    infer.record_parameter_cleanup_reads(&function.parameters, parameters, function.body.source)?;
     for predicate in &function.preconditions {
         if !nir::program::checkable_predicate(predicate) {
             return Err("invalid runtime predicate check".into());
@@ -7837,6 +8460,7 @@ fn infer_body(
         infer.walk_guard(predicate, 0)?;
         infer.may_reject |= infer.known_bool(predicate, 0)? != Some(true);
     }
+    infer.prepare_private_storage_roots(&function.body)?;
     infer.walk(&function.body, 0)?;
     let completes = !super::pattern_facts::cannot_complete(&function.body, infer.fuel, 0)?;
     if completes && infer.ty(&function.body.ty)? == **result {
@@ -7850,8 +8474,14 @@ fn infer_body(
         let targets = infer.optional_target(&function.body, 0)?;
         infer.merge_return(targets)?;
     }
-    let callable_result = matches!(result_view, Term::Function { .. });
-    if completes && callable_result && matches!(body_completion, Term::Function { .. }) {
+    let callable_result = matches!(result_view, Term::Function { .. } | Term::UnsafeFunction(_));
+    if completes
+        && callable_result
+        && matches!(
+            body_completion,
+            Term::Function { .. } | Term::UnsafeFunction(_)
+        )
+    {
         let key = infer.callee_key(&function.body)?;
         infer.callable_returns.join(&key, infer.fuel)?;
     }
@@ -7895,6 +8525,7 @@ fn infer_body(
         signature,
         callable_inputs: inputs.clone(),
         prepared_inputs: prepared.clone(),
+        borrowed_inputs: borrowed.clone(),
         effect_inputs: effects::copy_inputs(&infer.round.effects, infer.fuel)?,
         accesses: infer.accesses,
         code_fields: infer.code_field_returns,
@@ -8039,7 +8670,10 @@ pub fn infer_argument(
     fuel: &mut usize,
 ) -> Result<ArgumentSummary, String> {
     if !intrinsic_pointer_value(&expression.ty)
-        && !matches!(expression.ty, Term::Function { .. })
+        && !matches!(
+            expression.ty,
+            Term::Function { .. } | Term::UnsafeFunction(_)
+        )
         && expression.ty != Term::Primitive(Primitive::Void)
         && pointer_representation(Some(package), &expression.ty, fuel)?.is_none()
     {
@@ -8055,6 +8689,8 @@ pub fn infer_argument(
         ..Default::default()
     };
     let mut infer = Infer {
+        scope: expression,
+        borrowed_callable_slots: BTreeMap::new(),
         local_code: vec![],
         borrowed_code_pointers: BTreeMap::new(),
         stable_capture_roots: BTreeSet::new(),
@@ -8074,12 +8710,12 @@ pub fn infer_argument(
         effect_row: vec![],
         environment: Environment::default(),
         locals: BTreeMap::new(),
+        private_storage_roots: BTreeSet::new(),
         local_storage: vec![],
         loop_states: vec![],
         accesses: vec![],
         may_reject: false,
         may_run_cleanup: false,
-        cleanup_protocol_present: None,
         expression_results: HashMap::new(),
         callable_results: HashMap::new(),
         aggregate_callees: HashMap::new(),
@@ -8113,6 +8749,7 @@ pub fn infer_argument(
             infer.install_input_pointer_fields(*binding, *slot, ty)?;
         }
     }
+    infer.prepare_private_storage_roots(expression)?;
     infer.walk(expression, 0)?;
     if !super::pattern_facts::cannot_complete(expression, infer.fuel, 0)? {
         infer.merge_pointer_field_return(expression)?;
@@ -8552,11 +9189,24 @@ fn validate_borrowed_capture_storage<'a>(
     bindings: &BTreeSet<LocalId>,
     fuel: &mut usize,
 ) -> Result<(), String> {
+    validate_capture_storage(true, allow_pointer_rebinding, package, body, bindings, fuel)
+}
+
+// Alias publication is checked over the enclosing scope; writes can instead
+// be checked over the exact lifetime of a handler's candidate snapshot.
+fn validate_capture_storage(
+    check_writes: bool,
+    allow_pointer_rebinding: bool,
+    package: Option<&Package>,
+    body: &Expr,
+    bindings: &BTreeSet<LocalId>,
+    fuel: &mut usize,
+) -> Result<(), String> {
     let mut pending = vec![body];
     while let Some(root) = pending.pop() {
         nir::visit::expression_pruned(root, fuel, |expr, fuel| {
             match &expr.kind {
-                K::Assign { place, value } if bindings.contains(&place.root) => {
+                K::Assign { place, value } if check_writes && bindings.contains(&place.root) => {
                     // A data-only field has no pointer/code provenance to write
                     // back. The ordinary assignment checker below validates its
                     // owner, path and type; repeated invocations retain runtime
@@ -8897,6 +9547,8 @@ fn infer_closure_pass(
         }
     }
     let mut infer = Infer {
+        scope: body,
+        borrowed_callable_slots: BTreeMap::new(),
         local_code: vec![],
         borrowed_code_pointers: BTreeMap::new(),
         stable_capture_roots: BTreeSet::new(),
@@ -8916,12 +9568,12 @@ fn infer_closure_pass(
         effect_row: vec![],
         environment: Environment::default(),
         locals: BTreeMap::new(),
+        private_storage_roots: BTreeSet::new(),
         local_storage: vec![],
         loop_states: vec![],
         accesses: vec![],
         may_reject: false,
         may_run_cleanup: false,
-        cleanup_protocol_present: None,
         expression_results: HashMap::new(),
         callable_results: HashMap::new(),
         aggregate_callees: HashMap::new(),
@@ -8976,7 +9628,7 @@ fn infer_closure_pass(
             .ok_or("closure memory callable premise names an unknown capture")?;
         let capture_ty = infer.ty(&capture.ty)?;
         let expected = owned_path_type(Some(package), &capture_ty, &place.fields, infer.fuel)?;
-        if !matches!(expected, Term::Function { .. })
+        if !matches!(expected, Term::Function { .. } | Term::UnsafeFunction(_))
             || !matches!(
                 callable,
                 CallableResult::Known(_) | CallableResult::Candidates(_)
@@ -9012,6 +9664,7 @@ fn infer_closure_pass(
                     body_arguments,
                 )
                 .map_err(|error| error.to_string())?;
+            let signature = signature.with_unsafe_call_requirement(function.is_unsafe);
             if signature != expected {
                 return Err("closure memory callable signature disagrees with capture".into());
             }
@@ -9030,7 +9683,10 @@ fn infer_closure_pass(
             let ty = infer.ty(&capture.ty)?;
             let leaf = owned_path_type(Some(package), &ty, &place.fields, infer.fuel)?;
             if !place.fields.contains(&VARIANT_FIELD)
-                || !matches!(leaf, Term::Function { .. } | Term::Closure { .. })
+                || !matches!(
+                    leaf,
+                    Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+                )
             {
                 return Err(
                     "empty prepared capture requires a variant-guarded callable leaf".into(),
@@ -9123,7 +9779,9 @@ fn infer_closure_pass(
         );
     }
     infer.install_code_inputs(bindings, parameters, inputs, code_inputs)?;
+    infer.record_parameter_cleanup_reads(bindings, parameters, body.source)?;
     infer.code_field_returns = code_result_bottom(Some(package), result, infer.fuel)?;
+    infer.prepare_private_storage_roots(body)?;
     infer.walk(body, 0)?;
     let completes = !super::pattern_facts::cannot_complete(body, infer.fuel, 0)?;
     if completes {
@@ -9194,6 +9852,40 @@ mod record_layout_tests {
         assert!(readable_representation(None, &code_record, &mut 1000).unwrap());
         assert!(!data_representation(None, &code_record, &mut 1000).unwrap());
     }
+    #[test]
+    fn error_result_pointer_footprints_check_success_and_every_complete_label() {
+        let scalar = Term::Primitive(nir::Primitive::Bool);
+        let pointer = Term::Pointer(Box::new(scalar.clone()));
+        let closed = Term::error_result(vec![scalar.clone()], scalar.clone());
+        require_pointer_free_owned(None, &closed, &mut 1000, 0).unwrap();
+        assert!(require_pointer_free_owned(None, &closed, &mut 1, 0).is_err());
+        for ty in [
+            Term::error_result(vec![scalar.clone()], pointer.clone()),
+            Term::error_result(vec![pointer.clone()], scalar.clone()),
+            Term::error_result(
+                vec![Term::error_result(vec![pointer], scalar.clone())],
+                scalar.clone(),
+            ),
+            Term::error_result(
+                vec![Term::NormalForm {
+                    head: nir::DeclarationId {
+                        package: 0,
+                        local: 1,
+                    },
+                    sort: nir::Sort::Type,
+                    arguments: vec![scalar.clone()],
+                }],
+                scalar,
+            ),
+        ] {
+            assert!(
+                require_pointer_free_owned(None, &ty, &mut 1000, 0).is_err(),
+                "{ty}"
+            );
+        }
+        require_pointer_free_owned(None, &closed, &mut 1000, 0).unwrap();
+    }
+
     #[test]
     fn record_pointer_footprints_recurse_without_inventing_memory_evidence() {
         let scalar = Term::Primitive(nir::Primitive::Bool);
@@ -9370,6 +10062,27 @@ mod borrowed_capture_scope_tests {
 mod pointer_root_tests {
     use super::*;
     #[test]
+    fn closure_storage_projection_uses_environment_and_preserves_bounds() {
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let closure = Term::Closure {
+            environment: vec![Term::Pointer(Box::new(boolean.clone()))],
+            signature: Box::new(Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(nir::Primitive::Void)),
+            }),
+        };
+        let mut traversal = StorageTraversal::new(None, &closure, &[0], &mut 1000).unwrap();
+        assert_eq!(
+            traversal.target.fields,
+            vec![(nir::program::FieldOwner::Anonymous, 0)]
+        );
+        traversal.load(None, &[], &mut 1000).unwrap();
+        assert_eq!(traversal.target.ty, boolean);
+        assert_eq!(traversal.loads.len(), 1);
+        assert!(StorageTraversal::new(None, &closure, &[1], &mut 1000).is_err());
+        assert!(StorageTraversal::new(None, &closure, &[0], &mut 0).is_err());
+    }
+    #[test]
     fn input_field_origins_remain_distinct_from_pointee_projections() {
         let direct = PointerPlace {
             root: PointerRoot::Parameter(0),
@@ -9463,6 +10176,45 @@ mod pointer_root_tests {
         let mut different = exported.clone();
         different.conditions.get_mut(&1).unwrap()[0].1 = 7;
         assert_eq!(BTreeSet::from([exported, different]).len(), 2);
+    }
+
+    #[test]
+    fn error_storage_projection_preserves_payload_guards() {
+        let success = Term::Pointer(Box::new(Term::Primitive(Primitive::Bool)));
+        let failure = Term::Pointer(Box::new(Term::Primitive(Primitive::Char)));
+        let packet = Term::error_result(
+            vec![Term::Record(vec![("pointer".into(), failure.clone())])],
+            success.clone(),
+        );
+        for (path, expected, tag) in [
+            (vec![VARIANT_FIELD, 0, 0], success, 0),
+            (vec![VARIANT_FIELD, 1, 0, 0], failure, 1),
+        ] {
+            let projection = project_owned_storage(None, &packet, &path, &mut 1000).unwrap();
+            assert_eq!(projection.ty, expected);
+            assert_eq!(projection.guards, vec![(vec![], tag)]);
+            assert!(
+                projection
+                    .fields
+                    .iter()
+                    .all(|(owner, _)| *owner == nir::program::FieldOwner::Anonymous)
+            );
+            let root = Term::Record(vec![("packet".into(), packet.clone())]);
+            let rebased = project_owned_storage(None, &root, &[0], &mut 1000)
+                .unwrap()
+                .then(None, &path, &mut 1000)
+                .unwrap();
+            assert_eq!(rebased.guards, vec![(vec![0], tag)]);
+        }
+        for path in [
+            vec![VARIANT_FIELD],
+            vec![VARIANT_FIELD, 2, 0],
+            vec![VARIANT_FIELD, 0, 1],
+            vec![0],
+        ] {
+            assert!(project_owned_storage(None, &packet, &path, &mut 1000).is_err());
+        }
+        assert!(project_owned_storage(None, &packet, &[VARIANT_FIELD, 0, 0], &mut 0).is_err());
     }
 
     #[test]

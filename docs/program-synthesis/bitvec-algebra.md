@@ -39,6 +39,77 @@ assignment -> expr = expr
 
 `BitVec<0>` 只有一个空值。空值是拼接的单位元；对空值取反仍为空，同宽空值比较相等。零宽度没有合法的单比特索引。
 
+当前实现可以在显式延后签名中计算宽度，再按调用点的 comptime 输入形成具体类型：
+
+```flurry
+fn zeros() -> defer .BitVec'builtin<N> where N: .Integer'builtin { 0 }
+fn sized(comptime width: .Integer'builtin) -> defer .BitVec'builtin<width> { 0 }
+fn ones() -> defer .BitVec'builtin<N> where N: .Integer'builtin { not 0 }
+
+fn example() -> bool {
+    let empty = zeros<0>();
+    let wide = sized(1024);
+    empty == 0 and wide[0..512] == 0 and ones<8>() == 255
+}
+```
+
+这里显式写出内建构造器，便于独立运行。负宽度、非整数输入和完成后的类型不匹配仍被拒绝。impl 头或 struct 字段等即时类型形成位置尚不能保留抽象宽度，目前给出诊断而非崩溃；这项实现限制不改变上文允许受约束宽度的语言定义。
+
+在结果上下文尚待形成时，内建 `not` 对整数字面量的操作可以随上下文等待，包括连续取反。定义检查仍验证字面量，具体实例再检查目标域、字面量范围和运算；例如 8 位上下文中的 `not 256` 仍然非法。没有目标上下文的 `let x = not 0` 不会因此取得任意位宽。该路径不赋予 Any 变量位运算能力，也不跳过浮点操作数或自定义运算协议的检查，不能据此推断所有泛型位运算已完成。
+
+宽度计算也可以嵌套在显式延后的函数、指针或可选类型中。例如，转交一个返回指定位宽的回调：
+
+```flurry
+fn relay(comptime width: .Integer'builtin,
+         callback: defer (fn() -> .BitVec'builtin<width>))
+    -> defer (fn() -> .BitVec'builtin<width>) {
+    callback
+}
+
+fn callback_example() -> bool {
+    let callback = relay(65, ones<65>);
+    let nested = || callback();
+    nested() == not 0
+}
+```
+
+调用点先取得 width，再形成完整函数类型；返回 64 位值的函数不能传给 65 位目标。可选类型仍要求有效的 Optional 构造器绑定，指针类型仍保留实际目标类型。
+
+工厂可以转交尚待具体实例确定的声明值 N：
+
+```flurry
+fn factory() -> defer (fn() -> .BitVec'builtin<N>) where N: .Integer'builtin {
+    ones<N>
+}
+
+fn factory_example() -> bool {
+    let empty = factory<0>();
+    let wide = factory<1024>();
+    empty() == 0 and wide() == not 0
+}
+```
+
+定义阶段检查声明、子句域和函数值所需的参数协议，保留未完成的签名描述；具体实例取得 N 后再形成函数值和检查主体。未完成描述不是可执行函数类型，不能用它绕过 callable 所需的依据。函数值的 unsafe 标记、程序前置条件以及尚未支持的 optional／普通 comptime 参数协议不会被这条路径擦除。
+
+工厂的宽度也可以来自普通 comptime 输入，包括可选默认参数：
+
+```flurry
+fn ordinary_factory(comptime width: .Integer'builtin)
+    -> defer (fn() -> .BitVec'builtin<width>) { ones<width> }
+
+fn defaulted_factory(comptime .width: .Integer'builtin = 8)
+    -> defer (fn() -> .BitVec'builtin<width>) { ones<width> }
+
+fn ordinary_factory_example() -> bool {
+    let wide = ordinary_factory(1024);
+    let byte = defaulted_factory();
+    let empty = defaulted_factory(.width = 0);
+    wide() == not 0 and byte() == 255 and empty() == 0
+}
+```
+
+定义检查保留普通输入的参数槽位，调用取得实际值后再完成签名。显式覆盖跳过默认供应；省略参数时默认供应中的契约失败仍会报告。runtime 条件不能被这条路径提升成 comptime 宽度。这是工厂先消耗 comptime 输入再返回普通函数值，不意味着返回的 callable 本身能够擦除尚需供应的 comptime 形参。
+
 ### 宽度、顺序与表示
 
 索引 0 表示最低有效位；索引增大时向高位移动。`a ++ b` 把 a 放在高端、b 放在低端；位模式文本从高位写到低位。

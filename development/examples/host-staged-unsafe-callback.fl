@@ -1,0 +1,17 @@
+-- Runtime function identity crosses comptime through an explicit Splice protocol.
+-- The native program prints (bool true); unsafe call responsibility is retained.
+-- luna host-staged-unsafe-callback.fl --splice-protocol Splice --build run --output /tmp/flurry-staged-unsafe
+
+typealias Raw = unsafe fn(bool) -> bool;
+trait Splice {
+    assoc RuntimeTarget: .Type'builtin;
+    fn splice(comptime data: Self) -> RuntimeTarget;
+}
+impl Splice for Raw {
+    assoc RuntimeTarget: .Type'builtin = Raw;
+    fn splice(comptime data: Raw) -> Raw { data }
+}
+unsafe fn raw(value: bool) -> bool { value }
+comptime fn select() -> Raw { raw }
+const PICKED = select();
+fn run() -> bool { unsafe { PICKED(true) } }

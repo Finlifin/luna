@@ -1,17 +1,20 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- Declaration/implementation checking for method-local generics.
 -- See generic-trait-dispatch.fl for executable calls and specialization.
 trait Readable {}
 trait Rich :- Readable {}
 
 trait Mapper where A {
-    fn pair(first: A, second: B) -> (A, B) where B :- Rich;
+    fn pair(first: A, second: B) -> Tuple<A, B> where B :- Rich;
 }
 
 struct Holder where X {}
 
 impl Mapper<X> for Holder<X> where X {
     -- Names may differ. Requiring Readable is weaker than requiring Rich.
-    fn pair(first: X, second: Y) -> (X, Y) where Y :- Readable {
+    fn pair(first: X, second: Y) -> Tuple<X, Y> where Y :- Readable {
         (first, second)
     }
 }

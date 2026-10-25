@@ -85,3 +85,89 @@ fn callable_domain_validation_rejects_malformed_and_exhausted_inputs() {
     assert!(package.declaration_parameter_domains(&mut 0).is_err());
     assert!(package.declaration_parameter_domains(&mut 1000).is_ok());
 }
+
+#[test]
+fn callable_list_inputs_require_unique_representation_evidence_and_recover() {
+    use nir::function_parameters::validate_arguments;
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    let domain = Term::NormalForm {
+        head: id(20),
+        sort: Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Type)],
+    };
+    let head = Head {
+        declaration: id(20),
+        role: Role::TypeList,
+        parameters: vec![Parameter {
+            declaration: id(21),
+            binding: nir::program::LocalId {
+                owner: 20,
+                index: 0,
+            },
+            kind: Kind::Type,
+            ty: Term::Primitive(Primitive::Type),
+        }],
+        requirements: vec![],
+    };
+    let package = Package {
+        normal_forms: vec![head.clone()],
+        ..Default::default()
+    };
+    let valid = Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]);
+    let check = |package: &Package, value: Term, fuel: &mut usize| {
+        validate_arguments(package, &[id(1)], &[domain.clone()], &[value], fuel)
+    };
+    assert!(check(&package, valid.clone(), &mut 1000).is_ok());
+    assert!(check(&package, Term::TypeListValue(vec![]), &mut 1000).is_ok());
+    for heads in [
+        vec![],
+        vec![Head {
+            role: Role::Opaque,
+            ..head.clone()
+        }],
+        vec![head.clone(), head.clone()],
+    ] {
+        assert!(
+            check(
+                &Package {
+                    normal_forms: heads,
+                    ..Default::default()
+                },
+                valid.clone(),
+                &mut 1000
+            )
+            .is_err()
+        );
+    }
+    for value in [
+        Term::TypeListValue(vec![Term::Bool(true)]),
+        Term::TypeListValue(vec![Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        }]),
+        Term::Bool(true),
+    ] {
+        assert!(check(&package, value, &mut 1000).is_err());
+    }
+    assert!(check(&package, valid.clone(), &mut 0).is_err());
+    assert!(check(&package, valid.clone(), &mut 1000).is_ok());
+    // Resolve a domain supplied through another input, not merely a literal
+    // List<Type> annotation. Full-vector substitution must retain its identity.
+    assert!(
+        validate_arguments(
+            &package,
+            &[id(1), id(2)],
+            &[
+                Term::Primitive(Primitive::Type),
+                Term::Rigid {
+                    declaration: id(1),
+                    sort: Sort::Type
+                },
+            ],
+            &[domain, valid],
+            &mut 1000
+        )
+        .is_ok()
+    );
+}

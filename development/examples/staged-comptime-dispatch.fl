@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Type = .Type'builtin;
 
 trait Inspect {
@@ -22,7 +25,7 @@ where requires T :- Inspect {
     if again { forward(T, value, false) } else { leaf(T, value) }
 }
 
-comptime fn entry() -> (bool, bool) {
+comptime fn entry() -> Tuple<bool, bool> {
     (forward(bool, true, true), leaf(.u8'builtin, 7))
 }
 

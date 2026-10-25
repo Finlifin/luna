@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Byte = .u8'builtin;
 typealias Bool = true'type;
 struct Pair { left: Byte, right: Byte }
@@ -34,7 +37,7 @@ fn rhs_order() -> Byte {
     pair.left = do { pair.right = 10; 20 };
     pair.left + pair.right
 }
-fn copies() -> (Byte, Byte) {
+fn copies() -> Tuple<Byte, Byte> {
     var pair = Pair { left: 4, right: 5 };
     let old = pair;
     let callback = || pair.left + pair.right;

@@ -69,6 +69,87 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         found
     }
 
+    /// Recover declaration contracts from structurally known container results.
+    /// This exports names only: it neither evaluates the receiver nor selects
+    /// an implementation. Every possible container must have an accessible
+    /// member with the same output names; unknown results require more context.
+    fn computed_pattern_member_outputs(
+        &self,
+        receiver: &hir::Expr<'_>,
+        projection: hir::HirId,
+    ) -> Option<Vec<hir::common::Ident>> {
+        use hir::ExprKind as H;
+        let mut pending = vec![receiver];
+        let mut containers = std::collections::BTreeSet::new();
+        let mut fuel = 4096usize;
+        while let Some(value) = pending.pop() {
+            fuel = fuel.checked_sub(1)?;
+            match value.kind {
+                H::ResolvedDef { def_id, .. } => {
+                    containers.insert(def_id);
+                }
+                H::NFApplication(head, _) => pending.push(head),
+                H::Block(block) => pending.push(block.expr?),
+                H::If(_, yes, Some(no)) => {
+                    pending.push(yes.expr?);
+                    pending.push(no);
+                }
+                H::When(arms) if arms.iter().any(|arm| arm.cond.is_none()) => {
+                    pending.extend(arms.iter().map(|arm| arm.body));
+                }
+                H::Match(_, arms) if !arms.is_empty() => {
+                    pending.extend(arms.iter().map(|arm| arm.body));
+                }
+                _ => return None,
+            }
+        }
+        let candidates = self.package.member_access.get(&projection)?;
+        let mut found: Option<Vec<hir::common::Ident>> = None;
+        for container in containers {
+            let mut selected = None;
+            for (parent, member) in candidates.iter() {
+                fuel = fuel.checked_sub(1)?;
+                if *parent == container {
+                    if selected.replace(*member).is_some() {
+                        return None;
+                    }
+                }
+            }
+            let scope = self.resolver.find_scope_for_def(selected?)?;
+            let outputs = self
+                .resolver
+                .scope_tree()
+                .get(scope)?
+                .pattern_result_outputs
+                .as_ref()?;
+            fuel = fuel.checked_sub(outputs.len())?;
+            for (name, _) in outputs {
+                fuel = fuel.checked_sub(name.as_str().len())?;
+            }
+            let outputs: Vec<_> = outputs
+                .iter()
+                .map(|(name, span)| hir::common::Ident {
+                    name: *name,
+                    span: *span,
+                })
+                .collect();
+            if let Some(first) = &found {
+                let names = |items: &[hir::common::Ident]| {
+                    items
+                        .iter()
+                        .map(|item| item.name.as_str().to_string())
+                        .collect::<std::collections::BTreeSet<_>>()
+                };
+                if names(first) != names(&outputs) {
+                    return None;
+                }
+            } else {
+                found = Some(outputs);
+            }
+        }
+        found
+    }
+
     fn pattern_expression_leaf_outputs(
         &self,
         value: &hir::Expr<'_>,
@@ -100,7 +181,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                             // Resolve unique inherited origins before body lowering;
                             // implementation selection and type checking occur later.
                             let hir::ExprKind::Cast(_, interface) = base.kind else {
-                                return None;
+                                return self.computed_pattern_member_outputs(base, callee.hir_id);
                             };
                             let interface = match interface.kind {
                                 hir::ExprKind::NFApplication(head, _) => head,
@@ -364,7 +445,21 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let elem_nodes = self.ast.get_multi_child_slice(elems_node).unwrap_or(&[]);
                 let scope = self.local_enter(resolve::RibKind::MatchBody);
                 let mut pats = Vec::with_capacity(elem_nodes.len());
-                for &node in elem_nodes {
+                let mut rest = None;
+                for (index, &node) in elem_nodes.iter().enumerate() {
+                    if self.ast.get_node_kind(node) == Some(NodeKind::ListRestPattern) {
+                        if rest.is_some() || index + 1 != elem_nodes.len() {
+                            self.emit_malformed(
+                                "list rest pattern must occur once at the end",
+                                span,
+                            );
+                        }
+                        let target = self.ast.get_children(node)[0];
+                        let pattern = self.lower_pattern(target);
+                        self.bind_arm_pattern(target, &pattern);
+                        rest = Some(self.arena.alloc_pattern(pattern));
+                        continue;
+                    }
                     let pattern = self.lower_pattern(node);
                     self.bind_arm_pattern(node, &pattern);
                     pats.push(pattern);
@@ -373,7 +468,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let pats_slice = self.arena.alloc_pattern_slice(pats);
                 Pattern {
                     hir_id: self.next_hir_id(),
-                    kind: PatternKind::List(pats_slice, None),
+                    kind: PatternKind::List(pats_slice, rest),
                     span,
                 }
             }

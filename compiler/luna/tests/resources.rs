@@ -1,4 +1,6 @@
 //! Source resource analysis: moves, captures, control flow and call preparation.
+#[path = "support/execution.rs"]
+mod tuple_support;
 use luna::{
     cli::{Emit, Options},
     frontend::{self, Artifact},
@@ -1462,6 +1464,9 @@ fn compile_in_with_resources(
             splice_protocol: None,
             meta_list_type: None,
             index_protocol: None,
+            ord_protocol: None,
+            eq_protocol: None,
+            list_pattern_protocol: None,
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             tuple_type: None,
@@ -1713,15 +1718,15 @@ fn destructuring_transfers_each_owned_component_once() {
     use elaboration::verification::moves::{Delivery, analyze_in_package};
     let cases = [
         (
-            "fn run(value:(Ticket,Ticket)) {let (left,right)=value; take(left); take(right);}",
+            "fn run(value:Tuple<Ticket,Ticket>) {let (left,right)=value; take(left); take(right);}",
             true,
         ),
         (
-            "fn run(value:(Ticket,Ticket)) {let (left,right)=value; take(left); take(left);}",
+            "fn run(value:Tuple<Ticket,Ticket>) {let (left,right)=value; take(left); take(left);}",
             false,
         ),
         (
-            "fn run(value:(Ticket,Ticket)) {let (left,right)=value; let again=value;}",
+            "fn run(value:Tuple<Ticket,Ticket>) {let (left,right)=value; let again=value;}",
             false,
         ),
         (
@@ -1733,12 +1738,12 @@ fn destructuring_transfers_each_owned_component_once() {
             false,
         ),
         (
-            "fn run(value:Wrapper<(Ticket,Ticket)>) {let {item:(left,right)}=value; take(left); take(right);}",
+            "fn run(value:Wrapper<Tuple<Ticket,Ticket>>) {let {item:(left,right)}=value; take(left); take(right);}",
             true,
         ),
     ];
     for (body, accepted) in cases {
-        let package = compile(&format!(
+        let package = tuple_support::compile_with_tuple(&format!(
             "struct Ticket {{}} struct Pair {{left:Ticket,right:Ticket}} struct Wrapper where T {{item:T}} fn take(value:Ticket) {{}} {body}"
         ));
         let function = package.functions.iter().find(|f| f.name == "run").unwrap();
@@ -1753,8 +1758,8 @@ fn destructuring_transfers_each_owned_component_once() {
 #[test]
 fn wildcard_destructuring_retains_exact_residual_cleanup_paths() {
     use elaboration::verification::moves::{Delivery, analyze_in_package};
-    let package = compile(
-        "struct Ticket {} struct Pair {left:Ticket,right:Ticket} fn take(value:Ticket) {} fn tuple(value:((Ticket,Ticket),Ticket)) {let ((_,picked),_)=value; take(picked);} fn record(value:Pair) {let {left}=value; take(left);}",
+    let package = tuple_support::compile_with_tuple(
+        "struct Ticket {} struct Pair {left:Ticket,right:Ticket} fn take(value:Ticket) {} fn tuple(value:Tuple<Tuple<Ticket,Ticket>,Ticket>) {let ((_,picked),_)=value; take(picked);} fn record(value:Pair) {let {left}=value; take(left);}",
     );
     for (name, paths) in [
         ("tuple", vec![vec![0, 0], vec![1]]),
@@ -1786,8 +1791,8 @@ fn wildcard_destructuring_retains_exact_residual_cleanup_paths() {
 #[test]
 fn overlapping_pattern_moves_are_not_silently_accepted() {
     use elaboration::verification::moves::{Delivery, analyze_in_package};
-    let package = compile(
-        "struct Ticket {} fn overlap(value:(Ticket,Ticket)) {let (left,right) as whole=value;} fn refutable(value:bool) {let true=value else {return;};}",
+    let package = tuple_support::compile_with_tuple(
+        "struct Ticket {} fn overlap(value:Tuple<Ticket,Ticket>) {let (left,right) as whole=value;} fn refutable(value:bool) {let true=value else {return;};}",
     );
     for (name, message) in [("overlap", "overlapping")] {
         let function = package.functions.iter().find(|f| f.name == name).unwrap();
@@ -2202,7 +2207,7 @@ fn match_arms_transfer_owned_payloads_and_join_only_live_paths() {
             true,
         ),
         (
-            "fn run(value:(Ticket,bool)) {value match {(item,true)=>take(item),(item,false)=>take(item)}}",
+            "fn run(value:Tuple<Ticket,bool>) {value match {(item,true)=>take(item),(item,false)=>take(item)}}",
             true,
         ),
         (
@@ -2211,7 +2216,7 @@ fn match_arms_transfer_owned_payloads_and_join_only_live_paths() {
         ),
     ];
     for (body, accepted) in cases {
-        let package = compile(&format!(
+        let package = tuple_support::compile_with_tuple(&format!(
             "struct Ticket {{}} enum Maybe where T {{none,some(T)}} fn take(value:Ticket) {{}} {body}"
         ));
         let function = package.functions.iter().find(|f| f.name == "run").unwrap();
@@ -2352,7 +2357,7 @@ fn guard_observation_checks_availability_and_rejects_unmodeled_effects() {
         ),
         (
             "fn run(value:Maybe<Ticket>) {value match {.some(item) if consume(item)=>(),_=>()}}",
-            "failure-path",
+            "observation cleanup requires captured selection evidence",
         ),
     ];
     for (body, message) in sources {
@@ -3744,8 +3749,8 @@ fn record_patterns_keep_one_residual_parent_after_partial_or_complete_field_tran
 #[test]
 fn nested_generic_patterns_retain_each_enclosing_object_and_exact_residual_path() {
     use elaboration::verification::moves::{CleanupAction, Delivery, analyze_in_package};
-    let package = compile(
-        "struct Ticket {} struct Wrap where T {value:T,tag:Ticket} fn take(value:Ticket) {} fn run(value:Wrap<(Ticket,Ticket)>) {let {value:(picked,_),tag}=value;take(picked);take(tag);}",
+    let package = tuple_support::compile_with_tuple(
+        "struct Ticket {} struct Wrap where T {value:T,tag:Ticket} fn take(value:Ticket) {} fn run(value:Wrap<Tuple<Ticket,Ticket>>) {let {value:(picked,_),tag}=value;take(picked);take(tag);}",
     );
     let function = package.functions.iter().find(|f| f.name == "run").unwrap();
     let report = analyze_in_package(&package, function, |_| Ok(Delivery::Move), 20000).unwrap();
@@ -3828,8 +3833,8 @@ fn enum_pattern_cleanup_keeps_selected_variant_with_its_residual_payload() {
 #[test]
 fn nested_enum_selection_is_relative_to_the_whole_subject() {
     use elaboration::verification::moves::{CleanupAction, Delivery, analyze_in_package};
-    let package = compile(
-        "struct Ticket {} enum Choice where T {none,some(T,T)} fn take(value:Ticket) {} fn run(value:(Choice<Ticket>,Ticket)) {value match {(.some(item,_),last)=>{take(item);take(last);},_=>()}} ",
+    let package = tuple_support::compile_with_tuple(
+        "struct Ticket {} enum Choice where T {none,some(T,T)} fn take(value:Ticket) {} fn run(value:Tuple<Choice<Ticket>,Ticket>) {value match {(.some(item,_),last)=>{take(item);take(last);},_=>()}} ",
     );
     let function = package.functions.iter().find(|f| f.name == "run").unwrap();
     let report = analyze_in_package(&package, function, |_| Ok(Delivery::Move), 20000).unwrap();
@@ -3992,7 +3997,7 @@ fn invalid_normalized_variant_layout_fails_without_changing_the_valid_subject_pl
     *index = usize::MAX;
     let before = invalid.to_string();
     let error = analyze_in_package(&package, &invalid, |_| Ok(Delivery::Move), 20000).unwrap_err();
-    assert!(error.reason.contains("index out of bounds"), "{error}");
+    assert!(error.reason.contains("out of bounds"), "{error}");
     assert_eq!(invalid.to_string(), before);
     assert!(analyze_in_package(&package, function, |_| Ok(Delivery::Move), 1).is_err());
     assert_eq!(
@@ -4549,8 +4554,9 @@ fn recursive_memory_fixed_point_uses_a_worklist_for_long_call_chains() {
 #[test]
 fn recursive_memory_fixed_point_bounds_exponentially_growing_type_instances() {
     use elaboration::verification::memory;
-    let package =
-        compile("fn grow()->bool where T { grow<(T,T)>() } fn read(p:*bool)->bool { p.* }");
+    let package = tuple_support::compile_with_tuple(
+        "fn grow()->bool where T { grow<Tuple<T,T>>() } fn read(p:*bool)->bool { p.* }",
+    );
     let grow = package.functions.iter().find(|f| f.name == "grow").unwrap();
     let read = package.functions.iter().find(|f| f.name == "read").unwrap();
     let before = package.to_string();
@@ -5692,8 +5698,8 @@ fn pattern_pointer_origins_follow_nested_bindings_and_owned_subtrees() {
             } else {
                 "p.*"
             };
-            let package = compile(&format!(
-                "struct Cell {{value:bool,}} struct Holder {{ptr:*bool,}} struct Outer {{pair:(*bool,*bool),}} struct Nested {{inner:Holder,}} fn run() {{let first=Cell {{value:true}}; let second=Cell {{value:false}}; {setup} {moved} let seen={access};}}"
+            let package = tuple_support::compile_with_tuple(&format!(
+                "struct Cell {{value:bool,}} struct Holder {{ptr:*bool,}} struct Outer {{pair:Tuple<*bool,*bool>,}} struct Nested {{inner:Holder,}} fn run() {{let first=Cell {{value:true}}; let second=Cell {{value:false}}; {setup} {moved} let seen={access};}}"
             ));
             let run = package.functions.iter().find(|f| f.name == "run").unwrap();
             let result = analyze_in_package(
@@ -6407,7 +6413,7 @@ fn memory_match_call_sites_check_every_returned_owner_and_guard_access() {
 }
 
 #[test]
-fn memory_match_summaries_support_scalar_alternatives_but_reject_unmodeled_guard_effects() {
+fn memory_match_summaries_describe_writes_without_authorizing_guard_effects() {
     use elaboration::verification::memory;
     let package = compile(
         "fn select(flag:bool,p:*bool)->*bool {flag match {(true or false) as seen if seen=>p,_=>p}}",
@@ -6436,9 +6442,29 @@ fn memory_match_summaries_support_scalar_alternatives_but_reject_unmodeled_guard
         .iter()
         .find(|f| f.name == "select")
         .unwrap();
-    let error =
-        memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap_err();
-    assert!(error.contains("read-only"), "{error}");
+    let summary =
+        memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap();
+    assert!(
+        summary
+            .accesses
+            .iter()
+            .any(|a| a.target.parameter == 0 && a.write),
+        "{summary}"
+    );
+    // A descriptive write footprint is not permission for an observing guard.
+    let error = elaboration::verification::moves::analyze_in_package_with_borrows(
+        &package,
+        function,
+        |_| Ok(elaboration::verification::moves::Delivery::Copy),
+        100000,
+        None,
+        &[
+            (0, nir::Term::Primitive(nir::Primitive::Bool)),
+            (1, nir::Term::Primitive(nir::Primitive::Bool)),
+        ],
+    )
+    .unwrap_err();
+    assert!(error.reason.contains("observation"), "{error}");
 }
 
 #[test]
@@ -9226,8 +9252,8 @@ fn variadic_collections_transfer_each_affine_input_once_in_source_order() {
         ("take(first,second);consume(first);", false),
         ("take(first,do {return;second});", true),
     ] {
-        let package = compile(&format!(
-            "struct Ticket {{}} fn consume(value:Ticket) {{}} fn take(...items:(Ticket,Ticket),.flag:bool=false) {{}} fn run(first:Ticket,second:Ticket) {{{body}}}"
+        let package = tuple_support::compile_with_tuple(&format!(
+            "struct Ticket {{}} fn consume(value:Ticket) {{}} fn take(...items:Tuple<Ticket,Ticket>,.flag:bool=false) {{}} fn run(first:Ticket,second:Ticket) {{{body}}}"
         ));
         let function = package.functions.iter().find(|f| f.name == "run").unwrap();
         let result = analyze_in_package(
@@ -9395,8 +9421,8 @@ fn distinct_collection_entries_do_not_duplicate_affine_inputs() {
         ("first,field:first,second", false),
         ("field:first,first,second", false),
     ] {
-        let package = compile(&format!(
-            "struct Ticket {{}} fn take(...items:(Ticket,Ticket),...properties:T) where T {{}} fn run(first:Ticket,second:Ticket) {{take {{{inputs}}};}}"
+        let package = tuple_support::compile_with_tuple(&format!(
+            "struct Ticket {{}} fn take(...items:Tuple<Ticket,Ticket>,...properties:T) where T {{}} fn run(first:Ticket,second:Ticket) {{take {{{inputs}}};}}"
         ));
         let function = package.functions.iter().find(|f| f.name == "run").unwrap();
         let result = analyze_in_package(
@@ -9453,8 +9479,8 @@ fn generic_trait_method_values_preserve_affine_argument_delivery() {
 #[test]
 fn captured_field_evidence_checks_layout_type_and_budget() {
     use elaboration::verification::moves::{self, CallableParameter, Delivery};
-    let package = compile(
-        "struct Operations {pair:(fn(bool)->bool,bool)} typealias Callback=%{ops:Operations} fn(bool)->bool; fn negate(value:bool)->bool {not value} fn make()->Callback {let ops=Operations {pair:(negate,false)};|value:bool| {let (action,_)=ops.pair;action(value)}} fn invoke(callback:Callback,value:bool)->bool {callback(value)}",
+    let package = tuple_support::compile_with_tuple(
+        "struct Operations {pair:Tuple<fn(bool)->bool,bool>} typealias Callback=%{ops:Operations} fn(bool)->bool; fn negate(value:bool)->bool {not value} fn make()->Callback {let ops=Operations {pair:(negate,false)};|value:bool| {let (action,_)=ops.pair;action(value)}} fn invoke(callback:Callback,value:bool)->bool {callback(value)}",
     );
     let make = package.functions.iter().find(|f| f.name == "make").unwrap();
     let invoke = package
@@ -9516,8 +9542,8 @@ fn captured_field_evidence_checks_layout_type_and_budget() {
 #[test]
 fn aggregate_result_evidence_keeps_independent_exit_paths() {
     use elaboration::verification::moves::{self, Delivery};
-    let package = compile(
-        "fn known()->bool {true} fn make(flag:bool,action:fn()->bool)->(fn()->bool,bool) {if flag {return (known,true);}(action,false)}",
+    let package = tuple_support::compile_with_tuple(
+        "fn known()->bool {true} fn make(flag:bool,action:fn()->bool)->Tuple<fn()->bool,bool> {if flag {return (known,true);}(action,false)}",
     );
     let make = package.functions.iter().find(|f| f.name == "make").unwrap();
     let analyze = |fuel| moves::analyze_in_package(&package, make, |_| Ok(Delivery::Copy), fuel);
@@ -10376,8 +10402,8 @@ fn captured_memory_callable_paths_validate_layout_and_preserve_unknowns() {
         moves::{self, Delivery},
     };
     use std::collections::BTreeMap;
-    let package = compile(
-        "struct Ops {pair:(fn(*bool)->*bool,bool)} fn set(value:*bool)->*bool {value.* = true;value} fn make()->%{ops:Ops} fn(*bool)->*bool {let ops=Ops {pair:(set,false)};|value:*bool| {let (action,_)=ops.pair;action(value)}}",
+    let package = tuple_support::compile_with_tuple(
+        "struct Ops {pair:Tuple<fn(*bool)->*bool,bool>} fn set(value:*bool)->*bool {value.* = true;value} fn make()->%{ops:Ops} fn(*bool)->*bool {let ops=Ops {pair:(set,false)};|value:*bool| {let (action,_)=ops.pair;action(value)}}",
     );
     let make = package.functions.iter().find(|f| f.name == "make").unwrap();
     let report = moves::analyze_in_package(&package, make, |_| Ok(Delivery::Copy), 100000).unwrap();
@@ -10439,8 +10465,8 @@ fn captured_memory_callable_paths_validate_layout_and_preserve_unknowns() {
 #[test]
 fn recursive_aggregate_memory_results_keep_bottom_distinct_from_unknown() {
     use elaboration::verification::memory::{self, CallableResult};
-    let package = compile(
-        "struct Ops {pair:(fn(*bool)->*bool,bool)} fn first(value:*bool)->*bool {value} fn second(value:*bool)->*bool {value.* = true;value} fn left(flag:bool)->Ops {if flag {return Ops {pair:(first,true)};}right(true)} fn right(flag:bool)->Ops {if flag {return Ops {pair:(second,false)};}left(true)} fn unproven(action:fn(*bool)->*bool)->Ops {Ops {pair:(action,false)}} fn anon_result()->Ops {Ops {pair:(|value:*bool|value,false)}} fn cycle()->Ops {cycle()}",
+    let package = tuple_support::compile_with_tuple(
+        "struct Ops {pair:Tuple<fn(*bool)->*bool,bool>} fn first(value:*bool)->*bool {value} fn second(value:*bool)->*bool {value.* = true;value} fn left(flag:bool)->Ops {if flag {return Ops {pair:(first,true)};}right(true)} fn right(flag:bool)->Ops {if flag {return Ops {pair:(second,false)};}left(true)} fn unproven(action:fn(*bool)->*bool)->Ops {Ops {pair:(action,false)}} fn anon_result()->Ops {Ops {pair:(|value:*bool|value,false)}} fn cycle()->Ops {cycle()}",
     );
     let infer = |name: &str, fuel| {
         memory::infer_in_package(
@@ -14508,7 +14534,7 @@ fn computed_data_match_let_else_summary_retains_failure_return_origin() {
 }
 
 #[test]
-fn guard_memory_summary_tracks_nested_call_reads_and_rejects_external_block_writes() {
+fn guard_memory_summary_tracks_nested_reads_writes_and_region_boundaries() {
     use elaboration::verification::memory;
     for (guard, valid) in [
         ("accept(accept(gate.*))", true),
@@ -14537,7 +14563,7 @@ fn guard_memory_summary_tracks_nested_call_reads_and_rejects_external_block_writ
         ),
         ("do {gate.* = true;true}", false),
         ("do {outside=true;true}", false),
-        ("do {let pointer=gate;pointer.*}", false),
+        ("do {let pointer=gate;pointer.*}", true),
         (
             "gate.* match {true=>do {outside=true;true},false=>false}",
             false,
@@ -14567,6 +14593,15 @@ fn guard_memory_summary_tracks_nested_call_reads_and_rejects_external_block_writ
                 "{summary}"
             );
             assert!(!summary.accesses.iter().any(|a| a.write), "{summary}");
+        } else if guard == "do {gate.* = true;true}" {
+            let summary = result.unwrap();
+            assert!(
+                summary
+                    .accesses
+                    .iter()
+                    .any(|a| a.target.parameter == 1 && a.write),
+                "{summary}"
+            );
         } else {
             assert!(result.unwrap_err().contains("memory guard"));
         }
@@ -15909,9 +15944,9 @@ fn conditional_loop_dependencies_exclude_unrelated_sibling_fields() {
 fn tuple_pointer_slots_cross_calls_without_losing_snapshot_or_write_identity() {
     use elaboration::verification::{Limits, flow};
     for (ty, pattern, first, second) in [
-        ("(Byte,*Byte)", "(_,target)", "(0,a.ref)", "(1,b.ref)"),
+        ("Tuple<Byte,*Byte>", "(_,target)", "(0,a.ref)", "(1,b.ref)"),
         (
-            "((Byte,*Byte),bool)",
+            "Tuple<Tuple<Byte,*Byte>,bool>",
             "((_,target),_)",
             "((0,a.ref),true)",
             "((1,b.ref),false)",
@@ -15936,23 +15971,18 @@ fn tuple_pointer_slots_cross_calls_without_losing_snapshot_or_write_identity() {
                         "payload.ref",
                     )
                 };
-                let extra_copy = if ty == "(Byte,*Byte)" {
-                    String::new()
-                } else {
-                    format!("impl Duplicate for {ty} {{}}")
-                };
                 let binding_ty = if record { "Holder" } else { ty };
-                let package = compile_in_with_resources(&format!(
+                let package = tuple_support::compile_with_tuple_selectors(&format!(
                     "trait Duplicate {{}} trait Retire {{fn drop(*self);}} typealias Byte=.u8'builtin;
-                    impl Duplicate for (Byte,*Byte) {{}} {extra_copy}
+                    impl Duplicate for Tuple<A,B> where A, B {{}}
                     struct Holder {{payload:{ty}}}
                     fn pick(p:{parameter})->*Byte {{let {pattern}={read};target}}
                     fn relay(p:{parameter})->*Byte {{pick(p)}}
-                    fn run() {{var a:Byte=7;var b:Byte=19;var payload:{binding_ty}={initial};
+                    fn run() {{var a:Byte=7;var b:Byte=19;var payload:{binding_ty} = {initial};
                         let saved=relay({address});{replacement}
                         let current=relay({address});current.* = 23;
                         assumes saved.* == 7;assumes current.* == {expected};}}"
-                ),0,Some("Duplicate"),Some("Retire"));
+                ), &Default::default(), luna::protocols::type_constructors::Selectors { copy:Some("Duplicate"), drop:Some("Retire"), ..Default::default() }).unwrap();
                 let run = package.functions.iter().find(|f| f.name == "run").unwrap();
                 let report =
                     flow::analyze_in_package(&package, run, &mut Limits::default()).unwrap();
@@ -15991,7 +16021,7 @@ fn completed_aggregate_constants_supply_field_facts_without_sharing_mutable_stor
     for (declaration, ty, initial, extract, replace, correct) in [
         (
             "",
-            "(Byte,Byte)",
+            "Tuple<Byte,Byte>",
             "(7,19)",
             "let (left,right)=value;",
             "value=(23,29);",
@@ -15999,7 +16029,7 @@ fn completed_aggregate_constants_supply_field_facts_without_sharing_mutable_stor
         ),
         (
             "",
-            "((Byte,bool),Byte)",
+            "Tuple<Tuple<Byte,bool>,Byte>",
             "((7,true),19)",
             "let ((left,flag),right)=value;",
             "value=((23,false),29);",
@@ -16017,7 +16047,7 @@ fn completed_aggregate_constants_supply_field_facts_without_sharing_mutable_stor
             "enum Choice {none,pair(Byte,Byte)}",
             "Choice",
             "Choice.pair(7,19)",
-            "let (left,right):(Byte,Byte)=value match {.none=>(0,0),.pair(a,b)=>(a,b)};",
+            "let (left,right):Tuple<Byte,Byte> = value match {.none=>(0,0),.pair(a,b)=>(a,b)};",
             "value=Choice.none;",
             "left==7 and right==19",
         ),
@@ -16028,9 +16058,9 @@ fn completed_aggregate_constants_supply_field_facts_without_sharing_mutable_stor
             } else {
                 format!("not ({correct})")
             };
-            let package = compile(&format!(
-                "typealias Byte=.u8'builtin;{declaration} const seed:{ty}={initial};
-                comptime fn run() {{var value:{ty}=seed;{extract}{replace}assumes {condition};}}"
+            let package = tuple_support::compile_with_tuple(&format!(
+                "typealias Byte=.u8'builtin;{declaration} const seed:{ty} = {initial};
+                comptime fn run() {{var value:{ty} = seed;{extract}{replace}assumes {condition};}}"
             ));
             let run = package.functions.iter().find(|f| f.name == "run").unwrap();
             let report = flow::analyze_in_package(&package, run, &mut Limits::default()).unwrap();
@@ -16049,4 +16079,399 @@ fn completed_aggregate_constants_supply_field_facts_without_sharing_mutable_stor
             }
         }
     }
+}
+
+#[test]
+fn monotone_cubic_correlations_prove_unsigned_subtraction_safety() {
+    let package = compile(
+        "typealias Byte=.u8'builtin;
+        fn cubic(value:Byte)->Byte where requires (value >= 1 and value <= 6) {
+            value * value * value - value
+        }
+        fn run()->Byte {cubic(6)}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::UnsignedInteger(210)
+    );
+}
+
+#[test]
+fn borrowed_string_views_do_not_gain_pointer_free_layout_from_copy() {
+    for (extra, body) in [
+        ("fn inspect(value:str)->bool {true}", "inspect(\"static\")"),
+        (
+            "struct Text {view:str} fn inspect(value:Text)->bool {true}",
+            "inspect(Text {view:\"static\"})",
+        ),
+        (
+            "fn inspect(value:Tuple<bool,str>)->bool {true}",
+            "inspect((true,\"static\"))",
+        ),
+    ] {
+        let package = tuple_support::compile_with_tuple(&format!(
+            "typealias str=.str'builtin; trait Duplicate {{}} trait Retire {{fn drop(*self);}} impl Duplicate for str {{}} {extra} fn entry()->bool {{{body}}}"
+        ));
+        let error = luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            100_000,
+        )
+        .unwrap_err();
+        assert!(error.contains("string-view memory provenance"), "{error}");
+        assert!(error.contains("backing character storage"), "{error}");
+    }
+}
+
+#[test]
+fn handler_lexical_data_return_keeps_parameter_accesses_separate_from_completion() {
+    use elaboration::verification::memory;
+    for result in ["bool", "Byte"] {
+        for value in ["value.*", "do {value.* = true; value.*}"] {
+            let package = compile(&format!(
+                "typealias Byte = .u8'builtin;
+                 effect inspect(pointer:*bool)->{result};
+                 fn subject(pointer:*bool)->#inspect {result} {{inspect(pointer)#}}
+                 fn handled(pointer:*bool)->bool {{
+                    subject(pointer)# {{inspect(value)=>do {{value.* = true;return {value};}},}};
+                    false
+                 }}"
+            ));
+            let function = package
+                .functions
+                .iter()
+                .find(|f| f.name == "handled")
+                .unwrap();
+            let infer = |fuel: &mut usize| {
+                memory::infer_in_package(&package, function.declaration, &[], fuel)
+            };
+            let summary = infer(&mut 100000).unwrap();
+            assert!(summary.effect_inputs.is_empty(), "{summary}");
+            assert!(summary.result_targets.is_none(), "{summary}");
+            assert!(
+                summary
+                    .accesses
+                    .iter()
+                    .any(|a| a.target.parameter == 0 && a.read_value),
+                "{summary}"
+            );
+            assert!(
+                summary
+                    .accesses
+                    .iter()
+                    .any(|a| a.target.parameter == 0 && a.write),
+                "{summary}"
+            );
+            assert!(infer(&mut 1).is_err());
+            assert_eq!(summary, infer(&mut 100000).unwrap());
+        }
+    }
+}
+
+#[test]
+fn handler_local_closure_accesses_are_charged_at_invocation() {
+    use elaboration::verification::memory;
+    for (body, invoked) in [
+        (
+            "let change=|| {value.* = true; return value.*;}; return change();",
+            true,
+        ),
+        (
+            "let change=|| {value.* = true; return value.*;}; return false;",
+            false,
+        ),
+        (
+            "let borrow=|| {return value;}; let local=borrow(); local.* = true; return local.*;",
+            true,
+        ),
+    ] {
+        let package = compile(&format!(
+            "effect inspect(pointer:*bool)->bool;
+             fn subject(pointer:*bool)->#inspect bool {{inspect(pointer)#}}
+             fn handled(pointer:*bool)->bool {{
+                subject(pointer)# {{inspect(value)=>do {{{body}}},}};
+                false
+             }}"
+        ));
+        let function = package
+            .functions
+            .iter()
+            .find(|f| f.name == "handled")
+            .unwrap();
+        let mut handler = None;
+        nir::visit::expression(&function.body, &mut 10000, |node, _| {
+            if let nir::program::ExprKind::EffectHandle { handlers, .. } = &node.kind {
+                handler = Some(handlers[0].clone());
+            }
+            Ok(())
+        })
+        .unwrap();
+        let handler = handler.unwrap();
+        let infer = |fuel: &mut usize| {
+            memory::infer_handler_arm_memory(&package, &handler, &handler.arms[0], fuel)
+        };
+        let summary = infer(&mut 100000).unwrap();
+        assert!(summary.memory.result_targets.is_none(), "{summary}");
+        assert_eq!(
+            summary
+                .accesses
+                .iter()
+                .any(|a| a.parameter == 0 && a.read_value),
+            invoked,
+            "{summary}"
+        );
+        assert_eq!(
+            summary.accesses.iter().any(|a| a.parameter == 0 && a.write),
+            invoked,
+            "{summary}"
+        );
+        assert!(infer(&mut 1).is_err());
+        assert_eq!(summary, infer(&mut 100000).unwrap());
+    }
+}
+
+#[test]
+fn nested_handler_resume_retains_following_parameter_accesses() {
+    use elaboration::verification::memory;
+    for exit in ["false", "resume false;"] {
+        let package = compile(&format!(
+            "effect inspect(first:*bool,second:*bool)->bool;
+             effect change(pointer:*bool)->bool;
+             fn handled(first:*bool,second:*bool)->bool {{
+                inspect(first,second)# {{inspect(a,b)=>do {{
+                    change(a)# {{change(target)=>do {{target.* = true; {exit}}},}};
+                    b.* = true;
+                    return a.* and b.*;
+                }},}};
+                false
+             }}"
+        ));
+        let function = package
+            .functions
+            .iter()
+            .find(|f| f.name == "handled")
+            .unwrap();
+        let infer =
+            |fuel: &mut usize| memory::infer_in_package(&package, function.declaration, &[], fuel);
+        let summary = infer(&mut 100000).unwrap();
+        for parameter in [0, 1] {
+            assert!(
+                summary
+                    .accesses
+                    .iter()
+                    .any(|a| a.target.parameter == parameter && a.write),
+                "{summary}"
+            );
+            assert!(
+                summary
+                    .accesses
+                    .iter()
+                    .any(|a| a.target.parameter == parameter && a.read_value),
+                "{summary}"
+            );
+        }
+        assert!(summary.effect_inputs.is_empty(), "{summary}");
+        assert!(infer(&mut 1).is_err());
+        assert_eq!(summary, infer(&mut 100000).unwrap());
+    }
+}
+
+#[test]
+fn handler_memory_captures_complete_stable_callback_evidence() {
+    use elaboration::verification::memory;
+    for callback in [
+        "change",
+        "|value:*bool| {value.* = true;}",
+        "|value:*bool| {value.* = flag;}",
+        "if flag {change} else {other}",
+    ] {
+        for invocation in [
+            "callback(value)",
+            "relay(value)# {relay(target)=>do {callback(target);false},}",
+        ] {
+            let package = compile(&format!(
+                "effect inspect(pointer:*bool)->bool;
+             effect relay(pointer:*bool)->bool;
+             fn subject(pointer:*bool)->#inspect bool {{inspect(pointer)#}}
+             fn change(value:*bool) {{value.* = true;}}
+             fn other(value:*bool) {{value.* = false;}}
+             fn handled(pointer:*bool,flag:bool)->bool {{
+                let callback={callback};
+                subject(pointer)# {{inspect(value)=>do {{{invocation};return value.*;}},}};
+                false
+             }}"
+            ));
+            let function = package
+                .functions
+                .iter()
+                .find(|f| f.name == "handled")
+                .unwrap();
+            let infer = |fuel: &mut usize| {
+                memory::infer_in_package(&package, function.declaration, &[], fuel)
+            };
+            let summary = infer(&mut 100000).unwrap();
+            assert!(
+                summary
+                    .accesses
+                    .iter()
+                    .any(|a| a.target.parameter == 0 && a.write),
+                "{summary}"
+            );
+            assert!(
+                summary
+                    .accesses
+                    .iter()
+                    .any(|a| a.target.parameter == 0 && a.read_value),
+                "{summary}"
+            );
+            assert!(summary.effect_inputs.is_empty(), "{summary}");
+            assert!(infer(&mut 1).is_err());
+            assert_eq!(summary, infer(&mut 100000).unwrap());
+        }
+    }
+}
+
+#[test]
+fn handler_memory_callback_snapshot_rejects_mutation_and_address_exposure() {
+    use elaboration::verification::memory;
+    for (before, subject, body) in [
+        (
+            "",
+            "inspect(pointer)#",
+            "callback=other; callback(value); false",
+        ),
+        (
+            "let alias=callback.ref;",
+            "inspect(pointer)#",
+            "callback(value); false",
+        ),
+        (
+            "",
+            "(do {callback=other;inspect(pointer)#})#",
+            "callback(value); false",
+        ),
+    ] {
+        let package = compile(&format!(
+            "effect inspect(pointer:*bool)->bool;
+             fn change(value:*bool) {{value.* = true;}}
+             fn other(value:*bool) {{value.* = false;}}
+             fn handled(pointer:*bool)->bool {{
+                var callback=change;
+                {before}
+                {subject} {{inspect(value)=>do {{{body}}},}}
+             }}"
+        ));
+        let function = package
+            .functions
+            .iter()
+            .find(|f| f.name == "handled")
+            .unwrap();
+        let error =
+            memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap_err();
+        assert!(
+            error.contains("rebinding") || error.contains("addressing captured"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn handler_memory_does_not_invent_opaque_callback_behavior() {
+    use elaboration::verification::memory;
+    for source in [
+        "effect inspect(pointer:*bool)->bool;
+        fn handled(pointer:*bool, callback:fn(*bool)->bool)->bool {
+            inspect(pointer)# {inspect(value)=>callback(value),}
+        }",
+        "typealias Action=fn(*bool)->bool;enum Choice {none,some(Action)}
+         effect inspect(pointer:*bool)->bool;
+         fn handled(pointer:*bool,callback:Choice)->bool {
+             inspect(pointer)# {inspect(value)=>callback match {.none=>false,.some(call)=>call(value),},}
+         }",
+    ] { let package = compile(source);
+    let function = package
+        .functions
+        .iter()
+        .find(|f| f.name == "handled")
+        .unwrap();
+    let error =
+        memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap_err();
+    assert!(
+        error.contains("call") || error.contains("provenance"),
+        "{error}"
+    );
+    }
+}
+
+#[test]
+fn handler_memory_callback_candidates_union_distinct_parameter_writes() {
+    use elaboration::verification::memory;
+    let package = compile(
+        "effect inspect(first:*bool,second:*bool)->bool;
+        fn left(first:*bool,second:*bool) {first.* = true;}
+        fn right(first:*bool,second:*bool) {second.* = true;}
+        fn handled(first:*bool,second:*bool,flag:bool)->bool {
+            let callback=if flag {left} else {right};
+            inspect(first,second)# {inspect(a,b)=>do {callback(a,b);false},}
+        }",
+    );
+    let function = package
+        .functions
+        .iter()
+        .find(|f| f.name == "handled")
+        .unwrap();
+    let summary =
+        memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap();
+    for parameter in [0, 1] {
+        assert!(
+            summary
+                .accesses
+                .iter()
+                .any(|a| a.target.parameter == parameter && a.write),
+            "{summary}"
+        );
+    }
+}
+
+#[test]
+fn handler_memory_snapshot_uses_candidate_at_installation() {
+    use elaboration::verification::memory;
+    let package = compile(
+        "effect inspect(first:*bool,second:*bool)->bool;
+        fn left(first:*bool,second:*bool) {first.* = true;}
+        fn right(first:*bool,second:*bool) {second.* = true;}
+        fn handled(first:*bool,second:*bool)->bool {
+            var callback=left;
+            callback=right;
+            let result=inspect(first,second)# {inspect(a,b)=>do {callback(a,b);false},};
+            callback=left;
+            result
+        }",
+    );
+    let function = package
+        .functions
+        .iter()
+        .find(|f| f.name == "handled")
+        .unwrap();
+    let infer =
+        |fuel: &mut usize| memory::infer_in_package(&package, function.declaration, &[], fuel);
+    let summary = infer(&mut 100000).unwrap();
+    assert!(
+        summary
+            .accesses
+            .iter()
+            .any(|a| a.target.parameter == 1 && a.write),
+        "{summary}"
+    );
+    assert!(
+        !summary
+            .accesses
+            .iter()
+            .any(|a| a.target.parameter == 0 && a.write),
+        "{summary}"
+    );
+    assert!(infer(&mut 1).is_err());
+    assert_eq!(summary, infer(&mut 100000).unwrap());
 }

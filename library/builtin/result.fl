@@ -2,6 +2,7 @@
 -- builtin/result – the Result type
 -- ==========================================================================
 
+-- Panic-dependent unwrap methods live in result_unwrap.fl.
 -- #[lang = "result"]
 pub enum Result where T, E {
     Ok(T),
@@ -9,35 +10,36 @@ pub enum Result where T, E {
 }
 
 impl Result<T, E> where T, E {
-    pub fn is_ok(self) -> Bool = self match {
+    pub fn is_ok(self) -> bool = self match {
         .Ok(_)  => true,
         .Err(_) => false,
     };
 
-    pub fn is_err(self) -> Bool = not self.is_ok();
+    pub fn is_err(self) -> bool = not self.is_ok();
 
-    pub fn unwrap(self) -> T = self match {
-        .Ok(v)  => v,
-        .Err(_) => panic("called Result.unwrap() on an Err value"),
-    };
-
-    pub fn unwrap_err(self) -> E = self match {
-        .Ok(_)  => panic("called Result.unwrap_err() on an Ok value"),
-        .Err(e) => e,
-    };
-
-    pub fn map(self, f: fn(T) -> U) -> Result<U, E> where U = self match {
+    pub fn map(self, f: %c fn(T) -> U) -> Result<U, E> where U, c: (.Type'builtin).vars.Closure = self match {
         .Ok(v)  => .Ok(f(v)),
         .Err(e) => .Err(e),
     };
 
-    pub fn map_err(self, f: fn(E) -> F) -> Result<T, F> where F = self match {
+    pub fn map_err(self, f: %c fn(E) -> F) -> Result<T, F> where F, c: (.Type'builtin).vars.Closure = self match {
         .Ok(v)  => .Ok(v),
         .Err(e) => .Err(f(e)),
     };
 
-    pub fn and_then(self, f: fn(T) -> Result<U, E>) -> Result<U, E> where U = self match {
+    pub fn and_then(self, f: %c fn(T) -> Result<U, E>) -> Result<U, E> where U, c: (.Type'builtin).vars.Closure = self match {
         .Ok(v)  => f(v),
         .Err(e) => .Err(e),
+    };
+
+    -- Recover with a new error domain without evaluating the callback on Ok.
+    pub fn or_else(self, f: %c fn(E) -> Result<T, F>) -> Result<T, F> where F, c: (.Type'builtin).vars.Closure = self match {
+        .Ok(v) => .Ok(v),
+        .Err(e) => f(e),
+    };
+
+    pub fn unwrap_or_else(self, fallback: %c fn(E) -> T) -> T where c: (.Type'builtin).vars.Closure = self match {
+        .Ok(v) => v,
+        .Err(e) => fallback(e),
     };
 }

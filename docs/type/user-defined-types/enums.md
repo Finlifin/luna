@@ -168,7 +168,7 @@ fn is_ready(message: Message) -> bool {
 
 `Message.ready` 的编码是 `.wire_ready`，但它的类型仍是 Message；编码相同的另一 enum 不因此成为同一 nominal 类型。编码之间必须互斥，重复时诊断给出冲突变体与 Symbol。有限个变体也不覆盖所有 Symbol，未列出的符号不属于这个 enum 的合法编码域。
 
-当前实现要求显式 Symbol base type 和 `discrete_tag true`，各叶变体提供表达式或单个常量 Symbol 模式；支持分组及已可求值的 comptime 表达式。Symbol 表示没有隐含整数位宽，不能同时指定 width，也不能借此接纳载荷。表示表随 NIR/IIR 保留并在执行入口验证，底层编码／判别接口共用此表。源级原始 Symbol 的受检构造、一般 Symbol 模式及本机 ABI 降码仍待实现；逻辑解释执行不代表这些部分已经完成。
+当前实现要求显式 Symbol base type 和 `discrete_tag true`，各叶变体提供表达式或单个常量 Symbol 模式；支持分组及已可求值的 comptime 表达式。Symbol 表示没有隐含整数位宽，不能同时指定 width，也不能借此接纳载荷。表示表随 NIR/IIR 保留并在执行入口验证，底层编码／判别接口共用此表。LLVM host 路径已支持这类 enum 的构造、传递和成员模式匹配，私有存储使用只读符号文本及其长度，不增加整数判别值；这不是对 FFI 表示的承诺。将原始 Symbol 受检转换为该 enum 仍待实现；runtime Symbol 的独立存储不能替代 enum 的合法编码接纳检查。
 
 ### 分组构造与整组匹配
 

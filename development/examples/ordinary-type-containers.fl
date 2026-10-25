@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Type=.Type'builtin;
 struct Box where T {value:T,}
 enum Choice where T {some(T),none,}
@@ -8,4 +11,4 @@ fn read(comptime T:Type,value:Choice<T>,fallback:T)->T {
  value match {.some(item)=>item,.none=>fallback,}
 }
 fn replace(comptime T:Type,original:Box<T>,item:T)->Box<T> {var value=original;value.value=item;value}
-fn run()->(bool,bool) {(unwrap(bool,replace(bool,wrap(bool,false),true)),read(bool,choice(bool,true),false))}
+fn run()->Tuple<bool, bool> {(unwrap(bool,replace(bool,wrap(bool,false),true)),read(bool,choice(bool,true),false))}

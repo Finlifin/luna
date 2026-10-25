@@ -2,14 +2,14 @@
 //! query cache still establishes immutability, purity and equality-compatible
 //! reuse. Typed immutable snapshots do not enable global memoization.
 use comptime_executor::{Context, Error, KeyProtocol};
-use comptime_interpretor::{Budget, ContractOutcome, Interpreter, Value};
+use comptime_interpretor::{Budget, Interpreter, Value};
 use elaboration::{
     capabilities::World,
-    implementation::{ImplementationHead, Index},
+    implementation::Index,
     key_protocols::{Operation, Selected},
     ptc,
 };
-use intrinsic::LangItems;
+use intrinsic::{LangItem, LangItemDef, LangItems};
 use nir::{
     Term,
     program::{Package, TypePredicate},
@@ -52,6 +52,7 @@ pub struct Protocol {
     eq: Selected,
     hash: Selected,
     budget: ptc::Budget,
+    resources: Option<(nir::DeclarationId, nir::DeclarationId)>,
 }
 impl Protocol {
     /// Bind both operations, prove type capabilities, and prepare their
@@ -63,28 +64,26 @@ impl Protocol {
         subject: &Term,
         budget: ptc::Budget,
     ) -> Result<Self, String> {
-        let context = ptc::Context::from_package(package)?;
-        let mut index = Index::default();
-        for i in package
-            .implementations
-            .iter()
-            .filter(|i| i.interface.is_some())
-        {
-            index
-                .insert(
-                    ImplementationHead {
-                        parameter_types: i.parameter_types.clone(),
-                        declaration: i.declaration,
-                        interface: i.interface,
-                        interface_arguments: i.interface_arguments.clone(),
-                        subject: i.subject.clone(),
-                        type_parameters: i.type_parameters.clone(),
-                        requirements: i.requirements.clone(),
-                    },
+        let resources = match (items.get(LangItem::Copy), items.get(LangItem::Drop)) {
+            (None, None) => None,
+            (Some(LangItemDef::UserDef(copy)), Some(LangItemDef::UserDef(drop))) => {
+                crate::resources::ProtocolContext::selected(
+                    package,
+                    crate::resources::Selection::Identity(copy),
+                    Some(crate::resources::Selection::Identity(drop)),
                     budget,
-                )
-                .map_err(|e| format!("key implementation index: {e:?}"))?;
-        }
+                )?;
+                Some((copy, drop))
+            }
+            _ => {
+                return Err(
+                    "key pointer transfers require paired source Copy and Drop bindings".into(),
+                );
+            }
+        };
+        let context = ptc::Context::from_package(package)?;
+        let index = crate::implementation_world::index(&package, budget)
+            .map_err(|error| format!("key implementation index: {error}"))?;
         let world = World {
             context: &context,
             index: &index,
@@ -135,6 +134,7 @@ impl Protocol {
             eq,
             hash,
             budget,
+            resources,
         })
     }
     fn invoke(
@@ -183,20 +183,47 @@ impl Protocol {
             traits: &self.package.traits,
             assumptions: &[],
         };
-        let solver = |predicate: &TypePredicate| match world.check_predicate(predicate, self.budget)
-        {
-            Ok(ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,
-            Ok(ptc::Outcome::NotEntailed(_)) => ContractOutcome::Rejected,
-            _ => ContractOutcome::Unknown,
+        let solver = |predicate: &TypePredicate, remaining: &mut u64| {
+            crate::implementation_world::solve_metered(&world, predicate, self.budget, remaining)
+        };
+        let copy_failure = std::cell::RefCell::new(None::<String>);
+        let pointer_copy = |ty: &Term, remaining: &mut u64| {
+            let Some((copy, drop)) = self.resources else {
+                return false;
+            };
+            let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
+            let before = fuel;
+            let evidence = elaboration::verification::copy::acquire(
+                &self.package,
+                &world,
+                copy,
+                drop,
+                ty,
+                ptc::Budget {
+                    steps: fuel,
+                    ..self.budget
+                },
+                &mut fuel,
+            );
+            *remaining = remaining.saturating_sub((before - fuel) as u64);
+            let allowed = evidence.is_ok();
+            *copy_failure.borrow_mut() = evidence.err();
+            allowed
         };
         let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
         let mut interpreter =
             Interpreter::for_comptime(&self.package, Budget { steps, depth: 128 })
                 .map_err(|e| Error::Protocol(e.to_string()))?
-                .with_type_solver(&solver);
+                .with_budgeted_type_solver(&solver)
+                .with_budgeted_pointer_copy_permission(&pointer_copy);
         let result = action(&mut interpreter);
         context.spend::<String>((steps - interpreter.remaining_steps()) as usize)?;
-        result.map_err(|e| Error::Protocol(e.to_string()))
+        result.map_err(|e| {
+            Error::Protocol(match copy_failure.borrow().as_ref() {
+                Some(reason) => format!("{e}; pointer Copy evidence: {reason}"),
+                None => e.to_string(),
+            })
+        })
     }
 }
 impl KeyProtocol<Value> for Protocol {

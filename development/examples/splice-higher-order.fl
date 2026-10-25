@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- Intermediate functions and closures stay at comptime.
 -- Only the final bool crosses into runtime through Splice.
 -- Run with --interpret run --splice-protocol Splice.
@@ -7,18 +10,18 @@ trait Splice {
     fn splice(comptime data: Self) -> RuntimeTarget;
 }
 impl Splice for bool {
-    assoc RuntimeTarget: Type = (bool, bool);
-    fn splice(comptime data: bool) -> (bool, bool) { construct(data) }
+    assoc RuntimeTarget: Type = Tuple<bool, bool>;
+    fn splice(comptime data: bool) -> Tuple<bool, bool> { construct(data) }
 }
-fn construct(value: bool) -> (bool, bool) { (value, not value) }
+fn construct(value: bool) -> Tuple<bool, bool> { (value, not value) }
 typealias Callback = %{flag: bool} comptime fn() -> bool;
 comptime fn capture(flag: bool) -> Callback { || flag }
 comptime fn factory() -> comptime fn(bool) -> Callback { capture }
 
-fn forward(comptime flag: bool) -> (bool, bool) {
+fn forward(comptime flag: bool) -> Tuple<bool, bool> {
     factory()(flag)()
 }
 
-fn run() -> ((bool, bool), (bool, bool)) {
+fn run() -> Tuple<Tuple<bool, bool>, Tuple<bool, bool>> {
     (forward(true), (do { factory() })(false)())
 }

@@ -1,5 +1,8 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 trait Mapper where A {
-    fn pair(self, other: B) -> (A, B) where B;
+    fn pair(self, other: B) -> Tuple<A, B> where B;
 }
 
 struct Holder where X {
@@ -7,12 +10,12 @@ struct Holder where X {
 }
 
 impl Mapper<X> for Holder<X> where X {
-    fn pair(self, other: Y) -> (X, Y) where Y {
+    fn pair(self, other: Y) -> Tuple<X, Y> where Y {
         (self.value, other)
     }
 }
 
-fn apply(subject: S, value: T) -> (.u8'builtin, T)
+fn apply(subject: S, value: T) -> Tuple<.u8'builtin, T>
 where S :- Mapper<.u8'builtin>, T {
     subject.as(Mapper<.u8'builtin>).pair(value)
 }

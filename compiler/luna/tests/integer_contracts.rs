@@ -6,6 +6,80 @@ use comptime_interpretor::{Budget, Interpreter, Value};
 use support::{compile, compile_with_protocols, id};
 
 #[test]
+fn checked_execution_revalidates_residual_empty_window_endpoints() {
+    let mut package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+         typealias Bits=.BitVec'builtin<16>;typealias Empty=.BitVec'builtin<0>;
+         fn window(bits:Bits,start:.u8'builtin)->Empty {assumes start <= 16;bits[start..start]}
+         fn run()->Empty {let bits:Bits=0xABCD;window(bits,4)}",
+    );
+    let Value::BitVec(value) =
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 500_000)
+            .unwrap()
+    else {
+        panic!("expected bits")
+    };
+    assert!(value.words().is_empty());
+    let function = package
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "window")
+        .unwrap();
+    let mut removed = 0;
+    iir::visit::expression_mut(&mut function.body, &mut 100_000, |expr, _| {
+        if matches!(expr.kind, nir::program::ExprKind::CheckPredicate(_)) {
+            expr.kind = nir::program::ExprKind::Unit;
+            removed += 1;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(removed, 1);
+    let error =
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 500_000)
+            .unwrap_err();
+    assert!(error.contains("residual program contract"), "{error}");
+}
+
+#[test]
+fn checked_execution_revalidates_residual_arithmetic_evidence() {
+    let mut package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+         typealias Byte=.u8'builtin;
+         fn increment(value:Byte)->Byte {assumes value < 255;value + 1}
+         fn run()->Byte {increment(254)}",
+    );
+    let value =
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 500_000)
+            .unwrap();
+    assert_eq!(value, Value::UnsignedInteger(255));
+    // Simulate a transformation dropping the required runtime check. Source
+    // validation already ran; residual verification must catch the lost proof.
+    let function = package
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "increment")
+        .unwrap();
+    let mut removed = 0;
+    iir::visit::expression_mut(&mut function.body, &mut 100_000, |expr, _| {
+        if matches!(expr.kind, nir::program::ExprKind::CheckPredicate(_)) {
+            expr.kind = nir::program::ExprKind::Unit;
+            removed += 1;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(removed, 1);
+    let error =
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 500_000)
+            .unwrap_err();
+    assert!(
+        error.contains("residual program contract") && error.contains("range"),
+        "{error}"
+    );
+}
+
+#[test]
 fn unbounded_integer_contract_facts_survive_local_copies_and_calls() {
     let source = "typealias Int=.Integer'builtin;
         comptime fn positive(n:Int)->bool where requires n > 0 {true}

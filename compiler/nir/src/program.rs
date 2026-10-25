@@ -110,7 +110,19 @@ impl fmt::Display for ExpansionSource {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Literal {
-    BitVec { width: usize, words: Vec<u32> },
+    PendingInteger {
+        spelling: String,
+        negative: bool,
+    },
+    /// Definition-side exact spelling; must form after type substitution.
+    PendingFloat {
+        spelling: String,
+        negative: bool,
+    },
+    BitVec {
+        width: usize,
+        words: Vec<u32>,
+    },
     Float32(u32),
     Float64(u64),
     SignedInteger(i128),
@@ -121,6 +133,55 @@ pub enum Literal {
     Symbol(String),
     Integer(String),
     Float(String),
+}
+impl Literal {
+    /// Check the intrinsic domain and fixed-integer range without evaluating
+    /// or parsing a literal. Spelling and bit payload admission remain separate.
+    pub fn has_primitive_type(&self, ty: &Term) -> bool {
+        self.has_primitive_type_in(ty, None)
+    }
+
+    /// Target-dependent literal admission requires an explicit layout. This
+    /// does not rewrite the literal's type to a fixed-width primitive.
+    pub fn has_primitive_type_in(
+        &self,
+        ty: &Term,
+        target: Option<crate::target::TargetData>,
+    ) -> bool {
+        use crate::Primitive as P;
+        let Term::Primitive(domain) = ty else {
+            return false;
+        };
+        let integer_layout = || match target {
+            Some(target) => target.integer_layout(*domain),
+            None => domain.fixed_integer_layout(),
+        };
+        match self {
+            Self::PendingFloat { .. } | Self::PendingInteger { .. } => false,
+            Self::Bool(_) => *domain == P::Bool,
+            Self::Char(_) => *domain == P::Char,
+            Self::String(_) => *domain == P::Str,
+            Self::Symbol(_) => *domain == P::Symbol,
+            Self::Integer(_) => *domain == P::Integer,
+            Self::Float(_) => *domain == P::Float,
+            Self::Float32(_) => *domain == P::F32,
+            Self::Float64(_) => *domain == P::F64,
+            Self::BitVec { width, .. } => *domain == P::BitVec(*width),
+            Self::SignedInteger(value) => integer_layout().is_some_and(|(signed, width)| {
+                signed
+                    && comptime_runtime::machine::MachineInteger::from_signed(*value, width as u16)
+                        .is_ok()
+            }),
+            Self::UnsignedInteger(value) => integer_layout().is_some_and(|(signed, width)| {
+                !signed
+                    && comptime_runtime::machine::MachineInteger::from_unsigned(
+                        *value,
+                        width as u16,
+                    )
+                    .is_ok()
+            }),
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Expr {
@@ -756,6 +817,11 @@ impl fmt::Display for EffectHandler {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExprKind {
+    /// Explicit result construction/transport, independent of effect continuations.
+    ErrorConvert {
+        conversion: crate::error_results::Conversion,
+        value: Box<Expr>,
+    },
     /// Early delivery to the lexically enclosing direct handler branch.
     EffectResume(Box<Expr>),
     EffectHandle {
@@ -809,6 +875,9 @@ pub enum ExprKind {
     TypeEqual(Box<Expr>, Box<Expr>),
     /// Builtin scalar equality, including IEEE floats; never type equality.
     ScalarEqual(Box<Expr>, Box<Expr>),
+    /// Internal runtime dispatch comparison of validated staged callable
+    /// identities. This does not expose function equality in source syntax.
+    TemplateEqual(Box<Expr>, Box<Expr>),
     ScalarLessEqual(Box<Expr>, Box<Expr>),
     ScalarLess(Box<Expr>, Box<Expr>),
     ScalarGreater(Box<Expr>, Box<Expr>),
@@ -995,6 +1064,15 @@ pub enum ExprKind {
     RequirePredicate(Box<Expr>),
     EnsurePredicate(Box<Expr>),
     CheckPredicate(Box<Expr>),
+    /// Lexical unsafe audit boundary; ordinary body contracts still apply.
+    UnsafeScope(Box<Expr>),
+    /// Target-defined operation. Inputs remain in source evaluation order.
+    /// The enclosing Expr carries the explicit output type and source range.
+    Intrinsic {
+        tag: crate::intrinsics::Tag,
+        binding: Option<crate::intrinsics::Checked>,
+        inputs: Vec<Expr>,
+    },
     Discard(Box<Expr>),
     If {
         condition: Box<Expr>,
@@ -1102,6 +1180,11 @@ pub struct Capture {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pattern {
+    /// None selects success; Some selects a full error type identity.
+    ErrorResult {
+        label: Option<Term>,
+        inner: Box<Pattern>,
+    },
     /// Definition-only pattern-code evidence. Never executable or lowerable.
     CodeEvidence {
         outputs: Vec<(LocalId, Term)>,
@@ -1248,6 +1331,14 @@ impl fmt::Display for Pattern {
                 }
                 f.write_str(")")
             }
+            Self::ErrorResult { label, inner } => {
+                f.write_str("(error-result-pattern (branch ")?;
+                match label {
+                    Some(label) => write!(f, "(error {label})")?,
+                    None => f.write_str("success")?,
+                };
+                write!(f, ") (payload {inner}))")
+            }
             Self::Wild => f.write_str("(wild)"),
             Self::Unit => f.write_str("(unit-pattern)"),
             Self::Variant {
@@ -1329,6 +1420,8 @@ pub struct Function {
     pub inline: bool,
     /// Trusted source promise; never authorizes normal-form unfolding.
     pub pure: bool,
+    /// Caller must establish an explicit unsafe boundary; independent of phase/purity.
+    pub is_unsafe: bool,
     /// Checked program entry predicates; never sent to the type solver.
     pub preconditions: Vec<Expr>,
     pub postconditions: Vec<Expr>,
@@ -1345,6 +1438,15 @@ pub struct Function {
     pub defaults: Vec<(usize, Expr)>,
 }
 impl Function {
+    /// Value interface of this declaration; the stored signature remains its
+    /// parameter/result telescope for instantiation and ABI consumers.
+    pub fn callable_type(&self) -> Term {
+        self.signature
+            .clone()
+            .with_comptime_phase(self.phase == FunctionPhase::Comptime)
+            .with_unsafe_call_requirement(self.is_unsafe)
+    }
+
     /// Specialize every type-bearing part of a function template together.
     /// Declaration metadata and local identities are retained: selecting which
     /// binders disappear, replacing value locals and erasing staged arguments
@@ -1355,40 +1457,53 @@ impl Function {
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
         Term::Tuple(Vec::new()).instantiate_parameters(parameters, arguments)?;
-        let mut result = self.clone();
-        result.signature = self
-            .signature
-            .instantiate_parameters(parameters, arguments)?;
-        result.requirements = self
-            .requirements
-            .iter()
-            .map(|p| p.instantiate_parameters(parameters, arguments))
-            .collect::<Result<_, _>>()?;
-        result.capabilities = self
-            .capabilities
-            .iter()
-            .map(|p| p.instantiate_parameters(parameters, arguments))
-            .collect::<Result<_, _>>()?;
-        result.body = self.body.instantiate_parameters(parameters, arguments)?;
-        result.preconditions = self
-            .preconditions
-            .iter()
-            .map(|e| e.instantiate_parameters(parameters, arguments))
-            .collect::<Result<_, _>>()?;
-        result.postconditions = self
-            .postconditions
-            .iter()
-            .map(|e| e.instantiate_parameters(parameters, arguments))
-            .collect::<Result<_, _>>()?;
-        result.defaults = self
-            .defaults
-            .iter()
-            .map(|(index, e)| {
-                e.instantiate_parameters(parameters, arguments)
-                    .map(|e| (*index, e))
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(result)
+        // Type-bearing payloads are constructed once. Cloning the complete
+        // template here would duplicate and then discard its body, contracts,
+        // and defaults before their specialized copies replace them.
+        Ok(Self {
+            phase: self.phase,
+            inline: self.inline,
+            pure: self.pure,
+            is_unsafe: self.is_unsafe,
+            result_binding: self.result_binding,
+            entry_snapshots: self.entry_snapshots.clone(),
+            type_parameters: self.type_parameters.clone(),
+            declaration: self.declaration,
+            name: self.name.clone(),
+            parameters: self.parameters.clone(),
+            signature: self
+                .signature
+                .instantiate_parameters(parameters, arguments)?,
+            requirements: self
+                .requirements
+                .iter()
+                .map(|p| p.instantiate_parameters(parameters, arguments))
+                .collect::<Result<_, _>>()?,
+            capabilities: self
+                .capabilities
+                .iter()
+                .map(|p| p.instantiate_parameters(parameters, arguments))
+                .collect::<Result<_, _>>()?,
+            body: self.body.instantiate_parameters(parameters, arguments)?,
+            preconditions: self
+                .preconditions
+                .iter()
+                .map(|e| e.instantiate_parameters(parameters, arguments))
+                .collect::<Result<_, _>>()?,
+            postconditions: self
+                .postconditions
+                .iter()
+                .map(|e| e.instantiate_parameters(parameters, arguments))
+                .collect::<Result<_, _>>()?,
+            defaults: self
+                .defaults
+                .iter()
+                .map(|(index, e)| {
+                    e.instantiate_parameters(parameters, arguments)
+                        .map(|e| (*index, e))
+                })
+                .collect::<Result<_, _>>()?,
+        })
     }
 
     pub fn instantiate_types(
@@ -1561,6 +1676,11 @@ impl fmt::Display for TraitRequirement {
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
+    /// Explicit compilation target facts. None is target-independent; it must
+    /// never be filled from the process host during semantic queries.
+    pub target: Option<crate::target::TargetData>,
+    /// Ordinary source tests, with their independent declaration identities.
+    pub tests: Vec<DeclarationId>,
     /// Callable declaration telescopes; available even when a body is omitted
     /// from a required invocation snapshot. They do not authorize execution.
     pub function_parameters: Vec<crate::function_parameters::Declaration>,
@@ -1680,6 +1800,16 @@ impl Package {
         declaration: DeclarationId,
         arguments: &'a [Term],
     ) -> Option<(&'a Function, &'a [Term])> {
+        self.runtime_body_checked(declaration, arguments).ok()
+    }
+
+    /// Diagnostic-preserving form of runtime_body. An invalid selected
+    /// instance is an error, never permission to use the source definition.
+    pub fn runtime_body_checked<'a>(
+        &'a self,
+        declaration: DeclarationId,
+        arguments: &'a [Term],
+    ) -> Result<(&'a Function, &'a [Term]), &'static str> {
         let mut matches = self.runtime_instances.iter().filter(|instance| {
             instance.declaration == declaration && instance.arguments == arguments
         });
@@ -1687,24 +1817,38 @@ impl Package {
             if matches.next().is_some()
                 || instance.function.declaration != declaration
                 || !instance.function.type_parameters.is_empty()
+                || instance.function.phase != FunctionPhase::Runtime
+                || !matches!(&instance.function.signature, Term::Function { parameters, .. }
+                    if parameters.len() == instance.function.parameters.len()
+                        && parameters.iter().all(|p| p.sort == crate::Sort::Runtime))
             {
-                return None;
+                return Err("runtime function instance is ambiguous or malformed");
             }
-            return Some((&instance.function, &[]));
+            return Ok((&instance.function, &[]));
         }
-        self.functions
+        let mut declarations = self
+            .functions
             .iter()
             .chain(&self.quote_templates)
-            .find(|function| function.declaration == declaration)
-            .map(|function| (function, arguments))
+            .filter(|function| function.declaration == declaration);
+        let function = declarations.next().ok_or("unknown function")?;
+        if declarations.next().is_some() {
+            return Err("function declaration is ambiguous");
+        }
+        if function.type_parameters.len() != arguments.len() {
+            return Err("function type arguments have incorrect arity");
+        }
+        Ok((function, arguments))
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeFunctionIdentity {
     /// The producer checks formation obligations for each use before invoking
-    /// the interpreter. Program-precondition-bearing values cannot be erased
-    /// into this signature-only representation.
+    /// the interpreter. Staged runtime templates may carry program contracts:
+    /// the identity is transport-only and calls recover the source declaration
+    /// and its contracts during specialization. Ordinary contracted callable
+    /// values must not be erased into this signature-only representation.
     pub declaration: DeclarationId,
     pub type_parameters: Vec<DeclarationId>,
     pub signature: Term,
@@ -1863,6 +2007,8 @@ pub struct MethodContract {
     pub is_quote: bool,
     /// Runtime P4 promise; not a termination guarantee or a type predicate.
     pub pure: bool,
+    /// Caller must establish an explicit unsafe boundary; independent of phase/purity.
+    pub is_unsafe: bool,
     /// Concrete method arguments for a retained specialized interface entry.
     pub type_arguments: Vec<Term>,
     /// Method-local binders, excluding Self and enclosing trait parameters.
@@ -1949,11 +2095,12 @@ impl fmt::Display for MethodContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(method {} (name {:?}) (quote {}) (pure {}) (by-value-receiver {}) (by-reference-receiver {}) (signature {}) (requires",
+            "(method {} (name {:?}) (quote {}) (pure {}) (unsafe {}) (by-value-receiver {}) (by-reference-receiver {}) (signature {}) (requires",
             self.declaration,
             self.name,
             self.is_quote,
             self.pure,
+            self.is_unsafe,
             self.by_value_receiver,
             self.by_reference_receiver,
             self.signature
@@ -2035,6 +2182,8 @@ impl fmt::Display for Implementation {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Enum {
+    /// Source-declared operation-label family. Target support needs a separate binding.
+    pub is_intrinsic: bool,
     /// Ordered declaration input domains; empty is the compact all-Type form.
     pub parameter_types: Vec<Term>,
     pub capabilities: Vec<TraitRequirement>,
@@ -2079,6 +2228,13 @@ impl Enum {
         crate::nominal_parameters::binders(&self.type_parameters, &self.parameter_types)
     }
     pub fn validate_encoding(&self) -> Result<(), &'static str> {
+        self.validate_encoding_in(None)
+    }
+
+    pub fn validate_encoding_in(
+        &self,
+        target: Option<crate::target::TargetData>,
+    ) -> Result<(), &'static str> {
         let groups = self
             .groups
             .iter()
@@ -2131,7 +2287,7 @@ impl Enum {
         let Some(layout) = &self.encoding else {
             return Ok(());
         };
-        layout.validate()?;
+        layout.validate_in(target)?;
         if layout.variants().len() != self.variants.len() {
             return Err("enum encoding variant count differs from the logical enum");
         }
@@ -2155,9 +2311,9 @@ impl Enum {
             for (ty, field) in variant.fields.iter().zip(encoded.fields()) {
                 let width = match ty {
                     Term::Primitive(crate::Primitive::BitVec(width)) => Some(*width),
-                    Term::Primitive(primitive) => {
-                        primitive.unrestricted_scalar_width().map(|w| w as usize)
-                    }
+                    Term::Primitive(primitive) => primitive
+                        .unrestricted_scalar_width_in(target)
+                        .map(|w| w as usize),
                     _ => None,
                 };
                 if width != Some(field.width) {
@@ -2234,7 +2390,7 @@ impl fmt::Display for Enum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(enum (id {}) (name ", self.declaration)?;
         string(f, &self.name)?;
-        f.write_str(") (type-parameters")?;
+        write!(f, ") (intrinsic {}) (type-parameters", self.is_intrinsic)?;
         for parameter in &self.type_parameters {
             write!(f, " {parameter}")?;
         }
@@ -2395,6 +2551,16 @@ impl fmt::Display for Literal {
                 for word in words {
                     write!(f, " {word}")?;
                 }
+                f.write_str("))")
+            }
+            Self::PendingFloat { spelling, negative } => {
+                write!(f, "(pending-float (negative {negative}) (spelling ")?;
+                string(f, spelling)?;
+                f.write_str("))")
+            }
+            Self::PendingInteger { spelling, negative } => {
+                write!(f, "(pending-integer (negative {negative}) (spelling ")?;
+                string(f, spelling)?;
                 f.write_str("))")
             }
             Self::Float32(bits) => write!(f, "(float32 (bits \"{bits:08x}\"))"),
@@ -2662,6 +2828,22 @@ impl fmt::Display for ExprKind {
             Self::RequirePredicate(value) => write!(f, "(require-predicate {value})"),
             Self::EnsurePredicate(value) => write!(f, "(ensure-predicate {value})"),
             Self::CheckPredicate(value) => write!(f, "(check-predicate (condition {value}))"),
+            Self::Intrinsic {
+                tag,
+                inputs,
+                binding,
+            } => {
+                write!(f, "(intrinsic {tag} (binding")?;
+                if let Some(binding) = binding {
+                    write!(f, " {binding}")?;
+                }
+                write!(f, ") (inputs")?;
+                for input in inputs {
+                    write!(f, " {input}")?;
+                }
+                write!(f, "))")
+            }
+            Self::UnsafeScope(x) => write!(f, "(unsafe-scope {x})"),
             Self::Discard(x) => write!(f, "(discard {x})"),
             Self::If {
                 condition,
@@ -2831,6 +3013,9 @@ impl fmt::Display for ExprKind {
             Self::ScalarEqual(left, right) => {
                 write!(f, "(scalar-equal (left {left}) (right {right}))")
             }
+            Self::TemplateEqual(left, right) => {
+                write!(f, "(template-equal (left {left}) (right {right}))")
+            }
             Self::TypeListIndex(values, index) => {
                 write!(f, "(type-list-index (values {values}) (index {index}))")
             }
@@ -2907,6 +3092,10 @@ impl fmt::Display for ExprKind {
                 write!(f, "(integer-{op} (left {left}) (right {right}))")
             }
             Self::BitConvert(value) => write!(f, "(bit-convert {value})"),
+            Self::ErrorConvert { conversion, value } => write!(
+                f,
+                "(error-convert (conversion {conversion}) (value {value}))"
+            ),
             Self::NewtypeConvert(value) => write!(f, "(newtype-convert {value})"),
             Self::BitEqual(a, b) => write!(f, "(bit-equal {a} {b})"),
             Self::EnumName(x) => write!(f, "(enum-name {x})"),
@@ -2926,8 +3115,8 @@ impl fmt::Display for Function {
         string(f, &self.name)?;
         write!(
             f,
-            ") (phase {}) (inline {}) (pure {}) (capabilities",
-            self.phase, self.inline, self.pure
+            ") (phase {}) (inline {}) (pure {}) (unsafe {}) (capabilities",
+            self.phase, self.inline, self.pure, self.is_unsafe
         )?;
         for requirement in &self.capabilities {
             write!(f, " {requirement}")?;
@@ -2970,6 +3159,12 @@ impl fmt::Display for Function {
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(nir-package")?;
+        if let Some(target) = self.target {
+            write!(f, "\n {target}")?;
+        }
+        for test in &self.tests {
+            write!(f, "\n (test-entry {test})")?;
+        }
         for instance in &self.runtime_instances {
             write!(f, "\n {instance}")?;
         }
@@ -3108,23 +3303,254 @@ impl Expr {
     /// Callbacks run before children. This deliberately shares the exhaustive
     /// traversal used by type substitution so new operations cannot be skipped.
     pub fn rewrite_with<R: Rewriter>(&mut self, rewriter: &mut R) -> Result<(), R::Error> {
-        if !rewriter.expression(self)? {
-            return Ok(());
+        // Generated code can contain long chains of scopes and operations.
+        // Visit ordinary children using a heap frontier in the same preorder
+        // as recursive rewriting. Specialized nodes retain their own handling
+        // when child rewrites affect a parent's metadata or pattern domain.
+        enum Work<'a> {
+            Expr(&'a mut Expr),
+            Capture(&'a mut Capture),
+            ClosureBody(&'a mut Arc<Expr>),
         }
-        self.ty = rewriter.ty(&self.ty)?;
-        // Expanded code retains many lexical boundaries. Do not retain the
-        // large operation dispatcher frame while descending through each one.
-        match &mut self.kind {
-            ExprKind::Block { statements, result }
-            | ExprKind::CallPreparation { statements, result } => {
-                for statement in statements {
-                    (statement).rewrite_with(rewriter)?;
+        let mut work = vec![Work::Expr(self)];
+        while let Some(next) = work.pop() {
+            let expr = match next {
+                Work::Expr(expr) => expr,
+                Work::Capture(capture) => {
+                    capture.ty = rewriter.ty(&capture.ty)?;
+                    if let Some(value) = &mut capture.value {
+                        work.push(Work::Expr(value));
+                    }
+                    continue;
                 }
-                if let Some(result) = result {
-                    (result).rewrite_with(rewriter)?;
-                }
+                // Clone shared code only once all earlier captures succeeded.
+                Work::ClosureBody(body) => Arc::make_mut(body),
+            };
+            if !rewriter.expression(expr)? {
+                continue;
             }
-            _ => return self.rewrite_operation(rewriter),
+            expr.ty = rewriter.ty(&expr.ty)?;
+            if let ExprKind::Intrinsic {
+                binding: Some(binding),
+                ..
+            } = &mut expr.kind
+            {
+                binding.rewrite_pending(&mut |ty| rewriter.ty(ty))?;
+            }
+            if !matches!(
+                &expr.kind,
+                ExprKind::Block { .. }
+                    | ExprKind::CallPreparation { .. }
+                    | ExprKind::AnonymousField { .. }
+                    | ExprKind::Field { .. }
+                    | ExprKind::Let { .. }
+                    | ExprKind::Assign { .. }
+                    | ExprKind::UnsafeScope(_)
+                    | ExprKind::Discard(_)
+                    | ExprKind::RequirePredicate(_)
+                    | ExprKind::EnsurePredicate(_)
+                    | ExprKind::CheckPredicate(_)
+                    | ExprKind::BitSlice { .. }
+                    | ExprKind::AddressOf(_)
+                    | ExprKind::ReadPointer(_)
+                    | ExprKind::PointerAnonymousField { .. }
+                    | ExprKind::PointerField { .. }
+                    | ExprKind::PointerType(_)
+                    | ExprKind::BitVecType(_)
+                    | ExprKind::IntegerNegate(_)
+                    | ExprKind::FloatNegate(_)
+                    | ExprKind::BitConvert(_)
+                    | ExprKind::NewtypeConvert(_)
+                    | ExprKind::Snapshot(_)
+                    | ExprKind::TakeBits(_)
+                    | ExprKind::SymbolName(_)
+                    | ExprKind::EnumName(_)
+                    | ExprKind::Not(_)
+                    | ExprKind::Loop { .. }
+                    | ExprKind::WritePointer { .. }
+                    | ExprKind::FunctionResultType { .. }
+                    | ExprKind::IntegerBinary { .. }
+                    | ExprKind::FloatBinary { .. }
+                    | ExprKind::ScalarLess(_, _)
+                    | ExprKind::ScalarGreater(_, _)
+                    | ExprKind::ScalarGreaterEqual(_, _)
+                    | ExprKind::ScalarLessEqual(_, _)
+                    | ExprKind::TemplateEqual(_, _)
+                    | ExprKind::ScalarEqual(_, _)
+                    | ExprKind::TypeEqual(_, _)
+                    | ExprKind::TypeListIndex(_, _)
+                    | ExprKind::BitEqual(_, _)
+                    | ExprKind::BitConcat(_, _)
+                    | ExprKind::BitIndex(_, _)
+                    | ExprKind::And(_, _)
+                    | ExprKind::Or(_, _)
+                    | ExprKind::BitWindow { .. }
+                    | ExprKind::If { .. }
+                    | ExprKind::Return(_)
+                    | ExprKind::Call { .. }
+                    | ExprKind::FunctionType { .. }
+                    | ExprKind::TypeList(_)
+                    | ExprKind::TupleType(_)
+                    | ExprKind::Intrinsic { .. }
+                    | ExprKind::Tuple(_)
+                    | ExprKind::AnonymousRecord { .. }
+                    | ExprKind::Record { .. }
+                    | ExprKind::Variant { .. }
+                    | ExprKind::ClosureType { .. }
+                    | ExprKind::Closure { .. }
+                    | ExprKind::EffectResume(_)
+                    | ExprKind::EffectRun { .. }
+                    | ExprKind::EffectComputation { .. }
+                    | ExprKind::EffectRequest { .. }
+            ) {
+                expr.rewrite_operation(rewriter)?;
+                continue;
+            }
+            match &mut expr.kind {
+                ExprKind::Block { statements, result }
+                | ExprKind::CallPreparation { statements, result } => {
+                    if let Some(result) = result {
+                        work.push(Work::Expr(result));
+                    }
+                    work.extend(statements.iter_mut().rev().map(Work::Expr));
+                }
+                ExprKind::AnonymousField { value, .. }
+                | ExprKind::Field { value, .. }
+                | ExprKind::Let { value, .. }
+                | ExprKind::Assign { value, .. }
+                | ExprKind::UnsafeScope(value)
+                | ExprKind::Discard(value)
+                | ExprKind::RequirePredicate(value)
+                | ExprKind::EnsurePredicate(value)
+                | ExprKind::CheckPredicate(value)
+                | ExprKind::BitSlice { value, .. }
+                | ExprKind::AddressOf(value)
+                | ExprKind::ReadPointer(value)
+                | ExprKind::PointerAnonymousField { pointer: value, .. }
+                | ExprKind::PointerField { pointer: value, .. }
+                | ExprKind::PointerType(value)
+                | ExprKind::BitVecType(value)
+                | ExprKind::IntegerNegate(value)
+                | ExprKind::FloatNegate(value)
+                | ExprKind::BitConvert(value)
+                | ExprKind::NewtypeConvert(value)
+                | ExprKind::Snapshot(value)
+                | ExprKind::TakeBits(value)
+                | ExprKind::SymbolName(value)
+                | ExprKind::EnumName(value)
+                | ExprKind::Not(value)
+                | ExprKind::Loop { body: value, .. } => work.push(Work::Expr(value)),
+                ExprKind::WritePointer {
+                    pointer: a,
+                    value: b,
+                }
+                | ExprKind::FunctionResultType {
+                    signature: a,
+                    result: b,
+                }
+                | ExprKind::IntegerBinary {
+                    left: a, right: b, ..
+                }
+                | ExprKind::FloatBinary {
+                    left: a, right: b, ..
+                }
+                | ExprKind::ScalarLess(a, b)
+                | ExprKind::ScalarGreater(a, b)
+                | ExprKind::ScalarGreaterEqual(a, b)
+                | ExprKind::ScalarLessEqual(a, b)
+                | ExprKind::TemplateEqual(a, b)
+                | ExprKind::ScalarEqual(a, b)
+                | ExprKind::TypeEqual(a, b)
+                | ExprKind::TypeListIndex(a, b)
+                | ExprKind::BitEqual(a, b)
+                | ExprKind::BitConcat(a, b)
+                | ExprKind::BitIndex(a, b)
+                | ExprKind::And(a, b)
+                | ExprKind::Or(a, b) => {
+                    work.push(Work::Expr(b));
+                    work.push(Work::Expr(a));
+                }
+                ExprKind::BitWindow { value, start, end } => {
+                    work.push(Work::Expr(end));
+                    work.push(Work::Expr(start));
+                    work.push(Work::Expr(value));
+                }
+                ExprKind::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    if let Some(value) = else_branch {
+                        work.push(Work::Expr(value));
+                    }
+                    work.push(Work::Expr(then_branch));
+                    work.push(Work::Expr(condition));
+                }
+                ExprKind::Return(value) => {
+                    if let Some(value) = value {
+                        work.push(Work::Expr(value));
+                    }
+                }
+                ExprKind::Call {
+                    callee, arguments, ..
+                } => {
+                    work.extend(
+                        arguments
+                            .iter_mut()
+                            .rev()
+                            .map(|argument| Work::Expr(&mut argument.value)),
+                    );
+                    work.push(Work::Expr(callee));
+                }
+                ExprKind::FunctionType {
+                    parameters: fields, ..
+                }
+                | ExprKind::TypeList(fields)
+                | ExprKind::TupleType(fields)
+                | ExprKind::Intrinsic { inputs: fields, .. }
+                | ExprKind::Tuple(fields)
+                | ExprKind::AnonymousRecord { fields }
+                | ExprKind::Record { fields, .. }
+                | ExprKind::Variant { fields, .. } => {
+                    work.extend(fields.iter_mut().rev().map(Work::Expr))
+                }
+                ExprKind::Closure { captures, body, .. } => {
+                    work.push(Work::ClosureBody(body));
+                    work.extend(captures.iter_mut().rev().map(Work::Capture));
+                }
+                ExprKind::ClosureType {
+                    environment,
+                    signature,
+                } => {
+                    work.push(Work::Expr(signature));
+                    work.extend(environment.iter_mut().rev().map(Work::Expr));
+                }
+                ExprKind::EffectResume(value)
+                | ExprKind::EffectRun {
+                    computation: value, ..
+                } => work.push(Work::Expr(value)),
+                ExprKind::EffectComputation { effects, body } => {
+                    for operation in effects {
+                        for argument in &mut operation.arguments {
+                            *argument = rewriter.ty(argument)?;
+                        }
+                    }
+                    work.push(Work::Expr(body));
+                }
+                ExprKind::EffectRequest {
+                    operation,
+                    signature,
+                    arguments,
+                    ..
+                } => {
+                    for argument in &mut operation.arguments {
+                        *argument = rewriter.ty(argument)?;
+                    }
+                    **signature = rewriter.ty(signature)?;
+                    work.extend(arguments.iter_mut().rev().map(Work::Expr));
+                }
+                _ => unreachable!("specialized nodes were dispatched before borrowing children"),
+            }
         }
         Ok(())
     }
@@ -3132,6 +3558,19 @@ impl Expr {
     #[inline(never)]
     fn rewrite_operation<R: Rewriter>(&mut self, rewriter: &mut R) -> Result<(), R::Error> {
         match &mut self.kind {
+            ExprKind::ErrorConvert { conversion, value } => {
+                let was_error = matches!(value.ty, Term::ErrorResult { .. });
+                value.rewrite_with(rewriter)?;
+                if *conversion == crate::error_results::Conversion::Success
+                    && !was_error
+                    && matches!(value.ty, Term::ErrorResult { .. })
+                {
+                    // A generic success domain can itself acquire an error
+                    // qualifier. Preserve its selected branch after flattening.
+                    *conversion = crate::error_results::Conversion::Embed;
+                }
+            }
+
             ExprKind::EffectHandle {
                 computation,
                 handlers,
@@ -3337,6 +3776,7 @@ impl Expr {
             }
             | ExprKind::TypeList(fields)
             | ExprKind::TupleType(fields)
+            | ExprKind::Intrinsic { inputs: fields, .. }
             | ExprKind::Tuple(fields)
             | ExprKind::AnonymousRecord { fields }
             | ExprKind::Record { fields, .. }
@@ -3349,6 +3789,7 @@ impl Expr {
             | ExprKind::Field { value, .. }
             | ExprKind::Let { value, .. }
             | ExprKind::Assign { value, .. }
+            | ExprKind::UnsafeScope(value)
             | ExprKind::Discard(value)
             | ExprKind::RequirePredicate(value)
             | ExprKind::EnsurePredicate(value)
@@ -3388,6 +3829,7 @@ impl Expr {
             | ExprKind::ScalarGreater(a, b)
             | ExprKind::ScalarGreaterEqual(a, b)
             | ExprKind::ScalarLessEqual(a, b)
+            | ExprKind::TemplateEqual(a, b)
             | ExprKind::ScalarEqual(a, b)
             | ExprKind::TypeEqual(a, b)
             | ExprKind::TypeListIndex(a, b)
@@ -3405,13 +3847,51 @@ impl Expr {
                 end.rewrite_with(rewriter)?;
             }
             ExprKind::Match { value, arms } => {
+                let pattern_domain = value.ty.clone();
+                let (mut known_errors, projections) = match &value.ty {
+                    Term::ErrorResult { errors, result }
+                        if !matches!(result.as_ref(), Term::ErrorResult { .. }) =>
+                    {
+                        let projections = arms
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, arm)| {
+                                crate::error_results::specialize::projection_operand(&arm.body)
+                                    .is_some_and(|operand| operand.ty == **result)
+                                    .then_some(index)
+                            })
+                            .collect::<Vec<_>>();
+                        (errors.clone(), projections)
+                    }
+                    _ => (Vec::new(), Vec::new()),
+                };
                 (value).rewrite_with(rewriter)?;
-                for arm in arms {
-                    arm.pattern.rewrite_with(rewriter)?;
+                for arm in arms.iter_mut() {
+                    arm.pattern
+                        .rewrite_with_domain(rewriter, Some(&pattern_domain))?;
                     if let Some(g) = &mut arm.guard {
                         (g).rewrite_with(rewriter)?;
                     }
                     (&mut arm.body).rewrite_with(rewriter)?;
+                }
+                if projections.iter().any(|index| {
+                    crate::error_results::specialize::projection_operand(&arms[*index].body)
+                        .is_some_and(|operand| matches!(operand.ty, Term::ErrorResult { .. }))
+                }) {
+                    for label in &mut known_errors {
+                        *label = rewriter.ty(label)?;
+                    }
+                    // Preserve the user's arm order. Newly exposed inner
+                    // branches belong beside their original success arm.
+                    for index in projections.into_iter().rev() {
+                        let additional =
+                            crate::error_results::specialize::complete_success_projection(
+                                &value.ty,
+                                &known_errors,
+                                &mut arms[index],
+                            );
+                        arms.splice(index + 1..index + 1, additional);
+                    }
                 }
             }
             ExprKind::Block { .. } | ExprKind::CallPreparation { .. } => {
@@ -3423,7 +3903,8 @@ impl Expr {
                 guard,
                 otherwise,
             } => {
-                pattern.rewrite_with(rewriter)?;
+                let pattern_domain = value.ty.clone();
+                pattern.rewrite_with_domain(rewriter, Some(&pattern_domain))?;
                 (value).rewrite_with(rewriter)?;
                 if let Some(g) = guard {
                     (g).rewrite_with(rewriter)?;
@@ -3499,6 +3980,13 @@ impl Term {
                 | Term::TypeListValue(arguments)
                 | Term::TypeListConcat(arguments)
                 | Term::TupleValue(arguments) => terms.extend(arguments),
+                Term::ErrorValue { ty, label, value } => {
+                    terms.push(ty);
+                    if let Some(label) = label {
+                        terms.push(label);
+                    }
+                    terms.push(value);
+                }
                 Term::NominalValue { ty, fields, .. } => {
                     terms.push(ty);
                     terms.extend(fields);
@@ -3506,7 +3994,9 @@ impl Term {
                 Term::Record(fields) | Term::RecordValue(fields) => {
                     terms.extend(fields.iter().map(|(_, ty)| ty))
                 }
-                Term::Pointer(t) | Term::ComptimeFunction(t) => terms.push(t),
+                Term::Pointer(t) | Term::ComptimeFunction(t) | Term::UnsafeFunction(t) => {
+                    terms.push(t)
+                }
                 Term::Function { parameters, result } => {
                     terms.extend(parameters.iter().map(|p| &p.ty));
                     terms.push(result);
@@ -3771,8 +4261,42 @@ impl Pattern {
         self.rewrite_with(&mut TypeRewriter(transform))
     }
     pub fn rewrite_with<R: Rewriter>(&mut self, rewriter: &mut R) -> Result<(), R::Error> {
+        self.rewrite_with_domain(rewriter, None)
+    }
+    /// Carry the original subject domain through structural patterns. Only
+    /// explicit field layouts are used; opaque nominal/normal heads stay opaque.
+    fn rewrite_with_domain<R: Rewriter>(
+        &mut self,
+        rewriter: &mut R,
+        domain: Option<&Term>,
+    ) -> Result<(), R::Error> {
         rewriter.pattern(self)?;
+        let completion = match (&*self, domain) {
+            (Self::ErrorResult { label: None, .. }, Some(Term::ErrorResult { errors, result }))
+                if matches!(
+                    result.as_ref(),
+                    Term::Rigid { .. }
+                        | Term::Bound { .. }
+                        | Term::Hole { .. }
+                        | Term::AssociatedType { .. }
+                        | Term::NormalForm { .. }
+                ) =>
+            {
+                Some((errors, result))
+            }
+            _ => None,
+        };
         match self {
+            Self::ErrorResult { label, inner } => {
+                let inner_domain = label.clone().or_else(|| match domain {
+                    Some(Term::ErrorResult { result, .. }) => Some((**result).clone()),
+                    _ => None,
+                });
+                if let Some(ty) = label {
+                    *ty = rewriter.ty(ty)?;
+                }
+                inner.rewrite_with_domain(rewriter, inner_domain.as_ref())?;
+            }
             Self::CodeEvidence { outputs } => {
                 for (_, ty) in outputs {
                     *ty = rewriter.ty(ty)?;
@@ -3780,32 +4304,87 @@ impl Pattern {
             }
 
             Self::Then { first, value, next } => {
-                first.rewrite_with(rewriter)?;
+                first.rewrite_with_domain(rewriter, domain)?;
+                let computed_domain = value.ty.clone();
                 value.rewrite_with(rewriter)?;
-                next.rewrite_with(rewriter)?;
+                next.rewrite_with_domain(rewriter, Some(&computed_domain))?;
+                // An identity observation used to retain a generic error
+                // field's domain is no new value or ownership transfer. Once
+                // its success domain is concrete, keep matching the subject
+                // directly if the temporary alias is unused by the pattern.
+                if let Self::Observe { binding, inner } = first.as_ref() {
+                    if matches!(inner.as_ref(), Self::Wild)
+                        && matches!(&value.kind, ExprKind::Local(id) if id == binding)
+                        && matches!(&value.ty, Term::ErrorResult { result, .. }
+                            if !matches!(result.as_ref(), Term::Rigid { .. }
+                                | Term::Bound { .. } | Term::Hole { .. }
+                                | Term::AssociatedType { .. }))
+                        && crate::free_bindings::collect_pattern(next, &mut 4096)
+                            .is_ok_and(|free| !free.contains(binding))
+                    {
+                        *self = *std::mem::replace(next, Box::new(Self::Wild));
+                    }
+                }
             }
             Self::Guard { pattern, condition } => {
-                pattern.rewrite_with(rewriter)?;
+                pattern.rewrite_with_domain(rewriter, domain)?;
                 condition.rewrite_with(rewriter)?;
             }
             Self::Observe { inner: pattern, .. }
             | Self::Remap { pattern, .. }
-            | Self::Binding { inner: pattern, .. } => pattern.rewrite_with(rewriter)?,
+            | Self::Binding { inner: pattern, .. } => {
+                pattern.rewrite_with_domain(rewriter, domain)?
+            }
+            Self::Or(alternatives) => {
+                for pattern in alternatives {
+                    pattern.rewrite_with_domain(rewriter, domain)?;
+                }
+            }
+            Self::Tuple(fields) => {
+                let domains = match domain {
+                    Some(Term::Tuple(types)) if types.len() == fields.len() => Some(types),
+                    _ => None,
+                };
+                for (index, pattern) in fields.iter_mut().enumerate() {
+                    pattern.rewrite_with_domain(rewriter, domains.map(|types| &types[index]))?;
+                }
+            }
+            Self::AnonymousRecord { names, fields } => {
+                for (index, pattern) in fields.iter_mut().enumerate() {
+                    let field_domain = match (domain, names.get(index)) {
+                        (Some(Term::Record(types)), Some(name)) => types
+                            .iter()
+                            .find(|(field, _)| field == name)
+                            .map(|(_, ty)| ty),
+                        _ => None,
+                    };
+                    pattern.rewrite_with_domain(rewriter, field_domain)?;
+                }
+            }
             Self::NormalForm {
                 arguments: fields, ..
             }
             | Self::TypeTuple(fields)
-            | Self::Tuple(fields)
-            | Self::Or(fields)
             | Self::NominalType { fields, .. }
             | Self::Record { fields, .. }
-            | Self::AnonymousRecord { fields, .. }
             | Self::Variant { fields, .. } => {
                 for pattern in fields {
                     pattern.rewrite_with(rewriter)?;
                 }
             }
             _ => {}
+        }
+        if let Some((errors, result)) = completion {
+            let payload = rewriter.ty(result)?;
+            if matches!(payload, Term::ErrorResult { .. }) {
+                let labels = errors
+                    .iter()
+                    .map(|ty| rewriter.ty(ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                crate::error_results::specialize::complete_ignored_success_pattern(
+                    self, &labels, &payload,
+                );
+            }
         }
         Ok(())
     }
@@ -3826,11 +4405,31 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
             return false;
         }
         remaining -= 1;
+        if matches!(&expr.kind, ExprKind::UnsafeScope(body) if body.ty != expr.ty) {
+            return false;
+        }
         match &expr.kind {
             ExprKind::BitWindow { value, start, end } => {
                 pending.extend([value.as_ref(), start.as_ref(), end.as_ref()])
             }
             ExprKind::Literal(_) | ExprKind::Local(_) | ExprKind::Unit => {}
+            ExprKind::Intrinsic {
+                tag,
+                inputs,
+                binding,
+            } => {
+                // Target evidence establishes a scalar operation with no memory
+                // or owning-result effects. It never grants permission for its
+                // operands: continue visiting every input, including unsafe scopes.
+                // Pending evidence only admits template shape; concrete execution
+                // still calls intrinsics::checked after specialization.
+                if !binding.as_ref().is_some_and(|binding| {
+                    binding.validate_template(*tag, inputs, &expr.ty).is_ok()
+                }) {
+                    return false;
+                }
+                pending.extend(inputs);
+            }
             // A checked associated value is initialized at comptime. Reading
             // it is a predicate operand; invoking a callable stored in it is
             // still subject to the separate call admission rules below.
@@ -3858,11 +4457,13 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
             | ExprKind::IntegerNegate(value)
             | ExprKind::FloatNegate(value)
             | ExprKind::BitConvert(value)
+            | ExprKind::ErrorConvert { value: value, .. }
             | ExprKind::NewtypeConvert(value)
             | ExprKind::Snapshot(value)
             | ExprKind::TakeBits(value)
             | ExprKind::SymbolName(value)
             | ExprKind::EnumName(value)
+            | ExprKind::UnsafeScope(value)
             | ExprKind::Discard(value)
             | ExprKind::AnonymousField { value, .. }
             | ExprKind::Field { value, .. }
@@ -3980,6 +4581,17 @@ fn predicate_pattern<'a>(
 
 /// Representation selected for an integer operation, not a safety proof.
 pub fn machine_integer_type(expr: &Expr) -> Option<crate::Primitive> {
+    machine_integer_type_in(expr, None)
+}
+
+pub fn machine_integer_type_in(
+    expr: &Expr,
+    target: Option<crate::target::TargetData>,
+) -> Option<crate::Primitive> {
+    let supported = |p: crate::Primitive| match target {
+        Some(target) => target.integer_layout(p).is_some(),
+        None => p.fixed_integer_layout().is_some(),
+    };
     let operand = match &expr.kind {
         ExprKind::IntegerBinary { left, right, .. } => {
             if left.ty == Term::Primitive(crate::Primitive::Never) {
@@ -3992,9 +4604,9 @@ pub fn machine_integer_type(expr: &Expr) -> Option<crate::Primitive> {
         _ => return None,
     };
     match operand {
-        Term::Primitive(p) if p.fixed_integer_layout().is_some() => Some(*p),
+        Term::Primitive(p) if supported(*p) => Some(*p),
         _ => match expr.ty {
-            Term::Primitive(p) if p.fixed_integer_layout().is_some() => Some(p),
+            Term::Primitive(p) if supported(p) => Some(p),
             _ => None,
         },
     }
@@ -4002,6 +4614,13 @@ pub fn machine_integer_type(expr: &Expr) -> Option<crate::Primitive> {
 
 /// Structural pointer-operation checks, independent of memory access evidence.
 pub fn pointer_operation_error(expr: &Expr) -> Option<&'static str> {
+    pointer_operation_error_in(expr, None)
+}
+
+pub fn pointer_operation_error_in(
+    expr: &Expr,
+    target: Option<crate::target::TargetData>,
+) -> Option<&'static str> {
     use ExprKind as K;
     match &expr.kind {
         K::AddressOf(place) => {
@@ -4057,7 +4676,7 @@ pub fn pointer_operation_error(expr: &Expr) -> Option<&'static str> {
         K::BitWritePointer { pointer, .. } => match &pointer.ty {
             Term::Pointer(inner)
                 if matches!(inner.as_ref(),Term::Primitive(p)
-                if matches!(p,crate::Primitive::BitVec(_)) || p.unrestricted_scalar_width().is_some()) =>
+                if matches!(p,crate::Primitive::BitVec(_)) || p.unrestricted_scalar_width_in(target).is_some()) =>
             {
                 ()
             }
@@ -4092,10 +4711,23 @@ pub fn bit_writeback_error(
     value: &Term,
     result: &Term,
 ) -> Option<&'static str> {
+    bit_writeback_error_in(storage, start, end, value, result, None)
+}
+
+pub fn bit_writeback_error_in(
+    storage: &Term,
+    start: usize,
+    end: usize,
+    value: &Term,
+    result: &Term,
+    target: Option<crate::target::TargetData>,
+) -> Option<&'static str> {
     use crate::Primitive;
     let width = match storage {
         Term::Primitive(Primitive::BitVec(width)) => Some(*width),
-        Term::Primitive(primitive) => primitive.unrestricted_scalar_width().map(|n| n as usize),
+        Term::Primitive(primitive) => primitive
+            .unrestricted_scalar_width_in(target)
+            .map(|n| n as usize),
         _ => None,
     };
     let Some(width) = width else {
@@ -4118,6 +4750,12 @@ pub fn bit_writeback_error(
 /// still require separate Copy evidence; their structure does not grant
 /// copying or authorize user-defined cleanup inside a failed candidate.
 pub fn scalar_observation_shape(ty: &Term) -> bool {
+    scalar_observation_shape_in_package(None, ty)
+}
+
+/// Registered Tuple layouts may be inspected without unfolding normal-form
+/// identity. This checks representation only; callers still require Copy.
+pub fn scalar_observation_shape_in_package(package: Option<&Package>, ty: &Term) -> bool {
     let mut pending = vec![ty];
     let mut remaining = 4096usize;
     while let Some(ty) = pending.pop() {
@@ -4125,6 +4763,13 @@ pub fn scalar_observation_shape(ty: &Term) -> bool {
             return false;
         };
         remaining = next;
+        if let Some(fields) = crate::normal_forms::tuple_fields(package, ty) {
+            if fields.len().saturating_add(pending.len()) > remaining {
+                return false;
+            }
+            pending.extend(fields);
+            continue;
+        }
         match ty {
             Term::Primitive(crate::Primitive::Void) => {}
             Term::Primitive(_) if intrinsic_pointer_value(ty) => {}
@@ -4145,7 +4790,10 @@ pub fn intrinsic_pointer_value(ty: &Term) -> bool {
         ty,
         Term::Pointer(_)
             | Term::Primitive(
-                crate::Primitive::Bool
+                crate::Primitive::Void
+                    | crate::Primitive::Usize
+                    | crate::Primitive::Isize
+                    | crate::Primitive::Bool
                     | crate::Primitive::Integer
                     | crate::Primitive::Float
                     | crate::Primitive::Symbol
@@ -4163,9 +4811,21 @@ pub fn bit_update_error(
     value: &Term,
     result: &Term,
 ) -> Option<&'static str> {
+    bit_update_error_in(storage, selections, value, result, None)
+}
+
+/// Validate a writeback using the selected target for platform-integer indices.
+/// The storage representation is checked independently of the index width.
+pub fn bit_update_error_in(
+    storage: &Term,
+    selections: &[BitSelection],
+    value: &Term,
+    result: &Term,
+    target: Option<crate::target::TargetData>,
+) -> Option<&'static str> {
     let width = match storage {
         Term::Primitive(crate::Primitive::BitVec(width)) => Some(*width),
-        Term::Primitive(p) => p.unrestricted_scalar_width().map(|n| n as usize),
+        Term::Primitive(p) => p.unrestricted_scalar_width_in(target).map(|n| n as usize),
         _ => None,
     };
     let Some(mut width) = width else {
@@ -4178,7 +4838,7 @@ pub fn bit_update_error(
         };
         for expression in selection.expressions() {
             divergent |= expression.ty == Term::Primitive(crate::Primitive::Never);
-            if matches!(expression.ty, Term::Primitive(p) if !matches!(p,crate::Primitive::Integer | crate::Primitive::Never) && p.fixed_integer_layout().is_none())
+            if matches!(expression.ty, Term::Primitive(p) if !matches!(p,crate::Primitive::Integer | crate::Primitive::Never) && target.map_or_else(|| p.fixed_integer_layout(), |target| target.integer_layout(p)).is_none())
             {
                 return Some("bit writeback index must be an integer");
             }
@@ -4196,7 +4856,7 @@ pub fn bit_update_error(
         }
         return None;
     }
-    bit_writeback_error(storage, 0, width, value, result)
+    bit_writeback_error_in(storage, 0, width, value, result, target)
 }
 
 impl ExprKind {

@@ -241,3 +241,51 @@ fn unused_substitution_slots_do_not_keep_a_proven_obligation_waiting() {
     assert_eq!(engine.freeze(&term).unwrap(), Term::Primitive(P::Bool));
     assert!(engine.freeze(&T::Meta(unused)).is_err());
 }
+
+#[test]
+fn metered_advance_keeps_unprocessed_obligations_queued() {
+    let mut engine = Engine::default();
+    let ids = (0..8)
+        .map(|_| engine.require(R::Equal(stable(P::Bool), stable(P::Bool))))
+        .collect::<Vec<_>>();
+    let mut empty = Budget {
+        steps: 0,
+        ..Default::default()
+    };
+    assert_eq!(engine.advance_metered(8, &mut empty), 0);
+    let mut small = Budget {
+        steps: 1,
+        ..Default::default()
+    };
+    assert_eq!(engine.advance_metered(8, &mut small), 1);
+    assert_eq!(small.steps, 0);
+    assert!(ids[1..].iter().all(|id| engine.attempts(*id) == Some(0)));
+    engine.retry_unknown();
+    let mut enough = Budget::default();
+    engine.advance_metered(8, &mut enough);
+    assert!(ids.iter().all(|id| engine.state(*id).unwrap().is_proven()));
+    assert!(enough.steps < Budget::default().steps);
+}
+
+#[test]
+fn bounded_obligation_preparation_pauses_without_poisoning_inference() {
+    let ty = Term::Tuple(vec![Term::Primitive(P::Bool); 256]);
+    for requirement in [
+        R::Equal(T::Stable(ty.clone()), T::Stable(ty.clone())),
+        R::Stable(F::equal(ty.clone(), ty.clone())),
+    ] {
+        let mut engine = Engine::default();
+        let id = engine.require(requirement);
+        let mut small = Budget {
+            steps: 16,
+            ..Default::default()
+        };
+        assert_eq!(engine.advance_metered(1, &mut small), 1);
+        assert!(matches!(engine.state(id), Some(State::Ready)));
+        assert!(small.steps < 16);
+        let mut enough = Budget::default();
+        assert_eq!(engine.advance_metered(1, &mut enough), 1);
+        assert!(engine.state(id).unwrap().is_proven());
+        assert_eq!(engine.attempts(id), Some(2));
+    }
+}

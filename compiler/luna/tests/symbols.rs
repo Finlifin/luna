@@ -318,16 +318,18 @@ fn negated_symbol_patterns_execute_in_both_phases_without_exporting_bindings() {
 
 #[test]
 fn negated_symbol_products_preserve_subject_for_later_candidates() {
-    let source="typealias Symbol=.Symbol'builtin;trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for (Symbol,bool) {}
-        fn inspect(value:(Symbol,bool))->bool {value match {not (.ready,true)=>false,(tag,flag)=>tag==.ready and flag}}
+    let source="typealias Symbol=.Symbol'builtin;trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for Tuple<Symbol,bool> {}
+        fn inspect(value:Tuple<Symbol,bool>)->bool {value match {not (.ready,true)=>false,(tag,flag)=>tag==.ready and flag}}
         fn run()->bool {inspect((.ready,true)) and not inspect((.working,true))}";
-    let package = compile(source);
+    let package = support::compile_with_tuple(source);
     assert_eq!(
         luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 100_000)
             .unwrap(),
         Value::Bool(true)
     );
-    let no_copy = compile(&source.replace("impl Duplicate for (Symbol,bool) {}", ""));
+    let no_copy = support::compile_with_tuple(
+        &source.replace("impl Duplicate for Tuple<Symbol,bool> {}", ""),
+    );
     assert!(
         luna::execution::interpret_with_protocols(&no_copy, "run", "Duplicate", "Retire", 100_000)
             .is_err()
@@ -358,11 +360,11 @@ fn symbol_coverage_proves_complements_and_guard_decisions() {
 #[test]
 fn symbol_coverage_preserves_residual_values_and_tuple_correlations() {
     let source = "typealias Symbol=.Symbol'builtin;
-        fn inspect(value:(Symbol,bool))->bool {value match {
+        fn inspect(value:Tuple<Symbol,bool>)->bool {value match {
             (.ready,true)=>true,(.ready,false)=>false,(not .ready,_)=>false
         }} fn run()->bool {inspect((.ready,true)) and not inspect((.other,true))}";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(&support::compile_with_tuple(source), "run", 100_000).unwrap(),
         Value::Bool(true)
     );
     for invalid in [
@@ -370,7 +372,7 @@ fn symbol_coverage_preserves_residual_values_and_tuple_correlations() {
         "typealias Symbol=.Symbol'builtin;fn bad(value:Symbol)->bool {value match {.ready=>true,.closed=>false}}".into(),
         "typealias Symbol=.Symbol'builtin;fn unknown(value:Symbol)->bool {true} fn bad(value:Symbol)->bool {value match {tag if unknown(tag)=>true}}".into(),
     ] {
-        assert!(compile_with_protocols(&invalid,&Default::default()).is_err(),"{invalid}");
+        assert!(support::compile_with_tuple_protocols(&invalid,&Default::default()).is_err(),"{invalid}");
     }
 }
 
@@ -579,17 +581,18 @@ fn symbol_guards_match_and_destructure_constructed_tuples() {
                 and not inspect(.other,true) and not inspect(.other,false)}}"
         );
         assert_eq!(
-            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            luna::execution::interpret(&support::compile_with_tuple(&source), "run", 100_000)
+                .unwrap(),
             Value::Bool(true),
             "{guard}"
         );
-        let staged = compile(&source.replace("fn ", "comptime fn "));
+        let staged = support::compile_with_tuple(&source.replace("fn ", "comptime fn "));
         assert_eq!(
             luna::invocation::invoke(&staged, "run", 100_000).unwrap(),
             Value::Bool(true)
         );
-        let checked = compile(&format!(
-            "trait Duplicate {{}} trait Retire {{fn drop(*self);}} impl Duplicate for (Symbol,bool) {{}} impl Duplicate for ((Symbol,bool),Symbol) {{}} {source}"
+        let checked = support::compile_with_tuple(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}} impl Duplicate for Tuple<A,B> where A, B {{}} {source}"
         ));
         assert_eq!(
             luna::execution::interpret_with_protocols(
@@ -790,4 +793,85 @@ fn nominal_guard_cleanup_does_not_erase_failing_destructors() {
         result.is_err(),
         "a destructor must not disappear through release-only cleanup elision"
     );
+}
+
+#[test]
+fn iir_name_views_reject_forged_operand_and_result_domains() {
+    use nir::program::{ExprKind as K, Literal};
+    use nir::{Primitive as P, Term};
+    for (source, enum_view) in [
+        (
+            "typealias Symbol=.Symbol'builtin;typealias str=.str'builtin;fn tag()->Symbol {.ready} fn run()->str {tag()'tag_name}",
+            false,
+        ),
+        (
+            "typealias str=.str'builtin;enum State {ready,closed} fn tag()->State {State.ready} fn run()->str {tag()'tag_name}",
+            true,
+        ),
+    ] {
+        let package = compile(source);
+        let graph = luna::instantiation::instantiate(&package, "run", 100000).unwrap();
+        graph.validate(&mut 100000).unwrap();
+        for wrong_output in [false, true] {
+            let mut forged = graph.clone();
+            let mut changed = 0;
+            for instance in &mut forged.functions {
+                nir::visit::expression_mut(&mut instance.function.body, &mut 10000, |expr, _| {
+                    if let K::SymbolName(value) | K::EnumName(value) = &mut expr.kind {
+                        changed += 1;
+                        if wrong_output {
+                            expr.ty = Term::Primitive(P::Bool);
+                        } else {
+                            value.ty = Term::Primitive(P::Str);
+                            value.kind = K::Literal(Literal::String("ready".into()));
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            }
+            assert!(changed > 0, "missing name view: enum={enum_view}");
+            let error = forged.validate(&mut 100000).unwrap_err();
+            assert!(error.contains("tag_name"), "{error}");
+            assert!(
+                comptime_interpretor::Interpreter::from_iir(&forged, Default::default()).is_err()
+            );
+        }
+        assert!(graph.validate(&mut 0).is_err());
+        graph.validate(&mut 100000).unwrap();
+    }
+}
+
+#[test]
+fn host_symbol_text_lowering_is_bounded_and_recovers_without_repreparation() {
+    let name = "s".repeat(4096);
+    let package = compile(&format!(
+        "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+        impl Duplicate for .Symbol'builtin {{}}
+        fn run()->.Symbol'builtin {{.{name}}}"
+    ));
+    let copy = package
+        .traits
+        .iter()
+        .find(|t| t.name == "Duplicate")
+        .unwrap()
+        .declaration;
+    let drop = package
+        .traits
+        .iter()
+        .find(|t| t.name == "Retire")
+        .unwrap()
+        .declaration;
+    let prepared = luna::host::prepare_with_protocols(&package, "run", 100000, copy, drop).unwrap();
+    let error = luna::host::llvm_ir_prepared(&prepared, 1024).unwrap_err();
+    assert!(
+        error.contains("host text literal budget exhausted"),
+        "{error}"
+    );
+    let ir = luna::host::llvm_ir_prepared(&prepared, 100000).unwrap();
+    assert!(ir.contains("[4096 x i8]"));
+    luna::host::Toolchain::default()
+        .execute_test(&ir, std::time::Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(luna::host::llvm_ir_prepared(&prepared, 100000).unwrap(), ir);
 }

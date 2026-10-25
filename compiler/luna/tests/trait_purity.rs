@@ -297,3 +297,15 @@ fn interface_predicates_do_not_hide_effects_or_nontermination_in_defaults() {
         assert!(error.contains("P3 stability/termination"), "{error}");
     }
 }
+
+#[test]
+fn generic_pure_method_promises_do_not_grant_copy_cleanup_or_callable_purity() {
+    for source in [
+        "trait Keep {pure fn keep(self)->Self;} pure fn bad(value:T)->T where T:-Keep {let first=value.keep();value.keep()}",
+        "trait Keep {pure fn keep(self)->Self;} pure fn bad(value:T)->bool where T:-Keep {value.keep();true}",
+        "trait Factory {pure fn make(self)->fn()->bool;} pure fn bad(value:T)->bool where T:-Factory {let action=value.make();action()}",
+    ] {
+        let error = compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(error.contains("P4"), "{source}: {error}");
+    }
+}

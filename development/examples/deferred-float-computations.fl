@@ -1,8 +1,11 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Integer = .Integer'builtin;
 
 fn choose(comptime flag: bool) -> bool { flag }
 
-fn forward(comptime mode: Integer) -> (bool, bool, bool) {
+fn forward(comptime mode: Integer) -> Tuple<bool, bool, bool> {
     (
         choose(if mode == 3 { (1.0 + 1.0) == 2.0 } else { false }),
         choose(if mode == 3 { (0.0 / 0.0) != 0.0 } else { false }),
@@ -10,4 +13,4 @@ fn forward(comptime mode: Integer) -> (bool, bool, bool) {
     )
 }
 
-fn run() -> (bool, bool, bool) { forward(3) }
+fn run() -> Tuple<bool, bool, bool> { forward(3) }

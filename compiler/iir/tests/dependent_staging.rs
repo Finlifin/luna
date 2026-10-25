@@ -48,6 +48,7 @@ fn dependent_inputs_rebind_body_contracts_defaults_and_trait_arguments() {
         phase: FunctionPhase::Comptime,
         inline: false,
         pure: false,
+        is_unsafe: false,
         signature: Term::Function {
             parameters: vec![
                 Parameter {
@@ -130,6 +131,7 @@ fn dependent_default_values_receive_concrete_types_before_evaluation_or_runtime_
             phase: FunctionPhase::Runtime,
             inline: false,
             pure: false,
+            is_unsafe: false,
             signature: Term::Function {
                 parameters: vec![
                     Parameter {
@@ -295,6 +297,7 @@ fn dependent_defaults_do_not_recharge_unrelated_completed_payloads() {
         phase: FunctionPhase::Runtime,
         inline: false,
         pure: false,
+        is_unsafe: false,
         signature: Term::Function {
             parameters,
             result: Box::new(t.clone()),
@@ -399,6 +402,7 @@ fn dependent_type_value_domains_rebind_body_and_contracts_compositionally() {
         phase: FunctionPhase::Comptime,
         inline: false,
         pure: false,
+        is_unsafe: false,
         signature: Term::Function {
             parameters: vec![
                 Parameter {

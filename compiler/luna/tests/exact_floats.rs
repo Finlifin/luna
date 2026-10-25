@@ -357,10 +357,10 @@ fn exact_float_patterns_use_numeric_equality_and_support_negation() {
 
 #[test]
 fn exact_float_coverage_preserves_tuple_correlations_and_rejects_executable_guards() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         typealias Float=.Float'builtin;
-        comptime fn classify(value:(Float,bool))->bool {value match {
+        comptime fn classify(value:Tuple<Float,bool>)->bool {value match {
             (0.0,true)=>true,(not 0.0,_)=>true,(0.0,false)=>true,
         }}
         comptime fn nested(value:Float)->bool {value match {
@@ -398,9 +398,10 @@ fn exact_float_coverage_preserves_tuple_correlations_and_rejects_executable_guar
     }
     for body in ["value match {(0.0,true)=>true,(not 0.0,_)=>false}"] {
         let source = format!(
-            "typealias Float=.Float'builtin;comptime fn bad(value:(Float,bool))->bool {{{body}}}"
+            "typealias Float=.Float'builtin;comptime fn bad(value:Tuple<Float,bool>)->bool {{{body}}}"
         );
-        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(&source, &Default::default())
+            .unwrap_err();
         assert!(error.contains("non-exhaustive match"), "{error}");
     }
     for pattern in [
@@ -410,14 +411,15 @@ fn exact_float_coverage_preserves_tuple_correlations_and_rejects_executable_guar
         let source = format!(
             "typealias Float=.Float'builtin;comptime fn accepts(value:Float)->bool {{true}} comptime fn bad(value:Float)->bool {{value match {{{pattern}=>true,0.0=>false}}}}"
         );
-        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(&source, &Default::default())
+            .unwrap_err();
         assert!(error.contains("non-exhaustive match"), "{error}");
     }
 }
 
 #[test]
 fn exact_float_pure_equality_guards_cover_complements_and_keep_subject_identity() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         typealias Float=.Float'builtin;
         comptime fn reflexive(value:Float)->bool {value match {_ as x if x == x => true}}
@@ -432,7 +434,7 @@ fn exact_float_pure_equality_guards_cover_complements_and_keep_subject_identity(
         comptime fn negative(value:Float)->bool {value match {
             < -1.25 > => true, not < -1.25 > => false,
         }}
-        comptime fn negative_tuple(value:(Float,bool))->bool {value match {
+        comptime fn negative_tuple(value:Tuple<Float,bool>)->bool {value match {
             ( < -0.0 > ,true)=>true,(not < -0.0 > ,_)=>false,(0.0,false)=>true,
         }}
     "#,
@@ -485,7 +487,8 @@ fn exact_float_pure_equality_guards_cover_complements_and_keep_subject_identity(
         let source = format!(
             "typealias Float=.Float'builtin;comptime fn accepts(value:Float)->bool {{true}} comptime fn bad(value:Float,other:Float)->bool {{value match {{{guards}}}}}"
         );
-        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(&source, &Default::default())
+            .unwrap_err();
         assert!(error.contains("non-exhaustive match"), "{error}");
     }
 }
@@ -720,7 +723,7 @@ fn exact_float_alternatives_export_common_bindings_to_coverage_guards() {
 
 #[test]
 fn exact_float_guard_boolean_locals_and_conditionals_keep_decimal_precision() {
-    let package=compile(
+    let package=execution_support::compile_with_tuple(
         "typealias Float=.Float'builtin;
         comptime fn split(value:Float)->bool {value match {
             _ as x if do {let low=x < 1.0000000000000000000000000000001;let alias=low;alias == true}=>true,
@@ -729,7 +732,7 @@ fn exact_float_guard_boolean_locals_and_conditionals_keep_decimal_precision() {
         comptime fn all(value:Float)->bool {value match {
             _ as x if do {let low=x < 0.0;if low {low == true} else {not low}}=>true,
         }}
-        comptime fn run()->(bool,bool,bool,bool) {
+        comptime fn run()->Tuple<bool,bool,bool,bool> {
             (split(1.0000000000000000000000000000000),split(1.0000000000000000000000000000001),all(-0.0),all(-1.0))
         }"
     );
@@ -751,7 +754,7 @@ fn exact_float_guard_boolean_locals_and_conditionals_keep_decimal_precision() {
             "typealias Float=.Float'builtin;comptime fn decide(x:Float)->bool {{true}} comptime fn bad(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}"
         );
         assert!(
-            compile_with_protocols(&source, &Default::default()).is_err(),
+            execution_support::compile_with_tuple_protocols(&source, &Default::default()).is_err(),
             "{source}"
         );
     }
@@ -759,7 +762,7 @@ fn exact_float_guard_boolean_locals_and_conditionals_keep_decimal_precision() {
 
 #[test]
 fn exact_float_nested_match_guards_preserve_first_matching_arm() {
-    let package=compile(
+    let package=execution_support::compile_with_tuple(
         "typealias Float=.Float'builtin;
         comptime fn split(value:Float)->bool {value match {
             _ as x if (x < 1.0000000000000000000000000000001) match {true=>true,false=>false}=>true,
@@ -771,7 +774,7 @@ fn exact_float_nested_match_guards_preserve_first_matching_arm() {
         comptime fn numeric(value:Float)->bool {value match {
             _ as x if x match {..0.0=>true,0.0=>true,_=>true}=>true,
         }}
-        comptime fn run()->(bool,bool,bool,bool,bool) {
+        comptime fn run()->Tuple<bool,bool,bool,bool,bool> {
             (split(1.0000000000000000000000000000000),split(1.0000000000000000000000000000001),all(-1.0),all(1.0),numeric(-0.0))
         }"
     );
@@ -792,7 +795,7 @@ fn exact_float_nested_match_guards_preserve_first_matching_arm() {
             "typealias Float=.Float'builtin;comptime fn bad(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}"
         );
         assert!(
-            compile_with_protocols(&source, &Default::default()).is_err(),
+            execution_support::compile_with_tuple_protocols(&source, &Default::default()).is_err(),
             "{source}"
         );
     }
@@ -811,11 +814,11 @@ fn exact_float_guards_skip_unreachable_opaque_conditions() {
         "x match {..0.0=>true,0.0..=>true,_=>decide(x)}",
         "not (x < 0.0 and (x >= 0.0 and decide(x)))",
     ] {
-        let package = compile(&format!(
+        let package = execution_support::compile_with_tuple(&format!(
             "typealias Float=.Float'builtin;
             comptime fn decide(x:Float)->bool {{false}}
             comptime fn all(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}
-            comptime fn run()->(bool,bool,bool) {{(all(-1.0),all(0.0),all(1.0))}}"
+            comptime fn run()->Tuple<bool,bool,bool> {{(all(-1.0),all(0.0),all(1.0))}}"
         ));
         assert_eq!(
             luna::invocation::invoke(&package, "run", 100000).unwrap(),
@@ -840,7 +843,8 @@ fn exact_float_guards_skip_unreachable_opaque_conditions() {
         let source = format!(
             "typealias Float=.Float'builtin;comptime fn decide(x:Float)->bool {{true}} comptime fn bad(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}"
         );
-        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(&source, &Default::default())
+            .unwrap_err();
         assert!(error.contains("exhaustive"), "{source}: {error}");
     }
 }
@@ -855,8 +859,8 @@ fn exact_float_or_patterns_export_selected_computed_booleans() {
                     if selected == (value >= 0.0) => selected,
             }
         }
-        comptime fn run()->(bool,bool,bool) {(classify(-1.0),classify(0.0),classify(1.0))}";
-    let package = compile(source);
+        comptime fn run()->Tuple<bool,bool,bool> {(classify(-1.0),classify(0.0),classify(1.0))}";
+    let package = execution_support::compile_with_tuple(source);
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -869,7 +873,7 @@ fn exact_float_or_patterns_export_selected_computed_booleans() {
         "((value if value >= 0.0) and true is selected)",
         "(((value if value == 0.0) and true is selected) or ((value if value > 0.0) and false is selected))",
     ).replace("selected == (value >= 0.0)", "selected == (value == 0.0)");
-    let package = compile(&nested);
+    let package = execution_support::compile_with_tuple(&nested);
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -881,9 +885,181 @@ fn exact_float_or_patterns_export_selected_computed_booleans() {
     // The first candidate now matches every input. Its false result must not
     // be replaced by the later candidate's true result after guard failure.
     let shadowed = source.replace("value if value < 0.0", "value");
-    let error = compile_with_protocols(&shadowed, &Default::default()).unwrap_err();
+    let error = execution_support::compile_with_tuple_protocols(&shadowed, &Default::default())
+        .unwrap_err();
     assert!(error.contains("exhaustive"), "{error}");
     let wrong = source.replace("and true is selected", "and false is selected");
-    let error = compile_with_protocols(&wrong, &Default::default()).unwrap_err();
+    let error =
+        execution_support::compile_with_tuple_protocols(&wrong, &Default::default()).unwrap_err();
     assert!(error.contains("exhaustive"), "{error}");
+}
+
+#[test]
+fn generic_float_literals_form_at_the_selected_width() {
+    let source="fn midpoint()->T where T, requires T == .f32'builtin or T == .f64'builtin {1.0000000596046447753906250000000001}
+        fn negative_zero()->T where T, requires T == .f32'builtin or T == .f64'builtin { -0.0 }
+        fn run()->bool {
+            let a=midpoint<.f32'builtin>(); let b=midpoint<.f64'builtin>();
+            let z=negative_zero<.f32'builtin>(); let w=negative_zero<.f64'builtin>();
+            a'bitvec == 1065353217 and b'bitvec == 4607182419068452864
+            and z'bitvec == 2147483648 and w'bitvec == 9223372036854775808
+        }";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100000).unwrap(),
+        Value::Bool(true)
+    );
+    let ir = luna::host::llvm_ir(&package, "run", 100000).unwrap();
+    for optimization in [
+        luna::host::OptimizationLevel::O0,
+        luna::host::OptimizationLevel::O3,
+    ] {
+        luna::host::Toolchain {
+            optimization,
+            ..Default::default()
+        }
+        .execute_test(&ir, std::time::Duration::from_secs(5))
+        .unwrap();
+    }
+}
+
+#[test]
+fn generic_float_literals_require_a_proven_float_domain() {
+    for source in [
+        "fn zero()->T where T {0.0}",
+        "fn zero()->T where T, requires T == .f32'builtin or T == bool {0.0}",
+        "pure comptime fn Identity<T>->.Type'builtin {T} fn zero()->Identity<T> where T {0.0}",
+    ] {
+        assert!(
+            compile_with_protocols(source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn generic_float_default_forms_after_specialization() {
+    let source="fn choose(value:T,.fallback:T=0.0)->T where T, requires T == .f32'builtin or T == .f64'builtin {fallback}
+        fn run()->bool {choose<.f32'builtin>(1.0)==0.0 and choose<.f64'builtin>(1.0)==0.0}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100000).unwrap(),
+        Value::Bool(true)
+    );
+    let ir = luna::host::llvm_ir(&package, "run", 100000).unwrap();
+    luna::host::Toolchain::default()
+        .execute_test(&ir, std::time::Duration::from_secs(5))
+        .unwrap();
+}
+
+#[test]
+fn iir_rejects_pending_float_even_with_concrete_annotation() {
+    let package = compile("fn run()->.f32'builtin {0.0}");
+    let mut graph = luna::instantiation::instantiate(&package, "run", 100000).unwrap();
+    graph.functions[0].function.body.kind =
+        nir::program::ExprKind::Literal(nir::program::Literal::PendingFloat {
+            spelling: "0.0".into(),
+            negative: false,
+        });
+    assert!(
+        graph
+            .validate(&mut 100000)
+            .unwrap_err()
+            .contains("unformed float")
+    );
+}
+
+#[test]
+fn generic_float_overflow_is_checked_for_each_instance_independently() {
+    let package = compile(
+        "fn huge()->T where T, requires T == .f32'builtin or T == .f64'builtin {1.0e40}
+        fn small()->.f32'builtin {huge<.f32'builtin>()}
+        fn large()->.f64'builtin {huge<.f64'builtin>()}",
+    );
+    let error = luna::instantiation::instantiate(&package, "small", 100000).unwrap_err();
+    assert!(
+        error.contains("float-formation-error")
+            && error.contains("finite float literal exceeds")
+            && error.contains("f32"),
+        "{error}"
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "large", 100000).unwrap(),
+        Value::Float64(1e40f64.to_bits())
+    );
+    assert!(luna::instantiation::instantiate(&package, "large", 1).is_err());
+    assert!(luna::instantiation::instantiate(&package, "large", 100000).is_ok());
+}
+
+#[test]
+fn generic_float_formation_is_available_during_comptime_invocation() {
+    let package=compile("comptime fn midpoint()->T where T, requires T == .f32'builtin or T == .f64'builtin {1.0000000596046447753906250000000001}
+        fn run()->bool {const value=midpoint<.f32'builtin>();value'bitvec == 1065353217}");
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn generic_float_union_preserves_exact_comptime_values() {
+    let package=compile("typealias Float=.Float'builtin;
+        comptime fn decimal()->T where T, requires T == Float or T == .f32'builtin or T == .f64'builtin {1.0000000596046447753906250000000001}
+        comptime fn zero()->T where T, requires T == Float or T == .f32'builtin or T == .f64'builtin { -0.0 }
+        comptime fn exact()->bool {decimal<Float>() == 1.0000000596046447753906250000000001}
+        comptime fn negative()->Float {zero<Float>()}
+        fn run()->bool {const valid=exact();const rounded=decimal<.f32'builtin>(); valid and rounded'bitvec == 1065353217}");
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100000).unwrap(),
+        Value::Bool(true)
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let value = vm.invoke(id(&package, "negative"), vec![]).unwrap();
+    let Value::Float(value) = value else {
+        panic!("not exact Float")
+    };
+    assert!(value.is_zero() && value.is_negative());
+    let ir = luna::host::llvm_ir(&package, "run", 100000).unwrap();
+    luna::host::Toolchain::default()
+        .execute_test(&ir, std::time::Duration::from_secs(5))
+        .unwrap();
+}
+
+#[test]
+fn exact_generic_float_does_not_become_runtime_storage() {
+    let source = "fn value()->T where T, requires T == .Float'builtin or T == .f32'builtin {0.0}
+        fn run()->.Float'builtin {value<.Float'builtin>()}";
+    let error = match compile_with_protocols(source, &Default::default()) {
+        Ok(package) => {
+            assert!(luna::host::llvm_ir(&package, "run", 100000).is_err());
+            luna::instantiation::instantiate(&package, "run", 100000).unwrap_err()
+        }
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("comptime-only value cannot inhabit runtime storage"),
+        "{error}"
+    );
+}
+
+#[test]
+fn generic_float_formation_survives_quote_closure_and_default_callback_boundaries() {
+    for body in [
+        "quote fn produce()->T where T, requires T == .f32'builtin or T == .f64'builtin { -0.0 }
+         fn calculate()->T where T, requires T == .f32'builtin or T == .f64'builtin {produce<T>()}",
+        "fn make()->fn()->T where T, requires T == .f32'builtin or T == .f64'builtin {|| {let value:T= -0.0;value}}
+         fn calculate()->T where T, requires T == .f32'builtin or T == .f64'builtin {let action=make<T>();action()}",
+        "fn calculate(.action:fn()->T=|| { -0.0 })->T where T, requires T == .f32'builtin or T == .f64'builtin {action()}",
+        "fn make()->%{value:T} fn()->T where T, requires T == .f32'builtin or T == .f64'builtin {let value:T= -0.0;||value}
+         fn calculate()->T where T, requires T == .f32'builtin or T == .f64'builtin {let action=make<T>();action()}",
+    ] {
+        let source=format!("{body}
+            fn run()->bool {{let a=calculate<.f32'builtin>();let b=calculate<.f64'builtin>();a'bitvec == 2147483648 and b'bitvec == 9223372036854775808}}");
+        let package=compile_with_protocols(&source,&Default::default()).unwrap_or_else(|e|panic!("{source}: {e}"));
+        assert_eq!(luna::execution::interpret(&package,"run",100000).unwrap_or_else(|e|panic!("{source}: {e}")),Value::Bool(true));
+        let ir=luna::host::llvm_ir(&package,"run",100000).unwrap();
+        for optimization in [luna::host::OptimizationLevel::O0,luna::host::OptimizationLevel::O3] {
+            luna::host::Toolchain {optimization,..Default::default()}.execute_test(&ir,std::time::Duration::from_secs(5)).unwrap();
+        }
+    }
 }

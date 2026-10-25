@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- This helper executes only after a concrete instance supplies flag.
 comptime fn invert(flag: bool) -> bool {
     not flag
@@ -23,6 +26,6 @@ where T
 
 typealias Byte = .u8'builtin;
 
-fn run() -> (Byte, Byte) {
+fn run() -> Tuple<Byte, Byte> {
     (opposite(true, 3, 8), opposite(false, 3, 8))
 }

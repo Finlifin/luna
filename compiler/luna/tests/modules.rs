@@ -127,7 +127,7 @@ fn nested_type_visibility_is_checked_at_each_projection() {
         );
     }
 }
-struct Project(PathBuf);
+struct Project(PathBuf, bool);
 impl Project {
     fn new(files: &[(&str, &str)]) -> Self {
         let root = std::env::temp_dir().join(format!(
@@ -141,7 +141,23 @@ impl Project {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, text).unwrap();
         }
-        Self(root)
+        Self(root, false)
+    }
+    fn with_tuple(files: &[(&str, &str)]) -> Self {
+        let mut project = Self::new(files);
+        let main = project.0.join("main.fl");
+        let source = std::fs::read_to_string(&main).unwrap();
+        std::fs::write(
+            main,
+            format!(
+                "pure comptime fn TupleElements<T>->.Type'builtin {{T}}
+            pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>>->.Type'builtin {{bool}}
+            {source}"
+            ),
+        )
+        .unwrap();
+        project.1 = true;
+        project
     }
     fn compile(&self) -> Result<nir::program::Package, String> {
         match frontend::compile(&Options {
@@ -150,11 +166,14 @@ impl Project {
             output: None,
             sysroot: None,
             splice_protocol: None,
-            meta_list_type: None,
+            meta_list_type: self.1.then(|| "input::TupleElements".into()),
             index_protocol: None,
+            ord_protocol: None,
+            eq_protocol: None,
+            list_pattern_protocol: None,
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
-            tuple_type: None,
+            tuple_type: self.1.then(|| "input::Tuple".into()),
             optional_type: None,
         })? {
             Artifact::Nir(package) => Ok(package),
@@ -232,10 +251,10 @@ fn pattern_output_names_follow_forward_cross_file_imports() {
 
 #[test]
 fn files_directories_and_mod_bodies_share_one_declaration_collection() {
-    let project = Project::new(&[
+    let project = Project::with_tuple(&[
         (
             "main.fl",
-            "typealias Flag = true'type; fn run() -> (Flag,Flag,Flag) { (left.value(),nested.deep.read(),nested.value()) }",
+            "typealias Flag = true'type; fn run() -> Tuple<Flag,Flag,Flag> { (left.value(),nested.deep.read(),nested.value()) }",
         ),
         ("left.fl", "fn value() -> Flag { true }"),
         ("nested/mod.fl", "fn value() -> Flag { false }"),
@@ -371,6 +390,9 @@ fn output_cannot_overwrite_an_automatically_discovered_source() {
         splice_protocol: None,
         meta_list_type: None,
         index_protocol: None,
+        ord_protocol: None,
+        eq_protocol: None,
+        list_pattern_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,
@@ -652,6 +674,9 @@ fn grouped_imports_preserve_shared_prefixes_nested_paths_and_aliases() {
         splice_protocol: None,
         meta_list_type: None,
         index_protocol: None,
+        ord_protocol: None,
+        eq_protocol: None,
+        list_pattern_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,
@@ -811,14 +836,14 @@ fn explicit_and_contextual_generic_values_work_through_import_aliases() {
 
 #[test]
 fn imported_generic_optional_defaults_keep_definition_parameter_scope() {
-    let project = Project::new(&[
+    let project = Project::with_tuple(&[
         (
             "main.fl",
-            "use helper.build as make; fn run() -> (true'type, true'type) { let first = false; make(true, .first = true) }",
+            "use helper.build as make; fn run() -> Tuple<true'type, true'type> { let first = false; make(true, .first = true) }",
         ),
         (
             "helper.fl",
-            "pub fn build(value: T, .first: true'type = false, .second: true'type = first) -> (T, true'type) where T { (value, second) }",
+            "pub fn build(value: T, .first: true'type = false, .second: true'type = first) -> Tuple<T, true'type> where T { (value, second) }",
         ),
     ]);
     assert_eq!(
@@ -1042,13 +1067,13 @@ fn module_constants_preserve_import_visibility_and_comptime_dependencies() {
 
 #[test]
 fn generic_alias_parameters_are_private_to_the_definition_through_reexports() {
-    let project = Project::new(&[
+    let project = Project::with_tuple(&[
         (
             "main.fl",
-            "use facade.Pair; typealias T = 'a''type; fn run() -> (Pair<true'type>, T) { ((true, false), 'x') }",
+            "use facade.Pair; typealias T = 'a''type; fn run() -> Tuple<Pair<true'type>, T> { ((true, false), 'x') }",
         ),
         ("facade.fl", "pub use shapes.Pair;"),
-        ("shapes.fl", "pub typealias Pair<T> = (T, T);"),
+        ("shapes.fl", "pub typealias Pair<T> = Tuple<T, T>;"),
     ]);
     assert_eq!(
         project.run(),
@@ -1057,9 +1082,9 @@ fn generic_alias_parameters_are_private_to_the_definition_through_reexports() {
             Value::Char('x')
         ])
     );
-    let missing = Project::new(&[
+    let missing = Project::with_tuple(&[
         ("main.fl", "use shapes.Pair; fn bad(value: T) {}"),
-        ("shapes.fl", "pub typealias Pair<T> = (T, T);"),
+        ("shapes.fl", "pub typealias Pair<T> = Tuple<T, T>;"),
     ]);
     assert!(missing.compile().unwrap_err().contains("HIR lowering"));
 }

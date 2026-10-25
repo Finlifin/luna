@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Int = .Integer'builtin;
 
 comptime fn AdderType() -> .Type'builtin {
@@ -21,7 +24,7 @@ const PLUS_THREE = make_adder(3);
 const WIDTH = apply_twice(PLUS_THREE, 2);
 typealias Byte = .BitVec'builtin<WIDTH>;
 
-comptime fn run() -> (Int, Int, Int) {
+comptime fn run() -> Tuple<Int, Int, Int> {
     var offset: Int = 10;
     let snapshot = |value: Int| value + offset;
     offset = 20;

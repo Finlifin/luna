@@ -298,3 +298,132 @@ fn inline_control_is_an_expression_without_stealing_function_types() {
         Some(NodeKind::FnType)
     );
 }
+
+#[test]
+fn operator_spans_exclude_preceding_tokens_and_following_delimiters() {
+    for (source, expected) in [
+        (
+            "(a) + (not b)",
+            vec![
+                (NodeKind::Add, "(a) + (not b)"),
+                (NodeKind::BoolNot, "not b"),
+            ],
+        ),
+        (
+            "-(a + b)",
+            vec![(NodeKind::Negative, "-(a + b)"), (NodeKind::Add, "a + b")],
+        ),
+        (
+            "a + not b",
+            vec![(NodeKind::Add, "a + not b"), (NodeKind::BoolNot, "not b")],
+        ),
+        (
+            "a + -b * c",
+            vec![
+                (NodeKind::Add, "a + -b * c"),
+                (NodeKind::Mul, "-b * c"),
+                (NodeKind::Negative, "-b"),
+            ],
+        ),
+        (
+            "a and not not b",
+            vec![
+                (NodeKind::BoolAnd, "a and not not b"),
+                (NodeKind::BoolNot, "not not b"),
+                (NodeKind::BoolNot, "not b"),
+            ],
+        ),
+    ] {
+        let map = SourceMap::new(FilePathMapping::empty());
+        // Exercise offsets in a source map containing an earlier file too.
+        map.new_source_file(FileName::Custom("earlier.fl".into()), "padding".into());
+        let file = map.new_source_file(FileName::Custom("operators.fl".into()), source.into());
+        let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
+        assert!(errors.is_empty());
+        let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+        let root = parser.try_expr().unwrap();
+        let ast = parser.finalize();
+        let mut pending = vec![root];
+        let mut actual = Vec::new();
+        while let Some(node) = pending.pop() {
+            let (kind, span, children) = ast.get_node(node).unwrap();
+            if matches!(
+                kind,
+                NodeKind::Add
+                    | NodeKind::Mul
+                    | NodeKind::BoolAnd
+                    | NodeKind::BoolNot
+                    | NodeKind::Negative
+            ) {
+                let start = (span.lo() - file.start_pos).0 as usize;
+                let end = (span.hi() - file.start_pos).0 as usize;
+                actual.push((kind, &source[start..end]));
+                let arity = if matches!(kind, NodeKind::BoolNot | NodeKind::Negative) {
+                    1
+                } else {
+                    2
+                };
+                pending.extend(children[..arity].iter().rev().copied());
+            }
+        }
+        assert_eq!(actual, expected, "{source}");
+    }
+}
+
+#[test]
+fn guard_and_as_patterns_visit_only_their_two_children() {
+    for (source, count) in [
+        ("value if flag", 3),
+        ("value as whole", 3),
+        ("(value if flag) as whole", 5),
+    ] {
+        let map = SourceMap::new(FilePathMapping::empty());
+        let file = map.new_source_file(
+            FileName::Custom("pattern-children.fl".into()),
+            source.into(),
+        );
+        let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
+        assert!(errors.is_empty());
+        let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+        let root = parser.try_pattern().unwrap();
+        assert_eq!(parser.peek_next_token().kind, TokenKind::Eof);
+        let ast = parser.finalize();
+        assert_eq!(
+            ast::ast_visitor::count_ast_nodes(&ast, root, &map),
+            count,
+            "{source}"
+        );
+        assert_eq!(
+            ast.dump_to_s_expression(root, &map),
+            ast::ast_visitor::dump_ast_to_s_expression(&ast, root, &map)
+        );
+    }
+}
+
+#[test]
+fn constant_binding_visitors_include_failure_block() {
+    for source in [
+        "const value=true",
+        "const true as value=false else {return false;}",
+    ] {
+        let map = SourceMap::new(FilePathMapping::empty());
+        let file = map.new_source_file(FileName::Custom("constant.fl".into()), source.into());
+        let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
+        assert!(errors.is_empty());
+        let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+        let root = parser.try_const_statement().unwrap();
+        assert_eq!(parser.peek_next_token().kind, TokenKind::Eof);
+        let ast = parser.finalize();
+        let (kind, _, children) = ast.get_node(root).unwrap();
+        assert_eq!(kind, NodeKind::ConstDecl);
+        assert_eq!(children[3] != 0, source.contains("else"));
+        let dump = ast.dump_to_s_expression(root, &map);
+        assert_eq!(
+            dump,
+            ast::ast_visitor::dump_ast_to_s_expression(&ast, root, &map)
+        );
+        if source.contains("else") {
+            assert!(dump.to_lowercase().contains("return"), "{dump}");
+        }
+    }
+}

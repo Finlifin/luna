@@ -263,6 +263,7 @@ impl Checker<'_, '_> {
                 variants,
                 groups: vec![],
                 encoding: None,
+                is_intrinsic: false,
                 symbol_encoding: None,
             },
         );

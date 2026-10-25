@@ -34,14 +34,18 @@ pub(super) fn charge(expr: &n::Expr, fuel: &mut usize) -> Result<(), String> {
 }
 
 pub(super) fn dispatch(
-    value: n::Expr,
+    mut value: n::Expr,
     ty: &Term,
     targets: &[n::Expr],
+    next: &mut u32,
+    sources: &mut Vec<n::ExpansionSource>,
     fuel: &mut usize,
 ) -> Result<n::Expr, String> {
     let mut arms = Vec::new();
     for (index, target) in targets.iter().enumerate() {
         charge(target, fuel)?;
+        let mut body = target.clone();
+        crate::program::inlining::freshen_copied_expression(&mut body, next, sources, fuel)?;
         arms.push(n::MatchArm {
             pattern: if index + 1 == targets.len() {
                 P::Wild
@@ -49,11 +53,19 @@ pub(super) fn dispatch(
                 P::Literal(n::Literal::UnsignedInteger(index as u128))
             },
             guard: None,
-            body: target.clone(),
+            body,
         });
     }
+    let source = value.source;
+    let index =
+        u32::try_from(sources.len()).map_err(|_| "template dispatch source space exhausted")?;
+    sources.push(n::ExpansionSource {
+        original: source,
+        site: source,
+    });
+    value.source = n::SourceRange::generated(index);
     Ok(n::Expr {
-        source: value.source,
+        source,
         ty: ty.clone(),
         kind: K::Match {
             value: Box::new(value),
@@ -122,6 +134,7 @@ impl Builder<'_> {
         mutable_callbacks::lower(
             &mut transformed.body,
             &mut self.quote_cursor,
+            &mut self.quote_sources,
             &mut self.fuel,
         )?;
         staged::forward_template_aliases(
@@ -180,6 +193,8 @@ impl Builder<'_> {
                             },
                             result,
                             &targets,
+                            &mut self.quote_cursor,
+                            &mut self.quote_sources,
                             fuel,
                         )?;
                         return Ok(false);
@@ -202,7 +217,14 @@ impl Builder<'_> {
         if !self.expand_inline_instance(&transformed, &mut candidate)? {
             return Ok(false);
         }
-        candidate = dispatch(candidate, result, &targets, &mut self.fuel)?;
+        candidate = dispatch(
+            candidate,
+            result,
+            &targets,
+            &mut self.quote_cursor,
+            &mut self.quote_sources,
+            &mut self.fuel,
+        )?;
         self.normalize_expression(&mut candidate)?;
         *expression = candidate;
         Ok(true)

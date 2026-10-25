@@ -103,6 +103,113 @@ fn run() -> bool {
 
 同一签名的后续 trait bound 可以引用前面的值参数，例如 `where flag: bool, T :- Read<Config{enabled: flag}>`。调用检查同时核验输入声明域与对应 trait 实例；错误的值域或不满足的 bound 都不能通过实例化。值子句可以与 Type 子句混合，并支持显式可选输入及其默认值。
 
+已绑定的 `meta.List<Type>` 也可以作为普通函数的一个值子句输入：
+
+```flurry
+comptime fn First() -> Type where Es: meta.List<Type> { Es[0] }
+comptime fn Defaulted() -> Type where .Es: meta.List<Type> = [bool] { Es[0] }
+
+fn example() -> bool {
+    let first: First<[bool, u8]>() = true;
+    let fallback: Defaulted<>() = true;
+    first and fallback
+}
+```
+
+这里 `Es` 是一个完整的类型列表值，不是多个独立子句参数。尖括号先供应子句输入，随后的 `()` 调用 comptime 函数取得结果类型；这不会展开 normal-form 头。默认列表可以用 `.Es = [...]` 显式覆盖。列表元素必须为 Type，索引必须在范围内，调用输入的域仍由已绑定的 meta.List 身份检查；拼写或相同的函数体不能代替该身份。
+
+runtime 函数的签名需要检查列表内容时，可以显式延后该类型计算：
+
+```flurry
+fn identity(value: defer First<Es>()) -> defer First<Es>()
+where Es: meta.List<Type> {
+    value
+}
+
+fn example_instances() -> bool {
+    let flag = identity<[bool]>(true);
+    let byte = identity<[u8]>(42);
+    flag and byte == 42
+}
+```
+
+声明阶段的 `Es` 身份允许转交列表，但不能据此读取尚未提供的第一个元素。`defer` 保留类型计算，调用取得列表后再形成签名并检查普通实参；空列表或不匹配的普通实参仍被拒绝。没有引用未取得子句值的常量类型计算可以立即完成，不因位于泛型作用域中就自动延后。
+
+显式子句输入已经足以完成签名时，可以取得对应的函数值：
+
+```flurry
+fn apply(callback: fn(bool) -> bool) -> bool { callback(true) }
+
+fn example_callback() -> bool {
+    let callback: fn(bool) -> bool = identity<[bool]>;
+    apply(callback)
+}
+```
+
+形成函数值时完成签名并检查对应函数体，之后可以保存、转交或捕获该值。不同列表实例保留各自的参数和结果域；`identity<[u8]>` 不能赋给 `fn(bool) -> bool`。unsafe 标记与程序契约继续保留。当前实现接通子句可由显式输入、已明确的签名部分和默认值完成，且普通形参均为 runtime 的路径；仍需要普通 comptime 实参才能形成的开放签名，以及 optional／implicit 参数协议转为普通函数值的能力，不能据此视为完成。
+
+这里的契约保留也包括拒绝不合法的转换：当前普通函数类型尚未承载程序前置条件，因此带 `requires gate` 等程序前提的函数实例不能转成不携带该前提的 `fn(...) -> ...`，即使下一次调用看起来会传入合法值也不接受。直接调用仍正常检查前置条件。泛型工厂可以返回不丢失契约信息的函数值，例如 `fn factory() -> fn(T) -> T where T { identity<[T]> }`；外层 Type 捕获随具体工厂实例传递，被调用表达式先求值，随后普通实参按源码顺序各求值一次。
+
+工厂还可以转交外层的声明值参数。它们保留各自的声明域，直到具体工厂实例给出值；不会在检查泛型函数体时凭空求出结果：
+
+```flurry
+fn choose(value: defer First<Es>(), state: *bool) -> defer First<Es>()
+where Es: meta.List<Type>, flag: bool {
+    state.* = flag;
+    value
+}
+
+fn value_factory() -> fn(bool, *bool) -> bool where flag: bool {
+    choose<[bool], flag>
+}
+
+fn use_factories() -> bool {
+    var state = false;
+    let yes = value_factory<true>();
+    let no = value_factory<false>();
+    let a = yes(true, state.ref);
+    assumes state;
+    let b = no(true, state.ref);
+    a and b and not state
+}
+```
+
+这里捕获的是 `where` 声明值，不是把普通 runtime 局部变量提升到 comptime。不同值参数产生的实例必须保持区别；实现回归同时覆盖 bool 和 u8，原生示例通过实际 Copy／Drop 协议检查状态指针访问。
+
+默认子句足以完成实例时，也可以直接用函数名取得函数值：
+
+```flurry
+fn defaulted(value: defer First<Es>()) -> defer First<Es>()
+where .Es: meta.List<Type> = [bool] { value }
+
+fn example_defaulted_callback() -> bool {
+    let inferred = defaulted;
+    let annotated: fn(bool) -> bool = defaulted;
+    let byte: fn(u8) -> u8 = defaulted<.Es=[u8]>;
+    inferred(true) and annotated(true) and byte(42) == 42
+}
+```
+
+沿已有默认子句规则补齐输入后，再形成开放签名并检查函数类型上下文。上下文与所得签名不匹配时拒绝，不为匹配上下文改写默认列表。显式 `.Es=...` 跳过该位置的默认供应计算；省略时，供应计算中的失败仍正常传播。这个规则不擦除普通形参上的 optional／implicit 等调用协议。
+
+若有部分签名已明确，可以先从这些部分推导，再补齐依赖默认值：
+
+```flurry
+fn forward(value: T) -> defer First<Es>()
+where T, .Es: meta.List<Type> = [T] { value }
+
+fn reverse(value: defer First<Es>()) -> T
+where T, .Es: meta.List<Type> = [T] { value }
+
+fn example_context() -> bool {
+    let from_parameter: fn(bool) -> bool = forward;
+    let from_result: fn(u8) -> u8 = reverse;
+    from_parameter(true) and from_result(42) == 42
+}
+```
+
+forward 从参数域推导 T，reverse 从结果域推导 T；随后各自计算 `[T]` 并完成另一端的签名。尚未完成的 `defer` 注解本身不贡献推导约束，完整签名形成后仍与上下文核验。因此不能从 `First<Es>() == bool` 反向猜测整个 Es，也不能用一个不匹配的上下文绕过最终类型检查。
+
 方法保留外层实例输入，显式子句只填写方法自己的槽位。外层捕获也可以参与值域和默认值：
 
 ~~~flurry
@@ -123,7 +230,7 @@ fn run() -> bool {
 ~~~flurry
 struct Flag where enabled: bool {}
 
-fn packet(value: Flag<flag>) -> (Flag<flag>, bool)
+fn packet(value: Flag<flag>) -> Tuple<Flag<flag>, bool>
 where flag: bool { (value, true) }
 
 fn read(value: Flag<flag>, tail: bool) -> bool
@@ -143,7 +250,7 @@ fn run() -> bool {
 typealias Type = .Type'builtin;
 struct Flag where enabled: bool {}
 
-fn read(comptime T: Type, value: Flag<flag>, result: T) -> (T, bool)
+fn read(comptime T: Type, value: Flag<flag>, result: T) -> Tuple<T, bool>
 where flag: bool, .fallback: bool = flag {
     (result, fallback)
 }
@@ -208,7 +315,7 @@ struct Pair where A, .B: Type = A {
     second: B,
 }
 
-comptime fn packet(T: Type) -> (Type,) { (T,) }
+comptime fn packet(T: Type) -> Tuple<Type> { (T,) }
 
 comptime fn Build(T: Type) -> Type {
     Pair<...packet(T)>
@@ -250,7 +357,7 @@ typealias Packet = TaggedPack<...(u8, 9), .Es = [bool, u32]>;
 `.Es` 已供应整个收集参数，因此位置输入只属于固定前缀。编译器先展开字面元组，再用 u8 为 9 提供上下文；它不把字面元组与类型列表混同。命名输入可位于前缀前、中、后，实参仍按源码顺序各求值一次，提前退出会跳过后续输入。多余前缀项不能再进入已经完整供应的 Es，重复供应及缺失固定参数仍被拒绝。这一组合也支持计算产生的前缀包：
 
 ~~~flurry
-comptime fn prefix() -> (Type, bool) { (bool, true) }
+comptime fn prefix() -> Tuple<Type, bool> { (bool, true) }
 comptime fn tail() -> meta.List<Type> { [u32] }
 
 comptime fn BuildPacket() -> Type {
@@ -473,7 +580,7 @@ fn number() -> NumberType { 7 }
 例如沿用上面的 `Selected`，下面的收集输入可跨过显式可选参数：
 
 ~~~flurry
-comptime fn both(.flag: bool = true, ...values: (bool, bool))
+comptime fn both(.flag: bool = true, ...values: Tuple<bool, bool>)
     -> defer Selected(flag) {
     let (first, second) = values;
     first and second
@@ -531,12 +638,12 @@ comptime fn keep_inferred(U: Type, callback: defer fn(U) -> T)
 const INFERRED = keep_inferred(bool, identity_bool);
 ~~~
 
-先取得 U 交付的类型 bool，形成 callback 的输入域，再从 identity_bool 的结果推断 T 为 bool。换成接收 bool、返回 Byte 的函数时，T 推断为 Byte，实例签名分别保留。推断需要准备显式输入时仍遵守源码次序；尚含未求解子句参数的输入域不能被当作具体 expected type 强加给实参。可以先从独立的已形成域完成推断，再准备默认值。作为普通实参交付的函数声明引用已是值，可以原样保留；普通函数类型的前缀实参也可通过 comptime 调用产生，求得结果后复用常量值重建机制交付，包括泛型函数实例。生产过程的契约失败仍先于后续默认计算。位置收集可混合标量与此类函数值，并保留与命名参数交错的源码顺序。仅用于交付的收集允许没有完整符号表示；后续默认依赖复用已取得的交付值，不因缺少符号而重新调用生产函数。普通聚合实参同样适用：例如 `(bool, fn(bool) -> bool)` 或含 callback 字段的 struct，可以先完成生产、保留函数身份，再准备后续 Type 默认值。仅“没有符号表示”允许继续普通交付，预算耗尽、类型与作用域错误仍会拒绝；若聚合本身被类型计算要求，仍必须取得合法符号。计算型展开包也可以同时包含 Type 输入和普通函数值：先求值并重建整个包，只有签名真正读取的字段才转换为符号；函数字段保持原函数身份交给 runtime 或 comptime 调用。IIR 的准备应用允许完整函数身份作为普通字段交付，但不会把尚未执行的调用表达式当成已完成值。这种交付检查也递归覆盖 tuple 和结构记录，逐项检查字段类型、数量及记录标签；绑定 Tuple 的布局仍来自可信协议元数据，嵌套结构不会抹去函数身份。struct／enum 的普通交付同样保留 nominal 声明与泛型参数身份，并递归检查字段中的完成值；enum 分支不会因为载荷含函数而丢失。nominal 字段布局由常量重建阶段检查，交付阶段不展开类型头。trait 方法值也保留 elaboration 已选择的接口、成员、subject、接口实参与方法实参；准备交付不重新查找同名成员。默认方法、泛型方法以及通过子接口取得的父接口方法均遵循这一规则，实例中的类型必须已完成。若该函数值本身参与类型计算，所需 normal-form 符号表示仍未接通；一般前向依赖恢复也未因此完成。
+先取得 U 交付的类型 bool，形成 callback 的输入域，再从 identity_bool 的结果推断 T 为 bool。换成接收 bool、返回 Byte 的函数时，T 推断为 Byte，实例签名分别保留。推断需要准备显式输入时仍遵守源码次序；尚含未求解子句参数的输入域不能被当作具体 expected type 强加给实参。可以先从独立的已形成域完成推断，再准备默认值。作为普通实参交付的函数声明引用已是值，可以原样保留；普通函数类型的前缀实参也可通过 comptime 调用产生，求得结果后复用常量值重建机制交付，包括泛型函数实例。生产过程的契约失败仍先于后续默认计算。位置收集可混合标量与此类函数值，并保留与命名参数交错的源码顺序。仅用于交付的收集允许没有完整符号表示；后续默认依赖复用已取得的交付值，不因缺少符号而重新调用生产函数。普通聚合实参同样适用：例如 `Tuple<bool, fn(bool) -> bool>` 或含 callback 字段的 struct，可以先完成生产、保留函数身份，再准备后续 Type 默认值。仅“没有符号表示”允许继续普通交付，预算耗尽、类型与作用域错误仍会拒绝；若聚合本身被类型计算要求，仍必须取得合法符号。计算型展开包也可以同时包含 Type 输入和普通函数值：先求值并重建整个包，只有签名真正读取的字段才转换为符号；函数字段保持原函数身份交给 runtime 或 comptime 调用。IIR 的准备应用允许完整函数身份作为普通字段交付，但不会把尚未执行的调用表达式当成已完成值。这种交付检查也递归覆盖 tuple 和结构记录，逐项检查字段类型、数量及记录标签；绑定 Tuple 的布局仍来自可信协议元数据，嵌套结构不会抹去函数身份。struct／enum 的普通交付同样保留 nominal 声明与泛型参数身份，并递归检查字段中的完成值；enum 分支不会因为载荷含函数而丢失。nominal 字段布局由常量重建阶段检查，交付阶段不展开类型头。trait 方法值也保留 elaboration 已选择的接口、成员、subject、接口实参与方法实参；准备交付不重新查找同名成员。默认方法、泛型方法以及通过子接口取得的父接口方法均遵循这一规则，实例中的类型必须已完成。若该函数值本身参与类型计算，所需 normal-form 符号表示仍未接通；一般前向依赖恢复也未因此完成。
 
 tuple 类型结构同样可以等待普通 Type 输入：
 
 ~~~flurry
-comptime fn pair(T: Type, ...values: defer (T, T)) -> defer (T, T) {
+comptime fn pair(T: Type, ...values: defer Tuple<T, T>) -> defer Tuple<T, T> {
     values
 }
 
@@ -544,7 +651,7 @@ const PAIR = pair(bool, true, false);
 typealias Pair = PAIR'type;
 ~~~
 
-各元素在声明检查中要求产生 Type，取得 T 后再形成具体 tuple 域。嵌套结构 `(U, (U, U))` 也可等待前置 `U: defer T` 的域和值。绑定 Tuple 协议时，最终类型保留 Tuple 的 normal-form 头，结构视图只用于布局和元素检查；元素类型、数量以及非 Type 输入仍分别校验。
+各元素在声明检查中要求产生 Type，取得 T 后再形成具体 tuple 域。嵌套结构 `Tuple<U, Tuple<U, U>>` 也可等待前置 `U: defer T` 的域和值。绑定 Tuple 协议时，最终类型保留 Tuple 的 normal-form 头，结构视图只用于布局和元素检查；元素类型、数量以及非 Type 输入仍分别校验。
 
 下面的包把接口默认方法交给 runtime 调用；`T` 在编译时取得，callback 保留所选方法身份：
 
@@ -556,7 +663,7 @@ trait Mapper {
 struct Holder {}
 impl Mapper for Holder {}
 
-comptime fn packet() -> (Type, fn(bool) -> bool) {
+comptime fn packet() -> Tuple<Type, fn(bool) -> bool> {
     (bool, Holder.as(Mapper).action)
 }
 fn invoke(comptime T: Type, callback: fn(bool) -> bool) -> bool {
@@ -624,7 +731,7 @@ const CALLBACK = keep(bool, identity);
 
 匹配表达式也可形成索引，例如 `Indexed<flag match { true => false, false => true }>`。enum 的分支绑定可继续参与索引计算，如 `choice match { .none => false, .some(value) => not value }`。定义侧仍检查模式、绑定域、各分支类型和穷尽性，调用点根据实际值选取分支；签名挂起不允许省略这些检查。固定值前缀与 Type 变参的组合可复用已有输入计划，例如 `Pack<flag, T>`、`Pack<flag, ...types>` 与 `Pack<.Es=types, flag>`。同类位置 Type 应用也覆盖 struct、enum、newtype 和类型别名，例如 `defer fn(Holder<T>) -> Holder<T>`；调用点形成具体 Holder 实例并检查其 trait 约束。类型别名沿原有别名规则处理，nominal 实例身份与 newtype 边界不会被这一步抹去。
 
-固定参数头也可在 deferred 签名中展开计算产生的 tuple，例如 `Pair<...packet(T)>`，其中 packet 返回 `(Type, Type)`。定义侧根据已形成的 tuple 域检查字段数量和各槽位的域，不猜测包中具体 Type 值；调用点求得包后再完成类型应用。非 tuple、过多或缺少字段，以及已知的错误字段域会被拒绝，生产者的契约失败正常传播。空 tuple 包虽然不供应位置项，仍须执行生产者；其失败先于后续默认值求值。可用 `comptime fn empty(...items: Args) -> Args where Args { items }` 取得空包。返回 `()` 的 void 函数不能替代它。
+固定参数头也可在 deferred 签名中展开计算产生的 tuple，例如 `Pair<...packet(T)>`，其中 packet 返回 `Tuple<Type, Type>`。定义侧根据已形成的 tuple 域检查字段数量和各槽位的域，不猜测包中具体 Type 值；调用点求得包后再完成类型应用。非 tuple、过多或缺少字段，以及已知的错误字段域会被拒绝，生产者的契约失败正常传播。空 tuple 包虽然不供应位置项，仍须执行生产者；其失败先于后续默认值求值。可用 `comptime fn empty(...items: Args) -> Args where Args { items }` 取得空包。返回 `()` 的 void 函数不能替代它。
 
 
 
@@ -950,7 +1057,7 @@ fn forward_alias(
 解构也可以同时取得供类型计算使用的回调与普通 runtime 字段：
 
 ~~~flurry
-fn from_config(comptime config: (comptime fn() -> Type, bool)) -> bool {
+fn from_config(comptime config: Tuple<comptime fn() -> Type, bool>) -> bool {
     let (chosen, value) = config;
     keep(chosen, value)
 }
@@ -961,7 +1068,7 @@ fn from_config(comptime config: (comptime fn() -> Type, bool)) -> bool {
 纯 comptime 子包也可以分多步解构，不要求一次展开所有层次：
 
 ~~~flurry
-fn nested_config(comptime config: ((comptime fn() -> Type,), bool)) -> bool {
+fn nested_config(comptime config: Tuple<Tuple<comptime fn() -> Type>, bool>) -> bool {
     let (callbacks, value) = config;
     let (chosen,) = callbacks;
     keep(chosen, value)
@@ -972,7 +1079,7 @@ fn nested_config(comptime config: ((comptime fn() -> Type,), bool)) -> bool {
 
 ~~~flurry
 fn checked_nested_config(
-    comptime config: ((comptime fn() -> Type,), bool),
+    comptime config: Tuple<Tuple<comptime fn() -> Type>, bool>,
     ready: bool,
 ) -> bool {
     let (callbacks, value) = config;
@@ -993,7 +1100,7 @@ fn checked_nested_config(
 ~~~flurry
 fn fallback() -> bool { false }
 
-fn require_ready(comptime config: (comptime fn() -> Type, bool)) -> bool {
+fn require_ready(comptime config: Tuple<comptime fn() -> Type, bool>) -> bool {
     let (chosen, true) = config else { return fallback(); };
     keep(chosen, true)
 }
@@ -1006,7 +1113,7 @@ fn require_ready(comptime config: (comptime fn() -> Type, bool)) -> bool {
 ~~~flurry
 fn accept(value: bool) -> bool { value }
 
-fn guarded_config(comptime config: (comptime fn() -> Type, bool)) -> bool {
+fn guarded_config(comptime config: Tuple<comptime fn() -> Type, bool>) -> bool {
     let (chosen, value) if accept(value) = config else { return fallback(); };
     keep(chosen, value)
 }
@@ -1019,7 +1126,7 @@ fn guarded_config(comptime config: (comptime fn() -> Type, bool)) -> bool {
 ~~~flurry
 fn invert(value: bool) -> bool { not value }
 
-fn transform_config(comptime config: (comptime fn() -> Type, bool)) -> bool {
+fn transform_config(comptime config: Tuple<comptime fn() -> Type, bool>) -> bool {
     let (chosen, (value and invert(value) is result)) = config;
     keep(chosen, result)
 }
@@ -1086,7 +1193,7 @@ fn configured_boolean() -> bool { configured() }
 从计算得到的 tuple packet 展开这些输入时，也复用 packet 已完成的值：
 
 ~~~flurry
-comptime fn selector_packet() -> (Selector, bool) {
+comptime fn selector_packet() -> Tuple<Selector, bool> {
     (make_selector(bool), true)
 }
 
@@ -1183,23 +1290,23 @@ const with_explicit = choose_default(.select = alternating_selector());
 位置变参的收集值也可以保存活动闭包图。例如，两个收集元素可以引用同一个选择器：
 
 ~~~flurry
-comptime fn selector_pair() -> (AlternatingSelector, AlternatingSelector) {
+comptime fn selector_pair() -> Tuple<AlternatingSelector, AlternatingSelector> {
     let select = alternating_selector();
     (select, select)
 }
 
-comptime fn SelectFirst(selectors: (AlternatingSelector, AlternatingSelector)) -> Type {
+comptime fn SelectFirst(selectors: Tuple<AlternatingSelector, AlternatingSelector>) -> Type {
     let (first, second) = selectors;
     first()
 }
 
-comptime fn SelectSecond(selectors: (AlternatingSelector, AlternatingSelector)) -> Type {
+comptime fn SelectSecond(selectors: Tuple<AlternatingSelector, AlternatingSelector>) -> Type {
     let (first, second) = selectors;
     second()
 }
 
 comptime fn collect_choice(
-    ...selectors: (AlternatingSelector, AlternatingSelector),
+    ...selectors: Tuple<AlternatingSelector, AlternatingSelector>,
     .value: defer SelectFirst(selectors) = true,
 ) -> defer SelectSecond(selectors) {
     7

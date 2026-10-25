@@ -4,8 +4,19 @@ use std::collections::{HashMap, HashSet};
 
 impl Package {
     pub fn validate_index(&self) -> Result<(), String> {
+        let mut template_targets = HashSet::new();
+        for table in &self.templates {
+            for key in table.targets() {
+                if !template_targets.insert(key) {
+                    return Err("duplicate IIR template identity".into());
+                }
+            }
+        }
         let mut functions = HashMap::new();
         for instance in &self.functions {
+            if template_targets.contains(&instance.key) {
+                return Err("IIR identity is both a template and executable instance".into());
+            }
             if functions
                 .insert(&instance.key, &instance.function)
                 .is_some()
@@ -53,7 +64,7 @@ impl Package {
                 NominalDefinition::Struct(s) => (s.declaration, &s.type_parameters),
                 NominalDefinition::Newtype(n) => (n.declaration, &n.type_parameters),
                 NominalDefinition::Enum(e) => {
-                    e.validate_encoding().map_err(str::to_owned)?;
+                    e.validate_encoding_in(self.target).map_err(str::to_owned)?;
                     (e.declaration, &e.type_parameters)
                 }
             };
@@ -126,11 +137,22 @@ impl Package {
                             && m.type_arguments == method.method_arguments
                     })
                     .ok_or("IIR dispatch member is absent from its interface")?;
+                let key = InstanceKey {
+                    declaration: method.body,
+                    arguments: method.arguments.clone(),
+                };
+                if let Some(ty) = self.template_type(&key) {
+                    if declared.signature.ordinary().map_err(|e| e.to_string())? != ty
+                        || declared.signature.is_comptime_callable()
+                    {
+                        return Err(
+                            "IIR template method disagrees with its interface signature".into()
+                        );
+                    }
+                    continue;
+                }
                 let function = functions
-                    .get(&InstanceKey {
-                        declaration: method.body,
-                        arguments: method.arguments.clone(),
-                    })
+                    .get(&key)
                     .ok_or("IIR dispatch refers to a missing function instance")?;
                 if (function.phase == nir::program::FunctionPhase::Comptime)
                     != declared.signature.is_comptime_callable()

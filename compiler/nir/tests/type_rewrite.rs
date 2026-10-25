@@ -275,3 +275,185 @@ fn lexical_rewriting_keeps_order_pruning_and_failure_on_an_ordinary_stack() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn work_stack_preserves_preorder_pruning_and_failure_boundaries() {
+    fn node(index: u32, kind: K) -> Expr {
+        let mut value = expr(kind);
+        value.source.start = index;
+        value
+    }
+    fn tree() -> Expr {
+        node(
+            1,
+            K::Block {
+                statements: vec![node(2, K::Discard(Box::new(node(3, K::Unit))))],
+                result: Some(Box::new(node(
+                    4,
+                    K::And(
+                        Box::new(node(5, K::Not(Box::new(node(6, K::Unit))))),
+                        Box::new(node(7, K::Unit)),
+                    ),
+                ))),
+            },
+        )
+    }
+    struct Rewrite {
+        visits: Vec<u32>,
+        stop: Option<u32>,
+    }
+    impl nir::program::Rewriter for Rewrite {
+        type Error = u32;
+        fn expression(&mut self, value: &mut Expr) -> Result<bool, u32> {
+            let index = value.source.start;
+            self.visits.push(index);
+            if self.stop == Some(index) {
+                return Err(index);
+            }
+            Ok(index != 5)
+        }
+        fn ty(&mut self, _: &Term) -> Result<Term, u32> {
+            Ok(Term::Primitive(Primitive::Bool))
+        }
+    }
+    let mut rewrite = Rewrite {
+        visits: vec![],
+        stop: Some(4),
+    };
+    assert_eq!(tree().rewrite_with(&mut rewrite), Err(4));
+    assert_eq!(rewrite.visits, [1, 2, 3, 4]);
+    rewrite.visits.clear();
+    rewrite.stop = None;
+    let mut value = tree();
+    value.rewrite_with(&mut rewrite).unwrap();
+    assert_eq!(rewrite.visits, [1, 2, 3, 4, 5, 7]);
+    let K::Block {
+        result: Some(result),
+        ..
+    } = value.kind
+    else {
+        unreachable!()
+    };
+    let K::And(left, right) = result.kind else {
+        unreachable!()
+    };
+    assert_eq!(left.ty, rigid());
+    assert_eq!(right.ty, Term::Primitive(Primitive::Bool));
+}
+
+#[test]
+fn conditional_call_and_aggregate_children_keep_source_order() {
+    fn node(index: u32, kind: K) -> Expr {
+        let mut value = expr(kind);
+        value.source.start = index;
+        value
+    }
+    struct Order(Vec<u32>);
+    impl nir::program::Rewriter for Order {
+        type Error = ();
+        fn expression(&mut self, value: &mut Expr) -> Result<bool, ()> {
+            self.0.push(value.source.start);
+            Ok(true)
+        }
+        fn ty(&mut self, ty: &Term) -> Result<Term, ()> {
+            Ok(ty.clone())
+        }
+    }
+    let mut tree = node(
+        1,
+        K::If {
+            condition: Box::new(node(2, K::Unit)),
+            then_branch: Box::new(node(
+                3,
+                K::Call {
+                    callee: Box::new(node(4, K::Function(id(1)))),
+                    arguments: vec![
+                        nir::program::CallArgument {
+                            parameter: 1,
+                            value: node(5, K::Tuple(vec![node(6, K::Unit), node(7, K::Unit)])),
+                            is_default: false,
+                        },
+                        nir::program::CallArgument {
+                            parameter: 0,
+                            value: node(8, K::Return(Some(Box::new(node(9, K::Unit))))),
+                            is_default: true,
+                        },
+                    ],
+                    parameter_bindings: vec![],
+                },
+            )),
+            else_branch: Some(Box::new(node(
+                10,
+                K::ClosureType {
+                    environment: vec![node(11, K::Unit), node(12, K::Unit)],
+                    signature: Box::new(node(13, K::Unit)),
+                },
+            ))),
+        },
+    );
+    let mut order = Order(vec![]);
+    tree.rewrite_with(&mut order).unwrap();
+    assert_eq!(order.0, (1..=13).collect::<Vec<_>>());
+}
+
+#[test]
+fn capture_failure_does_not_rewrite_later_captures_or_clone_shared_body() {
+    let body = Arc::new(expr(K::Unit));
+    let mut value = expr(K::Closure {
+        parameters: vec![],
+        captures: (0..2)
+            .map(|index| Capture {
+                binding: LocalId { owner: 1, index },
+                ty: rigid(),
+                value: Some(Box::new(expr(K::Unit))),
+            })
+            .collect(),
+        body: body.clone(),
+    });
+    struct Stop;
+    impl nir::program::Rewriter for Stop {
+        type Error = ();
+        fn expression(&mut self, value: &mut Expr) -> Result<bool, ()> {
+            if matches!(value.kind, K::Unit) {
+                Err(())
+            } else {
+                Ok(true)
+            }
+        }
+        fn ty(&mut self, _: &Term) -> Result<Term, ()> {
+            Ok(Term::Primitive(Primitive::Bool))
+        }
+    }
+    assert_eq!(value.rewrite_with(&mut Stop), Err(()));
+    let K::Closure {
+        captures,
+        body: current,
+        ..
+    } = &value.kind
+    else {
+        unreachable!()
+    };
+    assert_eq!(captures[0].ty, Term::Primitive(Primitive::Bool));
+    assert_eq!(captures[0].value.as_ref().unwrap().ty, rigid());
+    assert_eq!(captures[1].ty, rigid());
+    assert!(Arc::ptr_eq(current, &body));
+    value
+        .rewrite_types(&mut |_| Ok::<_, ()>(Term::Primitive(Primitive::Bool)))
+        .unwrap();
+    let K::Closure {
+        captures,
+        body: current,
+        ..
+    } = &value.kind
+    else {
+        unreachable!()
+    };
+    assert!(
+        captures
+            .iter()
+            .all(|capture| capture.value.as_ref().unwrap().ty == Term::Primitive(Primitive::Bool))
+    );
+    assert!(!Arc::ptr_eq(current, &body));
+    assert_eq!(current.ty, Term::Primitive(Primitive::Bool));
+    assert_eq!(body.ty, rigid());
+}

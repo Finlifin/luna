@@ -62,7 +62,7 @@ pub fn acquire(
     let mut components = Vec::new();
     cleanup.check_trivial_components(fuel, &mut |ty, fuel| {
         super::memory::bound_type(ty, fuel)?;
-        let classification = classify(
+        let classification = classify_with_fuel(
             world,
             copy_protocol,
             ty,
@@ -70,10 +70,12 @@ pub fn acquire(
                 steps: budget.steps.min(*fuel),
                 ..budget
             },
+            fuel,
         )?;
         match &classification {
             Classification::Intrinsic | Classification::Declared { .. } => {}
-            Classification::Assumed(_) if matches!(ty, Term::Function { .. }) => {}
+            Classification::Assumed(_)
+                if matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_)) => {}
             Classification::Assumed(_) => {
                 return Err("Copy representation requires concrete capability evidence".into());
             }
@@ -84,14 +86,21 @@ pub fn acquire(
                 return Err(format!("Copy component is unresolved: {reason}"));
             }
         }
+        // Type values carry immutable descriptions, including opaque normal-form
+        // identities. An explicit Copy capability may authorize duplicating that
+        // description; it does not authorize runtime Type storage or unfolding.
         if !matches!(classification, Classification::Intrinsic)
             && nir::normal_forms::tuple_fields(Some(package), ty).is_none()
             && !matches!(
                 ty,
-                Term::Nominal { .. }
+                Term::Primitive(Primitive::Type)
+                    | Term::Nominal { .. }
+                    | Term::ErrorResult { .. }
                     | Term::Tuple(_)
                     | Term::Record(_)
                     | Term::Function { .. }
+                    | Term::UnsafeFunction(_)
+                    | Term::ComptimeFunction(_)
                     | Term::Closure { .. }
             )
         {
@@ -155,6 +164,18 @@ pub fn classify(
     ty: &Term,
     budget: Budget,
 ) -> Result<Classification, String> {
+    classify_with_fuel(world, protocol, ty, budget, &mut { budget.steps })
+}
+
+/// Propagate tracked capability work; unmetered candidate subqueries remain bounded
+/// by the allowance supplied to the capability solver.
+pub fn classify_with_fuel(
+    world: &World<'_>,
+    protocol: DeclarationId,
+    ty: &Term,
+    budget: Budget,
+    fuel: &mut usize,
+) -> Result<Classification, String> {
     let contract = world
         .traits
         .iter()
@@ -163,11 +184,12 @@ pub fn classify(
     if !contract.type_parameters.is_empty() {
         return Err("Copy protocol must have no explicit type parameters".into());
     }
-    if budget.steps == 0 {
+    if budget.steps == 0 || *fuel == 0 {
         return Ok(Classification::Pending(
             "Copy query budget exhausted".into(),
         ));
     }
+    super::memory::bound_type(ty, fuel)?;
     // Only the intrinsic classes whose copy behavior is specified independently
     // of user impls. Managed text, closures and arbitrary Type values are not
     // inferred Copy merely because the reference evaluator can clone them.
@@ -175,7 +197,8 @@ pub fn classify(
         ty,
         Term::Pointer(_)
             | Term::Primitive(
-                Primitive::Bool
+                Primitive::Void
+                    | Primitive::Bool
                     | Primitive::Char
                     | Primitive::Symbol
                     | Primitive::Integer
@@ -204,17 +227,27 @@ pub fn classify(
         interface_arguments: vec![],
         subject: ty.clone(),
     };
-    if let Some(given) = world.given(&requirement, budget) {
+    let mut allowance = Budget {
+        steps: budget.steps.min(*fuel),
+        ..budget
+    };
+    let before = allowance.steps;
+    let given = world.given_metered(&requirement, &mut allowance);
+    *fuel = fuel.saturating_sub(before - allowance.steps);
+    if let Some(given) = given {
         return Ok(Classification::Assumed(given));
     }
-    let resolution = world.resolve_instance(
+    let before = allowance.steps;
+    let resolution = world.resolve_instance_metered(
         &InterfaceInstance {
             declaration: protocol,
             arguments: vec![],
         },
         ty,
-        budget,
-    )?;
+        &mut allowance,
+    );
+    *fuel = fuel.saturating_sub(before - allowance.steps);
+    let resolution = resolution?;
     Ok(match resolution.types.selection {
         Selection::Selected(implementation) => {
             let Some(TypeAssessment::Applicable(evidence)) =

@@ -20,6 +20,31 @@ class Terminated(Exception):
     pass
 
 
+def save_summary(path, evidence, *, stream=None):
+    """Atomically publish aggregate evidence; preserve its last snapshot on error.
+
+    False means orchestration must stop with 125 before starting further work.
+    The terminal payload is authoritative when storage retains an older snapshot.
+    """
+    path = Path(path)
+    temporary = path.with_name(path.name + '.tmp')
+    try:
+        temporary.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + '\n',
+                             encoding='utf-8')
+        temporary.replace(path)
+        return True
+    except OSError as error:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        print(json.dumps({'status': 'evidence-error', 'wrapper_exit_code': 125,
+                          'summary': str(path), 'summary_saved': False,
+                          'error': str(error), 'evidence': evidence}, ensure_ascii=False),
+              file=stream, flush=True)
+        return False
+
+
 def run(command, *, cwd=ROOT, timeout=600, label='command', directory=None, env=None,
         log_limit=LOG_LIMIT):
     if not math.isfinite(timeout) or timeout <= 0 or log_limit < 0:
@@ -32,10 +57,28 @@ def run(command, *, cwd=ROOT, timeout=600, label='command', directory=None, env=
 
     def save():
         temporary = directory / 'result.json.tmp'
-        temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
-        temporary.replace(report_path)
+        try:
+            temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+            temporary.replace(report_path)
+            return True
+        except OSError as error:
+            report.setdefault('report_errors', []).append(str(error))
+            return False
 
-    save()
+    def publish(saved):
+        terminal = {'status': report['status'], 'exit_code': report['exit_code'],
+                    'wrapper_exit_code': report['wrapper_exit_code'],
+                    'report': str(report_path), 'report_saved': saved}
+        if not saved:
+            # The file may still contain an earlier running state. Preserve the
+            # terminal evidence on stdout when storage cannot accept an update.
+            terminal['evidence'] = report
+        print(json.dumps(terminal, ensure_ascii=False), flush=True)
+
+    if not save():
+        report.update(status='evidence-error', wrapper_exit_code=125)
+        publish(False)
+        return 125, directory
     # Publish the evidence location before waiting, including when the tool call
     # yields while the subprocess is still running.
     print(json.dumps({'status': 'running', 'report': str(report_path)},
@@ -60,10 +103,13 @@ def run(command, *, cwd=ROOT, timeout=600, label='command', directory=None, env=
                     output.flush()
                     kept += len(part)
         except OSError as error:
-            errors.append(str(error))
+            errors.append(f'{channel}: {error}')
             # Keep draining even if evidence storage fails, avoiding pipe deadlock.
-            while stream.read(65536):
-                pass
+            try:
+                while chunk := stream.read(65536):
+                    count += len(chunk)
+            except OSError as drain_error:
+                errors.append(f'{channel} drain: {drain_error}')
         finally:
             stream.close()
             report[channel] = {'bytes': count, 'saved_bytes': kept,
@@ -93,7 +139,8 @@ def run(command, *, cwd=ROOT, timeout=600, label='command', directory=None, env=
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, start_new_session=True)
         report['pid'] = process.pid
-        save()
+        if not save():
+            raise OSError('could not publish subprocess identity')
         for channel in ['stdout', 'stderr']:
             reader = threading.Thread(target=pump, args=(getattr(process, channel),
                                       directory / (channel + '.log'), channel), daemon=True)
@@ -121,23 +168,34 @@ def run(command, *, cwd=ROOT, timeout=600, label='command', directory=None, env=
         code = 143 if isinstance(error, Terminated) else 130
     except OSError as error:
         stop()
-        report.update(status='unavailable', error=str(error))
+        report.update(status='unavailable', error=str(error),
+                      exit_code=process.returncode if process else None)
         code = 125
     finally:
         if previous_term is not None:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
         for reader in readers:
             reader.join(timeout=1)
+        if process is not None and not readers:
+            # Startup can fail after Popen but before the pump threads own the
+            # pipes (for example when publishing its PID exhausts the quota).
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
         report['elapsed_seconds'] = round(time.monotonic() - started, 3)
         if errors:
             report['log_errors'] = errors
+        if errors or report.get('report_errors'):
             report['status'] = 'evidence-error'
             code = 125
         report['wrapper_exit_code'] = code
-        save()
-        if previous_term is not None:
-            signal.signal(signal.SIGTERM, previous_term)
-    print(json.dumps({'status': report['status'], 'exit_code': report['exit_code'],
-                      'wrapper_exit_code': code,
-                      'report': str(report_path)}, ensure_ascii=False), flush=True)
+        try:
+            saved = save()
+            if not saved:
+                code = 125
+                report.update(status='evidence-error', wrapper_exit_code=code)
+        finally:
+            if previous_term is not None:
+                signal.signal(signal.SIGTERM, previous_term)
+    publish(saved)
     return code, directory

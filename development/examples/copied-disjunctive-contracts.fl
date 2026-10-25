@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 fn accept(a: bool, b: bool) -> bool
 where requires a or b {
     true
@@ -28,6 +31,6 @@ where requires a or b {
     call()
 }
 
-fn run() -> (bool, bool, bool) {
+fn run() -> Tuple<bool, bool, bool> {
     (forward(false, true), snapshot(true, false), capture(false, true))
 }

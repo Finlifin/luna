@@ -1,0 +1,11 @@
+-- Current host support uses immutable UTF-8 literal storage.
+-- Checked str backing-region provenance is still a frontend checkpoint.
+typealias Text = .str'builtin;
+fn select(language: Text) -> Text {
+    language match {
+        "zh" => "你好，Flurry！",
+        "" => "",
+        _ => "Hello, Flurry!\n",
+    }
+}
+fn run() -> Text { select("zh") }

@@ -49,7 +49,7 @@ impl Walker<'_> {
         let end_type = self.scalar_type_view(&end.ty)?;
         for ty in [&start_type, &end_type] {
             if !matches!(ty, Term::Primitive(nir::Primitive::Integer))
-                && !matches!(ty, Term::Primitive(p) if p.fixed_integer_layout().is_some())
+                && !matches!(ty, Term::Primitive(p) if self.integer_layout(*p).is_some())
             {
                 return Err(Reason::Unsupported);
             }
@@ -104,7 +104,7 @@ impl Walker<'_> {
             };
             let position_type = self.scalar_type_view(&index.ty)?;
             if !matches!(position_type, Term::Primitive(nir::Primitive::Integer))
-                && !matches!(position_type, Term::Primitive(p) if p.fixed_integer_layout().is_some())
+                && !matches!(position_type, Term::Primitive(p) if self.integer_layout(p).is_some())
             {
                 return Err(Reason::Unsupported);
             }
@@ -138,9 +138,9 @@ impl Walker<'_> {
     ) -> Result<(), Reason> {
         let mut width = match self.scalar_type_view(storage)? {
             Term::Primitive(nir::Primitive::BitVec(width)) => width,
-            Term::Primitive(p) => {
-                p.unrestricted_scalar_width().ok_or(Reason::Unsupported)? as usize
-            }
+            Term::Primitive(p) => p
+                .unrestricted_scalar_width_in(self.target())
+                .ok_or(Reason::Unsupported)? as usize,
             _ => return Err(Reason::Unsupported),
         };
         for selection in selections {

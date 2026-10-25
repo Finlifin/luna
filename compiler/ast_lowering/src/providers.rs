@@ -116,6 +116,9 @@ fn lower_package_ast(db: &Db) -> Arc<HirPackageBox> {
         );
     }
 
+    crate::test_templates::link(&mut package, &arena, diag_ctx);
+    crate::function_templates::link(&mut package, &arena, diag_ctx);
+
     // SAFETY: `package` borrows from `arena`.  We erase the `'hir` lifetime so
     // the borrow checker permits moving `arena`.  Both are immediately bundled
     // together inside `HirPackageBox`, which upholds the invariant.

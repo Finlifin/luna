@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Flag = true'type;
 
 enum Entry {
@@ -26,6 +29,6 @@ fn forward(value: T) -> T where T {
     result
 }
 
-fn run() -> (Flag, Flag) {
+fn run() -> Tuple<Flag, Flag> {
     (forward(accept(true)), accept(false))
 }

@@ -83,6 +83,7 @@ impl Builder<'_> {
             phase: n::FunctionPhase::Comptime,
             inline: false,
             pure: false,
+            is_unsafe: false,
             signature: Term::Function {
                 parameters: vec![],
                 result: Box::new(Term::Primitive(nir::Primitive::Void)),
@@ -262,6 +263,29 @@ impl Builder<'_> {
                     parameters: closure.parameters().to_vec(),
                     captures: Vec::new(),
                     body: closure.body().clone(),
+                }
+            }
+            Value::ErrorResult {
+                ty: actual,
+                error,
+                value,
+            } => {
+                if actual != *ty {
+                    return Err("staged error result identity mismatch".into());
+                }
+                let Term::ErrorResult { errors, result } = ty else {
+                    return Err("staged error result type missing".into());
+                };
+                let (conversion, domain) = match error {
+                    None => (nir::error_results::Conversion::Success, result.as_ref()),
+                    Some(index) => (
+                        nir::error_results::Conversion::Failure,
+                        errors.get(index).ok_or("staged error result tag invalid")?,
+                    ),
+                };
+                K::ErrorConvert {
+                    conversion,
+                    value: Box::new(self.freeze_staged_value(*value, domain, source, depth + 1)?),
                 }
             }
             Value::Newtype { ty: actual, value } => {
@@ -501,7 +525,7 @@ pub(super) fn forward_template_aliases(
     iir::visit::expression_pruned(expression, fuel, |expr, fuel| {
         if matches!(
             expr.kind,
-            K::Assign { .. } | K::AddressOf(_) | K::Closure { .. }
+            K::Assign { .. } | K::AddressOf(_) | K::Closure { .. } | K::TemplateEqual(..)
         ) {
             unavailable.extend(nir::free_bindings::collect(expr, fuel)?);
             return Ok(false);

@@ -1,0 +1,8 @@
+struct Packet {selected: .Type'builtin, value: bool}
+comptime fn packet() -> Packet {
+    Packet {selected: bool, value: true}
+}
+fn run() -> bool {
+    let checked: packet().selected = true;
+    checked
+}

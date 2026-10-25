@@ -28,6 +28,7 @@ pub(super) fn bindings(
                 output.insert(*binding);
                 pending.push((inner, depth + 1));
             }
+            Pattern::ErrorResult { inner, .. } => pending.push((inner, depth + 1)),
             Pattern::Guard { pattern, .. } => pending.push((pattern, depth + 1)),
             Pattern::Then { first, next, .. } => {
                 pending.push((first, depth + 1));
@@ -81,6 +82,12 @@ fn matches<'layout>(
     }
     let pairs = match pattern {
         Pattern::Wild => return Ok(true),
+        Pattern::ErrorResult { label, inner } => {
+            return match error_values::payload(value, label.as_ref(), fuel)? {
+                Some(payload) => matches(heads, inner, payload, locals, fuel, depth + 1),
+                None => Ok(false),
+            };
+        }
         Pattern::Unit => return Ok(matches!(value.kind, K::Unit)),
         Pattern::Literal(literal) => {
             if !matches!(

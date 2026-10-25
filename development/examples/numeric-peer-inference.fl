@@ -1,7 +1,10 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias F32 = .f32'builtin;
 typealias Bool = true'type;
 comptime fn identity(value: T) -> T where T { value }
-comptime fn compare(value: F32) -> (Bool, Bool, Bool, Bool, Bool, Bool) {
+comptime fn compare(value: F32) -> Tuple<Bool, Bool, Bool, Bool, Bool, Bool> {
     ((1.0 + 2.0) == value, (1.0 + 2.0) < value,
      value >= (1.0 + 2.0), identity(3.0) == value,
      (if true { 3.0 } else { 4.0 }) == value,
@@ -23,6 +26,6 @@ comptime fn ordered(value: F32) -> Bool {
     seen and result == 7.0
 }
 comptime fn early(value: F32) -> Bool { (do { return true; 1.0 + 2.0 }) == value }
-comptime fn run() -> (Bool, Bool, Bool, Bool, Bool) {
+comptime fn run() -> Tuple<Bool, Bool, Bool, Bool, Bool> {
     (inferred(4.0), contextual() == 21.0, captured(3.0), ordered(4.0), early(3.0))
 }

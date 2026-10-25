@@ -216,6 +216,8 @@ pub const TPARAM_ERROR: u32 = 1 << 3;
 pub const TPARAM_LAMBDA: u32 = 1 << 4;
 pub const TPARAM_ASSOC: u32 = 1 << 5;
 pub const TPARAM_CATCH: u32 = 1 << 6;
+/// Named optional input in a callable type; its default belongs to the callable.
+pub const TPARAM_OPTIONAL: u32 = 1 << 7;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TyParam<'hir> {
@@ -226,6 +228,9 @@ pub struct TyParam<'hir> {
 }
 
 impl TyParam<'_> {
+    pub fn is_optional(&self) -> bool {
+        self.flags & TPARAM_OPTIONAL != 0
+    }
     pub fn is_implicit(&self) -> bool {
         self.flags & TPARAM_IMPLICIT != 0
     }

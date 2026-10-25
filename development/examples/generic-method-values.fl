@@ -1,9 +1,12 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 struct Box where A {
     value: A,
 }
 
 impl Box<A> where A {
-    fn pair(self, other: B) -> (A, B) where B {
+    fn pair(self, other: B) -> Tuple<A, B> where B {
         (self.value, other)
     }
 
@@ -18,7 +21,7 @@ fn apply(action: fn(T) -> T, value: T) -> T where T {
 
 fn entry() -> bool {
     -- The context determines B; A remains the chosen implementation argument.
-    let pair: fn(Box<.u8'builtin>, bool) -> (.u8'builtin, bool) =
+    let pair: fn(Box<.u8'builtin>, bool) -> Tuple<.u8'builtin, bool> =
         Box<.u8'builtin>.pair;
     let (number, flag) = pair(Box<.u8'builtin> { value: 9 }, true);
 

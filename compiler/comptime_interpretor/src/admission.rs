@@ -9,6 +9,19 @@ impl Interpreter<'_> {
         variant: Option<u32>,
         fuel: &mut usize,
     ) -> Result<Vec<Term>, nir::NominalAdmissionError> {
+        if variant.is_none() {
+            if let Term::NormalForm { head, .. } = ty {
+                if let Some(elements) = self
+                    .normal_forms
+                    .get(head)
+                    .and_then(|head| head.tuple_elements(ty))
+                {
+                    nir::type_computations::charge_term(ty, fuel)
+                        .map_err(nir::NominalAdmissionError::from)?;
+                    return Ok(elements.to_vec());
+                }
+            }
+        }
         self.normal_value_fields(ty, variant, fuel).ok_or_else(|| {
             if *fuel == 0 {
                 nir::NominalAdmissionError::Budget
@@ -56,7 +69,7 @@ impl Interpreter<'_> {
         self.tick(None)?;
         match value {
             Value::Type(_) | Value::TypeList(_) => self.admit_value_types(value, depth)?,
-            Value::Newtype { value, .. } => {
+            Value::ErrorResult { value, .. } | Value::Newtype { value, .. } => {
                 self.admit_embedded_type_descriptions(value, depth + 1)?
             }
             Value::Tuple(fields) | Value::Record { fields, .. } | Value::Variant { fields, .. } => {
@@ -80,7 +93,7 @@ impl Interpreter<'_> {
         }
         self.tick(None)?;
         match value {
-            Value::Newtype { ty, value } => {
+            Value::ErrorResult { ty, value, .. } | Value::Newtype { ty, value } => {
                 self.admit_type(ty, depth + 1)?;
                 self.admit_value_types(value, depth + 1)?;
             }
@@ -143,6 +156,34 @@ impl Interpreter<'_> {
                 declaration,
                 arguments,
             } => {
+                if let Some(graph) = self.graph {
+                    let nominal = graph
+                        .nominals
+                        .iter()
+                        .find(|entry| &entry.ty == ty)
+                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                    // Concrete descriptors already substituted their declaration telescope.
+                    let (requirements, capabilities) = match &nominal.definition {
+                        iir::NominalDefinition::Struct(d) => (&d.requirements, &d.capabilities),
+                        iir::NominalDefinition::Enum(d) => (&d.requirements, &d.capabilities),
+                        iir::NominalDefinition::Newtype(d) => (&d.requirements, &d.capabilities),
+                    };
+                    for predicate in requirements {
+                        self.tick(None)?;
+                        self.check_type_contract(predicate, source)?;
+                    }
+                    for predicate in capabilities {
+                        self.tick(None)?;
+                        self.check_type_contract(
+                            &nir::program::TypePredicate::Trait(predicate.clone()),
+                            source,
+                        )?;
+                    }
+                    for argument in arguments {
+                        self.admit_type(argument, depth + 1)?;
+                    }
+                    return Ok(());
+                }
                 let (parameters, domains, requirements, capabilities) =
                     if let Some(s) = self.structs.get(declaration) {
                         (
@@ -233,7 +274,7 @@ impl Interpreter<'_> {
                     .unwrap_or(usize::MAX)
                     .min(100_000);
                 let before = fuel;
-                let checked = metadata.check_arguments_with_evidence_budgeted(
+                let checked = metadata.check_arguments_with_evidence_budgeted_in(
                     arguments,
                     |head| {
                         self.normal_forms
@@ -242,8 +283,7 @@ impl Interpreter<'_> {
                     },
                     |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
                     |value, domain| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
-                    &mut fuel,
-                );
+                    &mut fuel, self.target);
                 self.budget.steps -= (before - fuel) as u64;
                 checked.map_err(|_| {
                     self.failure(
@@ -277,6 +317,13 @@ impl Interpreter<'_> {
                     self.admit_type(ty, depth + 1)?;
                 }
             }
+            Term::ErrorValue { ty, label, value } => {
+                self.admit_type(ty, depth + 1)?;
+                if let Some(label) = label {
+                    self.admit_type(label, depth + 1)?;
+                }
+                self.admit_type(value, depth + 1)?;
+            }
             Term::NominalValue { ty, fields, .. } => {
                 self.admit_type(ty, depth + 1)?;
                 for field in fields {
@@ -288,7 +335,9 @@ impl Interpreter<'_> {
                     self.admit_type(ty, depth + 1)?;
                 }
             }
-            Term::Pointer(ty) | Term::ComptimeFunction(ty) => self.admit_type(ty, depth + 1)?,
+            Term::Pointer(ty) | Term::ComptimeFunction(ty) | Term::UnsafeFunction(ty) => {
+                self.admit_type(ty, depth + 1)?
+            }
             Term::Function { parameters, result } => {
                 for p in parameters {
                     self.admit_type(&p.ty, depth + 1)?;
@@ -304,7 +353,12 @@ impl Interpreter<'_> {
                 }
                 self.admit_type(signature, depth + 1)?;
             }
-            Term::ErrorResult { .. } => return Err(self.failure(ErrorKind::Type, None)),
+            Term::ErrorResult { errors, result } => {
+                for label in errors {
+                    self.admit_type(label, depth + 1)?;
+                }
+                self.admit_type(result, depth + 1)?;
+            }
             Term::Computation { effects, result } => {
                 // Row entries preserve declaration identity, order and repeated
                 // occurrences. Formation does not install a handler or grant an

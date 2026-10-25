@@ -1,0 +1,15 @@
+-- Build with --build run; --build raw returns a Symbol directly.
+typealias Symbol = .Symbol'builtin;
+
+fn forward(value: Symbol) -> Symbol { value }
+fn accepted(value: Symbol) -> bool {
+    value match { .ready => true, _ => false }
+}
+fn run() -> bool {
+    var seen = false;
+    let value = forward(.ready);
+    let name = (do { assumes not seen; seen = true; value })'tag_name;
+    seen and accepted(value) and not accepted(.waiting)
+        and value == .ready and value != .waiting and name == "ready"
+}
+fn raw() -> Symbol { forward(.ready) }

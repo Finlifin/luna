@@ -512,3 +512,47 @@ fn fixed_environment_does_not_accept_missing_or_extra_captures() {
         );
     }
 }
+
+#[test]
+fn explicit_prefixes_preserve_result_types_and_infer_callback_contexts() {
+    for source in [
+        "typealias Type=.Type'builtin;
+         fn apply(f:%c fn(bool)->U)->U where U,c:Type.vars.Closure {f(true)}
+         fn run()->bool {let flag=true;let first=apply<bool>(|value:bool| value and flag);let second=apply<.u8'builtin>(|value:bool| if value {9} else {0});first and second == 9}",
+        "typealias Type=.Type'builtin;
+         struct Carrier where T {value:T}
+         impl Carrier<T> where T {fn apply(self,f:%c fn(T)->U)->U where U,c:Type.vars.Closure {f(self.value)}}
+         fn run()->bool {let flag=true;Carrier<bool> {value:true}.apply<bool>(|value:bool| value and flag)}",
+        "typealias Type=.Type'builtin;
+         trait Apply {fn apply(self,f:%c fn(bool)->U)->U where U,c:Type.vars.Closure;}
+         struct Flag {value:bool}
+         impl Apply for Flag {fn apply(self,f:%c fn(bool)->U)->U where U,c:Type.vars.Closure {f(self.value)}}
+         fn through(value:T,f:%c fn(bool)->bool)->bool where T:-Apply,c:Type.vars.Closure {value.apply<bool>(f)}
+         fn run()->bool {let flag=true;through(Flag {value:true},|value:bool|value and flag)}",
+        "fn second(a:T,b:U)->U where T,U {b}
+         fn choose(value:T)->T where flag:bool,T {if flag {value} else {value}}
+         fn run()->bool {second<bool>(false,choose<true>(true))}",
+    ] {
+        let package=support::compile(source);
+        assert_eq!(luna::execution::interpret(&package,"run",100000).unwrap(),Value::Bool(true));
+    }
+}
+
+#[test]
+fn explicit_prefixes_do_not_override_mismatches_or_publish_unsolved_contexts() {
+    let head = "typealias Type=.Type'builtin;
+        fn apply(f:%c fn(bool)->U)->U where U,c:Type.vars.Closure {f(true)}
+        fn unused(value:T)->T where T,c:Type.vars.Closure {value}";
+    for body in [
+        "apply<.u8'builtin>(|value:bool| value)",
+        "unused<bool>(true)",
+        "do {let saved=apply<bool>;saved(|value:bool|value)}",
+    ] {
+        let result = support::compile_with_source_bindings(
+            &format!("{head} fn run()->bool {{{body}}}"),
+            &Default::default(),
+            Default::default(),
+        );
+        assert!(result.is_err(), "{body}");
+    }
+}

@@ -360,7 +360,7 @@ impl Walker<'_> {
                     self.prime_fields(branch, state, depth + 1)?;
                 }
             }
-            K::Let { value, .. } | K::Discard(value) => {
+            K::Let { value, .. } | K::UnsafeScope(value) | K::Discard(value) => {
                 self.prime_fields(value, state, depth + 1)?
             }
             _ => {}

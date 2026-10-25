@@ -1,0 +1,15 @@
+fn negate(value: bool) -> bool { not value }
+
+test boolean_call {
+    let result = negate(false);
+    assumes result;
+}
+
+test staged_call {
+    let result = choose(true, false);
+    assumes result;
+}
+
+fn choose(comptime invert: bool, value: bool) -> bool {
+    if invert { not value } else { value }
+}

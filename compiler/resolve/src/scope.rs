@@ -58,10 +58,18 @@ pub struct Scope {
     /// before body lowering so callers do not depend on declaration order.
     /// This is name metadata only, not a checked code interface.
     pub pattern_result_outputs: Option<Vec<(Symbol, rustc_span::Span)>>,
+    /// Syntactic runtime ports of a test template body, not type evidence.
+    pub test_template_context: Option<Vec<(Symbol, rustc_span::Span)>>,
+    /// Parameter names only; declaration-side types are linked from HIR later.
+    pub function_parameters: Option<Vec<(Symbol, rustc_span::Span)>>,
+    /// Source identities of explicitly staged ordinary parameters.
+    pub staged_parameters: Vec<(crate::ids::AstNodeRef, DefId)>,
     /// Syntactic parent heads. None means their source is not statically known.
     pub trait_parent_paths: Option<Vec<Vec<(Symbol, rustc_span::Span)>>>,
     /// Direct child scope IDs.
     pub children: Vec<ScopeId>,
+    /// Source block represented by this lexical scope.
+    pub block_site: Option<crate::ids::AstNodeRef>,
 }
 
 impl Scope {
@@ -83,8 +91,12 @@ impl Scope {
             ordered,
             items: ItemScope::new(),
             pattern_result_outputs: None,
+            test_template_context: None,
+            function_parameters: None,
+            staged_parameters: Vec::new(),
             trait_parent_paths: None,
             children: Vec::new(),
+            block_site: None,
         }
     }
 
@@ -106,8 +118,12 @@ impl fmt::Debug for Scope {
             .field("owner_def", &self.owner_def)
             .field("ordered", &self.ordered)
             .field("pattern_result_outputs", &self.pattern_result_outputs)
+            .field("test_template_context", &self.test_template_context)
+            .field("function_parameters", &self.function_parameters)
+            .field("staged_parameters", &self.staged_parameters)
             .field("trait_parent_paths", &self.trait_parent_paths)
             .field("children", &self.children)
+            .field("block_site", &self.block_site)
             .finish()
     }
 }

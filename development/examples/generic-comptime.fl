@@ -1,7 +1,10 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Type = .Type'builtin;
 comptime fn identity(value: T) -> T where T { value }
 comptime fn Forward(value: T) -> Type where T { value'type }
-comptime fn Pair(value: T) -> Type where T { (T, T) }
+comptime fn Pair(value: T) -> Type where T { Tuple<T, T> }
 typealias Byte = identity(.u8'builtin);
 typealias Word = identity(.u16'builtin);
 typealias Inferred = Forward(true);
@@ -12,7 +15,7 @@ fn flag() -> Inferred { true }
 fn pair() -> PairOfFlags { (true, false) }
 comptime fn nested() -> .Integer'builtin { identity(identity(12345678901234567890)) }
 comptime fn relay(value: T) -> T where T { identity(value) }
-comptime fn Mixed() -> (Type, Type) {
+comptime fn Mixed() -> Tuple<Type, Type> {
     (relay(.u8'builtin), relay(.u16'builtin))
 }
 comptime fn ConcretePair() -> Type { Pair(false) }

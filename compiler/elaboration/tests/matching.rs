@@ -20,6 +20,102 @@ fn finish(engine: &mut Engine) {
 }
 
 #[test]
+fn tuple_pack_inference_preserves_head_proofs_and_transaction_isolation() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    let head = nir::DeclarationId {
+        package: 55,
+        local: 1,
+    };
+    let tuple = |input| Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments: vec![input],
+    };
+    let package = nir::program::Package {
+        normal_forms: vec![Head {
+            declaration: head,
+            role: Role::Tuple,
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: nir::DeclarationId {
+                    package: 55,
+                    local: 2,
+                },
+                binding: nir::program::LocalId { owner: 1, index: 0 },
+                kind: Kind::TypeList,
+                ty: Term::Nominal {
+                    declaration: nir::DeclarationId {
+                        package: 55,
+                        local: 3,
+                    },
+                    arguments: vec![Term::Primitive(P::Type)],
+                },
+            }],
+        }],
+        ..Default::default()
+    };
+    let context = elaboration::ptc::Context::from_package(&package).unwrap();
+    for fields in [
+        vec![],
+        vec![Term::Primitive(P::Bool)],
+        vec![Term::Primitive(P::Bool), tuple(Term::TypeListValue(vec![]))],
+    ] {
+        let mut engine = Engine::with_context(context.fork());
+        let pack = engine.fresh(Sort::ComptimeValue);
+        let template = I::Instantiate {
+            template: tuple(Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: Sort::ComptimeValue,
+            }),
+            arguments: vec![I::Meta(pack)],
+        };
+        let input = Term::TypeListValue(fields);
+        let (mut candidate, id) = engine
+            .match_types(
+                template.clone(),
+                I::Stable(tuple(input.clone())),
+                Budget::default(),
+            )
+            .unwrap();
+        finish(&mut candidate);
+        assert!(candidate.state(id).unwrap().is_proven());
+        assert!(engine.freeze(&I::Meta(pack)).is_err());
+        engine.commit(candidate).unwrap();
+        assert_eq!(engine.freeze(&I::Meta(pack)), Ok(input.clone()));
+        assert_eq!(engine.freeze(&template), Ok(tuple(input)));
+    }
+    // No Tuple role means no pack inference through an opaque normal-form head.
+    let mut engine = Engine::default();
+    let pack = engine.fresh(Sort::ComptimeValue);
+    let template = I::Instantiate {
+        template: tuple(Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::ComptimeValue,
+        }),
+        arguments: vec![I::Meta(pack)],
+    };
+    let (mut candidate, id) = engine
+        .match_types(
+            template,
+            I::Stable(tuple(Term::TypeListValue(vec![]))),
+            Budget::default(),
+        )
+        .unwrap();
+    finish(&mut candidate);
+    assert!(!candidate.state(id).unwrap().is_proven());
+    assert_eq!(engine.commit(candidate), Err(Error::Unsettled(id)));
+    engine
+        .assign(pack, I::Stable(Term::TypeListValue(vec![])))
+        .unwrap();
+    assert_eq!(
+        engine.freeze(&I::Meta(pack)),
+        Ok(Term::TypeListValue(vec![]))
+    );
+}
+
+#[test]
 fn record_fields_infer_only_with_matching_names_and_consistent_types() {
     for (names, types, accepted) in [
         (["first", "second"], [P::Bool, P::Bool], true),
@@ -435,4 +531,149 @@ fn structural_inference_ignores_unused_self_slots_in_shared_environments() {
         Ok(Term::Pointer(Box::new(Term::Primitive(P::Bool))))
     );
     root.commit(candidate).unwrap();
+}
+
+#[test]
+fn metered_multi_match_reports_failed_trial_work_without_committing_assignments() {
+    let mut parent = Engine::default();
+    let variable = parent.fresh(Sort::Type);
+    let relations = vec![
+        (I::Meta(variable), stable(P::Bool)),
+        (stable(P::Char), stable(P::Char)),
+    ];
+    let mut small = Budget {
+        steps: 2,
+        ..Default::default()
+    };
+    assert!(parent.match_many_metered(&relations, &mut small).is_err());
+    assert!(small.steps < 2);
+    assert!(parent.freeze(&I::Meta(variable)).is_err());
+    let mut enough = Budget::default();
+    let before = enough.steps;
+    let (mut candidate, ids) = parent.match_many_metered(&relations, &mut enough).unwrap();
+    assert!(enough.steps < before);
+    candidate.advance_metered(ids.len(), &mut enough);
+    assert!(
+        ids.iter()
+            .all(|id| candidate.state(*id).unwrap().is_proven())
+    );
+    parent.commit(candidate).unwrap();
+    assert_eq!(
+        parent.freeze(&I::Meta(variable)).unwrap(),
+        Term::Primitive(P::Bool)
+    );
+}
+
+#[test]
+fn copying_wide_matching_inputs_is_charged_before_structural_shortcuts() {
+    let parent = Engine::default();
+    let input = I::Stable(Term::Tuple(vec![Term::Primitive(P::Bool); 256]));
+    let relations = vec![(input.clone(), input)];
+    let mut small = Budget {
+        steps: 16,
+        ..Default::default()
+    };
+    assert!(matches!(
+        parent.match_many_metered(&relations, &mut small),
+        Err(MatchError::BudgetExhausted)
+    ));
+    let mut enough = Budget::default();
+    let before = enough.steps;
+    let (mut candidate, ids) = parent.match_many_metered(&relations, &mut enough).unwrap();
+    assert!(enough.steps + 512 < before);
+    candidate.advance_metered(ids.len(), &mut enough);
+    assert!(
+        ids.iter()
+            .all(|id| candidate.state(*id).unwrap().is_proven())
+    );
+}
+
+#[test]
+fn matching_copy_budget_does_not_evaluate_unused_substitution_inputs() {
+    let parent = Engine::default();
+    let mut foreign = Engine::default();
+    let unused = foreign.fresh(Sort::Type);
+    let input = I::Instantiate {
+        template: Term::Primitive(P::Bool),
+        arguments: vec![I::Meta(unused); 64],
+    };
+    let relations = vec![(input, stable(P::Bool))];
+    let mut small = Budget {
+        steps: 16,
+        ..Default::default()
+    };
+    assert!(matches!(
+        parent.match_many_metered(&relations, &mut small),
+        Err(MatchError::BudgetExhausted)
+    ));
+    let mut enough = Budget::default();
+    let (mut candidate, ids) = parent.match_many_metered(&relations, &mut enough).unwrap();
+    candidate.advance_metered(ids.len(), &mut enough);
+    assert!(
+        ids.iter()
+            .all(|id| candidate.state(*id).unwrap().is_proven())
+    );
+}
+
+#[test]
+fn bounded_alias_resolution_preserves_unresolved_inputs_and_recovers() {
+    let mut context = elaboration::InferenceContext::default();
+    let first = context.fresh(Sort::Type);
+    let mut previous = first;
+    for _ in 0..64 {
+        let next = context.fresh(Sort::Type);
+        context.assign(previous, I::Meta(next)).unwrap();
+        previous = next;
+    }
+    let mut small = 8;
+    assert!(matches!(
+        context.resolve_with_limits(&I::Meta(first), &mut small, 128),
+        Err(elaboration::InferenceError::Budget)
+    ));
+    let mut enough = 10_000;
+    assert_eq!(
+        context
+            .resolve_with_limits(&I::Meta(first), &mut enough, 128)
+            .unwrap(),
+        I::Meta(previous)
+    );
+    context.assign(previous, stable(P::Bool)).unwrap();
+    assert_eq!(
+        context
+            .resolve_with_limits(&I::Meta(first), &mut enough, 128)
+            .unwrap(),
+        stable(P::Bool)
+    );
+    assert!(enough < 10_000);
+}
+
+#[test]
+fn bounded_assignment_does_not_publish_on_exhaustion_or_occurs_failure() {
+    let mut context = elaboration::InferenceContext::default();
+    let target = context.fresh(Sort::Type);
+    let first = context.fresh(Sort::Type);
+    let mut previous = first;
+    for _ in 0..32 {
+        let next = context.fresh(Sort::Type);
+        context.assign(previous, I::Meta(next)).unwrap();
+        previous = next;
+    }
+    let mut small = 4;
+    assert!(matches!(
+        context.assign_with_limits(target, I::Meta(first), &mut small, 128),
+        Err(elaboration::InferenceError::Budget)
+    ));
+    assert!(context.freeze(&I::Meta(target)).is_err());
+    context.assign(previous, I::Meta(target)).unwrap();
+    let mut enough = 10_000;
+    assert!(
+        matches!(context.assign_with_limits(target,I::Meta(first),&mut enough,128),Err(elaboration::InferenceError::Occurs(id)) if id==target)
+    );
+    context
+        .assign_with_limits(target, stable(P::Bool), &mut enough, 128)
+        .unwrap();
+    assert_eq!(
+        context.freeze(&I::Meta(first)).unwrap(),
+        Term::Primitive(P::Bool)
+    );
 }

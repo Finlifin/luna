@@ -326,6 +326,7 @@ impl Analyzer<'_, '_, '_, '_> {
             // These operations evaluate their child expressions in source order.
             K::Let { value, .. }
             | K::Assign { value, .. }
+            | K::UnsafeScope(value)
             | K::Discard(value)
             | K::Not(value)
             | K::IntegerNegate(value)
@@ -355,6 +356,7 @@ impl Analyzer<'_, '_, '_, '_> {
             }
             | K::IntegerBinary { left, right, .. }
             | K::FloatBinary { left, right, .. }
+            | K::TemplateEqual(left, right)
             | K::ScalarEqual(left, right)
             | K::ScalarLessEqual(left, right)
             | K::ScalarLess(left, right)

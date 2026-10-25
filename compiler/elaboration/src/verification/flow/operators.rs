@@ -1,7 +1,69 @@
 //! Recursive scalar flow paths avoid retaining the general control-flow frame.
 use super::*;
 
+// Comparisons of already-bound scalar values are total observations. Their
+// symbolic Boolean composition needs no fork/join; executable short-circuit
+// evaluation is unchanged. Calls, loads and arithmetic deliberately do not fit.
+fn total_boolean_observation(expr: &Expr, limits: &mut Limits) -> Result<bool, Unknown> {
+    let leaf = |expr: &Expr| matches!(expr.kind, K::Local(_) | K::Literal(_));
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        limits.step(1)?;
+        if expr.ty != Term::Primitive(nir::Primitive::Bool) {
+            return Ok(false);
+        }
+        match &expr.kind {
+            K::Local(_) | K::Literal(_) => {}
+            K::Not(value) => pending.push(value),
+            K::And(a, b) | K::Or(a, b) => {
+                pending.push(b);
+                pending.push(a);
+            }
+            K::ScalarEqual(a, b)
+            | K::ScalarLess(a, b)
+            | K::ScalarLessEqual(a, b)
+            | K::ScalarGreater(a, b)
+            | K::ScalarGreaterEqual(a, b)
+                if leaf(a) && leaf(b) => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
 impl Walker<'_> {
+    // Only called after the complete tree passed total_boolean_observation.
+    // Internal nodes construct evidence; the enclosing inner() evaluates it
+    // once instead of proving every prefix before proving the whole tree again.
+    fn boolean_observation_condition(
+        &mut self,
+        expr: &Expr,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Option<Condition>, Reason> {
+        self.limits.step(1)?;
+        if depth >= 128 {
+            return Err(Reason::DepthLimit);
+        }
+        match &expr.kind {
+            K::Not(value) => Ok(self
+                .boolean_observation_condition(value, state, depth + 1)?
+                .map(|condition| Condition::Not(Box::new(condition)))),
+            K::And(a, b) | K::Or(a, b) => {
+                let a = self.boolean_observation_condition(a, state, depth + 1)?;
+                let b = self.boolean_observation_condition(b, state, depth + 1)?;
+                Ok(a.zip(b).map(|(a, b)| {
+                    if matches!(expr.kind, K::And(..)) {
+                        Condition::And(Box::new(a), Box::new(b))
+                    } else {
+                        Condition::Or(Box::new(a), Box::new(b))
+                    }
+                }))
+            }
+            _ => Ok(self.child(expr, state, depth)?.condition),
+        }
+    }
+
     fn division_ranges(
         &mut self,
         dividend: &Interval,
@@ -173,7 +235,7 @@ impl Walker<'_> {
                     }
                     _ => None,
                 };
-                self.refine_polynomial(&mut result, state)?;
+                self.refine_polynomial(expr, &mut result, state)?;
                 self.check_machine(expr, state, result.range.as_ref())?;
                 if upper_bound.is_some() || divisor_bound.is_some() {
                     if let Some(root) = self.result_root(&expr.ty)? {
@@ -250,7 +312,7 @@ impl Walker<'_> {
                         self.limits,
                     )?);
                 }
-                self.refine_polynomial(&mut result, state)?;
+                self.refine_polynomial(expr, &mut result, state)?;
                 self.check_machine(expr, state, result.range.as_ref())?;
                 self.record(expr, state, PointKind::Negate, result.range.as_ref())?;
             }
@@ -289,6 +351,11 @@ impl Walker<'_> {
                 }
                 result.condition = value.condition.map(|q| Condition::Not(Box::new(q)));
             }
+            K::TemplateEqual(a, b) => {
+                self.child(a, state, depth)?;
+                self.child(b, state, depth)?;
+                result = self.unknown_value(&expr.ty)?;
+            }
             K::ScalarEqual(a, b)
             | K::ScalarLess(a, b)
             | K::ScalarLessEqual(a, b)
@@ -313,6 +380,12 @@ impl Walker<'_> {
                 result = self.unknown_value(&expr.ty)?;
             }
             K::And(a, b) | K::Or(a, b) => {
+                if total_boolean_observation(expr, self.limits)? {
+                    result = self.unknown_value(&expr.ty)?;
+                    result.condition =
+                        self.boolean_observation_condition(expr, state, depth.saturating_sub(1))?;
+                    return Ok(result);
+                }
                 self.prime_fields(a, state, depth)?;
                 self.prime_fields(b, state, depth)?;
                 let a = self.child(a, state, depth)?.condition;
@@ -331,7 +404,8 @@ impl Walker<'_> {
                             .map(|r| r.copy(self.limits))
                             .transpose()?
                             .unwrap_or(
-                                domain(&expr.ty, self.limits)?.ok_or(Reason::InvalidSignature)?,
+                                domain_in(&expr.ty, self.target(), self.limits)?
+                                    .ok_or(Reason::InvalidSignature)?,
                             ),
                     )
                 } else {
@@ -347,9 +421,41 @@ impl Walker<'_> {
                     (Some(a), Some(b)) => Some(hull(&a, &b, self.limits)?),
                     (a, b) => a.or(b),
                 };
-                let b = b.condition;
+                let mut a = a;
+                let mut b = b.condition;
                 state.join_aggregates(&short, self.limits)?;
                 state.join_paths_and_facts(&short, self.limits)?;
+                // A computed operand can have no surviving predicate, while
+                // its sibling still describes current input observations.
+                // Keep that sibling without pretending it equals the result:
+                // model the unavailable operand by a fresh unconstrained Bool.
+                // In particular, A and unknown implies A only on its true path;
+                // A or unknown implies not A only on its false path.
+                for condition in [&mut a, &mut b] {
+                    if let Some(known) = condition {
+                        if !known.is_current(&state.facts, self.limits, 0)? {
+                            *condition = None;
+                        }
+                    }
+                }
+                if continued && state.facts.is_reachable() && (a.is_some() != b.is_some()) {
+                    let root = self
+                        .result_root(&expr.ty)?
+                        .ok_or(Reason::InvalidSignature)?;
+                    let range = domain_in(&expr.ty, self.target(), self.limits)?
+                        .ok_or(Reason::InvalidSignature)?;
+                    let value = state.facts.assign(root, range)?;
+                    let unknown = Some(Condition::Compare {
+                        value,
+                        relation: C::NotEqual,
+                        constant: Integer::from_u128(0),
+                    });
+                    if a.is_none() {
+                        a = unknown;
+                    } else {
+                        b = unknown;
+                    }
+                }
                 result.condition = match (a, b) {
                     (_, None) if !continued => Some(Condition::Bool(!continue_truth)),
                     (Some(Condition::Bool(a)), Some(b)) => Some(if a == continue_truth {

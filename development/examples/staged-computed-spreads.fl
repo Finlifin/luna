@@ -1,15 +1,18 @@
-comptime fn packet(flag: bool) -> (bool, bool) {
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+comptime fn packet(flag: bool) -> Tuple<bool, bool> {
     (flag, not flag)
 }
 
-fn selected(comptime first: bool, second: bool) -> (bool, bool) {
+fn selected(comptime first: bool, second: bool) -> Tuple<bool, bool> {
     (first, second)
 }
 
-fn configured(comptime flag: bool) -> (bool, bool) {
+fn configured(comptime flag: bool) -> Tuple<bool, bool> {
     selected(...packet(flag))
 }
 
-fn run() -> ((bool, bool), (bool, bool)) {
+fn run() -> Tuple<Tuple<bool, bool>, Tuple<bool, bool>> {
     (configured(false), configured(true))
 }

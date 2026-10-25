@@ -1,9 +1,11 @@
 //! Program specifications, kept separate from type predicates and trait selection.
+mod alignment;
 use crate::program::{
     EntrySnapshot, Expr, ExprKind as K, Function, FunctionPhase, LocalId, MethodContract,
     SourceRange,
 };
 use crate::{DeclarationId, Term, TypeError};
+pub use alignment::BindingAlignment;
 use std::{collections::BTreeMap, fmt};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -110,6 +112,7 @@ impl MethodContract {
             },
             inline: false,
             pure: self.pure,
+            is_unsafe: self.is_unsafe,
             signature: signature.callable_signature().clone(),
             parameters: self.parameter_bindings.clone(),
             preconditions: program.preconditions,
@@ -194,11 +197,13 @@ pub fn remap_predicate(
             | K::IntegerNegate(v)
             | K::FloatNegate(v)
             | K::BitConvert(v)
+            | K::ErrorConvert { value: v, .. }
             | K::NewtypeConvert(v)
             | K::Snapshot(v)
             | K::TakeBits(v)
             | K::SymbolName(v)
             | K::EnumName(v)
+            | K::UnsafeScope(v)
             | K::Discard(v)
             | K::AnonymousField { value: v, .. }
             | K::Field { value: v, .. }
@@ -227,7 +232,10 @@ pub fn remap_predicate(
                 pending.push(start);
                 pending.push(end);
             }
-            K::Tuple(fields) => pending.extend(fields),
+            K::Tuple(fields)
+            | K::Record { fields, .. }
+            | K::AnonymousRecord { fields, .. }
+            | K::Variant { fields, .. } => pending.extend(fields),
             K::Match { value, arms } => {
                 pending.push(value);
                 for arm in arms {
@@ -274,6 +282,7 @@ fn remap_predicate_pattern<'a>(
         *remaining -= 1;
         use crate::program::Pattern;
         match pattern {
+            Pattern::ErrorResult { inner, .. } => patterns.push(inner),
             Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
             Pattern::Then { first, value, next } => {
                 patterns.push(first);

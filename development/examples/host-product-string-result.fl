@@ -1,0 +1,15 @@
+-- Bind --meta-list-type input::Elements --tuple-type input::Tuple.
+pure comptime fn Elements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: Elements<.Type'builtin>> -> .Type'builtin { bool }
+typealias Text = .str'builtin;
+fn pair() -> Tuple<Text, Text> { ("", "a\0b\n\"\\") }
+fn record(...fields: T) -> T where T { fields }
+typealias Result = (record {label: "", data: pair(), seen: false})'type;
+fn run() -> Result {
+    var seen = false;
+    record {
+        label: do {seen = not seen; "中文 100%"},
+        data: pair(),
+        seen: seen,
+    }
+}

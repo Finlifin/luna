@@ -1,0 +1,23 @@
+-- Must reject: defaults cannot implicitly consume an external non-Copy binding.
+-- See docs/resource-management/runtime-purity.md.
+trait Duplicate {}
+trait Retire {fn drop(*self);}
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+struct State {bit:bool,live:bool,done:*bool}
+impl Retire for State {fn drop(*self){assumes self.live.*;assumes self.bit.*;assumes not self.done.*.*;self.done.*.* = true;self.live.* = false;}}
+fn pack(...fields:T)->T where T {fields}
+fn warm(input:%{state:T} fn(*bool)->bool,target:*bool,.callback:%{state:T} fn(*bool)->bool = input)->%{state:T} fn(*bool)->bool where T {
+    callback(target);callback(target);callback
+}
+fn run()->bool {
+    var done=false;var seen=false;
+    do {
+        var state=State {bit:false,live:true,done:done.ref};
+        let actions=pack {call:|target:*bool| {state.bit=not state.bit;target.* = state.bit;state.bit}};
+        let returned=warm(actions.call,seen.ref);
+        let packet=pack {inner:pack {call:returned}};
+        packet.inner.call(seen.ref);
+    };
+    done and seen
+}

@@ -59,7 +59,7 @@ impl Checker<'_, '_> {
                         base_type = Some(primitive);
                         continue;
                     }
-                    let Some((false, width)) = primitive.fixed_integer_layout() else {
+                    let Some((false, width)) = self.integer_layout(primitive) else {
                         return Err(error(
                             configuration.span,
                             "enum bit-pattern base type must be an unsigned integer",
@@ -274,7 +274,7 @@ impl Checker<'_, '_> {
                         let ty = self.type_expr(ty)?;
                         let width = match &ty {
                             Term::Primitive(P::BitVec(width)) => Some(*width),
-                            Term::Primitive(primitive) => primitive.unrestricted_scalar_width().map(|n|n as usize),
+                            Term::Primitive(primitive) => primitive.unrestricted_scalar_width_in(self.target).map(|n|n as usize),
                             _ => None,
                         }.ok_or_else(||error(pattern.span,"encoded payload requires a completed scalar or BitVec representation"))?;
                         let hir::PatternKind::Binding(hir::BindingMode::ByValue, name, None) =

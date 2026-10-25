@@ -223,7 +223,7 @@ impl Checker<'_, '_> {
             ));
         };
         let Some(allowed) = self.active_effect_environment() else {
-            return Err(error(
+            return Err(context_error(
                 expr.span,
                 "effect request requires an explicit allowed effect row",
             ));
@@ -401,11 +401,17 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         input: Option<&crate::calls::InputContext>,
     ) -> Result<n::Expr, Error> {
+        let (partial_effects, input) = match input {
+            Some(crate::calls::InputContext::Computation { effects, result }) => {
+                (Some(effects.clone()), Some(result.as_ref()))
+            }
+            other => (None, other),
+        };
         let (effects, value_type) = match expected {
             Some(Term::Computation { effects, result }) => {
                 (Some(effects.clone()), Some(result.as_ref()))
             }
-            other => (None, other),
+            other => (partial_effects, other),
         };
         let saved_resume = self.effect_resume_result.take();
         let saved_environment = std::mem::replace(&mut self.effect_environment, effects.clone());
@@ -431,7 +437,9 @@ impl Checker<'_, '_> {
         Ok(if let Some(effects) = effects {
             n::Expr {
                 source: source(body.span),
-                ty: expected.unwrap().clone(),
+                ty: expected
+                    .cloned()
+                    .unwrap_or_else(|| Term::computation(effects.clone(), checked.ty.clone())),
                 kind: K::EffectComputation {
                     effects,
                     body: Box::new(checked),
@@ -561,8 +569,11 @@ impl Checker<'_, '_> {
         variant: Option<u32>,
         fuel: &mut usize,
     ) -> Result<Vec<Term>, nir::NominalAdmissionError> {
-        let result =
-            nir::normal_forms::nominal_value_fields_with_lookup(ty, variant, fuel, &|id, fuel| {
+        let result = nir::normal_forms::nominal_value_fields_with_lookup_in(
+            ty,
+            variant,
+            fuel,
+            &|id, fuel| {
                 *fuel = fuel.checked_sub(1)?;
                 use nir::normal_forms::NominalValueDeclaration as D;
                 self.structs
@@ -570,7 +581,9 @@ impl Checker<'_, '_> {
                     .map(D::Struct)
                     .or_else(|| self.enums.get(&id).map(D::Enum))
                     .or_else(|| self.newtypes.get(&id).map(D::Newtype))
-            });
+            },
+            self.target,
+        );
         result.ok_or_else(|| {
             if *fuel == 0 {
                 nir::NominalAdmissionError::Budget

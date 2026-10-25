@@ -8,6 +8,7 @@ use crate::ptc::{Budget, Context};
 use nir::program::{Enum, Literal, Pattern, Struct};
 use nir::{DeclarationId, Primitive, Term};
 use std::collections::{BTreeMap, HashMap};
+mod negation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Coverage {
@@ -53,7 +54,35 @@ pub(crate) fn check_in_context_with_tuple_head(
     context: &Context,
     tuple_head: Option<DeclarationId>,
 ) -> Coverage {
+    check_metered(structs, enums, ty, patterns, steps, context, tuple_head).0
+}
+
+pub(crate) fn check_metered(
+    structs: &BTreeMap<DeclarationId, Struct>,
+    enums: &BTreeMap<DeclarationId, Enum>,
+    ty: &Term,
+    patterns: &[&Pattern],
+    steps: usize,
+    context: &Context,
+    tuple_head: Option<DeclarationId>,
+) -> (Coverage, usize) {
+    check_metered_in(
+        structs, enums, ty, patterns, steps, context, tuple_head, None,
+    )
+}
+
+pub(crate) fn check_metered_in(
+    structs: &BTreeMap<DeclarationId, Struct>,
+    enums: &BTreeMap<DeclarationId, Enum>,
+    ty: &Term,
+    patterns: &[&Pattern],
+    steps: usize,
+    context: &Context,
+    tuple_head: Option<DeclarationId>,
+    target: Option<nir::target::TargetData>,
+) -> (Coverage, usize) {
     let mut engine = Engine {
+        target,
         tuple_head,
         structs,
         enums,
@@ -61,11 +90,12 @@ pub(crate) fn check_in_context_with_tuple_head(
         context,
         domains: HashMap::new(),
     };
-    match engine.matrix(vec![ty], patterns.iter().map(|p| vec![*p]).collect(), 0) {
+    let outcome = match engine.matrix(vec![ty], patterns.iter().map(|p| vec![*p]).collect(), 0) {
         Ok(true) => Coverage::Exhaustive,
         Ok(false) => Coverage::Missing,
         Err(()) => Coverage::Unknown,
-    }
+    };
+    (outcome, steps - engine.steps)
 }
 
 #[derive(Clone, Copy)]
@@ -76,11 +106,13 @@ enum Head<'a> {
     Bool(bool),
     Unit,
     Variant(DeclarationId, usize),
+    ErrorResult(Option<&'a Term>),
     // The residual domain of an open scalar or unsupported type. A literal
     // cannot cover this domain; only the default (wildcard) rows contribute.
     Other,
 }
 struct Engine<'a> {
+    target: Option<nir::target::TargetData>,
     tuple_head: Option<DeclarationId>,
     structs: &'a BTreeMap<DeclarationId, Struct>,
     enums: &'a BTreeMap<DeclarationId, Enum>,
@@ -91,7 +123,11 @@ struct Engine<'a> {
 static WILD: Pattern = Pattern::Wild;
 impl Engine<'_> {
     fn spend(&mut self, n: usize) -> Result<(), ()> {
-        self.steps = self.steps.checked_sub(n).ok_or(())?;
+        let Some(remaining) = self.steps.checked_sub(n) else {
+            self.steps = 0;
+            return Err(());
+        };
+        self.steps = remaining;
         Ok(())
     }
     // Equality evidence changes only the type domain inspected by this matrix.
@@ -115,11 +151,13 @@ impl Engine<'_> {
         if matches!(
             ty,
             Term::Primitive(_)
+                | Term::ErrorResult { .. }
                 | Term::Nominal { .. }
                 | Term::Tuple(_)
                 | Term::Record(_)
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)
+                | Term::UnsafeFunction(_)
                 | Term::Closure { .. }
                 | Term::Pointer { .. }
         ) {
@@ -289,6 +327,40 @@ impl Engine<'_> {
         let domain = self.domain(types[0])?;
         let mut types = types;
         types[0] = &domain;
+        // Coverage-only constructor complements. Executable guards and their
+        // candidate rollback remain unchanged in the program representation.
+        let expanded = rows
+            .iter()
+            .map(|row| {
+                // Scalar engines already understand their executable guards.
+                // Rewrapping a constructor's scalar complement here repeats
+                // exact analysis and can exhaust the budget for wide BitVecs.
+                let specialized_scalar = matches!(&domain, Term::Primitive(p)
+                    if !matches!(p, Primitive::Bool | Primitive::Void));
+                if !specialized_scalar {
+                    // Wrapper traversal has its own bound; matrix depth also
+                    // counts already-specialized subject columns.
+                    self.expand_negations(row[0], types[0], 0)
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect::<Result<Vec<_>, ()>>()?;
+        let rows = if expanded.iter().any(Option::is_some) {
+            self.spend(rows.iter().map(Vec::len).sum())?;
+            rows.iter()
+                .zip(&expanded)
+                .map(|(row, expanded)| {
+                    let mut row = row.clone();
+                    if let Some(expanded) = expanded {
+                        row[0] = expanded;
+                    }
+                    row
+                })
+                .collect::<Vec<_>>()
+        } else {
+            rows
+        };
         if *types[0] == Term::Primitive(Primitive::Symbol) {
             let cells =
                 crate::symbol_coverage::cases(rows.iter().map(|row| row[0]), &mut self.steps)?;
@@ -322,7 +394,7 @@ impl Engine<'_> {
                     Some(domain),
                 );
             }
-            if let Some(domain) = crate::interval_coverage::domain(*primitive) {
+            if let Some(domain) = crate::interval_coverage::domain_in(*primitive, self.target) {
                 return self.interval_matrix(&domain, &types[1..], rows, depth);
             }
         }
@@ -350,6 +422,13 @@ impl Engine<'_> {
         };
         let mut branches = Vec::new();
         match types[0] {
+            Term::ErrorResult { errors, result } => {
+                self.spend(errors.len().saturating_add(1))?;
+                branches.push((Head::ErrorResult(None), vec![result.as_ref()]));
+                for label in errors {
+                    branches.push((Head::ErrorResult(Some(label)), vec![label]));
+                }
+            }
             Term::Record(fields) => branches.push((
                 Head::AnonymousRecord(fields),
                 fields.iter().map(|(_, ty)| ty).collect(),
@@ -511,53 +590,56 @@ impl Engine<'_> {
         rows: Vec<Vec<&'a Pattern>>,
         depth: usize,
     ) -> Result<bool, ()> {
+        // Keep each sorted cube once. Decision nodes advance a cursor instead
+        // of repeatedly removing BTreeMap keys or cloning the remaining bits.
+        let mut cubes = Vec::new();
+        let mut tails = Vec::new();
         let mut initial = Vec::new();
-        let mut analysis = crate::bit_coverage::Analysis::new(self.context);
+        let mut analysis = crate::bit_coverage::Analysis::new(self.context, self.target);
         for row in rows {
             for cube in analysis.extract(row[0], width, &mut self.steps)? {
-                self.spend(row.len())?;
-                initial.push((cube, row[1..].to_vec()));
+                self.spend(cube.len().saturating_add(row.len()).saturating_add(1))?;
+                initial.push((cubes.len(), 0usize));
+                cubes.push(cube.into_iter().collect::<Vec<_>>());
+                tails.push(row[1..].to_vec());
             }
         }
         let mut pending = vec![initial];
         while let Some(rows) = pending.pop() {
             self.spend(rows.len().saturating_add(1))?;
-            // Only unconditionally applicable rows can prove this residual
-            // region covered. Their tails retain all cross-column correlations.
-            let unconditional = rows
-                .iter()
-                .filter(|(cube, _)| cube.is_empty())
-                .map(|(_, tail)| tail.clone())
-                .collect();
+            let mut unconditional = Vec::new();
+            for (id, offset) in &rows {
+                if *offset == cubes[*id].len() {
+                    self.spend(tails[*id].len().saturating_add(1))?;
+                    unconditional.push(tails[*id].clone());
+                }
+            }
             if self.matrix(tail_types.to_vec(), unconditional, depth + 1)? {
                 continue;
             }
             let Some(bit) = rows
                 .iter()
-                .filter_map(|(cube, _)| cube.first_key_value().map(|(bit, _)| *bit))
+                .filter_map(|(id, offset)| cubes[*id].get(*offset).map(|(bit, _)| *bit))
                 .min()
             else {
                 return Ok(false);
             };
             let mut branches = [Vec::new(), Vec::new()];
-            for (mut cube, tail) in rows {
-                // A constrained row belongs to one child only. Move it rather
-                // than cloning every remaining bit at each decision level.
-                self.spend(cube.len().max(1).ilog2() as usize + 1)?;
-                if let Some(value) = cube.remove(&bit) {
-                    branches[usize::from(value)].push((cube, tail));
+            for (id, offset) in rows {
+                self.spend(1)?;
+                if let Some((_, value)) = cubes[id].get(offset).filter(|(next, _)| *next == bit) {
+                    branches[usize::from(*value)].push((id, offset + 1));
                 } else {
-                    self.spend(cube.len().saturating_add(tail.len()).saturating_add(2))?;
-                    branches[0].push((cube.clone(), tail.clone()));
-                    branches[1].push((cube, tail));
+                    self.spend(1)?;
+                    branches[0].push((id, offset));
+                    branches[1].push((id, offset));
                 }
             }
             let [zero, one] = branches;
+            self.spend(zero.len().min(one.len()))?;
             if zero == one {
                 pending.push(zero);
             } else if zero.len() > one.len() {
-                // Examine the less-covered region first; a missing branch
-                // should not wait behind a long constrained bit path.
                 pending.push(zero);
                 pending.push(one);
             } else {
@@ -593,6 +675,26 @@ impl Engine<'_> {
                         || self.matrix(vec![&value.ty], vec![vec![next]], depth + 1)?
                     {
                         pending.push(first);
+                    } else if let nir::program::ExprKind::Literal(Literal::Bool(selected)) =
+                        value.kind
+                    {
+                        // A constant computation selects one result case. Do
+                        // not recursively re-evaluate a long first pattern.
+                        if crate::interval_coverage::boolean_case(next, selected, &mut self.steps)?
+                            == Some(true)
+                        {
+                            pending.push(first);
+                        }
+                    } else if let Head::Bool(value) = head {
+                        // A non-universal suffix may still cover this subject
+                        // after its candidate-local computation. Preserve the
+                        // iterative universal path above for long chains.
+                        if crate::interval_coverage::boolean_case(pat, value, &mut self.steps)?
+                            == Some(true)
+                        {
+                            self.spend(tail.len().saturating_add(1))?;
+                            out.push(tail.to_vec());
+                        }
                     }
                     continue;
                 }
@@ -602,6 +704,17 @@ impl Engine<'_> {
                     continue;
                 }
                 _ => {}
+            }
+            if let Head::Bool(value) = head {
+                if matches!(pat, Pattern::Guard { .. } | Pattern::Observe { .. }) {
+                    if crate::interval_coverage::boolean_case(pat, value, &mut self.steps)?
+                        == Some(true)
+                    {
+                        self.spend(tail.len().saturating_add(1))?;
+                        out.push(tail.to_vec());
+                    }
+                    continue;
+                }
             }
             let prefix: Vec<_> = match (pat, head) {
                 (Pattern::AnonymousRecord { names, fields }, Head::AnonymousRecord(types))
@@ -629,6 +742,16 @@ impl Engine<'_> {
                     },
                     Head::Record(actual),
                 ) if *declaration == actual && fields.len() == arity => fields.iter().collect(),
+                (Pattern::ErrorResult { label, inner }, Head::ErrorResult(actual)) => {
+                    for ty in label.iter().chain(actual) {
+                        crate::associated::charge_projection_copy(ty, &mut self.steps)
+                            .map_err(|_| ())?;
+                    }
+                    if label.as_ref() != actual || arity != 1 {
+                        continue;
+                    }
+                    vec![inner.as_ref()]
+                }
                 (Pattern::Wild, _) => vec![&WILD; arity],
                 (Pattern::Unit, Head::Unit) => vec![],
                 (Pattern::Literal(Literal::Bool(a)), Head::Bool(b)) if *a == b => vec![],
@@ -718,6 +841,7 @@ mod tests {
                     parameter_types: vec![],
                     groups: vec![],
                     encoding: None,
+                    is_intrinsic: false,
                     symbol_encoding: None,
                     capabilities: Vec::new(),
                     requirements: vec![],
@@ -1054,6 +1178,11 @@ mod sequential_budget_tests {
         let partial = next(pattern, Pattern::Literal(Literal::Bool(true)));
         assert_eq!(
             check(&BTreeMap::new(), &ty, &[&partial], 100_000),
+            Coverage::Exhaustive
+        );
+        let rejected = next(partial, Pattern::Literal(Literal::Bool(false)));
+        assert_eq!(
+            check(&BTreeMap::new(), &ty, &[&rejected], 100_000),
             Coverage::Missing
         );
     }
@@ -1505,4 +1634,77 @@ fn abstract_pattern_code_is_not_coverage_evidence() {
         ),
         Coverage::Exhaustive
     );
+}
+
+#[test]
+fn error_result_coverage_matches_the_finite_branch_payload_oracle() {
+    let boolean = Term::Primitive(Primitive::Bool);
+    let ty = Term::error_result(vec![boolean.clone()], boolean.clone());
+    let patterns: Vec<_> = (0..4)
+        .map(|index| Pattern::ErrorResult {
+            label: (index >= 2).then(|| boolean.clone()),
+            inner: Box::new(Pattern::Literal(Literal::Bool(index % 2 == 1))),
+        })
+        .collect();
+    for mask in 0..16 {
+        let selected: Vec<_> = patterns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| (mask & (1 << i) != 0).then_some(p))
+            .collect();
+        assert_eq!(
+            check(&BTreeMap::new(), &ty, &selected, 100_000),
+            if mask == 15 {
+                Coverage::Exhaustive
+            } else {
+                Coverage::Missing
+            },
+            "mask {mask}"
+        );
+    }
+    let all: Vec<_> = patterns.iter().collect();
+    assert_eq!(check(&BTreeMap::new(), &ty, &all, 0), Coverage::Unknown);
+    assert_eq!(
+        check(&BTreeMap::new(), &ty, &all, 100_000),
+        Coverage::Exhaustive
+    );
+    let no_success = Term::error_result(vec![boolean], Term::Primitive(Primitive::Never));
+    assert_eq!(
+        check(
+            &BTreeMap::new(),
+            &no_success,
+            &[&patterns[2], &patterns[3]],
+            100_000
+        ),
+        Coverage::Exhaustive
+    );
+}
+
+#[test]
+fn metered_error_coverage_charges_failed_work_and_can_be_retried() {
+    let ty = Term::error_result(
+        vec![Term::Primitive(Primitive::Bool)],
+        Term::Primitive(Primitive::Bool),
+    );
+    let patterns = [
+        Pattern::ErrorResult {
+            label: None,
+            inner: Box::new(Pattern::Wild),
+        },
+        Pattern::ErrorResult {
+            label: Some(Term::Primitive(Primitive::Bool)),
+            inner: Box::new(Pattern::Wild),
+        },
+    ];
+    let refs: Vec<_> = patterns.iter().collect();
+    let structs = BTreeMap::new();
+    let enums = BTreeMap::new();
+    let context = Context::default();
+    assert_eq!(
+        check_metered(&structs, &enums, &ty, &refs, 1, &context, None),
+        (Coverage::Unknown, 1)
+    );
+    let (outcome, used) = check_metered(&structs, &enums, &ty, &refs, 100_000, &context, None);
+    assert_eq!(outcome, Coverage::Exhaustive);
+    assert!(used > 1 && used < 100_000);
 }

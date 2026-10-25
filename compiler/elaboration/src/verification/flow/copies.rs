@@ -1,11 +1,12 @@
 //! Relational value transfer. Source facts are frozen at evaluation time, then
 //! renamed to fresh destination identities. This is evidence about value copies,
 //! not aliasing and not permission to read or mutate the original storage.
+use super::super::relations::exact_equal_values;
 use super::*;
 use std::collections::BTreeSet;
 
 pub(super) struct PreparedCopy {
-    source: Facts,
+    source: std::sync::Arc<Facts>,
     scalar: Option<ValueId>,
     expression: Option<Polynomial>,
     range: Option<Interval>,
@@ -13,7 +14,7 @@ pub(super) struct PreparedCopy {
     children: Vec<(Component, std::sync::Arc<PreparedCopy>)>,
 }
 pub(super) struct InstalledCopy {
-    source: Facts,
+    source: std::sync::Arc<Facts>,
     mapping: BTreeMap<ValueId, ValueId>,
     expression: Option<(ValueId, Polynomial)>,
 }
@@ -29,7 +30,7 @@ pub(super) fn observation_link(
     let mut source = facts.fork(limits)?;
     source.retain_places(&BTreeSet::from([original.place]), limits)?;
     Ok(InstalledCopy {
-        source,
+        source: std::sync::Arc::new(source),
         mapping: BTreeMap::from([(original, observed)]),
         expression: None,
     })
@@ -46,7 +47,7 @@ impl Walker<'_> {
         entry_ghosts: &[InstalledCopy],
     ) -> Result<(), Reason> {
         let mut copy = InstalledCopy {
-            source: frame.facts.fork(self.limits)?,
+            source: std::sync::Arc::new(frame.facts.fork(self.limits)?),
             mapping: BTreeMap::new(),
             expression: None,
         };
@@ -82,24 +83,45 @@ impl Walker<'_> {
         // renaming polynomial rows. Difference projection alone loses
         // quadratic and cubic result/input relationships.
         let equal = exact_equal_values(&copy.source, self.limits)?;
-        loop {
-            let mut changed = false;
-            for (a, b) in &equal {
-                self.limits.step(1)?;
-                match (copy.mapping.get(a).copied(), copy.mapping.get(b).copied()) {
-                    (Some(mapped), None) => {
-                        copy.mapping.insert(*b, mapped);
-                        changed = true;
-                    }
-                    (None, Some(mapped)) => {
-                        copy.mapping.insert(*a, mapped);
-                        changed = true;
-                    }
-                    _ => {}
-                }
+        let mut frozen = BTreeSet::new();
+        for root in state.frozen.keys() {
+            self.limits.step(1)?;
+            if let Some(id) = state.facts.value(*root) {
+                frozen.insert(id);
             }
-            if !changed {
-                break;
+        }
+        for (path, id) in &state.paths {
+            self.limits.step(1)?;
+            if state.frozen.contains_key(&path.root) {
+                frozen.insert(*id);
+            }
+        }
+        // An unmapped callee snapshot may equal both a mutable argument and
+        // an immutable caller entry ghost. Prefer the ghost before filling
+        // remaining identities; nonlinear rows must retain the caller's old
+        // inputs even when its current parameter later changes. Never replace
+        // an explicit result/input mapping or infer equality from one bound.
+        for frozen_only in [true, false] {
+            loop {
+                let mut changed = false;
+                for (a, b) in &equal {
+                    self.limits.step(1)?;
+                    let candidate =
+                        match (copy.mapping.get(a).copied(), copy.mapping.get(b).copied()) {
+                            (Some(mapped), None) => Some((*b, mapped)),
+                            (None, Some(mapped)) => Some((*a, mapped)),
+                            _ => None,
+                        };
+                    if let Some((source, destination)) = candidate {
+                        if !frozen_only || frozen.contains(&destination) {
+                            copy.mapping.insert(source, destination);
+                            changed = true;
+                        }
+                    }
+                }
+                if !changed {
+                    break;
+                }
             }
         }
         Ok(())
@@ -147,6 +169,18 @@ impl Walker<'_> {
         value: &Value,
         state: &State,
     ) -> Result<Option<std::sync::Arc<PreparedCopy>>, Reason> {
+        self.prepare_copy_with_snapshot(value, state, &mut None)
+    }
+
+    // Components observed during one preparation see exactly the same state.
+    // Freeze it lazily once; preexisting component evidence keeps its own older
+    // snapshot. Separate prepare_copy calls never share a mutable observation.
+    fn prepare_copy_with_snapshot(
+        &mut self,
+        value: &Value,
+        state: &State,
+        snapshot: &mut Option<std::sync::Arc<Facts>>,
+    ) -> Result<Option<std::sync::Arc<PreparedCopy>>, Reason> {
         if let Some(evidence) = &value.evidence {
             return Ok(Some(evidence.clone()));
         }
@@ -193,7 +227,9 @@ impl Walker<'_> {
             if let (Some(kind), Some(values)) = (value.aggregate_kind, &value.fields) {
                 for (index, child) in values.iter().enumerate() {
                     self.limits.step(1)?;
-                    if let Some(evidence) = self.prepare_copy(child, state)? {
+                    if let Some(evidence) =
+                        self.prepare_copy_with_snapshot(child, state, snapshot)?
+                    {
                         children.push(((kind, index), evidence));
                     }
                 }
@@ -202,8 +238,12 @@ impl Walker<'_> {
         if scalar.is_none() && fields.is_empty() && expression.is_none() && children.is_empty() {
             return Ok(None);
         }
+        if snapshot.is_none() {
+            *snapshot = Some(std::sync::Arc::new(state.facts.fork(self.limits)?));
+        }
+        self.limits.step(1)?;
         Ok(Some(std::sync::Arc::new(PreparedCopy {
-            source: state.facts.fork(self.limits)?,
+            source: snapshot.as_ref().unwrap().clone(),
             scalar,
             expression,
             range: value
@@ -308,8 +348,9 @@ impl Walker<'_> {
             .transpose()?;
         let mut installed = Vec::new();
         if !mapping.is_empty() || expression.is_some() {
+            self.limits.step(1)?;
             installed.push(InstalledCopy {
-                source: copy.source.fork(self.limits)?,
+                source: copy.source.clone(),
                 mapping,
                 expression,
             });
@@ -366,6 +407,10 @@ impl Walker<'_> {
         state: &mut State,
         copies: &[InstalledCopy],
     ) -> Result<(), Reason> {
+        // A shared frozen snapshot with the same complete substitution exports
+        // the same evidence. Destination bounds only tighten during this batch;
+        // individual expression/result equalities are still handled below.
+        let mut imported: Vec<(std::sync::Arc<Facts>, BTreeMap<ValueId, ValueId>)> = Vec::new();
         for copy in copies {
             let mut mapping = BTreeMap::new();
             // Capture expressions evaluate in order. Only equal source lineage
@@ -391,57 +436,116 @@ impl Walker<'_> {
             // last sibling win; unbounded equalities have no interval to spread.
             mapping.extend(copy.mapping.iter().map(|(old, new)| (*old, *new)));
             let same_lineage = std::sync::Arc::ptr_eq(&copy.source.versions, &state.facts.versions);
-            let mut selected: BTreeSet<_> = mapping.keys().copied().collect();
-            if same_lineage {
-                for (place, (version, _)) in &copy.source.current {
-                    self.limits.step(1)?;
-                    let id = ValueId {
-                        place: *place,
-                        version: *version,
-                    };
-                    if state.facts.value(*place) == Some(id) {
-                        selected.insert(id);
+            let mut already_imported = false;
+            for (source, previous) in &imported {
+                self.limits.step(1)?;
+                if std::sync::Arc::ptr_eq(source, &copy.source) {
+                    self.limits.step(
+                        previous
+                            .len()
+                            .saturating_add(mapping.len())
+                            .saturating_add(1),
+                    )?;
+                    if previous == &mapping {
+                        already_imported = true;
+                        break;
                     }
                 }
             }
-            let mut rows = copy.source.copy_relations(self.limits)?;
-            rows.extend(super::super::differences::project_guarantees(
-                &copy.source,
-                &selected,
-                self.limits,
-            )?);
-            for row in rows {
-                if let Some(row) = rename(&row, &mapping, &state.facts, same_lineage, self.limits)?
-                {
-                    add_row(&mut state.facts, row, self.limits)?;
-                }
-            }
-            for (condition, truth) in copy.source.copy_conditions(self.limits)? {
-                if let Some(condition) =
-                    condition.renamed(&mapping, &state.facts, same_lineage, self.limits, 0)?
-                {
-                    // Copy evidence already establishes this premise, and the
-                    // source bounds/relations were transported above. Remember
-                    // its unresolved choices without replaying every retained
-                    // disjunction after each individual field binding.
-                    state
-                        .facts
-                        .remember_condition(&condition, truth, self.limits)?;
-                }
-            }
-            // A current source and its copy are equal, but their identities and
-            // later writes remain distinct. Cross-invocation IDs never alias.
-            if same_lineage {
-                for (old, new) in &mapping {
-                    if state.facts.value(old.place) == Some(*old) {
-                        add_equality(
-                            &mut state.facts,
-                            Polynomial::variable(*old, self.limits)?,
-                            Polynomial::variable(*new, self.limits)?,
-                            self.limits,
-                        )?;
+            if !already_imported {
+                let mut selected: BTreeSet<_> = mapping.keys().copied().collect();
+                let mut all_source_values_current = same_lineage;
+                if same_lineage {
+                    for (place, (version, _)) in &copy.source.current {
+                        self.limits.step(1)?;
+                        let id = ValueId {
+                            place: *place,
+                            version: *version,
+                        };
+                        if state.facts.value(*place) == Some(id) {
+                            selected.insert(id);
+                        } else {
+                            all_source_values_current = false;
+                        }
                     }
                 }
+                // With every source version still present in this lineage, rename
+                // retains the entire relation graph. Copy equalities below connect
+                // old and new identities, so eliminating intermediate variables
+                // would only recompute redundant all-pairs difference guarantees.
+                // Stale snapshots and cross-frame copies still need projection.
+                let projected = if !all_source_values_current {
+                    super::super::differences::project_guarantees(
+                        &copy.source,
+                        &selected,
+                        self.limits,
+                    )?
+                } else {
+                    Vec::new()
+                };
+                for row in (&copy.source.inequalities).into_iter().chain(&projected) {
+                    if !copy.source.relation_is_current(row, self.limits)? {
+                        continue;
+                    }
+                    // Unchanged facts already present in this frame need neither
+                    // a polynomial clone nor a rename/import. Affected rows still
+                    // get new identities: later writes may retire the originals.
+                    if same_lineage {
+                        let mut affected = false;
+                        for factors in row.terms.keys() {
+                            self.limits.step(
+                                factors
+                                    .len()
+                                    .saturating_mul(mapping.len().max(1).ilog2() as usize + 1)
+                                    .saturating_add(1),
+                            )?;
+                            if factors.iter().any(|id| mapping.contains_key(id)) {
+                                affected = true;
+                                break;
+                            }
+                        }
+                        if !affected
+                            && state.facts.relation_is_current(row, self.limits)?
+                            && state.facts.inequalities.contains(row, self.limits)?
+                        {
+                            continue;
+                        }
+                    }
+                    if let Some(row) =
+                        rename(row, &mapping, &state.facts, same_lineage, self.limits)?
+                    {
+                        add_row(&mut state.facts, row, self.limits)?;
+                    }
+                }
+                for (condition, truth) in copy.source.copy_conditions(self.limits)? {
+                    if let Some(condition) =
+                        condition.renamed(&mapping, &state.facts, same_lineage, self.limits, 0)?
+                    {
+                        // Copy evidence already establishes this premise, and the
+                        // source bounds/relations were transported above. Remember
+                        // its unresolved choices without replaying every retained
+                        // disjunction after each individual field binding.
+                        state
+                            .facts
+                            .remember_condition(&condition, truth, self.limits)?;
+                    }
+                }
+                // A current source and its copy are equal, but their identities and
+                // later writes remain distinct. Cross-invocation IDs never alias.
+                if same_lineage {
+                    for (old, new) in &mapping {
+                        if state.facts.value(old.place) == Some(*old) {
+                            add_equality(
+                                &mut state.facts,
+                                Polynomial::variable(*old, self.limits)?,
+                                Polynomial::variable(*new, self.limits)?,
+                                self.limits,
+                            )?;
+                        }
+                    }
+                }
+                self.limits.step(mapping.len().saturating_add(1))?;
+                imported.push((copy.source.clone(), mapping.clone()));
             }
             if let Some((destination, expression)) = &copy.expression {
                 if let Some(expression) = rename(
@@ -529,72 +633,6 @@ fn project_expression_bounds(
     Ok(())
 }
 
-// Exact current-value equalities, independent of interval coincidence. The
-// opposite inequalities must both be retained, including their coefficients.
-fn exact_equal_values(
-    facts: &Facts,
-    limits: &mut Limits,
-) -> Result<Vec<(ValueId, ValueId)>, Unknown> {
-    let mut equal = Vec::new();
-    for row in &facts.inequalities {
-        limits.step(1)?;
-        if row.terms.len() != 2 {
-            continue;
-        }
-        let mut terms = row.terms.iter();
-        let (a, ac) = terms.next().unwrap();
-        let (b, bc) = terms.next().unwrap();
-        if a.len() != 1 || b.len() != 1 {
-            continue;
-        }
-        let (a, b) = (a[0], b[0]);
-        if facts.value(a.place) != Some(a) || facts.value(b.place) != Some(b) {
-            continue;
-        }
-        let negative = bc.negate(&mut limits.arithmetic).map_err(Unknown::from)?;
-        if !limits.compare(ac, &negative)?.is_eq() || ac.is_zero() {
-            continue;
-        }
-        let reverse = Polynomial::default().subtract(row, limits)?;
-        if super::super::relations::contains_relation(&facts.inequalities, &reverse, limits)? {
-            if equal.len() >= limits.max_terms {
-                return Err(Unknown::TermLimit);
-            }
-            equal.push((a, b));
-        }
-    }
-    for (condition, truth) in facts.copy_conditions(limits)? {
-        let Condition::PolynomialCompare {
-            left,
-            relation,
-            right,
-        } = condition
-        else {
-            continue;
-        };
-        if !matches!((relation, truth), (C::Equal, true) | (C::NotEqual, false)) {
-            continue;
-        }
-        let row = left.subtract(&right, limits)?;
-        if row.terms.len() != 2 {
-            continue;
-        }
-        let mut terms = row.terms.iter();
-        let (a, ac) = terms.next().unwrap();
-        let (b, bc) = terms.next().unwrap();
-        if a.len() != 1 || b.len() != 1 {
-            continue;
-        }
-        let negative = bc.negate(&mut limits.arithmetic).map_err(Unknown::from)?;
-        if !ac.is_zero() && limits.compare(ac, &negative)?.is_eq() {
-            if equal.len() >= limits.max_terms {
-                return Err(Unknown::TermLimit);
-            }
-            equal.push((a[0], b[0]));
-        }
-    }
-    Ok(equal)
-}
 fn rename(
     p: &Polynomial,
     mapping: &BTreeMap<ValueId, ValueId>,
@@ -653,16 +691,15 @@ fn add_equality(
     add_row(facts, a.subtract(&b, limits)?, limits)?;
     add_row(facts, b.subtract(&a, limits)?, limits)
 }
-fn add_row(facts: &mut Facts, row: Polynomial, limits: &mut Limits) -> Result<(), Unknown> {
+pub(super) fn add_row(
+    facts: &mut Facts,
+    row: Polynomial,
+    limits: &mut Limits,
+) -> Result<(), Unknown> {
     if row.terms.is_empty() {
         return Ok(());
     }
-    if !super::super::relations::contains_relation(&facts.inequalities, &row, limits)? {
-        if facts.inequalities.len() >= limits.max_terms {
-            return Err(Unknown::TermLimit);
-        }
-        facts.inequalities.push(row);
-    }
+    facts.inequalities.insert(row, limits)?;
     Ok(())
 }
 
@@ -717,7 +754,7 @@ impl Walker<'_> {
     /// binds its actual result to this root; component identities are then
     /// aligned by State::merge before intersecting relational guarantees.
     pub(super) fn result_root(&mut self, ty: &Term) -> Result<Option<PlaceId>, Reason> {
-        let integer = matches!(ty, Term::Primitive(p) if p.fixed_integer_layout().is_some() || matches!(p, nir::Primitive::Bool | nir::Primitive::Integer));
+        let integer = matches!(ty, Term::Primitive(p) if self.integer_layout(*p).is_some() || matches!(p, nir::Primitive::Bool | nir::Primitive::Integer));
         if !integer
             && !matches!(ty, Term::Tuple(_) | Term::Record(_) | Term::Nominal { .. })
             && self.tuple_field_types(ty)?.is_none()

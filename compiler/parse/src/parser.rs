@@ -58,10 +58,12 @@ impl<'a> Parser<'a> {
         result
     }
 
-    pub fn parse(&mut self, diag_ctx: &DiagnosticContext) {
+    /// Report whether this file parsed, independently of earlier diagnostics.
+    pub fn parse(&mut self, diag_ctx: &DiagnosticContext) -> bool {
         match self.try_file_scope() {
             Ok(node_index) => {
                 self.ast.root = node_index;
+                true
             }
             Err(error) => {
                 // Handle parse error
@@ -70,6 +72,7 @@ impl<'a> Parser<'a> {
                     .lookup_source_file(self.current_span().lo())
                     .start_pos;
                 error.emit(diag_ctx, base_pos);
+                false
             }
         }
     }

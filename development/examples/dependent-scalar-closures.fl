@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 typealias Byte = .u8'builtin;
 
@@ -27,6 +30,6 @@ where requires T == bool {
     apply(value)
 }
 
-fn run() -> (Byte, bool) {
+fn run() -> Tuple<Byte, bool> {
     (increment(Byte, 8), keep(bool, true))
 }

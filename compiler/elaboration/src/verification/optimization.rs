@@ -248,6 +248,7 @@ fn visit(
         }
         | K::TypeList(fields)
         | K::TupleType(fields)
+        | K::Intrinsic { inputs: fields, .. }
         | K::Tuple(fields)
         | K::AnonymousRecord { fields }
         | K::Record { fields, .. }
@@ -261,6 +262,7 @@ fn visit(
         | K::Let { value, .. }
         | K::Assign { value, .. }
         | K::BitAssign { value, .. }
+        | K::UnsafeScope(value)
         | K::Discard(value)
         | K::RequirePredicate(value)
         | K::EnsurePredicate(value)
@@ -275,6 +277,7 @@ fn visit(
         | K::IntegerNegate(value)
         | K::FloatNegate(value)
         | K::BitConvert(value)
+        | K::ErrorConvert { value: value, .. }
         | K::NewtypeConvert(value)
         | K::Snapshot(value)
         | K::TakeBits(value)
@@ -300,6 +303,7 @@ fn visit(
         | K::ScalarGreater(a, b)
         | K::ScalarGreaterEqual(a, b)
         | K::ScalarLessEqual(a, b)
+        | K::TemplateEqual(a, b)
         | K::ScalarEqual(a, b)
         | K::TypeEqual(a, b)
         | K::TypeListIndex(a, b)
@@ -435,7 +439,8 @@ fn visit_pattern(
             visit_pattern(pattern, limits, depth, action)?;
             visit(condition, limits, depth, action)?;
         }
-        Pattern::Observe { inner: pattern, .. }
+        Pattern::ErrorResult { inner: pattern, .. }
+        | Pattern::Observe { inner: pattern, .. }
         | Pattern::Remap { pattern, .. }
         | Pattern::Binding { inner: pattern, .. } => visit_pattern(pattern, limits, depth, action)?,
         Pattern::NominalType { fields, .. }

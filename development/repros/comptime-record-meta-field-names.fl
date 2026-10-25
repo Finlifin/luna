@@ -1,0 +1,12 @@
+struct Fields {Closure: .Type'builtin, value: bool}
+struct Packet {vars: Fields}
+comptime fn configured(flag: bool) -> bool {
+    const packet = Packet {vars: Fields {Closure: bool, value: flag}};
+    let checked: packet.vars.Closure = packet.vars.value;
+    checked
+}
+fn run() -> bool {
+    const yes = configured(true);
+    const no = configured(false);
+    yes and not no
+}

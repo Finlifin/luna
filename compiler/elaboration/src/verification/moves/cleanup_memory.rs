@@ -73,6 +73,16 @@ pub(super) fn project_origin(
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Option<(memory::ParameterPlace, Term)>, String> {
+    project_origin_guarded(report, package, place, &[], fuel, depth)
+}
+fn project_origin_guarded(
+    report: &Report,
+    package: &Package,
+    place: &Place,
+    guards: &[(Vec<usize>, usize)],
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Option<(memory::ParameterPlace, Term)>, String> {
     charge(fuel, place.fields.len().saturating_add(1))?;
     if depth > 128 {
         return Err("cleanup memory origin depth exhausted".into());
@@ -141,21 +151,38 @@ pub(super) fn project_origin(
             (target, pointee.clone())
         }
     };
-    for index in &place.fields {
-        charge(fuel, 1)?;
-        let owner = match &ty {
-            Term::Nominal { declaration, .. } => nir::program::FieldOwner::Nominal(*declaration),
-            Term::Record(_) => nir::program::FieldOwner::Anonymous,
-            _ if nir::normal_forms::tuple_fields(Some(package), &ty).is_some() => {
-                nir::program::FieldOwner::Anonymous
+    let mut symbolic = vec![];
+    let mut consumed = 0;
+    for (depth, index) in place.fields.iter().enumerate() {
+        charge(fuel, guards.len().saturating_add(1))?;
+        for (path, tag) in guards {
+            charge(fuel, path.len())?;
+            if path.as_slice() == &place.fields[..depth] {
+                symbolic.extend([VARIANT_PATH, *tag]);
+                consumed += 1;
             }
-            _ => {
-                return Err("cleanup memory projection requires a known owned layout".into());
-            }
-        };
-        ty = memory::owned_path_type(Some(package), &ty, &[*index], fuel)?;
-        target.fields.push((owner, *index));
+        }
+        symbolic.push(*index);
     }
+    if consumed != guards.len() {
+        return Err("cleanup terminal guard lies outside its target path".into());
+    }
+    let projection = memory::project_owned_storage(Some(package), &ty, &symbolic, fuel)?;
+    let prefix: Vec<_> = target.fields.iter().map(|(_, index)| *index).collect();
+    if !projection.guards.is_empty() {
+        let conditions = target.conditions.entry(target.through.len()).or_default();
+        for (path, tag) in projection.guards {
+            charge(
+                fuel,
+                prefix.len().saturating_add(path.len()).saturating_add(1),
+            )?;
+            let mut absolute = prefix.clone();
+            absolute.extend(path);
+            conditions.push((absolute, tag));
+        }
+    }
+    target.fields.extend(projection.fields);
+    ty = projection.ty;
     Ok(Some((target, ty)))
 }
 impl Report {
@@ -221,7 +248,37 @@ impl Report {
         for (effect, targets) in resolved {
             charge(fuel, 1)?;
             for place in targets {
-                let Some((target, ty)) = project_origin(self, package, place, fuel, 0)? else {
+                let guards = effect
+                    .target
+                    .conditions
+                    .get(&effect.target.through.len())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let mut absolute = Vec::new();
+                if !guards.is_empty() {
+                    let suffix: Vec<_> = effect
+                        .target
+                        .fields
+                        .iter()
+                        .map(|(_, index)| *index)
+                        .collect();
+                    let prefix = place
+                        .fields
+                        .strip_suffix(suffix.as_slice())
+                        .ok_or("cleanup guarded target disagrees with terminal field path")?;
+                    for (path, tag) in guards {
+                        charge(
+                            fuel,
+                            prefix.len().saturating_add(path.len()).saturating_add(1),
+                        )?;
+                        let mut path_in_root = prefix.to_vec();
+                        path_in_root.extend(path);
+                        absolute.push((path_in_root, *tag));
+                    }
+                }
+                let Some((target, ty)) =
+                    project_origin_guarded(self, package, place, &absolute, fuel, 0)?
+                else {
                     continue;
                 };
                 if ty != effect.ty {
@@ -240,5 +297,100 @@ impl Report {
             }
         }
         Ok(output)
+    }
+}
+
+/// Speculative work within the same invocation needs the origin registry even
+/// when its execution records are isolated. This grants no storage validity.
+pub(super) fn copy_roots(
+    roots: &BTreeMap<PlaceId, BorrowedRoot>,
+    fuel: &mut usize,
+) -> Result<BTreeMap<PlaceId, BorrowedRoot>, String> {
+    for origin in roots.values() {
+        charge(fuel, 1)?;
+        match origin {
+            BorrowedRoot::Parameter {
+                input_fields,
+                pointee,
+                ..
+            } => {
+                charge(fuel, input_fields.len())?;
+                memory::bound_type(pointee, fuel)?;
+            }
+            BorrowedRoot::Indirect { slot, pointee } => {
+                charge(fuel, slot.fields.len())?;
+                memory::bound_type(pointee, fuel)?;
+            }
+            BorrowedRoot::GuardedIndirect {
+                base,
+                fields,
+                guards,
+                pointee,
+            } => {
+                charge(fuel, base.fields.len().saturating_add(fields.len()))?;
+                for (path, _) in guards {
+                    charge(fuel, path.len().saturating_add(1))?;
+                }
+                memory::bound_type(pointee, fuel)?;
+            }
+        }
+    }
+    Ok(roots.clone())
+}
+
+impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shape, String>>
+    Analyzer<'a, F, G>
+{
+    pub(super) fn prepare_cleanup_origins(
+        &mut self,
+        flow: &mut Flow,
+        root: PlaceId,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if self.report.borrowed_roots.is_empty()
+            || matches!(
+                ty,
+                Term::Primitive(_)
+                    | Term::Pointer(_)
+                    | Term::Function { .. }
+                    | Term::UnsafeFunction(_)
+            )
+        {
+            return Ok(());
+        }
+        let Some(policy) = self.cleanup.as_deref_mut() else {
+            return Ok(());
+        };
+        let Some(reads) = policy
+            .cleanup_reads(ty, &mut self.fuel)
+            .map_err(|e| error(source, e))?
+        else {
+            return Ok(());
+        };
+        let receiver = Place {
+            root,
+            fields: vec![],
+        };
+        let arguments =
+            BTreeMap::from([(0, BTreeMap::from([(vec![], BTreeSet::from([receiver]))]))]);
+        for read in reads {
+            let Some(first) = read.target.through.first() else {
+                continue;
+            };
+            // A moved component no longer contributes its own destructor. The
+            // acquired plan still rejects an enclosing Drop reading that slot.
+            if read.target.conditions.get(&0).is_none_or(Vec::is_empty) {
+                let slot = Place {
+                    root,
+                    fields: first.iter().map(|(_, index)| *index).collect(),
+                };
+                if flow.state.require_present(&slot).is_err() {
+                    continue;
+                }
+            }
+            self.map_memory_target(&read.target, &arguments, flow, source)?;
+        }
+        Ok(())
     }
 }

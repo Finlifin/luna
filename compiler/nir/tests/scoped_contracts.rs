@@ -242,6 +242,7 @@ fn nominal_fields_and_variants_instantiate_in_explicit_input_frames() {
         requirements: vec![],
         capabilities: vec![],
         encoding: None,
+        is_intrinsic: false,
         symbol_encoding: None,
         groups: vec![],
     };

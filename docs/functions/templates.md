@@ -35,6 +35,51 @@ case_param -> case pattern
 
 模板实例继承的是接口中的参数、结果和约束。参数名在实例正文中指向本次接口绑定；函数名则属于实例自身。两份实例可以共享接口却具有不同主体、不同效果和不同的实现代码。
 
+默认回调也属于复用的接口。例如，下面的默认值构造一个回调；调用实例时，实例正文才调用它。两个 `apply` 各自建立 tactic lambda 边界，因此内层 `_0` 指内层接收的 `false`，不与外层 `_0` 共用参数。
+
+~~~flurry
+fn apply(value: bool, lambda action: fn(bool) -> bool) -> bool {
+    action(value)
+}
+fn always(value: bool) -> bool { true }
+
+template fn choose(
+    value: bool,
+    .action: fn(bool) -> bool = |input: bool|
+        apply(input, _0 and not apply(false, _0))
+) -> bool;
+
+fn first use choose { action(value) }
+fn second use choose { action(value) }
+
+fn run() -> bool {
+    first(true) and not second(false) and first(false, .action = always)
+}
+~~~
+
+`run()` 返回 `true`。显式 `.action` 覆盖本次默认回调；签名克隆保留 tactic 的边界，模板参数和闭包捕获则映射到本实例的新鲜绑定。默认值形成仍需普通默认值的稳定性与终止性证据，复用签名不免除这些要求。
+
+默认值内部也可以形成代码值并接入 runtime 端口：
+
+~~~flurry
+template fn invert(
+    seed: bool,
+    .value: bool = do {
+        const code: <seed: bool |- bool> = '(not seed);
+        ~<code>
+    }
+) -> bool;
+
+fn first_invert use invert { value }
+fn second_invert use invert { value }
+
+fn check_invert() -> bool {
+    first_invert(false) and not second_invert(true)
+}
+~~~
+
+`code` 是 comptime 代码值，其中 `seed` 是 runtime 上下文端口。隐式接入沿模板声明保存的词法关联连接到本实例的 `seed`，不按实例正文中新出现的同名变量重新查找。复制签名时，contextual 绑定、quote 内部绑定以及 pattern quote 的成功输出一并建立新鲜身份；显式 substitution 和单洞限制仍照常检查。这里接入的是默认值中的代码；函数主体仍由各实例提供。
+
 不要把“使用模板定义一个函数”与“调用这个函数”混为一步。前者决定具体定义及其代码，后者才按该实例的普通或 quote 调用规则供应 runtime 输入。
 
 ### 基于 CMTT 的正文复用

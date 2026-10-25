@@ -145,6 +145,8 @@ fn describe(tag: Symbol) -> str { tag'tag_name }
 const ready_name: str = .ready'tag_name;
 ```
 
+LLVM host 已支持 Symbol 的字面量、传参、相等比较、成员字面量模式、指针存取和名称视图。其私有存储共享只读文本，不授予与 str 的隐式转换，也不引入大小次序；库中的 Once/Clone/Copy 实现保留这种值语义。
+
 这个视图可用于两阶段调用、常量、normal-form 的字符串参数和 staged 参数计算。所得字符串不依赖承载 Symbol 的局部对象继续存活。enum 值也支持名称视图：结果是声明中的变体名，分组变体包含组路径，与底层编码独立，具体见 [enum 表示](../type/user-defined-types/enums.md)。
 
 ---

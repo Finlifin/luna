@@ -89,55 +89,6 @@ impl Checker<'_, '_> {
         })
     }
 
-    pub(super) fn dynamic_tuple_type(
-        &mut self,
-        head: DeclarationId,
-        fields: Vec<n::Expr>,
-        span: Span,
-    ) -> Result<K, Error> {
-        let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                (matches_declaration(self.package, &self.package_identities, owner, head))
-                    .then_some(owner)
-            })
-            .ok_or_else(|| error(span, "bound Tuple head is not in this source package"))?;
-        let parameter = self.normal_parameters[&owner][0].0;
-        let items = fields
-            .into_iter()
-            .map(n::NormalFormArgument::Value)
-            .collect::<Vec<_>>();
-        let known = self.known_collected_type_list(&items);
-        let deferred = if known.is_some() {
-            BTreeSet::new()
-        } else {
-            BTreeSet::from([parameter])
-        };
-        // Inspect immutable inputs without invoking their code. Keep the source
-        // expressions in NIR so evaluation order and control flow remain intact.
-        self.check_formation_application(
-            owner,
-            FormationInputs {
-                terms: vec![known.unwrap_or(Term::Rigid {
-                    declaration: parameter,
-                    sort: Sort::ComptimeValue,
-                })],
-                deferred,
-                environment: BTreeMap::new(),
-            },
-            span,
-        )?;
-        Ok(K::NormalFormType {
-            head,
-            plan: None,
-            arguments: vec![n::NormalFormArgument::TypeList {
-                source: source(span),
-                items,
-            }],
-        })
-    }
-
     fn known_collected_type_list(&mut self, items: &[n::NormalFormArgument]) -> Option<Term> {
         self.known_collected_type_list_in(items, &BTreeMap::new())
     }
@@ -526,6 +477,19 @@ impl Checker<'_, '_> {
         if *ty == p(P::Type) {
             return self.type_expr(value);
         }
+        if let H::ResolvedLocal(_, id) = value.kind {
+            let binding = local(id);
+            if self.callable_type_inputs.contains_key(&binding) {
+                let Some((symbol, actual)) = self.callable_value_inputs.get(&binding) else {
+                    return Err(error(
+                        value.span,
+                        "normal-form argument requires an explicit comptime value input in this function type",
+                    ));
+                };
+                self.require(actual, ty, value.span)?;
+                return Ok(symbol.clone());
+            }
+        }
         if let H::ResolvedFnParam(_, id) = value.kind {
             let binding = local(id);
             let in_signature = self.signature_owner.is_some_and(|owner| {
@@ -648,6 +612,7 @@ impl Checker<'_, '_> {
         self.signatures
             .keys()
             .chain(self.interface_signatures.keys())
+            .chain(self.open_functions.keys())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .filter_map(|owner| {
@@ -677,6 +642,7 @@ impl Checker<'_, '_> {
                     domains,
                 })
             })
+            .chain(self.generated_function_parameters.values().cloned())
             .collect()
     }
 
@@ -1313,7 +1279,10 @@ impl Checker<'_, '_> {
                 if types.is_empty() {
                     Some(signature)
                 } else {
-                    if !matches!(signature, Term::Function { .. } | Term::ComptimeFunction(_)) {
+                    if !matches!(
+                        signature,
+                        Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                    ) {
                         return None;
                     }
                     Some(Term::Closure {
@@ -2098,6 +2067,13 @@ pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budge
                 pending.push((subject, depth + 1));
                 pending.extend(arguments.iter().map(|item| (item, depth + 1)));
             }
+            Term::ErrorValue { ty, label, value } => {
+                pending.push((ty, depth + 1));
+                if let Some(label) = label {
+                    pending.push((label, depth + 1));
+                }
+                pending.push((value, depth + 1));
+            }
             Term::NominalValue { ty, fields, .. } => {
                 if fields.len().saturating_add(1) > budget.steps {
                     return None;
@@ -2129,7 +2105,7 @@ pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budge
                 }
                 pending.extend(items.iter().map(|item| (item, depth + 1)));
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) => {
+            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
                 pending.push((inner, depth + 1))
             }
             Term::Function { parameters, result } => {

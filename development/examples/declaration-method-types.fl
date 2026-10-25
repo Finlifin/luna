@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Type = .Type'builtin;
 typealias Bool = true'type;
 typealias Chosen = Select(Selector {});
@@ -11,7 +14,7 @@ fn pair() -> Pair { (true, false) }
 fn character() -> Character { let .value(value) = Choice.value('z'); value }
 trait Shape {
     comptime fn Output(self) -> Type;
-    comptime fn Pair(self) -> Type { (self.Output(), Bool) }
+    comptime fn Pair(self) -> Type { Tuple<self.Output(), Bool> }
 }
 struct Box where T { value: T }
 impl Shape for Box<T> where T { comptime fn Output(self) -> Type { T } }

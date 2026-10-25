@@ -53,15 +53,19 @@ pub enum AttributeTarget {
     Member(HirId),
 }
 
-/// A definition attribute awaiting ordinary name resolution and comptime
-/// evaluation. The expression is retained verbatim, without treating its
+/// A definition attribute awaiting elaboration and comptime evaluation.
+/// Known names are resolved during lowering; unresolved names remain deferred.
+/// The expression is also retained verbatim, without treating its
 /// spelling as a compiler intrinsic. Entries for one target are stored in
 /// application order (inner prefix first).
 #[derive(Debug, Clone)]
-pub struct DeferredDefinitionAttribute {
+pub struct DeferredDefinitionAttribute<'hir> {
     pub target: AttributeTarget,
     pub lexical_owner: OwnerId,
     pub expression: String,
+    /// Structured expression in its original lexical context. Keeping source
+    /// text as well supports diagnostics; evaluation must consume this tree.
+    pub value: &'hir Expr<'hir>,
     /// Some for a configuration of the enclosing definition, None for a prefix Object.
     pub configuration_key: Option<String>,
     pub span: rustc_span::Span,
@@ -71,13 +75,14 @@ pub struct DeferredDefinitionAttribute {
 ///
 /// All `&'hir` references inside point into the [`HirArena`] owned by
 /// `CompilerInstance`.
+#[derive(Clone)]
 pub struct Package<'hir> {
     owners: IndexVec<LocalDefId, Option<OwnerInfo<'hir>>>,
     bodies: FxHashMap<BodyId, Body<'hir>>,
     pub root_mod: OwnerId,
     /// Semantic information not yet represented by dedicated HIR nodes.
     pub pending_semantics: Vec<(rustc_span::Span, String)>,
-    pub definition_attributes: Vec<DeferredDefinitionAttribute>,
+    pub definition_attributes: Vec<DeferredDefinitionAttribute<'hir>>,
     /// Resolver-selected members whose parameterized base must survive lowering.
     pub member_projections: FxHashMap<HirId, symbol::DefId>,
     /// Accessible static members for a base whose container is known only after
@@ -88,6 +93,9 @@ pub struct Package<'hir> {
     pub member_access: FxHashMap<HirId, std::sync::Arc<[(symbol::DefId, symbol::DefId)]>>,
     definitions: FxHashMap<symbol::DefId, OwnerId>,
     owner_definitions: FxHashMap<OwnerId, symbol::DefId>,
+    /// Lexical definition containing a block-local declaration.
+    pub lexical_parents: FxHashMap<OwnerId, OwnerId>,
+    pub staged_parameter_definitions: FxHashMap<HirId, symbol::DefId>,
 }
 
 impl<'hir> Package<'hir> {
@@ -103,6 +111,8 @@ impl<'hir> Package<'hir> {
             member_access: FxHashMap::default(),
             definitions: FxHashMap::default(),
             owner_definitions: FxHashMap::default(),
+            lexical_parents: FxHashMap::default(),
+            staged_parameter_definitions: FxHashMap::default(),
         }
     }
 

@@ -47,29 +47,74 @@ impl<'a> Resolver<'a> {
         scope_id: ScopeId,
         span: rustc_span::Span,
     ) -> ResolveResult<Resolution> {
-        // 1. Check the rib stack first (lexical / ordered bindings).
-        if let Some(binding) = self.ribs.lookup(name) {
-            return Ok(Resolution::from_binding(binding));
+        let plan = self.resolve_name_deferred(name, scope_id, span);
+        if plan.pending_outputs.is_empty() {
+            plan.fallback
+        } else {
+            Err(ResolveError::InvalidNodeType {
+                message: format!("name `{name}` awaits generated pattern outputs"),
+                span,
+            })
         }
+    }
 
-        // 2. Walk up the scope tree.
-        for scope in self.scope_tree().ancestors(scope_id) {
-            if scope.items.ambiguous_glob(name) {
-                return Err(ResolveError::InvalidNodeType {
-                    message: format!("ambiguous glob name `{name}`"),
-                    span,
-                });
+    /// Preserve pending lexical exports and the exact ordinary lookup result.
+    /// This query neither executes generators nor guesses their output names.
+    pub fn resolve_name_deferred(
+        &self,
+        name: Symbol,
+        scope_id: ScopeId,
+        span: rustc_span::Span,
+    ) -> crate::deferred::NameResolutionPlan {
+        let mut pending_outputs = Vec::new();
+        let fallback = (|| {
+            // Ordered locals and block declarations share lexical precedence:
+            // an inner block's declaration must beat an outer parameter/local.
+            for rib in self.ribs.inner_to_outer() {
+                if let Some(binding) = rib.get(name) {
+                    return Ok(Resolution::from_binding(binding));
+                }
+                if let Some(site) = rib.pending_outputs {
+                    pending_outputs.push(site);
+                }
+                if let Some(scope) = self.scope_tree().get(rib.scope_id) {
+                    if scope.items.ambiguous_glob(name) {
+                        return Err(ResolveError::InvalidNodeType {
+                            message: format!("ambiguous glob name `{name}`"),
+                            span,
+                        });
+                    }
+                    if let Some(binding) = self.lookup_in_scope(name, scope.id) {
+                        self.check_access(&binding, scope_id, span)?;
+                        return Ok(Resolution::from_binding(&binding));
+                    }
+                }
             }
-            if let Some(binding) = self.lookup_in_scope(name, scope.id) {
-                self.check_access(&binding, scope_id, span)?;
-                return Ok(Resolution::from_binding(&binding));
+
+            // 2. Walk up the scope tree.
+            for scope in self.scope_tree().ancestors(scope_id) {
+                if scope.items.ambiguous_glob(name) {
+                    return Err(ResolveError::InvalidNodeType {
+                        message: format!("ambiguous glob name `{name}`"),
+                        span,
+                    });
+                }
+                if let Some(binding) = self.lookup_in_scope(name, scope.id) {
+                    self.check_access(&binding, scope_id, span)?;
+                    return Ok(Resolution::from_binding(&binding));
+                }
             }
+
+            Err(ResolveError::UnresolvedIdentifier {
+                name: name.to_string(),
+                span,
+            })
+        })();
+        crate::deferred::NameResolutionPlan {
+            name,
+            pending_outputs,
+            fallback,
         }
-
-        Err(ResolveError::UnresolvedIdentifier {
-            name: name.to_string(),
-            span,
-        })
     }
 
     /// Access the rib stack (e.g. to push / pop ribs during lowering).
@@ -121,6 +166,12 @@ impl<'a> Resolver<'a> {
             }
         }
         None
+    }
+
+    pub fn block_scope(&self, site: crate::ids::AstNodeRef) -> Option<ScopeId> {
+        self.scope_tree()
+            .iter()
+            .find_map(|scope| (scope.block_site == Some(site)).then_some(scope.id))
     }
 
     /// Anonymous implementations cannot be looked up by a spelling. Their

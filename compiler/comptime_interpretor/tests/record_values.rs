@@ -32,6 +32,7 @@ fn identity(ty: Term) -> Package {
             phase: FunctionPhase::Runtime,
             inline: false,
             pure: false,
+            is_unsafe: false,
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,

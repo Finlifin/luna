@@ -21,6 +21,7 @@ fn function(local: u32, body: Expr, result: Term) -> Function {
         phase: FunctionPhase::Runtime,
         inline: false,
         pure: false,
+        is_unsafe: false,
         preconditions: vec![],
         postconditions: vec![],
         result_binding: None,

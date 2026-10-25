@@ -528,3 +528,301 @@ fn comptime_exact_numeric_pointer_updates_preserve_values() {
         );
     }
 }
+
+#[test]
+fn comptime_mixed_view_replacement_preserves_aliases_and_phase() {
+    let source = "typealias Type=.Type'builtin;trait Duplicate {}trait Retire {fn drop(*self);}
+        typealias Action=comptime fn(*bool)->bool;impl Duplicate for Action {}
+        struct View {action:Action,target:*bool}impl Duplicate for View {}
+        comptime fn read(p:*bool)->bool {p.*}
+        comptime fn invert(p:*bool)->bool {not p.*}
+        comptime fn compute()->bool {
+            let first=false;let last=true;var view=View {action:read,target:first.ref};
+            let saved=view;let slot=view.ref;slot.* = View {action:invert,target:last.ref};
+            view.target.* and view.action(first.ref) and not view.action(view.target)
+                and not saved.action(saved.target)
+        }
+        const VALUE=compute();comptime fn result()->bool {VALUE}
+        comptime fn Result()->Type {if compute() {bool} else {.u8'builtin}}
+        typealias Chosen=Result();fn run()->Chosen {true}";
+    let compile = |source: &str| {
+        execution_support::compile_with_source_bindings(
+            source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                copy: Some("Duplicate"),
+                drop: Some("Retire"),
+                ..Default::default()
+            },
+        )
+    };
+    let package = compile(source).unwrap();
+    assert_eq!(
+        Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .invoke(id(&package, "result"), vec![])
+            .unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("impl Duplicate for View {}", ""),
+        source.replace("impl Duplicate for Action {}", ""),
+        source.replace("comptime fn invert(p:*bool)", "fn invert(p:*bool)"),
+        source.replace(
+            "slot.* = View {action:invert,target:last.ref};",
+            "slot.* = do {let temporary=true;View {action:invert,target:temporary.ref}};",
+        ),
+    ] {
+        assert!(
+            compile(&invalid).is_err(),
+            "accepted invalid replacement: {invalid}"
+        );
+    }
+}
+
+#[test]
+fn type_storage_transfer_requires_explicit_copy_and_preserves_type_identity() {
+    let source = "typealias Type=.Type'builtin;
+        trait Duplicate {}trait Retire {fn drop(*self);}
+        impl Duplicate for Type {}
+        pure comptime fn Identity<T>->Type {T}
+        comptime fn Chosen()->Type {
+            let selected=Identity<bool>;
+            let saved=selected.ref.*;
+            selected.ref.* = bool;
+            saved
+        }
+        typealias Result=Chosen();
+        comptime fn ResultType()->Type {Result}";
+    let compile = |source: &str| {
+        execution_support::compile_with_source_bindings(
+            source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                copy: Some("Duplicate"),
+                drop: Some("Retire"),
+                ..Default::default()
+            },
+        )
+    };
+    let package = compile(source).unwrap();
+    let Value::Type(selected) = luna::invocation::invoke(&package, "ResultType", 100_000).unwrap()
+    else {
+        panic!("expected Type")
+    };
+    assert!(
+        matches!(selected, nir::Term::NormalForm { .. }),
+        "{selected}"
+    );
+    assert_ne!(selected, nir::Term::Primitive(nir::Primitive::Bool));
+    assert_eq!(
+        luna::invocation::invoke_with_protocols(&package, "Chosen", "Duplicate", "Retire", 100_000)
+            .unwrap(),
+        Value::Type(selected)
+    );
+    assert!(luna::invocation::invoke(&package, "Chosen", 100_000).is_err());
+
+    let missing = compile(&source.replace("impl Duplicate for Type {}", "")).unwrap_err();
+    assert!(missing.contains("Copy"), "{missing}");
+    let cleanup = compile(&format!(
+        "{source}impl Retire for Type {{fn drop(*self) {{}}}}"
+    ))
+    .unwrap_err();
+    assert!(
+        cleanup.contains("Copy") || cleanup.contains("comptime-only"),
+        "{cleanup}"
+    );
+}
+
+#[test]
+fn explicit_invocation_checks_aggregate_copy_evidence_and_recovers() {
+    let source = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Packet {flag:bool}impl Duplicate for Packet {}
+        comptime fn compute()->bool {
+            let packet=Packet {flag:true};let saved=packet.ref.*;
+            packet.ref.* = Packet {flag:false};saved.flag and not packet.flag
+        }";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke_with_protocols(
+            &package,
+            "compute",
+            "Duplicate",
+            "Retire",
+            100_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    assert!(
+        luna::invocation::invoke_with_protocols(&package, "compute", "Duplicate", "Retire", 1)
+            .is_err()
+    );
+    let missing = compile(&source.replace("impl Duplicate for Packet {}", ""));
+    let error = luna::invocation::invoke_with_protocols(
+        &missing,
+        "compute",
+        "Duplicate",
+        "Retire",
+        100_000,
+    )
+    .unwrap_err();
+    assert!(error.contains("pointer Copy evidence"), "{error}");
+    let cleanup = compile(&format!(
+        "{source}impl Retire for Packet {{fn drop(*self) {{}}}}"
+    ));
+    assert!(
+        luna::invocation::invoke_with_protocols(
+            &cleanup,
+            "compute",
+            "Duplicate",
+            "Retire",
+            100_000
+        )
+        .is_err()
+    );
+    assert_eq!(
+        luna::invocation::invoke_with_protocols(
+            &package,
+            "compute",
+            "Duplicate",
+            "Retire",
+            100_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn memoized_type_storage_uses_snapshot_resource_authority() {
+    let package=compile("typealias Type=.Type'builtin;
+        trait Duplicate {}trait Retire {fn drop(*self);}
+        impl Duplicate for Type {}
+        pure comptime fn Select()->Type {let value=bool;let saved=value.ref.*;value.ref.* = .u8'builtin;saved}");
+    let mut items = intrinsic::LangItems::new();
+    for (item, name) in [
+        (intrinsic::LangItem::Copy, "Duplicate"),
+        (intrinsic::LangItem::Drop, "Retire"),
+    ] {
+        let declaration = package
+            .traits
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap()
+            .declaration;
+        items
+            .bind_source_traits(&package, &[(item, declaration)])
+            .unwrap();
+    }
+    let prepare = |items: &intrinsic::LangItems| {
+        luna::memoization::Invocation::prepare(
+            &package,
+            items,
+            id(&package, "Select"),
+            vec![],
+            4,
+            Default::default(),
+        )
+        .unwrap()
+    };
+    let mut allowed = prepare(&items);
+    assert!(
+        allowed
+            .invoke(vec![], &mut comptime_executor::Context::new(1))
+            .is_err()
+    );
+    assert_eq!(allowed.cached_results(), 0);
+
+    for reused in [false, true] {
+        let outcome = allowed
+            .invoke(vec![], &mut comptime_executor::Context::new(100_000))
+            .unwrap();
+        assert_eq!(
+            *outcome.value,
+            Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
+        );
+        assert_eq!(outcome.reused, reused);
+    }
+    let mut denied = prepare(&intrinsic::LangItems::new());
+    assert!(
+        denied
+            .invoke(vec![], &mut comptime_executor::Context::new(100_000))
+            .is_err()
+    );
+    assert_eq!(denied.cached_results(), 0);
+    assert_eq!(allowed.cached_results(), 1);
+}
+
+#[test]
+fn memoized_keys_use_resource_evidence_in_source_eq_and_hash() {
+    let source = "trait Eq {comptime fn eq(self,other:Self)->bool;}
+        trait Hash {comptime fn hash(self)->.u8'builtin;}
+        trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Packet {flag:bool}impl Duplicate for Packet {}
+        impl Eq for bool {comptime fn eq(self,other:bool)->bool {
+            let packet=Packet {flag:self};let saved=packet.ref.*;saved.flag == other
+        }}
+        impl Hash for bool {comptime fn hash(self)->.u8'builtin {
+            let packet=Packet {flag:self};let saved=packet.ref.*;
+            if saved.flag {0} else {0}
+        }}
+        pure comptime fn inspect(flag:bool)->bool {flag}";
+    let package = compile(source);
+    let prepare = |resources: bool| {
+        let mut items = intrinsic::LangItems::new();
+        for (item, name) in [
+            (intrinsic::LangItem::Eq, "Eq"),
+            (intrinsic::LangItem::Hash, "Hash"),
+            (intrinsic::LangItem::Copy, "Duplicate"),
+            (intrinsic::LangItem::Drop, "Retire"),
+        ] {
+            if !resources && matches!(item, intrinsic::LangItem::Copy | intrinsic::LangItem::Drop) {
+                continue;
+            }
+            let declaration = package
+                .traits
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap()
+                .declaration;
+            items
+                .bind_source_traits(&package, &[(item, declaration)])
+                .unwrap();
+        }
+        luna::memoization::Invocation::prepare(
+            &package,
+            &items,
+            id(&package, "inspect"),
+            vec![],
+            4,
+            Default::default(),
+        )
+        .unwrap()
+    };
+    let mut allowed = prepare(true);
+    for (value, reused) in [(true, false), (true, true), (false, false), (false, true)] {
+        let outcome = allowed
+            .invoke(
+                vec![Value::Bool(value)],
+                &mut comptime_executor::Context::new(100_000),
+            )
+            .unwrap();
+        assert_eq!(*outcome.value, Value::Bool(value));
+        assert_eq!(outcome.reused, reused);
+    }
+    let mut denied = prepare(false);
+    assert!(
+        denied
+            .invoke(
+                vec![Value::Bool(true)],
+                &mut comptime_executor::Context::new(100_000)
+            )
+            .is_err()
+    );
+    assert_eq!(denied.cached_results(), 0);
+}

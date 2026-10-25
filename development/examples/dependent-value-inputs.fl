@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 typealias Integer = .Integer'builtin;
 
@@ -26,7 +29,7 @@ fn forward(comptime n: Integer) -> bool {
     tag(n)
 }
 
-fn run() -> (bool, bool) {
+fn run() -> Tuple<bool, bool> {
     -- Shape's storage default is evaluated after n becomes concrete.
     (forward(4), forward(5))
 }
@@ -45,6 +48,6 @@ fn mixed_forward(comptime A: Type, comptime v: A) -> bool {
     mixed_tag(A, v)
 }
 
-fn mixed() -> (bool, bool) {
+fn mixed() -> Tuple<bool, bool> {
     (mixed_forward(bool, true), mixed_forward(Type, bool))
 }

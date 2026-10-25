@@ -71,6 +71,7 @@ impl Parser<'_> {
     pub fn try_expr_pratt(&mut self, min_prec: i32, option: ExprOption) -> ParseResult {
         self.scoped(|p| {
             // 尝试解析前缀表达式作为左操作数
+            let expression_start = p.next_token_span().lo();
             let mut current_left = match p.try_prefix_expr(option)? {
                 0 => return Ok(0), // 没有找到有效的前缀表达式
                 node => node,
@@ -129,6 +130,28 @@ impl Parser<'_> {
                 }
                 let op_info = get_expr_op_info(token.kind);
 
+                // These tokens have prefix meanings, but cannot continue an
+                // expression as infix arithmetic without whitespace. A type
+                // qualifier also ends before its result, as in `#read *T`.
+                // Preserve the statement boundary after a brace-ending expression:
+                // e.g. `if ready {} -value;` starts a new statement.
+                if op_info.node_kind == NodeKind::Invalid
+                    && !option.stop_at_type_qualifier
+                    && matches!(
+                        token.kind,
+                        TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash
+                    )
+                    && p.current_token().kind != TokenKind::RBrace
+                {
+                    return Err(ParseError::invalid_syntax(
+                        format!(
+                            "Infix operator `{}` requires whitespace on both sides",
+                            token.kind.lexme()
+                        ),
+                        token.kind,
+                        p.next_token_span(),
+                    ));
+                }
                 // 如果操作符无效或优先级太低，则退出循环
                 if op_info.node_kind == NodeKind::Invalid || op_info.prec < min_prec {
                     break;
@@ -176,10 +199,13 @@ impl Parser<'_> {
                         };
 
                         // 创建二元操作符节点
-                        current_left = NodeBuilder::new(op_info.node_kind, p.current_span())
-                            .add_single_child(current_left)
-                            .add_single_child(right)
-                            .build(&mut p.ast);
+                        current_left = NodeBuilder::new(
+                            op_info.node_kind,
+                            rustc_span::Span::new(expression_start, p.current_span().hi()),
+                        )
+                        .add_single_child(current_left)
+                        .add_single_child(right)
+                        .build(&mut p.ast);
                     }
                 }
             }
@@ -900,15 +926,9 @@ impl Parser<'_> {
                     p.next_token_span(),
                 ));
             }
-            // AtomicBlock is (a, b, N) = DoubleWithMultiChildren?
-            // Actually it's N, a in current code comment. Let me use the correct layout.
-            // AtomicBlock: N, a -> but should be a, N = SingleWithMultiChildren
-            // Wait, current code says AtomicBlock is DoubleWithMultiChildren.
-            // Looking at the comment: AtomicBlock, // N, a
-            // This is wrong for DoubleWithMultiChildren. Let me keep it as-is for now.
             Ok(NodeBuilder::new(NodeKind::AtomicBlock, p.current_span())
-                .add_multiple_children(ids)
                 .add_single_child(block)
+                .add_multiple_children(ids)
                 .build(&mut p.ast))
         })
     }
@@ -1014,6 +1034,7 @@ impl Parser<'_> {
         option: ExprOption,
     ) -> ParseResult {
         self.scoped_with_expected_prefix(&[token], |p| {
+            let start = p.next_token_span().lo();
             p.eat_tokens(1); // 消耗前缀token
 
             // A prefix operand includes tighter postfix operations, but not
@@ -1029,9 +1050,12 @@ impl Parser<'_> {
                 ));
             }
 
-            Ok(NodeBuilder::new(node_kind, p.current_span())
-                .add_single_child(expr)
-                .build(&mut p.ast))
+            Ok(NodeBuilder::new(
+                node_kind,
+                rustc_span::Span::new(start, p.current_span().hi()),
+            )
+            .add_single_child(expr)
+            .build(&mut p.ast))
         })
     }
 

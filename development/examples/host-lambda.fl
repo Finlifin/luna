@@ -1,0 +1,12 @@
+fn factory() -> fn() -> fn(bool) -> bool {
+    || { |value| not value }
+}
+
+fn apply(callback: fn(bool) -> bool, value: bool) -> bool {
+    callback(value)
+}
+
+fn run() -> bool {
+    let callback = factory()();
+    apply(callback, false)
+}

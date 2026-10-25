@@ -1,0 +1,38 @@
+-- Build with --copy-protocol Duplicate --drop-protocol Retire --build run.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for .Symbol'builtin {}
+typealias Symbol = .Symbol'builtin;
+
+struct Session { state: Symbol, closed: *bool }
+impl Retire for Session {
+    fn drop(*self) {
+        let state = self.state.*;
+        assumes state == .closed;
+        let already_closed = self.closed.*.*;
+        assumes not already_closed;
+        self.closed.*.* = true;
+    }
+}
+
+typealias Transition = %{session: Session} fn(Symbol) -> Symbol;
+fn session(initial: Symbol, closed: *bool) -> Transition {
+    var session = Session {state: initial, closed: closed};
+    |next: Symbol| {
+        let previous = session.state;
+        session.state = next;
+        previous
+    }
+}
+fn close(transition: Transition) -> bool {
+    let previous = transition(.closed);
+    previous == .active
+}
+fn run() -> bool {
+    var closed = false;
+    let transition = session(.ready, closed.ref);
+    let first = transition(.active);
+    let valid = close(transition);
+    first == .ready and valid and closed
+}

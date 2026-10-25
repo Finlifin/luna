@@ -152,6 +152,8 @@ pub enum Boundary {
     Replacement,
     PredicateFailure,
     InterfacePreconditionFailure,
+    /// Invocation inputs have transferred; its result is still pending delivery.
+    InterfacePostconditionFailure,
     DefaultFailure(usize),
     PostconditionFailure(nir::program::SourceRange),
 }
@@ -186,6 +188,7 @@ impl fmt::Display for Boundary {
             Self::Replacement => "replacement",
             Self::PredicateFailure => "predicate-failure",
             Self::InterfacePreconditionFailure => "interface-precondition-failure",
+            Self::InterfacePostconditionFailure => "interface-postcondition-failure",
             Self::DefaultFailure(_) | Self::PostconditionFailure(_) => unreachable!(),
         })
     }
@@ -206,12 +209,12 @@ pub enum Target {
         value_source: nir::program::SourceRange,
     },
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Action {
     pub target: Target,
     pub program: Program,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Site {
     pub source: nir::program::SourceRange,
     pub boundary: Boundary,
@@ -265,7 +268,7 @@ impl fmt::Display for ContextKey {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FunctionSchedule {
     pub instance: InstanceKey,
     pub context: Vec<ContextKey>,
@@ -313,7 +316,7 @@ impl fmt::Display for Transfer {
     }
 }
 /// A whole result discarded at its own full-expression boundary.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DiscardCleanup {
     pub source: nir::program::SourceRange,
     pub value_source: nir::program::SourceRange,
@@ -355,8 +358,70 @@ impl fmt::Display for ContextAlias {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Schedule {
+    /// Concrete closure evidence for an invocation scope. Source ranges alone
+    /// cannot distinguish bodies produced by different generic instances.
+    pub closure_definitions: Vec<ClosureDefinition>,
+    /// Instances whose borrowed callable identities require per-call cleanup evidence.
+    pub borrowed_callable_functions: Vec<InstanceKey>,
     pub functions: Vec<FunctionSchedule>,
     pub aliases: Vec<ContextAlias>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClosureDefinition {
+    pub instance: InstanceKey,
+    pub context: Vec<ContextKey>,
+    pub definition: nir::program::Expr,
+}
+impl fmt::Display for ClosureDefinition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(closure-definition (instance {}) (context",
+            self.instance
+        )?;
+        for key in &self.context {
+            write!(f, " {key}")?;
+        }
+        write!(f, ") (definition {}))", self.definition)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeLookupError {
+    Missing,
+    Ambiguous,
+}
+impl fmt::Display for ScopeLookupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Missing => "(cleanup-scope-error missing)",
+            Self::Ambiguous => "(cleanup-scope-error ambiguous)",
+        })
+    }
+}
+impl std::error::Error for ScopeLookupError {}
+
+impl Schedule {
+    /// Resolve one concrete resource scope, including its complete instance and
+    /// lexical context. Callers charge the scan before entering this helper.
+    /// Aliases are intentionally not followed: handler/default activations need
+    /// their own published scope, not another activation's cleanup evidence.
+    pub fn exact_function(
+        &self,
+        instance: &InstanceKey,
+        context: &[ContextKey],
+    ) -> Result<&FunctionSchedule, ScopeLookupError> {
+        let mut matches = self
+            .functions
+            .iter()
+            .filter(|candidate| &candidate.instance == instance && candidate.context == context);
+        let result = matches.next().ok_or(ScopeLookupError::Missing)?;
+        if matches.next().is_some() {
+            return Err(ScopeLookupError::Ambiguous);
+        }
+        Ok(result)
+    }
 }
 impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -440,7 +505,14 @@ impl fmt::Display for FunctionSchedule {
 }
 impl fmt::Display for Schedule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("(cleanup-schedule")?;
+        f.write_str("(cleanup-schedule (borrowed-callable-functions")?;
+        for key in &self.borrowed_callable_functions {
+            write!(f, " {key}")?;
+        }
+        f.write_str(")")?;
+        for definition in &self.closure_definitions {
+            write!(f, " {definition}")?;
+        }
         for function in &self.functions {
             write!(f, " {function}")?;
         }

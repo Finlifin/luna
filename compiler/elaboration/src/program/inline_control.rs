@@ -2,6 +2,78 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    /// Validate checked selectors without interpreting them. Only walk the
+    /// when-condition spine, never ordinary runtime conditions in arm bodies.
+    pub(super) fn check_inactive_inline_selectors(
+        &mut self,
+        source: &Expr<'_>,
+        checked: &n::Expr,
+    ) -> Result<(), Error> {
+        let staged = BTreeSet::new();
+        match (&source.kind, &checked.kind) {
+            (H::If(..), K::If { condition, .. }) => {
+                self.check_inline_input_availability(condition, &staged, source.span)
+            }
+            (H::Match(..), K::Match { value, .. }) => {
+                self.check_inline_input_availability(value, &staged, source.span)
+            }
+            (H::When(arms), _) => {
+                let mut tail = checked;
+                for arm in *arms {
+                    if arm.cond.is_none() {
+                        break;
+                    }
+                    let K::If {
+                        condition,
+                        else_branch,
+                        ..
+                    } = &tail.kind
+                    else {
+                        return Err(error(source.span, "inline when lost its checked selector"));
+                    };
+                    self.check_inline_input_availability(condition, &staged, arm.body.span)?;
+                    if let Some(next) = else_branch {
+                        tail = next;
+                    } else {
+                        break;
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(error(
+                source.span,
+                "inline control lost its checked selector",
+            )),
+        }
+    }
+
+    /// Candidate-local observation aliases and or-branch binders are staged
+    /// even when they are not successful exports of the complete pattern.
+    pub(super) fn check_inline_pattern_availability(
+        &mut self,
+        pattern: &n::Pattern,
+        span: Span,
+    ) -> Result<(), Error> {
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let scanned = (|| {
+            let external = nir::free_bindings::collect_pattern(pattern, &mut fuel)?;
+            let observations = nir::visit::pattern_observations(pattern, &mut fuel)?;
+            let mut checks = Vec::new();
+            for observation in observations {
+                let free = nir::free_bindings::collect(observation, &mut fuel)?;
+                let staged = free.difference(&external).copied().collect::<BTreeSet<_>>();
+                checks.push((observation, staged));
+            }
+            Ok::<_, String>(checks)
+        })();
+        self.required_steps -= (before - fuel) as u64;
+        for (observation, staged) in scanned.map_err(|e| error(span, e))? {
+            self.check_inline_input_availability(observation, &staged, span)?;
+        }
+        Ok(())
+    }
+
     /// Pattern computations have already passed staged ordinary checking.
     /// Retain their domains and all possible outcomes in the P4 witness, without
     /// invoking them or treating their comptime calls as runtime behavior.
@@ -29,7 +101,8 @@ impl Checker<'_, '_> {
                     pending.push(pattern);
                     Some(condition)
                 }
-                n::Pattern::Observe { inner, .. }
+                n::Pattern::ErrorResult { inner, .. }
+                | n::Pattern::Observe { inner, .. }
                 | n::Pattern::Binding { inner, .. }
                 | n::Pattern::Remap { pattern: inner, .. } => {
                     pending.push(inner);

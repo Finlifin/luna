@@ -1,0 +1,40 @@
+-- The callback owns a non-Copy state; the handler only borrows it.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+
+struct State { bit: bool, live: bool }
+impl Retire for State {
+    fn drop(*self) {
+        assumes self.live.*;
+        assumes self.bit.*;
+        self.live.* = false;
+    }
+}
+
+effect inspect(pointer: *bool) -> bool;
+fn subject(pointer: *bool) -> #inspect bool {
+    inspect(pointer)#;
+    inspect(pointer)#
+}
+
+fn pack(...fields:T)->T where T {fields}
+fn run() -> bool {
+    var seen = false;
+    var state = State {bit:false, live:true};
+    let callback = |target: *bool| {
+        state.bit = not state.bit;
+        target.* = state.bit;
+    };
+    let actions = pack {inner:pack {call:callback}};
+    let result = subject(seen.ref)# {
+        inspect(value) => do {
+            actions.inner.call(value);
+            resume value.*;
+        },
+    };
+    let previous = seen;
+    actions.inner.call(seen.ref);
+    not result and not previous and seen
+}

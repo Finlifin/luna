@@ -1,12 +1,15 @@
 //! Bounded mathematical integer reasoning about versioned program values.
 //! Independent of PTC; this module grants neither memory access nor ownership.
+mod congruence;
 pub mod contracts;
 pub mod copy;
+mod cubic;
 mod differences;
 mod division;
 pub mod drop;
 mod effect_transfer;
 pub mod effect_usage;
+mod factors;
 pub mod flow;
 pub mod memory;
 pub mod moves;
@@ -15,9 +18,11 @@ pub mod optimization;
 pub mod ownership;
 mod pattern_facts;
 mod predicates;
+mod quadratic;
 mod rejection;
 mod relations;
 mod retained_conditions;
+mod signs;
 pub use predicates::PredicateProof;
 
 use comptime_runtime::{Budget, Error as ArithmeticError, Integer};
@@ -28,12 +33,12 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PlaceId {
     pub owner: u64,
     pub local: u32,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ValueId {
     pub place: PlaceId,
     pub version: u64,
@@ -350,6 +355,16 @@ impl Polynomial {
         facts: &Facts,
         limits: &mut Limits,
     ) -> Result<(Interval, BTreeMap<ValueId, Interval>), Unknown> {
+        self.interval_enclosure_with_override(facts, None, limits)
+    }
+    /// Temporary interval-box restriction for discrete step proofs. This does
+    /// not alter facts, versions, or propagate relational assumptions.
+    fn interval_enclosure_with_override(
+        &self,
+        facts: &Facts,
+        override_bound: Option<(ValueId, &Interval)>,
+        limits: &mut Limits,
+    ) -> Result<(Interval, BTreeMap<ValueId, Interval>), Unknown> {
         if !facts.reachable {
             return Err(Unknown::UnreachablePath);
         }
@@ -366,6 +381,10 @@ impl Polynomial {
                     end += 1;
                 }
                 let bound = facts.bound(id, limits)?;
+                let bound = override_bound
+                    .filter(|(selected, _)| *selected == id)
+                    .map(|(_, replacement)| replacement)
+                    .unwrap_or(bound);
                 term = term.multiply(&bound.power(end - index, limits)?, limits)?;
                 if !premises.contains_key(&id) {
                     premises.insert(id, bound.copy(limits)?);
@@ -378,7 +397,7 @@ impl Polynomial {
     }
     pub fn prove_within(&self, target: &Interval, facts: &Facts, limits: &mut Limits) -> Outcome {
         let result = (|| {
-            let (enclosure, premises) = self.enclosure(facts, limits)?;
+            let (enclosure, premises) = self.enclosure_for_target(target, facts, limits)?;
             if !enclosure.within(target, limits)? {
                 return Err(Unknown::InsufficientBounds);
             }
@@ -415,7 +434,7 @@ impl fmt::Display for Polynomial {
 /// alias model: callers must invalidate every affected place for memory writes.
 pub struct Facts {
     current: BTreeMap<PlaceId, (u64, Option<Interval>)>,
-    inequalities: Vec<Polynomial>,
+    inequalities: relations::RelationStore,
     conditions: Vec<(Condition, bool)>,
     // Forks share a clock: two assignments on different paths must never
     // accidentally denote the same value, even if their ranges are equal.
@@ -426,7 +445,7 @@ impl Default for Facts {
     fn default() -> Self {
         Self {
             current: BTreeMap::new(),
-            inequalities: Vec::new(),
+            inequalities: relations::RelationStore::default(),
             conditions: Vec::new(),
             versions: Arc::new(AtomicU64::new(0)),
             reachable: true,
@@ -450,6 +469,35 @@ impl Facts {
             self.reachable &= *value == truth;
             return Ok(());
         }
+        if !self.reachable {
+            return Ok(());
+        }
+        // Reasserting an entailed premise cannot refine this state. Keep its
+        // logical form for later joins, but do not replay every saved choice.
+        let known = self.known_condition(condition, limits)?;
+        let known = match known {
+            Some(value) => Some(value),
+            None if matches!(
+                (condition, truth),
+                (Condition::And(..), true) | (Condition::Or(..), false)
+            ) =>
+            {
+                None
+            }
+            None => match condition.truth_by_enclosure(self, limits, 0) {
+                Ok(value) => value,
+                Err(Unknown::MissingBound(_)) => None,
+                Err(error) => return Err(error),
+            },
+        };
+        if let Some(value) = known {
+            if value != truth {
+                self.reachable = false;
+            } else {
+                self.remember_condition(condition, truth, limits)?;
+            }
+            return Ok(());
+        }
         let mut next = self.fork(limits)?;
         next.assume_inner(condition, truth, 0, limits)?;
         next.remember_condition(condition, truth, limits)?;
@@ -465,6 +513,17 @@ impl Facts {
         depth: usize,
         limits: &mut Limits,
     ) -> Result<(), Unknown> {
+        self.assume_inner_mode(condition, truth, depth, limits, false)
+    }
+
+    fn assume_inner_mode(
+        &mut self,
+        condition: &Condition,
+        truth: bool,
+        depth: usize,
+        limits: &mut Limits,
+        replay: bool,
+    ) -> Result<(), Unknown> {
         limits.step(1)?;
         if depth >= 128 {
             return Err(Unknown::ConditionDepthLimit);
@@ -472,7 +531,21 @@ impl Facts {
         if !self.reachable {
             return Ok(());
         }
-        if let Some(known) = self.known_condition(condition, limits)? {
+        // Conjunctive assumptions need no speculative proof of the entire
+        // tree. Each atomic refinement propagates its new relations; process
+        // the second operand in that refined state. The public entry owns the
+        // transaction, so failure cannot publish a partial conjunction.
+        if let Condition::And(a, b) | Condition::Or(a, b) = condition {
+            if matches!(condition, Condition::And(..)) == truth {
+                self.assume_inner_mode(a, truth, depth + 1, limits, replay)?;
+                return self.assume_inner_mode(b, truth, depth + 1, limits, replay);
+            }
+        }
+        if let Some(known) = if replay {
+            None
+        } else {
+            self.known_condition(condition, limits)?
+        } {
             if known != truth {
                 self.reachable = false;
             }
@@ -613,7 +686,7 @@ impl Facts {
             }
         }
         self.current.retain(|place, _| places.contains(place));
-        self.inequalities = rows;
+        self.inequalities = relations::RelationStore::from_rows(rows, limits)?;
         Ok(())
     }
     pub fn is_reachable(&self) -> bool {
@@ -646,7 +719,10 @@ impl Facts {
             current,
             versions: self.versions.clone(),
             reachable: self.reachable,
-            inequalities: self.copy_relations(limits)?,
+            inequalities: relations::RelationStore::from_rows(
+                self.copy_relations(limits)?,
+                limits,
+            )?,
             conditions: self.copy_conditions(limits)?,
         })
     }
@@ -839,7 +915,10 @@ impl Facts {
             current,
             versions: self.versions.clone(),
             reachable: true,
-            inequalities: self.common_relations(other, limits)?,
+            inequalities: relations::RelationStore::from_rows(
+                self.common_relations(other, limits)?,
+                limits,
+            )?,
             conditions: self.common_conditions(other, limits)?,
         };
         differences::join_guarantees(self, other, &mut joined, limits)?;
@@ -972,7 +1051,16 @@ impl fmt::Display for Facts {
         }
         f.write_str(") (conditions")?;
         for (condition, truth) in &self.conditions {
-            write!(f, " (established (truth {truth}) {condition})")?;
+            // Retained conditions can outlive a write to their inputs. Their
+            // presence in storage is not evidence about the new versions.
+            // Display never changes facts or turns a failed bounded inspection
+            // into a claim that the condition is current (or definitely stale).
+            let status = match condition.is_current(self, &mut Limits::default(), 0) {
+                Ok(true) => "established",
+                Ok(false) => "stale-condition",
+                Err(_) => "unchecked-condition",
+            };
+            write!(f, " ({status} (truth {truth}) {condition})")?;
         }
         f.write_str("))")
     }
@@ -997,7 +1085,7 @@ impl RangeProof {
         }
         for constraint in &self.inequalities {
             if !facts.relation_is_current(constraint, limits)?
-                || !relations::contains_relation(&facts.inequalities, constraint, limits)?
+                || !facts.inequalities.contains(constraint, limits)?
             {
                 return Err(Unknown::InsufficientBounds);
             }
@@ -1010,7 +1098,9 @@ impl RangeProof {
                 return Err(Unknown::StaleValue(*id));
             }
         }
-        let (enclosure, _) = self.expression.enclosure(facts, limits)?;
+        let (enclosure, _) = self
+            .expression
+            .enclosure_for_target(&self.target, facts, limits)?;
         if enclosure.within(&self.target, limits)? {
             Ok(())
         } else {

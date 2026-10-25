@@ -1,0 +1,22 @@
+typealias Callback = fn(comptime bool, bool) -> bool;
+
+fn keep(comptime invert: bool, value: bool) -> bool {
+    if invert { not value } else { value }
+}
+
+fn reverse(comptime invert: bool, value: bool) -> bool {
+    if invert { value } else { not value }
+}
+
+fn choose(flag: bool) -> Callback {
+    if flag { keep } else { reverse }
+}
+
+fn apply(value: bool, .callback: Callback = keep) -> bool {
+    callback(false, value) and not callback(true, value)
+}
+
+fn run() -> bool {
+    let callback = choose(false);
+    apply(true) and apply(false, .callback = callback)
+}

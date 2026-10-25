@@ -1,0 +1,30 @@
+typealias U = .u32'builtin;
+typealias Type = .Type'builtin;
+
+fn preserve(value: T) -> T where T {
+    -- T comes from the enclosing instance, not from a new inference slot.
+    inline fn local(inner: T) -> T { inner }
+    local(value)
+}
+
+fn factory() -> fn(T) -> T where T {
+    fn local(value: T) -> T { value }
+    local
+}
+
+fn staged_factory(comptime T: Type, comptime value: T) -> fn(bool) -> T {
+    -- The returned function retains both the type and its staged value.
+    fn local(recur: bool) -> T {
+        if recur { local(false) } else { value }
+    }
+    local
+}
+
+fn run() -> bool {
+    preserve<bool>(true)
+        and preserve<U>(42) == 42
+        and factory<bool>()(true)
+        and factory<U>()(7) == 7
+        and staged_factory(bool, true)(true)
+        and staged_factory(U, 19)(true) == 19
+}

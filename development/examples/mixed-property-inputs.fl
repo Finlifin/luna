@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- Anchored inputs retain their parameter contexts. Properties form one packet;
 -- their positions among the explicit inputs determine evaluation order.
 fn configure(
@@ -5,7 +8,7 @@ fn configure(
     ...properties: T,
     enabled: bool,
     .limit: .u8'builtin = requested,
-) -> (.u8'builtin, T, bool)
+) -> Tuple<.u8'builtin, T, bool>
 where T
 {
     (limit, properties, enabled)

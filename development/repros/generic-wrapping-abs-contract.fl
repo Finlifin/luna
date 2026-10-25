@@ -1,0 +1,14 @@
+-- Regression: finite generic arithmetic domains and universal contract checking.
+-- Use --host-intrinsic abs=input::Ops::absolute.
+-- The result equality short-circuits at INT_MIN, before negating the input.
+^intrinsic_enum enum Ops {absolute}
+
+pub pure fn magnitude(value: T) -> result: T
+where T, requires T == .i8'builtin or T == .i16'builtin,
+    ensures result == value'old or result == -value'old {
+    unsafe { Ops.absolute'intrinsic(value).as(T) }
+}
+
+fn run() -> bool {
+    magnitude<.i8'builtin>(-5) == 5
+}

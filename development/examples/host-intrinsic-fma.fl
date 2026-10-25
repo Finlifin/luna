@@ -1,0 +1,15 @@
+-- --host-fma input::machine::Scalar::fused --build run --output /tmp/flurry-fma
+mod machine {
+    ^intrinsic_enum
+    enum Scalar { fused }
+}
+
+typealias F = .f32'builtin;
+
+pure fn fused(a: F, b: F, c: F) -> F {
+    unsafe { machine.Scalar.fused'intrinsic(a, b, c).as(F) }
+}
+
+pure fn run() -> F {
+    fused(3.0, 4.0, 5.0)
+}

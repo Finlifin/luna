@@ -1,0 +1,26 @@
+-- luna host-closure-cleanup.fl --build run --copy-protocol Duplicate --drop-protocol Retire --output /tmp/flurry-closure-cleanup
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+
+struct Watch { target: *bool }
+impl Retire for Watch {
+    fn drop(*self) { self.target.*.* = not self.target.*.*; }
+}
+
+typealias Held = %{watch: Watch} fn() -> Watch;
+
+fn hold(target: *bool) -> Held {
+    let watch = Watch {target: target};
+    || watch
+}
+
+fn release(action: Held) {
+    -- Scope exit drops the owned environment without calling action.
+}
+
+fn run() -> bool {
+    let released = false;
+    release(hold(released.ref));
+    released
+}

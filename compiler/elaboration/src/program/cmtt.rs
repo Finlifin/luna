@@ -5,6 +5,7 @@ use super::*;
 mod functions;
 mod generators;
 pub(super) mod patterns;
+mod test_templates;
 pub(super) use functions::expand_quote_functions;
 pub(crate) use functions::{expand_bound_quote, expand_materialized_quotes, inline_template};
 pub(super) use generators::Generator;
@@ -64,9 +65,21 @@ impl Checker<'_, '_> {
         value: &mut n::Expr,
         span: Span,
     ) -> Result<(), Error> {
+        // Completed snapshots are closed. Definition-side formation witnesses
+        // may still refer to the enclosing staged inputs: rename only their
+        // internal bindings, preserving those lexical connections.
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let free = nir::free_bindings::collect(value, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        let connections = free
+            .map_err(|message| error(span, message))?
+            .into_iter()
+            .map(|binding| (binding, binding))
+            .collect();
         freshen(
             value,
-            BTreeMap::new(),
+            connections,
             &mut self.next_temporary_binding,
             &mut self.expansion_sources,
             span,
@@ -177,11 +190,25 @@ impl Checker<'_, '_> {
         {
             return self.code_binding(decl, expected, false);
         }
-        if decl.mutable || decl.guard.is_some() || decl.otherwise.is_some() {
+        if decl.mutable {
             return Err(error(
                 decl.span,
-                "local const currently requires an unconditional immutable binding",
+                "local const requires an immutable binding",
             ));
+        }
+        if self.checking_open_behavior {
+            return if decl.guard.is_some() || decl.otherwise.is_some() {
+                self.ordinary_conditional_constant_binding(decl, expected)
+            } else {
+                self.ordinary_constant_binding(decl, expected)
+            };
+        }
+        if decl.guard.is_some() || decl.otherwise.is_some() {
+            let value = self.conditional_local_data_binding(decl)?;
+            if let Some(expected) = expected {
+                self.require_expression(&value.ty, expected, decl.span)?;
+            }
+            return Ok(value);
         }
         if let Some(expected) = expected {
             self.require(&p(P::Void), expected, decl.span)?;
@@ -349,6 +376,15 @@ impl Checker<'_, '_> {
         }
         self.required_steps -= 1;
         match &value.kind {
+            H::ResolvedClauseParam(_, id)
+                if self.template_code_values.contains_key(&(id.pkg, id.index)) =>
+            {
+                self.ascribe_code(
+                    self.template_code_values[&(id.pkg, id.index)].clone(),
+                    interface,
+                    value.span,
+                )
+            }
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
                 let code = self.code_values.get(&local(*id)).cloned().ok_or_else(|| {
                     error(
@@ -458,118 +494,132 @@ impl Checker<'_, '_> {
                 }
             }
             H::CodeQuote(body, substitutions) => {
-                // A quote owns a runtime boundary. Outer return/loop/resumption
-                // targets are not captured or reinterpreted at a splice site.
-                let checked = self.quoted_runtime_boundary(|checker| {
-                    // Definition checking admits pattern interface evidence;
-                    // the quoted body is retained only after actual invocation.
-                    checker.pattern_quote_pending = Some(false);
-                    checker.checking_attempt(true, false, |checker| {
-                        if interface.is_none()
-                            && let Some(context) = result_context
-                        {
-                            checker.input_context_expression(body, context)
-                        } else {
-                            checker.expr(body, interface.map(|interface| &interface.result))
-                        }
-                    })
-                });
-                let body = checked?.ok_or_else(|| {
-                    error(
-                        value.span,
-                        "quoted expression requires a result type context",
-                    )
-                })?;
-                constants::charge_copy(&body, &mut self.required_steps, value.span)?;
-                let mut fuel = self.required_steps as usize;
-                let free = nir::free_bindings::collect_with_dependencies(
-                    &body,
-                    &self.abstract_code_dependencies,
-                    &mut fuel,
-                );
-                self.required_steps = fuel as u64;
-                let free = free.map_err(|message| error(value.span, message))?;
-                let mut actual_free = BTreeSet::new();
-                for id in free {
-                    if !(self.checking_code_generator && self.generator_data.contains_key(&id)) {
-                        actual_free.insert(id);
-                    }
-                }
-                let mut context = BTreeMap::new();
-                for id in actual_free {
-                    if interface.is_some_and(|interface| {
-                        !interface.infer_context && !interface.context.contains_key(&id)
-                    }) {
-                        return Err(error(
-                            value.span,
-                            "quoted body requires a runtime binding absent from its declared context",
-                        ));
-                    }
-                    let ty = self.locals.get(&id).ok_or_else(|| {
-                        error(
-                            value.span,
-                            "quoted code has an unavailable runtime dependency",
-                        )
-                    })?;
-                    if *ty == p(P::Type)
-                        || matches!(ty, Term::ComptimeFunction(_))
-                        || self.type_input_bindings.contains_key(&id)
-                        || self.value_input_bindings.contains_key(&id)
-                    {
-                        return Err(error(
-                            value.span,
-                            "quote contexts contain only runtime bindings; comptime data lifting is not yet implemented",
-                        ));
-                    }
-                    context.insert(id, ty.clone());
-                }
-                let mut defaults = context.keys().map(|&id| (id, id)).collect();
-                let mut ports = BTreeMap::new();
-                if let Some(interface) = interface.filter(|interface| !interface.infer_context) {
-                    context = interface.context.clone();
-                    ports = interface.ports.clone();
-                    defaults = interface.defaults.clone();
-                }
-                for entry in substitutions {
-                    let id = binding(entry.binding)?;
-                    if !context.contains_key(&id) {
-                        return Err(error(
-                            entry.port.span,
-                            "quote port must expose a runtime dependency of its body",
-                        ));
-                    }
-                    if ports.insert(entry.port.name.to_string(), id).is_some() {
-                        return Err(error(entry.port.span, "duplicate quote interface name"));
-                    }
-                }
-                let metadata = n::Package {
-                    structs: self.structs.values().cloned().collect(),
-                    enums: self.enums.values().cloned().collect(),
-                    normal_forms: self.normal_form_metadata(),
-                    ..Default::default()
-                };
-                let scope = self.call_inference_scope();
-                let frames = vec![scope.iter().map(|parameter| parameter.sort).collect()];
-                for ty in context.values().chain(std::iter::once(&body.ty)) {
-                    nir::phases::validate_runtime_storage(ty, &metadata, &frames).map_err(
-                        |message| error(value.span, format!("quoted runtime interface: {message}")),
-                    )?;
-                }
-                let result = body.ty.clone();
-                let body = (!self.checking_code_generator).then(|| Arc::new(body));
-                Ok(Arc::new(ExpressionCode {
-                    body,
-                    result,
-                    context,
-                    ports,
-                    defaults,
-                }))
+                self.quote_expression(value, body, substitutions, interface, result_context, None)
             }
             _ => Err(error(
                 value.span,
                 "local const declaration stage checking: this initializer is not yet a supported comptime code producer",
             )),
         }
+    }
+
+    fn quote_expression(
+        &mut self,
+        value: &Expr<'_>,
+        body: &Expr<'_>,
+        substitutions: &[hir::expr::CodeSubstitution<'_>],
+        interface: Option<&Interface>,
+        result_context: Option<&crate::calls::InputContext>,
+        return_type: Option<Term>,
+    ) -> Result<Arc<ExpressionCode>, Error> {
+        // Ordinary quotes have no outer control targets. Template bodies may
+        // explicitly supply the return type of their generated function.
+        let checked = self.quoted_runtime_boundary(|checker| {
+            checker.result = return_type;
+            // Definition checking admits pattern interface evidence;
+            // the quoted body is retained only after actual invocation.
+            checker.pattern_quote_pending = Some(false);
+            checker.checking_attempt(true, false, |checker| {
+                if interface.is_none()
+                    && let Some(context) = result_context
+                {
+                    checker.input_context_expression(body, context)
+                } else {
+                    checker.expr(body, interface.map(|interface| &interface.result))
+                }
+            })
+        });
+        let body = checked?.ok_or_else(|| {
+            error(
+                value.span,
+                "quoted expression requires a result type context",
+            )
+        })?;
+        constants::charge_copy(&body, &mut self.required_steps, value.span)?;
+        let mut fuel = self.required_steps as usize;
+        let free = nir::free_bindings::collect_with_dependencies(
+            &body,
+            &self.abstract_code_dependencies,
+            &mut fuel,
+        );
+        self.required_steps = fuel as u64;
+        let free = free.map_err(|message| error(value.span, message))?;
+        let mut actual_free = BTreeSet::new();
+        for id in free {
+            if !(self.checking_code_generator && self.generator_data.contains_key(&id)) {
+                actual_free.insert(id);
+            }
+        }
+        let mut context = BTreeMap::new();
+        for id in actual_free {
+            if interface.is_some_and(|interface| {
+                !interface.infer_context && !interface.context.contains_key(&id)
+            }) {
+                return Err(error(
+                    value.span,
+                    "quoted body requires a runtime binding absent from its declared context",
+                ));
+            }
+            let ty = self.locals.get(&id).ok_or_else(|| {
+                error(
+                    value.span,
+                    "quoted code has an unavailable runtime dependency",
+                )
+            })?;
+            if *ty == p(P::Type)
+                || matches!(ty, Term::ComptimeFunction(_))
+                || self.type_input_bindings.contains_key(&id)
+                || self.value_input_bindings.contains_key(&id)
+            {
+                return Err(error(
+                    value.span,
+                    "quote contexts contain only runtime bindings; comptime data lifting is not yet implemented",
+                ));
+            }
+            context.insert(id, ty.clone());
+        }
+        let mut defaults = context.keys().map(|&id| (id, id)).collect();
+        let mut ports = BTreeMap::new();
+        if let Some(interface) = interface.filter(|interface| !interface.infer_context) {
+            context = interface.context.clone();
+            ports = interface.ports.clone();
+            defaults = interface.defaults.clone();
+        }
+        for entry in substitutions {
+            let id = binding(entry.binding)?;
+            if !context.contains_key(&id) {
+                return Err(error(
+                    entry.port.span,
+                    "quote port must expose a runtime dependency of its body",
+                ));
+            }
+            if ports.insert(entry.port.name.to_string(), id).is_some() {
+                return Err(error(entry.port.span, "duplicate quote interface name"));
+            }
+        }
+        let metadata = n::Package {
+            target: self.target,
+            structs: self.structs.values().cloned().collect(),
+            enums: self.enums.values().cloned().collect(),
+            normal_forms: self.normal_form_metadata(),
+            ..Default::default()
+        };
+        let scope = self.call_inference_scope();
+        let frames = vec![scope.iter().map(|parameter| parameter.sort).collect()];
+        for ty in context.values().chain(std::iter::once(&body.ty)) {
+            nir::phases::validate_runtime_storage(ty, &metadata, &frames).map_err(|message| {
+                error(value.span, format!("quoted runtime interface: {message}"))
+            })?;
+        }
+        let result = body.ty.clone();
+        let body = (!self.checking_code_generator).then(|| Arc::new(body));
+        Ok(Arc::new(ExpressionCode {
+            body,
+            result,
+            context,
+            ports,
+            defaults,
+        }))
     }
 
     fn quoted_runtime_boundary<R>(
@@ -726,6 +776,23 @@ impl Checker<'_, '_> {
                 kind: K::Local(id),
             });
         };
+        // A template body can carry a return to the generated test. Inserting
+        // that control transfer into a closure or an independent quote must
+        // not silently retarget it to the innermost function.
+        if self.result.is_none() || !self.captures.is_empty() {
+            let mut fuel = self.required_steps as usize;
+            let checked = nir::visit::expression_in_scope(template, &mut fuel, |node, _| {
+                if matches!(node.kind, K::Return(_)) {
+                    return Err(
+                        "code return cannot cross a closure or quote boundary at its splice site"
+                            .into(),
+                    );
+                }
+                Ok(())
+            });
+            self.required_steps = fuel as u64;
+            checked.map_err(|message| error(site.span, message))?;
+        }
         constants::charge_copy(template, &mut self.required_steps, site.span)?;
         let mut body = (**template).clone();
         let mut next = self.next_temporary_binding;

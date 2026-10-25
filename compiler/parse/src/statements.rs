@@ -84,6 +84,7 @@ impl Parser<'_> {
                 TokenKind::Newtype => p.try_newtype(),
                 TokenKind::Case => p.try_case(),
                 TokenKind::Test => p.try_test(),
+                TokenKind::Template => p.try_test_template(),
 
                 // keyword-modifier definitions (these start definitions)
                 TokenKind::Pure
@@ -93,43 +94,43 @@ impl Parser<'_> {
                 | TokenKind::Atomic => p.try_keyword_modified_definition(),
 
                 // verification statements
-                TokenKind::Axiom => p.try_unary(
+                TokenKind::Axiom => p.try_predicate_statement(
                     Rule::semicolon("predicate expression", |p| p.try_expr()),
                     TokenKind::Axiom,
                     NodeKind::Axiom,
                     "Expected predicate expression after `axiom`".to_string(),
                 ),
-                TokenKind::Ensures => p.try_unary(
+                TokenKind::Ensures => p.try_predicate_statement(
                     Rule::semicolon("ensures expression", |p| p.try_expr()),
                     TokenKind::Ensures,
                     NodeKind::Ensures,
                     "Expected ensures expression after `ensures`".to_string(),
                 ),
-                TokenKind::Requires => p.try_unary(
+                TokenKind::Requires => p.try_predicate_statement(
                     Rule::semicolon("requires expression", |p| p.try_expr()),
                     TokenKind::Requires,
                     NodeKind::Requires,
                     "Expected requires expression after `requires`".to_string(),
                 ),
-                TokenKind::Asserts => p.try_unary(
+                TokenKind::Asserts => p.try_predicate_statement(
                     Rule::semicolon("asserts expression", |p| p.try_expr()),
                     TokenKind::Asserts,
                     NodeKind::Asserts,
                     "Expected asserts expression after `asserts`".to_string(),
                 ),
-                TokenKind::Assumes => p.try_unary(
+                TokenKind::Assumes => p.try_predicate_statement(
                     Rule::semicolon("assumes expression", |p| p.try_expr()),
                     TokenKind::Assumes,
                     NodeKind::Assumes,
                     "Expected assumes expression after `assumes`".to_string(),
                 ),
-                TokenKind::Invariant => p.try_unary(
+                TokenKind::Invariant => p.try_predicate_statement(
                     Rule::semicolon("invariant expression", |p| p.try_expr()),
                     TokenKind::Invariant,
                     NodeKind::Invariant,
                     "Expected invariant expression after `invariant`".to_string(),
                 ),
-                TokenKind::Decreases => p.try_unary(
+                TokenKind::Decreases => p.try_predicate_statement(
                     Rule::semicolon("decreases expression", |p| p.try_expr()),
                     TokenKind::Decreases,
                     NodeKind::Decreases,
@@ -138,6 +139,33 @@ impl Parser<'_> {
 
                 _ => p.try_expr_statement(),
             }
+        })
+    }
+
+    // Predicate nodes share the clause layout (optional label, predicate).
+    // Statements currently have no label syntax, so retain an explicit empty
+    // slot rather than exposing the next arena allocation as a second child.
+    fn try_predicate_statement(
+        &mut self,
+        rule: Rule,
+        prefix: TokenKind,
+        kind: NodeKind,
+        info: String,
+    ) -> ParseResult {
+        self.scoped_with_expected_prefix(&[prefix], |p| {
+            p.eat_tokens(1);
+            let predicate = (rule.parser)(p)?;
+            if predicate == 0 {
+                return Err(ParseError::invalid_syntax(
+                    info,
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            Ok(NodeBuilder::new(kind, p.current_span())
+                .add_single_child(0)
+                .add_single_child(predicate)
+                .build(&mut p.ast))
         })
     }
 
@@ -274,10 +302,24 @@ impl Parser<'_> {
                 }
             }
 
+            let otherwise = if p.eat_token(TokenKind::Else) {
+                let block = p.try_block()?;
+                if block == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "Expected a block after const else".into(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+                block
+            } else {
+                0
+            };
             Ok(NodeBuilder::new(NodeKind::ConstDecl, p.current_span())
                 .add_single_child(pattern)
                 .add_single_child(expr)
                 .add_single_child(init)
+                .add_single_child(otherwise)
                 .build(&mut p.ast))
         })
     }

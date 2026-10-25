@@ -1,0 +1,8 @@
+typealias Type = .Type'builtin;
+
+fn outer(comptime T: Type, value: T) -> T {
+    fn local(inner: T) -> T { inner }
+    local(value)
+}
+
+fn run() -> bool { outer(bool, true) }

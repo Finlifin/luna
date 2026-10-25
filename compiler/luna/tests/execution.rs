@@ -8,6 +8,110 @@ use execution_support::{
     calls, compile, compile_with_bindings, compile_with_protocols, compile_with_source_bindings, id,
 };
 
+#[test]
+fn type_proposition_formation_keeps_deep_refinements_in_the_type_domain() {
+    for operator in ["and", "or"] {
+        let predicate = format!("Itself == bool{}", format!(" {operator} true").repeat(140));
+        let source = format!("typealias Checked = refines {{{predicate}}} bool;");
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("type proposition elaboration depth exhausted"),
+            "{error}"
+        );
+    }
+    let package = compile(
+        "typealias Checked = refines {not false and (Itself == bool or Itself == .u8'builtin)} bool;
+         fn run()->Checked {true}"
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for predicate in ["not (Itself == bool)", "Itself == bool and false"] {
+        let source = format!("typealias Rejected = refines {{{predicate}}} bool;");
+        assert!(
+            compile_with_protocols(&source, &Default::default()).is_err(),
+            "{predicate}"
+        );
+    }
+}
+
+#[test]
+fn logical_prefixes_keep_type_evidence_local_to_reachable_operands() {
+    let declarations = "typealias Type=.Type'builtin;
+        trait Flag {comptime fn ready()->bool;}
+        impl Flag for bool {comptime fn ready()->bool {true}}";
+    for prefix in [
+        "(flag or T == bool) and T == bool and",
+        "flag and T == bool and T == bool and",
+        "(flag and not (T == bool)) or not (T == bool) or",
+    ] {
+        let source = format!(
+            "{declarations}
+             comptime fn checked(flag:bool)->bool where T {{
+                 {prefix} T.as(Flag).ready()
+             }}
+             comptime fn run()->bool {{checked<bool>(true)}}"
+        );
+        let package = compile(&source);
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            Value::Bool(true),
+            "{prefix}"
+        );
+    }
+    for body in [
+        "(flag or T == bool) and T.as(Flag).ready()",
+        "flag and T == bool or T.as(Flag).ready()",
+        "flag and T == bool and T.as(Flag).ready(); T.as(Flag).ready()",
+    ] {
+        let source = format!("{declarations} comptime fn bad(flag:bool)->bool where T {{{body}}}");
+        assert!(
+            compile_with_protocols(&source, &Default::default()).is_err(),
+            "branch-local evidence escaped: {body}"
+        );
+    }
+}
+
+#[test]
+fn nested_negation_preserves_literal_and_operand_checking() {
+    let package = compile(
+        "comptime fn run()->bool {(- -1 == 1) and (- -1.5 == 1.5)}
+         fn minimum()->.i8'builtin { -128 }",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "minimum", 100_000).unwrap(),
+        Value::SignedInteger(-128)
+    );
+}
+
+fn compile_explicit_splice_with_protocols(
+    source: &str,
+    protocols: &elaboration::program::Protocols,
+) -> Result<Package, String> {
+    execution_support::compile_splice_fixture(source, protocols, None)
+}
+
+fn compile_explicit_splice(source: &str) -> Package {
+    compile_explicit_splice_with_protocols(source, &Default::default()).unwrap()
+}
+
+fn compile_bound_tuple_fixture(source: &str) -> Package {
+    execution_support::compile_splice_fixture(source, &Default::default(), None).unwrap()
+}
+
+fn tuple_type(package: &Package, elements: Vec<nir::Term>) -> nir::Term {
+    nir::Term::NormalForm {
+        head: id(package, "Tuple"),
+        sort: nir::Sort::Type,
+        arguments: vec![nir::Term::TypeListValue(elements)],
+    }
+}
+
 fn key_world<R>(
     package: &Package,
     run: impl FnOnce(&elaboration::capabilities::World<'_>) -> R,
@@ -1194,9 +1298,9 @@ fn ordinary_type_domain_refines_from_explicit_signature_equality() {
 #[test]
 fn generic_effect_requests_receive_partial_structural_result_contexts() {
     let source = "typealias Byte=.u8'builtin;
-        typealias Arguments=(fn(Byte)->bool,Byte);
+        typealias Arguments=Tuple<fn(Byte)->bool,Byte>;
         effect echo(value:T)->T where T;
-        fn apply(values:(fn(Byte)->T,Byte))->T where T {
+        fn apply(values:Tuple<fn(Byte)->T,Byte>)->T where T {
             let (callback,value)=values;callback(value)
         }
         fn subject()->#[echo<Arguments>] bool {
@@ -1205,20 +1309,38 @@ fn generic_effect_requests_receive_partial_structural_result_contexts() {
         }
         fn run()->bool {subject()# {echo<Arguments>(value)=>value,}}";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Bool(true)
     );
     let two_instances = source
         .replace(
             "typealias Arguments=",
-            "typealias Wrong=(fn(Byte)->Byte,Byte);typealias Arguments=",
+            "typealias Wrong=Tuple<fn(Byte)->Byte,Byte>;typealias Arguments=",
         )
         .replace("#[echo<Arguments>]", "#[echo<Wrong>,echo<Arguments>]")
         .replace(
             "echo<Arguments>(value)=>value,",
             "echo<Wrong>(value)=>value,echo<Arguments>(value)=>value,",
         );
-    let package = compile(&two_instances);
+    let ambiguous =
+        execution_support::compile_with_tuple_protocols(&two_instances, &Default::default())
+            .unwrap_err();
+    assert!(
+        ambiguous.contains("effect operation identity needs further evidence"),
+        "{ambiguous}"
+    );
+    // Two opaque Tuple applications do not provide a disequality proof merely
+    // because their arguments differ. A nominal alternative is provably distinct.
+    let two_instances = two_instances.replace(
+        "typealias Wrong=Tuple<fn(Byte)->Byte,Byte>;",
+        "struct Wrong {callback:fn(Byte)->Byte,value:Byte}",
+    );
+    let package = execution_support::compile_with_tuple(&two_instances);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -1238,9 +1360,8 @@ fn generic_effect_requests_receive_partial_structural_result_contexts() {
         {
             requests += 1;
             assert_eq!(*allowed_index, 1);
-            let nir::Term::Tuple(fields) = &operation.arguments[0] else {
-                panic!("tuple instance")
-            };
+            let fields = nir::normal_forms::tuple_fields(Some(&package), &operation.arguments[0])
+                .expect("registered Tuple instance");
             assert!(
                 matches!(fields[0].callable_signature(), nir::Term::Function {result, ..}
                 if result.as_ref() == &nir::Term::Primitive(nir::Primitive::Bool))
@@ -1254,11 +1375,13 @@ fn generic_effect_requests_receive_partial_structural_result_contexts() {
         source.replace("value == 9,9", "value == 9,256"),
         source.replace("|value| value == 9", "|value:bool| value"),
         source.replace(
-            "typealias Arguments=(fn(Byte)->bool,Byte)",
-            "typealias Arguments=(fn(Byte)->Byte,Byte)",
+            "typealias Arguments=Tuple<fn(Byte)->bool,Byte>",
+            "typealias Arguments=Tuple<fn(Byte)->Byte,Byte>",
         ),
     ] {
-        assert!(compile_with_bindings(&invalid, &Default::default(), None).is_err());
+        assert!(
+            execution_support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err()
+        );
     }
 }
 
@@ -1305,11 +1428,11 @@ fn generic_effect_requests_propagate_record_context_into_packet_producers() {
 #[test]
 fn partial_structural_results_flow_through_effectful_generic_producers() {
     let source = "typealias Byte=.u8'builtin;
-        typealias Pair=(bool,Byte);
+        typealias Pair=Tuple<bool,Byte>;
         ^attrs.effects.direct_passing effect tick()->bool;
         fn keep(value:T)->T where T {value}
         fn produce(value:T)->#tick T where T {let ignored=tick()#;value}
-        fn apply(values:(fn(Byte)->T,Byte))->T where T {
+        fn apply(values:Tuple<fn(Byte)->T,Byte>)->T where T {
             let (callback,value)=values;callback(value)
         }
         fn subject()->#tick Pair {
@@ -1318,12 +1441,12 @@ fn partial_structural_results_flow_through_effectful_generic_producers() {
             (first,second)
         }
         fn mark(seen:*bool)->bool {let previous=seen.*;assumes not previous;seen.* = true;true}
-        fn run()->((bool,Byte),bool) {
+        fn run()->Tuple<Tuple<bool,Byte>,bool> {
             var seen=false;
             let result=subject()# {tick()=>mark(seen.ref),};
             (result,seen)
         }";
-    let package = compile(source);
+    let package = execution_support::compile_with_tuple(source);
     let expected = Value::Tuple(vec![
         Value::Tuple(vec![Value::Bool(true), Value::UnsignedInteger(7)]),
         Value::Bool(true),
@@ -1373,7 +1496,9 @@ fn partial_structural_results_flow_through_effectful_generic_producers() {
         source.replace("value == 9,9", "value == 9,256"),
         source.replace("fn subject()->#tick Pair", "fn subject()->Pair"),
     ] {
-        assert!(compile_with_bindings(&invalid, &Default::default(), None).is_err());
+        assert!(
+            execution_support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err()
+        );
     }
 }
 
@@ -1384,26 +1509,36 @@ fn nested_generic_producers_receive_partial_structural_result_contexts() {
         fn packet(...fields:T)->T where T {fields}
         fn exemplar(value:Byte)->T where T {exemplar<T>(value)}
         fn zero()->Byte {0}
-        fn tuple_apply(values:(fn(Byte)->T,Byte))->T where T {
+        fn tuple_apply(values:Tuple<fn(Byte)->T,Byte>)->T where T {
             let (callback,value)=values;callback(value)
         }
         fn record_apply(...fields:(packet {callback:exemplar<T>,value:zero()})'type)->T where T {
             fields.callback(fields.value)
         }
-        fn run()->(bool,Byte) {
+        fn run()->Tuple<bool,Byte> {
             let first=tuple_apply(keep(keep((|value| value == 9,9))));
             let second=record_apply(.fields=packet {callback:|value| value,value:7});
             (first,second)
         }";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::UnsignedInteger(7)])
     );
     let comptime = source
         .replace("fn ", "comptime fn ")
         .replace("fn(Byte)", "comptime fn(Byte)");
     assert_eq!(
-        luna::invocation::invoke(&compile(&comptime), "run", 100_000).unwrap(),
+        luna::invocation::invoke(
+            &execution_support::compile_with_tuple(&comptime),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::UnsignedInteger(7)])
     );
     for invalid in [
@@ -1418,7 +1553,9 @@ fn nested_generic_producers_receive_partial_structural_result_contexts() {
             "fn keep(value:T)->T where T, requires T == bool {",
         ),
     ] {
-        assert!(compile_with_bindings(&invalid, &Default::default(), None).is_err());
+        assert!(
+            execution_support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err()
+        );
     }
 }
 
@@ -1431,18 +1568,28 @@ fn property_collection_infers_callback_results_from_partial_record_context() {
         fn apply(...fields:(packet {callback:exemplar<T>,value:zero()})'type)->T where T {
             fields.callback(fields.value)
         }
-        fn run()->(bool,Byte) {
+        fn run()->Tuple<bool,Byte> {
             let first=apply {callback:|value| value == 9,value:9};
             let second=apply {callback:|value| value,value:7};
             (first,second)
         }";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::UnsignedInteger(7)])
     );
     let comptime = source.replace("fn ", "comptime fn ");
     assert_eq!(
-        luna::invocation::invoke(&compile(&comptime), "run", 100_000).unwrap(),
+        luna::invocation::invoke(
+            &execution_support::compile_with_tuple(&comptime),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::UnsignedInteger(7)])
     );
     for bad in [
@@ -1453,14 +1600,14 @@ fn property_collection_infers_callback_results_from_partial_record_context() {
     ] {
         let invalid = source.replace("callback:|value| value == 9,value:9", bad);
         assert!(
-            compile_with_bindings(&invalid, &Default::default(), None).is_err(),
+            execution_support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err(),
             "{bad}"
         );
     }
     let declarations = source.split("fn run()").next().unwrap();
     let ordered = format!(
         "{declarations}
-        fn run()->(bool,bool) {{
+        fn run()->Tuple<bool,bool> {{
             var state=false;
             let result=apply {{
                 callback:do {{state=true;|value| value == 9}},
@@ -1470,7 +1617,12 @@ fn property_collection_infers_callback_results_from_partial_record_context() {
         }}"
     );
     assert_eq!(
-        luna::execution::interpret(&compile(&ordered), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(&ordered),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
     );
 }
@@ -1478,7 +1630,7 @@ fn property_collection_infers_callback_results_from_partial_record_context() {
 #[test]
 fn staged_generic_pattern_coverage_materializes_without_unfolding_types() {
     let source = include_str!("../../../development/examples/staged-pattern-coverage.fl");
-    let package = compile(source);
+    let package = compile_bound_tuple_fixture(source);
     assert_eq!(
         luna::invocation::invoke(&package, "evidence", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true); 4])
@@ -1526,10 +1678,15 @@ fn nested_match_guards_use_selected_branch_bindings_for_coverage() {
         let source = format!(
             "typealias Input={ty};
             fn classify(value:Input)->bool {{value match {{value if ({guard}) => true}}}}
-            fn run()->(bool,bool,bool,bool) {{({calls})}}"
+            fn run()->Tuple<bool,bool,bool,bool> {{({calls})}}"
         );
         assert_eq!(
-            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            luna::execution::interpret(
+                &execution_support::compile_with_tuple(&source),
+                "run",
+                100_000
+            )
+            .unwrap(),
             Value::Tuple(vec![Value::Bool(true); 4]),
             "{guard}"
         );
@@ -1550,7 +1707,9 @@ fn nested_match_guard_coverage_preserves_order_and_unknown_results() {
                 fn unknown(value:Input)->bool {{true}}
                 fn classify(value:Input)->bool {{value match {{value if ({guard}) => true}}}}"
             );
-            let error = compile_with_bindings(&source, &Default::default(), None).unwrap_err();
+            let error =
+                execution_support::compile_with_tuple_protocols(&source, &Default::default())
+                    .unwrap_err();
             assert!(error.contains("non-exhaustive match"), "{guard}: {error}");
         }
         let source = format!(
@@ -1559,10 +1718,15 @@ fn nested_match_guard_coverage_preserves_order_and_unknown_results() {
             fn classify(value:Input)->bool {{value match {{
                 value if (value match {{first => true, _ => unknown(value)}}) => true
             }}}}
-            fn run()->(bool,bool) {{(classify(0),classify(1))}}"
+            fn run()->Tuple<bool,bool> {{(classify(0),classify(1))}}"
         );
         assert_eq!(
-            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            luna::execution::interpret(
+                &execution_support::compile_with_tuple(&source),
+                "run",
+                100_000
+            )
+            .unwrap(),
             Value::Tuple(vec![Value::Bool(true); 2])
         );
     }
@@ -1582,10 +1746,15 @@ fn scalar_guard_conditionals_and_short_circuit_prove_coverage() {
             "typealias Byte=.i8'builtin;
             fn unknown(value:Byte)->bool {{assumes false;false}}
             fn classify(value:Byte)->bool {{value match {{value if ({guard}) => true}}}}
-            fn run()->(bool,bool,bool,bool) {{(classify(-128),classify(-1),classify(0),classify(127))}}"
+            fn run()->Tuple<bool,bool,bool,bool> {{(classify(-128),classify(-1),classify(0),classify(127))}}"
         );
         assert_eq!(
-            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            luna::execution::interpret(
+                &execution_support::compile_with_tuple(&source),
+                "run",
+                100_000
+            )
+            .unwrap(),
             Value::Tuple(vec![Value::Bool(true); 4]),
             "{guard}"
         );
@@ -1607,16 +1776,22 @@ fn scalar_guard_conditional_coverage_preserves_branch_regions() {
             fn unknown(value:Byte)->bool {{true}}
             fn classify(value:Byte)->bool {{value match {{value if ({guard}) => true}}}}"
         );
-        let error = compile_with_bindings(&source, &Default::default(), None).unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(&source, &Default::default())
+            .unwrap_err();
         assert!(error.contains("non-exhaustive match"), "{guard}: {error}");
     }
     let source = "typealias Character=.char'builtin;
         fn classify(value:Character)->bool {value match {
         value if (if value < 'm' {value < 'm'} else {value >= 'm'}) => true
     }}
-    fn run()->(bool,bool,bool) {(classify('a'),classify('m'),classify('z'))}";
+    fn run()->Tuple<bool,bool,bool> {(classify('a'),classify('m'),classify('z'))}";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(true); 3])
     );
 }
@@ -1629,15 +1804,22 @@ fn bit_guard_conditionals_and_projection_blocks_prove_coverage() {
         "if false {unknown(value)} else {true}",
         "do {let alias=value;if alias matches 0b00 {true} else {not (alias matches 0b00)}}",
         "if value matches 0b00 {do {let alias=value;alias matches 0b00}} else {true}",
+        "do {var alias=value;alias=0;true}",
+        "do {var alias=value;let original=alias;alias=0;original == value}",
     ] {
         let source = format!(
             "typealias Bits=.BitVec'builtin<2>;
             fn unknown(value:Bits)->bool {{assumes false;false}}
             fn classify(value:Bits)->bool {{value match {{value if ({guard}) => true}}}}
-            fn run()->(bool,bool,bool,bool) {{(classify(0),classify(1),classify(2),classify(3))}}"
+            fn run()->Tuple<bool,bool,bool,bool> {{(classify(0),classify(1),classify(2),classify(3))}}"
         );
         assert_eq!(
-            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            luna::execution::interpret(
+                &execution_support::compile_with_tuple(&source),
+                "run",
+                100_000
+            )
+            .unwrap(),
             Value::Tuple(vec![Value::Bool(true); 4]),
             "{guard}"
         );
@@ -1645,21 +1827,23 @@ fn bit_guard_conditionals_and_projection_blocks_prove_coverage() {
 }
 
 #[test]
-fn bit_guard_conditionals_do_not_hide_unknowns_or_mutations() {
+fn bit_guard_conditionals_do_not_hide_unknown_computations() {
     for guard in [
         "if value matches 0b00 {true} else {false}",
         "if unknown(value) {true} else {true}",
         "if value matches 0b00 {unknown(value)} else {true}",
-        "do {var alias=value;alias=0;true}",
+        "do {var alias=value;alias=unknown_bits(value);true}",
         "do {unknown(value);true}",
         "do {let alias=unknown(value);true}",
     ] {
         let source = format!(
             "typealias Bits=.BitVec'builtin<2>;
             fn unknown(value:Bits)->bool {{true}}
+            fn unknown_bits(value:Bits)->Bits {{value}}
             fn classify(value:Bits)->bool {{value match {{value if ({guard}) => true}}}}"
         );
-        let error = compile_with_bindings(&source, &Default::default(), None).unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(&source, &Default::default())
+            .unwrap_err();
         assert!(error.contains("non-exhaustive match"), "{guard}: {error}");
     }
     let source = "typealias Bits=.BitVec'builtin<2>;
@@ -1667,9 +1851,14 @@ fn bit_guard_conditionals_do_not_hide_unknowns_or_mutations() {
             value if (if value matches 0b00 {true} else {false}) => true,
             _ => false
         }}
-        fn run()->(bool,bool,bool,bool) {(classify(0),classify(1),classify(2),classify(3))}";
+        fn run()->Tuple<bool,bool,bool,bool> {(classify(0),classify(1),classify(2),classify(3))}";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![
             Value::Bool(true),
             Value::Bool(false),
@@ -1692,10 +1881,15 @@ fn bit_guard_boolean_combinations_prove_coverage_and_short_circuit() {
             "typealias Bits=.BitVec'builtin<2>;
             fn unknown(value:Bits)->bool {{assumes false;false}}
             fn classify(value:Bits)->bool {{value match {{value if {guard} => true}}}}
-            fn run()->(bool,bool,bool,bool) {{(classify(0),classify(1),classify(2),classify(3))}}"
+            fn run()->Tuple<bool,bool,bool,bool> {{(classify(0),classify(1),classify(2),classify(3))}}"
         );
         assert_eq!(
-            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            luna::execution::interpret(
+                &execution_support::compile_with_tuple(&source),
+                "run",
+                100_000
+            )
+            .unwrap(),
             Value::Tuple(vec![Value::Bool(true); 4]),
             "{guard}"
         );
@@ -1716,7 +1910,8 @@ fn bit_guard_boolean_coverage_preserves_unknowns_and_missing_values() {
             fn unknown(value:Bits)->bool {{true}}
             fn classify(value:Bits)->bool {{value match {{value if {guard} => true}}}}"
         );
-        let error = compile_with_bindings(&source, &Default::default(), None).unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(&source, &Default::default())
+            .unwrap_err();
         assert!(error.contains("non-exhaustive match"), "{guard}: {error}");
     }
     // The unknown call must stay unreachable at runtime as well as during analysis.
@@ -1725,9 +1920,14 @@ fn bit_guard_boolean_coverage_preserves_unknowns_and_missing_values() {
         fn classify(value:Bits)->bool {value match {
             value if false and unknown(value) => true, _ => false
         }}
-        fn run()->(bool,bool,bool,bool) {(classify(0),classify(1),classify(2),classify(3))}";
+        fn run()->Tuple<bool,bool,bool,bool> {(classify(0),classify(1),classify(2),classify(3))}";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(false); 4])
     );
 }
@@ -1742,10 +1942,15 @@ fn negated_bit_patterns_prove_complementary_coverage() {
             fn classify(value:Bits)->bool {{value match {{
                 not (0b < zero() >) => true, 0b < zero() > => false,
             }}}}
-            fn run()->(bool,bool) {{(classify(0),classify({outside}))}}"
+            fn run()->Tuple<bool,bool> {{(classify(0),classify({outside}))}}"
         );
         assert_eq!(
-            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            luna::execution::interpret(
+                &execution_support::compile_with_tuple(&source),
+                "run",
+                100_000
+            )
+            .unwrap(),
             Value::Tuple(vec![Value::Bool(false), Value::Bool(width != 0)])
         );
     }
@@ -1754,15 +1959,21 @@ fn negated_bit_patterns_prove_complementary_coverage() {
         fn classify(value:Bits)->bool {value match {
             not (_ if accepts(value))=>true,0b00=>false
         }}";
-    let error = compile_with_bindings(source, &Default::default(), None).unwrap_err();
+    let error =
+        execution_support::compile_with_tuple_protocols(source, &Default::default()).unwrap_err();
     assert!(error.contains("non-exhaustive match"), "{error}");
     let projected = "typealias Bit=.BitVec'builtin<1>;typealias Pair=.BitVec'builtin<2>;
         fn classify(value:Pair)->bool {value match {
             not (0b1 (_:Bit))=>true,0b1 (_:Bit)=>false
         }}
-        fn run()->(bool,bool,bool,bool) {(classify(0),classify(1),classify(2),classify(3))}";
+        fn run()->Tuple<bool,bool,bool,bool> {(classify(0),classify(1),classify(2),classify(3))}";
     assert_eq!(
-        luna::execution::interpret(&compile(projected), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(projected),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(
             vec![true, true, false, false]
                 .into_iter()
@@ -1782,11 +1993,12 @@ fn bit_coverage_keeps_first_alternative_projection_bindings() {
                 0b11=>false,
             }
         }";
-    let error = compile_with_bindings(source, &Default::default(), None).unwrap_err();
+    let error =
+        execution_support::compile_with_tuple_protocols(source, &Default::default()).unwrap_err();
     assert!(error.contains("non-exhaustive match"), "{error}");
     let complete = source.replace("0b11=>false,", "0b10=>false,0b11=>false,");
-    let package = compile(&format!(
-        "{complete} fn run()->(bool,bool,bool,bool) {{
+    let package = execution_support::compile_with_tuple(&format!(
+        "{complete} fn run()->Tuple<bool,bool,bool,bool> {{
         (classify(0),classify(1),classify(2),classify(3))}}"
     ));
     assert_eq!(
@@ -1828,9 +2040,14 @@ fn negated_scalar_patterns_prove_complementary_coverage() {
     ] {
         let source=format!("typealias Scalar={ty};
             fn classify(value:Scalar)->bool {{value match {{not ({pattern})=>true,{pattern}=>false}}}}
-            fn run()->(bool,bool) {{(classify({inside}),classify({outside}))}}");
+            fn run()->Tuple<bool,bool> {{(classify({inside}),classify({outside}))}}");
         assert_eq!(
-            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            luna::execution::interpret(
+                &execution_support::compile_with_tuple(&source),
+                "run",
+                100_000
+            )
+            .unwrap(),
             Value::Tuple(vec![Value::Bool(false), Value::Bool(true)])
         );
     }
@@ -1840,14 +2057,15 @@ fn negated_scalar_patterns_prove_complementary_coverage() {
             fn accepts(value:Byte)->bool {{true}}
             fn classify(value:Byte)->bool {{value match {{not ({pattern})=>true,0=>false}}}}"
         );
-        let error = compile_with_bindings(&source, &Default::default(), None).unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(&source, &Default::default())
+            .unwrap_err();
         assert!(error.contains("non-exhaustive match"), "{error}");
     }
 }
 
 #[test]
 fn property_pipeline_composes_tuple_contexts_patterns_and_ordered_effects() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/contextual-property-pipeline.fl"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -1885,7 +2103,7 @@ fn property_pipeline_composes_tuple_contexts_patterns_and_ordered_effects() {
             "value match { not 0 => true, _ => false }",
             "do {assumes value == 0;false}",
         );
-    let rejected = compile(&rejected);
+    let rejected = compile_bound_tuple_fixture(&rejected);
     let mut interpreter = Interpreter::new(&rejected, Budget::default()).unwrap();
     let error = interpreter
         .invoke(id(&rejected, "run"), vec![])
@@ -1903,16 +2121,21 @@ fn property_pipeline_composes_tuple_contexts_patterns_and_ordered_effects() {
 #[test]
 fn partial_tuple_match_context_keeps_coverage_and_control_exit_rules() {
     let template = "typealias Byte=.u8'builtin;
-        fn choose(value:(T,Byte))->(T,Byte) where T {value}
-        fn check(flag:bool)->(bool,Byte) {let result=choose(ARGUMENT);result}
-        fn run()->((bool,Byte),(bool,Byte)) {(check(true),check(false))}";
+        fn choose(value:Tuple<T,Byte>)->Tuple<T,Byte> where T {value}
+        fn check(flag:bool)->Tuple<bool,Byte> {let result=choose(ARGUMENT);result}
+        fn run()->Tuple<Tuple<bool,Byte>,Tuple<bool,Byte>> {(check(true),check(false))}";
     for argument in [
         "flag match {true=>return (true,1),false=>(false,7)}",
         "when {flag=>return (true,1),else=>(false,7)}",
     ] {
         let source = template.replace("ARGUMENT", argument);
         assert_eq!(
-            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            luna::execution::interpret(
+                &execution_support::compile_with_tuple(&source),
+                "run",
+                100_000
+            )
+            .unwrap(),
             Value::Tuple(vec![
                 Value::Tuple(vec![Value::Bool(true), Value::UnsignedInteger(1)]),
                 Value::Tuple(vec![Value::Bool(false), Value::UnsignedInteger(7)])
@@ -1920,7 +2143,8 @@ fn partial_tuple_match_context_keeps_coverage_and_control_exit_rules() {
         );
     }
     let partial = template.replace("ARGUMENT", "flag match {true=>(true,9)}");
-    let error = compile_with_bindings(&partial, &Default::default(), None).unwrap_err();
+    let error =
+        execution_support::compile_with_tuple_protocols(&partial, &Default::default()).unwrap_err();
     assert!(error.contains("non-exhaustive match"), "{error}");
     for argument in [
         "when {flag=>(true,9)}",
@@ -1947,21 +2171,31 @@ fn partial_tuple_context_reaches_match_and_when_results() {
     ] {
         let source = format!(
             "typealias Byte=.u8'builtin;
-            fn choose(value:(T,Byte))->(T,Byte) where T {{value}}
-            fn check(flag:bool)->(bool,Byte) {{let result=choose({argument});result}}
-            fn run()->((bool,Byte),(bool,Byte)) {{(check(true),check(false))}}"
+            fn choose(value:Tuple<T,Byte>)->Tuple<T,Byte> where T {{value}}
+            fn check(flag:bool)->Tuple<bool,Byte> {{let result=choose({argument});result}}
+            fn run()->Tuple<Tuple<bool,Byte>,Tuple<bool,Byte>> {{(check(true),check(false))}}"
         );
         let expected = Value::Tuple(vec![
             Value::Tuple(vec![Value::Bool(true), Value::UnsignedInteger(9)]),
             Value::Tuple(vec![Value::Bool(false), Value::UnsignedInteger(7)]),
         ]);
         assert_eq!(
-            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            luna::execution::interpret(
+                &execution_support::compile_with_tuple(&source),
+                "run",
+                100_000
+            )
+            .unwrap(),
             expected
         );
         let comptime = source.replace("fn ", "comptime fn ");
         assert_eq!(
-            luna::invocation::invoke(&compile(&comptime), "run", 100_000).unwrap(),
+            luna::invocation::invoke(
+                &execution_support::compile_with_tuple(&comptime),
+                "run",
+                100_000
+            )
+            .unwrap(),
             expected
         );
     }
@@ -1970,14 +2204,19 @@ fn partial_tuple_context_reaches_match_and_when_results() {
 #[test]
 fn partial_tuple_branches_preserve_early_return_and_local_scope() {
     let source = "typealias Byte=.u8'builtin;
-        fn choose(value:(T,Byte))->(T,Byte) where T {value}
-        fn check(flag:bool)->(bool,Byte) {
+        fn choose(value:Tuple<T,Byte>)->Tuple<T,Byte> where T {value}
+        fn check(flag:bool)->Tuple<bool,Byte> {
             let result=choose(if flag {return (true,1)} else {do {let local=false;(local,7)}});
             result
         }
-        fn run()->((bool,Byte),(bool,Byte)) {(check(true),check(false))}";
+        fn run()->Tuple<Tuple<bool,Byte>,Tuple<bool,Byte>> {(check(true),check(false))}";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![
             Value::Tuple(vec![Value::Bool(true), Value::UnsignedInteger(1)]),
             Value::Tuple(vec![Value::Bool(false), Value::UnsignedInteger(7)])
@@ -1988,16 +2227,25 @@ fn partial_tuple_branches_preserve_early_return_and_local_scope() {
         "if flag {do {let local=false;(local,7)}} else {return (true,1)}",
     );
     assert_eq!(
-        luna::execution::interpret(&compile(&reversed), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(&reversed),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![
             Value::Tuple(vec![Value::Bool(false), Value::UnsignedInteger(7)]),
             Value::Tuple(vec![Value::Bool(true), Value::UnsignedInteger(1)])
         ])
     );
     let invalid = source.replace("            result", "            (local,7)");
-    assert!(compile_with_bindings(&invalid, &Default::default(), None).is_err());
+    assert!(
+        execution_support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err()
+    );
     let mismatch = source.replace("return (true,1)", "('x',1)");
-    assert!(compile_with_bindings(&mismatch, &Default::default(), None).is_err());
+    assert!(
+        execution_support::compile_with_tuple_protocols(&mismatch, &Default::default()).is_err()
+    );
 }
 
 #[test]
@@ -2009,16 +2257,21 @@ fn partial_tuple_context_reaches_blocks_and_conditional_branches() {
     ] {
         let source = format!(
             "typealias Byte=.u8'builtin;
-            fn choose(value:(T,Byte))->(T,Byte) where T {{value}}
-            fn check(flag:bool)->(bool,Byte) {{let result=choose({argument});result}}
-            fn run()->((bool,Byte),(bool,Byte)) {{(check(true),check(false))}}"
+            fn choose(value:Tuple<T,Byte>)->Tuple<T,Byte> where T {{value}}
+            fn check(flag:bool)->Tuple<bool,Byte> {{let result=choose({argument});result}}
+            fn run()->Tuple<Tuple<bool,Byte>,Tuple<bool,Byte>> {{(check(true),check(false))}}"
         );
         let expected_false = if argument.starts_with("do {let") {
             9
         } else {
             7
         };
-        let runtime = luna::execution::interpret(&compile(&source), "run", 100_000).unwrap();
+        let runtime = luna::execution::interpret(
+            &execution_support::compile_with_tuple(&source),
+            "run",
+            100_000,
+        )
+        .unwrap();
         assert_eq!(
             runtime,
             Value::Tuple(vec![
@@ -2031,7 +2284,12 @@ fn partial_tuple_context_reaches_blocks_and_conditional_branches() {
         );
         let comptime = source.replace("fn ", "comptime fn ");
         assert_eq!(
-            luna::invocation::invoke(&compile(&comptime), "run", 100_000).unwrap(),
+            luna::invocation::invoke(
+                &execution_support::compile_with_tuple(&comptime),
+                "run",
+                100_000
+            )
+            .unwrap(),
             runtime
         );
     }
@@ -2040,18 +2298,18 @@ fn partial_tuple_context_reaches_blocks_and_conditional_branches() {
 #[test]
 fn tuple_callback_context_infers_lambda_result_from_known_inputs() {
     let source = "typealias Byte=.u8'builtin;
-        fn apply(values:(fn(Byte)->T,Byte))->T where T {
+        fn apply(values:Tuple<fn(Byte)->T,Byte>)->T where T {
             let (callback,value)=values;callback(value)
         }
-        fn nested(values:((fn(Byte)->T,Byte),bool))->T where T {
+        fn nested(values:Tuple<Tuple<fn(Byte)->T,Byte>,bool>)->T where T {
             let ((callback,value),_)=values;callback(value)
         }
-        fn run()->(bool,bool) {
+        fn run()->Tuple<bool,bool> {
             let first=apply((|value| value == 9,9));
             let second=nested(((|value| value == 7,8),true));
             (first,second)
         }";
-    let package = compile(source);
+    let package = execution_support::compile_with_tuple(source);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
@@ -2062,21 +2320,36 @@ fn tuple_callback_context_infers_lambda_result_from_known_inputs() {
         .replace("value == 9", "value == 9 and flag")
         .replace("value == 7", "value == 7 and flag");
     assert_eq!(
-        luna::execution::interpret(&compile(&captured), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(&captured),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
     );
     let comptime = source
         .replace("fn ", "comptime fn ")
         .replace("fn(Byte)", "comptime fn(Byte)");
     assert_eq!(
-        luna::invocation::invoke(&compile(&comptime), "run", 100_000).unwrap(),
+        luna::invocation::invoke(
+            &execution_support::compile_with_tuple(&comptime),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
     );
     let captured_comptime = captured
         .replace("fn ", "comptime fn ")
         .replace("fn(Byte)", "comptime fn(Byte)");
     assert_eq!(
-        luna::invocation::invoke(&compile(&captured_comptime), "run", 100_000).unwrap(),
+        luna::invocation::invoke(
+            &execution_support::compile_with_tuple(&captured_comptime),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
     );
     let variadic = source
@@ -2086,7 +2359,12 @@ fn tuple_callback_context_infers_lambda_result_from_known_inputs() {
             "apply(|value| value == 9,9)",
         );
     assert_eq!(
-        luna::execution::interpret(&compile(&variadic), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(&variadic),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
     );
     for argument in [
@@ -2098,12 +2376,19 @@ fn tuple_callback_context_infers_lambda_result_from_known_inputs() {
             &format!("apply({argument})"),
         );
         assert_eq!(
-            luna::execution::interpret(&compile(&branched), "run", 100_000).unwrap(),
+            luna::execution::interpret(
+                &execution_support::compile_with_tuple(&branched),
+                "run",
+                100_000
+            )
+            .unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
         );
     }
     let invalid = source.replace("|value| value == 9", "|value:bool| value");
-    assert!(compile_with_bindings(&invalid, &Default::default(), None).is_err());
+    assert!(
+        execution_support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err()
+    );
 }
 
 #[test]
@@ -2111,14 +2396,19 @@ fn partial_tuple_context_preserves_argument_evaluation_order() {
     let source = "typealias Byte=.u8'builtin;
         fn first(state:*bool)->bool {state.* = true;true}
         fn second(state:*bool)->bool {let old=state.*;state.* = false;old}
-        fn choose(value:(T,Byte,T,Byte))->(T,Byte,T,Byte) where T {value}
-        fn run()->(bool,bool,bool) {
+        fn choose(value:Tuple<T,Byte,T,Byte>)->Tuple<T,Byte,T,Byte> where T {value}
+        fn run()->Tuple<bool,bool,bool> {
             var state=false;
             let (a,_,b,_)=choose((first(state.ref),9,second(state.ref),7));
             (a,b,state)
         }";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![
             Value::Bool(true),
             Value::Bool(true),
@@ -2130,12 +2420,12 @@ fn partial_tuple_context_preserves_argument_evaluation_order() {
 #[test]
 fn generic_tuple_arguments_keep_known_component_contexts() {
     let source = "typealias Byte=.u8'builtin;
-        fn choose(value:(T,Byte))->(T,Byte) where T {value}
-        fn nested(value:((T,Byte),Byte))->((T,Byte),Byte) where T {value}
-        fn run()->((bool,Byte),((bool,Byte),Byte)) {
+        fn choose(value:Tuple<T,Byte>)->Tuple<T,Byte> where T {value}
+        fn nested(value:Tuple<Tuple<T,Byte>,Byte>)->Tuple<Tuple<T,Byte>,Byte> where T {value}
+        fn run()->Tuple<Tuple<bool,Byte>,Tuple<Tuple<bool,Byte>,Byte>> {
             let first=choose((true,9));let second=nested(((false,7),8));(first,second)
         }";
-    let package = compile(source);
+    let package = execution_support::compile_with_tuple(source);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -2160,7 +2450,12 @@ fn generic_tuple_arguments_keep_known_component_contexts() {
         .replace("fn choose(value:", "fn choose(...value:")
         .replace("choose((true,9))", "choose(true,9)");
     assert_eq!(
-        luna::execution::interpret(&compile(&variadic), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(&variadic),
+            "run",
+            100_000
+        )
+        .unwrap(),
         luna::execution::interpret(&package, "run", 100_000).unwrap()
     );
 }
@@ -2172,13 +2467,18 @@ fn negated_tuple_reuses_repeated_generic_field_evidence() {
     let mut values = vec!["true"; 32];
     values[31] = "false";
     let source = format!(
-        "fn check(value:({types}))->bool where T, requires T == bool {{
+        "fn check(value:Tuple<{types}>)->bool where T, requires T == bool {{
         value match {{not ({pattern})=>true,_=>false}}
     }} fn run()->bool {{check(({}))}}",
         values.join(",")
     );
     assert_eq!(
-        luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(&source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Bool(true)
     );
 }
@@ -2186,13 +2486,13 @@ fn negated_tuple_reuses_repeated_generic_field_evidence() {
 #[test]
 fn negated_structural_patterns_match_without_exporting_candidate_bindings() {
     let source = "typealias Byte=.u8'builtin;
-        fn tuple(value:(bool,Byte))->bool {
+        fn tuple(value:Tuple<bool,Byte>)->bool {
             value match {not (true,0)=>true,_=>false}
         }
-        fn nested(value:((bool,Byte),bool))->bool {
+        fn nested(value:Tuple<Tuple<bool,Byte>,bool>)->bool {
             value match {not ((true as hidden,0),false)=>true,_=>false}
         }
-        fn generic(value:(T,Byte))->bool where T, requires T == bool {
+        fn generic(value:Tuple<T,Byte>)->bool where T, requires T == bool {
             value match {not (true,0)=>true,_=>false}
         }
         comptime fn schema(...fields:T)->T where T {fields}
@@ -2201,12 +2501,12 @@ fn negated_structural_patterns_match_without_exporting_candidate_bindings() {
         fn record(...fields:Options)->bool {
             fields match {not {flag:true,other:false}=>true,_=>false}
         }
-        fn run()->(bool,bool,bool,bool,bool,bool,bool) {
+        fn run()->Tuple<bool,bool,bool,bool,bool,bool,bool> {
             (tuple((true,0)),tuple((false,0)),nested(((true,0),false)),
              nested(((true,1),false)),generic((true,0)),
              record {flag:true,other:false},record {flag:false,other:false})
         }";
-    let package = compile(source);
+    let package = execution_support::compile_with_tuple(source);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(
@@ -2217,17 +2517,20 @@ fn negated_structural_patterns_match_without_exporting_candidate_bindings() {
         )
     );
     let missing = source.replace("where T, requires T == bool", "where T");
-    assert!(compile_with_bindings(&missing, &Default::default(), None).is_err());
-    let owned = "struct Owned {} fn check(value:(bool,Owned))->bool {
+    assert!(
+        execution_support::compile_with_tuple_protocols(&missing, &Default::default()).is_err()
+    );
+    let owned = "struct Owned {pointer:*bool} fn check(value:Tuple<bool,Owned>)->bool {
         value match {not (true,_)=>true,_=>false}}";
-    let error = compile_with_bindings(owned, &Default::default(), None).unwrap_err();
+    let error =
+        execution_support::compile_with_tuple_protocols(owned, &Default::default()).unwrap_err();
     assert!(
         error.contains("negated pattern elaboration for this domain"),
         "{error}"
     );
-    let leaked = "fn check(value:(bool,bool))->bool {
+    let leaked = "fn check(value:Tuple<bool,bool>)->bool {
         value match {not (true as hidden,false)=>hidden,_=>false}}";
-    assert!(compile_with_bindings(leaked, &Default::default(), None).is_err());
+    assert!(execution_support::compile_with_tuple_protocols(leaked, &Default::default()).is_err());
 }
 
 #[test]
@@ -2242,7 +2545,7 @@ fn scalar_negated_patterns_preserve_domain_matching_rules() {
         fn character(value:Character)->bool {value match {not ('a'..='z')=>true,_=>false}}
         fn floating(value:F32)->bool {value match {not 0.0=>true,_=>false}}
         fn bits(value:Bits)->bool {value match {not 0b10101010=>true,_=>false}}
-        fn bitrun()->(bool,bool) {
+        fn bitrun()->Tuple<bool,bool> {
             let a:Byte=170;let b:Byte=171;(bits(a'bitvec),bits(b'bitvec))
         }";
     let cases = vec![
@@ -2267,7 +2570,7 @@ fn scalar_negated_patterns_preserve_domain_matching_rules() {
         } else {
             source.to_owned()
         };
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         let mut interpreter = if comptime {
             Interpreter::for_comptime(&package, Budget::default()).unwrap()
         } else {
@@ -2295,13 +2598,13 @@ fn arbitrary_integer_negation_keeps_full_range_endpoints() {
         comptime fn outside(value:Int)->bool {
             value match {not (340282366920938463463374607431768211456..=340282366920938463463374607431768211458)=>true,_=>false}
         }
-        comptime fn run()->(bool,bool,bool,bool) {
+        comptime fn run()->Tuple<bool,bool,bool,bool> {
             (outside(340282366920938463463374607431768211455),
              outside(340282366920938463463374607431768211456),
              outside(340282366920938463463374607431768211458),
              outside(340282366920938463463374607431768211459))
         }";
-    let package = compile(source);
+    let package = execution_support::compile_with_tuple(source);
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -2325,15 +2628,15 @@ fn negated_boolean_guards_run_once_only_after_inner_pattern_success() {
     ] {
         let source = format!("typealias Byte=.u8'builtin;
             fn tick(count:*Byte,accept:bool)->bool {{let before=count.*;assumes before < 255;count.* = before + 1;accept}}
-            fn choose(value:bool,accept:bool)->(bool,Byte) {{
+            fn choose(value:bool,accept:bool)->Tuple<bool,Byte> {{
                 var count:Byte=0;
                 let result=value match {{{pattern}=>true,_=>false}};
                 (result,count)
             }}
-            fn run()->((bool,Byte),(bool,Byte),(bool,Byte)) {{
+            fn run()->Tuple<Tuple<bool,Byte>,Tuple<bool,Byte>,Tuple<bool,Byte>> {{
                 (choose(false,true),choose(true,false),choose(true,true))
             }}");
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![
@@ -2350,7 +2653,7 @@ fn negated_guard_alternatives_preserve_effect_order_and_control_exits() {
     let source = "typealias Byte=.u8'builtin;
         fn first(count:*Byte)->bool {let before=count.*;assumes before < 255;count.* = before + 1;false}
         fn second(count:*Byte)->bool {let before=count.*;assumes before < 128;count.* = before * 2;true}
-        fn run()->(bool,Byte) {
+        fn run()->Tuple<bool,Byte> {
             var count:Byte=1;
             let result=true match {
                 not ((true if first(count.ref)) or (true if second(count.ref)))=>true,
@@ -2359,28 +2662,43 @@ fn negated_guard_alternatives_preserve_effect_order_and_control_exits() {
             (result,count)
         }";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(false), Value::UnsignedInteger(4)])
     );
     let source = "fn run()->bool {
         true match {not (_ if do {return true})=>false,_=>false}
     }";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Bool(true)
     );
     let source = "fn choose(value:bool)->bool {
         let candidate=false;
         value match {not (true as candidate if candidate)=>candidate,_=>true}
     }
-    fn run()->(bool,bool) {(choose(false),choose(true))}";
+    fn run()->Tuple<bool,bool> {(choose(false),choose(true))}";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Tuple(vec![Value::Bool(false), Value::Bool(true)])
     );
     let source = "fn checked(value:bool)->bool {assumes value;value}
         fn run()->bool {true match {not (_ if checked(false))=>true,_=>false}}";
-    let package = compile(source);
+    let package = execution_support::compile_with_tuple(source);
     let error = luna::execution::interpret(&package, "run", 100_000).unwrap_err();
     assert!(error.contains("ProgramContractRejected"), "{error}");
 }
@@ -2399,9 +2717,9 @@ fn boolean_negated_patterns_preserve_coverage_and_staged_inputs() {
             fn forward(comptime flag:bool)->bool {{
                 let result=flag match {{{pattern}=>false,false=>true}};keep(result)
             }}
-            fn run()->(bool,bool) {{(forward(false),forward(true))}}"
+            fn run()->Tuple<bool,bool> {{(forward(false),forward(true))}}"
         );
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
@@ -2409,7 +2727,7 @@ fn boolean_negated_patterns_preserve_coverage_and_staged_inputs() {
         let runtime = source
             .replace("comptime flag:", "flag:")
             .replace("keep(result)", "result");
-        let package = compile(&runtime);
+        let package = execution_support::compile_with_tuple(&runtime);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
@@ -2437,7 +2755,12 @@ fn boolean_negated_patterns_preserve_coverage_and_staged_inputs() {
             fn run()->bool {{choose(false) and choose(true)}}"
         );
         assert_eq!(
-            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            luna::execution::interpret(
+                &execution_support::compile_with_tuple(&source),
+                "run",
+                100_000
+            )
+            .unwrap(),
             Value::Bool(true)
         );
     }
@@ -2445,12 +2768,22 @@ fn boolean_negated_patterns_preserve_coverage_and_staged_inputs() {
         value match {not false=>true,false=>false}}
         fn run()->bool {choose(true) and not choose(false)}";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Bool(true)
     );
     let source = "fn run()->bool {true match {not (false if true)=>true,_=>false}}";
     assert_eq!(
-        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Bool(true)
     );
 }
@@ -2466,15 +2799,17 @@ fn boolean_alternative_bindings_forward_to_comptime_inputs() {
             fn forward(comptime flag:bool)->bool {{
                 let result=flag match {{{pattern}=>not selected}};keep(result)
             }}
-            fn run()->(bool,bool) {{(forward(false),forward(true))}}"
+            fn run()->Tuple<bool,bool> {{(forward(false),forward(true))}}"
         );
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
         );
         let runtime = source.replace("comptime flag:", "flag:");
-        assert!(compile_with_bindings(&runtime, &Default::default(), None).is_err());
+        assert!(
+            execution_support::compile_with_tuple_protocols(&runtime, &Default::default()).is_err()
+        );
     }
 }
 
@@ -2484,19 +2819,21 @@ fn boolean_match_locals_forward_to_comptime_inputs() {
         fn forward(comptime flag:bool)->bool {
             let selected=flag match {true=>false,false=>true};keep(selected)
         }
-        fn run()->(bool,bool) {(forward(false),forward(true))}";
-    let package = compile(source);
+        fn run()->Tuple<bool,bool> {(forward(false),forward(true))}";
+    let package = execution_support::compile_with_tuple(source);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
     );
     let runtime = source.replace("comptime flag:", "flag:");
-    assert!(compile_with_bindings(&runtime, &Default::default(), None).is_err());
+    assert!(
+        execution_support::compile_with_tuple_protocols(&runtime, &Default::default()).is_err()
+    );
 }
 
 #[test]
 fn staged_configuration_composes_defaults_bits_arithmetic_and_captures() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/staged-configuration.fl"
     ));
     assert!(luna::execution::interpret(&package, "run", 1).is_err());
@@ -2519,12 +2856,12 @@ fn staged_configuration_composes_defaults_bits_arithmetic_and_captures() {
 
 #[test]
 fn generic_aggregate_defaults_use_nested_scalar_evidence() {
-    let source="fn choose(options:(T,bool),.flag:bool=do {let (first,second)=options;first or second})->bool
+    let source="fn choose(options:Tuple<T,bool>,.flag:bool=do {let (first,second)=options;first or second})->bool
             where T, requires T == bool {flag}
-        fn nested(options:((T,bool),bool),.flag:bool=do {let ((first,second),third)=options;first or second or third})->bool
+        fn nested(options:Tuple<Tuple<T,bool>,bool>,.flag:bool=do {let ((first,second),third)=options;first or second or third})->bool
             where T, requires T == bool {flag}
-        fn run()->(bool,bool,bool) {(choose((false,true)),choose((false,false)),nested(((true,false),false)))}";
-    let package = compile(source);
+        fn run()->Tuple<bool,bool,bool> {(choose((false,true)),choose((false,false)),nested(((true,false),false)))}";
+    let package = execution_support::compile_with_tuple(source);
     let declaration = package
         .functions
         .iter()
@@ -2532,12 +2869,17 @@ fn generic_aggregate_defaults_use_nested_scalar_evidence() {
         .unwrap();
     let mut preserved = false;
     for (_, default) in &declaration.defaults {
-        iir::visit::expression(default,&mut 1000,|expr,_| {
-            if matches!(&expr.ty,nir::Term::Tuple(fields) if fields.iter().any(|ty|matches!(ty,nir::Term::Rigid {..}))) {
-                preserved=true;
+        iir::visit::expression(default, &mut 1000, |expr, _| {
+            if nir::normal_forms::tuple_fields(Some(&package), &expr.ty).is_some_and(|fields| {
+                fields
+                    .iter()
+                    .any(|ty| matches!(ty, nir::Term::Rigid { .. }))
+            }) {
+                preserved = true;
             }
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
     }
     assert!(
         preserved,
@@ -2568,12 +2910,12 @@ fn scalar_record_defaults_observe_the_callee_input_frame() {
         fn packet(...fields:Options)->Options {fields}
         fn choose(options:Options,.flag:bool=options.flag)->bool {flag}
         fn destructure(options:Options,.flag:bool=do {let {flag,other}=options;flag or other})->bool {flag}
-        fn run()->(bool,bool,bool,bool) {
+        fn run()->Tuple<bool,bool,bool,bool> {
             let flag=false;let options=packet {flag:true,other:false};
             let other=packet {flag:false,other:true};
             (choose(options),choose(options,.flag=flag),destructure(options),choose(other))
         }";
-    let package = compile(source);
+    let package = execution_support::compile_with_tuple(source);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -2587,7 +2929,7 @@ fn scalar_record_defaults_observe_the_callee_input_frame() {
         "fn choose(options:T,.flag:bool=options.flag)->bool where T, requires T == Options {flag}")
         .replace("fn destructure(options:Options,.flag:bool=do {let {flag,other}=options;flag or other})->bool {flag}",
         "fn destructure(options:T,.flag:bool=do {let {flag,other}=options;flag or other})->bool where T, requires T == Options {flag}");
-    let package = compile(&generic);
+    let package = execution_support::compile_with_tuple(&generic);
     let declaration = package
         .functions
         .iter()
@@ -2629,7 +2971,8 @@ fn scalar_record_defaults_observe_the_callee_input_frame() {
     let arbitrary = "fn keep(comptime value:bool)->bool {value}
         fn choose(.flag:bool=do {let local=true;keep(local)})->bool {flag}
         fn run()->bool {choose()}";
-    let error = compile_with_bindings(arbitrary, &Default::default(), None).unwrap_err();
+    let error = execution_support::compile_with_tuple_protocols(arbitrary, &Default::default())
+        .unwrap_err();
     assert!(error.contains("P3 stability/termination"), "{error}");
     let owned = "struct Owned {} comptime fn schema(...fields:T)->T where T {fields}
         const MODEL=schema {flag:true,owned:Owned {}};typealias Options=MODEL'type;
@@ -2637,8 +2980,11 @@ fn scalar_record_defaults_observe_the_callee_input_frame() {
     // Observing the scalar field neither consumes nor inspects its owned sibling.
     let run = "fn make(...fields:T)->T where T {fields}
         fn run()->bool {choose(make {flag:true,owned:Owned {}})}";
-    let package =
-        compile_with_bindings(&format!("{owned}{run}"), &Default::default(), None).unwrap();
+    let package = execution_support::compile_with_tuple_protocols(
+        &format!("{owned}{run}"),
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -2647,8 +2993,11 @@ fn scalar_record_defaults_observe_the_callee_input_frame() {
         "fn choose(options:Options,.flag:bool=options.flag)->bool {flag}",
         "fn choose(options:T,.flag:bool=options.flag)->bool where T, requires T == Options {flag}",
     );
-    let package =
-        compile_with_bindings(&format!("{owned_generic}{run}"), &Default::default(), None).unwrap();
+    let package = execution_support::compile_with_tuple_protocols(
+        &format!("{owned_generic}{run}"),
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -2662,19 +3011,21 @@ fn structural_local_blocks_forward_with_scoped_dependencies() {
             let result=do {let opposite=not flag;let (left,right)=(opposite,flag);left or right};
             keep(result)
         }
-        fn run()->(bool,bool) {(forward(false),forward(true))}";
-    let package = compile(source);
+        fn run()->Tuple<bool,bool> {(forward(false),forward(true))}";
+    let package = execution_support::compile_with_tuple(source);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true); 2])
     );
     let runtime = source.replace("comptime flag:", "flag:");
-    assert!(compile_with_bindings(&runtime, &Default::default(), None).is_err());
+    assert!(
+        execution_support::compile_with_tuple_protocols(&runtime, &Default::default()).is_err()
+    );
     let nested = source.replace(
         "do {let opposite=not flag;let (left,right)=(opposite,flag);left or right}",
         "do {let flag=not flag;do {let (left,right)=(flag,not flag);left or right}}",
     );
-    let package = compile(&nested);
+    let package = execution_support::compile_with_tuple(&nested);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true); 2])
@@ -2683,18 +3034,20 @@ fn structural_local_blocks_forward_with_scoped_dependencies() {
         "fn touch() {{}} {}",
         source.replace("let opposite=not flag;", "let opposite=not flag;touch();")
     );
-    assert!(compile_with_bindings(&effectful, &Default::default(), None).is_err());
+    assert!(
+        execution_support::compile_with_tuple_protocols(&effectful, &Default::default()).is_err()
+    );
 }
 
 #[test]
 fn staged_property_packets_fold_composed_fields_in_order() {
     let source = "fn keep(comptime ...properties:T)->T where T {properties}
-        fn forward(comptime flag:bool)->(bool,bool) {
+        fn forward(comptime flag:bool)->Tuple<bool,bool> {
             let result=keep {inverted:not flag,original:flag};
             (result.inverted,result.original)
         }
-        fn run()->((bool,bool),(bool,bool)) {(forward(false),forward(true))}";
-    let package = compile(source);
+        fn run()->Tuple<Tuple<bool,bool>,Tuple<bool,bool>> {(forward(false),forward(true))}";
+    let package = execution_support::compile_with_tuple(source);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -2703,7 +3056,9 @@ fn staged_property_packets_fold_composed_fields_in_order() {
         ])
     );
     let runtime = source.replace("comptime flag:", "flag:");
-    assert!(compile_with_bindings(&runtime, &Default::default(), None).is_err());
+    assert!(
+        execution_support::compile_with_tuple_protocols(&runtime, &Default::default()).is_err()
+    );
 }
 
 #[test]
@@ -2716,7 +3071,7 @@ fn closure_owned_constant_locals_forward_in_independent_frames() {
         let source = format!(
             "fn keep(comptime value:bool)->bool {{value}} fn run()->bool {{let invoke=|| {{{body}}};invoke()}}"
         );
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Bool(true),
@@ -2726,15 +3081,15 @@ fn closure_owned_constant_locals_forward_in_independent_frames() {
             "let flag=true;",
             "let flag=true;let pointer=flag.ref;pointer.* = false;",
         );
-        let package = compile(&invalid);
+        let package = execution_support::compile_with_tuple(&invalid);
         let error = luna::instantiation::instantiate(&package, "run", 100_000).unwrap_err();
         assert!(error.contains("writes or address escape"), "{error}");
     }
     let runtime = "fn keep(comptime value:bool)->bool {value} fn run(value:bool)->bool {let invoke=|| {let flag=value;keep(flag)};invoke()}";
-    assert!(compile_with_bindings(runtime, &Default::default(), None).is_err());
-    let package = compile(
+    assert!(execution_support::compile_with_tuple_protocols(runtime, &Default::default()).is_err());
+    let package = execution_support::compile_with_tuple(
         "fn keep(comptime value:bool)->bool {value}
-        fn run()->(bool,bool) {
+        fn run()->Tuple<bool,bool> {
             let invoke=|input:bool| {let flag=true;keep(flag) and input};
             (invoke(false),invoke(true))
         }",
@@ -2748,7 +3103,7 @@ fn closure_owned_constant_locals_forward_in_independent_frames() {
 #[test]
 fn closed_immutable_locals_forward_without_staged_formals() {
     let source = "fn keep(comptime value:T)->T where T {value}
-        fn run()->(bool,.u8'builtin) {
+        fn run()->Tuple<bool, .u8'builtin> {
             let flag=true;let reversed=not flag;let pair=(reversed,flag);
             let (left,right)=pair;let count:.u8'builtin=9;
             (keep(left or right),keep(count))
@@ -2760,7 +3115,7 @@ fn closed_immutable_locals_forward_without_staged_formals() {
         fn preserved()->bool {
             var seen=false;let flag=true;seen=true;keep(flag) and seen
         }";
-    let package = compile(source);
+    let package = execution_support::compile_with_tuple(source);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::UnsignedInteger(9)])
@@ -2782,7 +3137,7 @@ fn closed_immutable_locals_forward_without_staged_formals() {
         "let count:.u8'builtin=9;",
         "let count:.u8'builtin=9;let pointer=count.ref;pointer.* = 4;",
     );
-    let package = compile(&invalid);
+    let package = execution_support::compile_with_tuple(&invalid);
     let error = luna::instantiation::instantiate(&package, "run", 100_000).unwrap_err();
     assert!(error.contains("writes or address escape"), "{error}");
 }
@@ -2793,14 +3148,14 @@ fn derived_float_arithmetic_locals_forward_with_operand_precision() {
         let source = format!(
             "typealias Float=.{width}'builtin;
             fn keep(comptime value:Float)->Float {{value}}
-            fn forward(comptime left:Float,comptime right:Float)->(Float,Float,Float,Float,Float) {{
+            fn forward(comptime left:Float,comptime right:Float)->Tuple<Float, Float, Float, Float, Float> {{
                 let negative = -left;let sum = left + right;let difference = left - right;
                 let product = left * right;let quotient = left / right;
                 (keep(negative),keep(sum),keep(difference),keep(product),keep(quotient))
             }}
-            fn regular()->(Float,Float,Float,Float,Float) {{forward(6.0,2.0)}}
-            fn zero()->(Float,Float,Float,Float,Float) {{forward(0.0,0.0)}}
-            fn infinite()->(Float,Float,Float,Float,Float) {{forward(Float.Infinity,0.0)}}"
+            fn regular()->Tuple<Float, Float, Float, Float, Float> {{forward(6.0,2.0)}}
+            fn zero()->Tuple<Float, Float, Float, Float, Float> {{forward(0.0,0.0)}}
+            fn infinite()->Tuple<Float, Float, Float, Float, Float> {{forward(Float.Infinity,0.0)}}"
         );
         let value = |bits: u64| {
             if width == "f32" {
@@ -2827,7 +3182,7 @@ fn derived_float_arithmetic_locals_forward_with_operand_precision() {
             } else {
                 source.clone()
             };
-            let package = compile(&source);
+            let package = execution_support::compile_with_tuple(&source);
             for (entry, expected) in [
                 (
                     "regular",
@@ -2935,14 +3290,14 @@ fn derived_float_comparisons_forward_with_ieee_semantics() {
         let source = format!(
             "typealias Float=.{width}'builtin;
             fn accept(comptime value:bool)->bool {{value}}
-            fn compare(comptime left:Float,comptime right:Float)->(bool,bool,bool,bool,bool,bool) {{
+            fn compare(comptime left:Float,comptime right:Float)->Tuple<bool,bool,bool,bool,bool,bool> {{
                 let a=left < right;let b=left <= right;let c=left > right;
                 let d=left >= right;let e=left == right;let f=left != right;
                 (accept(a),accept(b),accept(c),accept(d),accept(e),accept(f))
             }}
-            fn nan()->(bool,bool,bool,bool,bool,bool) {{compare(Float.NaN,Float.NaN)}}
-            fn zero()->(bool,bool,bool,bool,bool,bool) {{compare(-0.0,0.0)}}
-            fn ordered()->(bool,bool,bool,bool,bool,bool) {{compare(1.5,Float.Infinity)}}"
+            fn nan()->Tuple<bool,bool,bool,bool,bool,bool> {{compare(Float.NaN,Float.NaN)}}
+            fn zero()->Tuple<bool,bool,bool,bool,bool,bool> {{compare(-0.0,0.0)}}
+            fn ordered()->Tuple<bool,bool,bool,bool,bool,bool> {{compare(1.5,Float.Infinity)}}"
         );
         for comptime in [false, true] {
             let source = if comptime {
@@ -2950,7 +3305,7 @@ fn derived_float_comparisons_forward_with_ieee_semantics() {
             } else {
                 source.clone()
             };
-            let package = compile(&source);
+            let package = execution_support::compile_with_tuple(&source);
             for (entry, expected) in [
                 ("nan", [false, false, false, false, false, true]),
                 ("zero", [false, true, false, true, true, false]),
@@ -2969,7 +3324,9 @@ fn derived_float_comparisons_forward_with_ieee_semantics() {
             }
         }
         let runtime = source.replace("comptime right:", "right:");
-        assert!(compile_with_bindings(&runtime, &Default::default(), None).is_err());
+        assert!(
+            execution_support::compile_with_tuple_protocols(&runtime, &Default::default()).is_err()
+        );
     }
 }
 
@@ -2977,16 +3334,16 @@ fn derived_float_comparisons_forward_with_ieee_semantics() {
 fn derived_integer_comparisons_forward_without_machine_truncation() {
     let source="typealias Integer=.Integer'builtin;
         comptime fn accept(comptime value:bool)->bool {value}
-        comptime fn compare(comptime left:Integer,comptime right:Integer)->(bool,bool,bool,bool,bool,bool) {
+        comptime fn compare(comptime left:Integer,comptime right:Integer)->Tuple<bool,bool,bool,bool,bool,bool> {
             let a=left < right;let b=left <= right;let c=left > right;
             let d=left >= right;let e=left == right;let f=left != right;
             (accept(a),accept(b),accept(c),accept(d),accept(e),accept(f))
         }
-        comptime fn entry()->(bool,bool,bool,bool,bool,bool) {compare(340282366920938463463374607431768211456,340282366920938463463374607431768211455)}
-        comptime fn zero()->(bool,bool,bool,bool,bool,bool) {compare(340282366920938463463374607431768211456,0)}
-        comptime fn equal()->(bool,bool,bool,bool,bool,bool) {compare(340282366920938463463374607431768211456,340282366920938463463374607431768211456)}
-        comptime fn negative()->(bool,bool,bool,bool,bool,bool) {compare(-340282366920938463463374607431768211456,-340282366920938463463374607431768211457)}";
-    let package = compile(source);
+        comptime fn entry()->Tuple<bool,bool,bool,bool,bool,bool> {compare(340282366920938463463374607431768211456,340282366920938463463374607431768211455)}
+        comptime fn zero()->Tuple<bool,bool,bool,bool,bool,bool> {compare(340282366920938463463374607431768211456,0)}
+        comptime fn equal()->Tuple<bool,bool,bool,bool,bool,bool> {compare(340282366920938463463374607431768211456,340282366920938463463374607431768211456)}
+        comptime fn negative()->Tuple<bool,bool,bool,bool,bool,bool> {compare(-340282366920938463463374607431768211456,-340282366920938463463374607431768211457)}";
+    let package = execution_support::compile_with_tuple(source);
     for (entry, expected) in [
         ("entry", vec![false, false, true, true, false, true]),
         ("zero", vec![false, false, true, true, false, true]),
@@ -3000,33 +3357,34 @@ fn derived_integer_comparisons_forward_without_machine_truncation() {
         );
     }
     let invalid = source.replace("comptime fn ", "fn ");
-    let error = compile_with_bindings(&invalid, &Default::default(), None).unwrap_err();
+    let error =
+        execution_support::compile_with_tuple_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(error.contains("comptime Integer operation"), "{error}");
 }
 
 #[test]
 fn derived_comptime_comparisons_forward_through_local_bindings() {
     let source="fn accept(comptime value:bool)->bool {value}
-        fn compare(comptime count:.u8'builtin,comptime limit:.u8'builtin)->(bool,bool,bool,bool,bool,bool) {
+        fn compare(comptime count:.u8'builtin,comptime limit:.u8'builtin)->Tuple<bool,bool,bool,bool,bool,bool> {
             let less=count < limit;let le=count <= limit;let greater=count > limit;
             let ge=count >= limit;let equal=count == limit;let different=count != limit;
             (accept(less),accept(le),accept(greater),accept(ge),accept(equal),accept(different))
         }
-        fn entry()->(bool,bool,bool,bool,bool,bool) {compare(7,9)}
-        fn equal()->(bool,bool,bool,bool,bool,bool) {compare(7,7)}
-        fn edges()->(bool,bool,bool,bool,bool,bool) {compare(255,0)}
-        fn text(comptime letter:.char'builtin,comptime word:.str'builtin,comptime flag:bool)->(bool,bool,bool) {
+        fn entry()->Tuple<bool,bool,bool,bool,bool,bool> {compare(7,9)}
+        fn equal()->Tuple<bool,bool,bool,bool,bool,bool> {compare(7,7)}
+        fn edges()->Tuple<bool,bool,bool,bool,bool,bool> {compare(255,0)}
+        fn text(comptime letter:.char'builtin,comptime word:.str'builtin,comptime flag:bool)->Tuple<bool,bool,bool> {
             let alphabet=letter < 'm';let spelling=word == \"ready\";let enabled=flag == true;
             (accept(alphabet),accept(spelling),accept(enabled))
         }
-        fn text_entry()->(bool,bool,bool) {text('a',\"ready\",false)}";
+        fn text_entry()->Tuple<bool,bool,bool> {text('a',\"ready\",false)}";
     for comptime in [false, true] {
         let source = if comptime {
             source.replace("fn ", "comptime fn ")
         } else {
             source.into()
         };
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         for (entry, expected) in [
             ("entry", vec![true, true, false, false, false, true]),
             ("equal", vec![false, true, false, true, true, false]),
@@ -3046,7 +3404,9 @@ fn derived_comptime_comparisons_forward_through_local_bindings() {
         }
     }
     let runtime = source.replace("comptime limit:", "limit:");
-    assert!(compile_with_bindings(&runtime, &Default::default(), None).is_err());
+    assert!(
+        execution_support::compile_with_tuple_protocols(&runtime, &Default::default()).is_err()
+    );
 }
 
 #[test]
@@ -3056,14 +3416,14 @@ fn derived_boolean_comptime_locals_forward_without_runtime_promotion() {
             let enabled=not disabled;let selected=enabled and allowed;let (copy,_)= (selected,disabled);accept(copy)
         }
         fn conditional(comptime flag:bool)->bool {let chosen=if flag {not flag} else {not flag};accept(chosen)}
-        fn entry()->(bool,bool,bool,bool,bool) {(forward(false,true),forward(true,true),forward(false,false),conditional(true),conditional(false))}";
+        fn entry()->Tuple<bool,bool,bool,bool,bool> {(forward(false,true),forward(true,true),forward(false,false),conditional(true),conditional(false))}";
     for comptime in [false, true] {
         let source = if comptime {
             source.replace("fn ", "comptime fn ")
         } else {
             source.into()
         };
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         let result = if comptime {
             luna::invocation::invoke(&package, "entry", 100_000)
         } else {
@@ -3081,12 +3441,14 @@ fn derived_boolean_comptime_locals_forward_without_runtime_promotion() {
         );
     }
     let runtime = source.replace("comptime allowed:bool", "allowed:bool");
-    assert!(compile_with_bindings(&runtime, &Default::default(), None).is_err());
+    assert!(
+        execution_support::compile_with_tuple_protocols(&runtime, &Default::default()).is_err()
+    );
     let escaped = source.replace(
         "let selected=enabled and allowed;",
         "let pointer=enabled.ref;pointer.* = false;let selected=enabled and allowed;",
     );
-    let package = compile(&escaped);
+    let package = execution_support::compile_with_tuple(&escaped);
     assert!(luna::execution::interpret(&package, "entry", 100_000).is_err());
 }
 
@@ -3146,14 +3508,14 @@ fn destructured_comptime_records_forward_by_field_identity() {
             let {payload:(left,right),flag}=options;let copy=flag;accept(copy,left,right)
         }
         fn partial(comptime options:Options)->bool {let {flag}=options;accept(flag,false,true)}
-        fn entry()->(bool,bool,bool,bool) {(forward(SAMPLE),forward(OTHER),partial(SAMPLE),partial(OTHER))}";
+        fn entry()->Tuple<bool,bool,bool,bool> {(forward(SAMPLE),forward(OTHER),partial(SAMPLE),partial(OTHER))}";
     for comptime in [false, true] {
         let source = if comptime {
             source.replace("\n        fn ", "\n        comptime fn ")
         } else {
             source.into()
         };
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         let result = if comptime {
             luna::invocation::invoke(&package, "entry", 100_000)
         } else {
@@ -3174,16 +3536,16 @@ fn destructured_comptime_records_forward_by_field_identity() {
 #[test]
 fn destructured_comptime_inputs_forward_to_staged_calls() {
     let source="fn accept(comptime flag:bool,comptime count:.u8'builtin)->bool {flag and count == 7}
-        fn forward(comptime options:(bool,.u8'builtin))->bool {let (flag,count)=options;let alias=flag;accept(alias,count)}
-        fn nested(comptime options:(bool,(bool,.u8'builtin)))->bool {let (_,inner)=options;let (flag,count)=inner;accept(flag,count)}
-        fn entry()->(bool,bool,bool) {(forward((true,7)),forward((false,7)),nested((false,(true,7))))}";
+        fn forward(comptime options:Tuple<bool,.u8'builtin>)->bool {let (flag,count)=options;let alias=flag;accept(alias,count)}
+        fn nested(comptime options:Tuple<bool,Tuple<bool,.u8'builtin>>)->bool {let (_,inner)=options;let (flag,count)=inner;accept(flag,count)}
+        fn entry()->Tuple<bool,bool,bool> {(forward((true,7)),forward((false,7)),nested((false,(true,7))))}";
     for comptime in [false, true] {
         let source = if comptime {
             source.replace("fn ", "comptime fn ")
         } else {
             source.into()
         };
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         let result = if comptime {
             luna::invocation::invoke(&package, "entry", 100_000)
         } else {
@@ -3199,11 +3561,11 @@ fn destructured_comptime_inputs_forward_to_staged_calls() {
         );
     }
     let runtime = "fn accept(comptime flag:bool)->bool {flag}
-        fn invalid(options:(bool,bool))->bool {let (flag,_)=options;accept(flag)}";
-    assert!(compile_with_bindings(runtime, &Default::default(), None).is_err());
-    let escaped = compile(
+        fn invalid(options:Tuple<bool,bool>)->bool {let (flag,_)=options;accept(flag)}";
+    assert!(execution_support::compile_with_tuple_protocols(runtime, &Default::default()).is_err());
+    let escaped = execution_support::compile_with_tuple(
         "fn accept(comptime flag:bool)->bool {flag}
-        fn invalid(comptime options:(bool,bool))->bool {
+        fn invalid(comptime options:Tuple<bool,bool>)->bool {
             let (flag,_)=options;let pointer=flag.ref;pointer.* = false;accept(flag)
         }
         fn entry()->bool {invalid((true,false))}",
@@ -3221,21 +3583,21 @@ fn conditional_callables_specialize_immutable_comptime_values() {
             not first(flip,count,value)
         }
         fn choose(flag:bool)->bool {let action=if flag {first} else {second};action(false,7,true)}
-        fn tuple_first(comptime options:(bool,.u8'builtin),value:bool)->bool {
+        fn tuple_first(comptime options:Tuple<bool,.u8'builtin>,value:bool)->bool {
             let (flip,count)=options;if flip {not value} else {value and count == 7}
         }
-        fn tuple_second(comptime options:(bool,.u8'builtin),value:bool)->bool {
+        fn tuple_second(comptime options:Tuple<bool,.u8'builtin>,value:bool)->bool {
             not tuple_first(options,value)
         }
         fn tuple_choice(flag:bool)->bool {let action=if flag {tuple_first} else {tuple_second};action((false,7),true)}
-        fn entry()->(bool,bool,bool,bool) {(choose(true),choose(false),tuple_choice(true),tuple_choice(false))}";
+        fn entry()->Tuple<bool,bool,bool,bool> {(choose(true),choose(false),tuple_choice(true),tuple_choice(false))}";
     for comptime in [false, true] {
         let source = if comptime {
             source.replace("fn ", "comptime fn ")
         } else {
             source.into()
         };
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         let result = if comptime {
             luna::invocation::invoke(&package, "entry", 100_000)
         } else {
@@ -3267,14 +3629,14 @@ fn nested_conditional_type_callables_preserve_selection_order() {
             } else {second};
             action(bool,outer and (if outer_flag {inner} else {not inner}))
         }
-        fn entry()->(bool,bool,bool,bool) {(choose(true,true),choose(true,false),choose(false,true),choose(false,false))}";
+        fn entry()->Tuple<bool,bool,bool,bool> {(choose(true,true),choose(true,false),choose(false,true),choose(false,false))}";
     for comptime in [false, true] {
         let source = if comptime {
             source.replace("fn ", "comptime fn ")
         } else {
             source.into()
         };
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         let result = if comptime {
             luna::invocation::invoke(&package, "entry", 100_000)
         } else {
@@ -3310,14 +3672,14 @@ fn conditional_type_callables_specialize_selected_targets() {
             let action=if (do {seen=true;flag}) {first} else {second};
             action(bool,(do {let before=seen;seen=false;before}))
         }
-        fn entry()->(bool,bool,bool,bool,bool,bool,bool,bool) {(choose(true),choose(false),ordered(true),ordered(false),generic_choice(true),generic_choice(false),method_choice(true),method_choice(false))}";
+        fn entry()->Tuple<bool,bool,bool,bool,bool,bool,bool,bool> {(choose(true),choose(false),ordered(true),ordered(false),generic_choice(true),generic_choice(false),method_choice(true),method_choice(false))}";
     for comptime in [false, true] {
         let source = if comptime {
             source.replace("fn ", "comptime fn ")
         } else {
             source.into()
         };
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         let invoke = |fuel| {
             if comptime {
                 luna::invocation::invoke(&package, "entry", fuel)
@@ -3343,7 +3705,7 @@ fn conditional_type_callables_specialize_selected_targets() {
             "where X, requires T == bool",
             "where X, requires T == .u8'builtin",
         );
-        let package = compile(&invalid);
+        let package = execution_support::compile_with_tuple(&invalid);
         let rejected = if comptime {
             luna::invocation::invoke(&package, "entry", 100_000)
         } else {
@@ -3524,9 +3886,9 @@ fn ordinary_type_static_methods_survive_higher_order_comptime_calls() {
         comptime fn apply(action:comptime fn()->bool)->bool {action()}
         comptime fn selected(comptime T:Type)->comptime fn()->bool
         where requires T :- Flag {T.as(Flag).flag}";
-    let package=compile(&format!("{prefix}
+    let package=execution_support::compile_with_tuple(&format!("{prefix}
         comptime fn stored(comptime T:Type)->bool where requires T :- Flag {{let action=T.as(Flag).flag;apply(action)}}
-        comptime fn entry()->(bool,bool,bool) {{(stored(bool),selected(.u8'builtin)(),apply(selected(bool)))}}
+        comptime fn entry()->Tuple<bool,bool,bool> {{(stored(bool),selected(.u8'builtin)(),apply(selected(bool)))}}
         trait Thunk {{comptime fn run()->bool;}}
         impl Thunk for bool {{comptime fn run()->bool {{selected(bool)()}}}}
         comptime fn hidden()->bool {{let action=bool.as(Thunk).run;action()}}
@@ -3554,7 +3916,9 @@ fn ordinary_type_static_methods_survive_higher_order_comptime_calls() {
         "{prefix} comptime fn wrong(comptime T:Type)->fn()->bool
         where requires T :- Flag {{T.as(Flag).flag}}"
     );
-    assert!(compile_with_bindings(&invalid, &Default::default(), None).is_err());
+    assert!(
+        execution_support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err()
+    );
 }
 
 #[test]
@@ -3633,10 +3997,10 @@ fn ordinary_comptime_entry_materializes_transitive_type_dispatch() {
         where requires T :- Inspect {value.as(Inspect).inspect()}
         comptime fn forward(comptime T:Type,value:T,again:bool)->bool
         where requires T :- Inspect {if again {forward(T,value,false)} else {leaf(T,value)}}
-        comptime fn entry()->(bool,bool) {(forward(bool,true,true),leaf(.u8'builtin,7))}
+        comptime fn entry()->Tuple<bool,bool> {(forward(bool,true,true),leaf(.u8'builtin,7))}
         comptime fn defaulted(comptime .T:Type=bool,.value:T=true)->bool
         where requires T == bool {leaf(T,value)}";
-    let package = compile(source);
+    let package = execution_support::compile_with_tuple(source);
     assert_eq!(
         luna::invocation::invoke(&package, "entry", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(true)])
@@ -3708,7 +4072,7 @@ fn memoized_staged_invocation_preserves_program_contracts_and_old_inputs() {
 #[test]
 fn memoized_invocation_specializes_nested_type_forwarding() {
     use nir::{Primitive, Term};
-    let package=compile(&format!("{MEMO_BOOL}
+    let package=execution_support::compile_with_tuple(&format!("{MEMO_BOOL}
         typealias Type=.Type'builtin;
         impl Eq for Type {{comptime fn eq(self,other:Type)->bool {{self == other}}}}
         impl Hash for Type {{comptime fn hash(self)->.u8'builtin {{0}}}}
@@ -3720,7 +4084,7 @@ fn memoized_invocation_specializes_nested_type_forwarding() {
         comptime fn recursive(comptime T:Type,value:T,again:bool)->bool
         where requires T :- Inspect {{if again {{recursive(T,value,false)}} else {{leaf(T,value)}}}}
         comptime fn generic(value:G)->bool where G :- Inspect {{value.as(Inspect).inspect()}}
-        pure comptime fn query(comptime T:Type,value:T)->(bool,bool,bool)
+        pure comptime fn query(comptime T:Type,value:T)->Tuple<bool,bool,bool>
         where requires T :- Inspect {{(recursive(T,value,true),leaf(.u8'builtin,7),generic<T>(value))}}
         struct Box where T {{value:T}}
         pure comptime fn boxed(comptime T:Type,value:T)->Box<T> {{Box<T>{{value:value}}}}
@@ -3868,12 +4232,12 @@ fn memoized_invocation_dispatches_traits_after_ordinary_type_binding() {
 
 #[test]
 fn ordinary_type_receivers_keep_caller_scope_in_trait_methods() {
-    let package=compile("typealias Type=.Type'builtin;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;
         trait Inspect {fn inspect(self)->bool;}
         impl Inspect for bool {fn inspect(self)->bool {self}}
         impl Inspect for .u8'builtin {fn inspect(self)->bool {self == 7}}
         fn query(comptime T:Type,value:T)->bool where requires T :- Inspect {value.as(Inspect).inspect()}
-        fn entry()->(bool,bool) {(query(bool,true),query(.u8'builtin,7))}");
+        fn entry()->Tuple<bool,bool> {(query(bool,true),query(.u8'builtin,7))}");
     assert_eq!(
         luna::execution::interpret(&package, "entry", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(true)])
@@ -4287,7 +4651,7 @@ fn automatic_splice_keeps_computed_comptime_callees_in_their_phase() {
             false,
         ),
         (
-            "comptime fn make(...flags:(bool,bool))->comptime fn(bool)->bool {invert} const PACK=(true,false);",
+            "comptime fn make(...flags:Tuple<bool,bool>)->comptime fn(bool)->bool {invert} const PACK=(true,false);",
             "make(...PACK)(false)",
             true,
         ),
@@ -4297,9 +4661,10 @@ fn automatic_splice_keeps_computed_comptime_callees_in_their_phase() {
             true,
         ),
     ] {
-        let source = format!("{prefix} {declarations} fn entry()->(bool,bool) {{{call}}}");
-        let package = compile_with_bindings(&source, &Default::default(), Some("Splice"))
-            .unwrap_or_else(|error| panic!("{call}: {error}"));
+        let source = format!("{prefix} {declarations} fn entry()->Tuple<bool,bool> {{{call}}}");
+        let package =
+            execution_support::compile_splice_fixture(&source, &Default::default(), Some("Splice"))
+                .unwrap_or_else(|error| panic!("{call}: {error}"));
         let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
         let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
         assert_eq!(
@@ -4329,10 +4694,12 @@ fn automatic_splice_computed_callees_preserve_outer_staged_inputs() {
         "{prefix}
         typealias Callback=%{{flag:bool}} comptime fn()->bool;
         comptime fn make(flag:bool)->Callback {{|| flag}}
-        fn apply(comptime flag:bool)->(bool,bool) {{make(flag)()}}
-        fn entry()->((bool,bool),(bool,bool)) {{(apply(true),apply(false))}}"
+        fn apply(comptime flag:bool)->Tuple<bool,bool> {{make(flag)()}}
+        fn entry()->Tuple<Tuple<bool,bool>,Tuple<bool,bool>> {{(apply(true),apply(false))}}"
     );
-    let package = compile_with_bindings(&source, &Default::default(), Some("Splice")).unwrap();
+    let package =
+        execution_support::compile_splice_fixture(&source, &Default::default(), Some("Splice"))
+            .unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "entry", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -4350,7 +4717,9 @@ fn computed_callee_context_does_not_restage_runtime_callback_arguments() {
         fn runtime_factory(callback:fn(bool)->bool)->fn(bool)->bool {{callback}}
         fn entry()->bool {{runtime_factory(|value| not value)(false)}}"
     );
-    let package = compile_with_bindings(&source, &Default::default(), Some("Splice")).unwrap();
+    let package =
+        execution_support::compile_splice_fixture(&source, &Default::default(), Some("Splice"))
+            .unwrap();
     let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
     assert_eq!(
@@ -4370,11 +4739,11 @@ fn computed_comptime_callees_cannot_escape_or_read_future_runtime_values() {
     let prefix = include_str!("../../../development/examples/splice-comptime-calls.fl");
     for extra in [
         "comptime fn make()->comptime fn(bool)->bool {invert} fn bad()->comptime fn(bool)->bool {make()}",
-        "typealias Callback=%{flag:bool} comptime fn()->bool;comptime fn make(flag:bool)->Callback {|| flag} fn bad(flag:bool)->(bool,bool) {make(flag)()}",
+        "typealias Callback=%{flag:bool} comptime fn()->bool;comptime fn make(flag:bool)->Callback {|| flag} fn bad(flag:bool)->Tuple<bool,bool> {make(flag)()}",
         "fn runtime_value(value:bool)->bool {value} comptime fn make()->fn(bool)->bool {runtime_value} fn bad()->bool {make()(true)}",
     ] {
         assert!(
-            compile_with_bindings(
+            execution_support::compile_splice_fixture(
                 &format!("{prefix} {extra}"),
                 &Default::default(),
                 Some("Splice")
@@ -4388,7 +4757,9 @@ fn computed_comptime_callees_cannot_escape_or_read_future_runtime_values() {
 #[test]
 fn automatic_splice_comptime_calls_keep_producers_out_of_runtime() {
     let source = include_str!("../../../development/examples/splice-comptime-calls.fl");
-    let package = compile_with_bindings(source, &Default::default(), Some("Splice")).unwrap();
+    let package =
+        execution_support::compile_splice_fixture(source, &Default::default(), Some("Splice"))
+            .unwrap();
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
     assert_eq!(
@@ -4462,9 +4833,10 @@ fn automatic_splice_comptime_methods_defaults_and_spreads() {
             true,
         ),
     ] {
-        let source = format!("{prefix} {declarations} fn entry()->(bool,bool) {{{call}}}");
-        let package = compile_with_bindings(&source, &Default::default(), Some("Splice"))
-            .unwrap_or_else(|error| panic!("{call}: {error}"));
+        let source = format!("{prefix} {declarations} fn entry()->Tuple<bool,bool> {{{call}}}");
+        let package =
+            execution_support::compile_splice_fixture(&source, &Default::default(), Some("Splice"))
+                .unwrap_or_else(|error| panic!("{call}: {error}"));
         assert_eq!(
             luna::execution::interpret(&package, "entry", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(expected), Value::Bool(!expected)]),
@@ -4477,13 +4849,13 @@ fn automatic_splice_comptime_methods_defaults_and_spreads() {
 fn automatic_splice_comptime_calls_reject_runtime_inputs_and_calls() {
     let prefix = include_str!("../../../development/examples/splice-comptime-calls.fl");
     for extra in [
-        "fn bad(flag:bool)->(bool,bool) {invert(flag)}",
-        "fn runtime_value()->bool {true} fn bad()->(bool,bool) {invert(runtime_value())}",
-        "fn runtime_value()->bool {true} comptime fn invalid()->bool {runtime_value()} fn bad()->(bool,bool) {invalid()}",
+        "fn bad(flag:bool)->Tuple<bool,bool> {invert(flag)}",
+        "fn runtime_value()->bool {true} fn bad()->Tuple<bool,bool> {invert(runtime_value())}",
+        "fn runtime_value()->bool {true} comptime fn invalid()->bool {runtime_value()} fn bad()->Tuple<bool,bool> {invalid()}",
         "fn wrong_target()->bool {invert(true)}",
     ] {
         assert!(
-            compile_with_bindings(
+            execution_support::compile_splice_fixture(
                 &format!("{prefix} {extra}"),
                 &Default::default(),
                 Some("Splice")
@@ -4492,7 +4864,9 @@ fn automatic_splice_comptime_calls_reject_runtime_inputs_and_calls() {
             "accepted {extra}"
         );
     }
-    let package = compile_with_bindings(prefix, &Default::default(), Some("Splice")).unwrap();
+    let package =
+        execution_support::compile_splice_fixture(prefix, &Default::default(), Some("Splice"))
+            .unwrap();
     assert!(luna::execution::interpret(&package, "run", 100_000).is_ok());
 }
 
@@ -4527,7 +4901,7 @@ fn automatic_splice_comptime_results_keep_runtime_cleanup_obligations() {
 #[test]
 fn automatic_splice_uses_bound_identity_and_runs_each_conversion() {
     let explicit = include_str!("../../../development/examples/explicit-splice.fl");
-    let baseline = compile(explicit);
+    let baseline = compile_explicit_splice(explicit);
     let protocols = elaboration::program::Protocols {
         splice: Some(baseline.traits[0].declaration),
         ..Default::default()
@@ -4537,7 +4911,7 @@ fn automatic_splice_uses_bound_identity_and_runs_each_conversion() {
         .replace("bool.as(Splice).splice(false)", "OTHER")
         + "\nconst OTHER = false;";
     assert!(
-        compile_with_protocols(&source, &Default::default())
+        compile_explicit_splice_with_protocols(&source, &Default::default())
             .unwrap_err()
             .contains("bound Splice")
     );
@@ -4547,7 +4921,7 @@ fn automatic_splice_uses_bound_identity_and_runs_each_conversion() {
             .replace("trait Splice", "trait Conversion")
             .replace("impl Splice", "impl Conversion"),
     ] {
-        let package = compile_with_protocols(&source, &protocols).unwrap();
+        let package = compile_explicit_splice_with_protocols(&source, &protocols).unwrap();
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
         let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
         assert_eq!(
@@ -4568,7 +4942,7 @@ fn automatic_splice_uses_bound_identity_and_runs_each_conversion() {
     let mut foreign = protocols.clone();
     foreign.splice.as_mut().unwrap().package += 1;
     assert!(
-        compile_with_protocols(&source, &foreign)
+        compile_explicit_splice_with_protocols(&source, &foreign)
             .unwrap_err()
             .contains("not a declared trait")
     );
@@ -4577,7 +4951,7 @@ fn automatic_splice_uses_bound_identity_and_runs_each_conversion() {
 #[test]
 fn automatic_splice_keeps_staged_inputs_and_runtime_failures_separate() {
     let explicit = include_str!("../../../development/examples/explicit-splice.fl");
-    let baseline = compile(explicit);
+    let baseline = compile_explicit_splice(explicit);
     let protocols = elaboration::program::Protocols {
         splice: Some(baseline.traits[0].declaration),
         ..Default::default()
@@ -4585,14 +4959,14 @@ fn automatic_splice_keeps_staged_inputs_and_runtime_failures_separate() {
     let source = format!(
         "{explicit}
         fn staged(comptime flag:bool)->bool {{flag}}
-        fn take(value:(bool,bool))->(bool,bool) {{value}}
-        fn forward()->(bool,bool) {{take(FLAG)}}
-        fn mixed()->(bool,(bool,bool)) {{(staged(FLAG),FLAG)}}
+        fn take(value:Tuple<bool,bool>)->Tuple<bool,bool> {{value}}
+        fn forward()->Tuple<bool,bool> {{take(FLAG)}}
+        fn mixed()->Tuple<bool,Tuple<bool,bool>> {{(staged(FLAG),FLAG)}}
         const BAD = false;
-        fn fail()->(bool,bool) {{BAD}}"
+        fn fail()->Tuple<bool,bool> {{BAD}}"
     );
     let source = source.replace("construct(data)", "assumes data; construct(data)");
-    let package = compile_with_protocols(&source, &protocols).unwrap();
+    let package = compile_explicit_splice_with_protocols(&source, &protocols).unwrap();
     for entry in ["mixed", "forward"] {
         let graph = luna::instantiation::instantiate(&package, entry, 100_000).unwrap();
         let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
@@ -4624,7 +4998,7 @@ fn automatic_splice_keeps_staged_inputs_and_runtime_failures_separate() {
     );
     assert!(!calls(&package, &vm).iter().any(|name| name == "construct"));
     let wrong_target = format!("{explicit} fn wrong()->bool {{FLAG}}");
-    assert!(compile_with_protocols(&wrong_target, &protocols).is_err());
+    assert!(compile_explicit_splice_with_protocols(&wrong_target, &protocols).is_err());
     // A spelling-identical trait without the required protocol surface must
     // not be accepted merely because it has an applicable implementation.
     let malformed = explicit
@@ -4632,7 +5006,7 @@ fn automatic_splice_keeps_staged_inputs_and_runtime_failures_separate() {
         .replace("comptime data: bool", "data: bool")
         .replace("bool.as(Splice).splice(FLAG)", "FLAG");
     assert!(
-        compile_with_protocols(&malformed, &protocols)
+        compile_explicit_splice_with_protocols(&malformed, &protocols)
             .unwrap_err()
             .contains("runtime fn splice(comptime data: Self)")
     );
@@ -4671,7 +5045,7 @@ fn automatic_splice_specializes_structural_comptime_values() {
 
 #[test]
 fn explicit_splice_retains_runtime_conversion_and_distinct_staged_inputs() {
-    let package = compile(include_str!(
+    let package = compile_explicit_splice(include_str!(
         "../../../development/examples/explicit-splice.fl"
     ));
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
@@ -4695,10 +5069,10 @@ fn explicit_splice_retains_runtime_conversion_and_distinct_staged_inputs() {
 fn explicit_splice_runtime_failure_is_not_executed_during_specialization() {
     let source = include_str!("../../../development/examples/explicit-splice.fl")
         .replace("construct(data)", "assumes data; construct(data)");
-    let package = compile(&format!(
+    let package = compile_explicit_splice(&format!(
         "{source}
-        fn bad()->(bool,bool) {{bool.as(Splice).splice(false)}}
-        fn good()->(bool,bool) {{bool.as(Splice).splice(true)}}"
+        fn bad()->Tuple<bool,bool> {{bool.as(Splice).splice(false)}}
+        fn good()->Tuple<bool,bool> {{bool.as(Splice).splice(true)}}"
     ));
     // Both instances can be constructed. The runtime check in bad must neither
     // run here nor disappear merely because its staged input is known.
@@ -4721,7 +5095,7 @@ fn explicit_splice_runtime_failure_is_not_executed_during_specialization() {
 fn splice_protocol_requires_bound_identity_and_runtime_staged_signature() {
     use intrinsic::{LangItem, LangItemDef, LangItems};
     use luna::protocols::splice::protocol;
-    let package = compile(include_str!(
+    let package = compile_explicit_splice(include_str!(
         "../../../development/examples/explicit-splice.fl"
     ));
     let id = package.traits[0].declaration;
@@ -4863,9 +5237,9 @@ fn extended_post_do_supports_tuple_collection_and_generic_property_packets() {
     for source in [
         "fn apply(lambda action:fn(bool)->bool,...properties:T)->T where T {let ignored=action(true);properties} fn run()->bool {let result=apply {flag:true} do {_0};result.flag}",
         "fn apply(lambda action:fn(bool)->bool,value:bool)->bool {action(value)} fn run()->bool {apply {true} do {_0}}",
-        "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;fn apply(lambda action:fn(bool,bool)->bool,...items:(bool,bool),...properties:Options)->bool {let (a,b)=items;properties.flag and action(a,b)} fn run()->bool {apply {true,flag:true,false} do {_0 and not _1}}",
+        "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;fn apply(lambda action:fn(bool,bool)->bool,...items:Tuple<bool,bool>,...properties:Options)->bool {let (a,b)=items;properties.flag and action(a,b)} fn run()->bool {apply {true,flag:true,false} do {_0 and not _1}}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Bool(true),
@@ -4912,12 +5286,12 @@ fn tactic_lambda_preserves_nested_marked_and_ordinary_expression_boundaries() {
         "fn apply(lambda action:fn(bool,bool)->bool)->bool {action(true,false)} fn run()->bool {apply() do {true}}",
         "fn apply(lambda action:fn(T)->T,value:T)->T where T {action(value)} fn run()->bool {apply(_0,...(true,))}",
         "fn apply(lambda action:fn(T)->T,value:T)->T where T {action(value)} fn run()->bool {apply(_0,true)}",
-        "fn apply(lambda action:fn(bool)->(bool,bool))->bool {let (a,b)=action(true);a and b} fn run()->bool {apply((_0,_0))}",
+        "fn apply(lambda action:fn(bool)->Tuple<bool,bool>)->bool {let (a,b)=action(true);a and b} fn run()->bool {apply((_0,_0))}",
         "fn identity(value:bool)->bool {value} fn apply(lambda action:fn(bool)->bool)->bool {action(true)} fn run()->bool {apply(identity)}",
         "fn apply(lambda action:%{flag:bool} fn(bool)->bool)->bool {action(true)} fn run()->bool {let flag=true;apply(_0 and flag)}",
         "enum Choice {none,some(bool),} fn apply(lambda action:fn(bool)->Choice)->bool {action(true) match {.some(value)=>value,.none=>false,}} fn run()->bool {apply(.some(_0))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Bool(true),
@@ -5045,11 +5419,11 @@ fn implicit_explicit_supply_supports_generic_forwarding_and_defaults() {
     for source in [
         "fn pick(value:T,implicit supplied:T)->T where T {supplied} fn forward(value:T,implicit supplied:T)->T where T {pick(value,.supplied=supplied)} fn run()->bool {forward(false,.supplied=true)}",
         "fn pick(implicit value:bool,.fallback:bool=value)->bool {fallback} fn run()->bool {pick(.value=true)}",
-        "fn pick(...items:(bool,bool),implicit value:bool)->bool {value} fn run()->bool {pick(false,false,.value=true)}",
+        "fn pick(...items:Tuple<bool,bool>,implicit value:bool)->bool {value} fn run()->bool {pick(false,false,.value=true)}",
         "struct Item {} impl Item {fn pick(*self,implicit value:bool)->bool {value}} fn run()->bool {let item=Item {};item.pick(.value=true)}",
         "trait Pick {fn pick(*self,implicit value:bool)->bool;} struct Item {} impl Pick for Item {fn pick(*self,implicit value:bool)->bool {value}} fn run()->bool {let item=Item {};item.as(Pick).pick(.value=true)}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Bool(true),
@@ -5331,12 +5705,12 @@ fn direct_passing_usage_tracks_factory_returned_aggregate_callables() {
             true,
         ),
         (
-            "fn make(flag:bool)->(Callback,Callback) {(one,twice)}",
+            "fn make(flag:bool)->Tuple<Callback, Callback> {(one,twice)}",
             "let (f,_)=make(flag);f()",
             true,
         ),
         (
-            "fn make(flag:bool)->(Callback,Callback) {(one,twice)}",
+            "fn make(flag:bool)->Tuple<Callback, Callback> {(one,twice)}",
             "let (_,f)=make(flag);f()",
             false,
         ),
@@ -5377,7 +5751,7 @@ fn direct_passing_usage_tracks_factory_returned_aggregate_callables() {
         ),
     ] {
         for flag in [false, true] {
-            let package = compile(&format!(
+            let package = execution_support::compile_with_tuple(&format!(
                 "{prefix} {factory} fn subject(flag:bool)->#token Token {{{body}}} fn run()->Token {{subject({flag})# {{token()=>Token {{}},}}}}"
             ));
             let result = luna::execution::interpret_effects_with_protocols(
@@ -5726,9 +6100,9 @@ fn direct_passing_usage_upper_bounds_reference_execution_across_compositions() {
             ] {
                 for flag in [false, true] {
                     let factories = format!(
-                        "typealias FactoryCallback=fn()->#token bool; typealias FactoryPacket=(FactoryCallback,); fn factory(flag:bool)->#token FactoryCallback {{{selector}}} fn record_factory(flag:bool)->#token Action {{Action {{call:{selector}}}}} fn tuple_factory(flag:bool)->#token FactoryPacket {{({selector},)}} fn variant_factory(flag:bool)->#token Choice {{Choice.some({selector})}}"
+                        "typealias FactoryCallback=fn()->#token bool; typealias FactoryPacket=Tuple<FactoryCallback>; fn factory(flag:bool)->#token FactoryCallback {{{selector}}} fn record_factory(flag:bool)->#token Action {{Action {{call:{selector}}}}} fn tuple_factory(flag:bool)->#token FactoryPacket {{({selector},)}} fn variant_factory(flag:bool)->#token Choice {{Choice.some({selector})}}"
                     );
-                    let package = compile(&format!(
+                    let package = execution_support::compile_with_tuple(&format!(
                         "{prefix} {factories} fn subject(flag:bool)->#token bool {{{body}}} fn entry()->bool {{subject({flag})# {{token()=>true,}}}}"
                     ));
                     let hit = id(&package, "hit");
@@ -7162,10 +7536,12 @@ fn direct_passing_copy_plan_repeats_nominal_results_without_aliasing_inline_fiel
             .unwrap_err()
             .contains("EffectValueConsumed")
     );
-    assert!(
+    // The checked path now acquires the direct-passing plan and cleanup.
+    // Mutating the first delivered Config must not alias the provider's slot.
+    assert_eq!(
         luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 100_000)
-            .unwrap_err()
-            .contains("cleanup protocol")
+            .unwrap(),
+        Value::Bool(true)
     );
     let mut changed = package.clone();
     changed.implementations.clear();
@@ -7198,7 +7574,7 @@ fn direct_passing_copy_plan_preserves_generic_and_enum_results() {
             "read(first) and read(second)",
         ),
         (
-            "typealias Pair=(bool,bool); impl Duplicate for Pair {}",
+            "typealias Pair=Tuple<bool, bool>; impl Duplicate for Pair {}",
             "Pair",
             "(true,true)",
             "let(a,b)=first;let(c,d)=second;a and b and c and d",
@@ -7210,7 +7586,7 @@ fn direct_passing_copy_plan_preserves_generic_and_enum_results() {
             "first(true) and second(true)",
         ),
     ] {
-        let package = compile(&format!(
+        let package = execution_support::compile_with_tuple(&format!(
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}} {definitions} ^attrs.effects.direct_passing effect config()->{result}; fn subject()->#config bool {{let first=config()#;let second=config()#;{check}}} fn run()->bool {{subject()# {{config()=>{supplied},}}}}"
         ));
         assert_eq!(
@@ -7527,8 +7903,8 @@ fn early_return_in_an_argument_skips_remaining_call_preparation() {
 }
 #[test]
 fn lambda_returns_are_local_and_tuples_keep_element_order() {
-    let package = compile(&format!(
-        "{FLAG} fn run() -> (Flag,'x''type) {{ let f = || {{ return true; }} let first = f(); (first,'x') }}"
+    let package = execution_support::compile_with_tuple(&format!(
+        "{FLAG} fn run() -> Tuple<Flag, 'x''type> {{ let f = || {{ return true; }} let first = f(); (first,'x') }}"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -7633,8 +8009,8 @@ fn malformed_call_plans_fail_without_panics() {
 
 #[test]
 fn block_updates_survive_exit_but_shadowed_bindings_do_not() {
-    let package = compile(&format!(
-        "{FLAG} fn run() -> (Flag,Flag) {{ var flag = false; {{ flag = true; let temporary = false; }} let first = flag; {{ var flag = false; flag = true; }} (first,flag) }}"
+    let package = execution_support::compile_with_tuple(&format!(
+        "{FLAG} fn run() -> Tuple<Flag, Flag> {{ var flag = false; {{ flag = true; let temporary = false; }} let first = flag; {{ var flag = false; flag = true; }} (first,flag) }}"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -7644,8 +8020,8 @@ fn block_updates_survive_exit_but_shadowed_bindings_do_not() {
 }
 #[test]
 fn closure_captures_keep_creation_values_after_assignment() {
-    let package = compile(&format!(
-        "{FLAG} fn run() -> (Flag,Flag,Flag) {{ var flag = true; let first = || flag; flag = false; let second = || flag; (first(),second(),flag) }}"
+    let package = execution_support::compile_with_tuple(&format!(
+        "{FLAG} fn run() -> Tuple<Flag, Flag, Flag> {{ var flag = true; let first = || flag; flag = false; let second = || flag; (first(),second(),flag) }}"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -7715,8 +8091,8 @@ fn return_crosses_loop_boundaries_and_infinite_loops_consume_fuel() {
 
 #[test]
 fn named_break_and_continue_cross_inner_loops_without_running_the_tail() {
-    let package = compile(&format!(
-        "{FLAG} fn skipped() -> Flag {{ skipped() }} fn run() -> (Flag,Flag) {{ var active = true; var reached = false; while:outer active {{ while true {{ active = false; continue outer; }} skipped(); }} while:finish true {{ while true {{ reached = true; break finish; }} skipped(); }} (active,reached) }}"
+    let package = execution_support::compile_with_tuple(&format!(
+        "{FLAG} fn skipped() -> Flag {{ skipped() }} fn run() -> Tuple<Flag, Flag> {{ var active = true; var reached = false; while:outer active {{ while true {{ active = false; continue outer; }} skipped(); }} while:finish true {{ while true {{ reached = true; break finish; }} skipped(); }} (active,reached) }}"
     ));
     let mut interpreter = Interpreter::new(
         &package,
@@ -7792,8 +8168,8 @@ fn literal_alternatives_and_match_arm_updates_execute() {
 
 #[test]
 fn single_pattern_control_flow_binds_only_on_success() {
-    let package = compile(&format!(
-        "{FLAG} fn run() -> (Flag,Flag) {{ var outer = false; if true is outer if outer do {{ outer = false; }}; var active = true; while:scan active is true as current do {{ active = not current; continue scan; }} (outer,active) }}"
+    let package = execution_support::compile_with_tuple(&format!(
+        "{FLAG} fn run() -> Tuple<Flag, Flag> {{ var outer = false; if true is outer if outer do {{ outer = false; }}; var active = true; while:scan active is true as current do {{ active = not current; continue scan; }} (outer,active) }}"
     ));
     let mut interpreter = Interpreter::new(
         &package,
@@ -7847,8 +8223,8 @@ fn failed_guards_keep_outer_writes_and_return_inside_guards_exits() {
 
 #[test]
 fn or_branches_export_the_same_binding_to_guards_and_closures() {
-    let package = compile(&format!(
-        "{FLAG} fn choose(input: Flag) -> Flag {{ input match {{ (false as value) or (true as value) if value => {{ let read = || value; read() }}, _ => false, }} }} fn run() -> (Flag,Flag) {{ (choose(false),choose(true)) }}"
+    let package = execution_support::compile_with_tuple(&format!(
+        "{FLAG} fn choose(input: Flag) -> Flag {{ input match {{ (false as value) or (true as value) if value => {{ let read = || value; read() }}, _ => false, }} }} fn run() -> Tuple<Flag, Flag> {{ (choose(false),choose(true)) }}"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -7859,8 +8235,8 @@ fn or_branches_export_the_same_binding_to_guards_and_closures() {
 
 #[test]
 fn nested_or_binders_remap_all_names_before_assignment_and_capture() {
-    let package = compile(&format!(
-        "{FLAG} fn run() -> (Flag,Flag) {{ true match {{ ((false as a) as b) or (((false as b) or (true as b)) as a) => {{ let original = || a and b; a = false; (original(),a or not b) }}, }} }}"
+    let package = execution_support::compile_with_tuple(&format!(
+        "{FLAG} fn run() -> Tuple<Flag, Flag> {{ true match {{ ((false as a) as b) or (((false as b) or (true as b)) as a) => {{ let original = || a and b; a = false; (original(),a or not b) }}, }} }}"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -7922,8 +8298,8 @@ fn irrefutable_or_and_wildcard_let_bindings_execute() {
 
 #[test]
 fn finite_match_defaults_bind_the_current_calls_parameter() {
-    let package = compile(&format!(
-        "{FLAG} fn choose(input: Flag, .selected: Flag = input match {{ false as x => not x, true as x => x, }}) -> Flag {{ selected }} fn run() -> (Flag,Flag) {{ (choose(false),choose(true)) }}"
+    let package = execution_support::compile_with_tuple(&format!(
+        "{FLAG} fn choose(input: Flag, .selected: Flag = input match {{ false as x => not x, true as x => x, }}) -> Flag {{ selected }} fn run() -> Tuple<Flag, Flag> {{ (choose(false),choose(true)) }}"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -7934,8 +8310,8 @@ fn finite_match_defaults_bind_the_current_calls_parameter() {
 
 #[test]
 fn nested_modules_resolve_qualified_calls_and_lexical_type_aliases() {
-    let package = compile(
-        "mod left { typealias Flag = true'type; fn value() -> Flag { true } mod nested { fn read() -> Flag { value() } } } mod right { fn value() -> true'type { false } } fn run() -> (true'type,true'type) { (left.nested.read(),right.value()) }",
+    let package = execution_support::compile_with_tuple(
+        "mod left { typealias Flag = true'type; fn value() -> Flag { true } mod nested { fn read() -> Flag { value() } } } mod right { fn value() -> true'type { false } } fn run() -> Tuple<true'type,true'type> { (left.nested.read(),right.value()) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8422,8 +8798,8 @@ fn qualified_patterns_work_in_condition_and_loop_bindings() {
 
 #[test]
 fn generic_identity_and_nested_calls_infer_distinct_instances() {
-    let package = compile(
-        "fn keep(value: T) -> T where T { value } fn twice(value: T) -> T where T { keep(keep(value)) } fn run() -> (true'type, 'x''type) { (twice(true), twice('x')) }",
+    let package = execution_support::compile_with_tuple(
+        "fn keep(value: T) -> T where T { value } fn twice(value: T) -> T where T { keep(keep(value)) } fn run() -> Tuple<true'type, 'x''type> { (twice(true), twice('x')) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8485,8 +8861,8 @@ fn generic_instances_reuse_types_without_reusing_runtime_values() {
 
 #[test]
 fn generic_higher_order_parameters_and_multiple_types_execute() {
-    let package = compile(
-        "fn apply(value: T, transform: fn(T) -> T) -> T where T { transform(value) } fn pair(a: A, b: B) -> (A, B) where A, B { (a, b) } fn negate(value: true'type) -> true'type { not value } fn run() -> (true'type, 'x''type) { pair(apply(false, negate), 'x') }",
+    let package = execution_support::compile_with_tuple(
+        "fn apply(value: T, transform: fn(T) -> T) -> T where T { transform(value) } fn pair(a: A, b: B) -> Tuple<A, B> where A, B { (a, b) } fn negate(value: true'type) -> true'type { not value } fn run() -> Tuple<true'type, 'x''type> { pair(apply(false, negate), 'x') }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8541,8 +8917,8 @@ fn explicit_instances_provide_context_for_lambdas_and_enum_symbols() {
 
 #[test]
 fn explicit_instances_inside_generic_bodies_specialize_outer_parameters() {
-    let package = compile(
-        "fn keep(value: T) -> T where T { value } fn wrap(value: U) -> U where U { let callback = keep<U>; callback(value) } fn phantom() -> true'type where T { true } fn run() -> (true'type, 'x''type) { (wrap(true) and phantom<true'type>(), wrap('x')) }",
+    let package = execution_support::compile_with_tuple(
+        "fn keep(value: T) -> T where T { value } fn wrap(value: U) -> U where U { let callback = keep<U>; callback(value) } fn phantom() -> true'type where T { true } fn run() -> Tuple<true'type, 'x''type> { (wrap(true) and phantom<true'type>(), wrap('x')) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8613,8 +8989,8 @@ fn generic_enum_inputs_get_context_from_later_arguments_and_expected_results() {
 
 #[test]
 fn generic_optional_defaults_read_current_call_parameters() {
-    let package = compile(
-        "typealias Flag = true'type; fn build(value: T, .first: Flag = false, .second: Flag = first) -> (T, Flag) where T { (value, second) } fn run() -> (('x''type, Flag), (Flag, Flag)) { let first = true; (build('x'), build<Flag>(true, .first = true)) }",
+    let package = execution_support::compile_with_tuple(
+        "typealias Flag = true'type; fn build(value: T, .first: Flag = false, .second: Flag = first) -> Tuple<T, Flag> where T { (value, second) } fn run() -> Tuple<Tuple<'x''type, Flag>, Tuple<Flag, Flag>> { let first = true; (build('x'), build<Flag>(true, .first = true)) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8628,8 +9004,8 @@ fn generic_optional_defaults_read_current_call_parameters() {
 
 #[test]
 fn generic_named_inputs_preserve_source_order_and_skip_overridden_defaults() {
-    let package = compile(
-        "typealias Flag = true'type; fn first() -> Flag { true } fn second() -> Flag { false } fn build(value: T, .left: Flag = false, .right: Flag = left) -> (T, Flag, Flag) where T { (value, left, right) } fn run() -> ('x''type, Flag, Flag) { build(.right = second(), 'x', .left = first()) }",
+    let package = execution_support::compile_with_tuple(
+        "typealias Flag = true'type; fn first() -> Flag { true } fn second() -> Flag { false } fn build(value: T, .left: Flag = false, .right: Flag = left) -> Tuple<T, Flag, Flag> where T { (value, left, right) } fn run() -> Tuple<'x''type, Flag, Flag> { build(.right = second(), 'x', .left = first()) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8698,8 +9074,8 @@ fn caller_type_facts_flow_into_generic_inference_and_function_values() {
 
 #[test]
 fn type_boolean_requirements_and_non_generic_function_references_execute() {
-    let package = compile(
-        "typealias Flag = true'type; typealias Character = 'x''type; fn keep(value: T) -> T where T, requires T == Flag or T == Character { value } fn ready() -> Flag where requires not (Flag == Character) { true } fn run() -> (Flag, Character) { let callback = ready; (keep(callback()), keep('x')) }",
+    let package = execution_support::compile_with_tuple(
+        "typealias Flag = true'type; typealias Character = 'x''type; fn keep(value: T) -> T where T, requires T == Flag or T == Character { value } fn ready() -> Flag where requires not (Flag == Character) { true } fn run() -> Tuple<Flag, Character> { let callback = ready; (keep(callback()), keep('x')) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8945,7 +9321,7 @@ fn nested_partial_context_retains_runtime_evaluation_order() {
 
 #[test]
 fn generic_structs_execute_construction_defaults_projection_and_assignment() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/generic-structs.fl"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -9189,13 +9565,13 @@ fn nominal_contracts_support_defaults_nested_fields_and_generic_forwarding() {
 
 #[test]
 fn enum_contracts_support_all_payload_shapes_and_qualified_matching() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Flag = true'type;
          enum Checked where T, requires T == Flag { none, value(T), named { value: T = true }, }
          fn read(value: Checked<U>) -> Flag where U, requires U == Flag {
              value match { Checked<U>.none => false, .value(x) => x, .named { value: x } => x, }
          }
-         fn run() -> (Flag, Flag, Flag) {
+         fn run() -> Tuple<Flag, Flag, Flag> {
              (read(Checked<Flag>.none), read(Checked<Flag>.value(true)), read(Checked<Flag>.named {}))
          }",
     );
@@ -9220,12 +9596,12 @@ fn enum_contracts_support_all_payload_shapes_and_qualified_matching() {
 
 #[test]
 fn nominal_contracts_propagate_boolean_obligations_and_aliases() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Flag = true'type; typealias Character = 'x''type;
          struct Scalar where T, requires T == Flag or T == Character { value: T, }
          typealias BooleanScalar = Scalar<Flag>;
          fn keep(value: Scalar<U>) -> U where U, requires U == Flag or U == Character { value.value }
-         fn run() -> (Flag, Character) { (keep(BooleanScalar { value: true }), keep(Scalar<Character> { value: 'x' })) }",
+         fn run() -> Tuple<Flag, Character> { (keep(BooleanScalar { value: true }), keep(Scalar<Character> { value: 'x' })) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9252,11 +9628,11 @@ fn nominal_contract_example_executes_through_the_shared_frontend() {
 
 #[test]
 fn generic_boolean_matches_use_definition_side_type_equality() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "fn invert(value: T) -> T where T, requires T == true'type {
              value match { true => false, false => true, }
          }
-         fn run() -> (true'type, true'type) { (invert(true), invert(false)) }",
+         fn run() -> Tuple<true'type, true'type> { (invert(true), invert(false)) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9269,7 +9645,7 @@ fn generic_boolean_matches_use_definition_side_type_equality() {
 
 #[test]
 fn nested_generic_enum_coverage_uses_type_contracts_for_each_payload() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "enum Pair where T { pair(T, T), }
          enum Wrapper where T { empty, wrap(Pair<T>), }
          fn read(value: Wrapper<U>) -> true'type where U, requires Pair<U> == Pair<true'type> {
@@ -9280,7 +9656,7 @@ fn nested_generic_enum_coverage_uses_type_contracts_for_each_payload() {
                  .wrap(.pair(false, false)) => false,
              }
          }
-         fn run() -> (true'type, true'type) {
+         fn run() -> Tuple<true'type, true'type> {
              (read(Wrapper<true'type>.wrap(.pair(false, true))), read(Wrapper<true'type>.wrap(.pair(false, false))))
          }",
     );
@@ -9313,8 +9689,8 @@ fn constrained_empty_payloads_remove_uninhabited_variants_from_coverage() {
 
 #[test]
 fn tuple_destructuring_is_heterogeneous_nested_and_evaluates_input_once() {
-    let package = compile(
-        "fn first() -> true'type { true } fn second() -> 'x''type { 'x' } fn input() -> (true'type, ('x''type,)) { (first(), (second(),)) } fn run() -> (true'type, 'x''type) { let (flag, (letter,)) = input(); let read = || letter; (flag, read()) }",
+    let package = execution_support::compile_with_tuple(
+        "fn first() -> true'type { true } fn second() -> 'x''type { 'x' } fn input() -> Tuple<true'type, Tuple<'x''type>> { (first(), (second(),)) } fn run() -> Tuple<true'type, 'x''type> { let (flag, (letter,)) = input(); let read = || letter; (flag, read()) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9335,8 +9711,8 @@ fn tuple_destructuring_is_heterogeneous_nested_and_evaluates_input_once() {
 
 #[test]
 fn tuple_patterns_support_generic_fields_and_enum_composition() {
-    let package = compile(
-        "enum Result where T { pair((T, true'type)), } fn read(value: Result<T>) -> T where T { let .pair((answer, _)) = value; answer } fn swap(value: (T, U)) -> (U, T) where T, U { let (left, right) = value; (right, left) } fn run() -> ('x''type, true'type) { swap((read(Result<true'type>.pair((true, false))), 'x')) }",
+    let package = execution_support::compile_with_tuple(
+        "enum Result where T { pair(Tuple<T, true'type>), } fn read(value: Result<T>) -> T where T { let .pair((answer, _)) = value; answer } fn swap(value: Tuple<T, U>) -> Tuple<U, T> where T, U { let (left, right) = value; (right, left) } fn run() -> Tuple<'x''type,true'type> { swap((read(Result<true'type>.pair((true, false))), 'x')) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9349,8 +9725,8 @@ fn tuple_patterns_support_generic_fields_and_enum_composition() {
 
 #[test]
 fn tuple_match_matrix_preserves_correlations_and_arm_order() {
-    let package = compile(
-        "fn read(value: (true'type, true'type)) -> 'x''type { value match { (true, _) => 'a', (_, true) => 'b', (false, false) => 'c', } }",
+    let package = execution_support::compile_with_tuple(
+        "fn read(value: Tuple<true'type, true'type>) -> 'x''type { value match { (true, _) => 'a', (_, true) => 'b', (false, false) => 'c', } }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     for (left, right, expected) in [
@@ -9373,8 +9749,8 @@ fn tuple_match_matrix_preserves_correlations_and_arm_order() {
 
 #[test]
 fn tuple_or_patterns_remap_bindings_and_rollback_failed_candidates() {
-    let package = compile(
-        "fn read(value: (true'type, true'type)) -> true'type { value match { (x, true) or (true, x) => x, (false, false) => true, } } fn run() -> (true'type, true'type, true'type) { (read((false, true)), read((true, false)), read((false, false))) }",
+    let package = execution_support::compile_with_tuple(
+        "fn read(value: Tuple<true'type, true'type>) -> true'type { value match { (x, true) or (true, x) => x, (false, false) => true, } } fn run() -> Tuple<true'type, true'type, true'type> { (read((false, true)), read((true, false)), read((false, false))) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9391,8 +9767,8 @@ fn tuple_or_patterns_remap_bindings_and_rollback_failed_candidates() {
 
 #[test]
 fn tuple_let_else_preserves_outer_bindings_on_partial_failure() {
-    let package = compile(
-        "fn read(value: (true'type, true'type)) -> true'type { let outer = true; let (outer, true) = value else { return outer; }; outer } fn run() -> (true'type, true'type) { (read((false, false)), read((false, true))) }",
+    let package = execution_support::compile_with_tuple(
+        "fn read(value: Tuple<true'type, true'type>) -> true'type { let outer = true; let (outer, true) = value else { return outer; }; outer } fn run() -> Tuple<true'type, true'type> { (read((false, false)), read((false, true))) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9405,8 +9781,8 @@ fn tuple_let_else_preserves_outer_bindings_on_partial_failure() {
 
 #[test]
 fn tuple_var_bindings_and_grouped_singletons_are_distinct() {
-    let package = compile(
-        "fn run() -> (true'type, true'type) { var (a, b) = (true, false); a = false; b = true; let (c,) = (b,); let (d) = a; (c, d) }",
+    let package = execution_support::compile_with_tuple(
+        "fn run() -> Tuple<true'type, true'type> { var (a, b) = (true, false); a = false; b = true; let (c,) = (b,); let (d) = a; (c, d) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9433,8 +9809,8 @@ fn tuple_patterns_in_conditions_loops_and_guards_use_successful_bindings() {
 
 #[test]
 fn tuple_pattern_coverage_uses_generic_constraints_for_individual_elements() {
-    let package = compile(
-        "fn read(pair: (T, T)) -> true'type where T, requires T == true'type { pair match { (true, _) => true, (false, true) => true, (false, false) => false, } } fn run() -> (true'type, true'type) { (read((false, true)), read((false, false))) }",
+    let package = execution_support::compile_with_tuple(
+        "fn read(pair: Tuple<T, T>) -> true'type where T, requires T == true'type { pair match { (true, _) => true, (false, true) => true, (false, false) => false, } } fn run() -> Tuple<true'type, true'type> { (read((false, true)), read((false, false))) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9447,7 +9823,7 @@ fn tuple_pattern_coverage_uses_generic_constraints_for_individual_elements() {
 
 #[test]
 fn tuple_pattern_example_runs_through_the_shared_frontend() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/tuple-patterns.fl"
     ));
     assert_eq!(
@@ -9476,8 +9852,8 @@ fn record_patterns_bind_names_specialize_generics_and_omit_fields() {
 
 #[test]
 fn record_patterns_compose_with_tuple_enum_and_closure_bindings() {
-    let package = compile(
-        "struct Box where T { value: T, } enum Entry where T { empty, data(Box<(T, true'type)>), } fn read(entry: Entry<T>, fallback: T) -> T where T { entry match { .data({ value: (item, true) }) => { let get = || item; get() }, _ => fallback, } } fn run() -> 'x''type { read(Entry<'x''type>.data(Box<('x''type, true'type)> { value: ('y', true) }), 'n') }",
+    let package = execution_support::compile_with_tuple(
+        "struct Box where T { value: T, } enum Entry where T { empty, data(Box<Tuple<T, true'type>>), } fn read(entry: Entry<T>, fallback: T) -> T where T { entry match { .data({ value: (item, true) }) => { let get = || item; get() }, _ => fallback, } } fn run() -> 'x''type { read(Entry<'x''type>.data(Box<Tuple<'x''type, true'type>> { value: ('y', true) }), 'n') }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9490,8 +9866,8 @@ fn record_patterns_compose_with_tuple_enum_and_closure_bindings() {
 
 #[test]
 fn record_matrix_preserves_field_names_and_correlations() {
-    let package = compile(
-        "struct Pair { left: true'type, right: true'type, } fn read(pair: Pair) -> 'x''type { pair match { { right: true, left: true } => 'a', { left: true, right: false } => 'b', { left: false } => 'c', } } fn run() -> ('x''type, 'x''type, 'x''type) { (read(Pair { left: true, right: true }), read(Pair { left: true, right: false }), read(Pair { left: false, right: true })) }",
+    let package = execution_support::compile_with_tuple(
+        "struct Pair { left: true'type, right: true'type, } fn read(pair: Pair) -> 'x''type { pair match { { right: true, left: true } => 'a', { left: true, right: false } => 'b', { left: false } => 'c', } } fn run() -> Tuple<'x''type, 'x''type, 'x''type> { (read(Pair { left: true, right: true }), read(Pair { left: true, right: false }), read(Pair { left: false, right: true })) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9504,8 +9880,8 @@ fn record_matrix_preserves_field_names_and_correlations() {
 
 #[test]
 fn record_or_patterns_rollback_and_remap_bindings() {
-    let package = compile(
-        "struct Pair { left: true'type, right: true'type, } fn read(pair: Pair) -> true'type { pair match { { left: x, right: true } or { left: true, right: x } => x, { left: false, right: false } => true, } } fn run() -> (true'type, true'type) { (read(Pair { left: true, right: false }), read(Pair { left: false, right: true })) }",
+    let package = execution_support::compile_with_tuple(
+        "struct Pair { left: true'type, right: true'type, } fn read(pair: Pair) -> true'type { pair match { { left: x, right: true } or { left: true, right: x } => x, { left: false, right: false } => true, } } fn run() -> Tuple<true'type, true'type> { (read(Pair { left: true, right: false }), read(Pair { left: false, right: true })) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9562,7 +9938,7 @@ fn record_patterns_preserve_input_evaluation_once_and_default_order() {
 
 #[test]
 fn record_pattern_example_runs_through_the_shared_frontend() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/record-patterns.fl"
     ));
     assert_eq!(
@@ -9576,8 +9952,8 @@ fn record_pattern_example_runs_through_the_shared_frontend() {
 
 #[test]
 fn structural_views_enable_tuple_destructuring_under_type_equations() {
-    let package = compile(
-        "fn read(value: T) -> true'type where T, requires T == (true'type, 'x''type) { let (flag, letter) = value; flag } fn run() -> true'type { read((true, 'x')) }",
+    let package = execution_support::compile_with_tuple(
+        "fn read(value: T) -> true'type where T, requires T == Tuple<true'type, 'x''type> { let (flag, letter) = value; flag } fn run() -> true'type { read((true, 'x')) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9632,7 +10008,7 @@ fn structural_views_follow_transitive_equations_for_nested_field_places() {
 
 #[test]
 fn structural_view_example_preserves_generic_signatures_and_executes() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/structural-views.fl"
     ));
     let inspect = package
@@ -9710,8 +10086,8 @@ fn constrained_callable_evaluation_runs_callee_and_arguments_once_in_order() {
 
 #[test]
 fn constrained_closure_types_preserve_captured_environments() {
-    let package = compile(
-        "typealias Captured = (do { let flag = true; || flag })'type; fn invoke(callback: F) -> true'type where F, requires F == Captured { callback() } fn make(flag: true'type) -> F where F, requires F == Captured { || flag } fn run() -> (true'type, true'type) { (invoke(make<Captured>(true)), invoke(make<Captured>(false))) }",
+    let package = execution_support::compile_with_tuple(
+        "typealias Captured = (do { let flag = true; || flag })'type; fn invoke(callback: F) -> true'type where F, requires F == Captured { callback() } fn make(flag: true'type) -> F where F, requires F == Captured { || flag } fn run() -> Tuple<true'type, true'type> { (invoke(make<Captured>(true)), invoke(make<Captured>(false))) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9724,7 +10100,7 @@ fn constrained_closure_types_preserve_captured_environments() {
 
 #[test]
 fn constrained_callable_example_runs_with_distinct_capture_values() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/constrained-callables.fl"
     ));
     assert_eq!(
@@ -9870,7 +10246,7 @@ fn chained_patterns_allow_finite_stable_default_computations() {
 
 #[test]
 fn chained_pattern_example_executes_ordered_lookup_and_generic_forwarding() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/chained-patterns.fl"
     ));
     assert_eq!(
@@ -9884,8 +10260,8 @@ fn chained_pattern_example_executes_ordered_lookup_and_generic_forwarding() {
 
 #[test]
 fn var_pattern_bindings_can_change_before_the_successful_candidate_is_exported() {
-    let package = compile(
-        "fn run() -> (true'type, true'type) { var x and (do { x = false; x }) is y = true; (x, y) }",
+    let package = execution_support::compile_with_tuple(
+        "fn run() -> Tuple<true'type, true'type> { var x and (do { x = false; x }) is y = true; (x, y) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9912,8 +10288,8 @@ fn var_or_patterns_publish_updated_values_and_discard_failed_candidate_bindings(
 
 #[test]
 fn let_pattern_binding_restrictions_do_not_forbid_field_writes_or_outer_var_effects() {
-    let package = compile(
-        "struct Box { value: true'type, } fn run() -> (true'type, true'type) { var changed = false; let box and (do { box.value = false; changed = true; box.value }) is result = Box { value: true }; (result, changed) }",
+    let package = execution_support::compile_with_tuple(
+        "struct Box { value: true'type, } fn run() -> Tuple<true'type, true'type> { var changed = false; let box and (do { box.value = false; changed = true; box.value }) is result = Box { value: true }; (result, changed) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9926,7 +10302,7 @@ fn let_pattern_binding_restrictions_do_not_forbid_field_writes_or_outer_var_effe
 
 #[test]
 fn concrete_trait_methods_dispatch_and_inherit_default_bodies() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         trait Flag {
             fn read() -> true'type;
@@ -9939,7 +10315,7 @@ fn concrete_trait_methods_dispatch_and_inherit_default_bodies() {
             fn read() -> true'type { false }
             fn invert(value: true'type) -> true'type { value }
         }
-        fn run() -> (true'type, true'type, true'type, true'type) {
+        fn run() -> Tuple<true'type, true'type, true'type, true'type> {
             (Yes.as(Flag).read(), No.as(Flag).read(), Yes.as(Flag).invert(false), No.as(Flag).invert(false))
         }
     "#,
@@ -9976,7 +10352,7 @@ fn concrete_inherent_methods_are_callable_and_can_be_function_values() {
 
 #[test]
 fn concrete_trait_views_preserve_interface_identity_and_argument_order() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         trait First { fn choose(a: true'type, b: true'type) -> true'type; }
         trait Second { fn choose(a: true'type, b: true'type) -> true'type; }
@@ -9985,7 +10361,7 @@ fn concrete_trait_views_preserve_interface_identity_and_argument_order() {
         impl Second for S { fn choose(a: true'type, b: true'type) -> true'type { b } }
         fn left() -> true'type { true }
         fn right() -> true'type { false }
-        fn run() -> (true'type, true'type) {
+        fn run() -> Tuple<true'type, true'type> {
             let second = S.as(Second).choose;
             (S.as(First).choose(left(), right()), second(left(), right()))
         }
@@ -10004,14 +10380,14 @@ fn concrete_trait_views_preserve_interface_identity_and_argument_order() {
 
 #[test]
 fn trait_self_specializes_default_bodies_without_conflating_subjects() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         trait Keep { fn keep(value: Self) -> Self { value } }
         struct A { flag: true'type, }
         struct B { flag: true'type, }
         impl Keep for A {}
         impl Keep for B {}
-        fn run() -> (true'type, true'type) {
+        fn run() -> Tuple<true'type, true'type> {
             let a = A.as(Keep).keep(A { flag: true });
             let keep_b = B.as(Keep).keep;
             let b = keep_b(B { flag: false });
@@ -10166,7 +10542,7 @@ fn callable_fields_are_not_misidentified_as_inherent_methods() {
 
 #[test]
 fn default_methods_call_required_members_and_observe_overrides() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         trait Read {
             fn read(self) -> true'type;
@@ -10176,7 +10552,7 @@ fn default_methods_call_required_members_and_observe_overrides() {
         struct No {}
         impl Read for Yes { fn read(self) -> true'type { true } }
         impl Read for No { fn read(self) -> true'type { false } }
-        fn run() -> (true'type, true'type) {
+        fn run() -> Tuple<true'type, true'type> {
             (Yes {}.as(Read).invert(), No {}.as(Read).invert())
         }
     "#,
@@ -10326,18 +10702,18 @@ fn parent_interface_evidence_is_transitive_and_diamond_paths_preserve_identity()
 
 #[test]
 fn parent_interfaces_do_not_merge_same_named_members() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         trait First { fn value() -> true'type { true } }
         trait Second { fn value() -> true'type { false } }
         trait Both :- First + Second {
-            fn values() -> (true'type, true'type) { (Self.as(First).value(), Self.as(Second).value()) }
+            fn values() -> Tuple<true'type, true'type> { (Self.as(First).value(), Self.as(Second).value()) }
         }
         struct Flag {}
         impl Both for Flag {}
         impl First for Flag {}
         impl Second for Flag {}
-        fn run() -> (true'type, true'type) { Flag.as(Both).values() }
+        fn run() -> Tuple<true'type, true'type> { Flag.as(Both).values() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10442,7 +10818,7 @@ fn an_explicit_parent_view_disambiguates_same_named_capabilities() {
 
 #[test]
 fn generic_trait_bounds_check_callers_and_dispatch_definition_fixed_members() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         trait Read { fn read(self) -> true'type; }
         struct Yes {}
@@ -10451,7 +10827,7 @@ fn generic_trait_bounds_check_callers_and_dispatch_definition_fixed_members() {
         impl Read for No { fn read(self) -> true'type { false } }
         fn read(value: T) -> true'type where T :- Read { value.read() }
         fn forward(value: U) -> true'type where U :- Read { read(value) }
-        fn run() -> (true'type, true'type) { (forward(Yes {}), read(No {})) }
+        fn run() -> Tuple<true'type, true'type> { (forward(Yes {}), read(No {})) }
     "#,
     );
     assert_eq!(
@@ -10496,7 +10872,7 @@ fn generic_bounds_support_conjunction_parent_evidence_and_function_values() {
 
 #[test]
 fn generic_static_members_and_explicit_views_keep_bound_interface_identity() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         trait First { fn read() -> true'type { true } }
         trait Second { fn read() -> true'type { false } }
@@ -10505,7 +10881,7 @@ fn generic_static_members_and_explicit_views_keep_bound_interface_identity() {
         impl Second for Flag {}
         fn first() -> true'type where T :- First { T.read() }
         fn second() -> true'type where T :- First + Second { T.as(Second).read() }
-        fn run() -> (true'type, true'type) { (first<Flag>(), second<Flag>()) }
+        fn run() -> Tuple<true'type, true'type> { (first<Flag>(), second<Flag>()) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11100,13 +11476,13 @@ fn generic_inherent_does_not_replace_definition_fixed_trait_members() {
 
 #[test]
 fn inherent_optional_methods_use_previous_parameters_and_per_call_defaults() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         struct S {}
         impl S {
             fn choose(self, value: true'type, .flip: true'type = not value, .last: true'type = flip) -> true'type { last }
         }
-        fn run() -> (true'type, true'type, true'type) {
+        fn run() -> Tuple<true'type, true'type, true'type> {
             (S {}.choose(true), S {}.choose(false), S {}.choose(true, .flip = true))
         }
     "#,
@@ -11346,6 +11722,7 @@ fn parameterized_interface_package() -> Package {
         methods: vec![n::MethodContract {
             is_quote: false,
             pure: false,
+            is_unsafe: false,
             type_arguments: vec![],
             type_parameters: vec![],
             capabilities: vec![],
@@ -11364,6 +11741,7 @@ fn parameterized_interface_package() -> Package {
         phase: n::FunctionPhase::Runtime,
         inline: false,
         pure: false,
+        is_unsafe: false,
         preconditions: vec![],
         postconditions: vec![],
         result_binding: None,
@@ -11404,6 +11782,7 @@ fn parameterized_interface_package() -> Package {
             phase: n::FunctionPhase::Runtime,
             inline: false,
             pure: false,
+            is_unsafe: false,
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,
@@ -12457,10 +12836,10 @@ fn bitvec_boolean_operations_evaluate_both_sides_once_in_source_order() {
 
 #[test]
 fn bitvec_or_keeps_rhs_effects_and_views_are_value_snapshots() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         typealias Bits = do { let v: .u8'builtin = 0; v'bitvec }'type;
-        fn entry() -> (Bits, Bits, true'type) {
+        fn entry() -> Tuple<Bits, Bits, true'type> {
             var byte: .u8'builtin = 1;
             let saved = byte'bitvec;
             byte = 2;
@@ -12626,7 +13005,7 @@ fn malformed_nir_bit_slices_fail_without_host_panics() {
 
 #[test]
 fn bitvec_writeback_overlaps_snapshots_fields_and_sign_bits_execute() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/bitvec-writeback.fl"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12776,7 +13155,7 @@ fn declaration_signature_defaults_are_independent_of_argument_probe_defaults() {
 
 #[test]
 fn bitvec_patterns_split_high_to_low_and_match_nested_patterns() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/bitvec-patterns.fl"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12912,7 +13291,7 @@ fn bitvec_coverage_accepts_complete_masks_without_fallbacks() {
 
 #[test]
 fn float_bit_views_preserve_ieee_layout_and_every_special_bit_pattern() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/float-bit-patterns.fl"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12990,12 +13369,12 @@ fn float_bit_views_preserve_ieee_layout_and_every_special_bit_pattern() {
 
 #[test]
 fn float_bit_writeback_preserves_payload_snapshots_and_rhs_updates() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         typealias Single = .f32'builtin;
         typealias Double = .f64'builtin;
         struct Sample { value: Single }
-        fn entry() -> (.u32'builtin, .u32'builtin) {
+        fn entry() -> Tuple<.u32'builtin, .u32'builtin> {
             let sample = Sample { value: -0.0 };
             let saved = sample.value'bitvec;
             sample.value'bitvec[0..8] = do { sample.value = 13.625; 0x42 };
@@ -13310,7 +13689,7 @@ fn comptime_entry_rechecks_stage_after_nir_mutation() {
 
 #[test]
 fn comptime_integers_compute_without_fixed_width_truncation() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/comptime-integers.fl"
     ));
     let mut engine = Interpreter::for_comptime(
@@ -13395,8 +13774,11 @@ fn comptime_integers_compute_without_fixed_width_truncation() {
         };
         assert_eq!(value.to_i128().unwrap(), expected);
     }
+    let limited_package = compile(
+        "typealias Int=.Integer'builtin;comptime fn square(value:Int)->Int {value * value}",
+    );
     let mut limited = Interpreter::for_comptime(
-        &package,
+        &limited_package,
         Budget {
             steps: 10,
             depth: 128,
@@ -13405,7 +13787,7 @@ fn comptime_integers_compute_without_fixed_width_truncation() {
     .unwrap();
     assert_eq!(
         limited
-            .invoke(id(&package, "square"), vec![wide])
+            .invoke(id(&limited_package, "square"), vec![wide])
             .unwrap_err()
             .kind,
         ErrorKind::StepsExhausted
@@ -13414,7 +13796,7 @@ fn comptime_integers_compute_without_fixed_width_truncation() {
 
 #[test]
 fn comptime_integer_operations_preserve_source_order_and_reject_malformed_nir() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/comptime-integers.fl"
     ));
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -13464,7 +13846,7 @@ fn comptime_integer_operations_preserve_source_order_and_reject_malformed_nir() 
 
 #[test]
 fn comptime_integer_size_limit_is_distinct_from_fuel_and_allows_recovery() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/comptime-integers.fl"
     ));
     let mut engine = Interpreter::for_comptime(
@@ -13520,7 +13902,7 @@ fn comptime_integer_operands_propagate_returns_without_evaluating_later_operands
 #[test]
 fn comptime_type_values_select_forward_observe_and_construct_bit_widths() {
     use nir::{Primitive as P, Term};
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/comptime-types.fl"
     ));
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -13545,13 +13927,16 @@ fn comptime_type_values_select_forward_observe_and_construct_bit_widths() {
     );
     assert_eq!(
         engine.invoke(id(&package, "Pair"), vec![]).unwrap(),
-        Value::Type(Term::Tuple(vec![
-            Term::Primitive(P::U8),
-            Term::Nominal {
-                declaration: packet,
-                arguments: vec![]
-            }
-        ]))
+        Value::Type(tuple_type(
+            &package,
+            vec![
+                Term::Primitive(P::U8),
+                Term::Nominal {
+                    declaration: packet,
+                    arguments: vec![]
+                }
+            ]
+        ))
     );
     let boxed = package
         .structs
@@ -13606,15 +13991,13 @@ fn comptime_type_values_select_forward_observe_and_construct_bit_widths() {
 #[test]
 fn comptime_type_values_preserve_opaque_heads_and_reject_unbound_environments() {
     use nir::{Primitive as P, Sort, Term};
-    let package = compile(include_str!(
-        "../../../development/examples/comptime-types.fl"
+    let package = compile_bound_tuple_fixture(&format!(
+        "{} pure comptime fn Opaque<T> -> Type {{T}}",
+        include_str!("../../../development/examples/comptime-types.fl")
     ));
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let opaque = Term::NormalForm {
-        head: nir::DeclarationId {
-            package: 19,
-            local: 71,
-        },
+        head: id(&package, "Opaque"),
         sort: Sort::Type,
         arguments: vec![Term::Primitive(P::U8)],
     };
@@ -13626,6 +14009,14 @@ fn comptime_type_values_preserve_opaque_heads_and_reject_unbound_environments() 
     );
     assert_ne!(Value::Type(opaque), Value::Type(Term::Primitive(P::U8)));
     for bad in [
+        Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 19,
+                local: 71,
+            },
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(P::U8)],
+        },
         Term::Bool(true),
         Term::Hole {
             index: 0,
@@ -13758,7 +14149,7 @@ fn required_comptime_results_form_aliases_signatures_and_concrete_runtime_values
 
 #[test]
 fn generic_comptime_instances_form_types_and_execute_nested_calls() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/generic-comptime.fl"
     ));
     let mut runtime = Interpreter::new(&package, Budget::default()).unwrap();
@@ -13790,7 +14181,10 @@ fn generic_comptime_instances_form_types_and_execute_nested_calls() {
         comptime
             .invoke(id(&package, "ConcretePair"), vec![])
             .unwrap(),
-        Value::Type(Term::Tuple(vec![Term::Primitive(Primitive::Bool); 2]))
+        Value::Type(tuple_type(
+            &package,
+            vec![Term::Primitive(Primitive::Bool); 2]
+        ))
     );
     assert!(
         comptime
@@ -13901,7 +14295,7 @@ fn interpreter_depth_budget_fires_on_a_two_mebibyte_host_stack_and_recovers() {
                     },
                 )
                 .unwrap();
-                for name in ["recurse", "deep", "pattern"] {
+                for name in ["recurse", "pattern"] {
                     assert_eq!(
                         engine.invoke(id(&package, name), vec![]).unwrap_err().kind,
                         ErrorKind::DepthExhausted
@@ -13911,6 +14305,36 @@ fn interpreter_depth_budget_fires_on_a_two_mebibyte_host_stack_and_recovers() {
                         Value::Bool(true)
                     );
                 }
+                // Linear Not chains use a heap continuation. They still pay
+                // for every node, but do not consume recursive call depth.
+                let before = engine.remaining_steps();
+                assert_eq!(
+                    engine.invoke(id(&package, "deep"), vec![]).unwrap(),
+                    Value::Bool(true)
+                );
+                assert!(before - engine.remaining_steps() >= 384);
+                let mut limited = Interpreter::for_comptime(
+                    &package,
+                    Budget {
+                        steps: 100_000,
+                        depth,
+                    },
+                )
+                .unwrap();
+                limited
+                    .charge_preparation((limited.remaining_steps() - 128) as usize)
+                    .unwrap();
+                assert_eq!(
+                    limited
+                        .invoke(id(&package, "deep"), vec![])
+                        .unwrap_err()
+                        .kind,
+                    ErrorKind::StepsExhausted
+                );
+                assert_eq!(
+                    engine.invoke(id(&package, "good"), vec![]).unwrap(),
+                    Value::Bool(true)
+                );
             }
         })
         .unwrap()
@@ -13920,7 +14344,7 @@ fn interpreter_depth_budget_fires_on_a_two_mebibyte_host_stack_and_recovers() {
 
 #[test]
 fn computed_bit_segments_become_fixed_constraints_without_runtime_calls() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/computed-bit-patterns.fl"
     ));
     let mut engine = Interpreter::new(&package, Budget::default()).unwrap();
@@ -14075,7 +14499,7 @@ fn mixed_normal_form_inputs_keep_boolean_and_integer_identity() {
 #[test]
 fn dependent_normal_form_parameters_substitute_prior_type_inputs_in_order() {
     use nir::{Primitive, Term};
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/normal-form-dependent.fl"
     ));
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -14118,7 +14542,7 @@ fn dependent_normal_form_parameters_substitute_prior_type_inputs_in_order() {
 fn normal_form_metadata_preserves_order_dependencies_and_rejects_corruption() {
     use nir::normal_forms::Kind;
     use nir::{Primitive, Sort, Term};
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/normal-form-dependent.fl"
     ));
     let pair = id(&package, "Pair");
@@ -14194,7 +14618,7 @@ fn known_normal_form_applications_reject_corrupt_arguments_in_values_and_inputs(
         "{} comptime fn Accept(value: Type) -> Type {{ value }} comptime fn Large() -> Type {{ Tagged<.Integer'builtin, 256> }}",
         include_str!("../../../development/examples/normal-form-dependent.fl")
     );
-    let package = compile(&source);
+    let package = compile_bound_tuple_fixture(&source);
     let accept = id(&package, "Accept");
     let entry = id(&package, "Large");
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -14635,7 +15059,7 @@ fn residual_normal_form_contracts_check_actual_inputs_and_recover() {
 #[test]
 fn dependent_normal_form_inputs_convert_literals_after_type_inputs_arrive() {
     use nir::{Primitive, Sort, Term};
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/dependent-normal-form-inputs.fl"
     ));
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -14747,7 +15171,7 @@ fn dependent_normal_form_inputs_convert_literals_after_type_inputs_arrive() {
 #[test]
 fn contextual_normal_form_control_flow_preserves_checks_scope_and_effect_order() {
     use nir::{Primitive, Sort, Term};
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/contextual-normal-form-inputs.fl"
     ));
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -14853,7 +15277,7 @@ fn contextual_normal_form_depth_limit_recovers_on_a_small_host_stack() {
         Primitive, Term,
         program::{Expr, ExprKind as K, NormalFormArgument as A},
     };
-    let mut package = compile(include_str!(
+    let mut package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/dependent-normal-form-inputs.fl"
     ));
     let target = id(&package, "Number");
@@ -15205,9 +15629,14 @@ fn normal_form_text_inputs_preserve_contents_contracts_and_work_limits() {
 #[test]
 fn normal_form_tuple_values_preserve_shape_types_contracts_and_order() {
     use nir::{Primitive, Sort, Term};
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/normal-form-tuples.fl"
     ));
+    let tuple = |elements| Term::NormalForm {
+        head: id(&package, "Tuple"),
+        sort: Sort::Type,
+        arguments: vec![Term::TypeListValue(elements)],
+    };
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let int = |n| Term::Integer(comptime_runtime::Integer::from_u128(n));
     let config = Term::TupleValue(vec![int(8), Term::Bool(true)]);
@@ -15235,7 +15664,7 @@ fn normal_form_tuple_values_preserve_shape_types_contracts_and_order() {
             vec![head("Config", vec![config.clone()]), config]
         ))
     );
-    let pair = Term::Tuple(vec![
+    let pair = tuple(vec![
         Term::Primitive(Primitive::U8),
         Term::Primitive(Primitive::Bool),
     ]);
@@ -15248,8 +15677,8 @@ fn normal_form_tuple_values_preserve_shape_types_contracts_and_order() {
             vec![pair, Term::TupleValue(vec![int(255), Term::Bool(true)])]
         ))
     );
-    let nested = Term::Tuple(vec![
-        Term::Tuple(vec![
+    let nested = tuple(vec![
+        tuple(vec![
             Term::Primitive(Primitive::U8),
             Term::Primitive(Primitive::Bool),
         ]),
@@ -15270,7 +15699,7 @@ fn normal_form_tuple_values_preserve_shape_types_contracts_and_order() {
             ]
         ))
     );
-    let ordered = Term::Tuple(vec![
+    let ordered = tuple(vec![
         Term::Primitive(Primitive::U8),
         Term::Primitive(Primitive::Integer),
     ]);
@@ -15383,7 +15812,7 @@ fn explicit_nir_integer_division_reports_zero_and_recovers() {
 fn symbolic_tuple_normal_contracts_instantiate_all_nested_fields() {
     use nir::program::TypePredicate;
     use nir::{Primitive, Sort, Term};
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/normal-form-symbolic-tuples.fl"
     ));
     let descriptor = package
@@ -15465,11 +15894,16 @@ fn normal_form_unit_values_preserve_identity_and_effectful_evaluation() {
 }
 
 #[test]
-fn contextual_tuple_syntax_uses_late_type_context_without_reordering_effects() {
+fn explicit_tuple_types_and_value_packets_preserve_late_inputs_and_effect_order() {
     use nir::{Primitive, Sort, Term};
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/contextual-type-tuples.fl"
     ));
+    let tuple = |elements| Term::NormalForm {
+        head: id(&package, "Tuple"),
+        sort: Sort::Type,
+        arguments: vec![Term::TypeListValue(elements)],
+    };
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let type_type = Term::Primitive(Primitive::Type);
     let byte = Term::Primitive(Primitive::U8);
@@ -15497,15 +15931,15 @@ fn contextual_tuple_syntax_uses_late_type_context_without_reordering_effects() {
                 vec![Value::Type(type_type.clone())]
             )
             .unwrap(),
-        head(
-            type_type.clone(),
-            Term::Tuple(vec![byte.clone(), void.clone()])
-        )
+        head(type_type.clone(), tuple(vec![byte.clone(), void.clone()]))
     );
-    let pair = Term::Tuple(vec![type_type.clone(), void.clone()]);
+    let pair = tuple(vec![type_type.clone(), void.clone()]);
     assert_eq!(
         engine
-            .invoke(id(&package, "TupleInput"), vec![Value::Type(pair.clone())])
+            .invoke(
+                id(&package, "TupleValueInput"),
+                vec![Value::Type(pair.clone())]
+            )
             .unwrap(),
         head(pair, Term::TupleValue(vec![byte.clone(), Term::Unit]))
     );
@@ -15518,7 +15952,7 @@ fn contextual_tuple_syntax_uses_late_type_context_without_reordering_effects() {
             .unwrap(),
         head(
             type_type.clone(),
-            Term::Tuple(vec![byte, Term::Primitive(Primitive::U16)])
+            tuple(vec![byte, Term::Primitive(Primitive::U16)])
         )
     );
     assert_eq!(
@@ -15530,7 +15964,7 @@ fn contextual_tuple_syntax_uses_late_type_context_without_reordering_effects() {
             .unwrap(),
         head(
             type_type,
-            Term::Tuple(vec![Term::Primitive(Primitive::U16), void])
+            tuple(vec![Term::Primitive(Primitive::U16), void])
         )
     );
 }
@@ -15603,7 +16037,7 @@ fn normal_bit_operation_identities_match_interpretation_without_speculative_call
 
 #[test]
 fn module_constants_feed_comptime_values_and_type_positions() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/comptime-constants.fl"
     ));
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -15833,7 +16267,7 @@ fn comptime_calls_retain_function_shape_proved_by_generic_requirements() {
 
 #[test]
 fn comptime_closures_keep_capture_values_and_generic_callback_contexts() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/comptime-closures.fl"
     ));
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -15850,7 +16284,7 @@ fn comptime_closures_keep_capture_values_and_generic_callback_contexts() {
 
 #[test]
 fn comptime_constant_closures_restore_nested_environments_and_named_instances() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         typealias Int = .Integer'builtin;
         comptime fn identity(value: T) -> T where T { value }
@@ -15870,7 +16304,7 @@ fn comptime_constant_closures_restore_nested_environments_and_named_instances() 
         };
         const WIDTH = COMBINED(4);
         typealias Byte = .BitVec'builtin<WIDTH>;
-        comptime fn run() -> (Int, Int) { (COMBINED(4), COMBINED(6)) }
+        comptime fn run() -> Tuple<Int, Int> { (COMBINED(4), COMBINED(6)) }
     "#,
     );
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -15910,7 +16344,7 @@ fn comptime_lambda_creation_does_not_execute_its_body() {
 
 #[test]
 fn comptime_nested_closure_factories_keep_distinct_invocation_environments() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         typealias Int = .Integer'builtin;
         const FACTORY = do {
@@ -15922,7 +16356,7 @@ fn comptime_nested_closure_factories_keep_distinct_invocation_environments() {
         };
         const FIRST = FACTORY(2);
         const SECOND = FACTORY(9);
-        comptime fn run() -> (Int, Int, Int) { (FIRST(1), SECOND(1), FIRST(1)) }
+        comptime fn run() -> Tuple<Int, Int, Int> { (FIRST(1), SECOND(1), FIRST(1)) }
     "#,
     );
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -15936,8 +16370,8 @@ fn comptime_nested_closure_factories_keep_distinct_invocation_environments() {
 #[test]
 fn restored_closure_environment_neither_reads_nor_overwrites_colliding_caller_binding() {
     use nir::program::ExprKind as K;
-    let package = compile(
-        "const CALLBACK = do { let flag = true; || flag }; comptime fn run(flag: true'type) -> (true'type, true'type) { (CALLBACK(), flag) }",
+    let package = execution_support::compile_with_tuple(
+        "const CALLBACK = do { let flag = true; || flag }; comptime fn run(flag: true'type) -> Tuple<true'type, true'type> { (CALLBACK(), flag) }",
     );
     let function = package.functions.iter().find(|f| f.name == "run").unwrap();
     let K::Block {
@@ -16015,7 +16449,7 @@ fn restored_closure_environment_neither_reads_nor_overwrites_colliding_caller_bi
 
 #[test]
 fn explicit_closure_environment_types_execute_runtime_and_comptime_callbacks() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/closure-environment-types.fl"
     ));
     assert_eq!(
@@ -16040,15 +16474,15 @@ fn explicit_closure_environment_types_execute_runtime_and_comptime_callbacks() {
 
 #[test]
 fn explicit_nested_environments_preserve_each_callback_value() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         typealias Bool = true'type;
         typealias Reader = %{flag: Bool} comptime fn() -> Bool;
-        typealias Both = %{left: Reader, right: Reader} comptime fn() -> (Bool, Bool);
+        typealias Both = %{left: Reader, right: Reader} comptime fn() -> Tuple<Bool, Bool>;
         comptime fn make(flag: Bool) -> Reader { || flag }
         comptime fn combine(left: Reader, right: Reader) -> Both { || (left(), right()) }
         const CALLBACK = combine(make(true), make(false));
-        comptime fn run() -> (Bool, Bool) { CALLBACK() }
+        comptime fn run() -> Tuple<Bool, Bool> { CALLBACK() }
     "#,
     );
     assert_eq!(
@@ -16062,7 +16496,7 @@ fn explicit_nested_environments_preserve_each_callback_value() {
 
 #[test]
 fn generic_type_aliases_preserve_underlying_types_callbacks_and_comptime_computation() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/generic-type-aliases.fl"
     ));
     assert_eq!(
@@ -16097,20 +16531,20 @@ fn generic_type_aliases_preserve_underlying_types_callbacks_and_comptime_computa
 
 #[test]
 fn generic_alias_instances_do_not_share_the_first_argument_or_caller_scope() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         typealias Type = .Type'builtin;
         typealias Bool = true'type;
         typealias T = 'a''type;
         typealias First<T, U> = T;
         typealias Second<T, U> = U;
-        typealias Pair<T> = (First<T, Bool>, Second<Bool, T>);
+        typealias Pair<T> = Tuple<First<T, Bool>, Second<Bool, T>>;
         comptime fn IdentityType(value: Type) -> Type { value }
         typealias Computed<T: Type> = IdentityType(T);
         fn first(value: Computed<Bool>) -> Bool { value }
         fn second(value: Computed<T>) -> T { value }
-        fn third(value: Pair<Bool>) -> (Bool, Bool) { value }
-        fn run() -> (Bool, T, (Bool, Bool)) { (first(true), second('z'), third((false, true))) }
+        fn third(value: Pair<Bool>) -> Tuple<Bool, Bool> { value }
+        fn run() -> Tuple<Bool, T, Tuple<Bool, Bool>> { (first(true), second('z'), third((false, true))) }
     "#,
     );
     assert_eq!(
@@ -16128,7 +16562,7 @@ fn generic_alias_instances_do_not_share_the_first_argument_or_caller_scope() {
 
 #[test]
 fn nested_computed_aliases_remain_residual_until_arguments_are_available() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         typealias Type = .Type'builtin;
         typealias Bool = true'type;
@@ -16139,7 +16573,7 @@ fn nested_computed_aliases_remain_residual_until_arguments_are_available() {
         typealias Twice<T> = IdentityType(Nested<T>);
         fn first(value: Twice<Bool>) -> Bool { value }
         fn second(value: Twice<Char>) -> Char { value }
-        fn run() -> (Bool, Char) { (first(true), second('z')) }
+        fn run() -> Tuple<Bool, Char> { (first(true), second('z')) }
     "#,
     );
     assert_eq!(
@@ -16153,20 +16587,20 @@ fn nested_computed_aliases_remain_residual_until_arguments_are_available() {
 
 #[test]
 fn computed_tuple_types_support_alias_fields_and_comptime_function_inputs() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         typealias Type = .Type'builtin;
         typealias Bool = true'type;
         typealias Char = 'a''type;
         comptime fn IdentityType(value: Type) -> Type { value }
-        comptime fn PairType(left: Type, right: Type) -> Type { (left, (right, left)) }
+        comptime fn PairType(left: Type, right: Type) -> Type { Tuple<left, Tuple<right, left>> }
         typealias Computed<T> = IdentityType(T);
-        typealias Pair<T> = (Computed<T>, Computed<T>);
-        typealias Nested<T> = (Pair<T>, Computed<T>);
+        typealias Pair<T> = Tuple<Computed<T>, Computed<T>>;
+        typealias Nested<T> = Tuple<Pair<T>, Computed<T>>;
         typealias FromFunction<T> = PairType(T, Char);
-        fn first(value: Nested<Bool>) -> ((Bool, Bool), Bool) { value }
-        fn second(value: FromFunction<Bool>) -> (Bool, (Char, Bool)) { value }
-        fn run() -> (((Bool, Bool), Bool), (Bool, (Char, Bool))) {
+        fn first(value: Nested<Bool>) -> Tuple<Tuple<Bool, Bool>, Bool> { value }
+        fn second(value: FromFunction<Bool>) -> Tuple<Bool, Tuple<Char, Bool>> { value }
+        fn run() -> Tuple<Tuple<Tuple<Bool, Bool>, Bool>, Tuple<Bool, Tuple<Char, Bool>>> {
             (first(((true, false), true)), second((false, ('z', true))))
         }
     "#,
@@ -16187,7 +16621,22 @@ fn computed_tuple_types_support_alias_fields_and_comptime_function_inputs() {
             ])
         ])
     );
-    assert!(package.to_string().contains("tuple-type-value"));
+    let function = package
+        .functions
+        .iter()
+        .find(|f| f.name == "first")
+        .unwrap();
+    let nir::Term::Function { parameters, result } = &function.signature else {
+        panic!("function signature")
+    };
+    assert_eq!(&parameters[0].ty, result.as_ref());
+    assert!(
+        matches!(result.as_ref(), nir::Term::NormalForm { head, .. } if *head == id(&package, "Tuple"))
+    );
+    let fields = nir::normal_forms::tuple_fields(Some(&package), result).unwrap();
+    assert!(
+        matches!(&fields[0], nir::Term::NormalForm { head, .. } if *head == id(&package, "Tuple"))
+    );
 }
 
 #[test]
@@ -16254,7 +16703,7 @@ fn computed_environments_preserve_captures_phase_and_empty_elimination() {
 
 #[test]
 fn nominal_type_factories_preserve_declarations_and_actual_arguments() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/computed-nominal-types.fl"
     ));
     assert_eq!(
@@ -16288,7 +16737,7 @@ fn nominal_type_factories_preserve_declarations_and_actual_arguments() {
 
 #[test]
 fn alias_type_value_arguments_are_bound_once_even_when_repeated_or_unused() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/alias-type-values.fl"
     ));
     let mut interpreter = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -16296,7 +16745,7 @@ fn alias_type_value_arguments_are_bound_once_even_when_repeated_or_unused() {
     for (name, expected) in [
         (
             "PairType",
-            nir::Term::Tuple(vec![bool_ty.clone(), bool_ty.clone()]),
+            tuple_type(&package, vec![bool_ty.clone(), bool_ty.clone()]),
         ),
         ("PointerType", nir::Term::Pointer(Box::new(bool_ty.clone()))),
     ] {
@@ -16309,7 +16758,7 @@ fn alias_type_value_arguments_are_bound_once_even_when_repeated_or_unused() {
     }
     assert_eq!(
         interpreter.invoke(id(&package, "Twice"), vec![]).unwrap(),
-        Value::Type(nir::Term::Tuple(vec![bool_ty.clone(), bool_ty.clone()]))
+        Value::Type(tuple_type(&package, vec![bool_ty.clone(), bool_ty.clone()]))
     );
     assert_eq!(
         interpreter.invoke(id(&package, "Ignored"), vec![]).unwrap(),
@@ -16342,7 +16791,7 @@ fn alias_type_value_arguments_are_bound_once_even_when_repeated_or_unused() {
                 vec![Value::Type(bool_ty.clone())]
             )
             .unwrap(),
-        Value::Type(nir::Term::Tuple(vec![boxed.clone(), boxed]))
+        Value::Type(tuple_type(&package, vec![boxed.clone(), boxed]))
     );
     let signature = nir::Term::Function {
         parameters: vec![],
@@ -16364,11 +16813,11 @@ fn alias_type_value_arguments_are_bound_once_even_when_repeated_or_unused() {
 
 #[test]
 fn alias_argument_order_failures_and_invocation_isolation_are_preserved() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         typealias Type = .Type'builtin;
         typealias First<A, B> = A;
-        typealias Pair<T> = (T, T);
+        typealias Pair<T> = Tuple<T, T>;
         comptime fn LeftType() -> Type { true'type }
         comptime fn RightType() -> Type { 'z''type }
         comptime fn BadType() -> Type { .BitVec'builtin<-1> }
@@ -16422,7 +16871,11 @@ fn alias_argument_order_failures_and_invocation_isolation_are_preserved() {
             interpreter
                 .invoke(id(&package, "Repeated"), vec![Value::Type(ty.clone())])
                 .unwrap(),
-            Value::Type(nir::Term::Tuple(vec![ty.clone(), ty]))
+            Value::Type(nir::Term::NormalForm {
+                head: id(&package, "Tuple"),
+                sort: nir::Sort::Type,
+                arguments: vec![nir::Term::TypeListValue(vec![ty.clone(), ty])]
+            })
         );
     }
 }
@@ -16443,7 +16896,7 @@ fn static_and_computed_result_replacement_keep_a_real_comptime_closure_callable(
 
 #[test]
 fn comptime_type_equality_drives_factories_without_unfolding_normal_heads() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/comptime-type-equality.fl"
     ));
     assert_eq!(
@@ -16473,7 +16926,7 @@ fn comptime_type_equality_drives_factories_without_unfolding_normal_heads() {
 
 #[test]
 fn comptime_type_reference_patterns_select_factories_without_inverting_heads() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/comptime-type-patterns.fl"
     ));
     assert_eq!(
@@ -16550,7 +17003,7 @@ fn computed_type_patterns_evaluate_only_attempted_candidates_in_order() {
 
 #[test]
 fn tuple_type_patterns_bind_nested_elements_and_preserve_opaque_heads() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/tuple-type-patterns.fl"
     ));
     assert_eq!(
@@ -16575,7 +17028,7 @@ fn tuple_type_patterns_bind_nested_elements_and_preserve_opaque_heads() {
 
 #[test]
 fn normal_form_patterns_observe_retained_heads_types_and_value_arguments() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/normal-form-patterns.fl"
     ));
     assert_eq!(
@@ -16630,7 +17083,7 @@ fn normal_form_patterns_observe_retained_heads_types_and_value_arguments() {
 
 #[test]
 fn computed_value_patterns_preserve_candidate_order_and_rollback() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/computed-value-patterns.fl"
     ));
     let integer = |value| Value::Integer(comptime_runtime::Integer::from_u128(value));
@@ -16712,7 +17165,7 @@ fn computed_value_pattern_failure_stops_before_later_candidates() {
 
 #[test]
 fn range_patterns_preserve_bounds_and_evaluate_endpoints_once() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/range-patterns.fl"
     ));
     let integer = |value| Value::Integer(comptime_runtime::Integer::from_u128(value));
@@ -16800,7 +17253,7 @@ fn range_patterns_preserve_bounds_and_evaluate_endpoints_once() {
 
 #[test]
 fn interval_coverage_accepts_complete_unions_and_preserves_product_correlations() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/interval-coverage.fl"
     ));
     let integer = |value| Value::Integer(comptime_runtime::Integer::from_u128(value));
@@ -16842,7 +17295,7 @@ fn interval_coverage_accepts_complete_unions_and_preserves_product_correlations(
 
 #[test]
 fn scalar_ordering_preserves_width_extrema_and_operand_order() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/scalar-ordering.fl"
     ));
     assert_eq!(
@@ -16928,7 +17381,7 @@ fn scalar_ordering_preserves_width_extrema_and_operand_order() {
 
 #[test]
 fn scalar_guard_coverage_proves_complements_without_evaluating_code() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/guard-coverage.fl"
     ));
     assert_eq!(
@@ -16968,7 +17421,7 @@ fn scalar_guard_coverage_proves_complements_without_evaluating_code() {
 
 #[test]
 fn comptime_methods_preserve_interface_phase_through_defaults_and_dispatch() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/comptime-methods.fl"
     ));
     assert_eq!(
@@ -17021,7 +17474,7 @@ fn comptime_methods_preserve_interface_phase_through_defaults_and_dispatch() {
 
 #[test]
 fn required_comptime_invocation_collects_method_contracts_and_dispatch() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/required-comptime-methods.fl"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -17072,7 +17525,7 @@ fn required_comptime_invocation_collects_method_contracts_and_dispatch() {
 #[test]
 fn declaration_types_can_invoke_methods_after_world_preparation() {
     let source = include_str!("../../../development/examples/declaration-method-types.fl");
-    let package = compile(source);
+    let package = compile_bound_tuple_fixture(source);
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
         interpreter.invoke(id(&package, "run"), vec![]).unwrap(),
@@ -17184,7 +17637,7 @@ fn parameter_default_queries_preserve_frames_and_independent_dependencies() {
 
 #[test]
 fn ieee_float_comparisons_preserve_unordered_values_zero_and_operand_order() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/float-comparisons.fl"
     ));
     let single: Vec<(u64, Option<i8>)> = vec![
@@ -17266,7 +17719,7 @@ fn ieee_float_comparisons_preserve_unordered_values_zero_and_operand_order() {
 
 #[test]
 fn prefix_precedence_keeps_boolean_arithmetic_and_postfix_semantics() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/prefix-precedence.fl"
     ));
     let mut interpreter = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -17309,7 +17762,7 @@ fn prefix_precedence_keeps_boolean_arithmetic_and_postfix_semantics() {
 
 #[test]
 fn float_arithmetic_preserves_precision_special_values_and_control_flow() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/float-arithmetic.fl"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -17458,7 +17911,7 @@ fn float_arithmetic_preserves_precision_special_values_and_control_flow() {
 
 #[test]
 fn float_arithmetic_rounds_halfway_results_and_underflow_to_even() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/float-arithmetic.fl"
     ));
     let mut interpreter = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -17510,7 +17963,7 @@ fn float_arithmetic_rounds_halfway_results_and_underflow_to_even() {
 
 #[test]
 fn numeric_peer_context_flows_through_computations_without_duplicating_effects() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/numeric-peer-inference.fl"
     ));
     let mut interpreter = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -17549,7 +18002,7 @@ fn numeric_peer_context_flows_through_computations_without_duplicating_effects()
 
 #[test]
 fn float_associated_constants_preserve_precision_aliases_and_generic_type_evidence() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/float-constants.fl"
     ));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -17601,7 +18054,7 @@ fn float_associated_constants_preserve_precision_aliases_and_generic_type_eviden
 
 #[test]
 fn program_assumes_checks_before_actions_and_recovers_after_rejection() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/program-assumes.fl"
     ));
     let function = package
@@ -17670,7 +18123,7 @@ fn program_assumes_checks_before_actions_and_recovers_after_rejection() {
 
 #[test]
 fn program_assumes_survives_specialization_closures_loops_and_required_invocation() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/program-assumes.fl"
     ));
     let mut interpreter = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -18222,7 +18675,7 @@ fn checked_machine_matches_keep_ordered_failure_paths_bindings_and_guard_effects
 
 #[test]
 fn checked_machine_tuples_preserve_element_snapshots_joins_captures_and_patterns() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/checked-machine-tuples.fl"
     ));
     let mut interpreter = Interpreter::new(
@@ -18300,7 +18753,8 @@ fn checked_machine_tuples_preserve_element_snapshots_joins_captures_and_patterns
         .iter()
         .find(|f| f.name == "branches")
         .unwrap();
-    let report = elaboration::verification::flow::analyze(
+    let report = elaboration::verification::flow::analyze_in_package(
+        &package,
         function,
         &mut elaboration::verification::Limits::default(),
     )
@@ -18311,7 +18765,7 @@ fn checked_machine_tuples_preserve_element_snapshots_joins_captures_and_patterns
 #[test]
 fn checked_machine_nominals_preserve_record_fields_variants_and_capture_identity() {
     let source = include_str!("../../../development/examples/checked-machine-nominals.fl");
-    let package = compile(source);
+    let package = execution_support::compile_with_tuple(source);
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     for (name, n) in [
         ("literal", 9),
@@ -18350,8 +18804,8 @@ fn checked_machine_nominals_preserve_record_fields_variants_and_capture_identity
             Value::UnsignedInteger(if value < 255 { value + 1 } else { 0 })
         );
     }
-    let wrapper = compile(&format!(
-        "{source} fn checks() -> (Byte,Byte,Byte,Byte,Byte) {{ (parameter(Pair {{ left: 100, right: 100 }}), generic(Box<Byte> {{ value: 254 }}), variant_parameter(Choice.none), variant_parameter(Choice.byte(254)), variant_parameter(Choice.pair(100,100))) }}"
+    let wrapper = execution_support::compile_with_tuple(&format!(
+        "{source} fn checks() -> Tuple<Byte, Byte, Byte, Byte, Byte> {{ (parameter(Pair {{ left: 100, right: 100 }}), generic(Box<Byte> {{ value: 254 }}), variant_parameter(Choice.none), variant_parameter(Choice.byte(254)), variant_parameter(Choice.pair(100,100))) }}"
     ));
     let mut interpreter = Interpreter::new(&wrapper, Budget::default()).unwrap();
     assert_eq!(
@@ -18381,7 +18835,7 @@ fn checked_machine_nominals_preserve_record_fields_variants_and_capture_identity
 #[test]
 fn checked_field_writes_update_only_the_target_path_after_evaluating_the_rhs() {
     let source = include_str!("../../../development/examples/checked-field-writes.fl");
-    let package = compile(source);
+    let package = compile_bound_tuple_fixture(source);
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     for (name, value) in [
         ("sibling", 105),
@@ -18409,8 +18863,8 @@ fn checked_field_writes_update_only_the_target_path_after_evaluating_the_rhs() {
             Value::UnsignedInteger(if flag { 105 } else { 205 })
         );
     }
-    let wrappers = compile(&format!(
-        "{source} fn inputs() -> (Byte,Byte,Byte,Byte) {{ (unknown_nested(Outer {{ inner: Pair {{ left: 255, right: 255 }}, tail: 255 }}),unknown(Pair {{ left: 255, right: 255 }}),generic(Box<Byte> {{ value: 255 }}),unrelated(Pair {{ left: 255, right: 255 }},254)) }}"
+    let wrappers = compile_bound_tuple_fixture(&format!(
+        "{source} fn inputs() -> Tuple<Byte, Byte, Byte, Byte> {{ (unknown_nested(Outer {{ inner: Pair {{ left: 255, right: 255 }}, tail: 255 }}),unknown(Pair {{ left: 255, right: 255 }}),generic(Box<Byte> {{ value: 255 }}),unrelated(Pair {{ left: 255, right: 255 }},254)) }}"
     ));
     let mut interpreter = Interpreter::new(&wrappers, Budget::default()).unwrap();
     assert_eq!(
@@ -18439,14 +18893,14 @@ fn checked_field_writes_update_only_the_target_path_after_evaluating_the_rhs() {
 #[test]
 fn checked_field_predicates_refine_paths_and_snapshot_copies() {
     let source = include_str!("../../../development/examples/checked-field-predicates.fl");
-    let package = compile(&format!("{source}
-        fn inputs(value: Byte, flag: Bool) -> (Byte,Byte,Byte,Byte,Byte,Byte,Byte,Byte,Byte) {{
+    let package = execution_support::compile_with_tuple(&format!("{source}
+        fn inputs(value: Byte, flag: Bool) -> Tuple<Byte, Byte, Byte, Byte, Byte, Byte, Byte, Byte, Byte> {{
             let pair = Pair {{ left: value, right: 255 }};
             let outer = Outer {{ inner: pair, tail: 255 }};
             (direct(pair), nested(outer), generic(Box<Byte> {{ value: value }}), sibling(pair,flag), nested_sibling(outer), copies(pair), capture(pair), match_scope(pair,flag), nested_capture(outer))
         }}
-        fn boolean_inputs() -> (Byte,Byte,Byte) {{ (conjunction(Pair {{ left: 99, right: 99 }}), disjunction(Pair {{ left: 99, right: 255 }}), block_condition(Pair {{ left: 99, right: 99 }})) }}
-        fn branch_inputs(flag: Bool) -> (Byte,Byte) {{ (both_branches(Pair {{ left: 99, right: 255 }}, flag), both_replaced(Pair {{ left: 255, right: 255 }}, flag)) }}
+        fn boolean_inputs() -> Tuple<Byte, Byte, Byte> {{ (conjunction(Pair {{ left: 99, right: 99 }}), disjunction(Pair {{ left: 99, right: 255 }}), block_condition(Pair {{ left: 99, right: 99 }})) }}
+        fn branch_inputs(flag: Bool) -> Tuple<Byte, Byte> {{ (both_branches(Pair {{ left: 99, right: 255 }}, flag), both_replaced(Pair {{ left: 255, right: 255 }}, flag)) }}
         fn guarded_input(value: Byte) -> Byte {{ guarded(Pair {{ left: value, right: 255 }}) }}"));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     for value in 0..255 {
@@ -18771,9 +19225,9 @@ fn checked_transitive_arithmetic_joins_alternative_proofs_and_rounds_coefficient
 #[test]
 fn checked_relational_copies_freeze_values_and_transfer_capture_evidence() {
     let source = include_str!("../../../development/examples/checked-relational-copies.fl");
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{source}
-        fn records(start: Byte,end: Byte) -> (Byte,Byte,Byte,Byte,Byte,Byte,Byte,Byte,Byte,Byte,Byte) {{
+        fn records(start: Byte,end: Byte) -> Tuple<Byte, Byte, Byte, Byte, Byte, Byte, Byte, Byte, Byte, Byte, Byte> {{
             let pair=Pair {{ start:start,end:end }};
             let outer=Outer {{ pair:pair,tag:255 }};
             (record_copy(pair),nested_copy(outer),record_capture(pair),nested_capture(outer),field_write(pair),pattern_copy(pair),remapped_copy(pair,true),remapped_copy(pair,false),generic_copy(Span<Byte> {{ start:start,end:end }}),branch_copy(pair,true),branch_copy(pair,false))
@@ -18984,7 +19438,7 @@ fn checked_relational_capture_initializers_preserve_evaluation_versions() {
 #[test]
 fn checked_aggregate_relations_freeze_constructor_elements_and_variant_payloads() {
     let source = include_str!("../../../development/examples/checked-aggregate-relations.fl");
-    let package = compile(&format!(
+    let package = compile_bound_tuple_fixture(&format!(
         "{source} fn after_call(a: Byte, b: Byte) -> Byte {{ tuple_after_call((a,b)) }}"
     ));
     for start in [0, 1, 100, 127, 254, 255] {
@@ -19047,7 +19501,7 @@ fn checked_aggregate_relations_freeze_constructor_elements_and_variant_payloads(
 
 #[test]
 fn checked_aggregate_joins_preserve_common_result_relations_and_arm_scopes() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/checked-aggregate-joins.fl"
     ));
     for a in 0u128..=255 {
@@ -19364,10 +19818,17 @@ fn proven_check_elision_preserves_values_failures_and_condition_evaluation() {
 fn proven_check_elision_detaches_shared_closure_bodies_before_using_capture_facts() {
     use elaboration::verification::{self as v, optimization};
     use nir::program::ExprKind as K;
-    let mut package = compile(
-        "typealias Byte=.u8'builtin; fn shared(a:Byte,b:Byte) -> (Byte,Byte) { var value=a; assumes value <= 100; let known=||{ assumes value <= 100; value }; value=b; let unknown=||{ assumes value <= 100; value }; (known(),unknown()) }",
+    let mut package = execution_support::compile_with_tuple(
+        "typealias Byte=.u8'builtin; fn shared(a:Byte,b:Byte) -> Tuple<Byte, Byte> { var value=a; assumes value <= 100; let known=||{ assumes value <= 100; value }; value=b; let unknown=||{ assumes value <= 100; value }; (known(),unknown()) }",
     );
-    let K::Block { statements, .. } = &mut package.functions[0].body.kind else {
+    let K::Block { statements, .. } = &mut package
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "shared")
+        .unwrap()
+        .body
+        .kind
+    else {
         panic!("body")
     };
     let mut closures = statements
@@ -20165,8 +20626,8 @@ fn expired_pointer_representation_can_return_but_cannot_be_read() {
 
 #[test]
 fn pointer_assignment_evaluates_target_before_rhs_once() {
-    let package = compile(
-        "typealias Flag = true'type; fn select(flag: *Flag, first: *Flag, second: *Flag) -> *Flag { if flag.* { first } else { second } } fn rhs(flag: *Flag) -> Flag { flag.* = false; true } fn run() -> (Flag, Flag) { let flag = true; let first = false; let second = false; select(flag.ref, first.ref, second.ref).* = rhs(flag.ref); (first, second) }",
+    let package = execution_support::compile_with_tuple(
+        "typealias Flag = true'type; fn select(flag: *Flag, first: *Flag, second: *Flag) -> *Flag { if flag.* { first } else { second } } fn rhs(flag: *Flag) -> Flag { flag.* = false; true } fn run() -> Tuple<Flag, Flag> { let flag = true; let first = false; let second = false; select(flag.ref, first.ref, second.ref).* = rhs(flag.ref); (first, second) }",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -20751,8 +21212,8 @@ fn bitvec_memory_analysis_agrees_with_eager_calls_and_pointer_updates() {
 
 #[test]
 fn bit_writeback_helper_summary_agrees_with_private_local_storage_execution() {
-    let package = compile(
-        "typealias Word=.u16'builtin; fn edit(p:*Word,q:*Word)->Word {var word=p.*; word'bitvec[4..12] = (q.*)'bitvec[0..8]; word} fn run()->(Word,Word) {let first:Word=4660; let second:Word=171; let changed=edit(first.ref,second.ref); (changed,first)}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Word=.u16'builtin; fn edit(p:*Word,q:*Word)->Word {var word=p.*; word'bitvec[4..12] = (q.*)'bitvec[0..8]; word} fn run()->Tuple<Word, Word> {let first:Word=4660; let second:Word=171; let changed=edit(first.ref,second.ref); (changed,first)}",
     );
     let run = package.functions.iter().find(|f| f.name == "run").unwrap();
     elaboration::verification::moves::analyze_in_package(
@@ -20937,7 +21398,7 @@ fn mutable_capture_cells_persist_and_each_construction_is_independent() {
 
 #[test]
 fn comptime_mutable_capture_snapshots_preserve_current_values_and_internal_sharing() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/comptime-stateful-closures.fl"
     ));
     let integer = |value| Value::Integer(comptime_runtime::Integer::from_u128(value));
@@ -21617,7 +22078,7 @@ fn local_pointer_origins_follow_copies_projections_and_rebinding() {
         "fn run()->.u8'builtin {let first:.u8'builtin=0;let second:.u8'builtin=7;var p=first.ref;p=second.ref;p.* + 1}",
         "fn run()->.u8'builtin {let n:.u8'builtin=7;let p=n.ref;let pp=p.ref;let q=pp.*;q.* + 1}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
             vm.invoke(id(&package, "run"), vec![]).unwrap(),
@@ -21633,8 +22094,8 @@ fn local_pointer_origins_follow_copies_projections_and_rebinding() {
         .unwrap();
         println!("POINTER_ORIGIN={report}");
     }
-    let package = compile(
-        "fn run()->(.u8'builtin,.u8'builtin,.u8'builtin) {let first:.u8'builtin=0;let second:.u8'builtin=7;var p=first.ref;p.* = do {p=second.ref;1};(first,second,p.*)}",
+    let package = execution_support::compile_with_tuple(
+        "fn run()->Tuple<.u8'builtin, .u8'builtin, .u8'builtin> {let first:.u8'builtin=0;let second:.u8'builtin=7;var p=first.ref;p.* = do {p=second.ref;1};(first,second,p.*)}",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -21763,8 +22224,8 @@ fn returned_pointer_writes_cannot_preserve_old_caller_values() {
 #[test]
 fn pointer_target_sets_merge_reads_and_weakly_update_each_possible_location() {
     for flag in [false, true] {
-        let package = compile(&format!(
-            "fn choose(flag:bool)->(.u8'builtin,.u8'builtin) {{let first:.u8'builtin=0;let second:.u8'builtin=7;let p=if flag {{first.ref}} else {{second.ref}};p.* = 1;(first + 1,second + 1)}} fn run()->(.u8'builtin,.u8'builtin) {{choose({flag})}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn choose(flag:bool)->Tuple<.u8'builtin, .u8'builtin> {{let first:.u8'builtin=0;let second:.u8'builtin=7;let p=if flag {{first.ref}} else {{second.ref}};p.* = 1;(first + 1,second + 1)}} fn run()->Tuple<.u8'builtin, .u8'builtin> {{choose({flag})}}"
         ));
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         let expected = if flag { (2, 8) } else { (1, 2) };
@@ -21779,7 +22240,7 @@ fn pointer_target_sets_merge_reads_and_weakly_update_each_possible_location() {
             "let first:.u8'builtin=7;let second:.u8'builtin=9;let p=if flag {first.ref} else {second.ref};p.* + 1",
             "let first:.u8'builtin=7;let second:.u8'builtin=9;select(flag,first.ref,second.ref).* + 1",
         ] {
-            let package = compile(&format!(
+            let package = execution_support::compile_with_tuple(&format!(
                 "fn select(flag:bool,p:*.u8'builtin,q:*.u8'builtin)->*.u8'builtin {{if flag {{p}} else {{q}}}} fn choose(flag:bool)->.u8'builtin {{{body}}} fn run()->.u8'builtin {{choose({flag})}}"
             ));
             let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
@@ -21789,7 +22250,7 @@ fn pointer_target_sets_merge_reads_and_weakly_update_each_possible_location() {
             );
         }
     }
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "fn choose(flag:bool)->.u8'builtin {let first:.u8'builtin=7;let second:.u8'builtin=9;let p=first.ref;let q=first.ref;let slot=if flag {p.ref} else {q.ref};slot.* = second.ref;p.* + q.*} fn run()->.u8'builtin {choose(false)}",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
@@ -21948,8 +22409,8 @@ fn loop_pointer_expression_effects_cannot_hide_rebinding() {
 #[test]
 fn variadic_calls_collect_heterogeneous_values_and_accept_whole_packages() {
     for input in ["take(true, 'x')", "take(.items = (true, 'x'))"] {
-        let package = compile(&format!(
-            "fn take(...items:(bool,'x''type))->(bool,'x''type) {{items}} fn run()->(bool,'x''type) {{{input}}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn take(...items:Tuple<bool,'x''type>)->Tuple<bool, 'x''type> {{items}} fn run()->Tuple<bool, 'x''type> {{{input}}}"
         ));
         let expected = Value::Tuple(vec![Value::Bool(true), Value::Char('x')]);
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
@@ -21966,32 +22427,33 @@ fn variadic_generic_calls_infer_packages_from_inputs_and_result_context() {
     for input in [
         "keep(true, 'x')",
         "keep(.items = (true, 'x'))",
-        "keep<(bool,'x''type)>(true, 'x')",
+        "keep<Tuple<bool,'x''type>>(true, 'x')",
     ] {
-        let package = compile(&format!(
-            "fn keep(...items:T)->T where T {{items}} fn run()->(bool,'x''type) {{{input}}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn keep(...items:T)->T where T {{items}} fn run()->Tuple<bool, 'x''type> {{{input}}}"
         ));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Char('x')])
         );
     }
-    let package = compile(
-        "fn keep(...items:T)->T where T {items} fn run()->(.u8'builtin,bool) {let number:.u8'builtin=7;let result=keep(number,true);result}",
+    let package = execution_support::compile_with_tuple(
+        "fn keep(...items:T)->T where T {items} fn run()->Tuple<.u8'builtin, bool> {let number:.u8'builtin=7;let result=keep(number,true);result}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::UnsignedInteger(7), Value::Bool(true)])
     );
-    let package = compile(
-        "fn keep(...items:T)->T where T {items} fn run()->(.u8'builtin,.u16'builtin) {keep(7,9)}",
+    let package = execution_support::compile_with_tuple(
+        "fn keep(...items:T)->T where T {items} fn run()->Tuple<.u8'builtin, .u16'builtin> {keep(7,9)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::UnsignedInteger(7), Value::UnsignedInteger(9)])
     );
-    let package =
-        compile("fn keep(...items:T)->T where T {items} fn run()->bool {let empty=keep();true}");
+    let package = execution_support::compile_with_tuple(
+        "fn keep(...items:T)->T where T {items} fn run()->bool {let empty=keep();true}",
+    );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -22004,10 +22466,10 @@ fn variadic_preparation_preserves_interleaved_input_order_and_single_evaluation(
         let declaration = if generic {
             "fn take(...items:T,.flag:bool=false)->T where T {items}"
         } else {
-            "fn take(...items:(bool,'x''type),.flag:bool=false)->(bool,'x''type) {items}"
+            "fn take(...items:Tuple<bool,'x''type>,.flag:bool=false)->Tuple<bool, 'x''type> {items}"
         };
-        let package = compile(&format!(
-            "fn first()->bool {{true}} fn middle()->bool {{false}} fn last()->'x''type {{'x'}} {declaration} fn run()->(bool,'x''type) {{take(first(), .flag=middle(), last())}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn first()->bool {{true}} fn middle()->bool {{false}} fn last()->'x''type {{'x'}} {declaration} fn run()->Tuple<bool, 'x''type> {{take(first(), .flag=middle(), last())}}"
         ));
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
@@ -22032,8 +22494,8 @@ fn variadic_defaults_observe_complete_prepared_package() {
         "take(.items=(true,'x'))",
         "take(true,.copy=(false,'y'),'x')",
     ] {
-        let package = compile(&format!(
-            "fn take(...items:(bool,'x''type),.copy:(bool,'x''type)=items)->(bool,'x''type) {{copy}} fn run()->(bool,'x''type) {{{input}}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn take(...items:Tuple<bool,'x''type>,.copy:Tuple<bool,'x''type> =items)->Tuple<bool, 'x''type> {{copy}} fn run()->Tuple<bool, 'x''type> {{{input}}}"
         ));
         let expected = if input.contains(".copy") {
             (false, 'y')
@@ -22049,8 +22511,8 @@ fn variadic_defaults_observe_complete_prepared_package() {
 
 #[test]
 fn variadic_routes_preserve_anchored_inputs_on_both_sides() {
-    let package = compile(
-        "fn take(first:bool,...items:(bool,'x''type),last:'x''type)->(bool,'x''type,bool,'x''type) {let (a,b)=items;(first,last,a,b)} fn run()->(bool,'x''type,bool,'x''type) {take(false,true,'x','z')}",
+    let package = execution_support::compile_with_tuple(
+        "fn take(first:bool,...items:Tuple<bool,'x''type>,last:'x''type)->Tuple<bool, 'x''type, bool, 'x''type> {let (a,b)=items;(first,last,a,b)} fn run()->Tuple<bool, 'x''type, bool, 'x''type> {take(false,true,'x','z')}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22067,13 +22529,13 @@ fn variadic_routes_preserve_anchored_inputs_on_both_sides() {
 fn variadic_methods_preserve_receiver_order_for_inherent_and_trait_calls() {
     for use_trait in [false, true] {
         let declarations = if use_trait {
-            "trait Take {fn take(self,...items:(bool,'x''type),.flag:bool=false)->(bool,'x''type);} impl Take for Holder {fn take(self,...items:(bool,'x''type),.flag:bool=false)->(bool,'x''type) {items}}"
+            "trait Take {fn take(self,...items:Tuple<bool,'x''type>,.flag:bool=false)->Tuple<bool, 'x''type>;} impl Take for Holder {fn take(self,...items:Tuple<bool,'x''type>,.flag:bool=false)->Tuple<bool, 'x''type> {items}}"
         } else {
-            "impl Holder {fn take(self,...items:(bool,'x''type),.flag:bool=false)->(bool,'x''type) {items}}"
+            "impl Holder {fn take(self,...items:Tuple<bool,'x''type>,.flag:bool=false)->Tuple<bool, 'x''type> {items}}"
         };
         let projection = if use_trait { ".as(Take)" } else { "" };
-        let package = compile(&format!(
-            "struct Holder {{}} {declarations} fn make()->Holder {{Holder {{}}}} fn first()->bool {{true}} fn middle()->bool {{false}} fn last()->'x''type {{'x'}} fn run()->(bool,'x''type) {{make(){projection}.take(first(),.flag=middle(),last())}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "struct Holder {{}} {declarations} fn make()->Holder {{Holder {{}}}} fn first()->bool {{true}} fn middle()->bool {{false}} fn last()->'x''type {{'x'}} fn run()->Tuple<bool, 'x''type> {{make(){projection}.take(first(),.flag=middle(),last())}}"
         ));
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
@@ -22093,8 +22555,8 @@ fn variadic_methods_preserve_receiver_order_for_inherent_and_trait_calls() {
 
 #[test]
 fn variadic_comptime_type_construction_keeps_collection_as_a_value_tuple() {
-    let package = compile(
-        "typealias Type=.Type'builtin; comptime fn Pair(...items:(Type,Type))->Type {let (first,second)=items;(first,second)} typealias Result=Pair(bool,'x''type); fn run()->Result {(true,'x')}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Type=.Type'builtin; comptime fn Pair(...items:Tuple<Type, Type>)->Type {let (first,second)=items;Tuple<first,second>} typealias Result=Pair(bool,'x''type); fn run()->Result {(true,'x')}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22108,8 +22570,8 @@ fn variadic_returned_pointers_keep_caller_storage_and_evaluation_snapshots() {
         "choose(pointer,.flag=do {pointer=second.ref;true},pointer)",
         "choose(.items=(first.ref,second.ref))",
     ] {
-        let package = compile(&format!(
-            "fn choose(...items:(*bool,*bool),.flag:bool=false)->*bool {{let (first,second)=items;first}} fn run()->bool {{let first=true;let second=false;var pointer=first.ref;let selected={input};selected.*}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn choose(...items:Tuple<*bool, *bool>,.flag:bool=false)->*bool {{let (first,second)=items;first}} fn run()->bool {{let first=true;let second=false;var pointer=first.ref;let selected={input};selected.*}}"
         ));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22126,15 +22588,15 @@ fn variadic_large_packages_preserve_field_count_order_and_nested_context() {
         .join(",");
     let types = vec!["bool"; 128].join(",");
     let expected = Value::Tuple((0..128).map(|i| Value::Bool(i % 3 == 0)).collect());
-    let package = compile(&format!(
-        "fn keep(...items:T)->T where T {{items}} fn run()->({types}) {{keep({fields})}}"
+    let package = execution_support::compile_with_tuple(&format!(
+        "fn keep(...items:T)->T where T {{items}} fn run()->Tuple<{types}> {{keep({fields})}}"
     ));
     assert_eq!(
         luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
         expected
     );
-    let package = compile(
-        "fn keep(...items:T)->T where T {items} fn run()->((bool,'x''type),bool) {keep(keep(true,'x'),false)}",
+    let package = execution_support::compile_with_tuple(
+        "fn keep(...items:T)->T where T {items} fn run()->Tuple<Tuple<bool, 'x''type>, bool> {keep(keep(true,'x'),false)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22148,8 +22610,8 @@ fn variadic_large_packages_preserve_field_count_order_and_nested_context() {
 #[test]
 fn variadic_preparation_ir_validates_its_binding_and_result_contract() {
     use nir::program::ExprKind as K;
-    let package = compile(
-        "fn take(...items:(bool,bool))->(bool,bool) {items} fn run()->(bool,bool) {take(true,false)}",
+    let package = execution_support::compile_with_tuple(
+        "fn take(...items:Tuple<bool, bool>)->Tuple<bool, bool> {items} fn run()->Tuple<bool, bool> {take(true,false)}",
     );
     nir::phases::validate(&package).unwrap();
     assert!(
@@ -22194,8 +22656,8 @@ fn variadic_preparation_ir_validates_its_binding_and_result_contract() {
 
 #[test]
 fn variadic_callable_elements_receive_context_and_whole_values_bypass_collection() {
-    let package = compile(
-        "fn apply(...items:(fn(bool)->bool,bool))->bool {let (callback,value)=items;callback(value)} fn run()->bool {apply(|value| not value,false)}",
+    let package = execution_support::compile_with_tuple(
+        "fn apply(...items:Tuple<fn(bool)->bool, bool>)->bool {let (callback,value)=items;callback(value)} fn run()->bool {apply(|value| not value,false)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22205,7 +22667,7 @@ fn variadic_callable_elements_receive_context_and_whole_values_bypass_collection
         "fn keep(...items:bool)->bool {items}",
         "fn keep(...items:T)->T where T {items}",
     ] {
-        let package = compile(&format!(
+        let package = execution_support::compile_with_tuple(&format!(
             "{declaration} fn run()->bool {{keep(.items=true)}}"
         ));
         assert_eq!(
@@ -22218,8 +22680,8 @@ fn variadic_callable_elements_receive_context_and_whole_values_bypass_collection
 #[test]
 fn variadic_collection_uses_proven_tuple_shapes_in_abstract_contexts() {
     for body in ["keep<T>(7,true)", "keep(7,true)", "(7,true)"] {
-        let package = compile(&format!(
-            "typealias Byte=.u8'builtin; fn keep(...items:T)->T where T {{items}} fn assemble()->T where T, requires T == (Byte,bool) {{{body}}} fn run()->(Byte,bool) {{assemble<(Byte,bool)>()}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "typealias Byte=.u8'builtin; fn keep(...items:T)->T where T {{items}} fn assemble()->T where T, requires T == Tuple<Byte,bool> {{{body}}} fn run()->Tuple<Byte, bool> {{assemble<Tuple<Byte, bool>>()}}"
         ));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22233,7 +22695,7 @@ fn variadic_collection_uses_proven_tuple_shapes_in_abstract_contexts() {
 fn tuple_spreads_supply_anchored_and_variadic_calls_once_in_source_order() {
     for (declaration, input) in [
         (
-            "fn take(a:bool,b:'x''type)->(bool,'x''type) {(a,b)}",
+            "fn take(a:bool,b:'x''type)->Tuple<bool, 'x''type> {(a,b)}",
             "take(...packet())",
         ),
         (
@@ -22241,7 +22703,7 @@ fn tuple_spreads_supply_anchored_and_variadic_calls_once_in_source_order() {
             "take(...packet())",
         ),
         (
-            "fn take(a:bool,b:'x''type)->(bool,'x''type) {(a,b)}",
+            "fn take(a:bool,b:'x''type)->Tuple<bool, 'x''type> {(a,b)}",
             "take(...(true,'x'))",
         ),
         (
@@ -22249,8 +22711,8 @@ fn tuple_spreads_supply_anchored_and_variadic_calls_once_in_source_order() {
             "take(...(true,'x'))",
         ),
     ] {
-        let package = compile(&format!(
-            "{declaration} fn packet()->(bool,'x''type) {{(true,'x')}} fn run()->(bool,'x''type) {{{input}}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "{declaration} fn packet()->Tuple<bool, 'x''type> {{(true,'x')}} fn run()->Tuple<bool, 'x''type> {{{input}}}"
         ));
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
@@ -22273,8 +22735,8 @@ fn tuple_spreads_supply_anchored_and_variadic_calls_once_in_source_order() {
 
 #[test]
 fn tuple_spreads_preserve_interleaving_with_named_inputs() {
-    let package = compile(
-        "fn first()->bool {true} fn packet()->(bool,'x''type) {(false,'x')} fn middle()->bool {false} fn last()->bool {true} fn take(head:bool,...items:(bool,'x''type,bool),.flag:bool=false)->(bool,'x''type,bool) {items} fn run()->(bool,'x''type,bool) {take(first(),...packet(),.flag=middle(),last())}",
+    let package = execution_support::compile_with_tuple(
+        "fn first()->bool {true} fn packet()->Tuple<bool, 'x''type> {(false,'x')} fn middle()->bool {false} fn last()->bool {true} fn take(head:bool,...items:Tuple<bool,'x''type,bool>,.flag:bool=false)->Tuple<bool, 'x''type, bool> {items} fn run()->Tuple<bool, 'x''type, bool> {take(first(),...packet(),.flag=middle(),last())}",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -22301,8 +22763,8 @@ fn tuple_spreads_preserve_interleaving_with_named_inputs() {
 
 #[test]
 fn tuple_spreads_evaluate_callee_before_packets_and_keep_empty_packet_effects() {
-    let package = compile(
-        "fn target(a:bool,b:'x''type)->bool {a} fn make()->fn(bool,'x''type)->bool {target} fn packet()->(bool,'x''type) {(true,'x')} fn empty(...items:T)->T where T {items} fn run()->bool {make()(...empty(),...packet(),...empty())}",
+    let package = execution_support::compile_with_tuple(
+        "fn target(a:bool,b:'x''type)->bool {a} fn make()->fn(bool,'x''type)->bool {target} fn packet()->Tuple<bool, 'x''type> {(true,'x')} fn empty(...items:T)->T where T {items} fn run()->bool {make()(...empty(),...packet(),...empty())}",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -22321,15 +22783,15 @@ fn tuple_spreads_evaluate_callee_before_packets_and_keep_empty_packet_effects() 
 
 #[test]
 fn tuple_spreads_preserve_method_receiver_and_nested_literal_contexts() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "struct Holder {} impl Holder {fn take(self,a:.u8'builtin,b:bool)->bool {b}} fn make()->Holder {Holder {}} fn run()->bool {make().take(...(7,true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
-    let package = compile(
-        "fn keep(...items:T)->T where T {items} fn packet()->(bool,'x''type) {(true,'x')} fn run()->(bool,'x''type) {keep(...keep(...packet()))}",
+    let package = execution_support::compile_with_tuple(
+        "fn keep(...items:T)->T where T {items} fn packet()->Tuple<bool, 'x''type> {(true,'x')} fn run()->Tuple<bool, 'x''type> {keep(...keep(...packet()))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22341,7 +22803,7 @@ fn tuple_spreads_preserve_method_receiver_and_nested_literal_contexts() {
 fn tuple_spreads_propagate_packet_context_from_fixed_and_generic_signatures() {
     for (declaration, input) in [
         (
-            "fn take(a:.u8'builtin,b:bool)->(.u8'builtin,bool) {(a,b)}",
+            "fn take(a:.u8'builtin,b:bool)->Tuple<.u8'builtin, bool> {(a,b)}",
             "take(...do {(7,true)})",
         ),
         (
@@ -22350,11 +22812,11 @@ fn tuple_spreads_propagate_packet_context_from_fixed_and_generic_signatures() {
         ),
         (
             "fn take(...items:T)->T where T {items}",
-            "take<(.u8'builtin,bool)>(...do {(7,true)})",
+            "take<Tuple<.u8'builtin, bool>>(...do {(7,true)})",
         ),
     ] {
-        let package = compile(&format!(
-            "{declaration} fn run()->(.u8'builtin,bool) {{{input}}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "{declaration} fn run()->Tuple<.u8'builtin, bool> {{{input}}}"
         ));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22384,8 +22846,8 @@ fn tuple_spreads_keep_pointer_origins_and_parameter_precondition_evidence() {
 
 #[test]
 fn tuple_spreads_work_in_comptime_type_invocations() {
-    let package = compile(
-        "typealias Type=.Type'builtin; comptime fn types()->(Type,Type) {(bool,'x''type)} comptime fn Swap(first:Type,second:Type)->Type {(second,first)} typealias Result=Swap(...types()); fn run()->Result {('x',true)}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Type=.Type'builtin; comptime fn types()->Tuple<Type, Type> {(bool,'x''type)} comptime fn Swap(first:Type,second:Type)->Type {Tuple<second,first>} typealias Result=Swap(...types()); fn run()->Result {('x',true)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22415,8 +22877,8 @@ fn tuple_spreads_preserve_divergence_before_callee_entry() {
 
 #[test]
 fn tuple_spreads_prepare_typed_method_packets_after_the_receiver() {
-    let package = compile(
-        "struct Holder {} impl Holder {fn take(self,a:.u8'builtin,b:bool)->bool {b}} fn make()->Holder {Holder {}} fn packet()->(.u8'builtin,bool) {(7,true)} fn run()->bool {make().take(...packet())}",
+    let package = execution_support::compile_with_tuple(
+        "struct Holder {} impl Holder {fn take(self,a:.u8'builtin,b:bool)->bool {b}} fn make()->Holder {Holder {}} fn packet()->Tuple<.u8'builtin, bool> {(7,true)} fn run()->bool {make().take(...packet())}",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -22433,8 +22895,8 @@ fn tuple_spreads_prepare_typed_method_packets_after_the_receiver() {
 #[test]
 fn tuple_spreads_validate_ir_unpackings_and_dump_their_preparation() {
     use nir::program::ExprKind as K;
-    let package = compile(
-        "fn packet()->(bool,bool) {(true,false)} fn take(a:bool,b:bool)->bool {a} fn run()->bool {take(...packet())}",
+    let package = execution_support::compile_with_tuple(
+        "fn packet()->Tuple<bool, bool> {(true,false)} fn take(a:bool,b:bool)->bool {a} fn run()->bool {take(...packet())}",
     );
     println!("SPREAD_NIR_DUMP={package}\nSPREAD_NIR_END");
     for duplicate in [false, true] {
@@ -22545,8 +23007,8 @@ fn tuple_spreads_use_closure_and_abstract_callable_contexts() {
 
 #[test]
 fn tuple_spreads_respect_trait_method_collection_and_optional_metadata() {
-    let package = compile(
-        "trait Take {fn take(self,...items:(.u8'builtin,bool),.enabled:bool=false)->bool;} struct Holder {} impl Take for Holder {fn take(self,...items:(.u8'builtin,bool),.enabled:bool=false)->bool {let (number,flag)=items;flag and enabled}} fn make()->Holder {Holder {}} fn run()->bool {make().as(Take).take(...do {(7,true)},.enabled=true)}",
+    let package = execution_support::compile_with_tuple(
+        "trait Take {fn take(self,...items:Tuple<.u8'builtin, bool>,.enabled:bool=false)->bool;} struct Holder {} impl Take for Holder {fn take(self,...items:Tuple<.u8'builtin, bool>,.enabled:bool=false)->bool {let (number,flag)=items;flag and enabled}} fn make()->Holder {Holder {}} fn run()->bool {make().as(Take).take(...do {(7,true)},.enabled=true)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22561,8 +23023,8 @@ fn tuple_spreads_infer_multiple_packet_contexts_without_defaulting_elements_earl
         "take(...first(),...do {(9,'x')})",
         "take(...do {(7,true)},...last())",
     ] {
-        let package = compile(&format!(
-            "fn take(a:.u8'builtin,b:bool,c:.u16'builtin,d:'x''type)->(.u8'builtin,.u16'builtin) {{(a,c)}} fn first()->(.u8'builtin,bool) {{(7,true)}} fn last()->(.u16'builtin,'x''type) {{(9,'x')}} fn run()->(.u8'builtin,.u16'builtin) {{{input}}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn take(a:.u8'builtin,b:bool,c:.u16'builtin,d:'x''type)->Tuple<.u8'builtin, .u16'builtin> {{(a,c)}} fn first()->Tuple<.u8'builtin, bool> {{(7,true)}} fn last()->Tuple<.u16'builtin, 'x''type> {{(9,'x')}} fn run()->Tuple<.u8'builtin, .u16'builtin> {{{input}}}"
         ));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22579,8 +23041,8 @@ fn tuple_spreads_partition_conditional_and_match_packets_without_running_produce
         "flag match {true => (7,true),false => (8,false)}",
     ] {
         for flag in [false, true] {
-            let package = compile(&format!(
-                "fn mark()->bool {{true}} fn take(a:.u8'builtin,b:bool,c:.u16'builtin,d:'x''type)->(.u8'builtin,.u16'builtin) {{(a,c)}} fn run()->(.u8'builtin,.u16'builtin) {{let flag={flag};take(...{branch},...do {{let seen=mark();(9,'x')}})}}"
+            let package = execution_support::compile_with_tuple(&format!(
+                "fn mark()->bool {{true}} fn take(a:.u8'builtin,b:bool,c:.u16'builtin,d:'x''type)->Tuple<.u8'builtin, .u16'builtin> {{(a,c)}} fn run()->Tuple<.u8'builtin, .u16'builtin> {{let flag={flag};take(...{branch},...do {{let seen=mark();(9,'x')}})}}"
             ));
             let expected = Value::Tuple(vec![
                 Value::UnsignedInteger(if flag { 7 } else { 8 }),
@@ -22599,8 +23061,8 @@ fn tuple_spreads_partition_conditional_and_match_packets_without_running_produce
 
 #[test]
 fn tuple_spreads_partition_generic_and_receiver_signatures_with_named_inputs() {
-    let package = compile(
-        "fn keep(...items:T,.enabled:bool=false)->T where T {items} fn run()->(.u8'builtin,bool,.u16'builtin,'x''type) {keep(...do {(7,true)},.enabled=true,...do {(9,'x')})}",
+    let package = execution_support::compile_with_tuple(
+        "fn keep(...items:T,.enabled:bool=false)->T where T {items} fn run()->Tuple<.u8'builtin, bool, .u16'builtin, 'x''type> {keep(...do {(7,true)},.enabled=true,...do {(9,'x')})}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22611,8 +23073,8 @@ fn tuple_spreads_partition_generic_and_receiver_signatures_with_named_inputs() {
             Value::Char('x')
         ])
     );
-    let package = compile(
-        "struct Holder {} impl Holder {fn take(self,a:.u8'builtin,b:bool,c:.u16'builtin,d:'x''type)->(.u8'builtin,.u16'builtin) {(a,c)}} fn run()->(.u8'builtin,.u16'builtin) {Holder {}.take(...do {(7,true)},...do {(9,'x')})}",
+    let package = execution_support::compile_with_tuple(
+        "struct Holder {} impl Holder {fn take(self,a:.u8'builtin,b:bool,c:.u16'builtin,d:'x''type)->Tuple<.u8'builtin, .u16'builtin> {(a,c)}} fn run()->Tuple<.u8'builtin, .u16'builtin> {Holder {}.take(...do {(7,true)},...do {(9,'x')})}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22622,8 +23084,8 @@ fn tuple_spreads_partition_generic_and_receiver_signatures_with_named_inputs() {
 
 #[test]
 fn tuple_spreads_solve_one_unknown_packet_from_known_neighbor_widths() {
-    let package = compile(
-        "fn keep(value:T)->T where T {value} fn take(a:.u8'builtin,b:bool,c:.u16'builtin,d:'x''type)->(.u8'builtin,.u16'builtin) {(a,c)} fn run()->(.u8'builtin,.u16'builtin) {let head:(.u8'builtin,bool)=(7,true);take(...keep(head),...do {(9,'x')})}",
+    let package = execution_support::compile_with_tuple(
+        "fn keep(value:T)->T where T {value} fn take(a:.u8'builtin,b:bool,c:.u16'builtin,d:'x''type)->Tuple<.u8'builtin, .u16'builtin> {(a,c)} fn run()->Tuple<.u8'builtin, .u16'builtin> {let head:Tuple<.u8'builtin, bool> =(7,true);take(...keep(head),...do {(9,'x')})}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22633,8 +23095,8 @@ fn tuple_spreads_solve_one_unknown_packet_from_known_neighbor_widths() {
 
 #[test]
 fn tuple_spreads_keep_producer_and_named_input_order_during_layout_inference() {
-    let package = compile(
-        "fn first()->(.u8'builtin,bool) {(7,true)} fn mark()->bool {true} fn last()->(.u16'builtin,'x''type) {(9,'x')} fn take(a:.u8'builtin,b:bool,c:.u16'builtin,d:'x''type,.enabled:bool=false)->bool {b and enabled} fn run()->bool {take(...first(),.enabled=mark(),...last())}",
+    let package = execution_support::compile_with_tuple(
+        "fn first()->Tuple<.u8'builtin, bool> {(7,true)} fn mark()->bool {true} fn last()->Tuple<.u16'builtin, 'x''type> {(9,'x')} fn take(a:.u8'builtin,b:bool,c:.u16'builtin,d:'x''type,.enabled:bool=false)->bool {b and enabled} fn run()->bool {take(...first(),.enabled=mark(),...last())}",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -22658,8 +23120,8 @@ fn constructor_spreads_contextualize_and_execute_tuple_payloads() {
         ".pair(...do {(7,true)},...do {(9,'x')})",
         "Choice.pair(...(7,true),9,'x')",
     ] {
-        let package = compile(&format!(
-            "enum Choice {{pair(.u8'builtin,bool,.u16'builtin,'x''type)}} fn make()->Choice {{{value}}} fn run()->(.u8'builtin,.u16'builtin) {{let .pair(a,b,c,d)=make();(a,c)}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "enum Choice {{pair(.u8'builtin,bool,.u16'builtin,'x''type)}} fn make()->Choice {{{value}}} fn run()->Tuple<.u8'builtin, .u16'builtin> {{let .pair(a,b,c,d)=make();(a,c)}}"
         ));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22667,7 +23129,7 @@ fn constructor_spreads_contextualize_and_execute_tuple_payloads() {
             "{value}"
         );
     }
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "enum Choice where T {pair(T,bool)} fn run()->.u8'builtin {let .pair(number,flag)=Choice<.u8'builtin>.pair(...do {(7,true)});number}",
     );
     assert_eq!(
@@ -22678,8 +23140,8 @@ fn constructor_spreads_contextualize_and_execute_tuple_payloads() {
 
 #[test]
 fn constructor_spreads_preserve_interleaving_and_empty_packet_effects() {
-    let package = compile(
-        "enum Choice {pair(bool,bool)} fn first()->bool {true} fn packet()->(bool,) {(false,)} fn empty(...items:T)->T where T {items} fn make()->Choice {Choice.pair(first(),...packet(),...empty())} fn run()->bool {let .pair(a,b)=make();a}",
+    let package = execution_support::compile_with_tuple(
+        "enum Choice {pair(bool,bool)} fn first()->bool {true} fn packet()->Tuple<bool> {(false,)} fn empty(...items:T)->T where T {items} fn make()->Choice {Choice.pair(first(),...packet(),...empty())} fn run()->bool {let .pair(a,b)=make();a}",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -22700,18 +23162,18 @@ fn constructor_spreads_preserve_interleaving_and_empty_packet_effects() {
 fn extended_calls_route_positional_inputs_through_function_protocols() {
     for source in [
         "fn take(a:.u8'builtin,b:bool)->.u8'builtin {a} fn run()->.u8'builtin {take {7,true}}",
-        "fn keep(...items:T)->T where T {items} fn run()->(.u8'builtin,bool) {keep {7,true}}",
-        "fn keep(...items:T)->T where T {items} fn run()->(.u8'builtin,bool) {keep<(.u8'builtin,bool)> {7,true}}",
+        "fn keep(...items:T)->T where T {items} fn run()->Tuple<.u8'builtin, bool> {keep {7,true}}",
+        "fn keep(...items:T)->T where T {items} fn run()->Tuple<.u8'builtin, bool> {keep<Tuple<.u8'builtin, bool>> {7,true}}",
         "fn take(a:bool,.enabled:bool=true)->bool {a and enabled} fn run()->bool {take {true}}",
         "fn take(a:bool)->bool {a} fn apply(callback:fn(bool)->bool)->bool {callback {true}} fn run()->bool {apply(take)}",
         "fn run()->bool {let callback=|flag:bool| flag;callback {true}}",
         "struct Holder {} impl Holder {fn take(self,a:bool)->bool {a}} fn run()->bool {Holder {}.take {true}}",
         "struct Holder {} impl Holder {fn take(a:bool)->bool {a}} fn run()->bool {Holder.take {true}}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         let value = vm.invoke(id(&package, "run"), vec![]).unwrap();
-        let expected = if source.contains("->(.u8'builtin,bool)") {
+        let expected = if source.contains("->Tuple<.u8'builtin, bool>") {
             Value::Tuple(vec![Value::UnsignedInteger(7), Value::Bool(true)])
         } else if source.contains("fn run()->.u8'builtin") {
             Value::UnsignedInteger(7)
@@ -22729,8 +23191,8 @@ fn extended_calls_route_positional_inputs_through_function_protocols() {
 
 #[test]
 fn extended_calls_preserve_receiver_and_positional_input_order() {
-    let package = compile(
-        "struct Holder {} impl Holder {fn take(self,...items:(bool,bool))->bool {let (a,b)=items;a}} fn make()->Holder {Holder {}} fn first()->bool {true} fn last()->bool {false} fn run()->bool {make().take {first(),last()}}",
+    let package = execution_support::compile_with_tuple(
+        "struct Holder {} impl Holder {fn take(self,...items:Tuple<bool, bool>)->bool {let (a,b)=items;a}} fn make()->Holder {Holder {}} fn first()->bool {true} fn last()->bool {false} fn run()->bool {make().take {first(),last()}}",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -22745,8 +23207,8 @@ fn extended_calls_preserve_receiver_and_positional_input_order() {
 
 #[test]
 fn property_collection_builds_records_and_preserves_whole_named_supply() {
-    let package = compile(
-        "fn keep(...properties:T)->T where T {properties} fn run()->(bool,'x''type) {let value=keep {enabled:true,label:'x'};let supplied=keep(.properties=value);(supplied.enabled,supplied.label)}",
+    let package = execution_support::compile_with_tuple(
+        "fn keep(...properties:T)->T where T {properties} fn run()->Tuple<bool, 'x''type> {let value=keep {enabled:true,label:'x'};let supplied=keep(.properties=value);(supplied.enabled,supplied.label)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22775,8 +23237,8 @@ fn property_collection_preserves_producer_order_and_nested_projection() {
 
 #[test]
 fn property_collection_constants_reify_nested_records_and_projection() {
-    let package = compile(
-        "comptime fn keep(...properties:T)->T where T {properties} const CONFIG=keep {enabled:true,nested:keep {label:'x'}}; comptime fn run()->(bool,'x''type) {(CONFIG.enabled,CONFIG.nested.label)}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn keep(...properties:T)->T where T {properties} const CONFIG=keep {enabled:true,nested:keep {label:'x'}}; comptime fn run()->Tuple<bool, 'x''type> {(CONFIG.enabled,CONFIG.nested.label)}",
     );
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -22788,7 +23250,7 @@ fn property_collection_constants_reify_nested_records_and_projection() {
 #[test]
 fn property_collection_preserves_scalar_defaults_and_known_record_contexts() {
     let package = compile(
-        "fn keep(...properties:T)->T where T {properties} fn run()->.u8'builtin {let template=keep {width:do {let value:.u8'builtin=7;value}};let actual:template'type=keep {width:9};actual.width}",
+        "fn keep(...properties:T)->T where T {properties} fn run()->.u8'builtin {let exemplar=keep {width:do {let value:.u8'builtin=7;value}};let actual:exemplar'type=keep {width:9};actual.width}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22805,14 +23267,14 @@ fn property_collection_preserves_scalar_defaults_and_known_record_contexts() {
 
 #[test]
 fn property_collection_keeps_optional_names_separate_and_pointer_origins_live() {
-    let package = compile(
-        "fn keep(...properties:T,.enabled:bool=false)->(T,bool) where T {(properties,enabled)} fn run()->bool {let (properties,enabled)=keep {enabled:true};properties.enabled and not enabled}",
+    let package = execution_support::compile_with_tuple(
+        "fn keep(...properties:T,.enabled:bool=false)->Tuple<T, bool> where T {(properties,enabled)} fn run()->bool {let (properties,enabled)=keep {enabled:true};properties.enabled and not enabled}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "fn keep(...properties:T)->T where T {properties} fn run()->bool {let data=true;let config=keep {pointer:data.ref};config.pointer.*}",
     );
     assert_eq!(
@@ -22860,8 +23322,8 @@ fn method_property_collection_stages_receiver_before_fields() {
 
 #[test]
 fn method_properties_preserve_context_and_optional_parameter_separation() {
-    let package = compile(
-        "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {width:do {let n:.u8'builtin=0;n},flag:true}; typealias Options=SAMPLE'type; struct Holder {} impl Holder {fn take(self,...properties:Options,.flag:bool=false)->(.u8'builtin,bool) {(properties.width,properties.flag and not flag)}} fn run()->(.u8'builtin,bool) {Holder {}.take {width:9,flag:true}}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {width:do {let n:.u8'builtin=0;n},flag:true}; typealias Options=SAMPLE'type; struct Holder {} impl Holder {fn take(self,...properties:Options,.flag:bool=false)->Tuple<.u8'builtin, bool> {(properties.width,properties.flag and not flag)}} fn run()->Tuple<.u8'builtin, bool> {Holder {}.take {width:9,flag:true}}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -22980,8 +23442,8 @@ fn mixed_properties_route_anchored_inputs_in_source_order() {
             vec!["run", "first", "last", "middle", "take"],
         ),
     ] {
-        let package = compile(&format!(
-            "fn first()->bool {{true}} fn middle()->bool {{true}} fn last()->bool {{false}} fn take(a:bool,...properties:T,b:bool)->(bool,T,bool) where T {{(a,properties,b)}} fn run()->bool {{let (a,properties,b)=take {{{inputs}}};a and properties.flag and not b}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn first()->bool {{true}} fn middle()->bool {{true}} fn last()->bool {{false}} fn take(a:bool,...properties:T,b:bool)->Tuple<bool, T, bool> where T {{(a,properties,b)}} fn run()->bool {{let (a,properties,b)=take {{{inputs}}};a and properties.flag and not b}}"
         ));
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
@@ -22998,8 +23460,8 @@ fn mixed_properties_route_anchored_inputs_in_source_order() {
 
 #[test]
 fn mixed_properties_preserve_literal_contexts_and_dependent_defaults() {
-    let package = compile(
-        "fn take(a:.u8'builtin,...properties:T,b:.u16'builtin,.copied:.u8'builtin=a)->(.u8'builtin,T,.u16'builtin,.u8'builtin) where T {(a,properties,b,copied)} fn run()->(.u8'builtin,.u16'builtin,.u8'builtin,bool) {let (a,properties,b,copied)=take {7,flag:true,9};(a,b,copied,properties.flag)}",
+    let package = execution_support::compile_with_tuple(
+        "fn take(a:.u8'builtin,...properties:T,b:.u16'builtin,.copied:.u8'builtin=a)->Tuple<.u8'builtin, T, .u16'builtin, .u8'builtin> where T {(a,properties,b,copied)} fn run()->Tuple<.u8'builtin, .u16'builtin, .u8'builtin, bool> {let (a,properties,b,copied)=take {7,flag:true,9};(a,b,copied,properties.flag)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -23045,8 +23507,8 @@ fn mixed_method_properties_preserve_receiver_then_interleaved_inputs() {
 
 #[test]
 fn mixed_property_comptime_calls_reify_collected_values() {
-    let package = compile(
-        "comptime fn keep(a:bool,...properties:T,b:bool)->(bool,T,bool) where T {(a,properties,b)} const CONFIG=keep {true,flag:true,false};comptime fn run()->bool {let (a,properties,b)=CONFIG;a and properties.flag and not b}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn keep(a:bool,...properties:T,b:bool)->Tuple<bool, T, bool> where T {(a,properties,b)} const CONFIG=keep {true,flag:true,false};comptime fn run()->bool {let (a,properties,b)=CONFIG;a and properties.flag and not b}",
     );
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -23061,11 +23523,11 @@ fn property_contexts_follow_explicit_instances_and_nested_results() {
     for functions in [
         "fn keep(...properties:T)->T where T {properties} fn run()->.u8'builtin {let value=keep<Options> {width:9};value.width}",
         "comptime fn Selected()->.Type'builtin {Options} fn keep(...properties:T)->T where T {properties} fn run()->.u8'builtin {let value=keep<Selected()> {width:9};value.width}",
-        "fn keep(...properties:T)->(bool,T) where T {(true,properties)} fn configured()->(bool,Options) {keep {width:9}} fn run()->.u8'builtin {let (_,value)=configured();value.width}",
-        "fn keep(...properties:T)->((T,bool),bool) where T {((properties,true),true)} fn configured()->((Options,bool),bool) {keep {width:9}} fn run()->.u8'builtin {let ((value,_),_)=configured();value.width}",
+        "fn keep(...properties:T)->Tuple<bool, T> where T {(true,properties)} fn configured()->Tuple<bool, Options> {keep {width:9}} fn run()->.u8'builtin {let (_,value)=configured();value.width}",
+        "fn keep(...properties:T)->Tuple<Tuple<T, bool>, bool> where T {((properties,true),true)} fn configured()->Tuple<Tuple<Options, bool>, bool> {keep {width:9}} fn run()->.u8'builtin {let ((value,_),_)=configured();value.width}",
         "fn keep(a:.u16'builtin,...properties:T,b:bool)->T where T {properties} fn run()->.u8'builtin {let value=keep<Options> {7,width:9,true};value.width}",
     ] {
-        let package = compile(&format!("{schema}{functions}"));
+        let package = execution_support::compile_with_tuple(&format!("{schema}{functions}"));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::UnsignedInteger(9)
@@ -23149,8 +23611,8 @@ fn explicit_packages_reserve_their_collection_entry_before_positional_routing() 
         "left(),.first=packet(),right()",
         "left(),right(),.first=packet()",
     ] {
-        let package = compile(&format!(
-            "fn packet()->(bool,bool) {{(true,false)}} fn left()->bool {{true}} fn right()->bool {{false}} fn take(...first:(bool,bool),...second:(bool,bool))->bool {{let (a,b)=first;let (c,d)=second;a and not b and c and not d}} fn run()->bool {{take({input})}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn packet()->Tuple<bool, bool> {{(true,false)}} fn left()->bool {{true}} fn right()->bool {{false}} fn take(...first:Tuple<bool, bool>,...second:Tuple<bool, bool>)->bool {{let (a,b)=first;let (c,d)=second;a and not b and c and not d}} fn run()->bool {{take({input})}}"
         ));
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
@@ -23175,8 +23637,8 @@ fn explicit_packages_reserve_their_collection_entry_before_positional_routing() 
 #[test]
 fn tuple_and_property_collectors_share_one_source_ordered_preparation() {
     for signature in [
-        "...items:(bool,bool),...properties:T",
-        "...properties:T,...items:(bool,bool)",
+        "...items:Tuple<bool, bool>,...properties:T",
+        "...properties:T,...items:Tuple<bool, bool>",
     ] {
         for (input, expected) in [
             (
@@ -23192,8 +23654,8 @@ fn tuple_and_property_collectors_share_one_source_ordered_preparation() {
                 vec!["run", "first", "last", "mark", "take"],
             ),
         ] {
-            let package = compile(&format!(
-                "fn first()->bool {{true}} fn mark()->bool {{true}} fn last()->bool {{false}} fn take({signature})->(T,(bool,bool)) where T {{(properties,items)}} fn run()->bool {{let (properties,(a,b))=take {{{input}}};properties.flag and a and not b}}"
+            let package = execution_support::compile_with_tuple(&format!(
+                "fn first()->bool {{true}} fn mark()->bool {{true}} fn last()->bool {{false}} fn take({signature})->Tuple<T, Tuple<bool, bool>> where T {{(properties,items)}} fn run()->bool {{let (properties,(a,b))=take {{{input}}};properties.flag and a and not b}}"
             ));
             let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
             assert_eq!(
@@ -23211,8 +23673,8 @@ fn tuple_and_property_collectors_share_one_source_ordered_preparation() {
 
 #[test]
 fn reserved_collectors_do_not_hide_spread_element_contexts() {
-    let package = compile(
-        "fn packet()->(bool,bool) {(true,false)} fn take(...first:(bool,bool),...second:(.u8'builtin,bool))->.u8'builtin {let (number,flag)=second;number} fn run()->.u8'builtin {take(.first=packet(),...do {(7,true)})}",
+    let package = execution_support::compile_with_tuple(
+        "fn packet()->Tuple<bool, bool> {(true,false)} fn take(...first:Tuple<bool, bool>,...second:Tuple<.u8'builtin, bool>)->.u8'builtin {let (number,flag)=second;number} fn run()->.u8'builtin {take(.first=packet(),...do {(7,true)})}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -23223,16 +23685,16 @@ fn reserved_collectors_do_not_hide_spread_element_contexts() {
 #[test]
 fn method_tuple_and_property_collectors_preserve_receiver_and_literal_contexts() {
     for declaration in [
-        "impl Holder {fn take(self,...items:(.u8'builtin,bool),...properties:Options,.flag:bool=false)->(.u8'builtin,bool) {let (n,b)=items;(n,b and properties.flag and not flag)}}",
-        "trait Take {fn take(self,...items:(.u8'builtin,bool),...properties:Options,.flag:bool=false)->(.u8'builtin,bool);} impl Take for Holder {fn take(self,...items:(.u8'builtin,bool),...properties:Options,.flag:bool=false)->(.u8'builtin,bool) {let (n,b)=items;(n,b and properties.flag and not flag)}}",
+        "impl Holder {fn take(self,...items:Tuple<.u8'builtin, bool>,...properties:Options,.flag:bool=false)->Tuple<.u8'builtin, bool> {let (n,b)=items;(n,b and properties.flag and not flag)}}",
+        "trait Take {fn take(self,...items:Tuple<.u8'builtin, bool>,...properties:Options,.flag:bool=false)->Tuple<.u8'builtin, bool>;} impl Take for Holder {fn take(self,...items:Tuple<.u8'builtin, bool>,...properties:Options,.flag:bool=false)->Tuple<.u8'builtin, bool> {let (n,b)=items;(n,b and properties.flag and not flag)}}",
     ] {
         let access = if declaration.starts_with("trait") {
             "make().as(Take).take"
         } else {
             "make().take"
         };
-        let package = compile(&format!(
-            "comptime fn schema(...properties:T)->T where T {{properties}} const SAMPLE=schema {{flag:true}};typealias Options=SAMPLE'type;struct Holder {{}} {declaration} fn make()->Holder {{Holder {{}}}} fn mark()->bool {{true}} fn run()->(.u8'builtin,bool) {{{access} {{7,flag:mark(),true}}}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "comptime fn schema(...properties:T)->T where T {{properties}} const SAMPLE=schema {{flag:true}};typealias Options=SAMPLE'type;struct Holder {{}} {declaration} fn make()->Holder {{Holder {{}}}} fn mark()->bool {{true}} fn run()->Tuple<.u8'builtin, bool> {{{access} {{7,flag:mark(),true}}}}"
         ));
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
@@ -23249,8 +23711,8 @@ fn method_tuple_and_property_collectors_preserve_receiver_and_literal_contexts()
 
 #[test]
 fn contextual_result_disambiguates_generic_collection_entries() {
-    let package = compile(
-        "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;fn gather(...items:A,...properties:B)->(A,B) where A,B {(items,properties)} fn configured()->((bool,bool),Options) {gather {true,flag:true,false}} fn run()->bool {let ((a,b),properties)=configured();a and not b and properties.flag}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;fn gather(...items:A,...properties:B)->Tuple<A, B> where A,B {(items,properties)} fn configured()->Tuple<Tuple<bool, bool>, Options> {gather {true,flag:true,false}} fn run()->bool {let ((a,b),properties)=configured();a and not b and properties.flag}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -23273,8 +23735,8 @@ fn inherent_generic_methods_infer_inputs_and_contextual_results() {
 
 #[test]
 fn inherent_generic_methods_preserve_implementation_arguments() {
-    let package = compile(
-        "struct Holder where A {value:A} impl Holder<A> where A {fn pair(self,value:B)->(A,B) where B {(self.value,value)}} fn run()->(.u8'builtin,bool) {Holder<.u8'builtin> {value:9}.pair(true)}",
+    let package = execution_support::compile_with_tuple(
+        "struct Holder where A {value:A} impl Holder<A> where A {fn pair(self,value:B)->Tuple<A, B> where B {(self.value,value)}} fn run()->Tuple<.u8'builtin, bool> {Holder<.u8'builtin> {value:9}.pair(true)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -23331,8 +23793,8 @@ fn inherent_generic_methods_evaluate_receiver_and_inputs_once() {
 
 #[test]
 fn inherent_generic_methods_infer_multiple_collectors_from_result() {
-    let package = compile(
-        "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;struct Holder where X {} impl Holder<X> where X {fn gather(self,...items:A,...properties:B)->(A,B) where A,B {(items,properties)}} fn configured()->((bool,bool),Options) {Holder<.u8'builtin> {}.gather {true,flag:true,false}} fn run()->bool {let ((a,b),properties)=configured();a and not b and properties.flag}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;struct Holder where X {} impl Holder<X> where X {fn gather(self,...items:A,...properties:B)->Tuple<A, B> where A,B {(items,properties)}} fn configured()->Tuple<Tuple<bool, bool>, Options> {Holder<.u8'builtin> {}.gather {true,flag:true,false}} fn run()->bool {let ((a,b),properties)=configured();a and not b and properties.flag}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -23375,8 +23837,8 @@ fn inherent_generic_methods_contextualize_spread_packets() {
 
 #[test]
 fn generic_method_values_instantiate_from_function_types() {
-    let package = compile(
-        "struct Holder where A {value:A} impl Holder<A> where A {fn pair(self,value:B)->(A,B) where B {(self.value,value)}} fn run()->bool {let action:fn(Holder<.u8'builtin>,bool)->(.u8'builtin,bool)=Holder<.u8'builtin>.pair;let (n,b)=action(Holder<.u8'builtin> {value:9},true);n==9 and b}",
+    let package = execution_support::compile_with_tuple(
+        "struct Holder where A {value:A} impl Holder<A> where A {fn pair(self,value:B)->Tuple<A, B> where B {(self.value,value)}} fn run()->bool {let action:fn(Holder<.u8'builtin>,bool)->Tuple<.u8'builtin, bool> =Holder<.u8'builtin>.pair;let (n,b)=action(Holder<.u8'builtin> {value:9},true);n==9 and b}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -23571,8 +24033,8 @@ fn generic_trait_methods_dispatch_distinct_method_instances() {
 
 #[test]
 fn generic_trait_methods_combine_receiver_interface_and_method_arguments() {
-    let package = compile(
-        "trait Mapper where A {fn pair(self,value:B)->(A,B) where B;} struct Holder where X {value:X} impl Mapper<X> for Holder<X> where X {fn pair(self,value:Y)->(X,Y) where Y {(self.value,value)}} fn apply(subject:S,value:T)->(.u8'builtin,T) where S :- Mapper<.u8'builtin>,T {subject.as(Mapper<.u8'builtin>).pair(value)} fn run()->bool {let (n,b)=apply(Holder<.u8'builtin> {value:9},true);n==9 and b}",
+    let package = execution_support::compile_with_tuple(
+        "trait Mapper where A {fn pair(self,value:B)->Tuple<A, B> where B;} struct Holder where X {value:X} impl Mapper<X> for Holder<X> where X {fn pair(self,value:Y)->Tuple<X, Y> where Y {(self.value,value)}} fn apply(subject:S,value:T)->Tuple<.u8'builtin, T> where S :- Mapper<.u8'builtin>,T {subject.as(Mapper<.u8'builtin>).pair(value)} fn run()->bool {let (n,b)=apply(Holder<.u8'builtin> {value:9},true);n==9 and b}",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -23753,8 +24215,8 @@ fn generic_trait_method_values_infer_through_nested_higher_order_calls() {
 
 #[test]
 fn generic_trait_method_values_preserve_receiver_and_interface_arguments() {
-    let package = compile(
-        "trait Mapper where A {fn pair(self,value:B)->(A,B) where B;} struct Holder where X {value:X} impl Mapper<X> for Holder<X> where X {fn pair(self,value:Y)->(X,Y) where Y {(self.value,value)}} fn run()->bool {let action:fn(Holder<.u8'builtin>,bool)->(.u8'builtin,bool)=Holder<.u8'builtin>.as(Mapper<.u8'builtin>).pair;let (n,b)=action(Holder<.u8'builtin> {value:9},true);n==9 and b}",
+    let package = execution_support::compile_with_tuple(
+        "trait Mapper where A {fn pair(self,value:B)->Tuple<A, B> where B;} struct Holder where X {value:X} impl Mapper<X> for Holder<X> where X {fn pair(self,value:Y)->Tuple<X, Y> where Y {(self.value,value)}} fn run()->bool {let action:fn(Holder<.u8'builtin>,bool)->Tuple<.u8'builtin, bool> =Holder<.u8'builtin>.as(Mapper<.u8'builtin>).pair;let (n,b)=action(Holder<.u8'builtin> {value:9},true);n==9 and b}",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -23800,11 +24262,11 @@ fn generic_trait_collectors_use_method_contexts_and_explicit_arguments() {
             "let value=Holder {}.as(Mapper).keep<Options> {width:9};value.width",
         ),
         (
-            "trait Mapper {fn keep(self,...items:A,...properties:B)->(A,B) where A,B;} impl Mapper for Holder {fn keep(self,...items:X,...properties:Y)->(X,Y) where X,Y {(items,properties)}}",
-            "let (items,value):((bool,bool),Options)=Holder {}.as(Mapper).keep {true,width:9,false};value.width",
+            "trait Mapper {fn keep(self,...items:A,...properties:B)->Tuple<A, B> where A,B;} impl Mapper for Holder {fn keep(self,...items:X,...properties:Y)->Tuple<X, Y> where X,Y {(items,properties)}}",
+            "let (items,value):Tuple<Tuple<bool, bool>, Options> =Holder {}.as(Mapper).keep {true,width:9,false};value.width",
         ),
     ] {
-        let package = compile(&format!(
+        let package = execution_support::compile_with_tuple(&format!(
             "{schema} struct Holder {{}} {declaration} fn run()->.u8'builtin {{{body}}}"
         ));
         assert_eq!(
@@ -23838,8 +24300,8 @@ fn associated_values_keep_interface_identity_and_generic_substitutions() {
 
 #[test]
 fn associated_values_freeze_computed_and_structured_defaults() {
-    let package = compile(
-        "comptime fn computed_capacity()->.u8'builtin {9} trait Source {assoc capacity:.u8'builtin=computed_capacity();assoc flags:(bool,bool)=(true,false);assoc Element:.Type'builtin=Self;} struct Holder {} impl Source for Holder {} fn run()->bool {let value:Holder.as(Source).Element=Holder {};let (a,b)=Holder.as(Source).flags;a and not b and Holder.as(Source).capacity==9}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn computed_capacity()->.u8'builtin {9} trait Source {assoc capacity:.u8'builtin=computed_capacity();assoc flags:Tuple<bool, bool> =(true,false);assoc Element:.Type'builtin=Self;} struct Holder {} impl Source for Holder {} fn run()->bool {let value:Holder.as(Source).Element=Holder {};let (a,b)=Holder.as(Source).flags;a and not b and Holder.as(Source).capacity==9}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -24129,8 +24591,8 @@ fn computed_trait_method_values_preserve_parent_and_implementation_substitution(
 
 #[test]
 fn direct_method_calls_retain_optional_and_variadic_protocols() {
-    let package = compile(
-        "trait Parent {fn choose(self,.flag:bool=true)->bool;} trait Child :- Parent {} struct Holder {} impl Parent for Holder {fn choose(self,value:bool)->bool {value}} impl Child for Holder {} impl Holder {fn gather(...items:(bool,bool))->bool {let (a,b)=items;a and not b} fn fallback(.flag:bool=true)->bool {flag}} fn run()->bool {Holder {}.as(Child).choose() and not Holder {}.as(Child).choose(.flag=false) and Holder.gather(true,false) and Holder.fallback()}",
+    let package = execution_support::compile_with_tuple(
+        "trait Parent {fn choose(self,.flag:bool=true)->bool;} trait Child :- Parent {} struct Holder {} impl Parent for Holder {fn choose(self,value:bool)->bool {value}} impl Child for Holder {} impl Holder {fn gather(...items:Tuple<bool, bool>)->bool {let (a,b)=items;a and not b} fn fallback(.flag:bool=true)->bool {flag}} fn run()->bool {Holder {}.as(Child).choose() and not Holder {}.as(Child).choose(.flag=false) and Holder.gather(true,false) and Holder.fallback()}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -24157,8 +24619,8 @@ fn associated_callable_values_use_positional_inputs_without_recovering_defaults(
 
 #[test]
 fn associated_variadic_method_values_take_the_completed_packet() {
-    let package = compile(
-        "trait Gather {fn gather(...items:(bool,bool))->bool;} struct Host {} impl Gather for Host {fn gather(items:(bool,bool))->bool {let (a,b)=items;a and not b}} trait Source {assoc action:fn((bool,bool))->bool=Host.as(Gather).gather;} struct Holder {} impl Source for Holder {} fn run()->bool {Holder.as(Source).action((true,false))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Gather {fn gather(...items:Tuple<bool, bool>)->bool;} struct Host {} impl Gather for Host {fn gather(items:Tuple<bool, bool>)->bool {let (a,b)=items;a and not b}} trait Source {assoc action:fn(Tuple<bool,bool>)->bool=Host.as(Gather).gather;} struct Holder {} impl Source for Holder {} fn run()->bool {Holder.as(Source).action((true,false))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -24922,8 +25384,8 @@ fn source_abstract_default_method_instantiates_with_selected_overrides() {
 
 #[test]
 fn source_calls_check_selected_associated_parameters_and_results() {
-    let package = compile(
-        "trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}} struct Flags {} struct Letters {} impl Source for Flags {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn run()->(bool,'x''type) {(Flags.as(Source).keep(true),Letters.as(Source).keep('x'))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}} struct Flags {} struct Letters {} impl Source for Flags {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn run()->Tuple<bool, 'x''type> {(Flags.as(Source).keep(true),Letters.as(Source).keep('x'))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -24944,8 +25406,8 @@ fn abstract_default_calls_keep_their_given_interface_until_instantiation() {
 
 #[test]
 fn generic_source_methods_infer_other_inputs_after_projection_resolution() {
-    let package = compile(
-        "trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element,other:T)->Element where T {value}} struct Flags {} struct Letters {} impl Source for Flags {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn run()->(bool,'x''type) {(Flags.as(Source).keep(true,'x'),Letters.as(Source).keep('y',true))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element,other:T)->Element where T {value}} struct Flags {} struct Letters {} impl Source for Flags {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn run()->Tuple<bool, 'x''type> {(Flags.as(Source).keep(true,'x'),Letters.as(Source).keep('y',true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -24966,8 +25428,8 @@ fn stored_source_method_values_use_selected_projection_inputs() {
 
 #[test]
 fn explicit_implementation_methods_match_their_associated_type_definitions() {
-    let package = compile(
-        "trait Source {assoc Element:.Type'builtin;fn keep(value:Element)->Element;} struct Holder where T {} impl Source for Holder<T> where T {assoc Element:.Type'builtin=T;fn keep(value:Element)->Element {value}} fn run()->(bool,'x''type) {(Holder<bool>.as(Source).keep(true),Holder<'x''type>.as(Source).keep('x'))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Source {assoc Element:.Type'builtin;fn keep(value:Element)->Element;} struct Holder where T {} impl Source for Holder<T> where T {assoc Element:.Type'builtin=T;fn keep(value:Element)->Element {value}} fn run()->Tuple<bool, 'x''type> {(Holder<bool>.as(Source).keep(true),Holder<'x''type>.as(Source).keep('x'))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -24988,8 +25450,8 @@ fn override_signatures_follow_default_dependencies_and_method_generics() {
 
 #[test]
 fn explicit_abstract_associated_views_in_generic_signatures_execute_per_instance() {
-    let package = compile(
-        "trait Source {assoc Element:.Type'builtin=bool;} struct Flags {} struct Letters {} impl Source for Flags {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn keep(value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->(bool,'x''type) {(keep<Flags>(true),keep<Letters>('x'))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Source {assoc Element:.Type'builtin=bool;} struct Flags {} struct Letters {} impl Source for Flags {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn keep(value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->Tuple<bool, 'x''type> {(keep<Flags>(true),keep<Letters>('x'))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -24999,8 +25461,8 @@ fn explicit_abstract_associated_views_in_generic_signatures_execute_per_instance
 
 #[test]
 fn explicit_abstract_associated_views_preserve_inherited_interface_arguments() {
-    let package = compile(
-        "trait Source where A {assoc Element:.Type'builtin=A;} trait Child :- Source<A> where A {} struct Holder {} impl Source<bool> for Holder {} impl Source<'x''type> for Holder {} impl Child<bool> for Holder {} impl Child<'x''type> for Holder {} fn keep(value:T.as(Child<A>).Element)->T.as(Source<A>).Element where A, T :- Child<A> {let result:T.as(Source<A>).Element=value;result} fn run()->(bool,'x''type) {(keep<bool,Holder>(true),keep<'x''type,Holder>('x'))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Source where A {assoc Element:.Type'builtin=A;} trait Child :- Source<A> where A {} struct Holder {} impl Source<bool> for Holder {} impl Source<'x''type> for Holder {} impl Child<bool> for Holder {} impl Child<'x''type> for Holder {} fn keep(value:T.as(Child<A>).Element)->T.as(Source<A>).Element where A, T :- Child<A> {let result:T.as(Source<A>).Element=value;result} fn run()->Tuple<bool, 'x''type> {(keep<bool,Holder>(true),keep<'x''type,Holder>('x'))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -25014,8 +25476,8 @@ fn declaration_associated_views_work_in_required_default_and_override_signatures
         "fn keep(value:Self.as(Source).Element)->Self.as(Source).Element;",
         "fn keep(value:Self.as(Source).Element)->Self.as(Source).Element {value}",
     ] {
-        let package = compile(&format!(
-            "trait Source {{assoc Element:.Type'builtin=bool;{methods}}} struct Holder where T {{}} impl Source for Holder<T> where T {{assoc Element:.Type'builtin=T;fn keep(value:Self.as(Source).Element)->Self.as(Source).Element {{value}}}} fn run()->(bool,'x''type) {{(Holder<bool>.as(Source).keep(true),Holder<'x''type>.as(Source).keep('x'))}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "trait Source {{assoc Element:.Type'builtin=bool;{methods}}} struct Holder where T {{}} impl Source for Holder<T> where T {{assoc Element:.Type'builtin=T;fn keep(value:Self.as(Source).Element)->Self.as(Source).Element {{value}}}} fn run()->Tuple<bool, 'x''type> {{(Holder<bool>.as(Source).keep(true),Holder<'x''type>.as(Source).keep('x'))}}"
         ));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -25026,8 +25488,8 @@ fn declaration_associated_views_work_in_required_default_and_override_signatures
 
 #[test]
 fn declaration_associated_views_follow_forward_declared_parent_contracts() {
-    let package = compile(
-        "trait Child :- Source<A> where A {fn keep(value:Self.as(Source<A>).Element)->Self.as(Child<A>).Element {value}} trait Source where A {assoc Element:.Type'builtin=A;} struct Holder {} impl Source<bool> for Holder {} impl Source<'x''type> for Holder {} impl Child<bool> for Holder {} impl Child<'x''type> for Holder {} fn run()->(bool,'x''type) {(Holder.as(Child<bool>).keep(true),Holder.as(Child<'x''type>).keep('x'))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Child :- Source<A> where A {fn keep(value:Self.as(Source<A>).Element)->Self.as(Child<A>).Element {value}} trait Source where A {assoc Element:.Type'builtin=A;} struct Holder {} impl Source<bool> for Holder {} impl Source<'x''type> for Holder {} impl Child<bool> for Holder {} impl Child<'x''type> for Holder {} fn run()->Tuple<bool, 'x''type> {(Holder.as(Child<bool>).keep(true),Holder.as(Child<'x''type>).keep('x'))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -25059,8 +25521,8 @@ fn declaration_associated_views_in_override_bodies_use_their_own_definitions() {
 
 #[test]
 fn declaration_associated_views_use_generic_equations_in_override_bodies() {
-    let package = compile(
-        "trait Source where A {assoc Element:.Type'builtin;fn keep(value:A)->Self.as(Source<A>).Element;} struct Holder where X {} impl Source<X> for Holder<X> where X {assoc Element:.Type'builtin=X;fn keep(value:X)->Self.as(Source<X>).Element {value}} fn run()->(bool,'x''type) {(Holder<bool>.as(Source<bool>).keep(true),Holder<'x''type>.as(Source<'x''type>).keep('x'))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Source where A {assoc Element:.Type'builtin;fn keep(value:A)->Self.as(Source<A>).Element;} struct Holder where X {} impl Source<X> for Holder<X> where X {assoc Element:.Type'builtin=X;fn keep(value:X)->Self.as(Source<X>).Element {value}} fn run()->Tuple<bool, 'x''type> {(Holder<bool>.as(Source<bool>).keep(true),Holder<'x''type>.as(Source<'x''type>).keep('x'))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -25070,8 +25532,8 @@ fn declaration_associated_views_use_generic_equations_in_override_bodies() {
 
 #[test]
 fn associated_method_values_adapt_to_annotations_and_higher_order_inputs() {
-    let package = compile(
-        "trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}} struct Flags {} struct Letters {} impl Source for Flags {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn apply(value:T,action:fn(T)->T)->T where T {action(value)} fn run()->(bool,'x''type) {let flag:fn(bool)->bool=Flags.as(Source).keep;(flag(true),apply('x',Letters.as(Source).keep))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}} struct Flags {} struct Letters {} impl Source for Flags {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn apply(value:T,action:fn(T)->T)->T where T {action(value)} fn run()->Tuple<bool, 'x''type> {let flag:fn(bool)->bool=Flags.as(Source).keep;(flag(true),apply('x',Letters.as(Source).keep))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -25103,8 +25565,8 @@ fn associated_method_values_supply_partial_higher_order_inference_and_return_val
 
 #[test]
 fn associated_function_instances_adapt_to_function_value_contexts() {
-    let package = compile(
-        "trait Source {assoc Element:.Type'builtin=bool;} struct Flags {} struct Letters {} impl Source for Flags {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn keep(value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn apply(action:fn(A)->A,value:A)->A where A {action(value)} fn choose()->fn(bool)->bool {keep<Flags>} fn run()->(bool,'x''type) {let action:fn(bool)->bool=keep<Flags>;(action(choose()(true)),apply(keep<Letters>,'x'))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Source {assoc Element:.Type'builtin=bool;} struct Flags {} struct Letters {} impl Source for Flags {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn keep(value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn apply(action:fn(A)->A,value:A)->A where A {action(value)} fn choose()->fn(bool)->bool {keep<Flags>} fn run()->Tuple<bool, 'x''type> {let action:fn(bool)->bool=keep<Flags>;(action(choose()(true)),apply(keep<Letters>,'x'))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -25136,8 +25598,8 @@ fn associated_function_instances_resolve_concrete_parts_while_preserving_given_p
 
 #[test]
 fn inferred_associated_calls_resolve_projections_after_subject_inference() {
-    let package = compile(
-        "trait Source {assoc Element:.Type'builtin=bool;} struct Flags {} struct Letters {} impl Source for Flags {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn keep(owner:T,value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->(bool,'x''type) {(keep(Flags {},true),keep(Letters {},'x'))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Source {assoc Element:.Type'builtin=bool;} struct Flags {} struct Letters {} impl Source for Flags {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn keep(owner:T,value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->Tuple<bool, 'x''type> {(keep(Flags {},true),keep(Letters {},'x'))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -25202,8 +25664,8 @@ fn associated_spreads_contextualize_explicit_function_instances() {
 
 #[test]
 fn associated_spreads_refine_generic_method_and_function_result_contexts() {
-    let package = compile(
-        "trait Source {assoc Element:.Type'builtin=bool;fn apply(action:fn(Element)->Element,value:Element,other:T)->(Element,T) where T {(action(value),other)}} struct Flags {} impl Source for Flags {} fn choose(owner:T,action:fn(T.as(Source).Element)->T.as(Source).Element,value:T.as(Source).Element)->(T,T.as(Source).Element) where T :- Source {(owner,action(value))} fn make()->(Flags,bool) {choose(...do {(Flags {},|value| not value,false)})} fn run()->(bool,'x''type) {let (owner,value)=make();Flags.as(Source).apply(...do {(|value| not value,false)},...do {('x',)})}",
+    let package = execution_support::compile_with_tuple(
+        "trait Source {assoc Element:.Type'builtin=bool;fn apply(action:fn(Element)->Element,value:Element,other:T)->Tuple<Element, T> where T {(action(value),other)}} struct Flags {} impl Source for Flags {} fn choose(owner:T,action:fn(T.as(Source).Element)->T.as(Source).Element,value:T.as(Source).Element)->Tuple<T, T.as(Source).Element> where T :- Source {(owner,action(value))} fn make()->Tuple<Flags, bool> {choose(...do {(Flags {},|value| not value,false)})} fn run()->Tuple<bool, 'x''type> {let (owner,value)=make();Flags.as(Source).apply(...do {(|value| not value,false)},...do {('x',)})}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -25213,8 +25675,8 @@ fn associated_spreads_refine_generic_method_and_function_result_contexts() {
 
 #[test]
 fn associated_spreads_evaluate_each_packet_and_named_input_once_in_source_order() {
-    let package = compile(
-        "trait Source {assoc Element:.Type'builtin=bool;fn apply(action:fn(Element)->Element,value:Element,.mark:bool=false)->Element {action(value)}} struct Flags {} impl Source for Flags {} fn flip(value:bool)->bool {not value} fn action_packet()->(fn(bool)->bool,) {(flip,)} fn value_packet()->(bool,) {(false,)} fn marker()->bool {true} fn run()->bool {Flags.as(Source).apply(...action_packet(),.mark=marker(),...value_packet())}",
+    let package = execution_support::compile_with_tuple(
+        "trait Source {assoc Element:.Type'builtin=bool;fn apply(action:fn(Element)->Element,value:Element,.mark:bool=false)->Element {action(value)}} struct Flags {} impl Source for Flags {} fn flip(value:bool)->bool {not value} fn action_packet()->Tuple<fn(bool)->bool> {(flip,)} fn value_packet()->Tuple<bool> {(false,)} fn marker()->bool {true} fn run()->bool {Flags.as(Source).apply(...action_packet(),.mark=marker(),...value_packet())}",
     );
     let root = iir::InstanceKey {
         declaration: id(&package, "run"),
@@ -25309,8 +25771,8 @@ fn joint_spread_inputs_defer_method_local_associated_selection_until_inference()
 
 #[test]
 fn joint_spread_inputs_leave_numeric_defaulting_until_other_packets_constrain_the_call() {
-    let package = compile(
-        "fn packet()->(.u8'builtin,) {(9,)} fn take(first:T,second:T)->bool where T {true} fn run()->bool {take(7,...packet())}",
+    let package = execution_support::compile_with_tuple(
+        "fn packet()->Tuple<.u8'builtin> {(9,)} fn take(first:T,second:T)->bool where T {true} fn run()->bool {take(7,...packet())}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -25395,8 +25857,8 @@ fn abstract_associated_values_keep_generic_implementation_arguments_in_comptime(
 
 #[test]
 fn abstract_associated_values_preserve_inherited_aggregate_origins_in_comptime() {
-    let package = compile(
-        "trait Pair where A {assoc flags:(bool,bool)=(true,false);} trait Child :- Pair<A> where A {} struct Host {} impl Pair<bool> for Host {assoc flags:(bool,bool)=(false,true);} impl Pair<'x''type> for Host {} impl Child<bool> for Host {} impl Child<'x''type> for Host {} comptime fn query(value:T,marker:A)->bool where A,T :- Child<A> {let (a,b)=T.as(Child<A>).flags;a and not b} trait Result {assoc first:bool=query(Host {},true);assoc second:bool=query(Host {},'x');} impl Result for bool {} fn run()->bool {not bool.as(Result).first and bool.as(Result).second}",
+    let package = execution_support::compile_with_tuple(
+        "trait Pair where A {assoc flags:Tuple<bool, bool> =(true,false);} trait Child :- Pair<A> where A {} struct Host {} impl Pair<bool> for Host {assoc flags:Tuple<bool, bool> =(false,true);} impl Pair<'x''type> for Host {} impl Child<bool> for Host {} impl Child<'x''type> for Host {} comptime fn query(value:T,marker:A)->bool where A,T :- Child<A> {let (a,b)=T.as(Child<A>).flags;a and not b} trait Result {assoc first:bool=query(Host {},true);assoc second:bool=query(Host {},'x');} impl Result for bool {} fn run()->bool {not bool.as(Result).first and bool.as(Result).second}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -25496,8 +25958,8 @@ fn dependent_associated_defaults_support_forward_edges_and_override_breaks() {
 
 #[test]
 fn dependent_associated_defaults_instantiate_generic_origins_and_aggregate_computation() {
-    let package = compile(
-        "comptime fn invert(flag:bool)->bool {not flag} trait Flags where A {assoc seed:bool=true;assoc pair:(bool,bool)=(seed,invert(Self.as(Flags<A>).seed));} struct Host where X {} impl Flags<X> for Host<X> where X {assoc seed:bool=false;} fn query(value:T,marker:A)->bool where A,T :- Flags<A> {let (a,b)=T.as(Flags<A>).pair;not a and b} fn run()->bool {query(Host<bool> {},true) and query(Host<'x''type> {},'x')}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn invert(flag:bool)->bool {not flag} trait Flags where A {assoc seed:bool=true;assoc pair:Tuple<bool, bool> =(seed,invert(Self.as(Flags<A>).seed));} struct Host where X {} impl Flags<X> for Host<X> where X {assoc seed:bool=false;} fn query(value:T,marker:A)->bool where A,T :- Flags<A> {let (a,b)=T.as(Flags<A>).pair;not a and b} fn run()->bool {query(Host<bool> {},true) and query(Host<'x''type> {},'x')}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -25507,7 +25969,7 @@ fn dependent_associated_defaults_instantiate_generic_origins_and_aggregate_compu
 
 #[test]
 fn dependent_associated_defaults_keep_symbolic_templates_and_completed_implementations() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/dependent-associated-values.fl"
     ));
     assert_eq!(
@@ -25577,8 +26039,8 @@ fn inherited_associated_initializers_use_selected_implementation_constraints() {
 
 #[test]
 fn inherited_associated_initializers_distinguish_same_named_parent_members() {
-    let package = compile(
-        "trait Left {assoc seed:bool=false;} trait Right {assoc seed:bool=true;} trait Child :- Left + Right {assoc pair:(bool,bool)=(Self.as(Left).seed,Self.as(Right).seed);} impl Left for bool {} impl Right for bool {} impl Child for bool {} fn run()->bool {let (a,b)=bool.as(Child).pair;not a and b}",
+    let package = execution_support::compile_with_tuple(
+        "trait Left {assoc seed:bool=false;} trait Right {assoc seed:bool=true;} trait Child :- Left + Right {assoc pair:Tuple<bool, bool> =(Self.as(Left).seed,Self.as(Right).seed);} impl Left for bool {} impl Right for bool {} impl Child for bool {} fn run()->bool {let (a,b)=bool.as(Child).pair;not a and b}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -25778,8 +26240,8 @@ fn selected_associated_result_types_support_comptime_method_override_signatures(
 
 #[test]
 fn selected_associated_result_types_preserve_nested_parameters_and_results() {
-    let package = compile(
-        "trait Source {assoc Item:.Type'builtin;} impl Source for bool {assoc Item:.Type'builtin=bool;} impl Source for 'x''type {assoc Item:.Type'builtin='x''type;} comptime fn keep(value:T.as(Source).Item)->(T.as(Source).Item,T.as(Source).Item) where T :- Source {(value,value)} trait Result {assoc flags:(bool,bool)=keep<bool>(true);assoc letters:('x''type,'x''type)=keep<'x''type>('x');} impl Result for bool {} fn run()->bool {let (a,b)=bool.as(Result).flags;let (c,d)=bool.as(Result).letters;a and b and c=='x' and d=='x'}",
+    let package = execution_support::compile_with_tuple(
+        "trait Source {assoc Item:.Type'builtin;} impl Source for bool {assoc Item:.Type'builtin=bool;} impl Source for 'x''type {assoc Item:.Type'builtin='x''type;} comptime fn keep(value:T.as(Source).Item)->Tuple<T.as(Source).Item, T.as(Source).Item> where T :- Source {(value,value)} trait Result {assoc flags:Tuple<bool, bool> =keep<bool>(true);assoc letters:Tuple<'x''type,'x''type> =keep<'x''type>('x');} impl Result for bool {} fn run()->bool {let (a,b)=bool.as(Result).flags;let (c,d)=bool.as(Result).letters;a and b and c=='x' and d=='x'}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -26147,13 +26609,17 @@ fn conditional_impl_requirements_select_methods_in_both_phases() {
 
 #[test]
 fn conditional_impl_requirements_compose_nested_boolean_queries() {
-    let package = compile(
-        "trait Disabled {} trait Missing {} trait Enabled {} impl Enabled for T where T, requires not (T :- Disabled) {} struct Box where T {} trait Read {fn read()->bool;} impl Read for Box<T> where T, requires (T :- Enabled) or (T :- Missing) {fn read()->bool {true}} fn run()->bool {Box<bool>.as(Read).read()}",
-    );
-    assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
-        Value::Bool(true)
-    );
+    for phase in ["", "comptime "] {
+        let package = compile(&format!(
+            "trait Disabled {{}} trait Missing {{}} trait Enabled {{}} impl Enabled for T where T, requires not (T :- Disabled) {{}} struct Box where T {{}} trait Read {{{phase}fn read()->bool;}} impl Read for Box<T> where T, requires (T :- Enabled) or (T :- Missing) {{{phase}fn read()->bool {{true}}}} {phase}fn run()->bool {{Box<bool>.as(Read).read()}}"
+        ));
+        let result = if phase.is_empty() {
+            luna::execution::interpret(&package, "run", 100_000)
+        } else {
+            luna::invocation::invoke(&package, "run", 100_000)
+        };
+        assert_eq!(result.unwrap(), Value::Bool(true));
+    }
 }
 
 #[test]
@@ -26476,7 +26942,7 @@ fn associated_captured_closures_survive_abstract_comptime_access() {
 
 #[test]
 fn associated_captured_closures_preserve_shared_and_distinct_environments() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/associated-closure-values.fl"
     ));
     let integer = |n| Value::Integer(comptime_runtime::Integer::from_u128(n));
@@ -26494,8 +26960,8 @@ fn associated_captured_closures_preserve_shared_and_distinct_environments() {
 
 #[test]
 fn associated_nested_closures_keep_shared_inner_state() {
-    let package = compile(
-        "typealias Int=.Integer'builtin; typealias Counter=%{value:Int} comptime fn()->Int; typealias Wrap=%{next:Counter} comptime fn()->Int; typealias Nested=%{left:Wrap,right:Wrap} comptime fn()->(Int,Int); comptime fn counter()->Counter {var value:Int=0;|| {value = value + 1; value}} comptime fn nested()->Nested {let next=counter();let left=|| next();let right=|| next();|| (left(),right())} trait Stored {assoc callback:Nested=nested();} impl Stored for bool {} comptime fn call()->(Int,Int) where T :- Stored {let callback=T.as(Stored).callback;callback();callback()} comptime fn entry()->(Int,Int) {call<bool>()}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Int=.Integer'builtin; typealias Counter=%{value:Int} comptime fn()->Int; typealias Wrap=%{next:Counter} comptime fn()->Int; typealias Nested=%{left:Wrap,right:Wrap} comptime fn()->Tuple<Int, Int>; comptime fn counter()->Counter {var value:Int=0;|| {value = value + 1; value}} comptime fn nested()->Nested {let next=counter();let left=|| next();let right=|| next();|| (left(),right())} trait Stored {assoc callback:Nested=nested();} impl Stored for bool {} comptime fn call()->Tuple<Int, Int> where T :- Stored {let callback=T.as(Stored).callback;callback();callback()} comptime fn entry()->Tuple<Int, Int> {call<bool>()}",
     );
     let integer = |n| Value::Integer(comptime_runtime::Integer::from_u128(n));
     assert_eq!(
@@ -26506,8 +26972,8 @@ fn associated_nested_closures_keep_shared_inner_state() {
 
 #[test]
 fn associated_captured_closures_keep_interface_argument_substitutions() {
-    let package = compile(
-        "comptime fn capture(value:T)->%{value:T} comptime fn()->T where T {|| value} trait Stored where A {assoc callback:%{value:A} comptime fn()->A;} impl Stored<bool> for bool {assoc callback:%{value:bool} comptime fn()->bool=capture(true);} impl Stored<'x''type> for bool {assoc callback:%{value:'x''type} comptime fn()->'x''type=capture('x');} comptime fn call()->A where A,T :- Stored<A> {T.as(Stored<A>).callback()} comptime fn entry()->(bool,'x''type) {(call<bool,bool>(),call<'x''type,bool>())}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn capture(value:T)->%{value:T} comptime fn()->T where T {|| value} trait Stored where A {assoc callback:%{value:A} comptime fn()->A;} impl Stored<bool> for bool {assoc callback:%{value:bool} comptime fn()->bool=capture(true);} impl Stored<'x''type> for bool {assoc callback:%{value:'x''type} comptime fn()->'x''type=capture('x');} comptime fn call()->A where A,T :- Stored<A> {T.as(Stored<A>).callback()} comptime fn entry()->Tuple<bool, 'x''type> {(call<bool,bool>(),call<'x''type,bool>())}",
     );
     assert_eq!(
         luna::invocation::invoke(&package, "entry", 100_000).unwrap(),
@@ -26517,7 +26983,7 @@ fn associated_captured_closures_keep_interface_argument_substitutions() {
 
 #[test]
 fn associated_closure_dispatch_missing_payload_is_rejected_and_recoverable() {
-    let mut package = compile(include_str!(
+    let mut package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/associated-closure-values.fl"
     ));
     let root = iir::InstanceKey {
@@ -27336,12 +27802,12 @@ fn generic_effect_requests_retry_early_closures_and_contextual_nested_calls() {
 
 #[test]
 fn direct_effect_reference_execution_repeats_requests_and_shares_lexical_captures() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         effect read()->bool;
-        typealias Pair=(bool,bool);
+        typealias Pair=Tuple<bool,bool>;
         fn pair()->#read Pair {(read()#,read()#)}
-        fn run()->((bool,bool),bool) {
+        fn run()->Tuple<Tuple<bool, bool>, bool> {
             var flag=false;
             let pair=pair()# {read()=> {flag=not flag; flag},};
             (pair,flag)
@@ -27367,13 +27833,13 @@ fn direct_effect_reference_execution_repeats_requests_and_shares_lexical_capture
 
 #[test]
 fn direct_effect_reference_execution_forwards_partial_requests_and_restores_inner_entries() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         effect echo(value:bool)->bool;
-        typealias Triple=(bool,bool,bool);
+        typealias Triple=Tuple<bool,bool,bool>;
         fn sequence()->#echo Triple {(echo(false)#,echo(true)#,echo(false)#)}
         fn inner()->#echo Triple {sequence()# {echo(true)=>false,}}
-        fn run()->(bool,bool,bool) {inner()# {echo(value)=>true,}}
+        fn run()->Tuple<bool, bool, bool> {inner()# {echo(value)=>true,}}
         fn nested()->bool {(echo(true)# {echo(value)=>not echo(value)#,})# {echo(value)=>value,}}
     "#,
     );
@@ -27533,13 +27999,13 @@ fn direct_effect_reference_execution_bounds_repeated_requests_and_checks_row_map
 
 #[test]
 fn direct_effect_reference_execution_preserves_argument_order_and_generic_group_identity() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         effect choose(first:bool,second:bool)->bool;
         effect enum Channel where T {echo(value:T)->T,}
         fn toggle(flag:*bool)->bool {flag.* = not flag.*; flag.*}
         fn forward(value:T)->#Channel<T> T where T {Channel.echo(value)#}
-        fn ordered()->(bool,bool) {
+        fn ordered()->Tuple<bool, bool> {
             var flag=false;
             let result=choose(toggle(flag.ref),toggle(flag.ref))# {choose(first,second)=>first and not second,};
             (result,flag)
@@ -27620,7 +28086,7 @@ fn direct_effect_reference_execution_checks_arguments_in_caller_environment() {
 
 #[test]
 fn direct_effect_reference_execution_prepares_named_arguments_and_callee_before_row_switch() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         effect input()->bool;
         effect read()->bool;
@@ -27630,7 +28096,7 @@ fn direct_effect_reference_execution_prepares_named_arguments_and_callee_before_
         fn named()->#[input,read] bool {callee(true,.extra=input()#)}
         fn selected()->#[input,read] bool {chooser()(input()#)}
         fn run_named()->bool {named()# {input()=>true,read()=>false,}}
-        fn run_selected()->(bool,bool) {
+        fn run_selected()->Tuple<bool, bool> {
             var flag=false;
             let result=selected()# {input()=> {flag=not flag;flag},read()=>true,};
             (result,flag)
@@ -27669,7 +28135,7 @@ fn direct_effect_reference_execution_argument_control_exit_skips_callee() {
 
 #[test]
 fn direct_effect_iir_execution_matches_reference_for_mapping_forwarding_and_control() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         r#"
         effect input()->bool;
         effect read()->bool;
@@ -27677,7 +28143,7 @@ fn direct_effect_iir_execution_matches_reference_for_mapping_forwarding_and_cont
         fn callee(value:bool,.extra:bool=value)->#read bool {value and extra and read()#}
         fn caller()->#[input,read] bool {callee(true,.extra=input()#)}
         fn mapped()->bool {caller()# {input()=>true,read()=>false,}}
-        typealias Triple=(bool,bool,bool);
+        typealias Triple=Tuple<bool,bool,bool>;
         fn sequence()->#echo Triple {(echo(false)#,echo(true)#,echo(false)#)}
         fn inner()->#echo Triple {sequence()# {echo(true)=>false,}}
         fn forwarded()->Triple {inner()# {echo(value)=>true,}}
@@ -28040,11 +28506,11 @@ fn typealias_defaults_preserve_transparency_and_named_overrides() {
     for source in [
         "typealias Alias<.T:Type=bool> = T;fn run()->bool {let x:Alias=true;x}",
         "typealias Alias<.T:Type=bool> = T;fn run()->bool {let x:Alias<.T=char> = 'x';x == 'x'}",
-        "typealias Pair<T,.U:Type=T> = (T,U);fn run()->bool {let (first,second):Pair<bool> = (true,true);first and second}",
-        "typealias Pair<T,.U:Type=T> = (T,U);comptime fn Make(value:Type)->Type {Pair<value>} typealias Flags=Make(bool);fn run()->bool {let (first,second):Flags=(true,true);first and second}",
-        "comptime fn Selected(value:Type)->Type {if value == bool {char} else {bool}} typealias Pair<T,.U:Type=Selected(T)> = (T,U);comptime fn Make(value:Type)->Type {Pair<value>} typealias Mixed=Make(bool);fn run()->bool {let (first,second):Mixed=(true,'x');first and second == 'x'}",
+        "typealias Pair<T,.U:Type=T> = Tuple<T, U>;fn run()->bool {let (first,second):Pair<bool> = (true,true);first and second}",
+        "typealias Pair<T,.U:Type=T> = Tuple<T, U>;comptime fn Make(value:Type)->Type {Pair<value>} typealias Flags=Make(bool);fn run()->bool {let (first,second):Flags=(true,true);first and second}",
+        "comptime fn Selected(value:Type)->Type {if value == bool {char} else {bool}} typealias Pair<T,.U:Type=Selected(T)> = Tuple<T, U>;comptime fn Make(value:Type)->Type {Pair<value>} typealias Mixed=Make(bool);fn run()->bool {let (first,second):Mixed=(true,'x');first and second == 'x'}",
     ] {
-        let package = compile(&format!(
+        let package = execution_support::compile_with_tuple(&format!(
             "typealias Type=.Type'builtin;typealias char=.char'builtin;{source}"
         ));
         assert_eq!(
@@ -28057,11 +28523,11 @@ fn typealias_defaults_preserve_transparency_and_named_overrides() {
 #[test]
 fn type_defaults_reuse_computed_inputs_once_in_source_order() {
     for definition in [
-        "typealias Pair<T,.U:Type=T> = (T,U);",
+        "typealias Pair<T,.U:Type=T> = Tuple<T, U>;",
         "struct Pair where T,.U:Type=T {first:T,second:U,}",
         "enum Pair where T,.U:Type=T {pair(T,U),}",
     ] {
-        let package = compile(&format!(
+        let package = execution_support::compile_with_tuple(&format!(
             "typealias Type=.Type'builtin;{definition} comptime fn First()->Type {{bool}} comptime fn Second()->Type {{'x''type}} comptime fn Make()->Type {{Pair<First()>}} comptime fn Explicit()->Type {{Pair<.U=Second(),First()>}}"
         ));
         for (entry, order) in [
@@ -28073,9 +28539,14 @@ fn type_defaults_reuse_computed_inputs_once_in_source_order() {
             let Value::Type(ty) = value else {
                 panic!("expected Type")
             };
-            let actual = match ty {
-                nir::Term::Tuple(arguments) | nir::Term::Nominal { arguments, .. } => arguments,
-                other => panic!("unexpected {other}"),
+            let actual = if let Some(fields) = nir::normal_forms::tuple_fields(Some(&package), &ty)
+            {
+                fields.to_vec()
+            } else {
+                match ty {
+                    nir::Term::Tuple(arguments) | nir::Term::Nominal { arguments, .. } => arguments,
+                    other => panic!("unexpected {other}"),
+                }
             };
             assert_eq!(
                 actual,
@@ -28444,8 +28915,8 @@ fn late_normal_form_types_check_unselected_branches_and_recover() {
 
 #[test]
 fn late_normal_form_types_stage_tuples_and_match_bindings_once() {
-    let package = compile(
-        "typealias Type=.Type'builtin;comptime fn Input()->bool {true} comptime fn Guard()->bool {true} comptime fn Target()->Type {(.u8'builtin,bool)} pure comptime fn Head<.T:Type=Target(),value:T,.copy:T=value>->Type {T} comptime fn Observed()->Type {Head<Input() match {flag if Guard() => (200,flag), _ => (5,false)},.T=Target()>} comptime fn Concrete()->Type {Head<(200,true),.T=(.u8'builtin,bool)>}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Type=.Type'builtin;comptime fn Input()->bool {true} comptime fn Guard()->bool {true} comptime fn Target()->Type {Tuple<.u8'builtin,bool>} pure comptime fn Head<.T:Type=Target(),value:T,.copy:T=value>->Type {T} comptime fn Observed()->Type {Head<Input() match {flag if Guard() => (200,flag), _ => (5,false)},.T=Target()>} comptime fn Concrete()->Type {Head<(200, true),.T=Tuple<.u8'builtin,bool>>}",
     );
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let expected = engine.invoke(id(&package, "Concrete"), vec![]).unwrap();
@@ -28579,7 +29050,7 @@ fn symbolic_normal_form_defaults_invoke_only_their_concrete_dependencies() {
             ],
         ),
         (
-            "comptime fn Read(pair:(Integer,bool))->Integer {let (n,flag)=pair;n} pure comptime fn Head<T,pair:(Integer,bool),.N:Integer=Next(Read(pair))>->Type {T} typealias Alias<T> = Head<T,(4,true)>; fn keep(value:Alias<T>)->Head<T,(4,true),.N=5> where T {value}",
+            "comptime fn Read(pair:Tuple<Integer, bool>)->Integer {let (n,flag)=pair;n} pure comptime fn Head<T,pair:Tuple<Integer, bool>,.N:Integer=Next(Read(pair))>->Type {T} typealias Alias<T> = Head<T,(4,true)>; fn keep(value:Alias<T>)->Head<T,(4,true),.N=5> where T {value}",
             vec![
                 Term::TupleValue(vec![
                     Term::Integer(comptime_runtime::Integer::from_u128(4)),
@@ -28589,7 +29060,7 @@ fn symbolic_normal_form_defaults_invoke_only_their_concrete_dependencies() {
             ],
         ),
     ] {
-        let package = compile(&format!("{prefix}{source}"));
+        let package = execution_support::compile_with_tuple(&format!("{prefix}{source}"));
         let function = package.functions.iter().find(|f| f.name == "keep").unwrap();
         let mut arguments = vec![Term::Rigid {
             declaration: function.type_parameters[0],
@@ -28824,20 +29295,23 @@ fn staged_function_inputs_reject_repeated_computation_and_recover() {
 fn staged_function_inputs_bind_aggregates_and_validate_numeric_ranges() {
     use nir::program::{Expr, ExprKind as K, Literal};
     use nir::{Primitive, Sort, Term};
-    let mut package = compile(
-        "fn choose(pair:(bool,.u8'builtin))->bool {let (flag,number)=pair;flag and number == 7}",
+    let mut package = execution_support::compile_with_tuple(
+        "fn choose(pair:Tuple<bool, .u8'builtin>)->bool {let (flag,number)=pair;flag and number == 7}",
     );
-    let function = &mut package.functions[0];
+    let heads = package.normal_forms.clone();
+    let function = package
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "choose")
+        .unwrap();
     let Term::Function { parameters, .. } = &mut function.signature else {
         panic!("signature")
     };
     parameters[0].sort = Sort::ComptimeValue;
+    let tuple_ty = parameters[0].ty.clone();
     let source = function.body.source;
     let constant = |number| Expr {
-        ty: Term::Tuple(vec![
-            Term::Primitive(Primitive::Bool),
-            Term::Primitive(Primitive::U8),
-        ]),
+        ty: tuple_ty.clone(),
         source,
         kind: K::Tuple(vec![
             Expr {
@@ -28852,8 +29326,22 @@ fn staged_function_inputs_bind_aggregates_and_validate_numeric_ranges() {
             },
         ]),
     };
-    assert!(iir::staging::bind_inputs(function, &[Some(constant(256))], &mut 10_000).is_err());
-    *function = iir::staging::bind_inputs(function, &[Some(constant(7))], &mut 10_000).unwrap();
+    assert!(
+        iir::staging::bind_inputs_with_layouts(
+            heads.as_slice(),
+            function,
+            &[Some(constant(256))],
+            &mut 10_000
+        )
+        .is_err()
+    );
+    *function = iir::staging::bind_inputs_with_layouts(
+        heads.as_slice(),
+        function,
+        &[Some(constant(7))],
+        &mut 10_000,
+    )
+    .unwrap();
     let identity = function.declaration;
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(vm.invoke(identity, vec![]).unwrap(), Value::Bool(true));
@@ -28862,8 +29350,8 @@ fn staged_function_inputs_bind_aggregates_and_validate_numeric_ranges() {
 #[test]
 fn staged_calls_keep_distinct_instances_and_runtime_evaluation_order() {
     use nir::Term;
-    let package = compile(
-        "fn first()->bool {true} fn second()->bool {false} fn choose(flag:bool,left:bool,right:bool)->bool {if flag {left} else {right}} fn run()->(bool,bool) {(choose(true,first(),second()),choose(false,first(),second()))}",
+    let package = execution_support::compile_with_tuple(
+        "fn first()->bool {true} fn second()->bool {false} fn choose(flag:bool,left:bool,right:bool)->bool {if flag {left} else {right}} fn run()->Tuple<bool, bool> {(choose(true,first(),second()),choose(false,first(),second()))}",
     );
     let (graph, root) = staged_direct_call_graph(&package);
     let template = package
@@ -28925,10 +29413,16 @@ fn staged_direct_call_graph(package: &Package) -> (iir::Package, iir::InstanceKe
     };
     let mut graph = iir::Package {
         roots: vec![root.clone()],
+        normal_forms: package.normal_forms.clone(),
         ..Default::default()
     };
     for function in &package.functions {
-        if function.declaration == template.declaration {
+        if function.declaration == template.declaration
+            || package
+                .normal_forms
+                .iter()
+                .any(|head| head.declaration == function.declaration)
+        {
             continue;
         }
         let mut function = function.clone();
@@ -29079,7 +29573,7 @@ fn staged_calls_retain_generic_identity_and_allow_empty_runtime_signatures() {
     use nir::{Primitive, Term};
     for (source, expected, keys) in [
         (
-            "fn choose(flag:bool,left:T,right:T)->T where T {if flag {left} else {right}} fn run()->(bool,'x''type) {(choose(true,true,false),choose(false,'a','b'))}",
+            "fn choose(flag:bool,left:T,right:T)->T where T {if flag {left} else {right}} fn run()->Tuple<bool, 'x''type> {(choose(true,true,false),choose(false,'a','b'))}",
             Value::Tuple(vec![Value::Bool(true), Value::Char('b')]),
             vec![
                 vec![Term::Primitive(Primitive::Bool), Term::Bool(true)],
@@ -29087,7 +29581,7 @@ fn staged_calls_retain_generic_identity_and_allow_empty_runtime_signatures() {
             ],
         ),
         (
-            "fn choose(.flag:bool=true)->bool {flag} fn run()->(bool,bool,bool) {(choose(),choose(.flag=false),choose())}",
+            "fn choose(.flag:bool=true)->bool {flag} fn run()->Tuple<bool, bool, bool> {(choose(),choose(.flag=false),choose())}",
             Value::Tuple(vec![
                 Value::Bool(true),
                 Value::Bool(false),
@@ -29096,7 +29590,7 @@ fn staged_calls_retain_generic_identity_and_allow_empty_runtime_signatures() {
             vec![vec![Term::Bool(true)], vec![Term::Bool(false)]],
         ),
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         let (graph, root) = staged_direct_call_graph(&package);
         let instances = graph
             .functions
@@ -29120,11 +29614,11 @@ fn staged_calls_retain_generic_identity_and_allow_empty_runtime_signatures() {
 #[test]
 fn source_comptime_parameters_specialize_direct_runtime_calls() {
     for source in [
-        "fn choose(comptime flag:bool,left:bool,right:bool)->bool {if flag {left} else {right}} fn run()->(bool,bool) {(choose(true,true,false),choose(false,true,false))}",
-        "comptime fn flag()->bool {true} fn choose(comptime flag:bool,left:bool,right:bool)->bool {if flag {left} else {right}} fn run()->(bool,bool) {(choose(flag(),true,false),choose(not flag(),true,false))}",
-        "fn choose(comptime flag:bool,left:T,right:T)->T where T {if flag {left} else {right}} fn run()->(bool,bool) {(choose(true,true,false),choose(false,true,false))}",
+        "fn choose(comptime flag:bool,left:bool,right:bool)->bool {if flag {left} else {right}} fn run()->Tuple<bool, bool> {(choose(true,true,false),choose(false,true,false))}",
+        "comptime fn flag()->bool {true} fn choose(comptime flag:bool,left:bool,right:bool)->bool {if flag {left} else {right}} fn run()->Tuple<bool, bool> {(choose(flag(),true,false),choose(not flag(),true,false))}",
+        "fn choose(comptime flag:bool,left:T,right:T)->T where T {if flag {left} else {right}} fn run()->Tuple<bool, bool> {(choose(true,true,false),choose(false,true,false))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
@@ -29148,11 +29642,11 @@ fn source_comptime_parameters_specialize_direct_runtime_calls() {
 #[test]
 fn source_comptime_parameters_support_defaults_and_runtime_default_dependencies() {
     for source in [
-        "fn choose(comptime .flag:bool=true,.value:bool=flag)->bool {flag and value} fn run()->(bool,bool) {(choose(),choose(.flag=false))}",
-        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime .first:bool=false,comptime .flag:bool=invert(first),.value:bool=flag)->bool {value} fn run()->(bool,bool) {(choose(),choose(.first=true))}",
-        "fn choose(comptime .flag:bool=true,value:T)->T where T {value} fn run()->(bool,bool) {(choose(true),choose(false,.flag=false))}",
+        "fn choose(comptime .flag:bool=true,.value:bool=flag)->bool {flag and value} fn run()->Tuple<bool, bool> {(choose(),choose(.flag=false))}",
+        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime .first:bool=false,comptime .flag:bool=invert(first),.value:bool=flag)->bool {value} fn run()->Tuple<bool, bool> {(choose(),choose(.first=true))}",
+        "fn choose(comptime .flag:bool=true,value:T)->T where T {value} fn run()->Tuple<bool, bool> {(choose(true),choose(false,.flag=false))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
@@ -29193,8 +29687,8 @@ fn source_comptime_parameters_do_not_invoke_overridden_defaults() {
 
 #[test]
 fn source_comptime_parameters_discover_recursive_constant_instances_once() {
-    let package = compile(
-        "fn choose(comptime flag:bool,again:bool)->bool {if again {choose(false,false)} else {flag}} fn run()->(bool,bool) {(choose(true,false),choose(true,true))}",
+    let package = execution_support::compile_with_tuple(
+        "fn choose(comptime flag:bool,again:bool)->bool {if again {choose(false,false)} else {flag}} fn run()->Tuple<bool, bool> {(choose(true,false),choose(true,true))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     assert_eq!(
@@ -29215,10 +29709,10 @@ fn source_comptime_parameters_discover_recursive_constant_instances_once() {
 #[test]
 fn source_comptime_parameters_forward_through_specialized_definitions() {
     for source in [
-        "fn choose(comptime flag:bool,value:bool)->bool {flag and value} fn forward(comptime flag:bool,value:bool)->bool {choose(flag,value)} fn run()->(bool,bool) {(forward(true,true),forward(false,true))}",
-        "fn choose(comptime flag:bool,value:T)->T where T {value} fn forward(comptime flag:bool,value:T)->T where T {choose(flag,value)} fn run()->(bool,'x''type) {(forward(true,true),forward(false,'x'))}",
+        "fn choose(comptime flag:bool,value:bool)->bool {flag and value} fn forward(comptime flag:bool,value:bool)->bool {choose(flag,value)} fn run()->Tuple<bool, bool> {(forward(true,true),forward(false,true))}",
+        "fn choose(comptime flag:bool,value:T)->T where T {value} fn forward(comptime flag:bool,value:T)->T where T {choose(flag,value)} fn run()->Tuple<bool, 'x''type> {(forward(true,true),forward(false,'x'))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
         assert_eq!(
             graph
@@ -29252,11 +29746,11 @@ fn source_comptime_parameters_forward_through_specialized_definitions() {
 #[test]
 fn source_comptime_forwarding_preserves_default_frames_and_recursive_keys() {
     for source in [
-        "fn choose(comptime .flag:bool=true,comptime .copy:bool=flag,.value:bool=copy)->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->(bool,bool) {(forward(true),forward(false))}",
-        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool,again:bool)->bool {if again {forward(flag,false)} else {choose(flag)}} fn run()->(bool,bool) {(forward(true,true),forward(false,true))}",
-        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {let action=|| choose(flag);action()} fn run()->(bool,bool) {(forward(true),forward(false))}",
+        "fn choose(comptime .flag:bool=true,comptime .copy:bool=flag,.value:bool=copy)->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
+        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool,again:bool)->bool {if again {forward(flag,false)} else {choose(flag)}} fn run()->Tuple<bool, bool> {(forward(true,true),forward(false,true))}",
+        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {let action=|| choose(flag);action()} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
@@ -29295,10 +29789,10 @@ fn source_comptime_forwarding_declines_runtime_modified_or_addressed_bindings() 
 #[test]
 fn source_comptime_forwarding_builds_aggregate_inputs_and_defaults() {
     for source in [
-        "fn choose(comptime pair:(bool,bool))->bool {let (a,b)=pair;a and b} fn forward(comptime flag:bool)->bool {choose((flag,true))} fn run()->(bool,bool) {(forward(true),forward(false))}",
-        "fn choose(comptime .flag:bool=true,comptime .pair:(bool,bool)=(flag,true))->bool {let (a,b)=pair;a and b} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->(bool,bool) {(forward(true),forward(false))}",
+        "fn choose(comptime pair:Tuple<bool, bool>)->bool {let (a,b)=pair;a and b} fn forward(comptime flag:bool)->bool {choose((flag,true))} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
+        "fn choose(comptime .flag:bool=true,comptime .pair:Tuple<bool, bool> =(flag,true))->bool {let (a,b)=pair;a and b} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
@@ -29317,8 +29811,8 @@ fn source_comptime_forwarding_folds_boolean_operations_and_choices() {
         ("if flag {false} else {true}", (false, true)),
         ("do {not flag}", (false, true)),
     ] {
-        let package = compile(&format!(
-            "fn choose(comptime flag:bool)->bool {{flag}} fn forward(comptime flag:bool)->bool {{choose({input})}} fn run()->(bool,bool) {{(forward(true),forward(false))}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn choose(comptime flag:bool)->bool {{flag}} fn forward(comptime flag:bool)->bool {{choose({input})}} fn run()->Tuple<bool, bool> {{(forward(true),forward(false))}}"
         ));
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
         let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
@@ -29354,28 +29848,28 @@ fn source_comptime_forwarding_folds_boolean_operations_and_choices() {
 fn source_comptime_forwarding_folds_defaults_recursive_choices_and_payloads() {
     let cases = [
         (
-            "fn choose(comptime .flag:bool=true,comptime .copy:bool=not flag)->bool {copy} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->(bool,bool) {(forward(true),forward(false))}",
+            "fn choose(comptime .flag:bool=true,comptime .copy:bool=not flag)->bool {copy} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
             Value::Tuple(vec![Value::Bool(false), Value::Bool(true)]),
         ),
         (
-            "fn choose(comptime flag:bool,again:bool)->bool {if again {choose(not flag,false)} else {flag}} fn run()->(bool,bool) {(choose(true,false),choose(true,true))}",
+            "fn choose(comptime flag:bool,again:bool)->bool {if again {choose(not flag,false)} else {flag}} fn run()->Tuple<bool, bool> {(choose(true,false),choose(true,true))}",
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
         ),
         (
-            "typealias Byte=.u8'builtin; fn choose(comptime value:Byte)->Byte {value} fn forward(comptime flag:bool)->Byte {choose(if flag {7} else {9})} fn run()->(Byte,Byte) {(forward(true),forward(false))}",
+            "typealias Byte=.u8'builtin; fn choose(comptime value:Byte)->Byte {value} fn forward(comptime flag:bool)->Byte {choose(if flag {7} else {9})} fn run()->Tuple<Byte, Byte> {(forward(true),forward(false))}",
             Value::Tuple(vec![Value::UnsignedInteger(7), Value::UnsignedInteger(9)]),
         ),
         (
-            "typealias Byte=.u8'builtin; fn choose(comptime value:bool)->bool {value} fn forward(comptime value:Byte)->bool {choose(value == 7)} fn run()->(bool,bool) {(forward(7),forward(9))}",
+            "typealias Byte=.u8'builtin; fn choose(comptime value:bool)->bool {value} fn forward(comptime value:Byte)->bool {choose(value == 7)} fn run()->Tuple<bool, bool> {(forward(7),forward(9))}",
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
         ),
         (
-            "fn choose(comptime pair:(bool,bool))->bool {let (a,b)=pair;a and b} fn forward(comptime flag:bool)->bool {choose((not flag,if flag {false} else {true}))} fn run()->(bool,bool) {(forward(true),forward(false))}",
+            "fn choose(comptime pair:Tuple<bool, bool>)->bool {let (a,b)=pair;a and b} fn forward(comptime flag:bool)->bool {choose((not flag,if flag {false} else {true}))} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
             Value::Tuple(vec![Value::Bool(false), Value::Bool(true)]),
         ),
     ];
     for (source, expected) in cases {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             expected,
@@ -29431,8 +29925,8 @@ fn source_comptime_forwarding_folds_ordered_comparisons_and_string_equality() {
 
 #[test]
 fn source_comptime_forwarding_combines_comparisons_choices_and_arithmetic() {
-    let package = compile(
-        "typealias Byte=.u8'builtin; fn choose(comptime value:Byte)->Byte {value} fn forward(comptime value:Byte)->Byte where requires value <= 10 {choose(if value < 5 {value + 1} else {value * 2})} fn run()->(Byte,Byte) {(forward(3),forward(7))}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Byte=.u8'builtin; fn choose(comptime value:Byte)->Byte {value} fn forward(comptime value:Byte)->Byte where requires value <= 10 {choose(if value < 5 {value + 1} else {value * 2})} fn run()->Tuple<Byte, Byte> {(forward(3),forward(7))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     for instance in graph
@@ -29459,8 +29953,8 @@ fn source_comptime_forwarding_combines_comparisons_choices_and_arithmetic() {
 
 #[test]
 fn source_comptime_forwarding_folds_local_blocks() {
-    let package = compile(
-        "typealias Flag=true'type; fn choose(comptime flag:Flag)->Flag {flag} fn forward(comptime flag:Flag)->Flag {choose(do {let opposite=not flag; let original=do {let inner=not opposite; inner}; original and not opposite})} fn run()->(Flag,Flag) {(forward(true),forward(false))}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Flag=true'type; fn choose(comptime flag:Flag)->Flag {flag} fn forward(comptime flag:Flag)->Flag {choose(do {let opposite=not flag; let original=do {let inner=not opposite; inner}; original and not opposite})} fn run()->Tuple<Flag, Flag> {(forward(true),forward(false))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     for instance in graph
@@ -29494,11 +29988,11 @@ fn source_comptime_forwarding_folds_local_blocks() {
 #[test]
 fn source_comptime_forwarding_folds_blocks_in_defaults_and_branches() {
     for source in [
-        "fn choose(comptime .flag:bool=true,comptime .copy:bool=do {let opposite=not flag;not opposite})->bool {copy} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->(bool,bool) {(forward(true),forward(false))}",
-        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(do {let value=flag; let opposite=do {let value=not value;value}; value and not opposite})} fn run()->(bool,bool) {(forward(true),forward(false))}",
-        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(if flag {let value=not flag;not value} else {let value=flag;value})} fn run()->(bool,bool) {(forward(true),forward(false))}",
+        "fn choose(comptime .flag:bool=true,comptime .copy:bool=do {let opposite=not flag;not opposite})->bool {copy} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
+        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(do {let value=flag; let opposite=do {let value=not value;value}; value and not opposite})} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
+        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(if flag {let value=not flag;not value} else {let value=flag;value})} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
@@ -29510,12 +30004,12 @@ fn source_comptime_forwarding_folds_blocks_in_defaults_and_branches() {
 #[test]
 fn source_comptime_forwarding_folds_structural_pattern_bindings() {
     for source in [
-        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(do {let (a,b)=(flag,not flag);a and not b})} fn run()->(bool,bool) {(forward(true),forward(false))}",
-        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime pair:(bool,(bool,bool)))->bool {choose(do {let (a,(_,b))=pair; a and b})} fn run()->(bool,bool) {(forward((true,(false,true))),forward((true,(true,false))))}",
-        "fn choose(comptime .flag:bool=true,comptime .value:bool=do {let (a,b)=(flag,not flag);a and not b})->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->(bool,bool) {(forward(true),forward(false))}",
-        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(do {let (a,b)=if flag {(true,false)} else {(false,true)};let result=do {let (a,b)=(b,a);not a and b};result})} fn run()->(bool,bool) {(forward(true),forward(false))}",
+        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(do {let (a,b)=(flag,not flag);a and not b})} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
+        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime pair:Tuple<bool, Tuple<bool, bool>>)->bool {choose(do {let (a,(_,b))=pair; a and b})} fn run()->Tuple<bool, bool> {(forward((true,(false,true))),forward((true,(true,false))))}",
+        "fn choose(comptime .flag:bool=true,comptime .value:bool=do {let (a,b)=(flag,not flag);a and not b})->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
+        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(do {let (a,b)=if flag {(true,false)} else {(false,true)};let result=do {let (a,b)=(b,a);not a and b};result})} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
         for instance in graph
             .functions
@@ -29543,11 +30037,11 @@ fn source_comptime_forwarding_folds_structural_pattern_bindings() {
 #[test]
 fn source_comptime_forwarding_invokes_user_comptime_functions() {
     for source in [
-        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(invert(flag))} fn run()->(bool,bool) {(forward(false),forward(true))}",
-        "comptime fn identity(value:T)->T where T {value} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(identity<bool>(flag))} fn run()->(bool,bool) {(forward(true),forward(false))}",
-        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(do {let (a,b)=(flag,invert(flag)); a and not b})} fn run()->(bool,bool) {(forward(true),forward(false))}",
+        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(invert(flag))} fn run()->Tuple<bool, bool> {(forward(false),forward(true))}",
+        "comptime fn identity(value:T)->T where T {value} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(identity<bool>(flag))} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
+        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(do {let (a,b)=(flag,invert(flag)); a and not b})} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
         assert!(
             graph
@@ -29585,10 +30079,10 @@ fn deferred_comptime_invocation_preserves_selection_and_recovers_after_failure()
 #[test]
 fn deferred_comptime_invocation_supports_defaults_and_aggregate_results() {
     for source in [
-        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime .flag:bool=false,comptime .copy:bool=invert(flag))->bool {copy} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->(bool,bool) {(forward(false),forward(true))}",
-        "comptime fn pair(flag:bool)->(bool,bool) {(flag,not flag)} fn choose(comptime pair:(bool,bool))->bool {let (a,b)=pair;a and not b} fn forward(comptime flag:bool)->bool {choose(pair(flag))} fn run()->(bool,bool) {(forward(true),forward(false))}",
+        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime .flag:bool=false,comptime .copy:bool=invert(flag))->bool {copy} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->Tuple<bool, bool> {(forward(false),forward(true))}",
+        "comptime fn pair(flag:bool)->Tuple<bool, bool> {(flag,not flag)} fn choose(comptime pair:Tuple<bool, bool>)->bool {let (a,b)=pair;a and not b} fn forward(comptime flag:bool)->bool {choose(pair(flag))} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
@@ -29634,12 +30128,12 @@ fn deferred_comptime_invocation_executes_helper_control_flow_and_contracts() {
 #[test]
 fn deferred_comptime_default_chains_use_prepared_results() {
     for source in [
-        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime .flag:bool=false,comptime .copy:bool=flag)->bool {copy} fn forward(comptime flag:bool)->bool {choose(.flag=invert(flag))} fn run()->(bool,bool) {(forward(false),forward(true))}",
-        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime .a:bool=false,comptime .b:bool=not a,comptime .c:bool=invert(b),.value:bool=c)->bool {value} fn forward(comptime flag:bool)->bool {choose(.a=invert(flag))} fn run()->(bool,bool) {(forward(false),forward(true))}",
-        "comptime fn invert(flag:bool)->bool {not flag} fn recurse(comptime .flag:bool=true,comptime .copy:bool=flag,.again:bool=false)->bool {if again {recurse(.flag=invert(flag))} else {copy}} fn run()->(bool,bool) {(recurse(.flag=false,.again=true),recurse(.flag=true,.again=true))}",
-        "comptime fn invert(flag:bool)->bool {not flag} comptime fn never(flag:bool)->bool {never(flag)} fn choose(comptime .a:bool=false,comptime .b:bool=never(a))->bool {b} fn forward(comptime flag:bool)->bool {choose(.a=invert(flag),.b=flag)} fn run()->(bool,bool) {(forward(true),forward(false))}",
+        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime .flag:bool=false,comptime .copy:bool=flag)->bool {copy} fn forward(comptime flag:bool)->bool {choose(.flag=invert(flag))} fn run()->Tuple<bool, bool> {(forward(false),forward(true))}",
+        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime .a:bool=false,comptime .b:bool=not a,comptime .c:bool=invert(b),.value:bool=c)->bool {value} fn forward(comptime flag:bool)->bool {choose(.a=invert(flag))} fn run()->Tuple<bool, bool> {(forward(false),forward(true))}",
+        "comptime fn invert(flag:bool)->bool {not flag} fn recurse(comptime .flag:bool=true,comptime .copy:bool=flag,.again:bool=false)->bool {if again {recurse(.flag=invert(flag))} else {copy}} fn run()->Tuple<bool, bool> {(recurse(.flag=false,.again=true),recurse(.flag=true,.again=true))}",
+        "comptime fn invert(flag:bool)->bool {not flag} comptime fn never(flag:bool)->bool {never(flag)} fn choose(comptime .a:bool=false,comptime .b:bool=never(a))->bool {b} fn forward(comptime flag:bool)->bool {choose(.a=invert(flag),.b=flag)} fn run()->Tuple<bool, bool> {(forward(true),forward(false))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
@@ -29746,8 +30240,8 @@ fn deferred_comptime_default_failure_does_not_poison_later_preparation() {
 
 #[test]
 fn deferred_comptime_trait_dispatch_selects_concrete_implementations() {
-    let package = compile(
-        "trait Transform {comptime fn apply(flag:bool)->bool;} impl Transform for bool {comptime fn apply(flag:bool)->bool {not flag}} impl Transform for 'x''type {comptime fn apply(flag:bool)->bool {flag}} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool where T :- Transform {choose(T.as(Transform).apply(flag))} fn run()->(bool,bool) {(forward<bool>(false),forward<'x''type>(false))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Transform {comptime fn apply(flag:bool)->bool;} impl Transform for bool {comptime fn apply(flag:bool)->bool {not flag}} impl Transform for 'x''type {comptime fn apply(flag:bool)->bool {flag}} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool where T :- Transform {choose(T.as(Transform).apply(flag))} fn run()->Tuple<bool, bool> {(forward<bool>(false),forward<'x''type>(false))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     assert!(
@@ -29766,10 +30260,10 @@ fn deferred_comptime_trait_dispatch_selects_concrete_implementations() {
 #[test]
 fn deferred_comptime_dispatch_waits_for_type_only_dependencies() {
     for source in [
-        "trait Flag {comptime fn read()->bool;} impl Flag for bool {comptime fn read()->bool {true}} impl Flag for 'x''type {comptime fn read()->bool {false}} fn choose(comptime flag:bool)->bool {flag} fn forward()->bool where T :- Flag {choose(T.as(Flag).read())} fn run()->(bool,bool) {(forward<bool>(),forward<'x''type>())}",
-        "trait Flag {comptime fn read()->bool;} impl Flag for bool {comptime fn read()->bool {true}} impl Flag for 'x''type {comptime fn read()->bool {false}} comptime fn read()->bool where T :- Flag {T.as(Flag).read()} fn choose(comptime flag:bool)->bool {flag} fn forward()->bool where T :- Flag {choose(read<T>())} fn run()->(bool,bool) {(forward<bool>(),forward<'x''type>())}",
+        "trait Flag {comptime fn read()->bool;} impl Flag for bool {comptime fn read()->bool {true}} impl Flag for 'x''type {comptime fn read()->bool {false}} fn choose(comptime flag:bool)->bool {flag} fn forward()->bool where T :- Flag {choose(T.as(Flag).read())} fn run()->Tuple<bool, bool> {(forward<bool>(),forward<'x''type>())}",
+        "trait Flag {comptime fn read()->bool;} impl Flag for bool {comptime fn read()->bool {true}} impl Flag for 'x''type {comptime fn read()->bool {false}} comptime fn read()->bool where T :- Flag {T.as(Flag).read()} fn choose(comptime flag:bool)->bool {flag} fn forward()->bool where T :- Flag {choose(read<T>())} fn run()->Tuple<bool, bool> {(forward<bool>(),forward<'x''type>())}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
@@ -29781,10 +30275,10 @@ fn deferred_comptime_dispatch_waits_for_type_only_dependencies() {
 #[test]
 fn deferred_comptime_dispatch_preserves_interface_arguments_and_defaults() {
     for source in [
-        "trait Transform where A {comptime fn apply(value:A)->A;} impl Transform<bool> for bool {comptime fn apply(value:bool)->bool {not value}} impl Transform<bool> for 'x''type {comptime fn apply(value:bool)->bool {value}} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool where T :- Transform<bool> {choose(T.as(Transform<bool>).apply(flag))} fn run()->(bool,bool) {(forward<bool>(false),forward<'x''type>(false))}",
-        "trait Transform {comptime fn apply(value:bool)->bool {not value}} trait Child :- Transform {} impl Transform for bool {} impl Child for bool {} fn choose(comptime .flag:bool=false,comptime .copy:bool=flag)->bool {copy} fn forward(comptime flag:bool)->bool where T :- Child {choose(.flag=T.as(Child).apply(flag))} fn run()->(bool,bool) {(forward<bool>(false),forward<bool>(true))}",
+        "trait Transform where A {comptime fn apply(value:A)->A;} impl Transform<bool> for bool {comptime fn apply(value:bool)->bool {not value}} impl Transform<bool> for 'x''type {comptime fn apply(value:bool)->bool {value}} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool where T :- Transform<bool> {choose(T.as(Transform<bool>).apply(flag))} fn run()->Tuple<bool, bool> {(forward<bool>(false),forward<'x''type>(false))}",
+        "trait Transform {comptime fn apply(value:bool)->bool {not value}} trait Child :- Transform {} impl Transform for bool {} impl Child for bool {} fn choose(comptime .flag:bool=false,comptime .copy:bool=flag)->bool {copy} fn forward(comptime flag:bool)->bool where T :- Child {choose(.flag=T.as(Child).apply(flag))} fn run()->Tuple<bool, bool> {(forward<bool>(false),forward<bool>(true))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
@@ -29796,10 +30290,10 @@ fn deferred_comptime_dispatch_preserves_interface_arguments_and_defaults() {
 #[test]
 fn deferred_comptime_dispatch_keeps_interface_and_method_type_arguments_distinct() {
     for source in [
-        "trait Choice where A {comptime fn read(flag:bool)->bool;} impl Choice<bool> for bool {comptime fn read(flag:bool)->bool {not flag}} impl Choice<'x''type> for bool {comptime fn read(flag:bool)->bool {flag}} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool where A,T :- Choice<A> {choose(T.as(Choice<A>).read(flag))} fn run()->(bool,bool) {(forward<bool,bool>(false),forward<'x''type,bool>(false))}",
-        "trait Keep {comptime fn keep(value:A)->A where A {value}} impl Keep for bool {} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool where T :- Keep {choose(T.as(Keep).keep<bool>(flag))} fn run()->(bool,bool) {(forward<bool>(true),forward<bool>(false))}",
+        "trait Choice where A {comptime fn read(flag:bool)->bool;} impl Choice<bool> for bool {comptime fn read(flag:bool)->bool {not flag}} impl Choice<'x''type> for bool {comptime fn read(flag:bool)->bool {flag}} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool where A,T :- Choice<A> {choose(T.as(Choice<A>).read(flag))} fn run()->Tuple<bool, bool> {(forward<bool,bool>(false),forward<'x''type,bool>(false))}",
+        "trait Keep {comptime fn keep(value:A)->A where A {value}} impl Keep for bool {} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool where T :- Keep {choose(T.as(Keep).keep<bool>(flag))} fn run()->Tuple<bool, bool> {(forward<bool>(true),forward<bool>(false))}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
@@ -29810,8 +30304,8 @@ fn deferred_comptime_dispatch_keeps_interface_and_method_type_arguments_distinct
 
 #[test]
 fn deferred_comptime_dispatch_supports_value_receivers() {
-    let package = compile(
-        "trait Toggle {comptime fn toggle(self)->bool;} impl Toggle for bool {comptime fn toggle(self)->bool {not self}} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime value:T)->bool where T :- Toggle {choose(value.toggle())} fn run()->(bool,bool) {(forward(false),forward(true))}",
+    let package = execution_support::compile_with_tuple(
+        "trait Toggle {comptime fn toggle(self)->bool;} impl Toggle for bool {comptime fn toggle(self)->bool {not self}} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime value:T)->bool where T :- Toggle {choose(value.toggle())} fn run()->Tuple<bool, bool> {(forward(false),forward(true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -29822,11 +30316,11 @@ fn deferred_comptime_dispatch_supports_value_receivers() {
 #[test]
 fn deferred_comptime_associated_values_support_callable_and_scalar_inputs() {
     for source in [
-        "comptime fn invert(flag:bool)->bool {not flag} comptime fn keep(flag:bool)->bool {flag} trait Stored {assoc callback:comptime fn(bool)->bool;} impl Stored for bool {assoc callback:comptime fn(bool)->bool=invert;} impl Stored for 'x''type {assoc callback:comptime fn(bool)->bool=keep;} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool where T :- Stored {choose(T.as(Stored).callback(flag))} fn run()->(bool,bool) {(forward<bool>(false),forward<'x''type>(false))}",
-        "trait Flag {assoc value:bool;} impl Flag for bool {assoc value:bool=true;} impl Flag for 'x''type {assoc value:bool=false;} fn choose(comptime flag:bool)->bool {flag} fn forward()->bool where T :- Flag {choose(T.as(Flag).value)} fn run()->(bool,bool) {(forward<bool>(),forward<'x''type>())}",
-        "typealias Callback=%{flag:bool} comptime fn()->bool; comptime fn make(flag:bool)->Callback {|| flag} trait Stored {assoc callback:Callback;} impl Stored for bool {assoc callback:Callback=make(true);} impl Stored for 'x''type {assoc callback:Callback=make(false);} fn choose(comptime flag:bool)->bool {flag} fn forward()->bool where T :- Stored {choose(T.as(Stored).callback())} fn run()->(bool,bool) {(forward<bool>(),forward<'x''type>())}",
+        "comptime fn invert(flag:bool)->bool {not flag} comptime fn keep(flag:bool)->bool {flag} trait Stored {assoc callback:comptime fn(bool)->bool;} impl Stored for bool {assoc callback:comptime fn(bool)->bool=invert;} impl Stored for 'x''type {assoc callback:comptime fn(bool)->bool=keep;} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool where T :- Stored {choose(T.as(Stored).callback(flag))} fn run()->Tuple<bool, bool> {(forward<bool>(false),forward<'x''type>(false))}",
+        "trait Flag {assoc value:bool;} impl Flag for bool {assoc value:bool=true;} impl Flag for 'x''type {assoc value:bool=false;} fn choose(comptime flag:bool)->bool {flag} fn forward()->bool where T :- Flag {choose(T.as(Flag).value)} fn run()->Tuple<bool, bool> {(forward<bool>(),forward<'x''type>())}",
+        "typealias Callback=%{flag:bool} comptime fn()->bool; comptime fn make(flag:bool)->Callback {|| flag} trait Stored {assoc callback:Callback;} impl Stored for bool {assoc callback:Callback=make(true);} impl Stored for 'x''type {assoc callback:Callback=make(false);} fn choose(comptime flag:bool)->bool {flag} fn forward()->bool where T :- Stored {choose(T.as(Stored).callback())} fn run()->Tuple<bool, bool> {(forward<bool>(),forward<'x''type>())}",
     ] {
-        let package = compile(source);
+        let package = execution_support::compile_with_tuple(source);
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
         assert!(
             graph
@@ -29845,8 +30339,8 @@ fn deferred_comptime_associated_values_support_callable_and_scalar_inputs() {
 
 #[test]
 fn deferred_comptime_associated_closures_preserve_local_shared_state() {
-    let package = compile(
-        "typealias Callback=%{value:bool} comptime fn()->bool; comptime fn make(flag:bool)->Callback {var value=flag;|| {value=not value;value}} trait Stored {assoc callback:Callback;} impl Stored for bool {assoc callback:Callback=make(false);} impl Stored for 'x''type {assoc callback:Callback=make(true);} fn choose(comptime flag:bool)->bool {flag} fn forward()->bool where T :- Stored {choose(do {let action=T.as(Stored).callback;action();action()})} fn run()->(bool,bool) {(forward<'x''type>(),forward<bool>())}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Callback=%{value:bool} comptime fn()->bool; comptime fn make(flag:bool)->Callback {var value=flag;|| {value=not value;value}} trait Stored {assoc callback:Callback;} impl Stored for bool {assoc callback:Callback=make(false);} impl Stored for 'x''type {assoc callback:Callback=make(true);} fn choose(comptime flag:bool)->bool {flag} fn forward()->bool where T :- Stored {choose(do {let action=T.as(Stored).callback;action();action()})} fn run()->Tuple<bool, bool> {(forward<'x''type>(),forward<bool>())}",
     );
     for _ in 0..2 {
         assert_eq!(
@@ -29858,8 +30352,8 @@ fn deferred_comptime_associated_closures_preserve_local_shared_state() {
 
 #[test]
 fn deferred_comptime_associated_values_preserve_interface_identity_and_defaults() {
-    let package = compile(
-        "comptime fn invert(flag:bool)->bool {not flag} comptime fn keep(flag:bool)->bool {flag} trait Stored where A {assoc callback:comptime fn(bool)->bool;} impl Stored<bool> for bool {assoc callback:comptime fn(bool)->bool=invert;} impl Stored<'x''type> for bool {assoc callback:comptime fn(bool)->bool=keep;} fn choose(comptime .flag:bool=true,comptime .copy:bool=flag)->bool {copy} fn forward(comptime flag:bool)->bool where A,T :- Stored<A> {choose(.flag=T.as(Stored<A>).callback(flag))} fn run()->(bool,bool) {(forward<bool,bool>(false),forward<'x''type,bool>(false))}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn invert(flag:bool)->bool {not flag} comptime fn keep(flag:bool)->bool {flag} trait Stored where A {assoc callback:comptime fn(bool)->bool;} impl Stored<bool> for bool {assoc callback:comptime fn(bool)->bool=invert;} impl Stored<'x''type> for bool {assoc callback:comptime fn(bool)->bool=keep;} fn choose(comptime .flag:bool=true,comptime .copy:bool=flag)->bool {copy} fn forward(comptime flag:bool)->bool where A,T :- Stored<A> {choose(.flag=T.as(Stored<A>).callback(flag))} fn run()->Tuple<bool, bool> {(forward<bool,bool>(false),forward<'x''type,bool>(false))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -29870,8 +30364,8 @@ fn deferred_comptime_associated_values_preserve_interface_identity_and_defaults(
 #[test]
 fn deferred_comptime_higher_order_calls_keep_closures_inside_invocation() {
     for body in ["make(flag)()", "apply(make(flag))"] {
-        let package = compile(&format!(
-            "typealias Callback=%{{flag:bool}} comptime fn()->bool; comptime fn make(flag:bool)->Callback {{|| flag}} comptime fn apply(action:Callback)->bool {{action()}} fn choose(comptime flag:bool)->bool {{flag}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->(bool,bool) {{(forward(true),forward(false))}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "typealias Callback=%{{flag:bool}} comptime fn()->bool; comptime fn make(flag:bool)->Callback {{|| flag}} comptime fn apply(action:Callback)->bool {{action()}} fn choose(comptime flag:bool)->bool {{flag}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->Tuple<bool, bool> {{(forward(true),forward(false))}}"
         ));
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
         for function in &graph.functions {
@@ -29902,14 +30396,14 @@ fn staged_invocations_do_not_recopy_unrelated_bodies_per_input() {
         source.push_str(&format!("fn unused{index}()->bool {{{body}}} "));
     }
     source.push_str(&format!(
-        "fn run()->({}) {{({})}}",
+        "fn run()->Tuple<{}> {{({})}}",
         vec!["Byte"; 16].join(","),
         (0..16)
             .map(|n| format!("forward({n})"))
             .collect::<Vec<_>>()
             .join(",")
     ));
-    let package = compile(&source);
+    let package = execution_support::compile_with_tuple(&source);
     let graph = luna::instantiation::instantiate(&package, "run", 30_000).unwrap();
     assert!(
         graph
@@ -29926,8 +30420,8 @@ fn staged_invocations_do_not_recopy_unrelated_bodies_per_input() {
 
 #[test]
 fn staged_snapshot_reuse_updates_result_types_between_invocations() {
-    let package = compile(
-        "comptime fn keep(value:T)->T where T {value} fn choose(comptime value:T)->T where T {value} fn forward(comptime value:T)->T where T {choose(keep(value))} fn run()->(bool,.u8'builtin,'x''type,\"\"'type) {(forward(true),forward(9),forward('z'),forward(\"text\"))}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn keep(value:T)->T where T {value} fn choose(comptime value:T)->T where T {value} fn forward(comptime value:T)->T where T {choose(keep(value))} fn run()->Tuple<bool, .u8'builtin, 'x''type, \"\"'type> {(forward(true),forward(9),forward('z'),forward(\"text\"))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -29949,8 +30443,8 @@ fn deferred_comptime_blocks_execute_local_mutation_and_loops() {
         "do {var value=flag;var again=true;while true {if again {again=false;value=not value;continue;} break;} value}",
         "do {var value=flag;while true {while true {value=not value;break;} break;} value}",
     ] {
-        let package = compile(&format!(
-            "fn choose(comptime flag:bool)->bool {{flag}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->(bool,bool) {{(forward(false),forward(true))}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn choose(comptime flag:bool)->bool {{flag}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->Tuple<bool, bool> {{(forward(false),forward(true))}}"
         ));
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
         for function in &graph.functions {
@@ -29977,8 +30471,8 @@ fn deferred_comptime_blocks_execute_local_mutation_and_loops() {
 
 #[test]
 fn deferred_comptime_local_control_flow_supports_default_frames() {
-    let package = compile(
-        "fn choose(comptime .flag:bool=false,comptime .value:bool=do {var current=flag;var again=true;while again {current=not current;again=false;} current})->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->(bool,bool) {(forward(false),forward(true))}",
+    let package = execution_support::compile_with_tuple(
+        "fn choose(comptime .flag:bool=false,comptime .value:bool=do {var current=flag;var again=true;while again {current=not current;again=false;} current})->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->Tuple<bool, bool> {(forward(false),forward(true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30003,7 +30497,7 @@ fn deferred_comptime_control_flow_enforces_budget_and_predicates() {
 
 #[test]
 fn deferred_comptime_numeric_local_loop_handles_zero_and_maximum() {
-    let package = compile(&format!(
+    let package = compile_bound_tuple_fixture(&format!(
         "{} fn zero()->bool {{parity(0)}} fn maximum()->bool {{parity(255)}}",
         include_str!("../../../development/examples/staged-local-control.fl")
     ));
@@ -30036,8 +30530,8 @@ fn deferred_comptime_matches_bind_patterns_and_select_branches() {
         "flag match {(x and not x is true) or (x and x is true)=>not x,_=>false,}",
         "flag match {value=>value match {true=>false,false=>true,},}",
     ] {
-        let package = compile(&format!(
-            "fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->(bool,bool) {{(forward(false),forward(true))}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->Tuple<bool, bool> {{(forward(false),forward(true))}}"
         ));
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
         for function in &graph.functions {
@@ -30061,8 +30555,8 @@ fn deferred_comptime_matches_bind_patterns_and_select_branches() {
 
 #[test]
 fn deferred_comptime_matches_preserve_guard_order_and_default_frames() {
-    let package = compile(
-        "fn choose(comptime .flag:bool=false,comptime .value:bool=flag match {true=>false,false=>true,})->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn ordered(comptime flag:bool)->bool {choose(.flag=do {var touched=false;flag match {true if do {touched=true;false}=>false,value=>touched == value,}})} fn run()->(bool,bool,bool,bool) {(forward(false),forward(true),ordered(false),ordered(true))}",
+    let package = execution_support::compile_with_tuple(
+        "fn choose(comptime .flag:bool=false,comptime .value:bool=flag match {true=>false,false=>true,})->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn ordered(comptime flag:bool)->bool {choose(.flag=do {var touched=false;flag match {true if do {touched=true;false}=>false,value=>touched == value,}})} fn run()->Tuple<bool, bool, bool, bool> {(forward(false),forward(true),ordered(false),ordered(true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30090,8 +30584,8 @@ fn deferred_comptime_matches_skip_unselected_calls_and_recover_after_failure() {
 
 #[test]
 fn deferred_comptime_matches_observe_nominal_values_and_opaque_type_heads() {
-    let package = compile(
-        "typealias Type=.Type'builtin; pure comptime fn Identity<T>->Type {T} struct Pair {left:bool,right:bool} enum Choice {empty,item(bool)} fn choose(comptime flag:bool)->bool {flag} fn record(comptime flag:bool)->bool {choose(Pair {left:flag,right:not flag} match {{left:value,right:true} or {left:true,right:value}=>not value,_=>false,})} fn variant(comptime flag:bool)->bool {choose(Choice.item(flag) match {.item(value)=>not value,.empty=>false,})} fn shape()->bool where T {choose(T match {Identity<U> => true,_=>false,})} fn run()->(bool,bool,bool,bool,bool,bool) {(record(false),record(true),variant(false),variant(true),shape<Identity<bool>>(),shape<bool>())}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Type=.Type'builtin; pure comptime fn Identity<T>->Type {T} struct Pair {left:bool,right:bool} enum Choice {empty,item(bool)} fn choose(comptime flag:bool)->bool {flag} fn record(comptime flag:bool)->bool {choose(Pair {left:flag,right:not flag} match {{left:value,right:true} or {left:true,right:value}=>not value,_=>false,})} fn variant(comptime flag:bool)->bool {choose(Choice.item(flag) match {.item(value)=>not value,.empty=>false,})} fn shape()->bool where T {choose(T match {Identity<U> => true,_=>false,})} fn run()->Tuple<bool, bool, bool, bool, bool, bool> {(record(false),record(true),variant(false),variant(true),shape<Identity<bool>>(),shape<bool>())}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30116,8 +30610,8 @@ fn deferred_comptime_let_patterns_support_guards_and_local_exits() {
         "do {let {value}=Box {value:flag};value}",
         "do {var result=false;while true {let (value and value is true)=flag else {break;};result=value;break;} result}",
     ] {
-        let package = compile(&format!(
-            "struct Box {{value:bool}} fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->(bool,bool) {{(forward(false),forward(true))}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "struct Box {{value:bool}} fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->Tuple<bool, bool> {{(forward(false),forward(true))}}"
         ));
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
         for function in &graph.functions {
@@ -30162,8 +30656,8 @@ fn deferred_comptime_let_patterns_preserve_guard_effects_and_failure() {
 
 #[test]
 fn deferred_comptime_let_patterns_preserve_defaults_and_binding_scope() {
-    let package = compile(
-        "fn choose(comptime .flag:bool=false,comptime .value:bool=do {var result=false;while true {let item if item=flag else {break;};result=item;break;} result})->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn scope(comptime flag:bool)->bool {choose(.value=do {var touched=false;let outer=not flag;while true {let outer if outer=do {touched=not touched;flag} else {touched=touched and outer;break;};touched=touched and outer;break;} touched})} fn run()->(bool,bool,bool,bool) {(forward(false),forward(true),scope(false),scope(true))}",
+    let package = execution_support::compile_with_tuple(
+        "fn choose(comptime .flag:bool=false,comptime .value:bool=do {var result=false;while true {let item if item=flag else {break;};result=item;break;} result})->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn scope(comptime flag:bool)->bool {choose(.value=do {var touched=false;let outer=not flag;while true {let outer if outer=do {touched=not touched;flag} else {touched=touched and outer;break;};touched=touched and outer;break;} touched})} fn run()->Tuple<bool, bool, bool, bool> {(forward(false),forward(true),scope(false),scope(true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30186,8 +30680,8 @@ fn deferred_comptime_fields_support_local_reads_and_nested_writes() {
         "do {let (cell,other)=(Cell {flag:flag},true);cell.flag and other}",
         "do {var pair=Pair {cell:Cell {flag:false},other:flag};pair.cell=Cell {flag:flag};pair.cell.flag and pair.other}",
     ] {
-        let package = compile(&format!(
-            "struct Cell {{flag:bool}} struct Pair {{cell:Cell,other:bool}} fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->(bool,bool) {{(forward(false),forward(true))}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "struct Cell {{flag:bool}} struct Pair {{cell:Cell,other:bool}} fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->Tuple<bool, bool> {{(forward(false),forward(true))}}"
         ));
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
         for function in &graph.functions {
@@ -30215,8 +30709,8 @@ fn deferred_comptime_fields_support_local_reads_and_nested_writes() {
 
 #[test]
 fn deferred_comptime_fields_preserve_defaults_and_anonymous_records() {
-    let package = compile(
-        "comptime fn schema(...properties:T)->T where T {properties} fn choose(comptime .flag:bool=false,comptime .value:bool=do {var cell=schema {flag:not flag,other:true};cell.flag=flag;cell.flag and cell.other})->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->(bool,bool) {(forward(false),forward(true))}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn schema(...properties:T)->T where T {properties} fn choose(comptime .flag:bool=false,comptime .value:bool=do {var cell=schema {flag:not flag,other:true};cell.flag=flag;cell.flag and cell.other})->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->Tuple<bool, bool> {(forward(false),forward(true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30226,8 +30720,8 @@ fn deferred_comptime_fields_preserve_defaults_and_anonymous_records() {
 
 #[test]
 fn deferred_comptime_fields_keep_property_order_and_nested_storage() {
-    let package = compile(
-        "comptime fn schema(...properties:T)->T where T {properties} fn choose(comptime value:bool)->bool {value} fn forward(comptime flag:bool)->bool {choose(do {var seen=false;let record=schema {first:do {seen=flag;seen},second:do {seen=not seen;seen},nested:schema {flag:false}};record.nested.flag=record.first;record.nested.flag and not record.second})} fn run()->(bool,bool) {(forward(false),forward(true))}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn schema(...properties:T)->T where T {properties} fn choose(comptime value:bool)->bool {value} fn forward(comptime flag:bool)->bool {choose(do {var seen=false;let record=schema {first:do {seen=flag;seen},second:do {seen=not seen;seen},nested:schema {flag:false}};record.nested.flag=record.first;record.nested.flag and not record.second})} fn run()->Tuple<bool, bool> {(forward(false),forward(true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30286,8 +30780,8 @@ fn deferred_comptime_bitvec_operations_preserve_width_and_order() {
 
 #[test]
 fn deferred_comptime_bitvec_inputs_freeze_and_use_default_frames() {
-    let package = compile(
-        "typealias Byte=.u8'builtin;typealias Bits=do {let byte:Byte=0;byte'bitvec}'type; fn choose(comptime .bits:Bits=0,comptime .inverted:Bits=not bits)->Byte {inverted.as(Byte)} fn forward(comptime byte:Byte)->Byte {choose(.bits=byte'bitvec)} fn run()->(Byte,Byte,Byte) {(forward(0),forward(255),forward(175))}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Byte=.u8'builtin;typealias Bits=do {let byte:Byte=0;byte'bitvec}'type; fn choose(comptime .bits:Bits=0,comptime .inverted:Bits=not bits)->Byte {inverted.as(Byte)} fn forward(comptime byte:Byte)->Byte {choose(.bits=byte'bitvec)} fn run()->Tuple<Byte, Byte, Byte> {(forward(0),forward(255),forward(175))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30314,8 +30808,8 @@ fn deferred_comptime_bitvec_logic_evaluates_both_sides_once() {
 
 #[test]
 fn deferred_comptime_bitvec_equality_and_empty_values_are_canonical() {
-    let package = compile(
-        "typealias Byte=.u8'builtin;fn choose(comptime flag:bool)->bool {flag} fn forward(comptime byte:Byte)->bool {choose((byte'bitvec == byte'bitvec) and (not byte'bitvec != byte'bitvec) and (not byte'bitvec[0..0] == byte'bitvec[8..8]))} fn run()->(bool,bool,bool) {(forward(0),forward(255),forward(175))}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Byte=.u8'builtin;fn choose(comptime flag:bool)->bool {flag} fn forward(comptime byte:Byte)->bool {choose((byte'bitvec == byte'bitvec) and (not byte'bitvec != byte'bitvec) and (not byte'bitvec[0..0] == byte'bitvec[8..8]))} fn run()->Tuple<bool, bool, bool> {(forward(0),forward(255),forward(175))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30329,8 +30823,8 @@ fn deferred_comptime_bitvec_equality_and_empty_values_are_canonical() {
 
 #[test]
 fn deferred_comptime_bitvec_instance_keys_cover_empty_and_multiword_widths() {
-    let package = compile(
-        "typealias Wide=.BitVec'builtin<129>;typealias Empty=.BitVec'builtin<0>;fn wide(comptime bits:Wide)->bool {bits[128..129] == 1 and bits[0..128] == 340282366920938463463374607431768211455} fn forward(comptime bits:Wide)->bool {wide(not bits)} fn empty(comptime bits:Empty)->bool {bits == 0} fn forward_empty(comptime bits:Empty)->bool {empty(not bits)} fn run()->(bool,bool) {(forward(0),forward_empty(0))}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Wide=.BitVec'builtin<129>;typealias Empty=.BitVec'builtin<0>;fn wide(comptime bits:Wide)->bool {bits[128..129] == 1 and bits[0..128] == 340282366920938463463374607431768211455} fn forward(comptime bits:Wide)->bool {wide(not bits)} fn empty(comptime bits:Empty)->bool {bits == 0} fn forward_empty(comptime bits:Empty)->bool {empty(not bits)} fn run()->Tuple<bool, bool> {(forward(0),forward_empty(0))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30355,9 +30849,9 @@ fn derived_staged_locals_forward_through_owned_closure_captures() {
             fn forward(comptime flag:bool)->bool {{
                 {initializer}choose(do {{{body}}})
             }}
-            fn run()->(bool,bool) {{(forward(false),forward(true))}}"
+            fn run()->Tuple<bool, bool> {{(forward(false),forward(true))}}"
             );
-            let package = compile(&source);
+            let package = execution_support::compile_with_tuple(&source);
             let expected = if body.contains("toggle") {
                 vec![true, true]
             } else {
@@ -30372,7 +30866,7 @@ fn derived_staged_locals_forward_through_owned_closure_captures() {
             assert!(compile_with_bindings(&runtime, &Default::default(), None).is_err());
             let invalidated =
                 source.replace("choose(do", "let ptr=enabled.ref;ptr.* = false;choose(do");
-            let package = compile(&invalidated);
+            let package = execution_support::compile_with_tuple(&invalidated);
             let error = luna::instantiation::instantiate(&package, "run", 100_000).unwrap_err();
             assert!(error.contains("writes or address escape"), "{error}");
         }
@@ -30386,8 +30880,8 @@ fn deferred_comptime_local_closures_capture_staged_inputs_and_local_state() {
         "do {let action:comptime fn(bool)->bool=|value| not value;not action(flag)}",
         "do {var value=flag;let action:%{value:bool} comptime fn()->bool=|| {value=not value;value};action();action()}",
     ] {
-        let package = compile(&format!(
-            "fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->(bool,bool) {{(forward(false),forward(true))}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->Tuple<bool, bool> {{(forward(false),forward(true))}}"
         ));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30399,8 +30893,8 @@ fn deferred_comptime_local_closures_capture_staged_inputs_and_local_state() {
 
 #[test]
 fn deferred_comptime_local_closures_support_generic_calls_and_defaults() {
-    let package = compile(
-        "fn choose(comptime value:T)->T where T {value} fn defaults(comptime .flag:bool=false,comptime .value:bool=do {let read:%{flag:bool} comptime fn()->bool=|| flag;read()})->bool {value} fn forward(comptime flag:bool)->bool {choose(do {let read:%{flag:bool} comptime fn()->bool=|| flag;read()})} fn deferred(comptime flag:bool)->bool {defaults(.flag=flag)} fn run()->(bool,bool,bool,bool,bool) {(forward(false),forward(true),deferred(false),deferred(true),defaults(.flag=true))}",
+    let package = execution_support::compile_with_tuple(
+        "fn choose(comptime value:T)->T where T {value} fn defaults(comptime .flag:bool=false,comptime .value:bool=do {let read:%{flag:bool} comptime fn()->bool=|| flag;read()})->bool {value} fn forward(comptime flag:bool)->bool {choose(do {let read:%{flag:bool} comptime fn()->bool=|| flag;read()})} fn deferred(comptime flag:bool)->bool {defaults(.flag=flag)} fn run()->Tuple<bool, bool, bool, bool, bool> {(forward(false),forward(true),deferred(false),deferred(true),defaults(.flag=true))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     for function in &graph.functions {
@@ -30428,8 +30922,8 @@ fn deferred_comptime_local_closures_support_generic_calls_and_defaults() {
 
 #[test]
 fn deferred_comptime_local_closures_keep_return_and_nested_capture_frames() {
-    let package = compile(
-        "fn choose(comptime value:bool)->bool {value} fn forward(comptime flag:bool)->bool {choose(do {let read:%{flag:bool} comptime fn()->bool=|| {let inner:%{flag:bool} comptime fn()->bool=|| {return flag;};inner()};read()})} fn run()->(bool,bool) {(forward(false),forward(true))}",
+    let package = execution_support::compile_with_tuple(
+        "fn choose(comptime value:bool)->bool {value} fn forward(comptime flag:bool)->bool {choose(do {let read:%{flag:bool} comptime fn()->bool=|| {let inner:%{flag:bool} comptime fn()->bool=|| {return flag;};inner()};read()})} fn run()->Tuple<bool, bool> {(forward(false),forward(true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30439,8 +30933,8 @@ fn deferred_comptime_local_closures_keep_return_and_nested_capture_frames() {
 
 #[test]
 fn staged_closure_capture_mutation_preserves_copy_and_private_state() {
-    let package = compile(
-        "fn choose(comptime value:bool)->bool {value} fn forward(comptime flag:bool)->bool {choose(do {let toggle:%{flag:bool} comptime fn()->bool=|| {flag=not flag;flag};let first=toggle();let second=toggle();first != flag and second == flag})} fn run()->(bool,bool) {(forward(false),forward(true))}",
+    let package = execution_support::compile_with_tuple(
+        "fn choose(comptime value:bool)->bool {value} fn forward(comptime flag:bool)->bool {choose(do {let toggle:%{flag:bool} comptime fn()->bool=|| {flag=not flag;flag};let first=toggle();let second=toggle();first != flag and second == flag})} fn run()->Tuple<bool, bool> {(forward(false),forward(true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30450,8 +30944,8 @@ fn staged_closure_capture_mutation_preserves_copy_and_private_state() {
 
 #[test]
 fn staged_closure_capture_mutation_preserves_concrete_and_deferred_defaults() {
-    let package = compile(
-        "fn choose(comptime .flag:bool=false,comptime .value:bool=do {let toggle:%{flag:bool} comptime fn()->bool=|| {flag=not flag;flag};toggle()})->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->(bool,bool,bool,bool) {(choose(.flag=false),choose(.flag=true),forward(false),forward(true))}",
+    let package = execution_support::compile_with_tuple(
+        "fn choose(comptime .flag:bool=false,comptime .value:bool=do {let toggle:%{flag:bool} comptime fn()->bool=|| {flag=not flag;flag};toggle()})->bool {value} fn forward(comptime flag:bool)->bool {choose(.flag=flag)} fn run()->Tuple<bool, bool, bool, bool> {(choose(.flag=false),choose(.flag=true),forward(false),forward(true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30470,8 +30964,8 @@ fn staged_closure_capture_mutation_keeps_nested_and_sibling_environments_distinc
         "do {let first:%{flag:bool} comptime fn()->bool=|| {flag=not flag;flag};let second:%{flag:bool} comptime fn()->bool=|| flag;first() != second()}",
         "do {let outer:%{flag:bool} comptime fn()->bool=|| {flag=not flag;let inner:%{flag:bool} comptime fn()->bool=|| {flag=not flag;flag};inner() != flag};outer()}",
     ] {
-        let package = compile(&format!(
-            "fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->(bool,bool) {{(forward(false),forward(true))}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool)->bool {{choose({body})}} fn run()->Tuple<bool, bool> {{(forward(false),forward(true))}}"
         ));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30494,8 +30988,8 @@ fn staged_closure_capture_mutation_does_not_hide_real_caller_writes() {
 
 #[test]
 fn literal_spreads_preserve_comptime_closure_context_and_runtime_order() {
-    let package = compile(
-        "fn choose(comptime value:T)->T where T {value} fn forward(comptime flag:bool)->bool {choose(...(do {let read:%{flag:bool} comptime fn()->bool=|| flag;read()},))} fn mix(left:bool,comptime flag:bool,right:bool)->bool {left and flag and right} fn run()->(bool,bool,bool) {var touched=false;let mixed=mix(...(do {touched=not touched;touched},do {let read:comptime fn()->bool=|| true;read()}),do {let result=touched;touched=not touched;result});(forward(false),forward(true),mixed and not touched)}",
+    let package = execution_support::compile_with_tuple(
+        "fn choose(comptime value:T)->T where T {value} fn forward(comptime flag:bool)->bool {choose(...(do {let read:%{flag:bool} comptime fn()->bool=|| flag;read()},))} fn mix(left:bool,comptime flag:bool,right:bool)->bool {left and flag and right} fn run()->Tuple<bool, bool, bool> {var touched=false;let mixed=mix(...(do {touched=not touched;touched},do {let read:comptime fn()->bool=|| true;read()}),do {let result=touched;touched=not touched;result});(forward(false),forward(true),mixed and not touched)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30509,8 +31003,8 @@ fn literal_spreads_preserve_comptime_closure_context_and_runtime_order() {
 
 #[test]
 fn literal_spreads_preserve_comptime_context_for_methods_and_defaults() {
-    let package = compile(
-        "struct Holder {} impl Holder {fn choose(self,comptime value:bool,.fallback:bool=false)->bool {value or fallback}} fn forward(comptime flag:bool)->bool {Holder {}.choose(...(do {let read:%{flag:bool} comptime fn()->bool=|| flag;read()},))} fn run()->(bool,bool) {(forward(false),forward(true))}",
+    let package = execution_support::compile_with_tuple(
+        "struct Holder {} impl Holder {fn choose(self,comptime value:bool,.fallback:bool=false)->bool {value or fallback}} fn forward(comptime flag:bool)->bool {Holder {}.choose(...(do {let read:%{flag:bool} comptime fn()->bool=|| flag;read()},))} fn run()->Tuple<bool, bool> {(forward(false),forward(true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30525,8 +31019,8 @@ fn computed_spreads_supply_staged_inputs_without_runtime_producers() {
         ("comptime first:bool,second:bool", "(first,second)"),
         ("first:bool,comptime second:bool", "(first,second)"),
     ] {
-        let package = compile(&format!(
-            "comptime fn packet(flag:bool)->(bool,bool) {{(flag,not flag)}} fn choose({signature})->(bool,bool) {{{body}}} fn forward(comptime flag:bool)->(bool,bool) {{choose(...packet(flag))}} fn run()->((bool,bool),(bool,bool)) {{(forward(false),forward(true))}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "comptime fn packet(flag:bool)->Tuple<bool, bool> {{(flag,not flag)}} fn choose({signature})->Tuple<bool, bool> {{{body}}} fn forward(comptime flag:bool)->Tuple<bool, bool> {{choose(...packet(flag))}} fn run()->Tuple<Tuple<bool, bool>, Tuple<bool, bool>> {{(forward(false),forward(true))}}"
         ));
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
         assert!(
@@ -30548,8 +31042,8 @@ fn computed_spreads_supply_staged_inputs_without_runtime_producers() {
 
 #[test]
 fn computed_spreads_preserve_staged_defaults_generics_and_runtime_order() {
-    let package = compile(
-        "comptime fn packet(flag:bool)->(bool,bool) {(flag,not flag)} fn choose(comptime a:T,comptime b:T,comptime .copy:T=a)->(T,T,T) where T {(a,b,copy)} fn forward(comptime flag:bool)->(bool,bool,bool) {choose(...packet(flag))} fn mixed(left:bool,comptime flag:bool,right:bool,last:bool)->bool {left and flag and right and last} fn run()->((bool,bool,bool),bool) {var touched=false;let result=mixed(do {touched=not touched;touched},...packet(true),do {let result=touched;touched=not touched;result});(forward(false),not result and not touched)}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn packet(flag:bool)->Tuple<bool, bool> {(flag,not flag)} fn choose(comptime a:T,comptime b:T,comptime .copy:T=a)->Tuple<T, T, T> where T {(a,b,copy)} fn forward(comptime flag:bool)->Tuple<bool, bool, bool> {choose(...packet(flag))} fn mixed(left:bool,comptime flag:bool,right:bool,last:bool)->bool {left and flag and right and last} fn run()->Tuple<Tuple<bool, bool, bool>, bool> {var touched=false;let result=mixed(do {touched=not touched;touched},...packet(true),do {let result=touched;touched=not touched;result});(forward(false),not result and not touched)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30566,8 +31060,8 @@ fn computed_spreads_preserve_staged_defaults_generics_and_runtime_order() {
 
 #[test]
 fn computed_spreads_propagate_stage_into_packet_closures_and_explicit_inputs() {
-    let package = compile(
-        "comptime fn packet(flag:bool)->(bool,bool) {(flag,not flag)} fn choose(comptime a:T,comptime b:T,comptime c:T)->(T,T,T) where T {(a,b,c)} fn forward(comptime flag:bool)->(bool,bool,bool) {choose(...do {let read:%{flag:bool} comptime fn()->bool=|| flag;(read(),not read())},do {let read:%{flag:bool} comptime fn()->bool=|| flag;read()})} fn run()->((bool,bool,bool),(bool,bool,bool)) {(forward(false),forward(true))}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn packet(flag:bool)->Tuple<bool, bool> {(flag,not flag)} fn choose(comptime a:T,comptime b:T,comptime c:T)->Tuple<T, T, T> where T {(a,b,c)} fn forward(comptime flag:bool)->Tuple<bool, bool, bool> {choose(...do {let read:%{flag:bool} comptime fn()->bool=|| flag;(read(),not read())},do {let read:%{flag:bool} comptime fn()->bool=|| flag;read()})} fn run()->Tuple<Tuple<bool, bool, bool>, Tuple<bool, bool, bool>> {(forward(false),forward(true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30588,8 +31082,8 @@ fn computed_spreads_propagate_stage_into_packet_closures_and_explicit_inputs() {
 
 #[test]
 fn computed_spreads_recover_after_packet_failure() {
-    let package = compile(
-        "comptime fn packet(flag:bool)->(bool,bool) {if flag {packet(flag)} else {(true,false)}} fn choose(comptime a:bool,comptime b:bool)->bool {a or b} fn forward(comptime flag:bool)->bool {choose(...packet(flag))} fn bad()->bool {forward(true)} fn good()->bool {forward(false)}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn packet(flag:bool)->Tuple<bool, bool> {if flag {packet(flag)} else {(true,false)}} fn choose(comptime a:bool,comptime b:bool)->bool {a or b} fn forward(comptime flag:bool)->bool {choose(...packet(flag))} fn bad()->bool {forward(true)} fn good()->bool {forward(false)}",
     );
     let error = luna::instantiation::instantiate(&package, "bad", 10_000).unwrap_err();
     assert!(error.contains("staged comptime invocation"), "{error}");
@@ -30601,8 +31095,8 @@ fn computed_spreads_recover_after_packet_failure() {
 
 #[test]
 fn computed_spreads_prepare_multiple_packets_for_receiver_calls() {
-    let package = compile(
-        "comptime fn packet(flag:bool)->(bool,bool) {(flag,not flag)} struct Holder {} impl Holder {fn choose(self,comptime a:bool,comptime b:bool,comptime c:bool,last:bool)->(bool,bool,bool,bool) {(a,b,c,last)}} fn forward(comptime flag:bool)->(bool,bool,bool,bool) {Holder {}.choose(...packet(flag),...packet(not flag))} fn run()->(bool,bool,bool,bool) {forward(false)}",
+    let package = execution_support::compile_with_tuple(
+        "comptime fn packet(flag:bool)->Tuple<bool, bool> {(flag,not flag)} struct Holder {} impl Holder {fn choose(self,comptime a:bool,comptime b:bool,comptime c:bool,last:bool)->Tuple<bool, bool, bool, bool> {(a,b,c,last)}} fn forward(comptime flag:bool)->Tuple<bool, bool, bool, bool> {Holder {}.choose(...packet(flag),...packet(not flag))} fn run()->Tuple<bool, bool, bool, bool> {forward(false)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30617,8 +31111,8 @@ fn computed_spreads_prepare_multiple_packets_for_receiver_calls() {
 
 #[test]
 fn comptime_only_inputs_erase_unused_storage_and_forward_through_instances() {
-    let package = compile(
-        "typealias Type=.Type'builtin;typealias Int=.Integer'builtin;fn choose(comptime T:Type,comptime n:Int,value:bool)->bool {value} fn forward(comptime T:Type,comptime n:Int,value:bool)->bool {choose(T,n,value)} fn run()->(bool,bool) {(forward(bool,340282366920938463463374607431768211456,true),forward('x''type,0,false))}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Type=.Type'builtin;typealias Int=.Integer'builtin;fn choose(comptime T:Type,comptime n:Int,value:bool)->bool {value} fn forward(comptime T:Type,comptime n:Int,value:bool)->bool {choose(T,n,value)} fn run()->Tuple<bool, bool> {(forward(bool,340282366920938463463374607431768211456,true),forward('x''type,0,false))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30628,8 +31122,8 @@ fn comptime_only_inputs_erase_unused_storage_and_forward_through_instances() {
 
 #[test]
 fn comptime_only_inputs_support_type_observation_defaults_and_computed_packets() {
-    let package = compile(
-        "typealias Type=.Type'builtin;pure comptime fn Identity<T>->Type {T} fn selected(comptime flag:bool)->bool {flag} fn has_head(comptime T:Type)->bool {selected(T match {Identity<U> => true,_=>false,})} fn choose(comptime .T:Type=bool,comptime .flag:bool=T match {Identity<U> => true,_=>false,})->bool {flag} comptime fn packet(flag:bool)->(Type,bool) {(bool,flag)} fn unpack(comptime T:Type,value:bool)->bool {value} fn forward(comptime flag:bool)->bool {unpack(...packet(flag))} fn run()->(bool,bool,bool,bool,bool) {(has_head(Identity<bool>),has_head(bool),choose(.T=Identity<bool>),forward(false),forward(true))}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Type=.Type'builtin;pure comptime fn Identity<T>->Type {T} fn selected(comptime flag:bool)->bool {flag} fn has_head(comptime T:Type)->bool {selected(T match {Identity<U> => true,_=>false,})} fn choose(comptime .T:Type=bool,comptime .flag:bool=T match {Identity<U> => true,_=>false,})->bool {flag} comptime fn packet(flag:bool)->Tuple<Type, bool> {(bool,flag)} fn unpack(comptime T:Type,value:bool)->bool {value} fn forward(comptime flag:bool)->bool {unpack(...packet(flag))} fn run()->Tuple<bool, bool, bool, bool, bool> {(has_head(Identity<bool>),has_head(bool),choose(.T=Identity<bool>),forward(false),forward(true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30645,8 +31139,8 @@ fn comptime_only_inputs_support_type_observation_defaults_and_computed_packets()
 
 #[test]
 fn comptime_only_inputs_capture_type_values_without_restoring_caller_storage() {
-    let package = compile(
-        "typealias Type=.Type'builtin;pure comptime fn Identity<T>->Type {T} fn selected(comptime flag:bool)->bool {flag} fn inspect(comptime T:Type)->bool {selected(do {let read:%{T:Type} comptime fn()->bool=|| {T match {Identity<U> => true,_=>false,}};read()})} fn run()->(bool,bool) {(inspect(Identity<bool>),inspect(bool))}",
+    let package = execution_support::compile_with_tuple(
+        "typealias Type=.Type'builtin;pure comptime fn Identity<T>->Type {T} fn selected(comptime flag:bool)->bool {flag} fn inspect(comptime T:Type)->bool {selected(do {let read:%{T:Type} comptime fn()->bool=|| {T match {Identity<U> => true,_=>false,}};read()})} fn run()->Tuple<bool, bool> {(inspect(Identity<bool>),inspect(bool))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     for function in &graph.functions {
@@ -30731,8 +31225,8 @@ fn dependent_comptime_type_inputs_elaborate_from_source() {
         fn apply(comptime T:Type,value:T,callback:fn(T)->T)->T {callback(value)}
         fn generic(value:G)->G where G {identity(G,value)}
         fn negate(value:bool)->bool {not value}
-        fn run()->(bool,Char,bool,bool) {(forward(bool,true),generic('x'),reordered(true,bool,false),apply(bool,true,negate))}";
-    let package = compile(source);
+        fn run()->Tuple<bool, Char, bool, bool> {(forward(bool,true),generic('x'),reordered(true,bool,false),apply(bool,true,negate))}";
+    let package = execution_support::compile_with_tuple(source);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -30760,11 +31254,11 @@ fn dependent_comptime_type_inputs_accept_computed_types() {
 
 #[test]
 fn dependent_comptime_type_inputs_keep_separate_slots_and_nested_results() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin; typealias Char='x''type;
-        fn pair(comptime A:Type,left:A,comptime B:Type,right:B)->(A,B) {(left,right)}
-        fn forward(comptime Z:Type,right:Z)->(bool,Z) {pair(bool,true,Z,right)}
-        fn run()->(bool,Char) {forward(Char,'x')}",
+        fn pair(comptime A:Type,left:A,comptime B:Type,right:B)->Tuple<A, B> {(left,right)}
+        fn forward(comptime Z:Type,right:Z)->Tuple<bool, Z> {pair(bool,true,Z,right)}
+        fn run()->Tuple<bool, Char> {forward(Char,'x')}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30813,14 +31307,14 @@ fn dependent_comptime_type_inputs_work_in_required_invocations() {
 
 #[test]
 fn dependent_type_defaults_and_late_named_inputs_supply_context() {
-    let package = compile("typealias Type=.Type'builtin; typealias Char='x''type;
+    let package = execution_support::compile_with_tuple("typealias Type=.Type'builtin; typealias Char='x''type;
         comptime fn Select(flag:bool)->Type {if flag {bool} else {Char}}
         fn identity(comptime .T:Type=bool,value:T)->T {value}
         fn configured(comptime .flag:bool=true,comptime .T:Type=Select(flag),value:T)->T {value}
         fn chained(comptime .T:Type=bool,comptime .U:Type=T,value:U)->U {value}
         fn forward(comptime X:Type,value:X)->X {chained(value,.T=X)}
         fn generic(value:G)->G where G {forward(G,value)}
-        fn run()->(bool,Char,Char,Char) {(identity(true),identity('x',.T=Char),configured('y',.flag=false),generic('z'))}");
+        fn run()->Tuple<bool, Char, Char, Char> {(identity(true),identity('x',.T=Char),configured('y',.flag=false),generic('z'))}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -30834,13 +31328,13 @@ fn dependent_type_defaults_and_late_named_inputs_supply_context() {
 
 #[test]
 fn dependent_type_preparation_preserves_runtime_order_and_skips_overridden_defaults() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         comptime fn Broken()->Type {Broken()}
-        fn pair(comptime .T:Type=Broken(),left:T,right:T)->(T,T) {(left,right)}
+        fn pair(comptime .T:Type=Broken(),left:T,right:T)->Tuple<T, T> {(left,right)}
         fn first(p:*bool)->bool {p.* = true;true}
         fn second(p:*bool)->bool {p.*}
-        fn run()->(bool,bool) {let flag=false;pair(first(flag.ref),second(flag.ref),.T=bool)}",
+        fn run()->Tuple<bool, bool> {let flag=false;pair(first(flag.ref),second(flag.ref),.T=bool)}",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -30856,9 +31350,9 @@ fn dependent_type_preparation_preserves_runtime_order_and_skips_overridden_defau
 
 #[test]
 fn dependent_type_defaults_include_internal_annotation_dependencies() {
-    let package=compile("typealias Type=.Type'builtin; typealias Char='x''type;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin; typealias Char='x''type;
         fn checked(comptime .T:Type=bool,comptime .value:bool=do {let callback:comptime fn(T)->T=|item| item;true})->bool {value}
-        fn run()->(bool,bool) {(checked(),checked(.T=Char))}");
+        fn run()->Tuple<bool, bool> {(checked(),checked(.T=Char))}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(true)])
@@ -30867,12 +31361,12 @@ fn dependent_type_defaults_include_internal_annotation_dependencies() {
 
 #[test]
 fn dependent_type_inputs_from_computed_packets() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin; typealias Char='x''type;
-        comptime fn bool_packet()->(Type,bool) {(bool,true)}
-        comptime fn char_packet()->(Type,Char) {(Char,'x')}
+        comptime fn bool_packet()->Tuple<Type, bool> {(bool,true)}
+        comptime fn char_packet()->Tuple<Type, Char> {(Char,'x')}
         fn identity(comptime T:Type,value:T)->T {value}
-        fn run()->(bool,Char) {(identity(...bool_packet()),identity(...char_packet()))}",
+        fn run()->Tuple<bool, Char> {(identity(...bool_packet()),identity(...char_packet()))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -30883,12 +31377,12 @@ fn dependent_type_inputs_from_computed_packets() {
 #[test]
 fn dependent_type_packets_share_multiple_type_fields_and_cross_packet_inputs() {
     let source = "typealias Type=.Type'builtin;typealias Char='x''type;
-        comptime fn whole()->(Type,bool,Type,Char) {(bool,true,Char,'x')}
-        comptime fn left()->(Type,bool) {(bool,false)}
-        comptime fn right()->(Type,Char) {(Char,'y')}
-        fn pair(comptime A:Type,a:A,comptime B:Type,b:B)->(A,B) {(a,b)}
-        fn run()->((bool,Char),(bool,Char)) {(pair(...whole()),pair(...left(),...right()))}";
-    let package = compile(source);
+        comptime fn whole()->Tuple<Type, bool, Type, Char> {(bool,true,Char,'x')}
+        comptime fn left()->Tuple<Type, bool> {(bool,false)}
+        comptime fn right()->Tuple<Type, Char> {(Char,'y')}
+        fn pair(comptime A:Type,a:A,comptime B:Type,b:B)->Tuple<A, B> {(a,b)}
+        fn run()->Tuple<Tuple<bool, Char>, Tuple<bool, Char>> {(pair(...whole()),pair(...left(),...right()))}";
+    let package = execution_support::compile_with_tuple(source);
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     assert!(
         graph
@@ -30908,14 +31402,14 @@ fn dependent_type_packets_share_multiple_type_fields_and_cross_packet_inputs() {
 
 #[test]
 fn dependent_type_packets_preserve_runtime_siblings_and_named_type_context() {
-    let package=compile("typealias Type=.Type'builtin;
-        comptime fn typed()->(Type,bool) {(bool,true)}
-        fn runtime_packet(p:*bool)->(bool,bool) {let before=p.*;p.* = true;(before,p.*)}
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;
+        comptime fn typed()->Tuple<Type, bool> {(bool,true)}
+        fn runtime_packet(p:*bool)->Tuple<bool, bool> {let before=p.*;p.* = true;(before,p.*)}
         fn first(p:*bool)->bool {p.* = true;true}
         fn last(p:*bool)->bool {p.*}
-        fn mixed(left:bool,comptime T:Type,value:T,right:bool)->(bool,T,bool) {(left,value,right)}
-        fn pair(comptime .T:Type=bool,left:T,right:T)->(T,T) {(left,right)}
-        fn run()->((bool,bool,bool),(bool,bool),bool) {var flag=false;let a=mixed(first(flag.ref),...typed(),last(flag.ref));flag=false;let b=pair(...runtime_packet(flag.ref),.T=bool);(a,b,flag)}");
+        fn mixed(left:bool,comptime T:Type,value:T,right:bool)->Tuple<bool, T, bool> {(left,value,right)}
+        fn pair(comptime .T:Type=bool,left:T,right:T)->Tuple<T, T> {(left,right)}
+        fn run()->Tuple<Tuple<bool, bool, bool>, Tuple<bool, bool>, bool> {var flag=false;let a=mixed(first(flag.ref),...typed(),last(flag.ref));flag=false;let b=pair(...runtime_packet(flag.ref),.T=bool);(a,b,flag)}");
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
     assert_eq!(
@@ -30941,8 +31435,8 @@ fn dependent_type_packets_preserve_runtime_siblings_and_named_type_context() {
 
 #[test]
 fn dependent_type_packets_supply_receiver_calls_and_staged_defaults() {
-    let package=compile("typealias Type=.Type'builtin;
-        comptime fn packet()->(Type,bool) {(bool,true)}
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;
+        comptime fn packet()->Tuple<Type, bool> {(bool,true)}
         struct Host {} impl Host {fn take(self,comptime T:Type,comptime value:T,comptime .copy:T=value)->T {copy}}
         fn run()->bool {Host {}.take(...packet())}");
     assert_eq!(
@@ -30953,9 +31447,9 @@ fn dependent_type_packets_supply_receiver_calls_and_staged_defaults() {
 
 #[test]
 fn dependent_type_packets_keep_enclosing_higher_order_frames() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
-        fn forward(comptime T:Type,values:(T,T),callback:fn(T,T)->T)->T {callback(...values)}
+        fn forward(comptime T:Type,values:Tuple<T, T>,callback:fn(T,T)->T)->T {callback(...values)}
         fn first(left:bool,right:bool)->bool {left}
         fn run()->bool {forward(bool,(true,false),first)}",
     );
@@ -30967,11 +31461,11 @@ fn dependent_type_packets_keep_enclosing_higher_order_frames() {
 
 #[test]
 fn dependent_type_defaults_can_read_staged_packet_configuration() {
-    let package=compile("typealias Type=.Type'builtin;typealias Char='x''type;
-        comptime fn flags()->(bool,bool) {(false,true)}
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;typealias Char='x''type;
+        comptime fn flags()->Tuple<bool, bool> {(false,true)}
         comptime fn Select(flag:bool)->Type {if flag {bool} else {Char}}
-        fn choose(comptime flag:bool,other:bool,comptime .T:Type=Select(flag),value:T)->(bool,bool,T) {(flag,other,value)}
-        fn run()->(bool,bool,Char) {choose(...flags(),'x')}");
+        fn choose(comptime flag:bool,other:bool,comptime .T:Type=Select(flag),value:T)->Tuple<bool, bool, T> {(flag,other,value)}
+        fn run()->Tuple<bool, bool, Char> {choose(...flags(),'x')}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -30984,13 +31478,13 @@ fn dependent_type_defaults_can_read_staged_packet_configuration() {
 
 #[test]
 fn dependent_comptime_value_inputs_can_specialize_to_type() {
-    let package=compile("typealias Type=.Type'builtin;typealias Char='x''type;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;typealias Char='x''type;
         pure comptime fn Identity<T>->Type {T}
         fn discard(comptime T:Type,comptime value:T,comptime .copy:T=value)->bool {true}
         fn forward(comptime T:Type,comptime value:T)->bool {discard(T,value)}
         fn generic(comptime value:G)->bool where G {true}
-        comptime fn packet()->(Type,Type) {(Type,bool)}
-        fn run()->(bool,bool,bool,bool,bool) {(forward(Type,bool),discard(Type,Char),generic(bool),discard(Type,Identity<bool>),discard(...packet()))}");
+        comptime fn packet()->Tuple<Type, Type> {(Type,bool)}
+        fn run()->Tuple<bool, bool, bool, bool, bool> {(forward(Type,bool),discard(Type,Char),generic(bool),discard(Type,Identity<bool>),discard(...packet()))}");
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     assert_eq!(
         graph
@@ -31010,12 +31504,12 @@ fn dependent_comptime_value_inputs_can_specialize_to_type() {
 
 #[test]
 fn ordinary_comptime_values_construct_distinct_normal_form_type_defaults() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;
         pure comptime fn Shape<N:Integer,Flag:bool>->Type {bool}
         fn tag(comptime n:Integer,comptime flag:bool,comptime .T:Type=Shape<n,flag>)->bool {flag}
         fn forward(comptime n:Integer,comptime flag:bool)->bool {tag(n,flag)}
-        fn run()->(bool,bool,bool) {(forward(4,true),forward(4,false),forward(5,true))}",
+        fn run()->Tuple<bool, bool, bool> {(forward(4,true),forward(4,false),forward(5,true))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let instances = graph
@@ -31044,12 +31538,12 @@ fn ordinary_comptime_values_construct_distinct_normal_form_type_defaults() {
 
 #[test]
 fn normal_form_type_default_chains_forward_ordinary_type_inputs() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         pure comptime fn Wrapper<T,.U:Type=T,.V:Type=U>->Type {T}
         fn tag(comptime A:Type,comptime .T:Type=Wrapper<A>)->bool {true}
         fn forward(comptime A:Type)->bool {tag(A)}
-        fn run()->(bool,bool) {(forward(bool),forward('x''type))}",
+        fn run()->Tuple<bool, bool> {(forward(bool),forward('x''type))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let instances = graph
@@ -31073,12 +31567,12 @@ fn normal_form_type_default_chains_forward_ordinary_type_inputs() {
 
 #[test]
 fn mixed_ordinary_type_and_value_indices_preserve_dependent_normal_defaults() {
-    let package=compile("typealias Type=.Type'builtin;typealias Pair=(bool,bool);
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;typealias Pair=Tuple<bool,bool>;
         pure comptime fn Tagged<T,value:T,.copy:T=value>->Type {T}
         fn keep(comptime A:Type,comptime v:A,value:Tagged<A,v>)->Tagged<A,v> {value}
         fn tag(comptime A:Type,comptime v:A,comptime .T:Type=Tagged<A,v>)->bool {true}
         fn forward(comptime A:Type,comptime v:A)->bool {tag(A,v)}
-        fn run()->(bool,bool,bool) {(forward(bool,true),forward(Type,bool),forward(Pair,(true,false)))}");
+        fn run()->Tuple<bool, bool, bool> {(forward(bool,true),forward(Type,bool),forward(Pair,(true,false)))}");
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let instances = graph
         .functions
@@ -31108,12 +31602,12 @@ fn mixed_ordinary_type_and_value_indices_preserve_dependent_normal_defaults() {
 
 #[test]
 fn ordinary_comptime_values_defer_normal_form_default_plans_until_specialization() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;
         pure comptime fn Shape<N: Integer, .storage: Integer = (N + 1)>->Type {bool}
         fn tag(comptime n:Integer,comptime .T:Type=Shape<n>)->bool {true}
         fn forward(comptime n:Integer)->bool {tag(n)}
-        fn run()->(bool,bool) {(forward(4),forward(5))}",
+        fn run()->Tuple<bool, bool> {(forward(4),forward(5))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let mut widths = Vec::new();
@@ -31212,11 +31706,11 @@ fn dependent_comptime_value_inputs_of_type_execute_and_recover_in_the_interprete
 
 #[test]
 fn mixed_dependent_and_clause_generic_inputs_infer_separate_frames() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;typealias Char='x''type;
-        fn pair(comptime T:Type,value:T,other:G)->(T,G) where G {(value,other)}
-        fn forward(value:A,other:B)->(A,B) where A,B {pair(A,value,other)}
-        fn run()->((bool,Char),(Char,bool)) {(pair(bool,true,'x'),forward('y',false))}",
+        fn pair(comptime T:Type,value:T,other:G)->Tuple<T, G> where G {(value,other)}
+        fn forward(value:A,other:B)->Tuple<A, B> where A,B {pair(A,value,other)}
+        fn run()->Tuple<Tuple<bool, Char>, Tuple<Char, bool>> {(pair(bool,true,'x'),forward('y',false))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -31229,14 +31723,14 @@ fn mixed_dependent_and_clause_generic_inputs_infer_separate_frames() {
 
 #[test]
 fn mixed_dependent_generic_calls_keep_the_enclosing_type_input_frame() {
-    let package=compile("typealias Type=.Type'builtin;typealias Char='x''type;
-        fn pair(comptime T:Type,value:T,other:G)->(T,G) where G {(value,other)}
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;typealias Char='x''type;
+        fn pair(comptime T:Type,value:T,other:G)->Tuple<T, G> where G {(value,other)}
         fn keep_generic(value:G)->G where G {value}
-        fn forward(comptime T:Type,value:T)->(T,bool) {pair(T,keep_generic(value),true)}
-        fn through_callback(comptime T:Type,value:T,callback:fn(T)->T)->(T,bool) {pair(T,callback(value),false)}
-        fn repeat(comptime T:Type,value:T)->(T,T) {pair(T,value,value)}
+        fn forward(comptime T:Type,value:T)->Tuple<T, bool> {pair(T,keep_generic(value),true)}
+        fn through_callback(comptime T:Type,value:T,callback:fn(T)->T)->Tuple<T, bool> {pair(T,callback(value),false)}
+        fn repeat(comptime T:Type,value:T)->Tuple<T, T> {pair(T,value,value)}
         fn keep(value:Char)->Char {value}
-        fn run()->((bool,bool),(Char,bool),(Char,Char)) {(forward(bool,false),through_callback(Char,'x',keep),repeat(Char,'y'))}");
+        fn run()->Tuple<Tuple<bool, bool>, Tuple<Char, bool>, Tuple<Char, Char>> {(forward(bool,false),through_callback(Char,'x',keep),repeat(Char,'y'))}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -31249,12 +31743,12 @@ fn mixed_dependent_generic_calls_keep_the_enclosing_type_input_frame() {
 
 #[test]
 fn scoped_structural_type_defaults_keep_caller_and_callee_frames_distinct() {
-    let package=compile("typealias Type=.Type'builtin;typealias Char='x''type;
-        fn pair(comptime .T:Type=G,value:T,other:G)->(T,G) where G {(value,other)}
-        fn forward(comptime A:Type,value:A)->(A,A) {pair(value,value)}
-        fn with_copy(comptime .T:Type=G,comptime value:T,comptime other:G,comptime .copy:G=other)->(T,G) where G {(value,copy)}
-        fn staged(comptime A:Type,comptime value:A)->(A,A) {with_copy(value,value)}
-        fn run()->((bool,bool),(Char,Char)) {(forward(bool,true),staged(Char,'x'))}");
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;typealias Char='x''type;
+        fn pair(comptime .T:Type=G,value:T,other:G)->Tuple<T, G> where G {(value,other)}
+        fn forward(comptime A:Type,value:A)->Tuple<A, A> {pair(value,value)}
+        fn with_copy(comptime .T:Type=G,comptime value:T,comptime other:G,comptime .copy:G=other)->Tuple<T, G> where G {(value,copy)}
+        fn staged(comptime A:Type,comptime value:A)->Tuple<A, A> {with_copy(value,value)}
+        fn run()->Tuple<Tuple<bool, bool>, Tuple<Char, Char>> {(forward(bool,true),staged(Char,'x'))}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -31266,11 +31760,11 @@ fn scoped_structural_type_defaults_keep_caller_and_callee_frames_distinct() {
 
 #[test]
 fn scoped_structural_type_defaults_work_in_trait_methods() {
-    let package=compile("typealias Type=.Type'builtin;
-        trait Mapper {fn pair(self,comptime .T:Type=G,value:T,other:G)->(T,G) where G;}
-        struct Host {} impl Mapper for Host {fn pair(self,comptime .T:Type=G,value:T,other:G)->(T,G) where G {(value,other)}}
-        fn forward(comptime A:Type,value:A)->(A,A) {Host {}.as(Mapper).pair(value,value)}
-        fn run()->(bool,bool) {forward(bool,true)}");
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;
+        trait Mapper {fn pair(self,comptime .T:Type=G,value:T,other:G)->Tuple<T, G> where G;}
+        struct Host {} impl Mapper for Host {fn pair(self,comptime .T:Type=G,value:T,other:G)->Tuple<T, G> where G {(value,other)}}
+        fn forward(comptime A:Type,value:A)->Tuple<A, A> {Host {}.as(Mapper).pair(value,value)}
+        fn run()->Tuple<bool, bool> {forward(bool,true)}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(true)])
@@ -31279,9 +31773,9 @@ fn scoped_structural_type_defaults_work_in_trait_methods() {
 
 #[test]
 fn scoped_structural_type_defaults_preserve_nested_callable_binders() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
-        fn pair(comptime .T:Type=fn(G)->G,action:T,value:G)->(T,G) where G {(action,value)}
+        fn pair(comptime .T:Type=fn(G)->G,action:T,value:G)->Tuple<T, G> where G {(action,value)}
         fn forward(comptime A:Type,value:A,action:fn(A)->A)->A {let (f,v)=pair(action,value);f(v)}
         fn keep(value:bool)->bool {value}
         fn run()->bool {forward(bool,true,keep)}",
@@ -31294,11 +31788,11 @@ fn scoped_structural_type_defaults_preserve_nested_callable_binders() {
 
 #[test]
 fn mixed_dependent_trait_calls_infer_enclosing_type_inputs() {
-    let package=compile("typealias Type=.Type'builtin;
-        trait Mapper {fn pair(self,comptime T:Type,value:T,other:G)->(T,G) where G;}
-        struct Host {} impl Mapper for Host {fn pair(self,comptime T:Type,value:T,other:G)->(T,G) where G {(value,other)}}
-        fn forward(comptime T:Type,value:T)->(T,T) {Host {}.as(Mapper).pair(T,value,value)}
-        fn run()->(bool,bool) {forward(bool,true)}");
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;
+        trait Mapper {fn pair(self,comptime T:Type,value:T,other:G)->Tuple<T, G> where G;}
+        struct Host {} impl Mapper for Host {fn pair(self,comptime T:Type,value:T,other:G)->Tuple<T, G> where G {(value,other)}}
+        fn forward(comptime T:Type,value:T)->Tuple<T, T> {Host {}.as(Mapper).pair(T,value,value)}
+        fn run()->Tuple<bool, bool> {forward(bool,true)}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(true)])
@@ -31337,12 +31831,12 @@ fn scoped_generic_function_values_infer_from_nested_callable_contexts() {
 
 #[test]
 fn scoped_generic_callbacks_infer_from_later_arguments() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         fn identity(value:G)->G where G {value}
         fn apply(action:fn(G)->G,value:G)->G where G {action(value)}
         fn forward(comptime A:Type,value:A)->A {apply(identity,value)}
-        fn run()->(bool,'x''type) {(forward(bool,true),forward('x''type,'x'))}",
+        fn run()->Tuple<bool, 'x''type> {(forward(bool,true),forward('x''type,'x'))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -31352,15 +31846,15 @@ fn scoped_generic_callbacks_infer_from_later_arguments() {
 
 #[test]
 fn scoped_generic_function_defaults_preserve_caller_bindings() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
-        fn pair(value:G,other:H)->(G,H) where G,.H:Type=G {(value,other)}
-        fn forward(comptime A:Type,value:A)->(A,A) {
-            let action:fn(A,A)->(A,A)=pair;
+        fn pair(value:G,other:H)->Tuple<G, H> where G,.H:Type=G {(value,other)}
+        fn forward(comptime A:Type,value:A)->Tuple<A, A> {
+            let action:fn(A,A)->Tuple<A, A> =pair;
             action(value,value)
         }
-        fn direct(comptime A:Type,value:A)->(A,A) {pair(value,value)}
-        fn run()->((bool,bool),('x''type,'x''type)) {(forward(bool,true),direct('x''type,'x'))}",
+        fn direct(comptime A:Type,value:A)->Tuple<A, A> {pair(value,value)}
+        fn run()->Tuple<Tuple<bool, bool>, Tuple<'x''type, 'x''type>> {(forward(bool,true),direct('x''type,'x'))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -31373,16 +31867,16 @@ fn scoped_generic_function_defaults_preserve_caller_bindings() {
 
 #[test]
 fn scoped_generic_computed_defaults_can_use_closed_dependencies() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         comptime fn Choose(T:Type)->Type {if T == bool {bool} else {'x''type}}
-        fn pair(value:G,other:H,proof:K)->K where G,H,.K:Type=(G,Choose(H)) {proof}
-        fn forward(comptime A:Type,value:A)->(A,bool) {
-            let action:fn(A,bool,(A,bool))->(A,bool)=pair;
+        fn pair(value:G,other:H,proof:K)->K where G,H,.K:Type=Tuple<G,Choose(H)> {proof}
+        fn forward(comptime A:Type,value:A)->Tuple<A, bool> {
+            let action:fn(A,bool,Tuple<A,bool>)->Tuple<A, bool> =pair;
             action(value,true,(value,true))
         }
-        fn direct(comptime A:Type,value:A)->(A,bool) {pair(value,true,(value,true))}
-        fn run()->((bool,bool),('x''type,bool)) {(forward(bool,false),direct('x''type,'x'))}",
+        fn direct(comptime A:Type,value:A)->Tuple<A, bool> {pair(value,true,(value,true))}
+        fn run()->Tuple<Tuple<bool, bool>, Tuple<'x''type, bool>> {(forward(bool,false),direct('x''type,'x'))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -31418,17 +31912,17 @@ fn generic_callback_values_preserve_inherited_trait_evidence() {
 
 #[test]
 fn ordinary_type_input_capabilities_support_callbacks_and_forwarding() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         trait Allowed {} impl Allowed for bool {}
         fn identity(value:G)->G where G :- Allowed {value}
         fn forward(comptime A:Type,value:A)->A where requires A :- Allowed {
             let action:fn(A)->A=identity; action(value)
         }
-        fn pair(comptime A:Type,value:A,other:G)->(A,G) where G,requires A :- Allowed {
+        fn pair(comptime A:Type,value:A,other:G)->Tuple<A, G> where G,requires A :- Allowed {
             (forward(A,value),other)
         }
-        fn run()->(bool,'x''type) {pair(bool,true,'x')}",
+        fn run()->Tuple<bool, 'x''type> {pair(bool,true,'x')}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -31451,15 +31945,15 @@ fn ordinary_type_inputs_used_only_by_capability_contracts_are_prepared() {
 
 #[test]
 fn ordinary_associated_parameter_types_use_incremental_signature_evidence() {
-    let package=compile("typealias Type=.Type'builtin;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;
         trait Source {assoc Item:Type;} trait Derived :- Source {}
         impl Source for bool {assoc Item:Type=bool;} impl Derived for bool {}
         impl Source for 'x''type {assoc Item:Type='x''type;}
         fn pair(comptime A:Type,left:A.as(Source).Item,comptime B:Type,right:B.as(Source).Item)
-            ->(A.as(Source).Item,B.as(Source).Item) where requires A :- Derived and B :- Source {(left,right)}
+            ->Tuple<A.as(Source).Item, B.as(Source).Item> where requires A :- Derived and B :- Source {(left,right)}
         fn forward(comptime A:Type,left:A.as(Source).Item,comptime B:Type,right:B.as(Source).Item)
-            ->(A.as(Source).Item,B.as(Source).Item) where requires A :- Derived and B :- Source {pair(A,left,B,right)}
-        fn run()->(bool,'x''type) {forward(bool,true,'x''type,'x')}");
+            ->Tuple<A.as(Source).Item, B.as(Source).Item> where requires A :- Derived and B :- Source {pair(A,left,B,right)}
+        fn run()->Tuple<bool, 'x''type> {forward(bool,true,'x''type,'x')}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Char('x')])
@@ -31468,12 +31962,12 @@ fn ordinary_associated_parameter_types_use_incremental_signature_evidence() {
 
 #[test]
 fn ordinary_associated_types_compose_with_clause_inference() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         trait Source {assoc Item:Type;} impl Source for bool {assoc Item:Type=bool;}
-        fn pair(comptime A:Type,value:A.as(Source).Item,other:G)->(A.as(Source).Item,G)
+        fn pair(comptime A:Type,value:A.as(Source).Item,other:G)->Tuple<A.as(Source).Item, G>
             where G,requires A :- Source {(value,other)}
-        fn run()->(bool,'x''type) {pair(bool,true,'x')}",
+        fn run()->Tuple<bool, 'x''type> {pair(bool,true,'x')}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -31483,7 +31977,7 @@ fn ordinary_associated_types_compose_with_clause_inference() {
 
 #[test]
 fn ordinary_associated_comptime_defaults_preserve_type_views_and_overrides() {
-    let package=compile("typealias Type=.Type'builtin;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;
         trait Source {assoc Item:Type;}
         impl Source for bool {assoc Item:Type=bool;}
         impl Source for 'x''type {assoc Item:Type='x''type;}
@@ -31491,7 +31985,7 @@ fn ordinary_associated_comptime_defaults_preserve_type_views_and_overrides() {
             ->A.as(Source).Item where requires A :- Source {copy}
         fn forward(comptime A:Type,comptime value:A.as(Source).Item)->A.as(Source).Item
             where requires A :- Source {keep(A,value)}
-        fn run()->(bool,bool,'x''type) {(forward(bool,true),keep(bool,true,.copy=false),forward('x''type,'x'))}");
+        fn run()->Tuple<bool, bool, 'x''type> {(forward(bool,true),keep(bool,true,.copy=false),forward('x''type,'x'))}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -31504,7 +31998,7 @@ fn ordinary_associated_comptime_defaults_preserve_type_views_and_overrides() {
 
 #[test]
 fn associated_input_domains_refine_type_values_and_keep_instance_keys_distinct() {
-    let package=compile("typealias Type=.Type'builtin;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;
         trait Source {assoc Item:Type;}
         impl Source for bool {assoc Item:Type=Type;}
         impl Source for 'x''type {assoc Item:Type=bool;}
@@ -31512,7 +32006,7 @@ fn associated_input_domains_refine_type_values_and_keep_instance_keys_distinct()
             ->bool where requires A :- Source {true}
         fn forward(comptime A:Type,comptime value:A.as(Source).Item)->bool
             where requires A :- Source {inspect(A,value)}
-        fn run()->(bool,bool,bool,bool) {(forward(bool,bool),forward(bool,'x''type),forward('x''type,true),inspect(bool,bool))}");
+        fn run()->Tuple<bool, bool, bool, bool> {(forward(bool,bool),forward(bool,'x''type),forward('x''type,true),inspect(bool,bool))}");
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let inspect = id(&package, "inspect");
     let keys = graph
@@ -31558,11 +32052,11 @@ fn scoped_generic_method_values_infer_local_type_arguments() {
 
 #[test]
 fn mixed_dependent_and_clause_generic_inputs_preserve_defaults_and_partial_arguments() {
-    let package=compile("typealias Type=.Type'builtin;typealias Char='x''type;
-        fn configured(comptime .T:Type=bool,value:T,comptime other:G,comptime .copy:G=other)->(T,G) where G {(value,copy)}
-        fn coupled(comptime .T:Type=G,value:T,other:G)->(T,G) where G {(value,other)}
-        fn triple(comptime T:Type,value:T,left:A,right:B)->(T,A,B) where A,.B:Type=bool {(value,left,right)}
-        fn run()->((bool,Char),(Char,Char),(bool,Char,bool)) {(configured(true,'x'),coupled('y','z'),triple<Char>(bool,false,'w',true))}");
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;typealias Char='x''type;
+        fn configured(comptime .T:Type=bool,value:T,comptime other:G,comptime .copy:G=other)->Tuple<T, G> where G {(value,copy)}
+        fn coupled(comptime .T:Type=G,value:T,other:G)->Tuple<T, G> where G {(value,other)}
+        fn triple(comptime T:Type,value:T,left:A,right:B)->Tuple<T, A, B> where A,.B:Type=bool {(value,left,right)}
+        fn run()->Tuple<Tuple<bool, Char>, Tuple<Char, Char>, Tuple<bool, Char, bool>> {(configured(true,'x'),coupled('y','z'),triple<Char>(bool,false,'w',true))}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -31579,10 +32073,10 @@ fn mixed_dependent_and_clause_generic_inputs_preserve_defaults_and_partial_argum
 
 #[test]
 fn dependent_type_defaults_wait_for_inferred_clause_arguments() {
-    let package=compile("typealias Type=.Type'builtin;typealias Char='x''type;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;typealias Char='x''type;
         comptime fn Choose(T:Type)->Type {if T == bool {bool} else {Char}}
-        fn pair(comptime .T:Type=Choose(G),value:T,other:G)->(T,G) where G {(value,other)}
-        fn run()->((bool,bool),(Char,Char),(Char,.u8'builtin)) {(pair(true,false),pair('x','y'),pair('z',9))}");
+        fn pair(comptime .T:Type=Choose(G),value:T,other:G)->Tuple<T, G> where G {(value,other)}
+        fn run()->Tuple<Tuple<bool, bool>, Tuple<Char, Char>, Tuple<Char, .u8'builtin>> {(pair(true,false),pair('x','y'),pair('z',9))}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -31595,9 +32089,9 @@ fn dependent_type_defaults_wait_for_inferred_clause_arguments() {
 
 #[test]
 fn dependent_type_defaults_follow_numeric_defaulting_and_delayed_callbacks() {
-    let package=compile("typealias Type=.Type'builtin;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;
         comptime fn Choose(T:Type)->Type {if T == .i32'builtin {'x''type} else {bool}}
-        fn pair(comptime .T:Type=Choose(G),value:T,action:fn(G)->G,other:G)->(T,G) where G {(value,action(other))}
+        fn pair(comptime .T:Type=Choose(G),value:T,action:fn(G)->G,other:G)->Tuple<T, G> where G {(value,action(other))}
         fn identity(value:G)->G where G {value}
         fn run()->bool {let (value,number)=identity(pair('x',|n| n,9));value == 'x' and number == 9}");
     assert_eq!(
@@ -31608,9 +32102,9 @@ fn dependent_type_defaults_follow_numeric_defaulting_and_delayed_callbacks() {
 
 #[test]
 fn dependent_type_defaults_use_later_callable_evidence_before_numeric_defaults() {
-    let package=compile("typealias Type=.Type'builtin;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;
         comptime fn Choose(T:Type)->Type {if T == .u64'builtin {bool} else {'x''type}}
-        fn pair(comptime .T:Type=Choose(G),value:T,other:G,action:fn(G)->G)->(T,G) where G {(value,action(other))}
+        fn pair(comptime .T:Type=Choose(G),value:T,other:G,action:fn(G)->G)->Tuple<T, G> where G {(value,action(other))}
         fn wide(value:.u64'builtin)->.u64'builtin {value}
         fn run()->bool {let (value,number)=pair(true,2147483648,wide);value and number == 2147483648}");
     assert_eq!(
@@ -31621,12 +32115,12 @@ fn dependent_type_defaults_use_later_callable_evidence_before_numeric_defaults()
 
 #[test]
 fn dependent_type_default_preparation_keeps_runtime_source_order_and_once_only_inputs() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         comptime fn Choose(T:Type)->Type {if T == bool {bool} else {'x''type}}
         fn first(p:*bool)->bool {p.* = true;true} fn last(p:*bool)->bool {p.*}
-        fn pair(comptime .T:Type=Choose(G),value:T,other:G)->(T,G) where G {(value,other)}
-        fn run()->(bool,bool) {var flag=false;pair(first(flag.ref),last(flag.ref))}",
+        fn pair(comptime .T:Type=Choose(G),value:T,other:G)->Tuple<T, G> where G {(value,other)}
+        fn run()->Tuple<bool, bool> {var flag=false;pair(first(flag.ref),last(flag.ref))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
@@ -31647,11 +32141,11 @@ fn dependent_type_default_preparation_keeps_runtime_source_order_and_once_only_i
 
 #[test]
 fn mixed_dependent_and_clause_generic_inputs_support_methods() {
-    let package=compile("typealias Type=.Type'builtin;typealias Char='x''type;
-        trait Mapper {fn pair(self,comptime T:Type,value:T,other:G)->(T,G) where G;}
-        struct Host {} impl Host {fn direct(self,comptime T:Type,value:T,other:G)->(T,G) where G {(value,other)}}
-        impl Mapper for Host {fn pair(self,comptime T:Type,value:T,other:G)->(T,G) where G {(value,other)}}
-        fn run()->((bool,Char),(Char,bool)) {(Host {}.direct(bool,true,'x'),Host {}.as(Mapper).pair(Char,'y',false))}");
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;typealias Char='x''type;
+        trait Mapper {fn pair(self,comptime T:Type,value:T,other:G)->Tuple<T, G> where G;}
+        struct Host {} impl Host {fn direct(self,comptime T:Type,value:T,other:G)->Tuple<T, G> where G {(value,other)}}
+        impl Mapper for Host {fn pair(self,comptime T:Type,value:T,other:G)->Tuple<T, G> where G {(value,other)}}
+        fn run()->Tuple<Tuple<bool, Char>, Tuple<Char, bool>> {(Host {}.direct(bool,true,'x'),Host {}.as(Mapper).pair(Char,'y',false))}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -31663,11 +32157,11 @@ fn mixed_dependent_and_clause_generic_inputs_support_methods() {
 
 #[test]
 fn mixed_dependent_trait_inputs_preserve_interface_defaults() {
-    let package=compile("typealias Type=.Type'builtin;typealias Char='x''type;
-        trait Mapper {fn pair(self,comptime T:Type,value:T,comptime other:G,comptime .copy:G=other)->(T,G) where G;}
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;typealias Char='x''type;
+        trait Mapper {fn pair(self,comptime T:Type,value:T,comptime other:G,comptime .copy:G=other)->Tuple<T, G> where G;}
         struct Host {}
-        impl Mapper for Host {fn pair(self,comptime A:Type,left:A,comptime right:B,comptime .copy:B=right)->(A,B) where B {(left,copy)}}
-        fn run()->(bool,Char) {Host {}.as(Mapper).pair(bool,true,'x')}");
+        impl Mapper for Host {fn pair(self,comptime A:Type,left:A,comptime right:B,comptime .copy:B=right)->Tuple<A, B> where B {(left,copy)}}
+        fn run()->Tuple<bool, Char> {Host {}.as(Mapper).pair(bool,true,'x')}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Char('x')])
@@ -31676,12 +32170,12 @@ fn mixed_dependent_trait_inputs_preserve_interface_defaults() {
 
 #[test]
 fn mixed_dependent_generic_inputs_keep_runtime_evaluation_order() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         fn first(p:*bool)->bool {p.* = true;true}
         fn last(p:*bool)->bool {p.*}
-        fn pair(comptime .T:Type=bool,left:T,right:G)->(T,G) where G {(left,right)}
-        fn run()->(bool,bool) {var flag=false;pair(first(flag.ref),last(flag.ref),.T=bool)}",
+        fn pair(comptime .T:Type=bool,left:T,right:G)->Tuple<T, G> where G {(left,right)}
+        fn run()->Tuple<bool, bool> {var flag=false;pair(first(flag.ref),last(flag.ref),.T=bool)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -31702,10 +32196,10 @@ fn staged_trait_calls_rebind_default_capture_initializers() {
 
 #[test]
 fn staged_trait_calls_rebind_runtime_defaults_without_repeating_arguments() {
-    let package=compile("trait Select {fn choose(self,comptime flag:bool,value:bool,.copy:bool=value)->bool;}
+    let package=execution_support::compile_with_tuple("trait Select {fn choose(self,comptime flag:bool,value:bool,.copy:bool=value)->bool;}
         struct Host {} impl Select for Host {fn choose(self,comptime active:bool,input:bool,.copy:bool=false)->bool {if active {copy} else {input}}}
         fn flip(p:*bool)->bool {p.* = not p.*;p.*}
-        fn run()->(bool,bool) {var flag=false;let result=Host {}.as(Select).choose(true,flip(flag.ref));(result,flag)}");
+        fn run()->Tuple<bool, bool> {var flag=false;let result=Host {}.as(Select).choose(true,flip(flag.ref));(result,flag)}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true), Value::Bool(true)])
@@ -31714,7 +32208,7 @@ fn staged_trait_calls_rebind_runtime_defaults_without_repeating_arguments() {
 
 #[test]
 fn ordinary_comptime_indices_in_capabilities_use_defaults_and_forwarded_evidence() {
-    let package = compile("typealias Type=.Type'builtin;
+    let package = execution_support::compile_with_tuple("typealias Type=.Type'builtin;
         trait Source {assoc Item:Type;}
         impl Source for bool {assoc Item:Type=Type;}
         trait Allowed where T {}
@@ -31727,7 +32221,7 @@ fn ordinary_comptime_indices_in_capabilities_use_defaults_and_forwarded_evidence
         where requires A :- Source, requires bool :- Allowed<Tagged<A.as(Source).Item,value>> {accept(A,value)}
         fn generic(comptime value:T,extra:G)->G where T,G,
             requires bool :- Allowed<Tagged<T,value>> {extra}
-        fn run()->(bool,bool,bool) { (accept(bool,bool),forward(bool,bool),generic(bool,true)) }");
+        fn run()->Tuple<bool, bool, bool> { (accept(bool,bool),forward(bool,bool),generic(bool,true)) }");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![
@@ -31744,9 +32238,9 @@ fn inferred_comptime_capability_domains_cover_scalars_types_and_aggregates() {
         ("bool", "true"),
         ("'x''type", "'x'"),
         ("Type", "bool"),
-        ("(bool,bool)", "(true,false)"),
+        ("Tuple<bool,bool>", "(true,false)"),
     ] {
-        let package = compile(&format!(
+        let package = execution_support::compile_with_tuple(&format!(
             "typealias Type=.Type'builtin;
             trait Allowed where Index {{}}
             pure comptime fn Tagged<T,value:T>->Type {{T}}
@@ -31755,7 +32249,7 @@ fn inferred_comptime_capability_domains_cover_scalars_types_and_aggregates() {
                 requires bool :- Allowed<Tagged<T,value>> {{extra}}
             fn forward(comptime value:T,extra:G)->G where T,G,
                 requires bool :- Allowed<Tagged<T,value>> {{accept(value,extra)}}
-            fn run()->(bool,bool) {{(accept({value},true),forward({value},false))}}"
+            fn run()->Tuple<bool, bool> {{(accept({value},true),forward({value},false))}}"
         ));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -31926,14 +32420,14 @@ fn declaration_sugar_and_explicit_bounds_share_one_prerequisite_schedule() {
 
 #[test]
 fn sugar_capability_dependencies_cross_clause_and_ordinary_input_parameters() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         trait Source {assoc Item:Type;} trait Accepts where T {}
         impl Source for bool {assoc Item:Type=bool;} impl Accepts<bool> for bool {}
         fn across(value:A,other:B)->bool where A :- Accepts<B.as(Source).Item>, B :- Source {true}
         fn ordinary(comptime B:Type,value:A)->bool
             where A :- Accepts<B.as(Source).Item>, requires B :- Source {true}
-        fn run()->(bool,bool) {(across(true,false),ordinary(bool,true))}",
+        fn run()->Tuple<bool, bool> {(across(true,false),ordinary(bool,true))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -31943,7 +32437,7 @@ fn sugar_capability_dependencies_cross_clause_and_ordinary_input_parameters() {
 
 #[test]
 fn ordinary_type_predicates_are_checked_after_inputs_and_support_forwarding() {
-    let package=compile("typealias Type=.Type'builtin;trait Forbidden {}
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;trait Forbidden {}
         fn identity(value:T)->T where T {value}
         fn convert(comptime A:Type,comptime B:Type,value:A)->B where requires A == B {identity(value)}
         fn defaulted(comptime A:Type,comptime .B:Type=A)->bool where requires A == B {true}
@@ -31952,7 +32446,7 @@ fn ordinary_type_predicates_are_checked_after_inputs_and_support_forwarding() {
         fn choice(comptime T:Type)->bool where requires T == bool or T == 'x''type {true}
         fn distinct(comptime A:Type,comptime B:Type)->bool where requires A != B {true}
         fn allowed(comptime T:Type)->bool where requires not (T :- Forbidden) {true}
-        fn run()->(bool,bool,bool,bool,bool,bool) {(forward(bool,bool,true),choice('x''type),distinct(bool,'x''type),allowed(bool),convert(bool,bool,true),defaulted(bool))}");
+        fn run()->Tuple<bool, bool, bool, bool, bool, bool> {(forward(bool,bool,true),choice('x''type),distinct(bool,'x''type),allowed(bool),convert(bool,bool,true),defaulted(bool))}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true); 6])
@@ -31998,13 +32492,13 @@ fn ordinary_trait_givens_support_disjunction_without_choosing_the_other_branch()
 
 #[test]
 fn scoped_trait_givens_coexist_with_closed_negative_queries() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         trait A {} trait Forbidden {} impl A for bool {}
         fn allowed(comptime T:Type)->bool where requires not (T :- Forbidden) {true}
         fn forward(comptime T:Type)->bool where requires T :- A {allowed(bool)}
         fn equal(comptime T:Type)->bool where requires T == bool {allowed(T)}
-        fn run()->(bool,bool) {(forward(bool),equal(bool))}",
+        fn run()->Tuple<bool, bool> {(forward(bool),equal(bool))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -32014,7 +32508,7 @@ fn scoped_trait_givens_coexist_with_closed_negative_queries() {
 
 #[test]
 fn staged_trait_calls_keep_self_interface_and_method_substitutions() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         trait Allowed {} impl Allowed for bool {}
         trait Service where Tag {
@@ -32028,7 +32522,7 @@ fn staged_trait_calls_keep_self_interface_and_method_substitutions() {
             fn permitted(comptime A:Type)->bool where requires A :- Allowed {true}
             fn generic(comptime A:Type,value:T)->T where T, requires A == bool {value}
         }
-        fn run()->(bool,bool,bool,bool) {(
+        fn run()->Tuple<bool, bool, bool, bool> {(
             bool.as(Service<bool>).same(bool,bool,true),
             bool.as(Service<bool>).defaulted(bool),
             bool.as(Service<bool>).permitted(bool),
@@ -32172,7 +32666,7 @@ fn staged_trait_postconditions_preserve_old_inputs_and_result_bindings() {
 
 #[test]
 fn staged_receiver_contract_defaults_use_scalar_evidence_without_repeating_inputs() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/staged-receiver-contracts.fl"
     ));
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
@@ -32221,7 +32715,7 @@ fn method_signature_equivalence_reaches_callbacks_inside_nominal_containers() {
 
 #[test]
 fn ordinary_type_containers_construct_update_and_destructure_in_scope() {
-    let package = compile(include_str!(
+    let package = compile_bound_tuple_fixture(include_str!(
         "../../../development/examples/ordinary-type-containers.fl"
     ));
     assert_eq!(
@@ -32232,13 +32726,13 @@ fn ordinary_type_containers_construct_update_and_destructure_in_scope() {
 
 #[test]
 fn ordinary_type_container_defaults_preserve_input_scope() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         struct Box where T, requires T == bool {value:T=true,}
         enum Choice where T, requires T == bool {some {value:T=true,},}
         fn make(comptime T:Type)->Box<T> where requires T == bool {Box<T>{}}
         fn choice(comptime T:Type)->Choice<T> where requires T == bool {Choice<T>.some{}}
-        fn run()->(bool,bool) {let .some{value}=choice(bool);(make(bool).value,value)}",
+        fn run()->Tuple<bool, bool> {let .some{value}=choice(bool);(make(bool).value,value)}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -32248,7 +32742,7 @@ fn ordinary_type_container_defaults_preserve_input_scope() {
 
 #[test]
 fn ordinary_type_container_program_contracts_keep_nominal_input_scope() {
-    let package=compile("typealias Type=.Type'builtin;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;
         struct Box where T {value:T,flag:bool,}
         enum Entry where T {some {value:T,flag:bool,},none,}
         fn read(comptime T:Type,box:Box<T>)->result:bool where requires box.flag, ensures result {box.flag}
@@ -32258,7 +32752,7 @@ fn ordinary_type_container_program_contracts_keep_nominal_input_scope() {
         }
         fn forward(comptime X:Type,comptime Y:Type,box:Box<Y>)->result:bool
             where requires box.flag, ensures result {read(Y,box)}
-        fn run()->(bool,bool,bool) {(forward('x''type,bool,Box<bool>{value:false,flag:true}),
+        fn run()->Tuple<bool, bool, bool> {(forward('x''type,bool,Box<bool>{value:false,flag:true}),
             update(bool,Box<bool>{value:true,flag:false}),examine(bool,Entry<bool>.some{value:true,flag:false}))}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -32296,13 +32790,13 @@ fn ordinary_type_inputs_do_not_hide_selective_memory_writes() {
 
 #[test]
 fn pointer_reads_and_writes_use_proved_scalar_type_identity() {
-    let package=compile("typealias Type=.Type'builtin;struct Box where T {value:T,}
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;struct Box where T {value:T,}
         fn replace(comptime T:Type,box:*Box<T>,value:T) where requires T == bool {box.*.value=value;}
         fn literal(comptime T:Type,box:*Box<T>) where requires T == bool {box.*.value=true;}
         fn read(comptime T:Type,box:*Box<T>)->T where requires T == bool {box.*.value}
         fn direct(comptime T:Type,p:*T)->T where requires T == bool {p.*}
         fn generic(p:*T,value:T) where T, requires T == bool {p.* = value;}
-        fn run()->(bool,bool,bool) {var box=Box<bool>{value:false};replace(bool,box.ref,true);
+        fn run()->Tuple<bool, bool, bool> {var box=Box<bool>{value:false};replace(bool,box.ref,true);
             let first=read(bool,box.ref);box.value=false;literal(bool,box.ref);
             var value=false;generic<bool>(value.ref,true);(first,read(bool,box.ref),direct(bool,value.ref))}");
     assert_eq!(
@@ -32511,7 +33005,7 @@ fn dependent_boolean_assumes_are_checked_at_runtime() {
 
 #[test]
 fn dependent_boolean_operators_preserve_contracts_and_short_circuiting() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         fn invert(comptime T:Type,value:T)->result:T
             where requires T == bool, requires not value, ensures result {not value}
@@ -32523,7 +33017,7 @@ fn dependent_boolean_operators_preserve_contracts_and_short_circuiting() {
         fn fail()->bool {assumes false;true}
         fn skip_and(comptime T:Type,left:T)->bool where requires T == bool {left and fail()}
         fn skip_or(comptime T:Type,left:T)->bool where requires T == bool {left or fail()}
-        fn run()->(bool,bool,bool,bool,bool) {
+        fn run()->Tuple<bool, bool, bool, bool, bool> {
             (invert(bool,false),both(bool,bool,true,true),either(bool,false,true),
              skip_and(bool,false),skip_or(bool,true))
         }
@@ -32550,10 +33044,10 @@ fn dependent_boolean_operators_preserve_contracts_and_short_circuiting() {
 
 #[test]
 fn disjunctive_program_facts_survive_unchanged_branch_paths() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "fn either(a:bool,b:bool,flag:bool)->result:bool
         where requires a or b, ensures result {if flag {a or b} else {a or b}}
-        fn run()->(bool,bool) {(either(false,true,true),either(true,false,false))}",
+        fn run()->Tuple<bool, bool> {(either(false,true,true),either(true,false,false))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -32563,7 +33057,7 @@ fn disjunctive_program_facts_survive_unchanged_branch_paths() {
 
 #[test]
 fn disjunctive_program_facts_follow_copies_captures_and_branch_merges() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "fn accept(a:bool,b:bool)->bool where requires a or b {true}
         fn forward(a:bool,b:bool)->bool where requires a or b {
             let x=a;let y=b;accept(x,y)
@@ -32579,7 +33073,7 @@ fn disjunctive_program_facts_follow_copies_captures_and_branch_merges() {
             if flag {x=a;y=b;} else {x=b;y=a;};
             accept(x,y)
         }
-        fn run()->(bool,bool,bool,bool,bool) {
+        fn run()->Tuple<bool, bool, bool, bool, bool> {
             (forward(false,true),snapshot(true,false),capture(false,true),
              merged(false,true,true),merged(true,false,false))
         }",
@@ -32592,9 +33086,9 @@ fn disjunctive_program_facts_follow_copies_captures_and_branch_merges() {
 
 #[test]
 fn regrouped_disjunctive_contracts_accept_permuted_forwarding() {
-    let package=compile("fn accept(a:bool,b:bool,c:bool)->bool where requires (a or b) or c {true}
+    let package=execution_support::compile_with_tuple("fn accept(a:bool,b:bool,c:bool)->bool where requires (a or b) or c {true}
         fn forward(a:bool,b:bool,c:bool)->bool where requires a or (b or c) {accept(c,a,b)}
-        fn run()->(bool,bool,bool) {(forward(true,false,false),forward(false,true,false),forward(false,false,true))}");
+        fn run()->Tuple<bool, bool, bool> {(forward(true,false,false),forward(false,true,false),forward(false,false,true))}");
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Tuple(vec![Value::Bool(true); 3])
@@ -32603,7 +33097,7 @@ fn regrouped_disjunctive_contracts_accept_permuted_forwarding() {
 
 #[test]
 fn dependent_scalar_closure_parameters_use_enclosing_type_evidence() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
         fn increment(comptime T:Type,value:T)->T where requires T == Byte {
             let outer=|item:T| {
@@ -32618,7 +33112,7 @@ fn dependent_scalar_closure_parameters_use_enclosing_type_evidence() {
             let apply=|item:T| {assumes item;identity(item)};
             apply(value)
         }
-        fn run()->(Byte,bool) {(increment(Byte,8),keep(bool,true))}
+        fn run()->Tuple<Byte, bool> {(increment(Byte,8),keep(bool,true))}
         fn overflow()->Byte {increment(Byte,255)}
         fn false_input()->bool {keep(bool,false)}",
     );
@@ -32636,7 +33130,7 @@ fn dependent_scalar_closure_parameters_use_enclosing_type_evidence() {
 
 #[test]
 fn runtime_closures_reference_staged_type_inputs_without_environment_cells() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         fn identity(comptime T:Type,value:T)->T {value}
         fn apply(comptime T:Type,value:T)->T {
@@ -32645,7 +33139,7 @@ fn runtime_closures_reference_staged_type_inputs_without_environment_cells() {
         fn captured(comptime T:Type,value:T)->T {
             let outer=|| {let inner=|| identity(T,value);inner()};outer()
         }
-        fn run()->(bool,'x''type,bool,'x''type) {
+        fn run()->Tuple<bool, 'x''type, bool, 'x''type> {
             (apply(bool,true),apply('x''type,'x'),captured(bool,true),captured('x''type,'y'))
         }",
     );
@@ -32714,14 +33208,14 @@ fn comptime_closures_keep_their_type_value_capture_cells() {
 
 #[test]
 fn staged_value_uses_in_runtime_closures_do_not_create_runtime_capture_cells() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;
         pure comptime fn Shape<N:Integer>->Type {bool}
         fn tag(comptime n:Integer,comptime flag:bool,comptime .T:Type=Shape<n>)->bool {flag}
         fn apply(comptime n:Integer,comptime flag:bool)->bool {
             let outer=|| {let inner=|| tag(n,flag);inner()};outer()
         }
-        fn run()->(bool,bool,bool) {(apply(3,true),apply(3,false),apply(7,true))}",
+        fn run()->Tuple<bool, bool, bool> {(apply(3,true),apply(3,false),apply(7,true))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let instances = graph
@@ -32764,10 +33258,10 @@ fn staged_value_uses_in_runtime_closures_do_not_create_runtime_capture_cells() {
 
 #[test]
 fn mixed_staged_and_runtime_uses_keep_runtime_value_captures() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "fn tag(comptime flag:bool)->bool {flag}
         fn apply(comptime flag:bool)->bool {let call=|| flag and tag(flag);call()}
-        fn run()->(bool,bool) {(apply(true),apply(false))}",
+        fn run()->Tuple<bool, bool> {(apply(true),apply(false))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -32792,14 +33286,14 @@ fn mixed_staged_and_runtime_uses_keep_runtime_value_captures() {
 
 #[test]
 fn deferred_mathematical_integer_comparisons_use_the_integer_evaluator() {
-    let package=compile("typealias Integer=.Integer'builtin;
-        fn flags(comptime a:bool,comptime b:bool,comptime c:bool,comptime d:bool,comptime e:bool,comptime f:bool)->(bool,bool,bool,bool,bool,bool) {(a,b,c,d,e,f)}
-        fn forward(comptime n:Integer)->(bool,bool,bool,bool,bool,bool) {
+    let package=execution_support::compile_with_tuple("typealias Integer=.Integer'builtin;
+        fn flags(comptime a:bool,comptime b:bool,comptime c:bool,comptime d:bool,comptime e:bool,comptime f:bool)->Tuple<bool, bool, bool, bool, bool, bool> {(a,b,c,d,e,f)}
+        fn forward(comptime n:Integer)->Tuple<bool, bool, bool, bool, bool, bool> {
             flags(n == 3, n != 3, n < 3, n <= 3, n > 3, n >= 3)
         }
-        fn low()->(bool,bool,bool,bool,bool,bool) {forward(-4)}
-        fn equal()->(bool,bool,bool,bool,bool,bool) {forward(3)}
-        fn high()->(bool,bool,bool,bool,bool,bool) {forward(340282366920938463463374607431768211456)}");
+        fn low()->Tuple<bool, bool, bool, bool, bool, bool> {forward(-4)}
+        fn equal()->Tuple<bool, bool, bool, bool, bool, bool> {forward(3)}
+        fn high()->Tuple<bool, bool, bool, bool, bool, bool> {forward(340282366920938463463374607431768211456)}");
     for (name, expected) in [
         ("low", [false, true, true, true, false, false]),
         ("equal", [true, false, false, true, false, true]),
@@ -32815,15 +33309,15 @@ fn deferred_mathematical_integer_comparisons_use_the_integer_evaluator() {
 
 #[test]
 fn deferred_integer_comparisons_work_in_defaults_and_nested_runtime_closures() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Integer=.Integer'builtin;
         fn choose(comptime flag:bool)->bool {flag}
         fn defaulted(comptime n:Integer,comptime .selected:bool=n==3)->bool {selected}
-        fn forward(comptime n:Integer)->(bool,bool) {
+        fn forward(comptime n:Integer)->Tuple<bool, bool> {
             let outer=|| {let inner=|| choose(n + 1 == 3);inner()};
             (outer(),defaulted(n))
         }
-        fn run()->((bool,bool),(bool,bool)) {(forward(2),forward(3))}",
+        fn run()->Tuple<Tuple<bool, bool>, Tuple<bool, bool>> {(forward(2),forward(3))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -32836,10 +33330,10 @@ fn deferred_integer_comparisons_work_in_defaults_and_nested_runtime_closures() {
 
 #[test]
 fn deferred_float_computations_preserve_ieee_comparisons_and_precision() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Integer=.Integer'builtin;
         fn choose(comptime flag:bool)->bool {flag}
-        fn forward(comptime n:Integer)->(bool,bool,bool,bool,bool,bool) {
+        fn forward(comptime n:Integer)->Tuple<bool, bool, bool, bool, bool, bool> {
             (choose(if n == 3 {(1.0 + 1.0) == 2.0} else {false}),
              choose(if n == 3 {(0.0 / 0.0) == (0.0 / 0.0)} else {true}),
              choose(if n == 3 {(0.0 / 0.0) != 0.0} else {false}),
@@ -32847,8 +33341,8 @@ fn deferred_float_computations_preserve_ieee_comparisons_and_precision() {
              choose(if n == 3 {let x:.f32'builtin=16777216.0;(x + 1.0) == x} else {false}),
              choose(if n == 3 {let x:.f64'builtin=16777216.0;(x + 1.0) > x} else {false}))
         }
-        fn yes()->(bool,bool,bool,bool,bool,bool) {forward(3)}
-        fn no()->(bool,bool,bool,bool,bool,bool) {forward(7)}",
+        fn yes()->Tuple<bool, bool, bool, bool, bool, bool> {forward(3)}
+        fn no()->Tuple<bool, bool, bool, bool, bool, bool> {forward(7)}",
     );
     for (name, expected) in [
         ("yes", [true, false, true, true, true, true]),
@@ -32863,7 +33357,7 @@ fn deferred_float_computations_preserve_ieee_comparisons_and_precision() {
 
 #[test]
 fn floating_comptime_inputs_preserve_bits_defaults_and_specialization_identity() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias F32=.f32'builtin;typealias F64=.f64'builtin;
         comptime fn nan_a()->F64 {var value:F64=0.0;value'bitvec=0x7FF8000000000042;value}
         comptime fn nan_b()->F64 {var value:F64=0.0;value'bitvec=0x7FF8000000000043;value}
@@ -32871,8 +33365,8 @@ fn floating_comptime_inputs_preserve_bits_defaults_and_specialization_identity()
         fn forward(comptime value:F64)->F64 {identity(value)}
         fn same(comptime value:F64)->bool {value==value}
         fn equal(comptime a:F64,comptime b:F64)->bool {a==b}
-        fn pair(comptime values:(F32,F64))->(F32,F64) {values}
-        fn run()->(F64,F64,F64,F64,bool,bool,bool,(F32,F64)) {
+        fn pair(comptime values:Tuple<F32, F64>)->Tuple<F32, F64> {values}
+        fn run()->Tuple<F64, F64, F64, F64, bool, bool, bool, Tuple<F32, F64>> {
             (forward(0.0),forward(-0.0),forward(nan_a()),forward(nan_b()),
              same(nan_a()),same(0.0),equal(0.0,-0.0),pair((-0.0,1.5)))
         }",
@@ -32918,12 +33412,12 @@ fn floating_comptime_inputs_preserve_bits_defaults_and_specialization_identity()
 
 #[test]
 fn floating_inputs_form_opaque_type_defaults_without_numeric_canonicalization() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;typealias F64=.f64'builtin;
         pure comptime fn Mark<Value:F64>->Type {bool}
         fn tag(comptime value:F64,comptime .T:Type=Mark<value>)->bool {true}
         fn forward(comptime value:F64)->bool {let call=||tag(value);call()}
-        fn run()->(bool,bool) {(forward(0.0),forward(-0.0))}",
+        fn run()->Tuple<bool, bool> {(forward(0.0),forward(-0.0))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let instances = graph
@@ -32947,16 +33441,16 @@ fn floating_inputs_form_opaque_type_defaults_without_numeric_canonicalization() 
 
 #[test]
 fn computed_floating_staged_results_freeze_after_instantiation() {
-    let package=compile("typealias Type=.Type'builtin;typealias F32=.f32'builtin;typealias F64=.f64'builtin;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;typealias F32=.f32'builtin;typealias F64=.f64'builtin;
         fn defaulted(comptime T:Type,comptime value:T,comptime .copy:T=value + 1.0)->T
             where requires T == F64 {copy}
         fn forward(comptime value:F64)->F64 {defaulted(F64,value)}
         comptime fn negate(value:F64)->F64 { -value }
         fn accept(comptime value:F64)->F64 {value}
         fn from_call(comptime value:F64)->F64 {let call=||accept(negate(value));call()}
-        fn collect(comptime values:(F32,F64))->(F32,F64) {values}
-        fn tuple(comptime x:F32,comptime y:F64)->(F32,F64) {collect((x + 1.0,y / -0.0))}
-        fn run()->(F64,F64,F64,F64,(F32,F64)) {
+        fn collect(comptime values:Tuple<F32, F64>)->Tuple<F32, F64> {values}
+        fn tuple(comptime x:F32,comptime y:F64)->Tuple<F32, F64> {collect((x + 1.0,y / -0.0))}
+        fn run()->Tuple<F64, F64, F64, F64, Tuple<F32, F64>> {
             (forward(2.0),forward(2.0),defaulted(F64,2.0,.copy=7.0),from_call(0.0),tuple(16777216.0,1.0))
         }");
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
@@ -32999,7 +33493,7 @@ fn computed_floating_staged_results_freeze_after_instantiation() {
 
 #[test]
 fn constants_are_available_in_staged_arguments_without_runtime_splicing() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Integer=.Integer'builtin;
         const FLAG=true;
         const COUNT=3;
@@ -33008,9 +33502,9 @@ fn constants_are_available_in_staged_arguments_without_runtime_splicing() {
         const OPTIONS=schema {enabled:true};
         fn select(comptime flag:bool)->bool {flag}
         fn count(comptime n:Integer)->bool {select(n == 3)}
-        fn pair(comptime values:(bool,bool))->(bool,bool) {values}
+        fn pair(comptime values:Tuple<bool, bool>)->Tuple<bool, bool> {values}
         fn forward(comptime n:Integer)->bool {let call=||select(FLAG) and count(n);call()}
-        fn run()->(bool,bool,(bool,bool),bool,bool) {
+        fn run()->Tuple<bool, bool, Tuple<bool, bool>, bool, bool> {
             (select(FLAG),count(COUNT),pair(PACKET),select(OPTIONS.enabled),forward(COUNT))
         }",
     );
@@ -33028,7 +33522,7 @@ fn constants_are_available_in_staged_arguments_without_runtime_splicing() {
 
 #[test]
 fn anonymous_records_freeze_as_staged_inputs_and_preserve_labels() {
-    let package=compile("typealias Type=.Type'builtin;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;
         comptime fn schema(...properties:T)->T where T {properties}
         const SAMPLE=schema {flag:true,nested:schema {other:false}};
         typealias Options=SAMPLE'type;
@@ -33036,7 +33530,7 @@ fn anonymous_records_freeze_as_staged_inputs_and_preserve_labels() {
         fn forward(comptime value:Options)->bool {let call=||accept(value);call()}
         fn identity(comptime T:Type,comptime value:T)->T {value}
         fn rebuild(comptime flag:bool)->bool {accept(schema {flag:flag,nested:schema {other:false}})}
-        fn run()->(bool,bool,bool,bool) {
+        fn run()->Tuple<bool, bool, bool, bool> {
             let left=identity(...(do {let v=schema {left:true};(v'type,v)}));
             let right=identity(...(do {let v=schema {right:true};(v'type,v)}));
             (accept(SAMPLE),forward(schema {flag:true,nested:schema {other:false}}),left.left and right.right,rebuild(true))
@@ -33068,14 +33562,14 @@ fn anonymous_records_freeze_as_staged_inputs_and_preserve_labels() {
 
 #[test]
 fn record_inputs_preserve_opaque_normal_form_defaults() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         comptime fn schema(...properties:T)->T where T {properties}
         const OPTIONS=schema {flag:true};typealias Options=OPTIONS'type;
         pure comptime fn Mark<Value:Options>->Type {bool}
         fn tag(comptime value:Options,comptime .T:Type=Mark<value>)->bool {true}
         fn forward(comptime value:Options)->bool {tag(value)}
-        fn run()->(bool,bool) {(forward(OPTIONS),forward(schema {flag:false}))}",
+        fn run()->Tuple<bool, bool> {(forward(OPTIONS),forward(schema {flag:false}))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let instances = graph
@@ -33100,13 +33594,13 @@ fn record_inputs_preserve_opaque_normal_form_defaults() {
 
 #[test]
 fn staged_property_collectors_feed_dependent_defaults_and_explicit_overrides() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "comptime fn schema(...properties:T)->T where T {properties}
         const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;
         fn take(comptime options:Options,comptime .flag:bool=options.flag)->bool {flag}
         fn collect(comptime ...properties:Options)->bool {take(properties)}
         fn forward(comptime flag:bool)->bool {collect {flag:flag}}
-        fn run()->(bool,bool,bool,bool) {
+        fn run()->Tuple<bool, bool, bool, bool> {
             (forward(true),forward(false),collect(.properties=SAMPLE),take(SAMPLE,.flag=false))
         }",
     );
@@ -33133,7 +33627,7 @@ fn staged_property_collectors_feed_dependent_defaults_and_explicit_overrides() {
 
 #[test]
 fn anonymous_record_patterns_bind_nested_fields_and_cover_boolean_products() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias char=.char'builtin;comptime fn schema(...properties:T)->T where T {properties}
         const SAMPLE=schema {flag:true,nested:schema {value:'x'}};typealias Options=SAMPLE'type;
         fn build(...properties:T)->T where T {properties}
@@ -33143,7 +33637,7 @@ fn anonymous_record_patterns_bind_nested_fields_and_cover_boolean_products() {
                 {flag:false} => 'n',
             }
         }
-        fn run()->(char,char,bool) {
+        fn run()->Tuple<char, char, bool> {
             let value=build {nested:build {value:'y'},flag:true};
             let {nested:{value:letter}}=value;
             let callback=||letter;
@@ -33179,11 +33673,11 @@ fn anonymous_record_patterns_preserve_pointer_and_callback_projections() {
 
 #[test]
 fn anonymous_record_patterns_support_refutable_let_and_mutable_bindings() {
-    let package=compile("comptime fn schema(...properties:T)->T where T {properties}
+    let package=execution_support::compile_with_tuple("comptime fn schema(...properties:T)->T where T {properties}
         const SAMPLE=schema {flag:true,value:false};typealias Options=SAMPLE'type;
         fn build(...properties:T)->T where T {properties}
         fn read(options:Options)->bool {let {flag:true,value}=options else {return false;};value}
-        fn run()->(bool,bool,bool) {
+        fn run()->Tuple<bool, bool, bool> {
             var {flag,value}=build {flag:false,value:true};flag=true;value=false;
             (read(build {flag:true,value:true}),read(build {flag:false,value:true}),flag and not value)
         }");
@@ -33199,14 +33693,14 @@ fn anonymous_record_patterns_support_refutable_let_and_mutable_bindings() {
 
 #[test]
 fn anonymous_record_patterns_use_generic_type_evidence_at_both_stages() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "comptime fn schema(...properties:T)->T where T {properties}
         const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;
         fn build(...properties:T)->T where T {properties}
         fn read(value:T)->bool where T, requires T == Options {let {flag}=value;flag}
         comptime fn extract(value:T)->bool where T, requires T == Options {let {flag}=value;flag}
         fn take(comptime flag:bool)->bool {flag}
-        fn run()->(bool,bool) {(read(build {flag:true}),take(extract(SAMPLE)))}",
+        fn run()->Tuple<bool, bool> {(read(build {flag:true}),take(extract(SAMPLE)))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -33216,7 +33710,7 @@ fn anonymous_record_patterns_use_generic_type_evidence_at_both_stages() {
 
 #[test]
 fn anonymous_record_patterns_restore_bindings_after_guards_and_or_failures() {
-    let package=compile("comptime fn schema(...properties:T)->T where T {properties}
+    let package=execution_support::compile_with_tuple("comptime fn schema(...properties:T)->T where T {properties}
         const SAMPLE=schema {left:false,right:true};typealias Pair=SAMPLE'type;
         fn build(...properties:T)->T where T {properties}
         fn classify(value:Pair)->bool {
@@ -33231,7 +33725,7 @@ fn anonymous_record_patterns_restore_bindings_after_guards_and_or_failures() {
                 _ => false,
             }
         }
-        fn run()->(bool,bool,bool) {
+        fn run()->Tuple<bool, bool, bool> {
             (classify(build {left:false,right:true}),either(build {left:false,right:true}),either(build {left:true,right:true}))
         }");
     assert_eq!(
@@ -33246,7 +33740,7 @@ fn anonymous_record_patterns_restore_bindings_after_guards_and_or_failures() {
 
 #[test]
 fn anonymous_record_patterns_observe_frozen_normal_form_inputs_without_unfolding() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;
         comptime fn schema(...properties:T)->T where T {properties}
         const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;
@@ -33255,7 +33749,7 @@ fn anonymous_record_patterns_observe_frozen_normal_form_inputs_without_unfolding
         comptime fn inspect(value:Type)->bool {
             value match {Box<'Options, {flag:result}> => result, _ => false}
         }
-        comptime fn run()->(bool,bool,bool,bool) {
+        comptime fn run()->Tuple<bool, bool, bool, bool> {
             (inspect(Box<Options,SAMPLE>),inspect(Box<Options,schema {flag:false}>),
              inspect(Other<Options,SAMPLE>),inspect(Options))
         }",
@@ -33466,12 +33960,12 @@ fn verified_explicit_machine_division_survives_instance_materialization() {
 #[test]
 fn unsigned_source_division_preserves_width_contracts_and_staged_defaults() {
     for ty in ["u8", "u16", "u32", "u64", "u128"] {
-        let package=compile(&format!("typealias Int=.{ty}'builtin;
+        let package=execution_support::compile_with_tuple(&format!("typealias Int=.{ty}'builtin;
             fn quotient(a:Int,b:Int)->result:Int where requires b != 0, ensures result <= a {{a / b}}
             fn checked(a:Int,b:Int)->Int {{assumes b != 0;quotient(a,b)}}
             fn configured(comptime a:Int,comptime .value:Int=a / 3)->Int {{value}}
             fn forward(comptime a:Int)->Int {{configured(a)}}
-            fn run()->(Int,Int,Int) {{(checked(20,3),forward(20),configured(20,.value=9))}}"));
+            fn run()->Tuple<Int, Int, Int> {{(checked(20,3),forward(20),configured(20,.value=9))}}"));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![
@@ -33503,10 +33997,10 @@ fn unsigned_source_division_preserves_width_contracts_and_staged_defaults() {
 
 #[test]
 fn unsigned_division_evaluates_operands_once_and_keeps_old_dividend_value() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Int=.u8'builtin;
         fn denominator(p:*Int)->result:Int where ensures result == 1 {p.* = 0;1}
-        fn run()->(Int,Int) {let a:Int=20;let q=a / denominator(a.ref);(q,a)}",
+        fn run()->Tuple<Int, Int> {let a:Int=20;let q=a / denominator(a.ref);(q,a)}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
@@ -33520,13 +34014,13 @@ fn unsigned_division_evaluates_operands_once_and_keeps_old_dividend_value() {
 #[test]
 fn unsigned_remainder_supports_strict_divisor_contracts_and_staged_defaults() {
     for ty in ["u8", "u16", "u32", "u64", "u128"] {
-        let package=compile(&format!("typealias Int=.{ty}'builtin;
+        let package=execution_support::compile_with_tuple(&format!("typealias Int=.{ty}'builtin;
             fn remainder(a:Int,b:Int)->result:Int
                 where requires b != 0, ensures result < b, ensures result <= a {{a % b}}
             fn checked(a:Int,b:Int)->Int {{assumes b != 0;remainder(a,b)}}
             fn configured(comptime a:Int,comptime .value:Int=a % 3)->Int {{value}}
             fn forward(comptime a:Int)->Int {{configured(a)}}
-            fn run()->(Int,Int,Int,Int) {{(checked(20,3),forward(20),configured(20,.value=9),checked(0,1))}}"));
+            fn run()->Tuple<Int, Int, Int, Int> {{(checked(20,3),forward(20),configured(20,.value=9),checked(0,1))}}"));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![
@@ -33564,12 +34058,12 @@ fn unsigned_round_down_proves_product_safety_and_relational_result() {
         ("u32", u32::MAX as u128),
         ("u128", u128::MAX),
     ] {
-        let package=compile(&format!("typealias UInt=.{ty}'builtin;
+        let package=execution_support::compile_with_tuple(&format!("typealias UInt=.{ty}'builtin;
             fn round_down(n:UInt,alignment:UInt)->result:UInt
                 where requires alignment != 0, ensures result <= n'old {{(n / alignment) * alignment}}
             fn forward(n:UInt,alignment:UInt)->result:UInt
                 where requires alignment != 0, ensures result <= n'old {{round_down(n,alignment)}}
-            fn run()->(UInt,UInt,UInt) {{(forward(20,3),forward(0,3),forward({max},3))}}"));
+            fn run()->Tuple<UInt, UInt, UInt> {{(forward(20,3),forward(0,3),forward({max},3))}}"));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Tuple(vec![
@@ -33583,7 +34077,7 @@ fn unsigned_round_down_proves_product_safety_and_relational_result() {
 
 #[test]
 fn copied_polynomial_results_retain_upper_and_lower_bounds() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias UInt=.u8'builtin;
         fn product(a:UInt,b:UInt,lower:UInt,upper:UInt)->result:UInt
         where requires a <= 15, requires b <= 15,
@@ -33595,7 +34089,7 @@ fn copied_polynomial_results_retain_upper_and_lower_bounds() {
             requires lower <= a * b * c, requires a * b * c <= upper,
             ensures result >= lower, ensures result <= upper
         {let value=a * b * c;value}
-        fn run()->(UInt,UInt) {(product(5,7,30,40),cube(3,4,5,50,70))}",
+        fn run()->Tuple<UInt, UInt> {(product(5,7,30,40),cube(3,4,5,50,70))}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -34066,11 +34560,11 @@ fn bound_tuple_values_keep_normal_form_identity_through_nested_patterns() {
         .declaration;
     protocols.tuple = Some(tuple);
     let source = format!("{prefix}
-        fn pair() -> (bool, Byte) {{ (true, 9) }}
+        fn pair() -> Tuple<bool, Byte> {{ (true, 9) }}
         fn nested() -> Tuple<Tuple<bool, Byte>, bool> {{ (pair(), true) }}
         comptime fn Choose() -> Type {{ Byte }}
-        comptime fn StaticType() -> Type {{ (bool, Byte) }}
-        comptime fn DynamicType() -> Type {{ (bool, Choose()) }}
+        comptime fn StaticType() -> Type {{ Tuple<bool, Byte> }}
+        comptime fn DynamicType() -> Type {{ Tuple<bool, Choose()> }}
         comptime fn KeepTuple(value: Tuple<bool, Byte>) -> Tuple<bool, Byte> {{ value }}
         comptime fn MetaType() -> Type {{ Type }}
         pure comptime fn Typed<T, value: T> -> Type {{ bool }}
@@ -34080,14 +34574,14 @@ fn bound_tuple_values_keep_normal_form_identity_through_nested_patterns() {
         comptime fn StaticTupleInput() -> Type {{ StaticTagged }}
         comptime fn PairType() -> Type {{ Tuple<bool, Byte> }}
         comptime fn DependentTupleInput() -> Type {{ Typed<PairType(), (true, 9)> }}
-        comptime fn DependentType() -> Type {{ Typed<MetaType(), (bool, Choose())> }}
-        comptime fn SwapType(value: Type) -> Type {{ value match {{ (Left, Right) => (Right, Left), _ => value }} }}
+        comptime fn DependentType() -> Type {{ Typed<MetaType(), Tuple<bool, Choose()>> }}
+        comptime fn SwapType(value: Type) -> Type {{ value match {{ (Left, Right) => Tuple<Right, Left>, _ => value }} }}
         comptime fn PatternCheck() -> bool {{
-            SwapType((Byte, bool)) == (bool, Byte)
+            SwapType(Tuple<Byte, bool>) == Tuple<bool, Byte>
             and SwapType(bool) == bool
-            and SwapType((bool, Byte, bool)) == (bool, Byte, bool)
+            and SwapType(Tuple<bool, Byte, bool>) == Tuple<bool, Byte, bool>
         }}
-        pure comptime fn Opaque<T> -> Type {{ (T, T) }}
+        pure comptime fn Opaque<T> -> Type {{ Tuple<T, T> }}
         comptime fn Unresolved() -> Type {{ SwapType(Opaque<bool>) }}
         fn accept(flag: bool, byte: Byte) -> bool {{ flag and byte == 9 }}
         fn forward(packet: Tuple<bool, Byte>) -> bool {{ accept(...packet) }}
@@ -34447,13 +34941,13 @@ fn bound_tuple_values_keep_normal_form_identity_through_nested_patterns() {
     // The Tuple body deliberately returns bool. Its body does not establish
     // an equality between bool and the retained Tuple application.
     let invalid = source.replace(
-        "fn pair() -> (bool, Byte) { (true, 9) }",
-        "fn pair() -> (bool, Byte) { true }",
+        "fn pair() -> Tuple<bool, Byte> { (true, 9) }",
+        "fn pair() -> Tuple<bool, Byte> { true }",
     );
     assert!(compile_with_protocols(&invalid, &protocols).is_err());
     let invalid = source.replace(
-        "fn pair() -> (bool, Byte) { (true, 9) }",
-        "fn pair() -> (bool, Byte) { (true, false) }",
+        "fn pair() -> Tuple<bool, Byte> { (true, 9) }",
+        "fn pair() -> Tuple<bool, Byte> { (true, false) }",
     );
     assert!(compile_with_protocols(&invalid, &protocols).is_err());
     let invalid = format!(
@@ -35466,7 +35960,7 @@ fn partial_enum_payload_spreads_infer_literal_fields_and_evaluate_packets_once()
         typealias Byte=.u8'builtin;
         enum Packet where T,E {pair(T,T,E)}
         fn first()->bool {true}
-        fn pair()->(bool,Byte) {(false,9)}
+        fn pair()->Tuple<bool, Byte> {(false,9)}
         fn accept(value:Packet<T,Byte>)->bool where T {true}
         fn run()->bool {accept(.pair(first(),...pair())) and accept(.pair(...(true,false,7)))}",
         &Default::default(),
@@ -35632,7 +36126,7 @@ fn partial_enum_peer_packets_settle_before_numeric_defaults() {
         pure comptime fn Tuple<...Es:List<Type>> -> Type {bool}
         typealias Byte=.u8'builtin;
         fn forward(value:T)->T where T {value}
-        fn typed()->(Byte,Byte) {(6,7)}
+        fn typed()->Tuple<Byte, Byte> {(6,7)}
         fn accept(value:Packet<T,Byte>)->bool where T {true}";
     for (declaration, expression, trace) in [
         (
@@ -35690,7 +36184,7 @@ fn partial_enum_packet_widths_come_from_checked_generic_results() {
         typealias Byte=.u8'builtin;
         enum Packet where T,E {data(T,T,E)}
         fn forward(value:T)->T where T {value}
-        fn typed()->(Byte,Byte) {(6,7)}
+        fn typed()->Tuple<Byte, Byte> {(6,7)}
         fn accept(value:Packet<T,Byte>)->bool where T {true}";
     for (expression, trace) in [
         (
@@ -36245,7 +36739,7 @@ fn bound_tuple_dynamic_syntax_checks_independent_formation_requirements() {
         tuple: Some("input::Tuple"),
         ..Default::default()
     };
-    for expression in ["Tuple<bool, Choose()>", "(bool, Choose())"] {
+    for expression in ["Tuple<bool, Choose()>", "Tuple<bool, do {Choose()}>"] {
         let source = format!(
             "typealias Type=.Type'builtin;
             pure comptime fn List<T> -> Type {{T}}
@@ -36284,7 +36778,10 @@ fn bound_tuple_syntax_checks_known_block_inputs_before_invocation() {
         tuple: Some("input::Tuple"),
         ..Default::default()
     };
-    for expression in ["Tuple<bool, do {.u8'builtin}>", "(bool, do {.u8'builtin})"] {
+    for expression in [
+        "Tuple<bool, do {.u8'builtin}>",
+        "Tuple<bool, do {let T=.u8'builtin;T}>",
+    ] {
         let source = format!(
             "typealias Type=.Type'builtin;
             pure comptime fn List<T> -> Type {{T}}
@@ -36308,8 +36805,8 @@ fn bound_tuple_deferred_list_contracts_check_values_and_recover() {
     };
     for expression in [
         "Tuple<bool, Choose(flag)>",
-        "(bool, Choose(flag))",
-        "(bool, do {let ty=Choose(flag);ty})",
+        "Tuple<bool, (Choose(flag))>",
+        "Tuple<bool, do {let ty=Choose(flag);ty}>",
     ] {
         let source = format!(
             "typealias Type=.Type'builtin;
@@ -36936,14 +37433,14 @@ fn defer_closed_type_computations_and_explicit_unsupported_boundaries() {
 
 #[test]
 fn explicit_defer_defaults_retain_order_and_execute_only_selected_inputs() {
-    let package=compile("typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;
+    let package=execution_support::compile_with_tuple("typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;
         comptime fn next(n:Integer)->Integer {n + 1}
         pure comptime fn Shape<N:Integer,.size:Integer=defer next(N),.end:Integer=defer next(size)>->Type {bool}
         comptime fn Build()->Type {Shape<4>}
         comptime fn Override()->Type {Shape<4,.size=10,.end=20>}
         fn tag(comptime n:Integer,comptime .T:Type=defer Shape<n>)->bool {true}
         fn forward(comptime n:Integer)->bool {tag(n)}
-        fn run()->(bool,bool) {(forward(4),forward(9))}");
+        fn run()->Tuple<bool, bool> {(forward(4),forward(9))}");
     let original = package.clone();
     let shape = id(&package, "Shape");
     let expected = |values: &[u128]| {
@@ -43086,6 +43583,36 @@ fn external_pointer_observations_check_call_inputs_after_argument_effects() {
 }
 
 #[test]
+fn total_boolean_trees_preserve_refinement_and_effectful_short_circuit_boundaries() {
+    let source = "typealias Byte=.u8'builtin;
+        fn guarded(a:Byte,b:Byte,c:Byte,flag:bool)->Byte {
+            if flag and not (a == 255 or b == 255 or c == 255) {a + 1} else {0}
+        }
+        fn probe(p:*bool)->bool {p.* = true;true}
+        fn run()->bool {
+            var touched=false;
+            let a:Byte=41;let b:Byte=1;let c:Byte=2;
+            let skipped=(a == 0 or b == 0 or c == 0) and probe(touched.ref);
+            let clean=not touched and not skipped;
+            let called=(a == 41 and b == 1 and c == 2) and probe(touched.ref);
+            clean and called and touched
+                and guarded(41,1,2,true)==42
+                and guarded(255,1,2,true)==0
+                and guarded(41,255,2,true)==0
+                and guarded(41,1,255,true)==0
+                and guarded(41,1,2,false)==0
+        }";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let invalid = source.replace("a == 255 or b == 255", "a == 254 or b == 255");
+    let error = compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(error.contains("not proven"), "{error}");
+}
+
+#[test]
 fn short_circuit_relations_do_not_outlive_operand_writes() {
     let prefix = "typealias Byte=.u8'builtin;fn next(value:Byte)->Byte where requires value < 255 {value + 1}";
     for condition in [
@@ -44487,8 +45014,8 @@ fn divergent_loop_constant_match_keeps_only_reachable_breaks() {
         "while true {Packet {flag:true} match {{flag:true}=>continue,_=>break}}",
         "while true {Choice.some((true,false)) match {.none=>break,.some((true,false))=>continue,_=>break}}",
     ] {
-        let package = compile(&format!(
-            "struct Packet {{flag:bool,}} struct Number {{value:.u8'builtin,}} enum Choice {{none,some((bool,bool))}} fn entry()->bool {{{body}}}"
+        let package = execution_support::compile_with_tuple(&format!(
+            "struct Packet {{flag:bool,}} struct Number {{value:.u8'builtin,}} enum Choice {{none,some(Tuple<bool,bool>)}} fn entry()->bool {{{body}}}"
         ));
         let mut vm = Interpreter::new(
             &package,
@@ -44519,8 +45046,9 @@ fn divergent_loop_constant_match_keeps_only_reachable_breaks() {
             "{body}"
         );
     }
-    let package =
-        compile("fn entry()->bool {while true {true match {true=>break,false=>continue}}true}");
+    let package = execution_support::compile_with_tuple(
+        "fn entry()->bool {while true {true match {true=>break,false=>continue}}true}",
+    );
     assert_eq!(
         luna::execution::interpret(&package, "entry", 10_000).unwrap(),
         Value::Bool(true)
@@ -45492,19 +46020,19 @@ fn live_callback_graph_inspection_retains_body_dependencies_without_effects() {
 
 #[test]
 fn tuple_pattern_fields_observe_earlier_successful_bindings() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "fn equal(left:bool,right:bool)->bool {left==right}
-         fn read(value:(bool,bool))->bool {
+         fn read(value:Tuple<bool, bool>)->bool {
              value match {
                  (first,(second if equal(first,second)))=>true,
                  _=>false,
              }
          }
-         fn nested(value:(bool,(bool,bool)))->bool {
+         fn nested(value:Tuple<bool, Tuple<bool, bool>>)->bool {
              let (first,(second,(third and equal(first,second) is same)))=value;
              same and third
          }
-         fn run()->(bool,bool,bool,bool) {
+         fn run()->Tuple<bool, bool, bool, bool> {
              (read((true,true)),read((true,false)),nested((true,(true,true))),nested((true,(false,true))))
          }",
     );
@@ -45544,9 +46072,9 @@ fn tuple_pattern_candidate_bindings_do_not_escape_failed_matches() {
         luna::instantiation::instantiate(&package, entry, 200_000).unwrap();
     }
     for source in [
-        "fn bad(value:(bool,bool)) {let ((_ if later),later)=value else {return;};}",
-        "fn bad(value:(bool,bool)) {let (same,same)=value;}",
-        "fn bad(value:(bool,bool))->bool {value match {(first,(_ if first))=>first,_=>first,}}",
+        "fn bad(value:Tuple<bool,bool>) {let ((_ if later),later)=value else {return;};}",
+        "fn bad(value:Tuple<bool,bool>) {let (same,same)=value;}",
+        "fn bad(value:Tuple<bool,bool>)->bool {value match {(first,(_ if first))=>first,_=>first,}}",
     ] {
         assert!(
             compile_with_protocols(source, &Default::default()).is_err(),
@@ -45600,10 +46128,15 @@ fn property_peer_inference_preserves_producer_order_and_exits() {
             prefix.to_owned()
         };
         let source = format!(
-            "{prefix} fn run()->(bool,bool) {{var state=false;let result=apply {{{properties}}};(result,state)}}"
+            "{prefix} fn run()->Tuple<bool, bool> {{var state=false;let result=apply {{{properties}}};(result,state)}}"
         );
         assert_eq!(
-            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            luna::execution::interpret(
+                &execution_support::compile_with_tuple(&source),
+                "run",
+                100_000
+            )
+            .unwrap(),
             Value::Tuple(vec![Value::Bool(true), Value::Bool(expected)])
         );
         let wrong = source.replace("|value|not value", "|value|7");
@@ -45613,7 +46146,12 @@ fn property_peer_inference_preserves_producer_order_and_exits() {
         "{prefix} fn run()->bool {{apply {{value:seed(),callback:do {{return true;|value|not value}}}}}}"
     );
     assert_eq!(
-        luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+        luna::execution::interpret(
+            &execution_support::compile_with_tuple(&source),
+            "run",
+            100_000
+        )
+        .unwrap(),
         Value::Bool(true)
     );
 }
@@ -45655,17 +46193,23 @@ fn nested_program_preconditions_stay_out_of_type_propositions() {
 
 #[test]
 fn destructuring_method_contracts_survive_trait_parameter_remapping() {
+    fn compile_fixture(source: &str) -> nir::program::Package {
+        execution_support::compile_with_tuple_protocols(source, &Default::default())
+            .unwrap_or_else(|error| panic!("{error}\nFixture:\n{source}"))
+    }
     let source = "trait Checked {
-        fn keep(self,pair:(bool,bool))->bool where requires do {let (first,second)=pair;first and second};
+        fn keep(self,pair:Tuple<bool, bool>)->bool where requires do {let (first,second)=pair;first and second};
         }
         struct Holder {}
-        impl Checked for Holder {fn keep(self,values:(bool,bool))->bool {true}}
+        impl Checked for Holder {fn keep(self,values:Tuple<bool, bool>)->bool {true}}
         fn invoke(flag:bool)->bool {assumes flag;Holder {}.as(Checked).keep((flag,true))}
         fn run()->bool {invoke(true)}";
-    let package = compile(source);
-    let rejected =
-        compile_with_protocols(&source.replace("assumes flag;", ""), &Default::default())
-            .unwrap_err();
+    let package = compile_fixture(source);
+    let rejected = execution_support::compile_with_tuple_protocols(
+        &source.replace("assumes flag;", ""),
+        &Default::default(),
+    )
+    .unwrap_err();
     assert!(
         rejected.contains("program precondition is not proven"),
         "{rejected}"
@@ -45711,12 +46255,12 @@ fn destructuring_method_contracts_survive_trait_parameter_remapping() {
     let with_post = source.replace("->bool where requires", "->result:bool where requires").replace(
         "first and second};", "first and second}, ensures result == do {let (first,second)=pair'old;first and second};",
     );
-    let checked = compile(&with_post);
+    let checked = compile_fixture(&with_post);
     assert_eq!(
         luna::execution::interpret(&checked, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
-    let quoted = compile(&with_post.replace("fn keep", "quote fn keep"));
+    let quoted = compile_fixture(&with_post.replace("fn keep", "quote fn keep"));
     assert_eq!(
         luna::execution::interpret(&quoted, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -45727,10 +46271,11 @@ fn destructuring_method_contracts_survive_trait_parameter_remapping() {
         with_post.replace("fn keep", "quote fn keep"),
     ] {
         let bad = candidate.replace(
-            "values:(bool,bool))->bool {true}",
-            "values:(bool,bool))->bool {false}",
+            "values:Tuple<bool, bool>)->bool {true}",
+            "values:Tuple<bool, bool>)->bool {false}",
         );
-        let error = compile_with_protocols(&bad, &Default::default()).unwrap_err();
+        let error =
+            execution_support::compile_with_tuple_protocols(&bad, &Default::default()).unwrap_err();
         assert!(error.contains("postcondition"), "{error}");
     }
     let computed_post = with_post.replace(
@@ -45741,16 +46286,17 @@ fn destructuring_method_contracts_survive_trait_parameter_remapping() {
         computed_post.clone(),
         computed_post.replace("fn keep", "quote fn keep"),
     ] {
-        let package = compile(&candidate);
+        let package = compile_fixture(&candidate);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Bool(true)
         );
         let bad = candidate.replace(
-            "values:(bool,bool))->bool {true}",
-            "values:(bool,bool))->bool {false}",
+            "values:Tuple<bool, bool>)->bool {true}",
+            "values:Tuple<bool, bool>)->bool {false}",
         );
-        let error = compile_with_protocols(&bad, &Default::default()).unwrap_err();
+        let error =
+            execution_support::compile_with_tuple_protocols(&bad, &Default::default()).unwrap_err();
         assert!(error.contains("postcondition"), "{error}");
     }
     let computed = source.replace(
@@ -45765,15 +46311,19 @@ fn destructuring_method_contracts_survive_trait_parameter_remapping() {
             .replace("and first is ready", "and (first,second) is (left,right)")
             .replace("fn keep", "quote fn keep"),
     ] {
-        let package = compile(&candidate);
+        let package = compile_fixture(&candidate);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Bool(true)
         );
         let unproven = candidate.replace("assumes flag;", "");
-        let error = compile_with_protocols(&unproven, &Default::default()).unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(&unproven, &Default::default())
+            .unwrap_err();
+        // Missing evidence must reject the call. Computed tuple observations
+        // can exhaust bounded verification; Unknown must not admit the call.
         assert!(
-            error.contains("program precondition is not proven"),
+            error.contains("program precondition is not proven")
+                || error.contains("verification-unknown (resource BudgetExhausted)"),
             "{error}"
         );
     }
@@ -45781,13 +46331,16 @@ fn destructuring_method_contracts_survive_trait_parameter_remapping() {
         "do {let (first,second)=pair;first and second}",
         "(pair match {(first,true)=>first,_=>false})",
     );
-    let checked = compile(&matched);
+    let checked = compile_fixture(&matched);
     assert_eq!(
         luna::execution::interpret(&checked, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
-    let error = compile_with_protocols(&matched.replace("assumes flag;", ""), &Default::default())
-        .unwrap_err();
+    let error = execution_support::compile_with_tuple_protocols(
+        &matched.replace("assumes flag;", ""),
+        &Default::default(),
+    )
+    .unwrap_err();
     assert!(
         error.contains("program precondition is not proven"),
         "{error}"
@@ -45798,14 +46351,16 @@ fn destructuring_method_contracts_survive_trait_parameter_remapping() {
         alternatives.clone(),
         alternatives.replace("fn keep", "quote fn keep"),
     ] {
-        let package = compile(&source);
+        let package = compile_fixture(&source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Bool(true)
         );
-        let error =
-            compile_with_protocols(&source.replace("assumes flag;", ""), &Default::default())
-                .unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(
+            &source.replace("assumes flag;", ""),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(
             error.contains("program precondition is not proven"),
             "{error}"
@@ -45819,14 +46374,16 @@ fn destructuring_method_contracts_survive_trait_parameter_remapping() {
         transformed.clone(),
         transformed.replace("fn keep", "quote fn keep"),
     ] {
-        let package = compile(&source);
+        let package = compile_fixture(&source);
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Bool(true)
         );
-        let error =
-            compile_with_protocols(&source.replace("assumes flag;", ""), &Default::default())
-                .unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(
+            &source.replace("assumes flag;", ""),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(
             error.contains("program precondition is not proven"),
             "{error}"
@@ -45836,8 +46393,8 @@ fn destructuring_method_contracts_survive_trait_parameter_remapping() {
 
 #[test]
 fn computed_tuple_let_patterns_preserve_evaluation_and_failure() {
-    let package = compile(
-        "fn run()->(bool,bool,bool) {
+    let package = execution_support::compile_with_tuple(
+        "fn run()->Tuple<bool, bool, bool> {
             var observed=false;
             let original and do {observed=true;(original,not original)} is (same,opposite)=true;
             (observed,same,opposite)
@@ -45855,7 +46412,7 @@ fn computed_tuple_let_patterns_preserve_evaluation_and_failure() {
         let original and (original,not original) is (true,other)=flag else {return false;};
         not other
     }";
-    let package = compile(source);
+    let package = execution_support::compile_with_tuple(source);
     for flag in [false, true] {
         assert_eq!(
             Interpreter::new(&package, Budget::default())
@@ -45865,7 +46422,7 @@ fn computed_tuple_let_patterns_preserve_evaluation_and_failure() {
             Value::Bool(flag)
         );
     }
-    let error = compile_with_protocols(
+    let error = execution_support::compile_with_tuple_protocols(
         &source.replace(" else {return false;}", ""),
         &Default::default(),
     )
@@ -45931,11 +46488,11 @@ fn conditional_callables_complete_computed_inputs_before_branch_specialization()
             "flag match {true=>first,false=>second}",
             "do {if flag {first} else {second}}",
         ] {
-            let package = compile(&format!(
+            let package = execution_support::compile_with_tuple(&format!(
                 "{definitions}
                 fn value()->bool {{true}}
                 fn choose(comptime config:bool,flag:bool)->bool {{let action={selector};action({producer},value())}}
-                fn entry()->(bool,bool) {{(choose(true,true),choose(true,false))}}"
+                fn entry()->Tuple<bool, bool> {{(choose(true,true),choose(true,false))}}"
             ));
             let graph = luna::instantiation::instantiate(&package, "entry", 200_000).unwrap();
             assert!(
@@ -45956,8 +46513,8 @@ fn conditional_callables_complete_computed_inputs_before_branch_specialization()
 
 #[test]
 fn variant_payload_patterns_observe_prior_bindings_and_nested_tuple_fields() {
-    let package = compile(
-        "enum Pair {pair(bool,bool),other(bool,bool),nested(bool,(bool,bool))}
+    let package = execution_support::compile_with_tuple(
+        "enum Pair {pair(bool,bool),other(bool,bool),nested(bool,Tuple<bool,bool>)}
         fn equal(first:bool,second:bool)->bool {first==second}
         fn read(value:Pair)->bool {value match {
             .pair(first,(second if equal(first,second)))=>true,
@@ -45965,7 +46522,7 @@ fn variant_payload_patterns_observe_prior_bindings_and_nested_tuple_fields() {
             .nested(first,(second,(third and equal(first,second) is same)))=>same and third,
             _=>false,
         }}
-        fn run()->(bool,bool,bool,bool,bool,bool) {
+        fn run()->Tuple<bool, bool, bool, bool, bool, bool> {
             (read(Pair.pair(true,true)),read(Pair.pair(true,false)),
              read(Pair.other(false,false)),read(Pair.other(false,true)),
              read(Pair.nested(true,(true,true))),read(Pair.nested(true,(false,true))))
@@ -45986,7 +46543,7 @@ fn variant_payload_patterns_observe_prior_bindings_and_nested_tuple_fields() {
 
 #[test]
 fn variant_payload_pattern_scopes_preserve_fallbacks_and_alternative_remapping() {
-    let package=compile("enum Pair {pair(bool,bool),other(bool,bool)}
+    let package=execution_support::compile_with_tuple("enum Pair {pair(bool,bool),other(bool,bool)}
         fn alternatives(value:Pair)->bool {value match {
             .pair(first,(second if first == second)) or .other(second,(first if first == second))=>first and second,
             _=>false,
@@ -45996,7 +46553,7 @@ fn variant_payload_pattern_scopes_preserve_fallbacks_and_alternative_remapping()
             let .pair(first,(_ if first))=Pair.pair(false,true) else {return first;};
             false
         }
-        fn run()->(bool,bool,bool,bool) {
+        fn run()->Tuple<bool, bool, bool, bool> {
             (alternatives(Pair.pair(true,true)),alternatives(Pair.other(true,true)),
              alternatives(Pair.other(false,true)),fallback())
         }");
@@ -46018,7 +46575,7 @@ fn variant_payload_pattern_scopes_preserve_fallbacks_and_alternative_remapping()
     ] {
         let source = format!("enum Pair {{pair(bool,bool),other(bool,bool)}} {body}");
         assert!(
-            compile_with_protocols(&source, &Default::default()).is_err(),
+            execution_support::compile_with_tuple_protocols(&source, &Default::default()).is_err(),
             "{source}"
         );
     }
@@ -46047,11 +46604,11 @@ fn pattern_guard_constructors_keep_expression_and_control_boundaries() {
             inline for index if Box {flag:index == 1}.flag in 0..3 {found=true;}
             found
         }
-        fn run()->(bool,bool,bool,bool,bool,bool,bool,bool,bool) {
+        fn run()->Tuple<bool, bool, bool, bool, bool, bool, bool, bool, bool> {
             (matched(true),matched(false),bound(true),bound(false),conditional(true),conditional(false),
              collected(true),collected(false),looped())
         }";
-    let package = compile(source);
+    let package = execution_support::compile_with_tuple(source);
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
         vm.invoke(id(&package, "run"), vec![]).unwrap(),
@@ -46067,7 +46624,7 @@ fn pattern_guard_constructors_keep_expression_and_control_boundaries() {
 
 #[test]
 fn named_field_candidates_observe_prior_bindings_across_record_kinds() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "struct Pair {first:bool,second:bool}
         enum Choice {pair {first:bool,second:bool},none}
         fn record(value:Pair)->bool {value match {
@@ -46084,7 +46641,7 @@ fn named_field_candidates_observe_prior_bindings_across_record_kinds() {
         fn nested(value:Choice)->bool {value match {
             .pair {first:a,second:(b and (a,b) is (true,true))}=>true,_=>false,
         }}
-        fn run()->(bool,bool,bool,bool,bool,bool,bool,bool) {
+        fn run()->Tuple<bool, bool, bool, bool, bool, bool, bool, bool> {
             (record(Pair {first:true,second:true}),record(Pair {first:true,second:false}),
              variant(Choice.pair {first:true,second:true}),variant(Choice.pair {first:true,second:false}),
              anonymous(true),anonymous(false),
@@ -46138,7 +46695,7 @@ fn named_field_candidates_keep_fallback_scope_and_reject_unavailable_fields() {
 
 #[test]
 fn named_field_candidates_remap_alternatives_and_keep_declaration_order() {
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "struct Pair {first:bool,second:bool}
         fn first()->bool {true} fn second()->bool {true}
         fn check(value:Pair)->bool {value match {
@@ -46148,7 +46705,7 @@ fn named_field_candidates_remap_alternatives_and_keep_declaration_order() {
         fn ordered(value:Pair)->bool {value match {
             {second:(_ if second()),first:(_ if first())}=>true,_=>false,
         }}
-        fn run()->(bool,bool,bool) {
+        fn run()->Tuple<bool, bool, bool> {
             (check(Pair {first:true,second:true}),check(Pair {first:true,second:false}),
              ordered(Pair {first:true,second:true}))
         }",
@@ -46263,4 +46820,737 @@ fn quote_callable_adapters_keep_affine_receiver_and_caller_cleanup_order() {
             "moved receiver reused"
         );
     }
+}
+
+#[test]
+fn polynomial_range_refinement_preserves_intermediate_overflow_and_interior_extrema() {
+    for source in [
+        "typealias Byte=.u8'builtin;fn bad(value:Byte)->Byte where requires (value >= 1 and value <= 7) {value * value * value - value * value * value}",
+        "typealias Byte=.u8'builtin;fn bad(value:Byte)->Byte where requires (value <= 2) {value * value - 2 * value}",
+    ] {
+        let error = compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("machine arithmetic range is not proven"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn monotone_cubic_contracts_prove_boolean_postconditions_without_assumes() {
+    let source = "typealias Byte=.u8'builtin;
+        fn checked(value:Byte)->result:bool
+        where requires (value >= 1 and value <= 6), ensures result {
+            value * value * value >= value
+        }
+        fn run()->bool {checked(1) and checked(6)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let strict = source.replace(
+        "value * value * value >= value",
+        "value * value * value > value",
+    );
+    assert!(compile_with_protocols(&strict, &Default::default()).is_err());
+}
+
+#[test]
+fn integer_grid_monotonicity_proves_cubic_contracts_at_zero() {
+    let source = "typealias Byte=.u8'builtin;typealias Word=.u16'builtin;
+        fn checked(value:Byte)->result:bool
+        where requires (value <= 6), ensures result {
+            value * value * value >= value
+        }
+        fn packed(x:Word,y:Word)->Word
+        where requires (x <= 10 and y <= 3) {x * x * y - x * y}
+        fn run()->bool {checked(0) and checked(1) and checked(6) and packed(10,3)==270}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn discrete_step_domains_accept_integer_plateaus_without_inspecting_outside_values() {
+    let source = "typealias Byte=.u8'builtin;
+        fn plateau(value:Byte)->result:Byte
+        where requires (value <= 2), ensures (result <= 2) {3 * value - value * value}
+        fn run()->bool {plateau(0)==0 and plateau(1)==2 and plateau(2)==2}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let invalid = source.replace("value <= 2", "value <= 4");
+    assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn finite_integer_domains_prove_nonmonotone_contracts_and_keep_intermediate_checks() {
+    let source = "typealias Byte=.u8'builtin;
+        fn arch(x:Byte)->result:Byte
+        where requires (x <= 4), ensures (result <= 4) {x * (4 - x)}
+        fn checked(x:Byte)->result:bool
+        where requires (x <= 4), ensures result {x * (4 - x) <= 4}
+        fn run()->bool {arch(0)==0 and arch(1)==3 and arch(2)==4 and arch(3)==3
+            and arch(4)==0 and checked(0) and checked(2) and checked(4)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("result <= 4", "result < 4"),
+        source.replace("x * (4 - x) <= 4", "x * (4 - x) < 4"),
+        source.replace("x <= 4", "x <= 5"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn large_quadratic_domains_prove_machine_safety_and_integer_vertex_contracts() {
+    let source = "typealias Word=.u16'builtin;
+        fn arch(x:Word)->result:Word
+        where requires (x <= 500), ensures (result <= 62500) {x * (500 - x)}
+        fn odd(x:Word)->result:Word
+        where requires (x <= 501), ensures (result <= 62750) {x * (501 - x)}
+        fn run()->bool {arch(0)==0 and arch(250)==62500 and arch(500)==0
+            and odd(250)==62750 and odd(251)==62750 and odd(501)==0}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("result <= 62500", "result < 62500"),
+        source.replace("result <= 62750", "result <= 62749"),
+        source.replace("x <= 500", "x <= 501"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+    let overflow = "typealias Word=.u16'builtin; fn bad(x:Word)->Word
+        where requires (x <= 600) {x * (600 - x)}";
+    let failure = compile_with_protocols(overflow, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("machine arithmetic range is not proven"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn separable_quadratic_predicates_cover_large_signed_domains() {
+    let source = "typealias Int=.i32'builtin;
+        fn checked(x:Int,y:Int)->result:bool
+        where requires (x >= -1000 and x <= 1000 and y >= -1000 and y <= 1000), ensures result {x * x + y * y + x + y >= 0}
+        fn run()->bool {checked(0,0) and checked(-1,-1) and checked(-1000,1000)
+            and checked(17,-23)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let strict = source.replace("+ y >= 0", "+ y > 0");
+    assert!(compile_with_protocols(&strict, &Default::default()).is_err());
+    let crossed = source.replace("x * x + y * y + x + y", "x * x + y * y + 3 * x * y + x + y");
+    assert!(compile_with_protocols(&crossed, &Default::default()).is_err());
+}
+
+#[test]
+fn mixed_cubic_coordinates_prove_large_machine_ranges() {
+    let source = "typealias Word=.u32'builtin;
+        fn scaled(x:Word,y:Word)->result:Word
+        where requires (x <= 400 and y <= 100000), ensures (result <= 4000000000) {
+            x * (400 - x) * y
+        }
+        fn run()->bool {scaled(200,100000)==4000000000}";
+    // x<=400 keeps the subtraction safe. The maximum in x is interior,
+    // while y is monotone; naive multiplication exceeds the machine range.
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("result <= 4000000000", "result < 4000000000"),
+        source.replace("y <= 100000", "y <= 110000"),
+        source.replace("x <= 400", "x <= 401"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn quadratic_cross_term_certificates_prove_square_predicates() {
+    let source = "typealias Int=.i32'builtin;
+        fn checked(x:Int,y:Int,z:Int)->result:bool
+        where requires (x >= -1000 and x <= 1000 and y >= -1000 and y <= 1000 and z >= -1000 and z <= 1000), ensures result {
+            (x - y) * (x - y) + (y + z) * (y + z) >= 0
+        }
+        fn run()->bool {checked(0,0,0) and checked(1000,-1000,1000) and checked(-13,-13,13)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace(">= 0", "> 0"),
+        source.replace("+ (y + z) * (y + z)", "- (y + z) * (y + z)"),
+        source.replace("1000", "40000"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn semidefinite_program_contracts_accept_weighted_affine_squares() {
+    let source = "typealias Int=.i32'builtin;
+        fn checked(x:Int,y:Int,z:Int)->result:bool
+        where requires (x >= -1000 and x <= 1000 and y >= -1000 and y <= 1000 and z >= -1000 and z <= 1000), ensures result {
+            (2 * x - y + 1) * (2 * x - y + 1) + (3 * y + z - 2) * (3 * y + z - 2) >= 0
+        }
+        fn run()->bool {checked(0,1,-1) and checked(1000,-1000,1000) and checked(-17,23,-31)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace(">= 0", "> 0"),
+        source.replace("+ (3 * y", "- (3 * y"),
+        source.replace("1000", "40000"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn shifted_square_certificates_preserve_signed_machine_endpoints() {
+    let source = "typealias Int=.i32'builtin;
+        fn low(x:Int,y:Int)->Int
+        where requires (x >= -1000 and x <= 1000 and y >= -1000 and y <= 1000) {
+            -2147483648 + (2 * x - y + 1) * (2 * x - y + 1)
+        }
+        fn high(x:Int,y:Int)->Int
+        where requires (x >= -1000 and x <= 1000 and y >= -1000 and y <= 1000) {
+            2147483647 - (2 * x - y + 1) * (2 * x - y + 1)
+        }
+        fn run()->bool {low(0,1) == -2147483648 and high(0,1) == 2147483647
+            and low(1,0) == -2147483639 and high(1,0) == 2147483638}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("-2147483648 +", "-2147483648 -"),
+        source.replace("2147483647 -", "2147483647 +"),
+        source.replace("1000", "40000"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn cubic_integer_extrema_prove_machine_products_without_domain_enumeration() {
+    let source = "typealias Word=.u32'builtin;
+        fn volume(x:Word)->result:Word
+        where requires (x <= 3000), ensures (result <= 4000000000) {
+            x * x * (3000 - x)
+        }
+        fn run()->bool {volume(0)==0 and volume(2000)==4000000000 and volume(3000)==0}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("result <= 4000000000", "result < 4000000000"),
+        source.replace("x <= 3000", "x <= 3001"),
+        source.replace("3000", "4000"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn independent_cubic_predicates_prove_joint_result_contracts() {
+    let source = "typealias Word=.u32'builtin;
+        fn checked(x:Word,y:Word)->result:bool
+        where requires (x <= 300 and y <= 300), ensures result {
+            x * x * (300 - x) + y * y * (300 - y) <= 8000000
+        }
+        fn run()->bool {checked(0,300) and checked(200,200) and checked(17,281)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("<= 8000000", "< 8000000"),
+        source.replace("x <= 300", "x <= 301"),
+        source.replace("300", "30000"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn unbounded_integer_contracts_prove_affine_squares_without_range_premises() {
+    let source = "typealias Integer=.Integer'builtin;
+        comptime fn checked(x:Integer,y:Integer)->result:bool where ensures result {
+            (2 * x - y + 1) * (2 * x - y + 1) >= 0
+        }
+        comptime fn strict(x:Integer)->result:bool where ensures result {x * x + 1 > 0}
+        comptime fn run()->bool {checked(0,1) and checked(-1000000000000,1000000000000)
+            and strict(0) and strict(-1000000000000)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace(">= 0", "> 0"),
+        source.replace("x * x + 1 > 0", "x * x - 1 > 0"),
+        source.replace("(2 * x - y + 1) * (2 * x - y + 1)", "x * y"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn comptime_integer_contracts_use_integer_quadratic_extrema() {
+    let source = "typealias Integer=.Integer'builtin;
+        comptime fn nonnegative(x:Integer)->result:bool where ensures result {x * (x + 1) >= 0}
+        comptime fn positive(x:Integer)->result:bool where ensures result {2 * x * x + x + 1 > 0}
+        comptime fn nonpositive(x:Integer)->result:bool where ensures result {0 - x * (x - 1) <= 0}
+        comptime fn run()->bool {nonnegative(-1) and nonnegative(0) and nonnegative(-1000000000000)
+            and positive(-1) and positive(0) and nonpositive(1) and nonpositive(1000000000000)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("x * (x + 1) >= 0", "x * (x + 1) > 0"),
+        source.replace("2 * x * x + x + 1 > 0", "2 * x * x + x > 0"),
+        source.replace("0 - x * (x - 1) <= 0", "0 - x * (x - 1) < 0"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn integer_residue_contracts_need_no_range_premise() {
+    let source = "typealias Integer=.Integer'builtin;
+        comptime fn checked(x:Integer,y:Integer)->result:bool where ensures result {
+            6 * x * x * y - 4 * y - 1 != 0
+        }
+        comptime fn verify()->bool {checked(0,0) and checked(1000000000000,-1000000000000)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "verify", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("- 4 * y - 1 != 0", "- 4 * y != 0"),
+        source.replace("- 1 != 0", "- 1 == 0"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn integer_residue_certificates_prove_explicit_signed_division_and_remainder() {
+    use elaboration::verification::{Limits, flow};
+    use nir::program::{ExprKind as K, IntegerOp};
+    for operation in [IntegerOp::DivideTrunc, IntegerOp::RemainderTrunc] {
+        for offset in [0, 1] {
+            // Signed source / still needs its rounding protocol. Exercise the
+            // existing explicitly rounded IR without choosing that protocol.
+            let mut package = compile(&format!("typealias Signed=.i32'builtin;
+                fn calculate(x:Signed)->Signed where requires (x >= -100 and x <= 100) {{100 + (2 * x + {offset})}}
+                fn run()->Signed {{calculate(-2)}}"));
+            let function = package
+                .functions
+                .iter_mut()
+                .find(|f| f.name == "calculate")
+                .unwrap();
+            let K::Block {
+                result: Some(result),
+                ..
+            } = &mut function.body.kind
+            else {
+                panic!("expected block body")
+            };
+            let K::IntegerBinary { op, .. } = &mut result.kind else {
+                panic!("expected arithmetic body")
+            };
+            *op = operation;
+            let function = package
+                .functions
+                .iter()
+                .find(|f| f.name == "calculate")
+                .unwrap();
+            let checked = flow::analyze_in_package(&package, function, &mut Limits::default());
+            if offset == 0 {
+                assert!(checked.is_err(), "zero divisor must be rejected");
+            } else {
+                checked.unwrap();
+                assert_eq!(
+                    luna::execution::interpret(&package, "run", 100_000).unwrap(),
+                    Value::SignedInteger(if operation == IntegerOp::DivideTrunc {
+                        -33
+                    } else {
+                        1
+                    })
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn modular_integer_contracts_cover_cubic_and_multivariate_nonzero_polynomials() {
+    let source = "typealias Integer=.Integer'builtin;
+        comptime fn cubic(x:Integer)->result:bool where ensures result {x * x * x - x + 1 != 0}
+        comptime fn mixed(x:Integer,y:Integer)->result:bool where ensures result {
+            x * x + x + y * y + y - 1 != 0
+        }
+        comptime fn run()->bool {cubic(-1000000000000) and cubic(1)
+            and mixed(-7,9) and mixed(0,0)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("x * x * x - x + 1", "x * x * x - x"),
+        source.replace("y * y + y - 1", "y * y + y"),
+        source.replace("!= 0", "== 0"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn prime_power_integer_contracts_exclude_square_roots_without_bounds() {
+    let source = "typealias Integer=.Integer'builtin;
+        comptime fn checked(x:Integer)->result:bool where ensures result {
+            x * x - 6 != 0 and x * x - 21 != 0 and x * x - 24 != 0
+        }
+        comptime fn run()->bool {checked(0) and checked(-5) and checked(1000000000000)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("- 6", "- 4"),
+        source.replace("- 21", "- 25"),
+        source.replace("- 24", "- 16"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn integer_residue_contracts_use_partial_input_ranges() {
+    let source = "typealias Integer=.Integer'builtin;
+        comptime fn checked(x:Integer,y:Integer)->result:bool
+        where requires (y >= 1 and y <= 2), ensures result {
+            x * x - y * y - 1 != 0 and x * x + y * y != 0
+        }
+        comptime fn run()->bool {checked(0,1) and checked(1000000000000,2)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(
+        compile_with_protocols(&source.replace("y >= 1", "y >= 0"), &Default::default()).is_err()
+    );
+}
+
+#[test]
+fn integer_nonzero_factors_propagate_through_products_and_common_factors() {
+    let source = "typealias Integer=.Integer'builtin;
+        comptime fn product(x:Integer,y:Integer)->result:bool
+        where requires (x != 0 and y != 0), ensures result {x * x * y != 0}
+        comptime fn factored(x:Integer,y:Integer)->result:bool
+        where requires x != 0, ensures result {x * y * y + x != 0}
+        comptime fn run()->bool {product(-3,7) and product(1000000000000,-4)
+            and factored(-1,0) and factored(9,1000000000000)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("x != 0 and y != 0", "x != 0"),
+        source.replace("x * y * y + x", "x * y * y - x"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn nonzero_product_contracts_establish_each_common_factor() {
+    let source = "typealias Integer=.Integer'builtin;
+        comptime fn checked(x:Integer,y:Integer)->result:bool
+        where requires x * y != 0, ensures result {x != 0 and y != 0}
+        comptime fn common(x:Integer,y:Integer)->result:bool
+        where requires x * y + x != 0, ensures result {x != 0}
+        comptime fn run()->bool {checked(-3,7) and common(9,0)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("requires x * y != 0", "requires x + y != 0"),
+        source.replace("requires x * y + x != 0", "requires x * y + 1 != 0"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn integer_product_signs_follow_half_line_contracts() {
+    let source = "typealias Integer=.Integer'builtin;
+        comptime fn negative(x:Integer,y:Integer)->result:bool
+        where requires (x > 0 and y < 0), ensures result {x * y < 0}
+        comptime fn repeated(x:Integer,y:Integer)->result:bool
+        where requires (x != 0 and y < 0), ensures result {x * x * y < 0}
+        comptime fn weak(x:Integer,y:Integer)->result:bool
+        where requires y <= 0, ensures result {x * x * y <= 0}
+        comptime fn run()->bool {negative(3,-7) and repeated(-9,-11) and weak(0,-1) and weak(7,0)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("x > 0 and y < 0", "x >= 0 and y < 0"),
+        source.replace("x != 0 and y < 0", "y < 0"),
+        source.replace("x * x * y <= 0", "x * x * y < 0"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn polynomial_sum_signs_combine_cubic_and_nonnegative_terms() {
+    let source = "typealias Integer=.Integer'builtin;
+        comptime fn checked(x:Integer,y:Integer)->result:bool
+        where requires x > 0, ensures result {x * x * x + y * y > 0}
+        comptime fn mixed(x:Integer,y:Integer)->result:bool
+        where requires (x > 0 and y >= 0), ensures result {x * x * y + x * x * x > 0}
+        comptime fn run()->bool {checked(1,0) and checked(2,-1000000000000) and mixed(7,0)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("requires x > 0", "requires x >= 0"),
+        source.replace("y >= 0", "y <= 0"),
+        source.replace("+ y * y > 0", "- y * y > 0"),
+    ] {
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn memoized_nominal_value_index_keys_execute_protocols_and_preserve_type_identity() {
+    use comptime_executor::Context;
+    let package = compile(
+        "trait Eq {comptime fn eq(self,other:Self)->bool;}
+         trait Hash {comptime fn hash(self)->.u8'builtin;}
+         struct Config {enabled:bool}
+         struct Key where config:Config {value:bool}
+         impl Eq for Key<config> where config:Config {
+             comptime fn eq(self,other:Self)->bool {self.value == other.value}
+         }
+         impl Hash for Key<config> where config:Config {
+             comptime fn hash(self)->.u8'builtin {0}
+         }
+         pure comptime fn inspect(value:Key<Config{enabled:true}>)->bool {value.value}",
+    );
+    let config = package
+        .structs
+        .iter()
+        .find(|s| s.name == "Config")
+        .unwrap()
+        .declaration;
+    let key = package
+        .structs
+        .iter()
+        .find(|s| s.name == "Key")
+        .unwrap()
+        .declaration;
+    let make = |enabled, value| Value::Record {
+        declaration: key,
+        arguments: vec![nir::Term::NominalValue {
+            ty: Box::new(nir::Term::Nominal {
+                declaration: config,
+                arguments: vec![],
+            }),
+            variant: None,
+            fields: vec![nir::Term::Bool(enabled)],
+        }],
+        fields: vec![Value::Bool(value)],
+    };
+    let mut invocation = memoized(&package, "inspect", vec![], 8).unwrap();
+    let mut context = Context::new(100_000);
+    for (value, reused) in [(true, false), (false, false), (true, true), (false, true)] {
+        let result = invocation
+            .invoke(vec![make(true, value)], &mut context)
+            .unwrap();
+        assert_eq!(*result.value, Value::Bool(value));
+        assert_eq!(result.reused, reused);
+    }
+    assert!(
+        invocation
+            .invoke(vec![make(false, true)], &mut context)
+            .is_err()
+    );
+    assert_eq!(invocation.cached_results(), 2);
+    let recovered = invocation
+        .invoke(vec![make(true, true)], &mut context)
+        .unwrap();
+    assert!(recovered.reused);
+    assert_eq!(*recovered.value, Value::Bool(true));
+    let mut exhausted = Context::new(0);
+    assert!(
+        invocation
+            .invoke(vec![make(true, true)], &mut exhausted)
+            .is_err()
+    );
+    assert_eq!(invocation.cached_results(), 2);
+    let result = invocation
+        .invoke(vec![make(true, false)], &mut context)
+        .unwrap();
+    assert!(result.reused);
+    assert_eq!(*result.value, Value::Bool(false));
+}
+
+#[test]
+fn concrete_runtime_entry_signatures_recheck_comptime_storage_after_substitution() {
+    let package = compile(
+        "fn consume(value:T) where T {} fn pointer(value:*T) where T {} struct Box where T {value:T} fn boxed(value:Box<T>) where T {} fn errors(value:!bool T) where T {}",
+    );
+    for entry in ["consume", "pointer", "boxed", "errors"] {
+        for (primitive, accepted) in [
+            (nir::Primitive::Bool, true),
+            (nir::Primitive::Type, false),
+            (nir::Primitive::Integer, false),
+            (nir::Primitive::Float, false),
+        ] {
+            let result = elaboration::materialization::instantiate(
+                &package,
+                &[iir::InstanceKey {
+                    declaration: id(&package, entry),
+                    arguments: vec![nir::Term::Primitive(primitive)],
+                }],
+                Default::default(),
+                Default::default(),
+            );
+            if accepted {
+                result.unwrap();
+            } else {
+                assert!(
+                    result.unwrap_err().contains("comptime-only"),
+                    "{entry}: {primitive}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn independent_iir_validation_uses_concrete_nominal_storage_not_phantom_arguments() {
+    let package = compile(
+        "struct Box where T {value:T} struct Phantom where T {flag:bool}
+        fn boxed(value:Box<T>) where T {} fn phantom(value:Phantom<T>) where T {}",
+    );
+    let instantiate = |entry, argument| {
+        elaboration::materialization::instantiate(
+            &package,
+            &[iir::InstanceKey {
+                declaration: id(&package, entry),
+                arguments: vec![argument],
+            }],
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap()
+    };
+    let mut graph = instantiate("boxed", nir::Term::Primitive(nir::Primitive::Bool));
+    graph.validate(&mut 100_000).unwrap();
+    let definition = graph
+        .nominals
+        .iter_mut()
+        .find_map(|n| match &mut n.definition {
+            iir::NominalDefinition::Struct(s) if s.name == "Box" => Some(s),
+            _ => None,
+        })
+        .unwrap();
+    definition.fields[0].1 = nir::Term::Primitive(nir::Primitive::Type);
+    assert!(
+        graph
+            .validate(&mut 100_000)
+            .unwrap_err()
+            .contains("comptime-only")
+    );
+    let phantom = instantiate("phantom", nir::Term::Primitive(nir::Primitive::Type));
+    phantom.validate(&mut 100_000).unwrap();
+    let mut direct = phantom.clone();
+    let nir::Term::Function { parameters, .. } = &mut direct.functions[0].function.signature else {
+        unreachable!()
+    };
+    parameters[0].ty = nir::Term::Primitive(nir::Primitive::Type);
+    assert!(
+        direct
+            .validate(&mut 100_000)
+            .unwrap_err()
+            .contains("comptime-only")
+    );
+}
+
+#[test]
+fn independent_iir_validation_rejects_comptime_local_storage_in_runtime_bodies() {
+    let package = compile("fn entry() {}");
+    let mut graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+    let body = &mut graph.functions[0].function.body;
+    let source = body.source;
+    body.kind = nir::program::ExprKind::Block {
+        statements: vec![nir::program::Expr {
+            source,
+            ty: nir::Term::Primitive(nir::Primitive::Void),
+            kind: nir::program::ExprKind::Let {
+                binding: nir::program::LocalId {
+                    owner: 900,
+                    index: 1,
+                },
+                value: Box::new(nir::program::Expr {
+                    source,
+                    ty: nir::Term::Primitive(nir::Primitive::Type),
+                    kind: nir::program::ExprKind::TypeValue(nir::Term::Primitive(
+                        nir::Primitive::Bool,
+                    )),
+                }),
+            },
+        }],
+        result: None,
+    };
+    assert!(
+        graph
+            .validate(&mut 100_000)
+            .unwrap_err()
+            .contains("comptime-only")
+    );
 }

@@ -1,6 +1,9 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 pure comptime fn Tagged<T: Type, value: T> -> Type { T }
-pure comptime fn Pair<A: Type, a: A, B: Type, b: B> -> Type { (A, B) }
+pure comptime fn Pair<A: Type, a: A, B: Type, b: B> -> Type { Tuple<A, B> }
 comptime fn Number(ty: Type) -> Type { Tagged<ty, 255> }
 comptime fn Negative(ty: Type) -> Type { Tagged<ty, -128> }
 comptime fn Pass(ty: Type, value: .u8'builtin) -> Type { Tagged<ty, value> }

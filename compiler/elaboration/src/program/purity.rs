@@ -1,7 +1,9 @@
-//! Bounded program-behavior analysis, independent of PTC and interpretation.
+//! Bounded program-behavior analysis. Type-domain coverage is checked separately;
+//! no program-state or resource obligation is sent to PTC.
 //! Runtime `pure` promises require P4, while runtime defaults also require finite
 //! completion. Recursion/loops alone do not violate P4; neither mode authorizes
 //! unknown calls, external storage effects or unaccounted resource cleanup.
+mod type_domains;
 use super::*;
 use crate::verification::memory::{CallableInput, CallablePlace};
 use std::collections::{HashMap, HashSet};
@@ -190,6 +192,7 @@ mod behavior_code_snapshot_tests {
             phase: n::FunctionPhase::Runtime,
             inline: false,
             pure: false,
+            is_unsafe: false,
             type_parameters: vec![],
             parameters: vec![],
             defaults: vec![],
@@ -353,7 +356,7 @@ mod behavior_code_snapshot_tests {
         };
         let fields = BTreeMap::from([(vec![1, VARIANT_FIELD, 0, 0], vec![])]);
         let structural = n::Pattern::Tuple(vec![n::Pattern::Wild, variant.clone()]);
-        assert!(analysis.code_pattern_absent(&structural, &fields, &mut vec![], 0));
+        assert!(analysis.code_pattern_absent(None, &structural, &fields, &mut vec![], 0));
         let computed = n::Pattern::Tuple(vec![
             n::Pattern::Then {
                 first: Box::new(n::Pattern::Wild),
@@ -366,7 +369,7 @@ mod behavior_code_snapshot_tests {
             },
             variant,
         ]);
-        assert!(!analysis.code_pattern_absent(&computed, &fields, &mut vec![], 0));
+        assert!(!analysis.code_pattern_absent(None, &computed, &fields, &mut vec![], 0));
     }
 
     #[test]
@@ -444,10 +447,10 @@ mod behavior_code_snapshot_tests {
             fields: vec![n::Pattern::Wild],
         };
         let direct = BTreeMap::from([(vec![VARIANT_FIELD, 0, 0], vec![])]);
-        assert!(analysis.code_pattern_absent(&pattern, &direct, &mut vec![], 0));
-        assert!(!analysis.code_pattern_absent(&pattern, &BTreeMap::new(), &mut vec![], 0));
+        assert!(analysis.code_pattern_absent(None, &pattern, &direct, &mut vec![], 0));
+        assert!(!analysis.code_pattern_absent(None, &pattern, &BTreeMap::new(), &mut vec![], 0));
         let nested = BTreeMap::from([(vec![VARIANT_FIELD, 0, 0, VARIANT_FIELD, 1, 0], vec![])]);
-        assert!(!analysis.code_pattern_absent(&pattern, &nested, &mut vec![], 0));
+        assert!(!analysis.code_pattern_absent(None, &pattern, &nested, &mut vec![], 0));
         assert!(
             analysis
                 .join_code_fields(direct.clone(), BTreeMap::new())
@@ -622,7 +625,15 @@ pub(super) fn validate_runtime_promises(
                     .unwrap_or(Sort::Type),
             })
             .collect::<Vec<_>>();
-        if !analysis.function(function.declaration, &types, 0) {
+        let cases = type_domains::cases(function, &types, &mut analysis.fuel);
+        let valid = if let Some(cases) = cases {
+            cases
+                .iter()
+                .all(|types| analysis.function(function.declaration, types, 0))
+        } else {
+            analysis.function(function.declaration, &types, 0)
+        };
+        if !valid {
             return Err(Error {
                 source: function
                     .body
@@ -645,13 +656,23 @@ pub(super) fn validate_runtime_promises(
 
 pub(super) fn validate_defaults(
     package: &n::Package,
-    obligations: &[(n::Expr, Span)],
+    obligations: &[(n::Expr, Span, BTreeSet<n::LocalId>)],
     protocols: &Protocols,
 ) -> Result<(), Error> {
     let mut analysis = Analysis::new(package, true);
     analysis.protocols = protocols.clone();
-    for (value, span) in obligations {
-        if !analysis.default_expression(value) {
+    for (value, span, staged) in obligations {
+        analysis.fuel = analysis.fuel.saturating_sub(staged.len());
+        let introduced: Vec<_> = staged
+            .iter()
+            .copied()
+            .filter(|binding| analysis.staged_parameters.insert(*binding))
+            .collect();
+        let valid = analysis.default_expression(value);
+        for binding in introduced {
+            analysis.staged_parameters.remove(&binding);
+        }
+        if !valid {
             return Err(error(
                 *span,
                 "default expression requires P3 stability/termination evidence; call graph or operations could not be certified",
@@ -668,7 +689,9 @@ struct Analysis<'a> {
     functions: HashMap<DeclarationId, &'a n::Function>,
     tuple_heads: HashSet<DeclarationId>,
     parameter_sorts: Option<BTreeMap<DeclarationId, Sort>>,
+    staged_parameters: BTreeSet<n::LocalId>,
     finite: bool,
+    finite_loop_breaks: BTreeSet<n::LocalId>,
     resource_scope: bool,
     callables: BTreeMap<CallablePlace, Codes>,
     // Frame-local aliases to owned places. Assignments widen target sets; bindings
@@ -688,8 +711,25 @@ impl<'a> Analysis<'a> {
     fn new(package: &'a n::Package, finite: bool) -> Self {
         let mut fuel = 100_000;
         let parameter_sorts = package.declaration_parameter_sorts(&mut fuel).ok();
+        let mut staged_parameters = BTreeSet::new();
+        for function in &package.functions {
+            let Term::Function { parameters, .. } = function.signature.callable_signature() else {
+                continue;
+            };
+            for (binding, parameter) in function.parameters.iter().zip(parameters) {
+                if fuel == 0 {
+                    break;
+                }
+                fuel -= 1;
+                if parameter.sort != Sort::Runtime {
+                    staged_parameters.insert(*binding);
+                }
+            }
+        }
         Self {
+            finite_loop_breaks: BTreeSet::new(),
             parameter_sorts,
+            staged_parameters,
             package,
             method_callees: Default::default(),
             protocols: Protocols::default(),
@@ -718,6 +758,17 @@ impl<'a> Analysis<'a> {
         }
     }
 
+    // Definition-side inputs need not have concrete values yet. A computation
+    // closed over declared staged parameters retains their availability. This
+    // is dependency evidence only: expression/call analysis below must still
+    // prove finite behavior, and phase validation owns stage correctness.
+    fn has_staged_input_evidence(&mut self, value: &n::Expr) -> bool {
+        let Ok(inputs) = nir::free_bindings::collect(value, &mut self.fuel) else {
+            return false;
+        };
+        !inputs.is_empty() && inputs.is_subset(&self.staged_parameters)
+    }
+
     fn default_expression(&mut self, value: &n::Expr) -> bool {
         if self.protocols.drop.is_none() {
             return self.expression(value, &mut BTreeSet::new(), false, 0);
@@ -728,6 +779,12 @@ impl<'a> Analysis<'a> {
         // or resource assumptions into the temporary-owning path below.
         let mut observation = Self::new(self.package, self.finite);
         observation.protocols = self.protocols.clone();
+        let Some(remaining) = self.fuel.checked_sub(self.staged_parameters.len()) else {
+            self.fuel = 0;
+            return false;
+        };
+        self.fuel = remaining;
+        observation.staged_parameters = self.staged_parameters.clone();
         observation.fuel = self.fuel;
         let observed = observation.expression(value, &mut BTreeSet::new(), false, 0);
         self.fuel = observation.fuel;
@@ -789,6 +846,7 @@ impl<'a> Analysis<'a> {
             phase: n::FunctionPhase::Runtime,
             inline: false,
             pure: false,
+            is_unsafe: false,
             type_parameters: vec![],
             parameters: types.keys().copied().collect(),
             defaults: vec![],
@@ -816,14 +874,24 @@ impl<'a> Analysis<'a> {
         valid && self.transfer_cleanup_is_pure(&function, &BTreeMap::new())
     }
 
-    fn resource_world_parts(&self) -> Option<(crate::ptc::Context, crate::implementation::Index)> {
+    fn resource_world_parts(
+        &mut self,
+    ) -> Option<(crate::ptc::Context, crate::implementation::Index)> {
         let context = crate::ptc::Context::from_package(self.package).ok()?;
-        let mut index = crate::implementation::Index::default();
+        let mut index = crate::implementation::Index::for_target(self.package.target);
+        index.set_normal_form_metadata(self.package.normal_forms.clone());
         index.sync_nominal_layouts(
             &self.package.structs,
             &self.package.enums,
             &self.package.newtypes,
         );
+        for (id, domain) in self
+            .package
+            .declaration_parameter_domains(&mut self.fuel)
+            .ok()?
+        {
+            index.register_parameter_domain(id, domain).ok()?;
+        }
         let budget = crate::ptc::Budget {
             steps: self.fuel,
             ..Default::default()
@@ -983,6 +1051,7 @@ impl<'a> Analysis<'a> {
             K::Local(_)
                 | K::Record { .. }
                 | K::Variant { .. }
+                | K::ErrorConvert { .. }
                 | K::Tuple(_)
                 | K::AnonymousRecord { .. }
                 | K::Call { .. }
@@ -1081,6 +1150,7 @@ impl<'a> Analysis<'a> {
 
     fn bind_code_pattern(
         &mut self,
+        subject: Option<&Term>,
         pattern: &n::Pattern,
         fields: &BTreeMap<Vec<usize>, Codes>,
         addresses: Option<&[n::Expr]>,
@@ -1131,8 +1201,15 @@ impl<'a> Analysis<'a> {
                         codes,
                     );
                 }
-                let valid =
-                    self.bind_code_pattern(inner, fields, addresses, path, private, depth + 1);
+                let valid = self.bind_code_pattern(
+                    subject,
+                    inner,
+                    fields,
+                    addresses,
+                    path,
+                    private,
+                    depth + 1,
+                );
                 if observation {
                     private.remove(binding);
                     self.private_addresses.remove(binding);
@@ -1158,6 +1235,7 @@ impl<'a> Analysis<'a> {
                 for (index, pattern) in patterns.iter().enumerate() {
                     path.push(index);
                     let valid = self.bind_code_pattern(
+                        subject,
                         pattern,
                         fields,
                         addresses,
@@ -1172,6 +1250,37 @@ impl<'a> Analysis<'a> {
                 }
                 true
             }
+            n::Pattern::ErrorResult { inner, .. } => {
+                let Some(subject) = subject else { return false };
+                let Ok(ty) = crate::verification::memory::owned_path_type(
+                    Some(self.package),
+                    subject,
+                    path,
+                    &mut self.fuel,
+                ) else {
+                    return false;
+                };
+                let Ok((tag, _, _)) = crate::verification::memory::owned_variant_pattern(
+                    Some(self.package),
+                    pattern,
+                    &ty,
+                    &mut self.fuel,
+                ) else {
+                    return false;
+                };
+                path.extend([VARIANT_FIELD, tag, 0]);
+                let valid = self.bind_code_pattern(
+                    Some(subject),
+                    inner,
+                    fields,
+                    addresses,
+                    path,
+                    private,
+                    depth + 1,
+                );
+                path.truncate(path.len() - 3);
+                valid
+            }
             n::Pattern::Variant {
                 index,
                 fields: patterns,
@@ -1181,6 +1290,7 @@ impl<'a> Analysis<'a> {
                 for (field, pattern) in patterns.iter().enumerate() {
                     path.push(field);
                     let valid = self.bind_code_pattern(
+                        subject,
                         pattern,
                         fields,
                         addresses,
@@ -1197,7 +1307,15 @@ impl<'a> Analysis<'a> {
                 true
             }
             n::Pattern::Remap { pattern, bindings } => {
-                if !self.bind_code_pattern(pattern, fields, addresses, path, private, depth + 1) {
+                if !self.bind_code_pattern(
+                    subject,
+                    pattern,
+                    fields,
+                    addresses,
+                    path,
+                    private,
+                    depth + 1,
+                ) {
                     return false;
                 }
                 let mut renamed = vec![];
@@ -1253,13 +1371,20 @@ impl<'a> Analysis<'a> {
                 let mut joined_addresses: Option<BTreeMap<n::LocalId, Vec<n::Expr>>> = None;
                 let mut joined: Option<BTreeMap<CallablePlace, Codes>> = None;
                 for pattern in patterns {
-                    if self.code_pattern_absent(pattern, fields, path, depth + 1) {
+                    if self.code_pattern_absent(subject, pattern, fields, path, depth + 1) {
                         continue;
                     }
                     // Failed alternatives may have already changed private
                     // locals. Carry those widened facts into later alternatives.
-                    if !self.bind_code_pattern(pattern, fields, addresses, path, private, depth + 1)
-                    {
+                    if !self.bind_code_pattern(
+                        subject,
+                        pattern,
+                        fields,
+                        addresses,
+                        path,
+                        private,
+                        depth + 1,
+                    ) {
                         return false;
                     }
                     let mut keys = vec![];
@@ -1324,8 +1449,15 @@ impl<'a> Analysis<'a> {
                 self.fuel > 0
             }
             n::Pattern::Then { first, value, next } => {
-                if !self.bind_code_pattern(first, fields, addresses, path, private, depth + 1)
-                    || (self.finite && !self.resource_scope && !self.copy_type(&value.ty))
+                if !self.bind_code_pattern(
+                    subject,
+                    first,
+                    fields,
+                    addresses,
+                    path,
+                    private,
+                    depth + 1,
+                ) || (self.finite && !self.resource_scope && !self.copy_type(&value.ty))
                     || !self.expression(value, private, false, depth + 1)
                 {
                     return false;
@@ -1333,6 +1465,7 @@ impl<'a> Analysis<'a> {
                 let computed = self.take_code_fields();
                 let computed_addresses = self.result_addresses.take();
                 self.bind_code_pattern(
+                    Some(&value.ty),
                     next,
                     &computed,
                     computed_addresses.as_deref(),
@@ -1342,8 +1475,15 @@ impl<'a> Analysis<'a> {
                 )
             }
             n::Pattern::Guard { pattern, condition } => {
-                self.bind_code_pattern(pattern, fields, addresses, path, private, depth + 1)
-                    && self.copy_type(&condition.ty)
+                self.bind_code_pattern(
+                    subject,
+                    pattern,
+                    fields,
+                    addresses,
+                    path,
+                    private,
+                    depth + 1,
+                ) && self.copy_type(&condition.ty)
                     && self.expression(condition, private, false, depth + 1)
             }
             _ => true,
@@ -1352,6 +1492,7 @@ impl<'a> Analysis<'a> {
 
     fn code_pattern_absent(
         &mut self,
+        subject: Option<&Term>,
         pattern: &n::Pattern,
         fields: &BTreeMap<Vec<usize>, Codes>,
         path: &mut Vec<usize>,
@@ -1374,9 +1515,9 @@ impl<'a> Analysis<'a> {
                 n::Pattern::Then { .. } | n::Pattern::Guard { .. } | n::Pattern::Observe { .. } => {
                     false
                 }
-                n::Pattern::Binding { inner, .. } | n::Pattern::Remap { pattern: inner, .. } => {
-                    structural(inner, fuel, depth + 1)
-                }
+                n::Pattern::ErrorResult { inner, .. }
+                | n::Pattern::Binding { inner, .. }
+                | n::Pattern::Remap { pattern: inner, .. } => structural(inner, fuel, depth + 1),
                 n::Pattern::Tuple(fields)
                 | n::Pattern::TypeTuple(fields)
                 | n::Pattern::Or(fields)
@@ -1399,13 +1540,34 @@ impl<'a> Analysis<'a> {
             n::Pattern::Binding { inner, .. }
             | n::Pattern::Guard { pattern: inner, .. }
             | n::Pattern::Remap { pattern: inner, .. } => {
-                self.code_pattern_absent(inner, fields, path, depth + 1)
+                self.code_pattern_absent(subject, inner, fields, path, depth + 1)
             }
-            n::Pattern::Variant {
-                index,
-                fields: patterns,
-                ..
-            } => {
+            n::Pattern::Variant { .. } | n::Pattern::ErrorResult { .. } => {
+                let (tag, patterns) = match pattern {
+                    n::Pattern::Variant { index, fields, .. } => (*index, fields.as_slice()),
+                    n::Pattern::ErrorResult { inner, .. } => {
+                        let Some(subject) = subject else { return false };
+                        let Ok(ty) = crate::verification::memory::owned_path_type(
+                            Some(self.package),
+                            subject,
+                            path,
+                            &mut self.fuel,
+                        ) else {
+                            return false;
+                        };
+                        let Ok((tag, _, _)) = crate::verification::memory::owned_variant_pattern(
+                            Some(self.package),
+                            pattern,
+                            &ty,
+                            &mut self.fuel,
+                        ) else {
+                            return false;
+                        };
+                        (tag, std::slice::from_ref(inner.as_ref()))
+                    }
+                    _ => unreachable!(),
+                };
+                let index = &tag;
                 path.extend([VARIANT_FIELD, *index]);
                 let absent = fields.iter().any(|(field, codes)| {
                     self.fuel = self.fuel.saturating_sub(field.len().saturating_add(1));
@@ -1421,7 +1583,8 @@ impl<'a> Analysis<'a> {
                 }
                 for (index, pattern) in patterns.iter().enumerate() {
                     path.push(index);
-                    let absent = self.code_pattern_absent(pattern, fields, path, depth + 1);
+                    let absent =
+                        self.code_pattern_absent(subject, pattern, fields, path, depth + 1);
                     path.pop();
                     if absent {
                         path.truncate(path.len() - 2);
@@ -1443,7 +1606,8 @@ impl<'a> Analysis<'a> {
             } => {
                 for (index, pattern) in patterns.iter().enumerate() {
                     path.push(index);
-                    let absent = self.code_pattern_absent(pattern, fields, path, depth + 1);
+                    let absent =
+                        self.code_pattern_absent(subject, pattern, fields, path, depth + 1);
                     path.pop();
                     if absent {
                         return true;
@@ -1453,12 +1617,124 @@ impl<'a> Analysis<'a> {
             }
             n::Pattern::Or(patterns) => {
                 !patterns.is_empty()
-                    && patterns
-                        .iter()
-                        .all(|pattern| self.code_pattern_absent(pattern, fields, path, depth + 1))
+                    && patterns.iter().all(|pattern| {
+                        self.code_pattern_absent(subject, pattern, fields, path, depth + 1)
+                    })
             }
             _ => false,
         }
+    }
+
+    #[inline(never)]
+    fn error_conversion_behavior(
+        &mut self,
+        value: &n::Expr,
+        private: &mut BTreeSet<n::LocalId>,
+        returns: bool,
+        depth: usize,
+    ) -> bool {
+        let K::ErrorConvert {
+            conversion,
+            value: inner,
+        } = &value.kind
+        else {
+            unreachable!()
+        };
+        if nir::error_results::validate_conversion_with_tuple(
+            *conversion,
+            &inner.ty,
+            &value.ty,
+            &mut self.fuel,
+            &mut |a, b| a == b,
+            &|head| {
+                self.package
+                    .normal_forms
+                    .iter()
+                    .any(|m| m.declaration == head && m.role == nir::normal_forms::Role::Tuple)
+            },
+        )
+        .is_err()
+        {
+            return false;
+        }
+        if !self.expression(inner, private, returns, depth + 1) {
+            return false;
+        }
+        let source = self.take_code_fields();
+        let Ok(layout) = crate::verification::memory::code_result_bottom(
+            Some(self.package),
+            &value.ty,
+            &mut self.fuel,
+        ) else {
+            return false;
+        };
+        let mut fields = layout
+            .into_keys()
+            .map(|path| (path, vec![]))
+            .collect::<BTreeMap<_, _>>();
+        if matches!(
+            conversion,
+            nir::error_results::Conversion::Embed | nir::error_results::Conversion::Product
+        ) {
+            let Ok(mapping) = crate::verification::memory::error_tag_mapping(
+                value,
+                Some(self.package),
+                &mut self.fuel,
+            ) else {
+                return false;
+            };
+            let Ok(source_layout) = crate::verification::memory::code_result_bottom(
+                Some(self.package),
+                &inner.ty,
+                &mut self.fuel,
+            ) else {
+                return false;
+            };
+            // Active leaves with unknown identity must stay unknown. Only
+            // newly introduced, unreachable labels retain bottom evidence.
+            for mut path in source_layout.into_keys() {
+                if crate::verification::memory::remap_error_path(
+                    &mut path,
+                    &mapping,
+                    &mut self.fuel,
+                )
+                .is_err()
+                {
+                    return false;
+                }
+                fields.remove(&path);
+            }
+            for (mut path, codes) in source {
+                if crate::verification::memory::remap_error_path(
+                    &mut path,
+                    &mapping,
+                    &mut self.fuel,
+                )
+                .is_err()
+                {
+                    return false;
+                }
+                fields.insert(path, codes);
+            }
+        } else {
+            let Ok((_, Some(tag))) =
+                crate::verification::memory::owned_constructor(value, &mut self.fuel)
+            else {
+                return false;
+            };
+            fields.retain(|path, _| !path.starts_with(&[VARIANT_FIELD, tag]));
+            for (path, codes) in source {
+                let Some(fuel) = self.fuel.checked_sub(path.len() + 3) else {
+                    return false;
+                };
+                self.fuel = fuel;
+                let mut nested = vec![VARIANT_FIELD, tag, 0];
+                nested.extend(path);
+                fields.insert(nested, codes);
+            }
+        }
+        self.set_code_fields(fields);
+        true
     }
 
     fn check_expression(
@@ -1552,6 +1828,7 @@ impl<'a> Analysis<'a> {
                 let addresses = self.result_addresses.take();
                 let outer_private = private.clone();
                 let valid = self.bind_code_pattern(
+                    Some(&value.ty),
                     pattern,
                     &fields,
                     addresses.as_deref(),
@@ -1677,6 +1954,30 @@ impl<'a> Analysis<'a> {
                     addresses.and_then(|places| self.project_private_targets(value, places));
                 true
             }
+            // Formation is compile-time work and can only produce an intrinsic
+            // scalar float. Its generic annotation is not an owned runtime
+            // value requiring a user Copy witness. Domain admission and actual
+            // conversion remain mandatory before executable IIR publication.
+            K::Literal(n::Literal::PendingInteger { spelling, .. }) => {
+                let mut budget = comptime_runtime::Budget {
+                    steps: self.fuel,
+                    max_limbs: self.fuel,
+                };
+                let valid = comptime_runtime::Integer::parse_literal(spelling, &mut budget).is_ok();
+                self.fuel = budget.steps;
+                valid
+            }
+            K::Literal(n::Literal::PendingFloat { spelling, negative }) => {
+                let mut budget = comptime_runtime::Budget {
+                    steps: self.fuel,
+                    max_limbs: self.fuel,
+                };
+                let valid =
+                    nir::float_formation::FloatFormation::parse(spelling, *negative, &mut budget)
+                        .is_ok();
+                self.fuel = budget.steps;
+                valid
+            }
             K::ComptimeValue(_) | K::Literal(_) | K::Unit | K::AssociatedValue { .. } => {
                 self.copy_type(&value.ty)
             }
@@ -1764,13 +2065,30 @@ impl<'a> Analysis<'a> {
                     && self.expression(inner, private, returns, depth + 1)
                     && self.expression(index, private, returns, depth + 1)
             }
-            K::Loop { body, .. } => {
-                if self.finite || !self.loop_code_closure(body) {
+            K::Loop { identity, body } => {
+                if self.finite {
+                    // A Never body cannot fall through to the next iteration.
+                    // Exclude explicit backedges too; all remaining operations
+                    // still undergo finite analysis, including nested loops.
+                    if !is_never(&body.ty)
+                        || control::loop_may_continue(body, *identity, &mut self.fuel) != Ok(false)
+                    {
+                        return false;
+                    }
+                    let inserted = self.finite_loop_breaks.insert(*identity);
+                    let valid = self.expression(body, private, returns, depth + 1);
+                    if inserted {
+                        self.finite_loop_breaks.remove(identity);
+                    }
+                    return valid;
+                }
+                if !self.loop_code_closure(body) {
                     return false;
                 }
                 self.loop_private_addresses(body, private, returns, depth + 1)
             }
-            K::Break(_) | K::Continue(_) => !self.finite,
+            K::Break(identity) => !self.finite || self.finite_loop_breaks.contains(identity),
+            K::Continue(_) => !self.finite,
             K::Return(value) => {
                 returns
                     && value
@@ -1824,8 +2142,13 @@ impl<'a> Analysis<'a> {
                 let mut codes = None;
                 let mut addresses = Some(Vec::new());
                 for arm in arms {
-                    let absent =
-                        self.code_pattern_absent(&arm.pattern, &scrutinee, &mut vec![], depth + 1);
+                    let absent = self.code_pattern_absent(
+                        Some(&value.ty),
+                        &arm.pattern,
+                        &scrutinee,
+                        &mut vec![],
+                        depth + 1,
+                    );
                     if self.fuel == 0 {
                         return false;
                     }
@@ -1834,6 +2157,7 @@ impl<'a> Analysis<'a> {
                     }
                     let mut arm_private = private.clone();
                     if !self.bind_code_pattern(
+                        Some(&value.ty),
                         &arm.pattern,
                         &scrutinee,
                         scrutinee_addresses.as_deref(),
@@ -1898,11 +2222,13 @@ impl<'a> Analysis<'a> {
                             return false;
                         };
                         if parameter.sort != Sort::Runtime
+                            // A declaration's staged parameter has a value at
+                            // invocation even when this definition-side proof
+                            // does not know it. Inspect every callee branch;
+                            // phase validation still owns actual availability.
+                            && !self.has_staged_input_evidence(&arg.value)
                             && iir::staging::canonical_input_with_layouts(
-                                iir::staging::Layouts::new(
-                                    &self.package.normal_forms,
-                                    &self.package.newtypes,
-                                ),
+                                iir::staging::Layouts::from(self.package),
                                 &arg.value,
                                 &mut self.fuel,
                             )
@@ -2021,12 +2347,22 @@ impl<'a> Analysis<'a> {
                 self.set_code_fields(result);
                 true
             }
+            K::Intrinsic { inputs, .. } => {
+                nir::intrinsics::checked(value).is_ok()
+                    && inputs
+                        .iter()
+                        .all(|input| self.expression(input, private, returns, depth + 1))
+            }
+            K::UnsafeScope(inner) => self.expression(inner, private, returns, depth + 1),
             K::Discard(inner) => {
                 (!self.finite
                     || self.resource_scope
                     || self.copy_type(&inner.ty)
                     || is_never(&inner.ty))
                     && self.expression(inner, private, returns, depth + 1)
+            }
+            K::ErrorConvert { .. } => {
+                self.error_conversion_behavior(value, private, returns, depth)
             }
             K::NewtypeConvert(inner) => {
                 let Ok(Some(conversion)) = nir::newtypes::conversion(
@@ -2087,18 +2423,25 @@ impl<'a> Analysis<'a> {
             | K::FloatBinary {
                 left: a, right: b, ..
             } => {
-                self.copy_type(&value.ty)
+                // A diverging operand leaves no scalar result to duplicate or
+                // retire. Its evaluation still needs the full behavior check:
+                // an early return cannot hide an external write or impure call.
+                (is_never(&value.ty) || self.copy_type(&value.ty))
                     && self.expression(a, private, returns, depth + 1)
                     && self.expression(b, private, returns, depth + 1)
             }
             K::IntegerBinary { left, right, .. } => {
-                (n::machine_integer_type(value).is_some()
+                (n::machine_integer_type_in(value, self.package.target).is_some()
+                    || (matches!(value.ty, Term::Primitive(P::Usize | P::Isize))
+                        && (left.ty == value.ty || is_never(&left.ty))
+                        && (right.ty == value.ty || is_never(&right.ty)))
                     || (!self.finite && left.ty == p(P::Integer) && right.ty == p(P::Integer)))
                     && self.expression(left, private, returns, depth + 1)
                     && self.expression(right, private, returns, depth + 1)
             }
             K::IntegerNegate(inner) => {
-                (n::machine_integer_type(value).is_some()
+                (n::machine_integer_type_in(value, self.package.target).is_some()
+                    || (value.ty == p(P::Isize) && inner.ty == value.ty)
                     || (!self.finite && inner.ty == p(P::Integer)))
                     && self.expression(inner, private, returns, depth + 1)
             }
@@ -2235,6 +2578,7 @@ impl<'a> Analysis<'a> {
         // unconditional memory contract. Resource checking at each actual call
         // still establishes the footprint and lifetime of the supplied targets.
         let mut borrowed_parameters = Vec::new();
+        let mut borrowed_fields = Vec::new();
         if self.finite {
             let Term::Function { parameters, .. } = function.signature.callable_signature() else {
                 return false;
@@ -2249,11 +2593,27 @@ impl<'a> Analysis<'a> {
                     Ok(None) => {}
                     Err(_) => return false,
                 }
+                let Ok(layout) = crate::verification::memory::pointer_input_layout(
+                    Some(self.package),
+                    &parameter.ty,
+                    &mut self.fuel,
+                ) else {
+                    return false;
+                };
+                for leaf in layout {
+                    if !leaf.input_fields.is_empty() {
+                        borrowed_fields.push(moves::BorrowedField {
+                            parameter: slot,
+                            fields: leaf.input_fields,
+                            pointee: leaf.pointee,
+                        });
+                    }
+                }
             }
         }
         let mut copy_types = HashSet::new();
         if self.protocols.drop.is_none() {
-            let report = moves::analyze_in_package_with_inputs(
+            let report = moves::analyze_in_package_with_field_context(
                 self.package,
                 function,
                 |ty| {
@@ -2267,6 +2627,9 @@ impl<'a> Analysis<'a> {
                 None,
                 &borrowed_parameters,
                 &callable_parameters,
+                &[],
+                vec![],
+                &borrowed_fields,
             );
             let Ok(report) = report else {
                 return false;
@@ -2289,7 +2652,7 @@ impl<'a> Analysis<'a> {
             implementations: &self.package.implementations,
             assumptions: &function.capabilities,
         };
-        let report = moves::analyze_in_package_with_inputs(
+        let report = moves::analyze_in_package_with_field_context(
             self.package,
             function,
             |ty| {
@@ -2318,6 +2681,9 @@ impl<'a> Analysis<'a> {
             None,
             &borrowed_parameters,
             &callable_parameters,
+            &[],
+            vec![],
+            &borrowed_fields,
         );
         self.fuel = fuel;
         let Ok(report) = report else {
@@ -2680,23 +3046,43 @@ impl<'a> Analysis<'a> {
                     // this does not weaken Copy's prohibition on duplicating
                     // custom Drop responsibility or the separate access checks.
                     let mut methods = Vec::new();
-                    if cleanup
-                        .visit_components(&mut self.fuel, &mut |_, resolution, fuel| {
-                            use crate::verification::drop::Resolution;
-                            match resolution {
-                                Resolution::NoCustomDrop(_) => Ok(()),
-                                Resolution::Selected(selected) => {
-                                    for argument in &selected.method.arguments {
-                                        crate::associated::charge_projection_copy(argument, fuel)?;
-                                    }
-                                    methods.push(selected.method.clone());
-                                    Ok(())
+                    let mut collect = |_: &Term,
+                                       resolution: &crate::verification::drop::Resolution,
+                                       fuel: &mut usize| {
+                        use crate::verification::drop::Resolution;
+                        match resolution {
+                            Resolution::NoCustomDrop(_) => Ok(()),
+                            Resolution::Selected(selected) => {
+                                for argument in &selected.method.arguments {
+                                    crate::associated::charge_projection_copy(argument, fuel)?;
                                 }
-                                _ => Err("cleanup selection is unresolved".into()),
+                                methods.push(selected.method.clone());
+                                Ok(())
                             }
-                        })
-                        .is_err()
-                    {
+                            _ => Err("cleanup selection is unresolved".into()),
+                        }
+                    };
+                    let inspected = match action {
+                        CleanupAction::Owned { remaining, .. } => cleanup
+                            .visit_remaining_components(
+                                remaining,
+                                &[],
+                                &mut self.fuel,
+                                &mut collect,
+                            ),
+                        CleanupAction::Temporary {
+                            remaining,
+                            variants,
+                            ..
+                        } => cleanup.visit_remaining_components(
+                            remaining,
+                            variants,
+                            &mut self.fuel,
+                            &mut collect,
+                        ),
+                        _ => cleanup.visit_components(&mut self.fuel, &mut collect),
+                    };
+                    if inspected.is_err() {
                         return false;
                     }
                     if !methods
@@ -2725,6 +3111,7 @@ impl<'a> Analysis<'a> {
     /// early exits), not just the final state of one syntactic body traversal.
     fn loop_code_closure(&mut self, body: &n::Expr) -> bool {
         fn pattern_sources<'p>(
+            package: &n::Package,
             pattern: &'p n::Pattern,
             value: &'p n::Expr,
             path: &mut Vec<usize>,
@@ -2741,7 +3128,7 @@ impl<'a> Analysis<'a> {
             match pattern {
                 n::Pattern::Binding { binding, inner } => {
                     out.push((*binding, value, path.clone()));
-                    pattern_sources(inner, value, path, out, fuel, depth + 1)?;
+                    pattern_sources(package, inner, value, path, out, fuel, depth + 1)?;
                 }
                 n::Pattern::Tuple(fields)
                 | n::Pattern::NominalType { fields, .. }
@@ -2749,27 +3136,45 @@ impl<'a> Analysis<'a> {
                 | n::Pattern::AnonymousRecord { fields, .. } => {
                     for (index, field) in fields.iter().enumerate() {
                         path.push(index);
-                        pattern_sources(field, value, path, out, fuel, depth + 1)?;
+                        pattern_sources(package, field, value, path, out, fuel, depth + 1)?;
                         path.pop();
                     }
+                }
+                n::Pattern::ErrorResult { inner, .. } => {
+                    let ty = crate::verification::memory::owned_path_type(
+                        Some(package),
+                        &value.ty,
+                        path,
+                        fuel,
+                    )?;
+                    let (tag, _, _) = crate::verification::memory::owned_variant_pattern(
+                        Some(package),
+                        pattern,
+                        &ty,
+                        fuel,
+                    )?;
+                    path.extend([VARIANT_FIELD, tag, 0]);
+                    let result = pattern_sources(package, inner, value, path, out, fuel, depth + 1);
+                    path.truncate(path.len() - 3);
+                    result?;
                 }
                 n::Pattern::Variant { index, fields, .. } => {
                     path.extend([VARIANT_FIELD, *index]);
                     for (index, field) in fields.iter().enumerate() {
                         path.push(index);
-                        pattern_sources(field, value, path, out, fuel, depth + 1)?;
+                        pattern_sources(package, field, value, path, out, fuel, depth + 1)?;
                         path.pop();
                     }
                     path.truncate(path.len() - 2);
                 }
                 n::Pattern::Or(patterns) => {
                     for pattern in patterns {
-                        pattern_sources(pattern, value, path, out, fuel, depth + 1)?;
+                        pattern_sources(package, pattern, value, path, out, fuel, depth + 1)?;
                     }
                 }
                 n::Pattern::Remap { pattern, bindings } => {
                     let start = out.len();
-                    pattern_sources(pattern, value, path, out, fuel, depth + 1)?;
+                    pattern_sources(package, pattern, value, path, out, fuel, depth + 1)?;
                     let end = out.len();
                     for index in start..end {
                         let (binding, value, path) = &out[index];
@@ -2795,11 +3200,11 @@ impl<'a> Analysis<'a> {
                     value: computed,
                     next,
                 } => {
-                    pattern_sources(first, value, path, out, fuel, depth + 1)?;
-                    pattern_sources(next, computed, &mut vec![], out, fuel, depth + 1)?;
+                    pattern_sources(package, first, value, path, out, fuel, depth + 1)?;
+                    pattern_sources(package, next, computed, &mut vec![], out, fuel, depth + 1)?;
                 }
                 n::Pattern::Guard { pattern, .. } => {
-                    pattern_sources(pattern, value, path, out, fuel, depth + 1)?
+                    pattern_sources(package, pattern, value, path, out, fuel, depth + 1)?
                 }
                 _ => {}
             }
@@ -2822,7 +3227,15 @@ impl<'a> Analysis<'a> {
                 )),
                 K::LetPattern { pattern, value, .. } => {
                     let mut bindings = vec![];
-                    pattern_sources(pattern, value, &mut vec![], &mut bindings, fuel, 0)?;
+                    pattern_sources(
+                        self.package,
+                        pattern,
+                        value,
+                        &mut vec![],
+                        &mut bindings,
+                        fuel,
+                        0,
+                    )?;
                     for (binding, producer, path) in bindings {
                         raw.push((code_root(binding), producer, path, true));
                     }
@@ -2830,7 +3243,15 @@ impl<'a> Analysis<'a> {
                 K::Match { value, arms } => {
                     for arm in arms {
                         let mut bindings = vec![];
-                        pattern_sources(&arm.pattern, value, &mut vec![], &mut bindings, fuel, 0)?;
+                        pattern_sources(
+                            self.package,
+                            &arm.pattern,
+                            value,
+                            &mut vec![],
+                            &mut bindings,
+                            fuel,
+                            0,
+                        )?;
                         for (binding, producer, path) in bindings {
                             raw.push((code_root(binding), producer, path, true));
                         }
@@ -3025,6 +3446,52 @@ impl<'a> Analysis<'a> {
                 })?,
                 &mut self.fuel,
             ),
+            K::ErrorConvert {
+                conversion,
+                value: inner,
+            } => {
+                if matches!(
+                    conversion,
+                    nir::error_results::Conversion::Embed | nir::error_results::Conversion::Product
+                ) {
+                    let mapping = crate::verification::memory::error_tag_mapping(
+                        value,
+                        Some(self.package),
+                        &mut self.fuel,
+                    )
+                    .ok()?;
+                    let mut original = path.to_vec();
+                    if !mapping.inverse_path(&mut original, &mut self.fuel).ok()? {
+                        return Some(LoopCode::Known(vec![]));
+                    }
+                    return Some(self.loop_code_value_at(inner, &original, facts, depth + 1));
+                }
+                let [marker, tag, field, tail @ ..] = path else {
+                    return None;
+                };
+                if *marker != VARIANT_FIELD || *field != 0 {
+                    return None;
+                }
+                let leaf = crate::verification::memory::owned_path_type(
+                    Some(self.package),
+                    &value.ty,
+                    path,
+                    &mut self.fuel,
+                )
+                .ok()?;
+                if !matches!(leaf, Term::Function { .. } | Term::Closure { .. }) {
+                    return None;
+                }
+                {
+                    let (_, selected) =
+                        crate::verification::memory::owned_constructor(value, &mut self.fuel)
+                            .ok()?;
+                    if selected != Some(*tag) {
+                        return Some(LoopCode::Known(vec![]));
+                    }
+                    Some(self.loop_code_value_at(inner, tail, facts, depth + 1))
+                }
+            }
             K::NewtypeConvert(inner) => {
                 let conversion = nir::newtypes::conversion(
                     &self.package.newtypes,

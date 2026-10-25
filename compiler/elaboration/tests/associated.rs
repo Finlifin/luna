@@ -624,3 +624,147 @@ fn type_list_inputs_resolve_associated_elements_without_changing_the_head() {
     assert_eq!(result.value, wrap(ty(P::Char)));
     assert_eq!(result.steps.len(), 1);
 }
+
+#[test]
+fn associated_success_resolution_rebuilds_frozen_error_without_unfolding_head() {
+    let subject = holder(ty(P::Bool));
+    let inner_type = Term::error_result(vec![ty(P::Char)], ty(P::Bool));
+    let input = Term::NormalForm {
+        head: id(30),
+        sort: Sort::Type,
+        arguments: vec![Term::ErrorValue {
+            ty: Box::new(Term::error_result(
+                vec![ty(P::Bool)],
+                projection(subject.clone(), vec![]),
+            )),
+            label: None,
+            value: Box::new(Term::ErrorValue {
+                ty: Box::new(inner_type.clone()),
+                label: Some(Box::new(ty(P::Char))),
+                value: Box::new(Term::Char('x')),
+            }),
+        }],
+    };
+    let expected = Term::NormalForm {
+        head: id(30),
+        sort: Sort::Type,
+        arguments: vec![Term::ErrorValue {
+            ty: Box::new(Term::error_result(
+                vec![ty(P::Bool), ty(P::Char)],
+                ty(P::Bool),
+            )),
+            label: Some(Box::new(ty(P::Char))),
+            value: Box::new(Term::Char('x')),
+        }],
+    };
+    assert_eq!(
+        normalize(
+            &[contract()],
+            &[implementation(subject.clone(), inner_type)],
+            &input,
+            Budget::default()
+        )
+        .unwrap()
+        .value,
+        expected
+    );
+    assert!(
+        normalize(
+            &[contract()],
+            &[implementation(subject, ty(P::Bool))],
+            &input,
+            Budget::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn associated_type_expansion_is_bounded_and_a_later_query_can_recover() {
+    let argument = Term::Tuple(vec![ty(P::Bool); 16]);
+    let mut template = implementation(holder(rigid(8)), Term::Tuple(vec![rigid(8); 256]));
+    template.type_parameters = vec![id(8)];
+    let root = projection(holder(argument.clone()), vec![]);
+    with_world(&[contract()], &[template], |world| {
+        let failure = world
+            .resolve_associated_type(
+                &root,
+                Budget {
+                    steps: 4000,
+                    ..Budget::default()
+                },
+            )
+            .unwrap_err();
+        assert!(failure.contains("budget"), "{failure}");
+        let recovered = world
+            .resolve_associated_type(
+                &root,
+                Budget {
+                    steps: 1_000_000,
+                    ..Budget::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(recovered.value, Term::Tuple(vec![argument.clone(); 256]));
+        assert_eq!(recovered.evidence.type_arguments, vec![argument]);
+    });
+}
+
+#[test]
+fn distinct_projection_sequences_share_work_without_discarding_unused_allowances() {
+    let mut selected = implementation(holder(rigid(5)), rigid(5));
+    selected.type_parameters = vec![id(5)];
+    selected.parameter_types = vec![ty(P::Type)];
+    let mut inputs = Vec::new();
+    let mut output = Vec::new();
+    let mut element = ty(P::Bool);
+    for _ in 0..16 {
+        inputs.push(projection(holder(element.clone()), vec![]));
+        output.push(element.clone());
+        element = Term::Pointer(Box::new(element));
+    }
+    let input = Term::Tuple(inputs);
+    let expected = Term::Tuple(output);
+    let traits = [contract()];
+    let implementations = [selected];
+    assert_eq!(
+        normalize(
+            &traits,
+            &implementations,
+            &input,
+            Budget {
+                steps: 100_000,
+                ..Budget::default()
+            }
+        )
+        .unwrap()
+        .value,
+        expected
+    );
+    assert!(
+        normalize(
+            &traits,
+            &implementations,
+            &input,
+            Budget {
+                steps: 10,
+                ..Budget::default()
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(
+        normalize(
+            &traits,
+            &implementations,
+            &input,
+            Budget {
+                steps: 100_000,
+                ..Budget::default()
+            }
+        )
+        .unwrap()
+        .value,
+        expected
+    );
+}

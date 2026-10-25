@@ -1,0 +1,17 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+
+fn swap(pair: Tuple<A, B>) -> Tuple<B, A> where A, B {
+    let (left, right) = pair;
+    (right, left)
+}
+
+fn take(...values: Tuple<bool, bool>) -> bool {
+    let (first, second) = values;
+    first and not second
+}
+
+fn run() -> bool {
+    take(...swap((false, true)))
+}

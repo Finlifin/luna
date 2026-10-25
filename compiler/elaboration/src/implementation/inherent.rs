@@ -34,6 +34,13 @@ pub struct InherentIndex {
     heads: BTreeMap<DeclarationId, InherentHead>,
 }
 impl InherentIndex {
+    pub fn for_target(target: Option<nir::target::TargetData>) -> Self {
+        Self {
+            index: Index::for_target(target),
+            heads: BTreeMap::new(),
+        }
+    }
+
     pub fn set_nominal_layouts(
         &mut self,
         structs: Vec<nir::program::Struct>,
@@ -41,6 +48,10 @@ impl InherentIndex {
         newtypes: Vec<nir::newtypes::Newtype>,
     ) {
         self.index.set_nominal_layouts(structs, enums, newtypes);
+    }
+
+    pub fn set_normal_form_metadata(&mut self, heads: Vec<nir::normal_forms::Head>) {
+        self.index.set_normal_form_metadata(heads);
     }
 
     /// Avoid copying complete layouts on repeated method lookup in an unchanged

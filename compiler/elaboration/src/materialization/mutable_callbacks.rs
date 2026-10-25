@@ -68,12 +68,16 @@ fn sources(value: &n::Expr, candidate: &mut Candidate, fuel: &mut usize) -> Resu
 pub(super) fn lower(
     expression: &mut n::Expr,
     next: &mut u32,
+    expansion_sources: &mut Vec<n::ExpansionSource>,
     fuel: &mut usize,
 ) -> Result<(), String> {
     let mut excluded = BTreeSet::new();
     let mut candidates = BTreeMap::<n::LocalId, Candidate>::new();
     iir::visit::expression_pruned(expression, fuel, |expr, fuel| {
-        if matches!(expr.kind, K::AddressOf(_) | K::Closure { .. }) {
+        if matches!(
+            expr.kind,
+            K::AddressOf(_) | K::Closure { .. } | K::TemplateEqual(..)
+        ) {
             excluded.extend(nir::free_bindings::collect(expr, fuel)?);
             return Ok(false);
         }
@@ -207,6 +211,13 @@ pub(super) fn lower(
                     let mut arms = Vec::new();
                     for (index, target) in targets.iter().enumerate() {
                         charge(target, fuel)?;
+                        let mut body = target.clone();
+                        crate::program::inlining::freshen_copied_expression(
+                            &mut body,
+                            next,
+                            expansion_sources,
+                            fuel,
+                        )?;
                         arms.push(n::MatchArm {
                             pattern: if index + 1 == targets.len() {
                                 P::Wild
@@ -214,12 +225,18 @@ pub(super) fn lower(
                                 P::Literal(n::Literal::UnsignedInteger(index as u128))
                             },
                             guard: None,
-                            body: target.clone(),
+                            body,
                         });
                     }
+                    let index = u32::try_from(expansion_sources.len())
+                        .map_err(|_| "mutable template source space exhausted")?;
+                    expansion_sources.push(n::ExpansionSource {
+                        original: expr.source,
+                        site: expr.source,
+                    });
                     expr.kind = K::Match {
                         value: Box::new(n::Expr {
-                            source: expr.source,
+                            source: n::SourceRange::generated(index),
                             ty: tag_type.clone(),
                             kind: K::Local(*tag),
                         }),

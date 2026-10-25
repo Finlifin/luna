@@ -1,19 +1,23 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 typealias Int = .Integer'builtin;
 pure comptime fn Tagged<T: Type, value: T> -> Type { T }
-comptime fn UnitInput(ty: Type) -> Type { Tagged<ty, ()> }
-comptime fn TupleInput(ty: Type) -> Type { Tagged<ty, (.u8'builtin, ())> }
-comptime fn NestedInput(ty: Type) -> Type { Tagged<ty, ((.u8'builtin, ()), .u16'builtin)> }
+comptime fn UnitInput(ty: Type) -> Type { Tagged<ty, .void'builtin> }
+comptime fn TupleInput(ty: Type) -> Type { Tagged<ty, Tuple<.u8'builtin, .void'builtin>> }
+comptime fn NestedInput(ty: Type) -> Type { Tagged<ty, Tuple<Tuple<.u8'builtin, .void'builtin>, .u16'builtin>> }
 comptime fn BranchInput(ty: Type, flag: true'type) -> Type {
-    Tagged<ty, if flag { (.u8'builtin, ()) } else { (.u16'builtin, ()) }>
+    Tagged<ty, if flag { Tuple<.u8'builtin, .void'builtin> } else { Tuple<.u16'builtin, .void'builtin> }>
 }
 comptime fn Pick(index: Int) -> Type { if index == 1 { .u8'builtin } else { .u16'builtin } }
 comptime fn Ordered(ty: Type) -> Type {
     var count: Int = 0;
-    Tagged<ty, (do { count = count + 1; Pick(count) }, do { count = count + 1; Pick(count) })>
+    Tagged<ty, Tuple<do { count = count + 1; Pick(count) }, do { count = count + 1; Pick(count) }>>
 }
 typealias VoidType = UnitInput(Type);
 typealias PairType = TupleInput(Type);
-typealias PairValue = TupleInput((Type, ()));
+comptime fn TupleValueInput(ty: Type) -> Type { Tagged<ty, (.u8'builtin, ())> }
+typealias PairValue = TupleValueInput(Tuple<Type, .void'builtin>);
 typealias NestedType = NestedInput(Type);
 typealias BranchType = BranchInput(Type, false);

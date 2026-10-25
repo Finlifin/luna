@@ -105,17 +105,25 @@ fn value(ty: &Term, package: &Package, fuel: &mut usize) -> Result<bool, String>
             ty,
             Term::Primitive(nir::Primitive::Void | nir::Primitive::Never)
         )
-        || matches!(ty, Term::Function { .. })
+        || matches!(
+            ty,
+            Term::Function { .. } | Term::UnsafeFunction(_) | Term::Pointer(_)
+        )
         || packet(ty, package)
     {
         return Ok(true);
     }
     if matches!(
         ty,
-        Term::Nominal { .. } | Term::Record(_) | Term::Tuple(_) | Term::NormalForm { .. }
+        Term::Nominal { .. }
+            | Term::Record(_)
+            | Term::Tuple(_)
+            | Term::NormalForm { .. }
+            | Term::ErrorResult { .. }
     ) {
-        super::memory::require_pointer_free_owned(Some(package), ty, fuel, 0)?;
-        return Ok(true);
+        // Shape admission is not delivery or cleanup permission. The resource
+        // pass retains pointer origins and proves observation-local cleanup.
+        return super::memory::copy_readable_representation(Some(package), ty, fuel);
     }
     Ok(false)
 }
@@ -147,7 +155,9 @@ fn pattern_locals(
                 pending.push(next);
                 pending.push(first);
             }
-            Pattern::Guard { pattern, .. } => pending.push(pattern),
+            Pattern::ErrorResult { inner: pattern, .. } | Pattern::Guard { pattern, .. } => {
+                pending.push(pattern)
+            }
             Pattern::Tuple(fields)
             | Pattern::TypeTuple(fields)
             | Pattern::Or(fields)
@@ -194,7 +204,7 @@ pub(super) fn check(
             } => {
                 if !value(&input.ty, package, fuel)? {
                     return Err(
-                        "observation region pattern requires pointer-free observation input".into(),
+                        "observation region pattern requires a readable observation input".into(),
                     );
                 }
                 pattern_locals(pattern, &mut locals, fuel)?;
@@ -216,10 +226,15 @@ pub(super) fn check(
     })?;
     reachable(expr, fuel, 0, &mut |node, fuel| {
         match &node.kind {
+            K::Intrinsic { .. } => {
+                nir::intrinsics::checked(node).map_err(str::to_owned)?;
+            }
+
             K::Let { .. }
             | K::LetPattern { .. }
             | K::Block { .. }
             | K::CallPreparation { .. }
+            | K::UnsafeScope(_)
             | K::Discard(_)
             | K::If { .. }
             | K::Match { .. }
@@ -232,9 +247,14 @@ pub(super) fn check(
             | K::FunctionInstance { .. }
             | K::Field { .. }
             | K::AnonymousField { .. }
+            | K::AddressOf(_)
             | K::ReadPointer(_)
             | K::PointerField { .. }
             | K::PointerAnonymousField { .. }
+            // Provenance checks in the resource walk must establish that every
+            // possible destination belongs to this observation's private locals.
+            | K::WritePointer { .. }
+            | K::BitWritePointer { .. }
             | K::Not(_)
             | K::IntegerNegate(_)
             | K::FloatNegate(_)
@@ -248,6 +268,7 @@ pub(super) fn check(
             | K::BitWindow { .. }
             | K::And(..)
             | K::Or(..)
+            | K::TemplateEqual(..)
             | K::ScalarEqual(..)
             | K::ScalarLess(..)
             | K::ScalarLessEqual(..)
@@ -259,14 +280,26 @@ pub(super) fn check(
             | K::IntegerBinary { .. }
             | K::FloatBinary { .. }
             | K::Call { .. } => {}
-            K::Tuple(_) | K::Record { .. } | K::AnonymousRecord { .. } | K::Variant { .. }
+            K::Tuple(_)
+            | K::Record { .. }
+            | K::AnonymousRecord { .. }
+            | K::Variant { .. }
+            | K::ErrorConvert { .. }
                 if value(&node.ty, package, fuel)? => {}
             K::Assign {
                 place,
                 value: input,
-            } if place.fields.is_empty()
-                && locals.contains(&place.root)
-                && value(&input.ty, package, fuel)? => {}
+            } if locals.contains(&place.root) && value(&input.ty, package, fuel)? => {
+                // Direct fields belong to this private root. Ordinary resource
+                // analysis validates their layout, state and replacement cleanup;
+                // pointer-target writes separately check their actual provenance.
+            }
+            K::BitAssign { place, .. } | K::BitUpdate { place, .. }
+                if locals.contains(&place.root) =>
+            {
+                // Private bit storage follows the same ownership boundary as
+                // direct assignment. Bounds and Copy remain ordinary checks.
+            }
             K::Break(identity) | K::Continue(identity) if loops.contains(identity) => {}
             K::RequirePredicate(condition)
             | K::EnsurePredicate(condition)

@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 typealias Char = 'x''type;
 
@@ -29,7 +32,7 @@ where requires A :- Accepts<B> {
     witness(A, B)
 }
 
-fn run() -> (bool, bool) {
+fn run() -> Tuple<bool, bool> {
     (forward(bool, true), forward_witness(bool, Char))
 }
 
@@ -41,20 +44,20 @@ impl Source for Char { assoc Item: Type = Char; }
 
 fn pair(comptime A: Type, left: A.as(Source).Item,
         comptime B: Type, right: B.as(Source).Item)
-    -> (A.as(Source).Item, B.as(Source).Item)
+    -> Tuple<A.as(Source).Item, B.as(Source).Item>
 where requires A :- Derived and B :- Source {
     (left, right)
 }
 
 fn forward_pair(comptime A: Type, left: A.as(Source).Item,
                 comptime B: Type, right: B.as(Source).Item)
-    -> (A.as(Source).Item, B.as(Source).Item)
+    -> Tuple<A.as(Source).Item, B.as(Source).Item>
 where requires A :- Derived and B :- Source {
     -- A's bound is available while checking left; B is bound later.
     pair(A, left, B, right)
 }
 
-fn associated() -> (bool, Char) {
+fn associated() -> Tuple<bool, Char> {
     forward_pair(bool, true, Char, 'x')
 }
 
@@ -69,7 +72,7 @@ fn forward_default(comptime A: Type, comptime value: A.as(Source).Item)
     select_default(A, value)
 }
 
-fn defaults() -> (bool, bool, Char) {
+fn defaults() -> Tuple<bool, bool, Char> {
     (forward_default(bool, true),
      select_default(bool, true, .copy = false),
      forward_default(Char, 'x'))
@@ -84,7 +87,7 @@ where requires A :- Source {
     true
 }
 
-fn type_domain() -> (bool, bool, bool) {
+fn type_domain() -> Tuple<bool, bool, bool> {
     -- The selected domain decides whether value/copy are Types or bool values.
     (inspect_input(TypeDomain, bool),
      inspect_input(TypeDomain, Char),

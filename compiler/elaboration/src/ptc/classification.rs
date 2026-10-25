@@ -49,7 +49,9 @@ impl TypeKind {
             Term::Primitive(_) => return Some(false),
             Term::Tuple(_) => Self::Tuple,
             Term::Pointer(_) => Self::Pointer,
-            Term::Function { .. } | Term::ComptimeFunction(_) => Self::Function,
+            Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_) => {
+                Self::Function
+            }
             // Closure qualification and nominal/newtype descriptors are not
             // inferred by peeking through an environment or representation.
             _ => return None,

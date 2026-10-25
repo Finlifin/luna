@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- Evidence dependencies determine preparation order, not clause position.
 typealias Type = .Type'builtin;
 trait Source { assoc Item: Type; }
@@ -21,6 +24,6 @@ where A,
     true
 }
 
-fn run() -> (bool, bool) {
+fn run() -> Tuple<bool, bool> {
     (ordinary(bool, true), generic<bool>(true))
 }

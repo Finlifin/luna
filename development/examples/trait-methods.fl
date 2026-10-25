@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- Concrete static methods through explicit trait views.
 -- Runtime receivers, Self substitution and generic interfaces are pending.
 trait Flag {
@@ -17,7 +20,7 @@ impl Flag for No {
     fn invert(value: true'type) -> true'type { value }
 }
 
-fn run() -> (true'type, true'type, true'type) {
+fn run() -> Tuple<true'type, true'type, true'type> {
     let invert = Yes.as(Flag).invert;
     (Yes.as(Flag).read(), No.as(Flag).read(), invert(false))
 }

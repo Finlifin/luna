@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 
 fn invert(comptime T: Type, value: T) -> result: T
@@ -16,6 +19,6 @@ where requires T == bool, requires left or right, ensures result {
     left or right
 }
 
-fn run() -> (bool, bool, bool) {
+fn run() -> Tuple<bool, bool, bool> {
     (invert(bool, false), both(bool, bool, true, true), either(bool, false, true))
 }

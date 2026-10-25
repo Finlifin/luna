@@ -830,3 +830,52 @@ fn rigid_dependency_inspection_is_bounded_and_keeps_opaque_heads() {
     ));
     assert!(has_rigid_parameters_bounded(&open, &mut 32).unwrap());
 }
+
+#[test]
+fn signature_fragment_copy_budget_does_not_certify_its_enclosing_scope() {
+    use nir::type_computations::{charge_parameter_substitution, instantiate_parameters_bounded};
+    let parameter = nir::DeclarationParameter {
+        declaration: target(),
+        sort: Sort::Type,
+    };
+    let outer = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let mut fields = vec![
+        Term::Rigid {
+            declaration: target(),
+            sort: Sort::Type
+        };
+        20
+    ];
+    fields.push(outer.clone());
+    let fragment = Term::Tuple(fields);
+    let arguments = [Term::Tuple(vec![Term::Primitive(Primitive::Bool); 100])];
+    assert!(matches!(
+        charge_parameter_substitution(&fragment, &[parameter], &arguments, &mut 500),
+        Err(Error::Budget)
+    ));
+    charge_parameter_substitution(&fragment, &[parameter], &arguments, &mut 10000).unwrap();
+    // Allocation admission preserves the open fragment; only its owner can
+    // supply the binder frame, and the closed API must continue to reject it.
+    assert!(
+        instantiate_parameters_bounded(&fragment, &[parameter], &arguments, &[], &mut 10000)
+            .is_err()
+    );
+    let result = instantiate_parameters_bounded(
+        &fragment,
+        &[parameter],
+        &arguments,
+        &[vec![Sort::Type]],
+        &mut 10000,
+    )
+    .unwrap();
+    let Term::Tuple(fields) = result else {
+        panic!("tuple")
+    };
+    assert_eq!(fields.len(), 21);
+    assert_eq!(fields.last(), Some(&outer));
+    assert!(fields[..20].iter().all(|field| field == &arguments[0]));
+}

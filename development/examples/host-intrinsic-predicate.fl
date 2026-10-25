@@ -1,0 +1,25 @@
+-- Bind fma=input::Ops::fma and enable Duplicate/Retire when building run.
+-- The operation has scalar target evidence; unsafe does not authorize writes
+-- or unchecked function calls inside the predicate.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for .f32'builtin {}
+impl Duplicate for .f64'builtin {}
+
+^intrinsic_enum
+enum Ops { fma }
+
+fn check32(a: .f32'builtin, b: .f32'builtin, c: .f32'builtin, expected: .f32'builtin) {
+    assumes unsafe { Ops.fma'intrinsic(a, b, c).as(.f32'builtin) } == expected;
+}
+
+fn check64(a: .f64'builtin, b: .f64'builtin, c: .f64'builtin, expected: .f64'builtin) {
+    assumes unsafe { Ops.fma'intrinsic(a, b, c).as(.f64'builtin) } == expected;
+}
+
+fn run() -> bool {
+    check32(3.0, 4.0, 5.0, 17.0);
+    check64(3.0, 4.0, 5.0, 17.0);
+    true
+}

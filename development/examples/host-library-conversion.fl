@@ -1,0 +1,64 @@
+use conversion.{Into, From};
+
+struct Flag { value: bool }
+impl Into<bool> for Flag {
+    fn into(self) -> bool { self.value }
+}
+impl Into<.u8'builtin> for Flag {
+    fn into(self) -> .u8'builtin { if self.value { 7 } else { 3 } }
+}
+impl From<bool> for Flag {
+    fn from(source: bool) -> Self { Flag {value: source} }
+}
+
+fn convert(value: T) -> U where T, U, requires T :- Into<U> {
+    value.as(Into<U>).into()
+}
+fn construct(value: T) -> U where T, U, requires U :- From<T> {
+    U.as(From<T>).from(value)
+}
+
+fn round_trip() -> bool {
+    var called = false;
+    let flag = construct<bool, Flag>(do {
+        assumes not called;
+        called = true;
+        true
+    });
+    let result = convert<Flag, bool>(flag);
+    called and result
+}
+
+fn distinct_targets() -> bool {
+    let bit = convert<Flag, bool>(Flag {value: true});
+    let code = convert<Flag, .u8'builtin>(Flag {value: false});
+    bit and code == 3
+}
+
+struct Token { retired: *bool }
+impl resources.Drop for Token {
+    fn drop(*self) {
+        assumes not self.retired.*.*;
+        self.retired.*.* = true;
+    }
+}
+struct Packet { token: Token }
+impl Into<Token> for Packet {
+    fn into(self) -> Token { self.token }
+}
+fn retire(value: Token) {}
+
+fn transfer() -> bool {
+    var retired = false;
+    let packet = Packet {token: Token {retired: retired.ref}};
+    let token = convert<Packet, Token>(packet);
+    assumes not retired;
+    retire(token);
+    retired
+}
+
+fn run() -> bool { round_trip() and distinct_targets() and transfer() }
+
+test round_trip_once { let passed = round_trip(); assumes passed; }
+test interface_arguments_select_target { let passed = distinct_targets(); assumes passed; }
+test affine_transfer { let passed = transfer(); assumes passed; }

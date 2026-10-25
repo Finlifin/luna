@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 pure comptime fn Identity<T> -> Type { T }
 
@@ -7,16 +10,16 @@ comptime fn copy_value(comptime T: Type, comptime value: T,
     copy
 }
 
-comptime fn check() -> (bool, bool, bool) {
+comptime fn check() -> Tuple<bool, bool, bool> {
     (copy_value(Type, bool) == bool,
      copy_value(Type, Identity<bool>) == Identity<bool>,
      not copy_value(bool, false))
 }
 
-fn deliver(comptime values: (bool, bool, bool)) -> (bool, bool, bool) {
+fn deliver(comptime values: Tuple<bool, bool, bool>) -> Tuple<bool, bool, bool> {
     values
 }
 
-fn run() -> (bool, bool, bool) {
+fn run() -> Tuple<bool, bool, bool> {
     deliver(check())
 }

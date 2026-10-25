@@ -162,6 +162,81 @@ class ProcessToolsTests(unittest.TestCase):
             self.assertEqual(code, 125)
             self.assertEqual(json.loads((directory / 'result.json').read_text())['status'], 'unavailable')
 
+    def test_initial_report_quota_failure_never_launches_command(self):
+        from unittest.mock import patch
+        import errno
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as output:
+            with patch.object(Path, 'write_text', side_effect=OSError(errno.EDQUOT, 'quota exceeded')), \
+                    patch('process_tools.subprocess.Popen') as spawn:
+                code, directory = run([sys.executable, '-c', 'raise Exception()'], directory=temporary)
+            self.assertEqual(code, 125)
+            spawn.assert_not_called()
+            report = json.loads(output.getvalue())
+            self.assertFalse(report['report_saved'])
+            self.assertEqual(report['status'], 'evidence-error')
+            self.assertIn('quota', report['evidence']['report_errors'][0])
+
+    def test_final_report_quota_failure_publishes_terminal_evidence(self):
+        from unittest.mock import patch
+        import errno
+        import signal
+        original_write = Path.write_text
+        original_handler = signal.getsignal(signal.SIGTERM)
+        def write(path, text, *args, **kwargs):
+            if path.name == 'result.json.tmp' and json.loads(text)['status'] != 'running':
+                raise OSError(errno.EDQUOT, 'quota exceeded')
+            return original_write(path, text, *args, **kwargs)
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as output:
+            with patch.object(Path, 'write_text', new=write):
+                code, directory = run([sys.executable, '-c', "print('retained');raise SystemExit(7)"], directory=temporary)
+            self.assertEqual(code, 125)
+            report = json.loads(output.getvalue().splitlines()[-1])
+            self.assertFalse(report['report_saved'])
+            self.assertEqual(report['status'], 'evidence-error')
+            self.assertEqual(report['evidence']['exit_code'], 7)
+            self.assertEqual((directory / 'stdout.log').read_text(), 'retained\n')
+            self.assertEqual(json.loads((directory / 'result.json').read_text())['status'], 'running')
+            self.assertEqual(signal.getsignal(signal.SIGTERM), original_handler)
+
+    def test_pid_report_failure_stops_spawned_process(self):
+        from unittest.mock import patch
+        import errno
+        import signal
+        original_write = Path.write_text
+        original_handler = signal.getsignal(signal.SIGTERM)
+        def write(path, text, *args, **kwargs):
+            report = json.loads(text)
+            if path.name == 'result.json.tmp' and report.get('pid'):
+                raise OSError(errno.ENOSPC, 'no space')
+            return original_write(path, text, *args, **kwargs)
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as output:
+            with patch.object(Path, 'write_text', new=write):
+                code, _ = run([sys.executable, '-c', 'import time;time.sleep(5)'], directory=temporary)
+            self.assertEqual(code, 125)
+            report = json.loads(output.getvalue().splitlines()[-1])
+            self.assertIsNotNone(report['evidence'].get('pid'))
+            self.assertIsNotNone(report['evidence']['exit_code'])
+            self.assertFalse(report['report_saved'])
+            self.assertEqual(signal.getsignal(signal.SIGTERM), original_handler)
+
+    def test_log_quota_failure_drains_and_counts_unsaved_output(self):
+        from unittest.mock import patch
+        import errno
+        original_open = Path.open
+        def open_file(path, *args, **kwargs):
+            if path.name == 'stdout.log':
+                raise OSError(errno.EDQUOT, 'quota exceeded')
+            return original_open(path, *args, **kwargs)
+        with patch.object(Path, 'open', new=open_file):
+            code, _, report = self.execute("import os;os.write(1,b'x'*200000);os.write(2,b'y'*200000)")
+        self.assertEqual(code, 125)
+        self.assertEqual(report['exit_code'], 0)
+        self.assertEqual(report['status'], 'evidence-error')
+        self.assertEqual(report['stdout']['bytes'], 200000)
+        self.assertEqual(report['stdout']['saved_bytes'], 0)
+        self.assertTrue(report['stdout']['truncated'])
+        self.assertEqual(report['stderr']['bytes'], 200000)
+
 
 if __name__ == '__main__':
     unittest.main()

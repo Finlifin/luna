@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- Result context flows through nested generic calls before runtime execution.
 typealias Flag = true'type;
 
@@ -13,7 +16,7 @@ fn apply(callback: fn(T) -> T, value: T) -> T where T {
     callback(value)
 }
 
-fn run() -> (Flag, Flag) {
+fn run() -> Tuple<Flag, Flag> {
     (
         apply(keep(factory()), true),
         apply(keep(keep(|value| value)), false),

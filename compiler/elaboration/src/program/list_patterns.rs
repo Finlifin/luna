@@ -10,16 +10,10 @@ impl Checker<'_, '_> {
         rest: Option<&hir::pattern::Pattern<'_>>,
         ty: &Term,
     ) -> Result<n::Pattern, Error> {
-        if rest.is_some() {
+        if rest.is_some_and(|rest| !matches!(rest.kind, hir::pattern::PatternKind::Wild)) {
             return Err(error(
                 pattern.span,
                 "list rest patterns require a slicing protocol",
-            ));
-        }
-        if !self.runtime_value_context() && !self.in_code_body {
-            return Err(error(
-                pattern.span,
-                "comptime list patterns require the comptime ListPatternView phase",
             ));
         }
         let protocol = self.protocols.list_pattern.ok_or_else(|| {
@@ -28,8 +22,20 @@ impl Checker<'_, '_> {
                 "list patterns require a bound ListPatternView protocol",
             )
         })?;
-        let size = crate::list_patterns::protocol(&self.checked_traits, protocol)
+        let contract = crate::list_patterns::protocol(&self.checked_traits, protocol)
             .map_err(|message| error(pattern.span, message))?;
+        let comptime = !self.runtime_value_context() && !self.in_code_body;
+        if contract.comptime != comptime {
+            return Err(error(
+                pattern.span,
+                if comptime {
+                    "list patterns require the comptime ListPatternView phase"
+                } else {
+                    "list patterns require the runtime ListPatternView phase"
+                },
+            ));
+        }
+        let size = contract.size;
         let binding = n::LocalId {
             owner: u32::MAX,
             index: self.next_temporary_binding,
@@ -83,24 +89,61 @@ impl Checker<'_, '_> {
             Some(&size),
             pattern.span,
         )?;
-        let K::Literal(arity) = arity.kind else {
-            unreachable!("validated unsigned size literal")
-        };
         let length = call(self, "list_pattern_view_get_len", None)?;
-        let mut result = n::Pattern::Then {
-            first: Box::new(n::Pattern::Wild),
-            value: Box::new(length),
-            next: Box::new(n::Pattern::Literal(arity)),
+        let (value, next) = if rest.is_some() {
+            (
+                n::Expr {
+                    source: source(pattern.span),
+                    ty: p(P::Bool),
+                    kind: K::ScalarLessEqual(Box::new(arity), Box::new(length)),
+                },
+                n::Pattern::Literal(n::Literal::Bool(true)),
+            )
+        } else {
+            let K::Literal(arity) = arity.kind else {
+                unreachable!("validated unsigned size literal")
+            };
+            (length, n::Pattern::Literal(arity))
         };
+        let length_check = n::Pattern::Then {
+            first: Box::new(n::Pattern::Wild),
+            value: Box::new(value),
+            next: Box::new(next),
+        };
+        let mut steps = vec![length_check];
         for (index, element) in elements.iter().enumerate() {
             let value = call(self, "list_pattern_view_get_element", Some(index))?;
             let next = self.pattern(element, &value.ty)?;
-            result = n::Pattern::Then {
-                first: Box::new(result),
+            steps.push(n::Pattern::Then {
+                first: Box::new(n::Pattern::Wild),
                 value: Box::new(value),
                 next: Box::new(next),
-            };
+            });
         }
+        // Each generated step observes the alias, not its incoming subject.
+        // A unit bridge can therefore balance the sequence without copying the
+        // subject or changing the left-to-right short-circuiting evaluation.
+        // User element patterns remain intact and retain their own input.
+        while steps.len() > 1 {
+            let mut balanced = Vec::with_capacity(steps.len().div_ceil(2));
+            let mut pending = steps.into_iter();
+            while let Some(first) = pending.next() {
+                balanced.push(match pending.next() {
+                    Some(next) => n::Pattern::Then {
+                        first: Box::new(first),
+                        value: Box::new(n::Expr {
+                            source: source(pattern.span),
+                            ty: p(P::Void),
+                            kind: K::Unit,
+                        }),
+                        next: Box::new(next),
+                    },
+                    None => first,
+                });
+            }
+            steps = balanced;
+        }
+        let result = steps.pop().expect("length check is always present");
         Ok(n::Pattern::Observe {
             binding,
             inner: Box::new(result),

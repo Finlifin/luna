@@ -157,6 +157,7 @@ impl Checker<'_, '_> {
         Ok(n::MethodContract {
             is_quote: signature.modifiers.is_quote,
             pure: signature.modifiers.is_pure,
+            is_unsafe: signature.modifiers.is_unsafe,
             type_arguments: vec![],
             type_parameters: signature
                 .clause_params
@@ -295,7 +296,7 @@ impl Checker<'_, '_> {
             {
                 return Err(error(item.span,"associated values require an enclosing trait or trait implementation"));
             }
-            if matches!(&item.kind, ItemKind::FnDeclaration(sig) if !sig.modifiers.is_quote)
+            if matches!(&item.kind, ItemKind::FnDeclaration(sig) if !sig.modifiers.is_quote && !sig.modifiers.is_function_template)
                 && !required_members.contains(&owner)
             {
                 return Err(error(
@@ -306,16 +307,17 @@ impl Checker<'_, '_> {
         }
         let mut implementations: Vec<n::Implementation> = Vec::new();
         let mut method_capability_checks = Vec::new();
+        let mut method_signature_checks = Vec::new();
         // Declaration guarantees are available when checking implementation
         // binders, but the implementation being checked is never an assumption.
         self.checked_traits = traits.values().cloned().collect();
-        let mut index = crate::implementation::Index::default();
+        let mut index = crate::implementation::Index::for_target(self.target);
         for (id, domain) in &self.implementation_index.parameter_domains {
             index
                 .register_parameter_domain(*id, domain.clone())
                 .map_err(|message| error(Span::default(), message))?;
         }
-        let mut inherent_index = crate::implementation::InherentIndex::default();
+        let mut inherent_index = crate::implementation::InherentIndex::for_target(self.target);
         // Collect and admit every head before elaborating any implementation
         // member. A head is candidate data, not evidence of a complete trait
         // implementation; keep this index private until all checks succeed.
@@ -394,12 +396,14 @@ impl Checker<'_, '_> {
                 if !matches!(
                     subject,
                     Term::Nominal { .. }
+                        | Term::ErrorResult { .. }
                         | Term::Primitive(_)
                         | Term::Tuple(_)
                         | Term::Record(_)
                         | Term::Pointer(_)
                         | Term::Function { .. }
                         | Term::ComptimeFunction(_)
+                        | Term::UnsafeFunction(_)
                         | Term::Rigid {
                             sort: Sort::Type,
                             ..
@@ -458,6 +462,9 @@ impl Checker<'_, '_> {
             self.enums.values().cloned().collect(),
             self.newtypes.values().cloned().collect(),
         );
+        let normal_forms = self.normal_form_metadata();
+        index.set_normal_form_metadata(normal_forms.clone());
+        inherent_index.set_normal_form_metadata(normal_forms);
         let coherence_context = self.nominal_context();
         let coherence = index.check_type_coherence(&coherence_context, Budget::default());
         if !index.verify_type_coherence(&coherence, &coherence_context, Budget::default()) {
@@ -708,7 +715,7 @@ impl Checker<'_, '_> {
                         }
                         method_capability_checks.push((
                             actual.capabilities.clone(),
-                            assumptions,
+                            assumptions.clone(),
                             context.clone(),
                             item.span,
                             contract.name.clone(),
@@ -737,9 +744,13 @@ impl Checker<'_, '_> {
                             clause_domains.iter().map(|(a, b)| (a, b)),
                             Budget::default(),
                         ) {
-                            return Err(error(
+                            method_signature_checks.push((
+                                clause_domains,
+                                context.clone(),
+                                assumptions.clone(),
                                 item.span,
-                                "method clause domains do not match its trait signature",
+                                contract.name.clone(),
+                                true,
                             ));
                         }
                         // Open matching function binders in the contract's input
@@ -823,13 +834,31 @@ impl Checker<'_, '_> {
                             _ => Formula::False,
                         };
                         if !matches!(context.prove(goal, Budget::default()), Outcome::Entailed(_)) {
-                            return Err(error(
-                                item.span,
-                                format!(
-                                    "method `{}` does not match its trait signature",
-                                    contract.name
-                                ),
-                            ));
+                            if let (
+                                MethodSignature::Callable(expected),
+                                MethodSignature::Callable(actual),
+                            ) = (&expected_signature, actual_signature)
+                            {
+                                // Another admitted head may provide a parent-interface
+                                // associated Type. Keep the obligation private until
+                                // all member declarations have been checked.
+                                method_signature_checks.push((
+                                    vec![(expected.clone(), actual.clone())],
+                                    context.clone(),
+                                    assumptions.clone(),
+                                    item.span,
+                                    contract.name.clone(),
+                                    false,
+                                ));
+                            } else {
+                                return Err(error(
+                                    item.span,
+                                    format!(
+                                        "method `{}` does not match its trait signature",
+                                        contract.name,
+                                    ),
+                                ));
+                            }
                         }
                         for requirement in &actual.requirements {
                             if !matches!(
@@ -1153,6 +1182,88 @@ impl Checker<'_, '_> {
                 ));
             }
         }
+        if !method_signature_checks.is_empty() {
+            // This private world contains Type templates only. Do not evaluate
+            // scalar associated initializers or install implementations before
+            // every deferred signature obligation succeeds.
+            let mut type_world = implementations.clone();
+            for implementation in &mut type_world {
+                let Some(interface) = implementation.interface else {
+                    continue;
+                };
+                for member in &traits[&interface].associated {
+                    if member.ty != p(P::Type) {
+                        continue;
+                    }
+                    let (owner, parameters, arguments) = self.associated_initializers
+                        [&(implementation.declaration, member.declaration)]
+                        .clone();
+                    let span = self.package.item(owner).unwrap().span;
+                    let value = self
+                        .associated_contract(owner, true)?
+                        .default
+                        .ok_or_else(|| error(span, "associated Type initializer is missing"))?;
+                    let binders = self.input_binders(&parameters);
+                    let mut fuel = self.required_steps.min(100_000) as usize;
+                    let before = fuel;
+                    let charged = nir::copy_budget::charge_substitution(
+                        &value, &binders, &arguments, &mut fuel,
+                    );
+                    self.required_steps -= (before - fuel) as u64;
+                    charged.map_err(|reason| {
+                        error(
+                            span,
+                            format!("associated signature copy budget exhausted: {reason:?}"),
+                        )
+                    })?;
+                    let value = value
+                        .instantiate_parameters(&binders, &arguments)
+                        .map_err(|reason| error(span, reason.to_string()))?;
+                    implementation.associated.push((member.declaration, value));
+                }
+            }
+            for (pairs, context, assumptions, span, name, clause_domains) in method_signature_checks
+            {
+                let world = crate::capabilities::World {
+                    index: &index,
+                    implementations: &type_world,
+                    traits: &trait_values,
+                    assumptions: &assumptions,
+                    context: &context,
+                };
+                for (expected, actual) in pairs {
+                    let expected = world
+                        .associated_type_view(&expected, Budget::default())
+                        .map_err(|reason| {
+                            error(
+                                span,
+                                format!("method `{name}` signature projection: {reason}"),
+                            )
+                        })?
+                        .value;
+                    let actual = world
+                        .associated_type_view(&actual, Budget::default())
+                        .map_err(|reason| {
+                            error(
+                                span,
+                                format!("method `{name}` signature projection: {reason}"),
+                            )
+                        })?
+                        .value;
+                    if !signatures::equivalent(&context, [(&expected, &actual)], Budget::default())
+                    {
+                        return Err(error(
+                            span,
+                            if clause_domains {
+                                "method clause domains do not match its trait signature".into()
+                            } else {
+                                format!("method `{name}` does not match its trait signature")
+                            },
+                        ));
+                    }
+                }
+            }
+        }
         self.implementation_index = index;
         self.inherent_index = inherent_index;
         Ok((traits.into_values().collect(), implementations))
@@ -1192,7 +1303,9 @@ impl Checker<'_, '_> {
             H::Cast(base, interface) => (base, Some(interface)),
             _ => (value, None),
         };
-        let subject = if self.is_static_method_subject(base) {
+        let subject = if self.is_static_method_subject(base)
+            || self.local_field_domain(base)? == Some(p(P::Type))
+        {
             self.type_expr(base)?
         } else if let H::Projection(view, field) = &base.kind {
             match self.associated_projection(view, field.name.as_str(), base.span)? {
@@ -1362,25 +1475,28 @@ impl Checker<'_, '_> {
             ));
         }
         if let Some(interface) = interface.as_ref() {
-            if let Some(origin) = self.inherited_member_source(&subject, interface, name, span)? {
-                if &origin != interface {
-                    // The requested child view must itself be justified. A
-                    // parent implementation alone cannot grant that view.
-                    if !self.symbolic_interface_evidence(&subject, interface) {
-                        let resolution = self
-                            .resolve_trait_capability(interface, &subject, Budget::default())
-                            .map_err(|e| {
-                                error(span, format!("interface view query failed: {e:?}"))
-                            })?;
-                        if !matches!(
-                            resolution.selection,
-                            crate::implementation::Selection::Selected(_)
-                        ) {
-                            return Err(error(span, "requested interface view is not established"));
-                        }
+            // Establish membership before querying implementations. An absent
+            // member is not a capability obligation, especially while ordinary
+            // Type inputs still contain signature-bound references.
+            let Some(origin) = self.inherited_member_source(&subject, interface, name, span)?
+            else {
+                return Err(error(span, format!("unknown trait member {name}")));
+            };
+            if &origin != interface {
+                // The requested child view must itself be justified. A
+                // parent implementation alone cannot grant that view.
+                if !self.symbolic_interface_evidence(&subject, interface) {
+                    let resolution = self
+                        .resolve_trait_capability(interface, &subject, Budget::default())
+                        .map_err(|e| error(span, format!("interface view query failed: {e:?}")))?;
+                    if !matches!(
+                        resolution.selection,
+                        crate::implementation::Selection::Selected(_)
+                    ) {
+                        return Err(error(span, "requested interface view is not established"));
                     }
-                    return self.selected_method(subject, Some(origin), name, span);
                 }
+                return self.selected_method(subject, Some(origin), name, span);
             }
             if self.symbolic_interface_evidence(&subject, interface) {
                 let contract = self
@@ -1578,6 +1694,14 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         span: Span,
     ) -> Result<(), Error> {
+        if matches!(self.package.item(owner).map(|item| &item.kind),
+            Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) if sig.modifiers.is_function_template)
+        {
+            return Err(error(
+                span,
+                "function templates are instantiated with `fn ... use`, not called as functions",
+            ));
+        }
         if matches!(
             self.package.item(owner).map(|item| &item.kind),
             Some(ItemKind::Effect(..))
@@ -1864,10 +1988,21 @@ impl Checker<'_, '_> {
         // A projected associated Type is a static subject, even though the
         // syntax-only type-head predicate cannot classify its member type.
         // Resolve it before treating the Type value as a runtime receiver.
-        let projected_subject = match view.kind {
-            H::Cast(base, _) => matches!(base.kind, H::Projection(..)),
-            H::Projection(..) => true,
-            _ => false,
+        let computed_subject = |kind: &H<'_>| {
+            matches!(
+                kind,
+                H::Projection(..)
+                    | H::Block(_)
+                    | H::If(..)
+                    | H::When(_)
+                    | H::Match(..)
+                    | H::Application(..)
+                    | H::ExtendedApplication(..)
+            )
+        };
+        let projected_subject = match &view.kind {
+            H::Cast(base, _) => computed_subject(&base.kind),
+            kind => computed_subject(kind),
         };
         if projected_subject {
             if let Some(method) =
@@ -2047,7 +2182,7 @@ impl Checker<'_, '_> {
                     source: source(base.span),
                     kind: K::AddressOf(Box::new(receiver)),
                 };
-                if let Some(message) = n::pointer_operation_error(&address) {
+                if let Some(message) = n::pointer_operation_error_in(&address, self.target) {
                     return Err(error(base.span, message));
                 }
                 receiver = address;
@@ -2485,6 +2620,34 @@ impl Checker<'_, '_> {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn partial_callable_instance(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        arguments: Vec<Term>,
+    ) -> Result<n::Expr, Error> {
+        let parameters = &self.type_parameters[&owner];
+        let signature = self
+            .signatures
+            .get(&owner)
+            .or_else(|| self.interface_signatures.get(&owner))
+            .ok_or_else(|| error(expr.span, "partial callable signature is missing"))?
+            .instantiate_parameters_in_scope(
+                &self.input_binders(&parameters[..arguments.len()]),
+                &arguments,
+                &self.call_input_frames(),
+            )
+            .map_err(|e| error(expr.span, e.to_string()))?;
+        Ok(n::Expr {
+            ty: self.callable_type(owner, signature),
+            source: source(expr.span),
+            kind: K::FunctionInstance {
+                declaration: declaration(self.package, &self.package_identities, owner),
+                arguments,
+            },
+        })
+    }
+
     pub(super) fn explicit_method_instance(
         &mut self,
         expr: &Expr<'_>,
@@ -2499,6 +2662,14 @@ impl Checker<'_, '_> {
                 "explicit instantiation requires a generic method",
             )
         })?;
+        if allow_optional {
+            if let Some(arguments) =
+                self.partial_positional_clause_prefix(owner, args, &fixed, expr.span)?
+            {
+                let value = self.partial_callable_instance(expr, owner, arguments)?;
+                return Ok(self.retain_method_origin(method, value));
+            }
+        }
         if self.has_optional_type_clauses(owner)
             || self.trait_domains(owner)?[fixed.len()..]
                 .iter()
@@ -2557,6 +2728,7 @@ impl Checker<'_, '_> {
             interface_arguments,
             subject,
             member,
+            method_arguments,
             ..
         } = callee.kind
         else {
@@ -2564,8 +2736,9 @@ impl Checker<'_, '_> {
         };
         let fixed: Vec<_> = std::iter::once(subject.clone())
             .chain(interface_arguments.iter().cloned())
+            .chain(method_arguments.iter().cloned())
             .collect();
-        let inherited = fixed.len();
+        let inherited = 1 + interface_arguments.len();
         let mut call =
             self.generic_call_with_receiver(expr, owner, args, expected, partial, prefix, fixed)?;
         fn prepared_callee(call: &mut n::Expr) -> Option<&mut n::Expr> {

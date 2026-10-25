@@ -1,0 +1,3 @@
+struct Ops {pub comptime fn pattern()-><bool -| value:bool> {'<value>}}
+comptime fn Make()->.Type'builtin {Ops}
+fn run()->bool {const pat=Make().pattern();let ~<pat> = true;value}

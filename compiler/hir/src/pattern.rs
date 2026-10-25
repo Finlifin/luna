@@ -44,7 +44,7 @@ pub enum PatternKind<'hir> {
     /// inferred.  Syntax: `{ field1, field2, field3: pat3, .. }`.
     /// Fields without an explicit sub-pattern bind their name (`field: field`).
     Struct(&'hir Pattern<'hir>, &'hir [FieldPat<'hir>], bool),
-    /// List / slice / iterator pattern: `[pat1, pat2, rest..]`.
+    /// List pattern: `[pat1, pat2, ...rest]` or `[pat1, pat2, ..._]`.
     List(&'hir [Pattern<'hir>], Option<&'hir Pattern<'hir>>),
 
     /// Tuple-like enum variant pattern: `.NetErr.Timeout(pat1, pat2)`.

@@ -1968,3 +1968,30 @@ fn closure_context_input_budget_failure_does_not_poison_later_proofs() {
         proved(&context, proposition);
     }
 }
+
+#[test]
+fn unsafe_callable_constructor_keeps_identity_and_congruence() {
+    let callable = |result| Term::Function {
+        parameters: vec![],
+        result: Box::new(result),
+    };
+    let unsafe_type = |result| Term::UnsafeFunction(Box::new(callable(result)));
+    let mut context = Context::default();
+    context.assume(eq(variable(701), ty(P::Bool)));
+    proved(
+        &context,
+        eq(unsafe_type(variable(701)), unsafe_type(ty(P::Bool))),
+    );
+    for other in [
+        callable(ty(P::Bool)),
+        callable(ty(P::Bool)).with_comptime_phase(true),
+    ] {
+        proved(
+            &context,
+            F::Not(Box::new(eq(unsafe_type(ty(P::Bool)), other))),
+        );
+    }
+    let mut injectivity = Context::default();
+    injectivity.assume(eq(unsafe_type(variable(702)), unsafe_type(ty(P::Bool))));
+    proved(&injectivity, eq(variable(702), ty(P::Bool)));
+}

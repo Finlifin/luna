@@ -1,6 +1,7 @@
 //! Closed value reconstruction, not arbitrary initialization programs. Closure
 //! bodies are immutable checked code; only their capture initializers execute
 //! during reconstruction. Ordinary typing/phase checks still apply to that code.
+use crate::normal_forms::NominalValueDeclaration;
 use crate::program::{Expr, ExprKind as K, Literal, LocalId};
 use crate::{Primitive, Term};
 use std::collections::BTreeMap;
@@ -39,9 +40,10 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             Term::ContextualClosure { .. } => 2,
             Term::Closure { environment, .. } => environment.len().saturating_add(1),
             Term::Function { parameters, .. } => parameters.len().saturating_add(1),
+            Term::ErrorValue { .. } => 3,
             Term::NominalValue { fields, .. } => fields.len().saturating_add(1),
             Term::Record(fields) | Term::RecordValue(fields) => fields.len(),
-            Term::Pointer(_) | Term::ComptimeFunction(_) => 1,
+            Term::Pointer(_) | Term::ComptimeFunction(_) | Term::UnsafeFunction(_) => 1,
             _ => 0,
         };
         charge(fuel, width)?;
@@ -83,10 +85,19 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
                 children.extend(environment);
                 children.push(signature);
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) => children.push(inner),
+            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
+                children.push(inner)
+            }
             Term::Function { parameters, result } => {
                 children.extend(parameters.iter().map(|p| &p.ty));
                 children.push(result);
+            }
+            Term::ErrorValue { ty, label, value } => {
+                children.push(ty);
+                if let Some(label) = label {
+                    children.push(label);
+                }
+                children.push(value);
             }
             Term::NominalValue { ty, fields, .. } => {
                 children.push(ty);
@@ -115,35 +126,177 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn literal_payload(literal: &Literal, fuel: &mut usize) -> Result<(), &'static str> {
+    use comptime_runtime::{Budget, Error, Integer};
+    let mut budget = Budget {
+        steps: *fuel,
+        max_limbs: *fuel,
+    };
+    let checked = match literal {
+        Literal::Integer(spelling) => {
+            Integer::parse_literal(spelling.strip_prefix('-').unwrap_or(spelling), &mut budget)
+                .map(|_| ())
+        }
+        Literal::Float(spelling) => {
+            comptime_runtime::decimal::DecimalValue::parse_literal(spelling, &mut budget)
+                .map(|_| ())
+        }
+        Literal::BitVec { width, words } => {
+            comptime_runtime::bitvec::BitVec::from_words(*width, words, &mut budget)
+                .map(|_| ())
+                .map_err(|error| match error {
+                    comptime_runtime::bitvec::Error::Resource(error) => error,
+                    _ => Error::InvalidLiteral,
+                })
+        }
+        _ => return Ok(()),
+    };
+    // Failed parsing consumes work too; never reset the caller's budget.
+    *fuel = budget.steps;
+    checked.map_err(|error| match error {
+        Error::BudgetExhausted | Error::SizeLimit => "completed value budget exhausted",
+        _ => "invalid completed literal payload",
+    })
+}
+
 /// Validate and bound the serialized value graph before copying/substitution.
 /// The only permitted call reconstructs a private graph through a zero-input,
 /// captureless comptime closure. Its body must itself be a completed value graph.
 pub fn validate(value: &Expr, fuel: &mut usize) -> Result<(), &'static str> {
-    value_in(value, fuel, &mut BTreeMap::new(), 0)
+    validate_with_newtypes(value, std::iter::empty(), fuel)
 }
-fn value_in<'a>(
+
+pub fn validate_in(
+    value: &Expr,
+    target: crate::target::TargetData,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
+    validate_with_declarations_in(
+        value,
+        std::iter::empty(),
+        &|_| false,
+        &|_, _| None,
+        Some(target),
+        fuel,
+    )
+}
+
+/// Validate frozen nominal wrappers using declaration-owned representation
+/// evidence. No representation is guessed from nominal arguments or names.
+pub fn validate_with_newtypes<'d>(
+    value: &Expr,
+    definitions: impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
+    validate_with_layouts(value, definitions, &|_| false, fuel)
+}
+
+/// Tuple views must come from the registered protocol, never a head's shape.
+pub fn validate_with_layouts<'d>(
+    value: &Expr,
+    definitions: impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone,
+    is_tuple: &impl Fn(crate::DeclarationId) -> bool,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
+    validate_with_declarations(value, definitions, is_tuple, &|_, _| None, fuel)
+}
+
+pub fn lookup_nominal<'a>(
+    package: &'a crate::program::Package,
+    id: crate::DeclarationId,
+    fuel: &mut usize,
+) -> Option<NominalValueDeclaration<'a>> {
+    let mut found = None;
+    for definition in &package.structs {
+        charge(fuel, 1).ok()?;
+        if definition.declaration == id {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(NominalValueDeclaration::Struct(definition));
+        }
+    }
+    for definition in &package.enums {
+        charge(fuel, 1).ok()?;
+        if definition.declaration == id {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(NominalValueDeclaration::Enum(definition));
+        }
+    }
+    found
+}
+
+/// Declaration layouts validate constructors without unfolding opaque heads.
+/// Generic template arguments remain symbolic; invocation checks their domains.
+pub fn validate_with_declarations<'d>(
+    value: &Expr,
+    definitions: impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone,
+    is_tuple: &impl Fn(crate::DeclarationId) -> bool,
+    lookup: &impl Fn(crate::DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'d>>,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
+    validate_with_declarations_in(value, definitions, is_tuple, lookup, None, fuel)
+}
+
+/// Target facts apply to every reconstructed child, including closure captures.
+/// No target means platform integers remain unadmitted.
+pub fn validate_with_declarations_in<'d>(
+    value: &Expr,
+    definitions: impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone,
+    is_tuple: &impl Fn(crate::DeclarationId) -> bool,
+    lookup: &impl Fn(crate::DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'d>>,
+    target: Option<crate::target::TargetData>,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
+    value_in(
+        value,
+        fuel,
+        &mut BTreeMap::new(),
+        0,
+        &definitions,
+        is_tuple,
+        lookup,
+        target,
+    )
+}
+fn value_in<'a, 'd>(
     value: &'a Expr,
     fuel: &mut usize,
     scope: &mut BTreeMap<LocalId, &'a Term>,
     depth: usize,
+    definitions: &(impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone),
+    is_tuple: &impl Fn(crate::DeclarationId) -> bool,
+    lookup: &impl Fn(crate::DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'d>>,
+    target: Option<crate::target::TargetData>,
 ) -> Result<(), &'static str> {
     if depth >= 64 {
         return Err("completed value representation depth exhausted");
     }
     charge(fuel, 1)?;
     ty(&value.ty, fuel)?;
+    if let K::Literal(literal) = &value.kind {
+        if !literal.has_primitive_type_in(&value.ty, target) {
+            return Err("completed literal disagrees with its declared type");
+        }
+    }
     match &value.kind {
+        K::Literal(Literal::Symbol(s) | Literal::String(s)) => charge(fuel, s.len()),
         K::Literal(
-            Literal::Symbol(s) | Literal::String(s) | Literal::Integer(s) | Literal::Float(s),
-        ) => charge(fuel, s.len()),
-        K::Literal(Literal::BitVec { words, .. }) => charge(fuel, words.len()),
-        K::Literal(_) | K::Unit | K::Function(_) => Ok(()),
-        K::TypeValue(t) => ty(t, fuel),
+            literal @ (Literal::Integer(_) | Literal::Float(_) | Literal::BitVec { .. }),
+        ) => literal_payload(literal, fuel),
+        K::Literal(_) | K::Function(_) => Ok(()),
+        K::Unit if matches!(value.ty, Term::Primitive(Primitive::Unit | Primitive::Void)) => Ok(()),
+        K::TypeValue(t)
+            if value.ty == Term::Primitive(Primitive::Type) && t.sort() == crate::Sort::Type =>
+        {
+            ty(t, fuel)
+        }
         // A captured data parameter is already a value, not a deferred program.
         // Specialization supplies its domain-checked concrete representation.
-        K::ComptimeValue(t) => {
-            crate::comptime_values::validate(t, &value.ty, fuel).map_err(|error| error.message())
-        }
+        K::ComptimeValue(t) => crate::comptime_values::validate_in(t, &value.ty, target, fuel)
+            .map_err(|error| error.message()),
         K::TypeListValue(types) => {
             for element in types {
                 ty(element, fuel)?;
@@ -171,14 +324,199 @@ fn value_in<'a>(
             }
             Ok(())
         }
-        K::Tuple(fields)
-        | K::Record { fields, .. }
-        | K::Variant { fields, .. }
-        | K::AnonymousRecord { fields } => {
-            for field in fields {
-                value_in(field, fuel, scope, depth + 1)?;
+        K::Tuple(fields) => {
+            let expected = match &value.ty {
+                Term::Tuple(types) => types.as_slice(),
+                Term::NormalForm {
+                    head,
+                    sort: crate::Sort::Type,
+                    arguments,
+                } if is_tuple(*head) => {
+                    let [Term::TypeListValue(types)] = arguments.as_slice() else {
+                        return Err("completed tuple has an invalid registered layout");
+                    };
+                    types.as_slice()
+                }
+                _ => return Err("completed tuple lacks registered layout evidence"),
+            };
+            if fields.len() != expected.len() {
+                return Err("completed tuple field count mismatch");
+            }
+            for (field, expected) in fields.iter().zip(expected) {
+                if &field.ty != expected {
+                    return Err("completed tuple field type mismatch");
+                }
+                value_in(
+                    field,
+                    fuel,
+                    scope,
+                    depth + 1,
+                    definitions,
+                    is_tuple,
+                    lookup,
+                    target,
+                )?;
             }
             Ok(())
+        }
+        K::AnonymousRecord { fields } => {
+            let Term::Record(expected) = &value.ty else {
+                return Err("completed record lacks a structural record type");
+            };
+            if fields.len() != expected.len() {
+                return Err("completed record field count mismatch");
+            }
+            let mut names = std::collections::BTreeSet::new();
+            for (field, (name, expected)) in fields.iter().zip(expected) {
+                charge(fuel, 1)?;
+                if !names.insert(name) || &field.ty != expected {
+                    return Err("completed record field identity or type mismatch");
+                }
+                value_in(
+                    field,
+                    fuel,
+                    scope,
+                    depth + 1,
+                    definitions,
+                    is_tuple,
+                    lookup,
+                    target,
+                )?;
+            }
+            Ok(())
+        }
+        K::Record {
+            declaration,
+            fields,
+        }
+        | K::Variant {
+            declaration,
+            fields,
+            ..
+        } => {
+            let Term::Nominal {
+                declaration: owner,
+                arguments,
+            } = &value.ty
+            else {
+                return Err("completed nominal constructor lacks a nominal type");
+            };
+            if declaration != owner {
+                return Err("completed nominal constructor identity mismatch");
+            }
+            let definition = lookup(*owner, fuel).ok_or("completed nominal layout unavailable")?;
+            let (parameters, domains, expected): (_, _, Vec<&Term>) =
+                match (definition, &value.kind) {
+                    (NominalValueDeclaration::Struct(definition), K::Record { .. })
+                        if definition.declaration == *owner =>
+                    {
+                        charge(
+                            fuel,
+                            definition.type_parameters.len() + definition.fields.len(),
+                        )?;
+                        (
+                            &definition.type_parameters,
+                            &definition.parameter_types,
+                            definition.fields.iter().map(|(_, ty)| ty).collect(),
+                        )
+                    }
+                    (NominalValueDeclaration::Enum(definition), K::Variant { index, .. })
+                        if definition.declaration == *owner =>
+                    {
+                        charge(fuel, definition.type_parameters.len() + 1)?;
+                        let variant = definition
+                            .variants
+                            .get(*index)
+                            .ok_or("completed enum variant out of bounds")?;
+                        charge(fuel, variant.fields.len())?;
+                        (
+                            &definition.type_parameters,
+                            &definition.parameter_types,
+                            variant.fields.iter().collect(),
+                        )
+                    }
+                    _ => return Err("completed nominal constructor kind mismatch"),
+                };
+            if fields.len() != expected.len() || arguments.len() != parameters.len() {
+                return Err("completed nominal field or argument count mismatch");
+            }
+            let expected = crate::normal_forms::instantiate_value_fields(
+                parameters,
+                domains,
+                arguments,
+                expected.into_iter(),
+                fuel,
+            )
+            .ok_or("completed nominal layout instantiation failed")?;
+            for (field, expected) in fields.iter().zip(expected) {
+                if field.ty != expected {
+                    return Err("completed nominal field type mismatch");
+                }
+                value_in(
+                    field,
+                    fuel,
+                    scope,
+                    depth + 1,
+                    definitions,
+                    is_tuple,
+                    lookup,
+                    target,
+                )?;
+            }
+            Ok(())
+        }
+        K::ErrorConvert {
+            conversion,
+            value: payload,
+        } => {
+            // Completed payloads can undergo checked row and product layout
+            // transport. No call or other deferred computation is introduced.
+            crate::error_results::validate_conversion_with_tuple(
+                *conversion,
+                &payload.ty,
+                &value.ty,
+                fuel,
+                &mut |_, _| false,
+                is_tuple,
+            )
+            .map_err(|error| match error {
+                crate::error_results::Error::Budget => "completed value budget exhausted",
+                _ => "completed error payload type mismatch",
+            })?;
+            value_in(
+                payload,
+                fuel,
+                scope,
+                depth + 1,
+                definitions,
+                is_tuple,
+                lookup,
+                target,
+            )
+        }
+        K::NewtypeConvert(payload) => {
+            let conversion = crate::newtypes::conversion_from(
+                definitions.clone(),
+                &payload.ty,
+                &value.ty,
+                &[],
+                fuel,
+            )
+            .map_err(|_| "invalid completed newtype representation")?;
+            if !conversion.is_some_and(|edge| edge.direction() == crate::newtypes::Direction::Wrap)
+            {
+                return Err("completed newtype requires a declared wrapping edge");
+            }
+            value_in(
+                payload,
+                fuel,
+                scope,
+                depth + 1,
+                definitions,
+                is_tuple,
+                lookup,
+                target,
+            )
         }
         K::Local(binding) => {
             if scope.get(binding).is_some_and(|ty| *ty == &value.ty) {
@@ -227,7 +565,16 @@ fn value_in<'a>(
                 if captured.ty != capture.ty {
                     return Err("completed closure capture type mismatch");
                 }
-                value_in(captured, fuel, scope, depth + 1)?;
+                value_in(
+                    captured,
+                    fuel,
+                    scope,
+                    depth + 1,
+                    definitions,
+                    is_tuple,
+                    lookup,
+                    target,
+                )?;
             }
             Ok(())
         }
@@ -263,7 +610,16 @@ fn value_in<'a>(
                 return Err("reconstruction result mismatch");
             }
             ty(&callee.ty, fuel)?;
-            value_in(body, fuel, &mut BTreeMap::new(), depth + 1)
+            value_in(
+                body,
+                fuel,
+                &mut BTreeMap::new(),
+                depth + 1,
+                definitions,
+                is_tuple,
+                lookup,
+                target,
+            )
         }
         K::Block { statements, result } => {
             let mut introduced = Vec::new();
@@ -278,7 +634,16 @@ fn value_in<'a>(
                     {
                         return Err("invalid completed graph binding");
                     }
-                    value_in(value, fuel, scope, depth + 1)?;
+                    value_in(
+                        value,
+                        fuel,
+                        scope,
+                        depth + 1,
+                        definitions,
+                        is_tuple,
+                        lookup,
+                        target,
+                    )?;
                     scope.insert(*binding, &value.ty);
                     introduced.push(*binding);
                 }
@@ -286,7 +651,16 @@ fn value_in<'a>(
                 if result.ty != value.ty {
                     return Err("completed graph result type mismatch");
                 }
-                value_in(result, fuel, scope, depth + 1)
+                value_in(
+                    result,
+                    fuel,
+                    scope,
+                    depth + 1,
+                    definitions,
+                    is_tuple,
+                    lookup,
+                    target,
+                )
             })();
             for binding in introduced {
                 scope.remove(&binding);

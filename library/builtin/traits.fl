@@ -5,42 +5,8 @@
 -- These traits form the core protocol system of Flurry. Many of them are
 -- lang items that the compiler desugars syntax into.
 
--- ── Equality ───────────────────────────────────────────────────────────────
-
--- #[lang = "eq"]
-pub trait Eq {
-    fn eq(self, other: Self) -> Bool;
-    fn ne(self, other: Self) -> Bool = not self.eq(other);
-}
-
--- ── Ordering ───────────────────────────────────────────────────────────────
-
--- #[lang = "ord"]
-pub trait Ord :- Eq {
-    fn cmp(self, other: Self) -> Ordering;
-    fn lt(self, other: Self) -> Bool = self.cmp(other) match {
-        .Less => true,
-        _ => false,
-    };
-    fn le(self, other: Self) -> Bool = self.cmp(other) match {
-        .Greater => false,
-        _ => true,
-    };
-    fn gt(self, other: Self) -> Bool = self.cmp(other) match {
-        .Greater => true,
-        _ => false,
-    };
-    fn ge(self, other: Self) -> Bool = self.cmp(other) match {
-        .Less => false,
-        _ => true,
-    };
-}
-
-pub enum Ordering {
-    Less,
-    Equal,
-    Greater,
-}
+-- Comparison protocols can be loaded without formatting/owned strings.
+pub use comparison.{Eq, Ord, Ordering};
 
 -- ── Display / Debug ────────────────────────────────────────────────────────
 
@@ -54,24 +20,8 @@ pub trait Debug {
     fn debug_fmt(self) -> String;
 }
 
--- ── Once / Clone / Copy ────────────────────────────────────────────────────
-
-pub trait Once {}
-
--- #[lang = "clone"]
-pub trait Clone :- Once {
-    fn clone(*self) -> Self;
-}
-
--- #[lang = "copy"]
-pub trait Copy :- Clone {}
-
--- ── Drop ───────────────────────────────────────────────────────────────────
-
--- #[lang = "drop"]
-pub trait Drop {
-    fn drop(*self);
-}
+-- Resource protocols live separately from formatting and owned strings.
+pub use resources.{Once, Clone, Copy, Drop};
 
 -- ── Hash ───────────────────────────────────────────────────────────────────
 
@@ -82,15 +32,7 @@ pub trait Hash {
 
 -- ── Conversion ─────────────────────────────────────────────────────────────
 
--- #[lang = "into"]
-pub trait Into where Target {
-    fn into(self) -> Target;
-}
-
--- #[lang = "from"]
-pub trait From where Source {
-    fn from(source: Source) -> Self;
-}
+pub use conversion.{Into, From};
 
 -- ── Default ────────────────────────────────────────────────────────────────
 

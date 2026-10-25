@@ -6,6 +6,7 @@ use nir::{DeclarationId, Sort, Term};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    sync::Arc,
 };
 
 fn scope_frames(scope: &[(Sort, Option<Term>)]) -> Vec<Vec<Sort>> {
@@ -122,6 +123,109 @@ impl Requirement {
             ),
         })
     }
+    fn dependencies_metered(
+        &self,
+        inference: &InferenceContext,
+        budget: &mut Budget,
+    ) -> Result<BTreeSet<MetaId>, InferenceError> {
+        let mut result = BTreeSet::new();
+        let mut pending = vec![self];
+        while let Some(requirement) = pending.pop() {
+            budget.steps = budget.steps.checked_sub(1).ok_or(InferenceError::Budget)?;
+            match requirement {
+                Self::Stable(_) => {}
+                Self::Equal(a, b) => {
+                    result.extend(inference.unresolved_with_limits(
+                        a,
+                        &mut budget.steps,
+                        budget.max_depth,
+                    )?);
+                    result.extend(inference.unresolved_with_limits(
+                        b,
+                        &mut budget.steps,
+                        budget.max_depth,
+                    )?);
+                }
+                Self::Kind(ty, _) => result.extend(inference.unresolved_with_limits(
+                    ty,
+                    &mut budget.steps,
+                    budget.max_depth,
+                )?),
+                Self::Not(inner) => pending.push(inner),
+                Self::And(items) | Self::Or(items) => pending.extend(items),
+            }
+        }
+        Ok(result)
+    }
+    fn freeze_metered(
+        &self,
+        inference: &InferenceContext,
+        scope: &[(Sort, Option<Term>)],
+        native_scope: bool,
+        budget: &mut Budget,
+        depth: usize,
+    ) -> Result<Formula, InferenceError> {
+        if depth >= budget.max_depth.min(128) {
+            return Err(InferenceError::Budget);
+        }
+        budget.steps = budget.steps.checked_sub(1).ok_or(InferenceError::Budget)?;
+        if matches!(self, Self::Equal(..)) {
+            for _ in 0..2 {
+                for (_, domain) in scope {
+                    budget.steps = budget.steps.checked_sub(1).ok_or(InferenceError::Budget)?;
+                    if let Some(ty) = domain {
+                        nir::type_computations::charge_term_with_depth(
+                            ty,
+                            &mut budget.steps,
+                            budget.max_depth,
+                        )
+                        .map_err(|_| InferenceError::Budget)?;
+                    }
+                }
+            }
+        }
+        Ok(match self {
+            Self::Stable(formula) => {
+                if !ptc::within_limits(
+                    formula,
+                    budget.max_depth.saturating_sub(depth),
+                    &mut budget.steps,
+                ) {
+                    return Err(InferenceError::Budget);
+                }
+                formula.clone()
+            }
+            Self::Equal(a, b) => scoped_equality(
+                inference.freeze_with_limits(a, &mut budget.steps, budget.max_depth)?,
+                inference.freeze_with_limits(b, &mut budget.steps, budget.max_depth)?,
+                scope,
+                native_scope,
+            )?,
+            Self::Kind(ty, kind) => Formula::kind(
+                inference.freeze_with_limits(ty, &mut budget.steps, budget.max_depth)?,
+                *kind,
+            ),
+            Self::Not(inner) => inner
+                .freeze_metered(inference, scope, native_scope, budget, depth + 1)?
+                .negate(),
+            Self::And(items) => Formula::And(
+                items
+                    .iter()
+                    .map(|item| {
+                        item.freeze_metered(inference, scope, native_scope, budget, depth + 1)
+                    })
+                    .collect::<Result<_, _>>()?,
+            ),
+            Self::Or(items) => Formula::Or(
+                items
+                    .iter()
+                    .map(|item| {
+                        item.freeze_metered(inference, scope, native_scope, budget, depth + 1)
+                    })
+                    .collect::<Result<_, _>>()?,
+            ),
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -138,7 +242,7 @@ impl State {
 }
 #[derive(Clone, Debug)]
 struct Obligation {
-    requirement: Requirement,
+    requirement: Arc<Requirement>,
     state: State,
     attempts: usize,
 }
@@ -162,10 +266,10 @@ pub struct Engine {
     parent: Option<(u64, u64)>,
     inference: InferenceContext,
     context: ptc::Context,
-    scope: Vec<(Sort, Option<Term>)>,
-    obligations: BTreeMap<ObligationId, Obligation>,
-    ready: BTreeSet<ObligationId>,
-    watchers: BTreeMap<MetaId, BTreeSet<ObligationId>>,
+    scope: Arc<Vec<(Sort, Option<Term>)>>,
+    obligations: Arc<BTreeMap<ObligationId, Arc<Obligation>>>,
+    ready: Arc<BTreeSet<ObligationId>>,
+    watchers: Arc<BTreeMap<MetaId, Arc<BTreeSet<ObligationId>>>>,
 }
 impl Default for Engine {
     fn default() -> Self {
@@ -175,10 +279,10 @@ impl Default for Engine {
             parent: None,
             inference: InferenceContext::default(),
             context: ptc::Context::default(),
-            scope: Vec::new(),
-            obligations: BTreeMap::new(),
-            ready: BTreeSet::new(),
-            watchers: BTreeMap::new(),
+            scope: Arc::default(),
+            obligations: Arc::default(),
+            ready: Arc::default(),
+            watchers: Arc::default(),
         }
     }
 }
@@ -195,7 +299,8 @@ impl Engine {
             scope: scope
                 .into_iter()
                 .map(|parameter| (parameter.sort, Some(parameter.ty)))
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
             ..Self::default()
         }
     }
@@ -239,7 +344,7 @@ impl Engine {
         };
         Ok(Self {
             context,
-            scope,
+            scope: Arc::new(scope),
             ..Self::default()
         })
     }
@@ -270,16 +375,32 @@ impl Engine {
         relations: &[(InferenceTerm, InferenceTerm)],
         budget: Budget,
     ) -> Result<(Self, Vec<ObligationId>), crate::matching::MatchError> {
+        self.match_many_metered(relations, &mut { budget })
+    }
+    /// Failed trials preserve the parent and return their consumed work.
+    pub fn match_many_metered(
+        &self,
+        relations: &[(InferenceTerm, InferenceTerm)],
+        budget: &mut Budget,
+    ) -> Result<(Self, Vec<ObligationId>), crate::matching::MatchError> {
         let mut candidate = self.trial();
-        for (left, right) in relations {
-            crate::matching::propose(
-                &mut candidate.inference,
-                left,
-                right,
-                &candidate.context,
-                &scope_frames(&candidate.scope),
-                budget,
-            )?;
+        loop {
+            let before = candidate.inference.revision;
+            for (left, right) in relations {
+                crate::matching::propose_metered(
+                    &mut candidate.inference,
+                    left,
+                    right,
+                    &candidate.context,
+                    &scope_frames(&candidate.scope),
+                    budget,
+                )?;
+            }
+            // New assignments can disambiguate an earlier structural row.
+            // Retry only after real progress, under one transaction budget.
+            if candidate.inference.revision == before {
+                break;
+            }
         }
         candidate.invalidate();
         let ids = relations
@@ -325,7 +446,7 @@ impl Engine {
     pub fn assign(&mut self, id: MetaId, value: InferenceTerm) -> Result<(), Error> {
         self.inference.assign(id, value)?;
         let affected = self.watchers.get(&id).cloned().unwrap_or_default();
-        for obligation in affected {
+        for obligation in affected.iter().copied() {
             self.enqueue(obligation);
         }
         self.changed();
@@ -334,13 +455,19 @@ impl Engine {
     fn enqueue(&mut self, id: ObligationId) {
         if let State::Waiting(dependencies) = &self.obligations[&id].state {
             for dependency in dependencies {
-                if let Some(waiters) = self.watchers.get_mut(dependency) {
-                    waiters.remove(&id);
+                if let Some(waiters) = Arc::make_mut(&mut self.watchers).get_mut(dependency) {
+                    Arc::make_mut(waiters).remove(&id);
                 }
             }
         }
-        self.obligations.get_mut(&id).unwrap().state = State::Ready;
-        self.ready.insert(id);
+        let old = &self.obligations[&id];
+        let ready = Arc::new(Obligation {
+            requirement: old.requirement.clone(),
+            state: State::Ready,
+            attempts: old.attempts,
+        });
+        Arc::make_mut(&mut self.obligations).insert(id, ready);
+        Arc::make_mut(&mut self.ready).insert(id);
     }
     fn invalidate(&mut self) {
         for id in self.obligations.keys().copied().collect::<Vec<_>>() {
@@ -362,15 +489,15 @@ impl Engine {
     }
     pub fn require(&mut self, requirement: Requirement) -> ObligationId {
         let id = ObligationId(unique());
-        self.obligations.insert(
+        Arc::make_mut(&mut self.obligations).insert(
             id,
-            Obligation {
-                requirement,
+            Arc::new(Obligation {
+                requirement: Arc::new(requirement),
                 state: State::Ready,
                 attempts: 0,
-            },
+            }),
         );
-        self.ready.insert(id);
+        Arc::make_mut(&mut self.ready).insert(id);
         self.changed();
         id
     }
@@ -393,16 +520,22 @@ impl Engine {
     pub fn advance(&mut self, limit: usize, budget: Budget) -> usize {
         let mut processed = 0;
         while processed < limit {
-            let Some(id) = self.ready.pop_first() else {
+            let Some(id) = Arc::make_mut(&mut self.ready).pop_first() else {
                 break;
             };
-            let obligation = self.obligations.get_mut(&id).unwrap();
+            let obligation =
+                Arc::make_mut(Arc::make_mut(&mut self.obligations).get_mut(&id).unwrap());
             obligation.attempts += 1;
             obligation.state = match obligation.requirement.dependencies(&self.inference) {
                 Err(error) => State::InvalidInference(error.to_string()),
                 Ok(dependencies) if !dependencies.is_empty() => {
                     for dependency in &dependencies {
-                        self.watchers.entry(*dependency).or_default().insert(id);
+                        Arc::make_mut(
+                            Arc::make_mut(&mut self.watchers)
+                                .entry(*dependency)
+                                .or_default(),
+                        )
+                        .insert(id);
                     }
                     State::Waiting(dependencies)
                 }
@@ -416,6 +549,65 @@ impl Engine {
                 },
             };
             processed += 1;
+        }
+        if processed != 0 {
+            self.changed();
+        }
+        processed
+    }
+    /// Advance ready obligations under one shared proof allowance. Unprocessed
+    /// entries remain queued when the allowance is exhausted.
+    pub fn advance_metered(&mut self, limit: usize, budget: &mut Budget) -> usize {
+        let mut processed = 0;
+        while processed < limit && budget.steps > 0 {
+            let Some(id) = Arc::make_mut(&mut self.ready).pop_first() else {
+                break;
+            };
+            budget.steps -= 1;
+            let obligation =
+                Arc::make_mut(Arc::make_mut(&mut self.obligations).get_mut(&id).unwrap());
+            obligation.attempts += 1;
+            let mut paused = false;
+            obligation.state = match obligation
+                .requirement
+                .dependencies_metered(&self.inference, budget)
+            {
+                Err(InferenceError::Budget) => {
+                    paused = true;
+                    State::Ready
+                }
+                Err(error) => State::InvalidInference(error.to_string()),
+                Ok(dependencies) if !dependencies.is_empty() => {
+                    for dependency in &dependencies {
+                        Arc::make_mut(
+                            Arc::make_mut(&mut self.watchers)
+                                .entry(*dependency)
+                                .or_default(),
+                        )
+                        .insert(id);
+                    }
+                    State::Waiting(dependencies)
+                }
+                Ok(_) => match obligation.requirement.freeze_metered(
+                    &self.inference,
+                    &self.scope,
+                    self.context.scope() == scope_frames(&self.scope).as_slice(),
+                    budget,
+                    0,
+                ) {
+                    Ok(formula) => State::Solved(self.context.prove_metered(formula, budget)),
+                    Err(InferenceError::Budget) => {
+                        paused = true;
+                        State::Ready
+                    }
+                    Err(error) => State::InvalidInference(error.to_string()),
+                },
+            };
+            processed += 1;
+            if paused {
+                Arc::make_mut(&mut self.ready).insert(id);
+                break;
+            }
         }
         if processed != 0 {
             self.changed();
@@ -438,6 +630,8 @@ impl Engine {
             self.changed();
         }
     }
+    /// All candidate tables are shared until written. Individual requirements
+    /// and untouched obligations remain shared even after a table detaches.
     pub fn trial(&self) -> Self {
         Self {
             identity: unique(),
@@ -530,7 +724,7 @@ impl fmt::Display for Engine {
         f.write_str("(obligations")?;
         if !self.scope.is_empty() {
             f.write_str(" (scope")?;
-            for (sort, domain) in &self.scope {
+            for (sort, domain) in self.scope.iter() {
                 match domain {
                     Some(ty) => write!(f, " (parameter {sort} {ty})")?,
                     None => write!(f, " (parameter {sort} (unknown-domain))")?,
@@ -538,7 +732,7 @@ impl fmt::Display for Engine {
             }
             f.write_str(")")?;
         }
-        for (id, obligation) in &self.obligations {
+        for (id, obligation) in self.obligations.iter() {
             write!(
                 f,
                 " (obligation {} (attempts {}) (requirement {}) (state ",
@@ -559,5 +753,57 @@ impl fmt::Display for Engine {
             f.write_str("))")?;
         }
         f.write_str(")")
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn candidate_wakeups_preserve_parent_waiters_and_share_untouched_proofs() {
+        let mut parent = Engine::default();
+        let variable = parent.fresh(Sort::Type);
+        let boolean = InferenceTerm::Stable(Term::Primitive(nir::Primitive::Bool));
+        let ids = (0..64)
+            .map(|_| {
+                parent.require(Requirement::Equal(
+                    InferenceTerm::Meta(variable),
+                    boolean.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let settled = parent.require(Requirement::Stable(Formula::True));
+        parent.advance(65, Budget::default());
+        let mut child = parent.trial();
+        let sibling = parent.trial();
+        assert!(Arc::ptr_eq(&parent.obligations, &child.obligations));
+        assert!(Arc::ptr_eq(&parent.watchers, &child.watchers));
+        assert!(Arc::ptr_eq(&parent.ready, &child.ready));
+        assert!(Arc::ptr_eq(&parent.scope, &child.scope));
+        child.assign(variable, boolean).unwrap();
+        assert!(Arc::ptr_eq(
+            &parent.obligations[&settled],
+            &child.obligations[&settled]
+        ));
+        assert!(!Arc::ptr_eq(&parent.obligations, &child.obligations));
+        for id in &ids {
+            assert!(matches!(parent.state(*id), Some(State::Waiting(_))));
+            assert!(matches!(child.state(*id), Some(State::Ready)));
+            assert!(Arc::ptr_eq(
+                &parent.obligations[id].requirement,
+                &child.obligations[id].requirement
+            ));
+        }
+        assert!(parent.ready.is_empty());
+        assert_eq!(parent.watchers[&variable].len(), 64);
+        assert!(child.watchers[&variable].is_empty());
+        child.advance(64, Budget::default());
+        parent.commit(child).unwrap();
+        for id in ids {
+            assert!(parent.state(id).unwrap().is_proven());
+            assert!(matches!(sibling.state(id), Some(State::Waiting(_))));
+        }
+        assert_eq!(parent.commit(sibling), Err(Error::StaleCandidate));
     }
 }

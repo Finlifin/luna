@@ -163,3 +163,175 @@ impl InferenceContext {
         Ok(values.pop().expect("visited root").0)
     }
 }
+
+/// Account for an inference syntax copy, including unused substitution inputs.
+/// This observes shape only; it does not resolve or evaluate those inputs.
+pub(crate) fn copy_input(
+    input: &InferenceTerm,
+    fuel: &mut usize,
+    max_depth: usize,
+) -> Result<InferenceTerm, InferenceError> {
+    let mut pending = vec![(input, 0usize)];
+    while let Some((input, depth)) = pending.pop() {
+        if depth >= max_depth.min(128) {
+            return Err(InferenceError::Budget);
+        }
+        charge(fuel, 1)?;
+        match input {
+            InferenceTerm::Stable(term) => {
+                term_work(term, fuel, max_depth.saturating_sub(depth))?;
+            }
+            InferenceTerm::Meta(_) => {}
+            InferenceTerm::Instantiate {
+                template,
+                arguments,
+            } => {
+                term_work(template, fuel, max_depth.saturating_sub(depth))?;
+                charge(fuel, arguments.len())?;
+                pending.extend(arguments.iter().map(|input| (input, depth + 1)));
+            }
+        }
+    }
+    Ok(input.clone())
+}
+
+impl InferenceContext {
+    pub fn resolve_with_limits(
+        &self,
+        term: &InferenceTerm,
+        fuel: &mut usize,
+        max_depth: usize,
+    ) -> Result<InferenceTerm, InferenceError> {
+        let mut term = term;
+        loop {
+            charge(fuel, 1)?;
+            match term {
+                InferenceTerm::Meta(id) => {
+                    let variable = self
+                        .variables
+                        .get(id)
+                        .ok_or(InferenceError::ForeignVariable(*id))?;
+                    match &variable.value {
+                        Some(value) => term = value,
+                        None => return copy_input(term, fuel, max_depth),
+                    }
+                }
+                InferenceTerm::Instantiate {
+                    template:
+                        Term::Bound {
+                            depth: 0,
+                            index,
+                            sort,
+                        },
+                    arguments,
+                } => {
+                    let value =
+                        arguments
+                            .get(*index)
+                            .ok_or(InferenceError::InvalidSubstitution(
+                                TypeError::MissingArgument(*index),
+                            ))?;
+                    let actual = self.sort(value)?;
+                    if actual != *sort {
+                        return Err(InferenceError::WrongSort {
+                            expected: *sort,
+                            actual,
+                        });
+                    }
+                    term = value;
+                }
+                _ => break,
+            }
+        }
+        match self.freeze_with_limits(term, fuel, max_depth) {
+            Ok(stable) => Ok(InferenceTerm::Stable(stable)),
+            Err(InferenceError::Unresolved(_)) => copy_input(term, fuel, max_depth),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl InferenceContext {
+    /// Publish an assignment only after bounded occurrence and sort checks.
+    pub fn assign_with_limits(
+        &mut self,
+        id: MetaId,
+        value: InferenceTerm,
+        fuel: &mut usize,
+        max_depth: usize,
+    ) -> Result<(), InferenceError> {
+        charge(fuel, 1)?;
+        let variable = self
+            .variables
+            .get(&id)
+            .ok_or(InferenceError::ForeignVariable(id))?;
+        if variable.value.is_some() {
+            return Err(InferenceError::AlreadyAssigned(id));
+        }
+        let expected = variable.sort;
+        self.check_occurs_with_limits(id, &value, fuel, max_depth)?;
+        let actual = self.sort(&value)?;
+        if actual != expected {
+            return Err(InferenceError::WrongSort { expected, actual });
+        }
+        std::sync::Arc::make_mut(&mut self.variables)
+            .get_mut(&id)
+            .unwrap()
+            .value = Some(std::sync::Arc::new(value));
+        self.changed();
+        Ok(())
+    }
+    fn check_occurs_with_limits(
+        &self,
+        target: MetaId,
+        term: &InferenceTerm,
+        fuel: &mut usize,
+        max_depth: usize,
+    ) -> Result<(), InferenceError> {
+        let mut pending = vec![term];
+        let mut seen = BTreeSet::new();
+        while let Some(term) = pending.pop() {
+            charge(fuel, 1)?;
+            match term {
+                InferenceTerm::Stable(_) => {}
+                InferenceTerm::Meta(id) => {
+                    if *id == target {
+                        return Err(InferenceError::Occurs(target));
+                    }
+                    let variable = self
+                        .variables
+                        .get(id)
+                        .ok_or(InferenceError::ForeignVariable(*id))?;
+                    if seen.insert(*id) {
+                        if let Some(value) = &variable.value {
+                            pending.push(value);
+                        }
+                    }
+                }
+                InferenceTerm::Instantiate {
+                    template,
+                    arguments,
+                } => {
+                    term_work(template, fuel, max_depth)?;
+                    for (index, expected) in template
+                        .substitution_parameters()
+                        .map_err(InferenceError::InvalidSubstitution)?
+                    {
+                        let argument =
+                            arguments
+                                .get(index)
+                                .ok_or(InferenceError::InvalidSubstitution(
+                                    TypeError::MissingArgument(index),
+                                ))?;
+                        let actual = self.sort(argument)?;
+                        if actual != expected {
+                            return Err(InferenceError::WrongSort { expected, actual });
+                        }
+                        pending.push(argument);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}

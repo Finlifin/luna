@@ -82,6 +82,14 @@ fn local_identity(
             | Term::TypeListValue(arguments)
             | Term::TypeListConcat(arguments)
             | Term::TupleValue(arguments) => arguments,
+            Term::ErrorValue { ty, label, value } => {
+                work.push((ty, depth + 1));
+                if let Some(label) = label {
+                    work.push((label, depth + 1));
+                }
+                work.push((value, depth + 1));
+                continue;
+            }
             Term::NominalValue { ty, fields, .. } => {
                 if fields.len().saturating_add(1) > *fuel {
                     return Err(Error::BudgetExhausted);
@@ -97,7 +105,7 @@ fn local_identity(
                 work.extend(fields.iter().rev().map(|(_, ty)| (ty, depth + 1)));
                 continue;
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) => {
+            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
                 work.push((inner, depth + 1));
                 continue;
             }

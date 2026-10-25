@@ -352,7 +352,7 @@ fn use(value:Wrapped(false)) -> bool {
 ```flurry
 newtype Flags<a:bool,b:bool> = bool;
 
-comptime fn packet(pointer:*bool) -> (bool,bool) {
+comptime fn packet(pointer:*bool) -> Tuple<bool, bool> {
     pointer.* = not pointer.*;
     (pointer.*,not pointer.*)
 }

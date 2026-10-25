@@ -637,9 +637,9 @@ fn mutable_template_storage_keeps_address_escape_opaque() {
         Term::Pointer(Box::new(signature)),
     ));
     let original = candidate.clone();
-    mutable_callbacks::lower(&mut candidate, &mut 100, &mut 10000).unwrap();
+    mutable_callbacks::lower(&mut candidate, &mut 100, &mut vec![], &mut 10000).unwrap();
     assert_eq!(candidate, original);
-    assert!(mutable_callbacks::lower(&mut candidate, &mut 100, &mut 0).is_err());
+    assert!(mutable_callbacks::lower(&mut candidate, &mut 100, &mut vec![], &mut 0).is_err());
 }
 
 #[test]
@@ -678,7 +678,149 @@ fn mutable_template_components_preserve_escaping_aliases_and_unknown_sources() {
             Term::Primitive(Primitive::Void),
         ));
         let original = candidate.clone();
-        mutable_callbacks::lower(&mut candidate, &mut 100, &mut 10000).unwrap();
+        mutable_callbacks::lower(&mut candidate, &mut 100, &mut vec![], &mut 10000).unwrap();
         assert_eq!(candidate, original);
+    }
+}
+
+#[test]
+fn preparation_pruning_removes_only_completed_void_placeholders() {
+    let void = Term::Primitive(Primitive::Void);
+    let binding = n::LocalId { owner: 1, index: 0 };
+    let runtime_binding = expr(
+        K::Let {
+            binding,
+            value: Box::new(expr(
+                K::Block {
+                    statements: vec![],
+                    result: None,
+                },
+                void.clone(),
+            )),
+        },
+        void.clone(),
+    );
+    let result = Some(Box::new(expr(K::Local(binding), void.clone())));
+    let mut preparation = expr(
+        K::CallPreparation {
+            statements: vec![
+                expr(K::Unit, void.clone()),
+                runtime_binding.clone(),
+                expr(K::Unit, void.clone()),
+            ],
+            result: result.clone(),
+        },
+        void.clone(),
+    );
+    dead_tails::prune_type_preparations(&mut preparation, &mut 1000).unwrap();
+    assert_eq!(
+        preparation,
+        expr(
+            K::CallPreparation {
+                statements: vec![runtime_binding],
+                result,
+            },
+            void.clone()
+        )
+    );
+    // Ordinary blocks retain their sequencing nodes; this repair is scoped to
+    // the binding-only protocol of materialized call preparations.
+    let mut block = expr(
+        K::Block {
+            statements: vec![expr(K::Unit, void.clone())],
+            result: None,
+        },
+        void,
+    );
+    let original = block.clone();
+    dead_tails::prune_type_preparations(&mut block, &mut 1000).unwrap();
+    assert_eq!(block, original);
+}
+
+#[test]
+fn mutable_callback_reads_have_distinct_cleanup_sources() {
+    let (mut candidate, binding, signature) = fixture();
+    let K::Block { statements, .. } = &mut candidate.kind else {
+        unreachable!()
+    };
+    statements.push(expr(
+        K::Assign {
+            place: n::Place {
+                root: binding,
+                fields: vec![],
+            },
+            value: Box::new(expr(
+                K::Function(Id {
+                    package: 0,
+                    local: 2,
+                }),
+                signature.clone(),
+            )),
+        },
+        Term::Primitive(Primitive::Void),
+    ));
+    statements.push(expr(K::Local(binding), signature));
+    let original = candidate.clone();
+    let mut sources = vec![];
+    mutable_callbacks::lower(&mut candidate, &mut 100, &mut sources, &mut 10000).unwrap();
+    let mut generated = BTreeSet::new();
+    let mut matches = 0;
+    nir::visit::expression(&candidate, &mut 10000, |expression, _| {
+        if let K::Match { value, arms } = &expression.kind {
+            matches += 1;
+            assert_ne!(expression.source, value.source);
+            for source in
+                std::iter::once(value.source).chain(arms.iter().map(|arm| arm.body.source))
+            {
+                assert_eq!(source.start, u32::MAX);
+                assert!(
+                    generated.insert(source.end),
+                    "generated cleanup sources must be unique"
+                );
+                assert!((source.end as usize) < sources.len());
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(matches, 2);
+    let mut repeated = original;
+    let mut repeated_sources = vec![];
+    mutable_callbacks::lower(&mut repeated, &mut 100, &mut repeated_sources, &mut 10000).unwrap();
+    assert_eq!(candidate, repeated);
+    assert_eq!(sources, repeated_sources);
+}
+
+#[test]
+fn factory_dispatch_separates_wrapper_and_copied_target_sources() {
+    let (_, binding, signature) = fixture();
+    let value = expr(K::Local(binding), Term::Primitive(Primitive::U64));
+    let source = value.source;
+    let target = expr(
+        K::Function(Id {
+            package: 0,
+            local: 1,
+        }),
+        signature.clone(),
+    );
+    let mut sources = vec![];
+    let dispatch = template_factories::dispatch(
+        value,
+        &signature,
+        &[target.clone(), target],
+        &mut 100,
+        &mut sources,
+        &mut 10000,
+    )
+    .unwrap();
+    assert_eq!(dispatch.source, source);
+    let K::Match { value, arms } = dispatch.kind else {
+        unreachable!()
+    };
+    let mut generated = BTreeSet::new();
+    for source in std::iter::once(value.source).chain(arms.iter().map(|arm| arm.body.source)) {
+        assert_eq!(source.start, u32::MAX);
+        assert!(generated.insert(source.end));
+        assert!((source.end as usize) < sources.len());
     }
 }

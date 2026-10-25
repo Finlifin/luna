@@ -82,10 +82,8 @@ impl Checker<'_, '_> {
                     unavailable.push(all[*slot]);
                 }
             }
-            let signature = self
-                .copy_alias_type(&base.signature, span)?
-                .instantiate_parameters(&binders, &values)
-                .map_err(|e| error(span, e.to_string()))?;
+            let signature =
+                self.instantiate_generator_type(&base.signature, &binders, &values, span)?;
             let Term::Function {
                 parameters: inputs,
                 result,
@@ -189,8 +187,12 @@ impl Checker<'_, '_> {
                 let prefix = plan[..*slot]
                     .iter()
                     .map(|ty| {
-                        ty.instantiate_parameters(&self.input_binders(parameters), &hints)
-                            .map_err(|e| error(span, e.to_string()))
+                        self.instantiate_generator_type(
+                            ty,
+                            &self.input_binders(parameters),
+                            &hints,
+                            span,
+                        )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let ready = unknown.is_empty()

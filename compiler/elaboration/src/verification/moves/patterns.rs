@@ -17,9 +17,9 @@ pub(super) fn binding_orders(
     }
     charge(fuel, source)?;
     let orders = match pattern {
-        Pattern::Observe { inner: pattern, .. } | Pattern::Guard { pattern, .. } => {
-            binding_orders(pattern, fuel, source, depth + 1)?
-        }
+        Pattern::Observe { inner: pattern, .. }
+        | Pattern::ErrorResult { inner: pattern, .. }
+        | Pattern::Guard { pattern, .. } => binding_orders(pattern, fuel, source, depth + 1)?,
         Pattern::Then { first, next, .. } => {
             let first = binding_orders(first, fuel, source, depth + 1)?;
             let next = binding_orders(next, fuel, source, depth + 1)?;
@@ -126,7 +126,8 @@ pub(super) fn has_alternatives(
         // An as-binding owns the whole position. Its inner alternatives may
         // only copy, and already use the compact Copy candidate analysis.
         Pattern::Binding { .. } => Ok(false),
-        Pattern::Observe { inner, .. }
+        Pattern::ErrorResult { inner, .. }
+        | Pattern::Observe { inner, .. }
         | Pattern::Remap { pattern: inner, .. }
         | Pattern::Guard { pattern: inner, .. } => has_alternatives(inner, fuel, source, depth + 1),
         Pattern::Tuple(fields)
@@ -174,6 +175,18 @@ pub(super) fn alternatives(
                 inner: Box::new(inner),
             })
             .collect(),
+        Pattern::ErrorResult { label, inner } => {
+            if let Some(label) = label {
+                super::super::memory::bound_type(label, fuel).map_err(|e| error(source, e))?;
+            }
+            alternatives(inner, fuel, source, depth + 1)?
+                .into_iter()
+                .map(|inner| Pattern::ErrorResult {
+                    label: label.clone(),
+                    inner: Box::new(inner),
+                })
+                .collect()
+        }
         Pattern::Binding { .. } => vec![pattern.clone()],
         // The next pattern observes a separately computed scalar in the
         // currently supported ownership path. Its Copy alternatives remain
@@ -266,6 +279,26 @@ pub(super) fn common_plan(
     let pair = match pattern {
         Pattern::Wild | Pattern::Literal(_) => (Pattern::Wild, Pattern::Wild),
         Pattern::Unit => (Pattern::Unit, Pattern::Wild),
+        Pattern::ErrorResult { label, inner } => {
+            if let Some(label) = label {
+                super::super::memory::bound_type(label, fuel).map_err(|e| error(source, e))?;
+            }
+            let (observation, transfer) = common_plan(inner, fuel, source, depth + 1)?;
+            (
+                Pattern::ErrorResult {
+                    label: label.clone(),
+                    inner: Box::new(observation),
+                },
+                if matches!(transfer, Pattern::Wild) {
+                    Pattern::Wild
+                } else {
+                    Pattern::ErrorResult {
+                        label: label.clone(),
+                        inner: Box::new(transfer),
+                    }
+                },
+            )
+        }
         Pattern::Binding { binding, inner } => {
             let (observation, transfer) = common_plan(inner, fuel, source, depth + 1)?;
             (
@@ -402,7 +435,9 @@ fn exports(
     charge(fuel, source)?;
     let mut names = BTreeSet::new();
     match pattern {
-        Pattern::Observe { inner: pattern, .. } | Pattern::Guard { pattern, .. } => {
+        Pattern::Observe { inner: pattern, .. }
+        | Pattern::ErrorResult { inner: pattern, .. }
+        | Pattern::Guard { pattern, .. } => {
             return exports(pattern, fuel, source, depth + 1);
         }
         Pattern::Then { first, next, .. } => {
@@ -500,6 +535,7 @@ fn remap(
                 }
                 pending.push(inner);
             }
+            Pattern::ErrorResult { inner, .. } => pending.push(inner),
             Pattern::Tuple(fields)
             | Pattern::Record { fields, .. }
             | Pattern::AnonymousRecord { fields, .. }

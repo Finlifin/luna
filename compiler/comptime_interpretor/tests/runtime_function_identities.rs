@@ -30,6 +30,7 @@ fn package() -> Package {
             phase: FunctionPhase::Comptime,
             inline: false,
             pure: false,
+            is_unsafe: false,
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,
@@ -182,6 +183,7 @@ fn trait_package() -> Package {
         methods: vec![nir::program::MethodContract {
             is_quote: false,
             pure: false,
+            is_unsafe: false,
             type_arguments: vec![],
             type_parameters: vec![id(3)],
             capabilities: vec![],
@@ -270,9 +272,11 @@ fn body_free_trait_method_cannot_execute_or_erase_a_precondition() {
         });
     assert!(Interpreter::for_comptime(&package, Budget::default()).is_err());
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    // Reject storing the contracted interface value before attempting to
+    // resolve an executable body; its precondition cannot be erased.
     assert_eq!(
         vm.invoke(id(1), vec![]).unwrap_err().kind,
-        ErrorKind::InvalidCallPlan
+        ErrorKind::Unsupported
     );
 }
 
@@ -293,6 +297,7 @@ fn generator_method_contract_cannot_enter_ordinary_interpreter_dispatch() {
         methods: vec![nir::program::MethodContract {
             is_quote: false,
             pure: false,
+            is_unsafe: false,
             type_arguments: vec![],
             type_parameters: vec![],
             capabilities: vec![],
@@ -639,4 +644,149 @@ fn available_runtime_body_does_not_erase_transported_trait_origin() {
         .preconditions
         .push(predicate);
     assert!(Interpreter::for_comptime(&package, Budget::default()).is_err());
+}
+
+#[test]
+fn frozen_runtime_identity_round_trips_without_changing_phase_or_responsibility() {
+    use nir::{Parameter, program::LocalId};
+    for unsafe_call in [false, true] {
+        let mut package = package();
+        let callable =
+            signature(Term::Primitive(Primitive::Bool)).with_unsafe_call_requirement(unsafe_call);
+        package.runtime_function_identities[0].signature = package.runtime_function_identities[0]
+            .signature
+            .clone()
+            .with_unsafe_call_requirement(unsafe_call);
+        package.functions[0].signature = signature(callable.clone());
+        package.functions[0].body.ty = callable.clone();
+        let binding = LocalId { owner: 4, index: 0 };
+        let mut accept = package.functions[0].clone();
+        accept.declaration = id(4);
+        accept.name = "accept".into();
+        accept.signature = Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::ComptimeValue,
+                ty: callable.clone(),
+            }],
+            result: Box::new(callable.clone()),
+        };
+        accept.parameters = vec![binding];
+        accept.body = Expr {
+            source: SourceRange { start: 3, end: 4 },
+            ty: callable.clone(),
+            kind: K::Local(binding),
+        };
+        package.functions.push(accept);
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let value = vm.invoke(id(1), vec![]).unwrap();
+        assert_eq!(
+            value.clone().into_normal_term(&mut Default::default()),
+            Err(ErrorKind::Unsupported)
+        );
+        let frozen = value
+            .clone()
+            .into_scoped_invocation_term(&mut Default::default(), &Default::default())
+            .unwrap();
+        assert_eq!(
+            frozen,
+            Term::FunctionValue {
+                declaration: id(2),
+                arguments: vec![Term::Primitive(Primitive::Bool)]
+            }
+        );
+        assert_eq!(
+            vm.invoke_with_normal_arguments(id(4), vec![(callable.clone(), frozen.clone())])
+                .unwrap(),
+            value
+        );
+        for (domain, term) in [
+            (callable.clone().with_comptime_phase(true), frozen.clone()),
+            (
+                signature(Term::Primitive(Primitive::Bool))
+                    .with_unsafe_call_requirement(!unsafe_call),
+                frozen.clone(),
+            ),
+            (
+                callable.clone(),
+                Term::FunctionValue {
+                    declaration: id(99),
+                    arguments: vec![],
+                },
+            ),
+            (
+                callable.clone(),
+                Term::FunctionValue {
+                    declaration: id(2),
+                    arguments: vec![Term::Primitive(Primitive::Char)],
+                },
+            ),
+            (
+                callable.clone(),
+                Term::FunctionValue {
+                    declaration: id(2),
+                    arguments: vec![],
+                },
+            ),
+        ] {
+            assert!(
+                vm.invoke_with_normal_arguments(id(4), vec![(domain, term)])
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            vm.invoke(id(2), vec![]).unwrap_err().kind,
+            ErrorKind::PhaseMismatch
+        );
+        assert_eq!(
+            vm.invoke_with_normal_arguments(id(4), vec![(callable, frozen)])
+                .unwrap(),
+            value
+        );
+    }
+}
+
+#[test]
+fn runtime_identity_freezing_is_bounded_and_keeps_aggregate_structure() {
+    let identity = Value::RuntimeFunction {
+        declaration: id(2),
+        arguments: vec![Term::Primitive(Primitive::Bool)],
+    };
+    let value = Value::Tuple(vec![Value::AnonymousRecord(vec![(
+        "callback".into(),
+        identity,
+    )])]);
+    assert_eq!(
+        value.clone().into_scoped_invocation_term(
+            &mut comptime_runtime::Budget {
+                steps: 0,
+                max_limbs: 4096
+            },
+            &Default::default()
+        ),
+        Err(ErrorKind::StepsExhausted)
+    );
+    let term = value
+        .into_scoped_invocation_term(&mut Default::default(), &Default::default())
+        .unwrap();
+    assert_eq!(
+        term,
+        Term::TupleValue(vec![Term::RecordValue(vec![(
+            "callback".into(),
+            Term::FunctionValue {
+                declaration: id(2),
+                arguments: vec![Term::Primitive(Primitive::Bool)]
+            }
+        )])])
+    );
+    let unresolved = Value::RuntimeFunction {
+        declaration: id(2),
+        arguments: vec![Term::Rigid {
+            declaration: id(8),
+            sort: Sort::ComptimeValue,
+        }],
+    };
+    assert_eq!(
+        unresolved.into_scoped_invocation_term(&mut Default::default(), &Default::default()),
+        Err(ErrorKind::Type)
+    );
 }

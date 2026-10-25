@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Flag = true'type;
 typealias Unary = fn(Flag) -> Flag;
 typealias Captured = (do { let flag = true; || flag })'type;
@@ -27,7 +30,7 @@ fn invoke(callback: F) -> Flag where F, requires F == Captured {
     callback()
 }
 
-fn run() -> (Flag, Flag, Flag, Flag) {
+fn run() -> Tuple<Flag, Flag, Flag, Flag> {
     (
         apply(identity<Unary>(), true),
         apply(negate<Unary>(), false),

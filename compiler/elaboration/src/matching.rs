@@ -1,6 +1,7 @@
 //! Inference proposals, validated by an obligation on the original types.
 //! Structural decomposition never treats an opaque function as injective.
 mod effects;
+mod error_rows;
 use crate::ptc::Budget;
 use crate::{InferenceContext, InferenceError, InferenceTerm as I};
 use nir::{Sort, Term};
@@ -23,87 +24,143 @@ pub(crate) fn propose(
     context: &crate::ptc::Context,
     scope: &[Vec<Sort>],
     budget: Budget,
-) -> Result<(), MatchError> {
-    for term in [left, right] {
-        let actual = inference.sort(term)?;
-        if actual != Sort::Type {
-            return Err(InferenceError::WrongSort {
-                expected: Sort::Type,
-                actual,
-            }
-            .into());
-        }
-    }
-    let mut work = vec![(left.clone(), right.clone(), 0)];
-    let mut fuel = budget.steps;
-    while let Some((left, right, depth)) = work.pop() {
-        tick(&mut fuel, depth, budget.max_depth)?;
-        let left = inference.resolve(&left)?;
-        let right = inference.resolve(&right)?;
-        if left == right {
-            continue;
-        }
-        match (&left, &right) {
-            (I::Meta(id), _) => inference.assign(*id, right)?,
-            (_, I::Meta(id)) => inference.assign(*id, left)?,
-            (
-                I::Instantiate {
-                    template,
-                    arguments,
-                },
-                I::Stable(actual),
-            )
-            | (
-                I::Stable(actual),
-                I::Instantiate {
-                    template,
-                    arguments,
-                },
-            ) => {
-                decompose(
-                    template,
-                    actual,
-                    arguments,
-                    None,
-                    0,
-                    depth + 1,
-                    &mut fuel,
-                    budget.max_depth,
-                    context,
-                    scope,
-                    &mut work,
-                )?;
-            }
-            (
-                I::Instantiate {
-                    template: left,
-                    arguments: la,
-                },
-                I::Instantiate {
-                    template: right,
-                    arguments: ra,
-                },
-            ) => {
-                decompose(
-                    left,
-                    right,
-                    la,
-                    Some(ra),
-                    0,
-                    depth + 1,
-                    &mut fuel,
-                    budget.max_depth,
-                    context,
-                    scope,
-                    &mut work,
-                )?;
-            }
-            // Stable unequal terms need PTC; opaque heads are never inverted.
-            _ => {}
-        }
-    }
-    Ok(())
+) -> Result<usize, MatchError> {
+    let mut remaining = budget;
+    propose_metered(inference, left, right, context, scope, &mut remaining)?;
+    Ok(budget.steps - remaining.steps)
 }
+
+pub(crate) fn propose_metered(
+    inference: &mut InferenceContext,
+    left: &I,
+    right: &I,
+    context: &crate::ptc::Context,
+    scope: &[Vec<Sort>],
+    budget: &mut Budget,
+) -> Result<(), MatchError> {
+    let mut fuel = budget.steps;
+    let result = (|| {
+        for term in [left, right] {
+            let actual = inference.sort(term)?;
+            if actual != Sort::Type {
+                return Err(InferenceError::WrongSort {
+                    expected: Sort::Type,
+                    actual,
+                }
+                .into());
+            }
+        }
+        let left = crate::inference_budget::copy_input(left, &mut fuel, budget.max_depth)
+            .map_err(|_| MatchError::BudgetExhausted)?;
+        let right = crate::inference_budget::copy_input(right, &mut fuel, budget.max_depth)
+            .map_err(|_| MatchError::BudgetExhausted)?;
+        let mut work = vec![(left, right, 0)];
+        while let Some((left, right, depth)) = work.pop() {
+            tick(&mut fuel, depth, budget.max_depth)?;
+            if left == right {
+                continue;
+            }
+            let left = resolved_shape(inference, &left, &mut fuel)?;
+            let right = resolved_shape(inference, &right, &mut fuel)?;
+            if left == right {
+                continue;
+            }
+            match (&left, &right) {
+                (I::Meta(id), _) => inference
+                    .assign_with_limits(*id, right, &mut fuel, budget.max_depth)
+                    .map_err(match_error)?,
+                (_, I::Meta(id)) => inference
+                    .assign_with_limits(*id, left, &mut fuel, budget.max_depth)
+                    .map_err(match_error)?,
+                (
+                    I::Instantiate {
+                        template,
+                        arguments,
+                    },
+                    I::Stable(actual),
+                )
+                | (
+                    I::Stable(actual),
+                    I::Instantiate {
+                        template,
+                        arguments,
+                    },
+                ) => {
+                    decompose(
+                        template,
+                        actual,
+                        arguments,
+                        None,
+                        0,
+                        depth + 1,
+                        &mut fuel,
+                        budget.max_depth,
+                        context,
+                        scope,
+                        &mut work,
+                    )?;
+                }
+                (
+                    I::Instantiate {
+                        template: left,
+                        arguments: la,
+                    },
+                    I::Instantiate {
+                        template: right,
+                        arguments: ra,
+                    },
+                ) => {
+                    decompose(
+                        left,
+                        right,
+                        la,
+                        Some(ra),
+                        0,
+                        depth + 1,
+                        &mut fuel,
+                        budget.max_depth,
+                        context,
+                        scope,
+                        &mut work,
+                    )?;
+                }
+                // Stable unequal terms need PTC; opaque heads are never inverted.
+                _ => {}
+            }
+        }
+        Ok(())
+    })();
+    budget.steps = fuel;
+    result
+}
+
+fn match_error(error: InferenceError) -> MatchError {
+    match error {
+        InferenceError::Budget => MatchError::BudgetExhausted,
+        error => MatchError::Inference(error),
+    }
+}
+
+fn resolved_shape(
+    inference: &InferenceContext,
+    term: &I,
+    fuel: &mut usize,
+) -> Result<I, MatchError> {
+    let resolve = |term: &I, fuel: &mut usize| {
+        inference
+            .resolve_with_limits(term, fuel, 128)
+            .map_err(match_error)
+    };
+    let mut term = resolve(term, fuel)?;
+    if let I::Instantiate { arguments, .. } = &mut term {
+        for argument in arguments {
+            *fuel = fuel.checked_sub(1).ok_or(MatchError::BudgetExhausted)?;
+            *argument = resolve(argument, fuel)?;
+        }
+    }
+    Ok(term)
+}
+
 fn tick(fuel: &mut usize, depth: usize, limit: usize) -> Result<(), MatchError> {
     if depth >= limit.min(128) {
         return Err(MatchError::BudgetExhausted);
@@ -214,7 +271,10 @@ fn decompose(
             actual,
         ) if matches!(
             actual,
-            Term::Closure { .. } | Term::Function { .. } | Term::ComptimeFunction(_)
+            Term::Closure { .. }
+                | Term::Function { .. }
+                | Term::ComptimeFunction(_)
+                | Term::UnsafeFunction(_)
         ) =>
         {
             let (fields, body) = match actual {
@@ -263,7 +323,10 @@ fn decompose(
             },
         ) if matches!(
             template,
-            Term::Closure { .. } | Term::Function { .. } | Term::ComptimeFunction(_)
+            Term::Closure { .. }
+                | Term::Function { .. }
+                | Term::ComptimeFunction(_)
+                | Term::UnsafeFunction(_)
         ) =>
         {
             let (fields, body) = match template {
@@ -347,8 +410,68 @@ fn decompose(
                 work,
             )?;
         }
+        (
+            Term::ErrorResult {
+                errors: left,
+                result: a,
+            },
+            Term::ErrorResult {
+                errors: right,
+                result: b,
+            },
+        ) => {
+            error_rows::labels(
+                left,
+                a,
+                right,
+                b,
+                arguments,
+                actual_arguments,
+                nesting,
+                depth + 1,
+                fuel,
+                limit,
+                context,
+                scope,
+                work,
+            )?;
+            if let Some(actual_arguments) = actual_arguments {
+                error_rows::labels(
+                    right,
+                    b,
+                    left,
+                    a,
+                    actual_arguments,
+                    Some(arguments),
+                    nesting,
+                    depth + 1,
+                    fuel,
+                    limit,
+                    context,
+                    scope,
+                    work,
+                )?;
+            }
+            // Infer the successful component; row compatibility remains an
+            // obligation on the original complete types. Never zip unordered
+            // labels or infer their identity from layout positions.
+            decompose(
+                a,
+                b,
+                arguments,
+                actual_arguments,
+                nesting,
+                depth + 1,
+                fuel,
+                limit,
+                context,
+                scope,
+                work,
+            )?;
+        }
         (Term::Pointer(a), Term::Pointer(b))
-        | (Term::ComptimeFunction(a), Term::ComptimeFunction(b)) => decompose(
+        | (Term::ComptimeFunction(a), Term::ComptimeFunction(b))
+        | (Term::UnsafeFunction(a), Term::UnsafeFunction(b)) => decompose(
             a,
             b,
             arguments,
@@ -394,29 +517,25 @@ fn decompose(
         ) if a == b && context.is_tuple_head(*a) => {
             // Syntactic candidate substitutions only. The original application
             // equality remains an obligation; no inverse theorem is asserted.
-            if let ([Term::TypeListValue(left)], [Term::TypeListValue(right)]) =
-                (left.as_slice(), right.as_slice())
-            {
-                if left.len() == right.len() {
-                    for (left, right) in left.iter().zip(right) {
-                        decompose(
-                            left,
-                            right,
-                            arguments,
-                            actual_arguments,
-                            nesting,
-                            depth + 1,
-                            fuel,
-                            limit,
-                            context,
-                            scope,
-                            work,
-                        )?;
-                    }
-                }
+            if let ([left], [right]) = (left.as_slice(), right.as_slice()) {
+                decompose(
+                    left,
+                    right,
+                    arguments,
+                    actual_arguments,
+                    nesting,
+                    depth + 1,
+                    fuel,
+                    limit,
+                    context,
+                    scope,
+                    work,
+                )?;
             }
         }
-        (Term::Tuple(a), Term::Tuple(b)) if a.len() == b.len() => {
+        (Term::Tuple(a), Term::Tuple(b)) | (Term::TypeListValue(a), Term::TypeListValue(b))
+            if a.len() == b.len() =>
+        {
             for (a, b) in a.iter().zip(b) {
                 decompose(
                     a,

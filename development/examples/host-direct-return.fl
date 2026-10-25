@@ -1,0 +1,33 @@
+-- The handler returns from install, not from the operation's machine entry.
+-- Run with Duplicate/Retire; expected output: (bool true).
+trait Duplicate {}
+trait Retire {fn drop(*self);}
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+
+typealias U=.u128'builtin;
+struct Watch {target:*bool}
+impl Retire for Watch {
+    fn drop(*self) {
+        let previous=self.target.*.*;
+        assumes not previous;
+        self.target.*.* = true;
+    }
+}
+effect read()->U;
+fn subject(target:*bool)->#read U {
+    let owner=Watch {target:target};
+    read()#
+}
+fn relay(target:*bool)->#read U {subject(target)}
+fn install(target:*bool)->bool {
+    relay(target)# {
+        read()=>do {return true;},
+    };
+    false
+}
+fn run()->bool {
+    let cleaned=false;
+    let result=install(cleaned.ref);
+    result and cleaned
+}

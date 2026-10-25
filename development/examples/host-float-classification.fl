@@ -1,0 +1,15 @@
+-- Run with the math package and its Scalar bindings; host_examples.py supplies them.
+fn run() -> bool {
+    let boundary: .f64'builtin = -0.0;
+    -- Direct target operations are accepted in runtime predicates.
+    assumes unsafe { math.target.Scalar.isfinite'intrinsic(boundary).as(bool) };
+    let not_number = math.sqrt<.f32'builtin>(-1.0);
+    math.isnan(not_number)
+        and not math.isinf(not_number)
+        and not math.isfinite(not_number)
+        and math.isfinite<.f64'builtin>(-0.0)
+        and not math.isinf<.f64'builtin>(1.0)
+        and math.isnormal<.f32'builtin>(1.0)
+        and not math.issubnormal<.f64'builtin>(1.0)
+        and math.signbit(boundary)
+}

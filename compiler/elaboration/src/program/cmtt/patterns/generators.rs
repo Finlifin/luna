@@ -239,7 +239,7 @@ impl Checker<'_, '_> {
                         ));
                     }
                 };
-                if !nir::normal_forms::supported_input_type_in_scope(
+                if !nir::normal_forms::supported_input_type_in_scope_in(
                     &domain,
                     &this.input_binders(&visible_parameters),
                     |head| Some(head) == this.protocols.tuple,
@@ -249,6 +249,7 @@ impl Checker<'_, '_> {
                             || this.newtypes.contains_key(&id)
                             || this.context.is_nominal_constructor(id)
                     },
+                    this.target,
                 ) {
                     return Err(error(
                         parameter.span,

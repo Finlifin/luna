@@ -1,6 +1,9 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Byte = .u8'builtin;
 struct Pair { start: Byte, end: Byte }
-enum Choice { empty, pair(Byte, Byte), tuple((Byte, Byte)) }
+enum Choice { empty, pair(Byte, Byte), tuple(Tuple<Byte, Byte>) }
 struct Holder { item: Choice }
 enum Maybe where T { none, some(T) }
 fn tuple(start: Byte, end: Byte) -> Byte {
@@ -38,7 +41,7 @@ fn nested(start: Byte, end: Byte) -> Byte {
 }
 fn generic(start: Byte, end: Byte) -> Byte {
     assumes start <= end;
-    let value = Maybe<(Byte, Byte)>.some((start, end));
+    let value = Maybe<Tuple<Byte, Byte>>.some((start, end));
     value match { .some((a, b)) => b - a, _ => 0 }
 }
 fn tuple_capture(start: Byte, end: Byte) -> Byte {
@@ -97,7 +100,7 @@ fn variant_switch(start: Byte, end: Byte) -> Byte {
     value match { .tuple((a, b)) => a - b, _ => 0 }
 }
 fn unknown() {}
-fn tuple_after_call(pair: (Byte, Byte)) -> Byte {
+fn tuple_after_call(pair: Tuple<Byte, Byte>) -> Byte {
     unknown();
     let (a, b) = pair;
     assumes a <= b;

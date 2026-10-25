@@ -3,14 +3,17 @@
 #[allow(dead_code)]
 mod support;
 use comptime_interpretor::{Budget, Interpreter, Value};
-use support::{calls, compile, id};
+use support::{
+    calls, compile_with_tuple as compile, compile_with_tuple_protocols as compile_with_protocols,
+    id,
+};
 
 #[test]
 fn prepared_never_initializers_keep_formed_pattern_domains() {
     for (declaration, pattern) in [
-        ("fn pair(a:bool,b:bool)->(bool,bool) {(a,b)}", "(a,b)"),
+        ("fn pair(a:bool,b:bool)->Tuple<bool,bool> {(a,b)}", "(a,b)"),
         (
-            "fn pair(a:bool,b:bool)->((bool,bool),bool) {((a,b),a)}",
+            "fn pair(a:bool,b:bool)->Tuple<Tuple<bool,bool>,bool> {((a,b),a)}",
             "((a,b),_)",
         ),
         (
@@ -30,7 +33,7 @@ fn prepared_never_initializers_keep_formed_pattern_domains() {
                 a and b
             }}"
         );
-        let package = support::compile_with_protocols(&source, &Default::default())
+        let package = compile_with_protocols(&source, &Default::default())
             .unwrap_or_else(|error| panic!("{pattern}: {error}"));
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
@@ -46,7 +49,7 @@ fn prepared_never_initializers_keep_formed_pattern_domains() {
             ";\n                a and b",
             &format!(" match {{{pattern}=>a and b}}"),
         );
-        let matched = support::compile_with_protocols(&matched, &Default::default())
+        let matched = compile_with_protocols(&matched, &Default::default())
             .unwrap_or_else(|error| panic!("match {pattern}: {error}"));
         assert_eq!(
             luna::execution::interpret(&matched, "run", 100_000).unwrap(),
@@ -54,12 +57,12 @@ fn prepared_never_initializers_keep_formed_pattern_domains() {
         );
         let wrong = source.replace(&format!("let {pattern}="), "let (a,b,c)=");
         assert!(
-            support::compile_with_protocols(&wrong, &Default::default()).is_err(),
+            compile_with_protocols(&wrong, &Default::default()).is_err(),
             "accepted an incompatible pattern: {pattern}"
         );
     }
     assert!(
-        support::compile_with_protocols(
+        compile_with_protocols(
             "fn run()->bool {let (a,b)=do {return true;};a and b}",
             &Default::default()
         )
@@ -183,7 +186,7 @@ fn prepared_constructor_type_constrains_an_outer_effect_without_dispatch() {
 #[test]
 fn arbitrary_divergence_does_not_invent_generic_type_evidence() {
     assert!(
-        support::compile_with_protocols(
+        compile_with_protocols(
             "fn ignore(value:T)->bool where T {true}
          fn run()->bool {ignore(do {return true;})}",
             &Default::default()

@@ -1,9 +1,11 @@
 //! Concrete high-level instances. Structured NIR operations are retained; this
 //! stage neither invents SSA names nor erases program contracts or opaque heads.
 pub mod effect_values;
-mod effects;
+pub mod effects;
 mod index;
 pub mod staging;
+mod storage;
+pub mod template_storage;
 pub mod visit;
 use nir::program::{DispatchInstance, Function};
 use nir::{DeclarationId, RuntimeId, Term};
@@ -89,12 +91,18 @@ impl fmt::Display for InterfaceContract {
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
+    pub target: Option<nir::target::TargetData>,
     pub expansion_sources: Vec<nir::program::ExpansionSource>,
     pub roots: Vec<InstanceKey>,
     pub nominals: Vec<NominalInstance>,
     pub interfaces: Vec<InterfaceContract>,
     pub normal_forms: Vec<nir::normal_forms::Head>,
     pub functions: Vec<FunctionInstance>,
+    /// Declaration-derived contracts demanded by concrete effect rows, even
+    /// when the operation is never requested or handled in this graph.
+    pub effect_contracts: Vec<effects::Contract>,
+    /// Validated identities stored as values, with no executable template body.
+    pub templates: Vec<template_storage::TemplateStorage>,
     /// Fully selected implementation evidence; no runtime implementation search.
     pub dispatch: Vec<DispatchInstance>,
     /// Explicitly supplied external runtime identities. Availability is not an
@@ -102,6 +110,40 @@ pub struct Package {
     pub runtime_bindings: BTreeSet<RuntimeId>,
 }
 impl Package {
+    pub fn template_method_type(
+        &self,
+        interface: &nir::program::InterfaceInstance,
+        subject: &Term,
+        member: DeclarationId,
+        arguments: &[Term],
+    ) -> Option<&Term> {
+        let method = self
+            .dispatch
+            .iter()
+            .find(|selected| {
+                selected.interface == interface.declaration
+                    && selected.interface_arguments == interface.arguments
+                    && &selected.subject == subject
+            })?
+            .methods
+            .iter()
+            .find(|method| method.member == member && method.method_arguments == arguments)?;
+        self.templates
+            .iter()
+            .find(|table| {
+                table
+                    .targets()
+                    .iter()
+                    .any(|key| key.declaration == method.body && key.arguments == method.arguments)
+            })
+            .map(|table| table.logical_type())
+    }
+    pub fn template_type(&self, key: &InstanceKey) -> Option<&Term> {
+        self.templates
+            .iter()
+            .find(|table| table.targets().contains(key))
+            .map(|table| table.logical_type())
+    }
     pub fn function(&self, key: &InstanceKey) -> Option<&FunctionInstance> {
         self.functions.iter().find(|function| &function.key == key)
     }
@@ -109,6 +151,14 @@ impl Package {
     /// reference, including references embedded in defaults and patterns.
     pub fn validate(&self, fuel: &mut usize) -> Result<(), String> {
         self.validate_index()?;
+        for table in &self.templates {
+            self.validate_type(table.logical_type(), fuel)?;
+            for target in table.targets() {
+                for argument in &target.arguments {
+                    self.validate_type(argument, fuel)?;
+                }
+            }
+        }
         if self
             .dispatch
             .iter()
@@ -155,15 +205,117 @@ impl Package {
                 })?;
             }
         }
+        // Storage checks consume concrete layout evidence from this artifact;
+        // they must not rely on the producer's generic source declarations.
+        let storage_metadata = nir::program::Package {
+            target: self.target,
+            normal_forms: self.normal_forms.clone(),
+            ..Default::default()
+        };
+        let layouts: std::collections::HashMap<_, _> = self
+            .nominals
+            .iter()
+            .map(|instance| (&instance.ty, &instance.definition))
+            .collect();
+        let resolve_storage = |ty: &Term, fuel: &mut usize| -> Option<Vec<Term>> {
+            let mut copy_field = |field: &Term| {
+                nir::type_computations::charge_term(field, fuel).ok()?;
+                Some(field.clone())
+            };
+            match layouts.get(ty)? {
+                NominalDefinition::Struct(definition) => definition
+                    .fields
+                    .iter()
+                    .map(|(_, ty)| copy_field(ty))
+                    .collect(),
+                NominalDefinition::Enum(definition) => definition
+                    .variants
+                    .iter()
+                    .flat_map(|v| &v.fields)
+                    .map(copy_field)
+                    .collect(),
+                NominalDefinition::Newtype(definition) => {
+                    Some(vec![copy_field(&definition.representation)?])
+                }
+            }
+        };
         use nir::program::ExprKind as K;
         for instance in &self.functions {
             self.validate_type(&instance.function.signature, fuel)?;
+            nir::call_safety::validate(&instance.function, fuel)?;
+            if instance.function.is_unsafe && self.roots.contains(&instance.key) {
+                return Err("unsafe entry requires an explicit safe wrapper".into());
+            }
+            if instance.function.phase == nir::program::FunctionPhase::Runtime {
+                nir::phases::validate_runtime_storage_with_nominals(
+                    &instance.function.signature,
+                    &storage_metadata,
+                    &[],
+                    &resolve_storage,
+                    fuel,
+                )
+                .map_err(|message| {
+                    format!("IIR runtime signature for {}: {message}", instance.key)
+                })?;
+            }
+
+            storage::validate(
+                &instance.function,
+                &storage_metadata,
+                &resolve_storage,
+                fuel,
+            )?;
             for argument in &instance.key.arguments {
                 self.validate_type(argument, fuel)?;
             }
             visit::expressions(&instance.function, fuel, |expr, fuel| {
+                if matches!(
+                    expr.kind,
+                    K::Literal(
+                        nir::program::Literal::PendingFloat { .. }
+                            | nir::program::Literal::PendingInteger { .. }
+                    )
+                ) {
+                    return Err("IIR contains an unformed float or integer literal".into());
+                }
+
                 self.validate_expression_types(expr, fuel)?;
-                if let Some(message) = nir::program::pointer_operation_error(expr) {
+                if let K::TemplateEqual(left, right) = &expr.kind {
+                    let identity_operand = |value: &nir::program::Expr| {
+                        matches!(
+                            value.kind,
+                            K::Local(_)
+                                | K::Function(_)
+                                | K::FunctionInstance { .. }
+                                | K::TraitMethod { .. }
+                        )
+                    };
+                    if instance.function.phase != nir::program::FunctionPhase::Runtime
+                        || expr.ty != Term::Primitive(nir::Primitive::Bool)
+                        || left.ty != right.ty
+                        || !identity_operand(left)
+                        || !identity_operand(right)
+                        || !self
+                            .templates
+                            .iter()
+                            .any(|table| table.logical_type() == &left.ty)
+                    {
+                        return Err(
+                            "IIR template comparison requires stored callable identities".into(),
+                        );
+                    }
+                }
+                if instance.function.phase == nir::program::FunctionPhase::Runtime {
+                    if let K::Call { callee, .. } = &expr.kind {
+                        if !callee.ty.is_comptime_callable()
+                            && matches!(callee.ty.callable_signature(), Term::Function { parameters, .. }
+                                if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))
+                        {
+                            return Err("IIR runtime call retains staged inputs".into());
+                        }
+                    }
+                }
+                if let Some(message) = nir::program::pointer_operation_error_in(expr, self.target) {
                     return Err(message.into());
                 }
                 let target = match &expr.kind {
@@ -230,12 +382,21 @@ impl Package {
                     _ => None,
                 };
                 if let Some(target) = target {
+                    if let Some(ty) = self.template_type(&target) {
+                        if ty != &expr.ty {
+                            return Err("IIR template reference changed logical type".into());
+                        }
+                        return Ok(());
+                    }
                     let target = self
                         .function(&target)
                         .ok_or("IIR callable reference is dangling")?;
                     let comptime = target.function.phase == nir::program::FunctionPhase::Comptime;
                     if comptime != expr.ty.is_comptime_callable() {
                         return Err("IIR callable reference changed execution phase".into());
+                    }
+                    if target.function.is_unsafe != expr.ty.is_unsafe_callable() {
+                        return Err("IIR callable reference changed unsafe responsibility".into());
                     }
                 }
                 Ok(())
@@ -256,7 +417,11 @@ impl Package {
                         for handler in handlers {
                             if handler.abi != nir::effects::Abi::Direct
                                 && !(handler.abi == nir::effects::Abi::DirectPassing
-                                    && nir::effects::scalar_passing_signature(&handler.signature))
+                                    && effects::data_passing_signature(
+                                        self,
+                                        &handler.signature,
+                                        fuel,
+                                    )?)
                             {
                                 return Err("IIR effect installation requires slot/capture cleanup protocol lowering".into());
                             }
@@ -272,7 +437,7 @@ impl Package {
                     K::EffectRequest { abi, signature, .. }
                         if *abi != nir::effects::Abi::Direct
                             && !(*abi == nir::effects::Abi::DirectPassing
-                                && nir::effects::scalar_passing_signature(signature)) =>
+                                && effects::data_passing_signature(self, signature, fuel)?) =>
                     {
                         return Err(
                             "IIR effect request requires slot/capture cleanup protocol lowering"
@@ -295,7 +460,104 @@ impl Package {
     ) -> Result<(), String> {
         use nir::program::ExprKind as K;
         self.validate_type(&expr.ty, fuel)?;
+        if let K::SymbolName(operand) | K::EnumName(operand) = &expr.kind {
+            let never = Term::Primitive(nir::Primitive::Never);
+            let expected = if operand.ty == never {
+                never
+            } else {
+                Term::Primitive(nir::Primitive::Str)
+            };
+            if expr.ty != expected {
+                return Err("IIR tag_name result type disagrees with its operand".into());
+            }
+            if operand.ty != Term::Primitive(nir::Primitive::Never) {
+                match &expr.kind {
+                    K::SymbolName(_) if operand.ty != Term::Primitive(nir::Primitive::Symbol) => {
+                        return Err("IIR Symbol tag_name requires a Symbol operand".into());
+                    }
+                    K::EnumName(_) => {
+                        let mut found = false;
+                        for nominal in &self.nominals {
+                            *fuel = fuel
+                                .checked_sub(1)
+                                .ok_or("IIR tag_name layout budget exhausted")?;
+                            if nominal.ty == operand.ty {
+                                found = matches!(nominal.definition, NominalDefinition::Enum(_));
+                                break;
+                            }
+                        }
+                        if !found {
+                            return Err("IIR enum tag_name requires an enum instance".into());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let K::Intrinsic { tag, .. } = &expr.kind {
+            nir::intrinsics::checked(expr).map_err(str::to_owned)?;
+            // Intrinsic families currently have no type/value parameters.
+            // A matching declaration alone must not authorize another instance.
+            let mut family = None;
+            for nominal in &self.nominals {
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or("IIR intrinsic tag family lookup budget exhausted")?;
+                if matches!(&nominal.ty, Term::Nominal { declaration, arguments }
+                    if *declaration == tag.family && arguments.is_empty())
+                {
+                    if let NominalDefinition::Enum(definition) = &nominal.definition {
+                        family = Some(definition);
+                    }
+                    break;
+                }
+            }
+            let family = family.ok_or("IIR intrinsic tag family instance is missing")?;
+            nir::intrinsics::validate_family(family, *tag).map_err(str::to_owned)?;
+        }
+        if matches!(&expr.kind, K::UnsafeScope(body) if body.ty != expr.ty) {
+            return Err("unsafe scope changes its body type".into());
+        }
+        let mut check_pattern = |pattern: &nir::program::Pattern| {
+            nir::visit::pattern_types(pattern, fuel, |ty, fuel| {
+                if ty.sort() != nir::Sort::Type {
+                    return Err("IIR pattern label is not a type".into());
+                }
+                self.validate_type(ty, fuel)
+            })
+        };
         match &expr.kind {
+            K::Match { arms, .. } => {
+                for arm in arms {
+                    check_pattern(&arm.pattern)?;
+                }
+            }
+            K::LetPattern { pattern, .. } => check_pattern(pattern)?,
+            K::EffectHandle { handlers, .. } => {
+                for handler in handlers {
+                    for arm in &handler.arms {
+                        check_pattern(&arm.pattern)?;
+                    }
+                }
+            }
+            _ => (),
+        }
+        match &expr.kind {
+            K::ErrorConvert { conversion, value } => {
+                nir::error_results::validate_conversion_with_tuple(
+                    *conversion,
+                    &value.ty,
+                    &expr.ty,
+                    fuel,
+                    &mut |a, b| a == b,
+                    &|head| {
+                        self.normal_forms.iter().any(|m| {
+                            m.declaration == head && m.role == nir::normal_forms::Role::Tuple
+                        })
+                    },
+                )
+                .map_err(|e| format!("IIR error result conversion: {e}"))?;
+            }
             K::NewtypeConvert(value) => {
                 if self
                     .newtype_conversion(&value.ty, &expr.ty, fuel)
@@ -386,6 +648,10 @@ impl Package {
             }
             *fuel -= 1;
             match ty {
+                Term::ErrorResult { errors, result } => {
+                    pending.push(result);
+                    pending.extend(errors);
+                }
                 Term::Computation { effects, result } => {
                     pending.push(result);
                     for operation in effects {
@@ -410,6 +676,13 @@ impl Package {
                 | Term::TypeListValue(fields)
                 | Term::TypeListConcat(fields)
                 | Term::TupleValue(fields) => pending.extend(fields),
+                Term::ErrorValue { ty, label, value } => {
+                    pending.push(ty);
+                    if let Some(label) = label {
+                        pending.push(label);
+                    }
+                    pending.push(value);
+                }
                 Term::NominalValue { ty, fields, .. } => {
                     pending.push(ty);
                     pending.extend(fields);
@@ -417,7 +690,9 @@ impl Package {
                 Term::Record(fields) | Term::RecordValue(fields) => {
                     pending.extend(fields.iter().map(|(_, ty)| ty))
                 }
-                Term::Pointer(inner) | Term::ComptimeFunction(inner) => pending.push(inner),
+                Term::Pointer(inner)
+                | Term::ComptimeFunction(inner)
+                | Term::UnsafeFunction(inner) => pending.push(inner),
                 Term::Function { parameters, result } => {
                     pending.extend(parameters.iter().map(|p| &p.ty));
                     pending.push(result);
@@ -446,10 +721,20 @@ impl fmt::Display for Package {
             write!(f, " (runtime {} {})", binding.instance, binding.local)?;
         }
         f.write_str(")")?;
+        if let Some(target) = self.target {
+            write!(f, " {target}")?;
+        }
         if !self.expansion_sources.is_empty() {
             f.write_str(" (expansion-sources")?;
             for (index, origin) in self.expansion_sources.iter().enumerate() {
                 write!(f, " (expansion-source {index} {origin})")?;
+            }
+            f.write_str(")")?;
+        }
+        if !self.effect_contracts.is_empty() {
+            f.write_str(" (effect-contracts")?;
+            for contract in &self.effect_contracts {
+                write!(f, " {contract}")?;
             }
             f.write_str(")")?;
         }
@@ -464,6 +749,12 @@ impl fmt::Display for Package {
         f.write_str(") (interfaces")?;
         for interface in &self.interfaces {
             write!(f, "\n {interface}")?;
+        }
+        if !self.templates.is_empty() {
+            f.write_str(") (templates")?;
+            for template in &self.templates {
+                write!(f, " {template}")?;
+            }
         }
         f.write_str(") (functions")?;
         for function in &self.functions {
@@ -501,6 +792,10 @@ pub fn completed_dependencies(
         }
         *fuel -= 1;
         match ty {
+            Term::ErrorResult { errors, result } => {
+                pending.push(result);
+                pending.extend(errors);
+            }
             Term::Computation { effects, result } => {
                 pending.push(result);
                 for operation in effects {
@@ -534,6 +829,13 @@ pub fn completed_dependencies(
             | Term::Tuple(arguments)
             | Term::TypeListValue(arguments)
             | Term::TupleValue(arguments) => pending.extend(arguments),
+            Term::ErrorValue { ty, label, value } => {
+                pending.push(ty);
+                if let Some(label) = label {
+                    pending.push(label);
+                }
+                pending.push(value);
+            }
             Term::NominalValue { ty, fields, .. } => {
                 pending.push(ty);
                 pending.extend(fields);
@@ -541,7 +843,9 @@ pub fn completed_dependencies(
             Term::Record(fields) | Term::RecordValue(fields) => {
                 pending.extend(fields.iter().map(|(_, ty)| ty))
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) => pending.push(inner),
+            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
+                pending.push(inner)
+            }
             Term::Function { parameters, result } => {
                 pending.extend(parameters.iter().map(|p| &p.ty));
                 pending.push(result);

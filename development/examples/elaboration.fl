@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- This fixture uses an explicit type alias until builtin.prelude is wired in.
 typealias Flag = true'type;
 typealias Unary = fn(Flag) -> Flag;
@@ -32,7 +35,7 @@ fn use_defaults() -> Flag {
     configured(.fallback = true, false) and configured(true)
 }
 
-fn loop_capture() -> (Flag, Flag) {
+fn loop_capture() -> Tuple<Flag, Flag> {
     var active = true;
     let initial = || active;
     while:outer active {

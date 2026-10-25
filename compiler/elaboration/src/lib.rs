@@ -4,6 +4,7 @@
 use nir::{Sort, Term, TypeError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -31,14 +32,14 @@ pub enum InferenceTerm {
 #[derive(Clone)]
 struct Variable {
     sort: Sort,
-    value: Option<InferenceTerm>,
+    value: Option<Arc<InferenceTerm>>,
 }
 
 pub struct InferenceContext {
     identity: u64,
     revision: u64,
     parent: Option<(u64, u64)>,
-    variables: BTreeMap<MetaId, Variable>,
+    variables: Arc<BTreeMap<MetaId, Variable>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -59,7 +60,7 @@ impl Default for InferenceContext {
             identity: unique(),
             revision: 0,
             parent: None,
-            variables: BTreeMap::new(),
+            variables: Arc::default(),
         }
     }
 }
@@ -67,7 +68,7 @@ impl Default for InferenceContext {
 impl InferenceContext {
     pub fn fresh(&mut self, sort: Sort) -> MetaId {
         let id = MetaId(unique());
-        self.variables.insert(id, Variable { sort, value: None });
+        Arc::make_mut(&mut self.variables).insert(id, Variable { sort, value: None });
         self.changed();
         id
     }
@@ -79,7 +80,9 @@ impl InferenceContext {
             .expect("inference revision exhausted");
     }
 
-    /// Private copy of the entire inference store. Other candidate-owned state
+    /// Isolated snapshot of the inference store. Read-only trials share storage;
+    /// the first write detaches the table, retaining immutable assigned values.
+    /// Other candidate-owned state
     /// (obligations, diagnostics, facts) must join the transaction before a
     /// higher-level candidate can be considered committed.
     pub fn trial(&self) -> Self {
@@ -114,7 +117,10 @@ impl InferenceContext {
         if expected != actual {
             return Err(InferenceError::WrongSort { expected, actual });
         }
-        self.variables.get_mut(&id).unwrap().value = Some(value);
+        Arc::make_mut(&mut self.variables)
+            .get_mut(&id)
+            .unwrap()
+            .value = Some(Arc::new(value));
         self.changed();
         Ok(())
     }
@@ -346,6 +352,50 @@ impl InferenceContext {
         }
         debug_assert_eq!(values.len(), 1);
         Ok(values.pop().expect("visited root"))
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn trials_share_values_but_isolate_writes_and_failed_assignments() {
+        let mut parent = InferenceContext::default();
+        let settled = parent.fresh(Sort::Type);
+        let pending = parent.fresh(Sort::Type);
+        parent
+            .assign(
+                settled,
+                InferenceTerm::Stable(Term::Primitive(nir::Primitive::Bool)),
+            )
+            .unwrap();
+        let mut child = parent.trial();
+        let sibling = parent.trial();
+        assert!(Arc::ptr_eq(&parent.variables, &child.variables));
+
+        let value = InferenceTerm::Stable(Term::Primitive(nir::Primitive::U8));
+        assert_eq!(
+            child.assign_with_limits(pending, value.clone(), &mut 0, 128),
+            Err(InferenceError::Budget)
+        );
+        assert!(Arc::ptr_eq(&parent.variables, &child.variables));
+        child.assign(pending, value).unwrap();
+        assert!(!Arc::ptr_eq(&parent.variables, &child.variables));
+        assert!(Arc::ptr_eq(
+            parent.variables[&settled].value.as_ref().unwrap(),
+            child.variables[&settled].value.as_ref().unwrap(),
+        ));
+        assert_eq!(
+            sibling.freeze(&InferenceTerm::Meta(pending)),
+            Err(InferenceError::Unresolved(pending))
+        );
+        parent.commit(child).unwrap();
+        assert_eq!(
+            parent.freeze(&InferenceTerm::Meta(pending)).unwrap(),
+            Term::Primitive(nir::Primitive::U8)
+        );
+        assert_eq!(parent.commit(sibling), Err(InferenceError::StaleCandidate));
     }
 }
 

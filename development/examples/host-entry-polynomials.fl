@@ -1,0 +1,62 @@
+-- Callee contracts refer to entry values even when parameters are overwritten.
+typealias Byte = .u8'builtin;
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for Byte {}
+impl Duplicate for bool {}
+
+fn square(value: Byte) -> result: Byte
+where requires value <= 15,
+    ensures result == (value * value)'old {
+    value = value * value;
+    value
+}
+
+fn cube(value: Byte) -> result: Byte
+where requires value <= 6,
+    ensures result == (value * value * value)'old {
+    value = value * value * value;
+    value
+}
+
+fn square_relay(value: Byte) -> result: Byte
+where requires value <= 15,
+    ensures result == (value * value)'old {
+    let saved = square(value);
+    value = 0;
+    saved
+}
+
+fn cube_relay(value: Byte) -> result: Byte
+where requires value <= 6,
+    ensures result == (value * value * value)'old {
+    let saved = cube(value);
+    value = 0;
+    saved
+}
+
+fn run() -> bool {
+    square_relay(0) == 0 and square_relay(15) == 225
+        and cube_relay(0) == 0 and cube_relay(6) == 216
+        and from_sample(Sample { value: 6 }) == 216
+        and from_equal(3, 3, 3) == 27
+}
+
+struct Sample { value: Byte }
+impl Duplicate for Sample {}
+
+fn from_sample(sample: Sample) -> result: Byte
+where requires sample.value <= 6,
+    ensures result == (sample.value * sample.value * sample.value)'old {
+    let alias = sample.value;
+    let saved = cube_relay(alias);
+    sample.value = 0;
+    saved
+}
+
+fn from_equal(value: Byte, middle: Byte, other: Byte) -> result: Byte
+where requires value <= 6, requires other <= 6,
+    requires value == middle and middle == other,
+    ensures result == (value * value * value)'old {
+    cube_relay(other)
+}

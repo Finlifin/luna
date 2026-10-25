@@ -1,0 +1,22 @@
+-- Regression: dependent value indices retain their scope during associated
+-- initializer selection. Expected interpreter result: (bool true).
+-- Run via development/cargo.py run -p luna -- <this-file> --interpret run.
+typealias Type = .Type'builtin;
+trait Base { assoc Key: Type; assoc initial: Key; }
+trait Child :- Base {
+    fn selected() -> Self.as(Base).Key
+    where .key: Self.as(Base).Key = Self.as(Base).initial;
+}
+struct Slot where T, seed: T {}
+impl Base for Slot<T, seed> where T, seed: T {
+    assoc Key: Type = T;
+    assoc initial: T = seed;
+}
+impl Child for Slot<T, seed> where T, seed: T {
+    fn selected() -> T where .key: T = seed { key }
+}
+fn run() -> bool {
+    Slot<bool, true>.as(Child).selected()
+    and not Slot<bool, false>.as(Child).selected()
+    and Slot<.u8'builtin, 7>.as(Child).selected() == 7
+}

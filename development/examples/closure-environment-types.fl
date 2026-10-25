@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Bool = true'type;
 typealias Int = .Integer'builtin;
 typealias Adder = %{offset: Int} comptime fn(Int) -> Int;
@@ -9,7 +12,7 @@ const WIDTH = twice(ADD_THREE, 2);
 typealias Byte = .BitVec'builtin<WIDTH>;
 
 fn keep(value: T) -> %{saved: T} fn() -> T where T { || value }
-fn read_pair() -> (Bool, Bool) {
+fn read_pair() -> Tuple<Bool, Bool> {
     let left: %{first: Bool} fn() -> Bool = keep(true);
     let right: %{second: Bool} fn() -> Bool = keep(false);
     (left(), right())

@@ -2,6 +2,7 @@
 //! stay in NIR; only fixed selections are exported to the execution table.
 #[cfg(test)]
 mod callable_tests;
+mod captured_templates;
 mod conditional_calls;
 mod dead_tails;
 mod mutable_callbacks;
@@ -109,6 +110,8 @@ struct Builder<'a> {
     runtime_bindings: BTreeSet<nir::RuntimeId>,
     nominals: Vec<iir::NominalInstance>,
     interface_contracts: Vec<iir::InterfaceContract>,
+    effect_contracts: Vec<iir::effects::Contract>,
+    effect_instances: HashSet<nir::effects::Operation>,
 }
 /// Bounded, transactional: failure returns no partially materialized world.
 pub fn dispatch_instances(
@@ -116,7 +119,7 @@ pub fn dispatch_instances(
     budget: Budget,
 ) -> Result<Vec<n::DispatchInstance>, String> {
     build(package, budget, Roots::All, BTreeSet::new(), &[], None)
-        .map(|(dispatch, _, _, _, _, _)| dispatch)
+        .map(|(dispatch, _, _, _, _, _, _)| dispatch)
 }
 /// Prepare only the transitive dispatch dependencies of explicit entry points.
 /// This preserves NIR function bodies and does not impose runtime IIR closure
@@ -134,7 +137,7 @@ pub fn dispatch_instances_for_roots(
         &[],
         None,
     )
-    .map(|(dispatch, _, _, _, _, _)| dispatch)
+    .map(|(dispatch, _, _, _, _, _, _)| dispatch)
 }
 
 /// Prepare reachable dispatch while retaining ordinary Type telescopes for
@@ -152,7 +155,7 @@ pub fn dispatch_instances_for_invocation(
         &[],
         None,
     )
-    .map(|(dispatch, _, _, _, _, _)| dispatch)
+    .map(|(dispatch, _, _, _, _, _, _)| dispatch)
 }
 
 /// Resolve one concrete method through the same checked dispatch closure used
@@ -176,7 +179,7 @@ pub fn resolve_method_instance(
         None,
     );
     match result {
-        Ok((_, _, _, _, remaining, _)) => {
+        Ok((_, _, _, _, remaining, _, _)) => {
             *fuel = remaining;
             selected.ok_or_else(|| "method selection produced no body identity".into())
         }
@@ -222,7 +225,7 @@ pub(crate) fn normalize_inline_annotations(
         None,
     );
     match result {
-        Ok((_, _, _, _, remaining, _)) => {
+        Ok((_, _, _, _, remaining, _, _)) => {
             *fuel = remaining;
             Ok(())
         }
@@ -252,7 +255,7 @@ pub(crate) fn resolve_quote_method_instance(
         None,
     );
     match result {
-        Ok((_, _, _, _, remaining, _)) => {
+        Ok((_, _, _, _, remaining, _, _)) => {
             *fuel = remaining;
             selected.ok_or("quote selection produced no body identity".into())
         }
@@ -279,7 +282,7 @@ pub(crate) fn dispatch_instances_in_context(
         &[],
         Some((context, assumptions)),
     )
-    .map(|(dispatch, _, _, _, _, _)| dispatch)
+    .map(|(dispatch, _, _, _, _, _, _)| dispatch)
 }
 /// Materialize an explicit set of function instances. Failure publishes no
 /// partial graph; recursive calls reuse the same instance identity.
@@ -301,14 +304,18 @@ pub fn instantiate_with_types(
     budget: Budget,
 ) -> Result<iir::Package, String> {
     nir::phases::validate(package).map_err(|e| format!("IIR input phase: {}", e.message))?;
-    let (mut dispatch, functions, nominals, interfaces, _, expansion_sources) = build(
-        package,
-        budget,
-        Roots::Iir(roots),
-        runtime_bindings.clone(),
-        types,
-        None,
-    )?;
+    let (mut dispatch, functions, nominals, interfaces, _, expansion_sources, effect_contracts) =
+        build(
+            package,
+            budget,
+            Roots::Iir(roots),
+            runtime_bindings.clone(),
+            types,
+            None,
+        )?;
+    let mut template_fuel = budget.steps;
+    let templates =
+        captured_templates::storage(&functions, package, &dispatch, &mut template_fuel)?;
     // A selected interface may have conditionally available or simply unused
     // methods. Publish executable links only for demanded concrete bodies.
     let demanded: HashSet<_> = functions
@@ -316,14 +323,23 @@ pub fn instantiate_with_types(
         .map(|f| (&f.key.declaration, &f.key.arguments))
         .collect();
     for interface in &mut dispatch {
-        interface
-            .methods
-            .retain(|m| demanded.contains(&(&m.body, &m.arguments)));
+        interface.methods.retain(|m| {
+            demanded.contains(&(&m.body, &m.arguments))
+                || templates.iter().any(|table| {
+                    table
+                        .targets()
+                        .iter()
+                        .any(|key| key.declaration == m.body && key.arguments == m.arguments)
+                })
+        });
     }
     let output = iir::Package {
+        target: package.target,
         expansion_sources,
+        effect_contracts,
         roots: roots.to_vec(),
         functions,
+        templates,
         dispatch,
         runtime_bindings,
         nominals,
@@ -354,7 +370,7 @@ pub(crate) fn normalize_concrete_type(
         None,
     );
     match result {
-        Ok((_, _, _, _, remaining, _)) => {
+        Ok((_, _, _, _, remaining, _, _)) => {
             *fuel = remaining;
             normalized.ok_or_else(|| "type normalization produced no annotation".into())
         }
@@ -391,6 +407,7 @@ fn build(
         Vec<iir::InterfaceContract>,
         usize,
         Vec<n::ExpansionSource>,
+        Vec<iir::effects::Contract>,
     ),
     String,
 > {
@@ -403,7 +420,8 @@ fn build(
         None => Context::from_package(package)
             .map_err(|reason| format!("dispatch type context: {reason}"))?,
     };
-    let mut index = Index::default();
+    let mut index = Index::for_target(package.target);
+    index.set_normal_form_metadata(package.normal_forms.clone());
     index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
 
     for implementation in &package.implementations {
@@ -489,6 +507,8 @@ fn build(
         runtime_bindings,
         nominals: vec![],
         interface_contracts: vec![],
+        effect_contracts: vec![],
+        effect_instances: HashSet::new(),
         declaration_parameter_sorts,
     };
     for ty in type_roots {
@@ -642,6 +662,7 @@ fn build(
         builder.interface_contracts,
         builder.fuel,
         builder.quote_sources,
+        builder.effect_contracts,
     ))
 }
 impl Builder<'_> {
@@ -714,6 +735,22 @@ impl Builder<'_> {
                 self.queue.push_back(Task::Type(argument.clone()));
             }
         }
+        // Check the complete selected template before Clone or substitution
+        // enters recursive owned trees. Later dependency traversal is too late
+        // to enforce the depth bound safely. Include contracts and defaults,
+        // and shared closure bodies that type rewriting may copy on write.
+        // Ordinary templates charge substituted type occurrences as well:
+        // bounding only the original tree misses wide generic expansions.
+        let staged = self.staged_functions.get(&(id, arguments.clone()));
+        let template = staged.unwrap_or(f);
+        let parameters = self.input_binders(&f.type_parameters);
+        let checked = nir::copy_budget::charge_function_substitution(
+            template,
+            if staged.is_some() { &[] } else { &parameters },
+            if staged.is_some() { &[] } else { &arguments },
+            &mut self.fuel,
+        );
+        checked.map_err(|reason| format!("dispatch template copy budget exhausted: {reason:?}"))?;
         let mut function = if let Some(staged) = self.staged_functions.get(&(id, arguments.clone()))
         {
             staged.clone()
@@ -724,7 +761,6 @@ impl Builder<'_> {
             {
                 return Err("staged runtime function requires a specialized direct call".into());
             }
-            let parameters = self.input_binders(&f.type_parameters);
             f.instantiate_parameters(&parameters, &arguments)
                 .map_err(|e| e.to_string())?
         };
@@ -799,6 +835,39 @@ impl Builder<'_> {
             }
         }
         function.type_parameters.clear();
+        if self.instances.is_some() {
+            // Interface and body predicates may substitute the same staged
+            // input expression. Each predicate executes at a distinct boundary,
+            // even when those copies retain the same original source range.
+            for predicate in function
+                .preconditions
+                .iter_mut()
+                .chain(&mut function.postconditions)
+            {
+                nir::error_results::specialize::anchor_expression_copy(
+                    predicate,
+                    function.body.source,
+                    &mut self.quote_sources,
+                    &mut self.fuel,
+                )?;
+            }
+            for expression in std::iter::once(&mut function.body)
+                .chain(&mut function.preconditions)
+                .chain(&mut function.postconditions)
+                .chain(
+                    function
+                        .defaults
+                        .iter_mut()
+                        .map(|(_, expression)| expression),
+                )
+            {
+                nir::error_results::specialize::anchor_completed_projections(
+                    expression,
+                    &mut self.quote_sources,
+                    &mut self.fuel,
+                )?;
+            }
+        }
         self.expr(&function.body, 0)?;
         for expression in function
             .preconditions
@@ -1270,14 +1339,6 @@ impl Builder<'_> {
             });
             self.fuel = fuel.min(self.fuel);
             result?;
-            mutable_callbacks::lower(expression, &mut self.quote_cursor, &mut self.fuel)?;
-            staged::forward_template_aliases(
-                expression,
-                &mut self.quote_cursor,
-                &mut self.quote_sources,
-                &mut self.fuel,
-            )?;
-            template_factories::discard_selections(expression, &mut self.fuel)?;
         }
         let mut fuel = self.fuel;
         let result = iir::visit::expression_mut(expression, &mut fuel, |expr, fuel| {
@@ -1409,7 +1470,25 @@ impl Builder<'_> {
         self.fuel = fuel.min(self.fuel);
         result?;
         expression.rewrite_types(&mut |ty| self.staging_type_view(ty))?;
+        nir::float_formation::complete(expression, &mut self.fuel)?;
+        nir::integer_formation::complete(expression, self.package.target, &mut self.fuel)?;
         if self.instances.is_some() {
+            // Associated initializers can expose runtime template identities.
+            // Collect capture domains only after those selections are visible.
+            captured_templates::forward(expression, &mut self.quote_cursor, &mut self.fuel)?;
+            mutable_callbacks::lower(
+                expression,
+                &mut self.quote_cursor,
+                &mut self.quote_sources,
+                &mut self.fuel,
+            )?;
+            staged::forward_template_aliases(
+                expression,
+                &mut self.quote_cursor,
+                &mut self.quote_sources,
+                &mut self.fuel,
+            )?;
+            template_factories::discard_selections(expression, &mut self.fuel)?;
             let mut generated = Vec::new();
             crate::program::expand_materialized_quotes(
                 self.package,
@@ -1485,6 +1564,7 @@ impl Builder<'_> {
                 &mut self.fuel,
             )?;
             self.register_quote_layouts(generated)?;
+            dead_tails::prune_type_preparations(expression, &mut self.fuel)?;
         }
         Ok(())
     }
@@ -1771,34 +1851,18 @@ impl Builder<'_> {
                         .program
                         .instantiate_parameters(&parameters, &inputs)
                         .map_err(|e| e.to_string())?;
-                    let mut aliases = contract
-                        .parameter_bindings
-                        .iter()
-                        .copied()
-                        .zip(template.parameters.iter().copied())
-                        .collect::<std::collections::BTreeMap<_, _>>();
-                    if let (Some(source), Some(target)) =
-                        (program.result_binding, template.result_binding)
-                    {
-                        aliases.insert(source, target);
-                        program.result_binding = Some(target);
-                    }
-                    // An old-value observation belongs to the entry frame of
-                    // the selected body. Reuse its snapshot when available;
-                    // otherwise retain the interface binding with its remapped input.
-                    for snapshot in &mut program.entry_snapshots {
-                        snapshot.parameter = *aliases
-                            .get(&snapshot.parameter)
-                            .ok_or("staged trait snapshot does not refer to a parameter")?;
-                        if let Some(existing) = template
-                            .entry_snapshots
-                            .iter()
-                            .find(|s| s.parameter == snapshot.parameter)
-                        {
-                            aliases.insert(snapshot.binding, existing.binding);
-                            snapshot.binding = existing.binding;
-                        }
-                    }
+                    let alignment = program
+                        .binding_alignment(
+                            &contract.parameter_bindings,
+                            &template.parameters,
+                            template.result_binding,
+                            &template.entry_snapshots,
+                            &mut self.fuel,
+                        )
+                        .map_err(str::to_owned)?;
+                    let aliases = alignment.aliases;
+                    program.result_binding = alignment.result_binding;
+                    program.entry_snapshots = alignment.entry_snapshots;
                     for predicate in program
                         .preconditions
                         .iter_mut()
@@ -1948,6 +2012,7 @@ impl Builder<'_> {
                             | K::SymbolName(_)
                             | K::TakeBits(_)
                             | K::BitConvert(_)
+                            | K::ErrorConvert { value: _, .. }
                             | K::NewtypeConvert(_)
                             | K::BitSlice { .. }
                             | K::BitEqual(..)
@@ -2137,7 +2202,7 @@ impl Builder<'_> {
         let Term::Nominal { declaration, .. } = ty.as_ref() else {
             return Err("nominal value index has no nominal domain".into());
         };
-        nir::validate_declaration_arguments_with_layouts(
+        nir::validate_declaration_arguments_with_layouts_in(
             &[*declaration],
             std::slice::from_ref(ty.as_ref()),
             std::slice::from_ref(input),
@@ -2152,6 +2217,7 @@ impl Builder<'_> {
                         }
                     })
             },
+            self.package.target,
         )
         .map_err(|e| e.to_string())?;
         Ok(true)
@@ -2259,7 +2325,7 @@ impl Builder<'_> {
                     .find(|s| s.declaration == *declaration)
                 {
                     if self.instances.is_some() {
-                        nir::validate_declaration_arguments_with_layouts(
+                        nir::validate_declaration_arguments_with_layouts_in(
                             &s.type_parameters,
                             &s.parameter_types,
                             arguments,
@@ -2281,6 +2347,7 @@ impl Builder<'_> {
                                     }
                                 })
                             },
+                            self.package.target,
                         )?;
                     }
                     let parameters = s.parameter_binders().map_err(|e| e.to_string())?;
@@ -2337,7 +2404,7 @@ impl Builder<'_> {
                     .find(|e| e.declaration == *declaration)
                 {
                     if self.instances.is_some() {
-                        nir::validate_declaration_arguments_with_layouts(
+                        nir::validate_declaration_arguments_with_layouts_in(
                             &e.type_parameters,
                             &e.parameter_types,
                             arguments,
@@ -2359,6 +2426,7 @@ impl Builder<'_> {
                                     }
                                 })
                             },
+                            self.package.target,
                         )?;
                     }
                     let parameters = e.parameter_binders().map_err(|e| e.to_string())?;
@@ -2422,7 +2490,7 @@ impl Builder<'_> {
                     // value admission belongs to concrete materialization, as
                     // for struct and enum; invocation checks scoped evidence.
                     if self.instances.is_some() {
-                        n.validate_completed_arguments_with_layouts(
+                        n.validate_completed_arguments_with_layouts_in(
                             arguments,
                             &mut self.fuel,
                             |ty, variant, fuel| {
@@ -2442,6 +2510,7 @@ impl Builder<'_> {
                                     }
                                 })
                             },
+                            self.package.target,
                         )?;
                     }
                     let parameters = n.parameter_binders().map_err(|e| e.to_string())?;
@@ -2505,7 +2574,7 @@ impl Builder<'_> {
                         .find(|h| h.declaration == *head)
                         .ok_or("IIR normal-form type has no head declaration")?;
                     descriptor
-                        .check_closed_arguments_budgeted(
+                        .check_closed_arguments_budgeted_in(
                             arguments,
                             |head| {
                                 self.package.normal_forms.iter().any(|metadata| {
@@ -2522,6 +2591,7 @@ impl Builder<'_> {
                                 )
                             },
                             &mut self.fuel,
+                            self.package.target,
                         )
                         .map_err(|e| format!("IIR normal-form inputs: {e}"))?;
                     let parameters: Vec<_> = descriptor
@@ -2593,9 +2663,45 @@ impl Builder<'_> {
                 children.extend(arguments.iter().cloned());
                 children.push((**subject).clone());
             }
+            Term::ErrorResult { errors, result } => {
+                children.extend(errors.iter().cloned());
+                children.push((**result).clone());
+            }
             Term::Computation { effects, result } => {
                 for operation in effects {
                     children.extend(operation.arguments.iter().cloned());
+                    if self.instances.is_some() && self.effect_instances.insert(operation.clone()) {
+                        self.fuel = self
+                            .fuel
+                            .checked_sub(self.package.effects.len())
+                            .ok_or("materialized effect declaration lookup budget exhausted")?;
+                        let declaration = self
+                            .package
+                            .effects
+                            .iter()
+                            .find(|d| d.declaration == operation.declaration)
+                            .ok_or("materialized effect operation declaration missing")?;
+                        crate::associated::charge_projection_copy(
+                            &declaration.signature,
+                            &mut self.fuel,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let signature = declaration
+                            .signature
+                            .instantiate_parameters(
+                                &declaration.parameter_binders().map_err(|e| e.to_string())?,
+                                &operation.arguments,
+                            )
+                            .map_err(|e| e.to_string())?;
+                        let abi = declaration.abi;
+                        let signature = self.normalized_type(&signature)?;
+                        children.push(signature.clone());
+                        self.effect_contracts.push(iir::effects::Contract {
+                            operation: operation.clone(),
+                            abi,
+                            signature,
+                        });
+                    }
                 }
                 children.push((**result).clone());
             }
@@ -2603,6 +2709,13 @@ impl Builder<'_> {
             | Term::TypeListValue(items)
             | Term::TypeListConcat(items)
             | Term::TupleValue(items) => children.extend(items.iter().cloned()),
+            Term::ErrorValue { ty, label, value } => {
+                children.push((**ty).clone());
+                if let Some(label) = label {
+                    children.push((**label).clone());
+                }
+                children.push((**value).clone());
+            }
             Term::NominalValue { ty, fields, .. } => {
                 children.push((**ty).clone());
                 children.extend(fields.iter().cloned());
@@ -2610,7 +2723,9 @@ impl Builder<'_> {
             Term::Record(fields) | Term::RecordValue(fields) => {
                 children.extend(fields.iter().map(|(_, ty)| ty.clone()))
             }
-            Term::Pointer(t) | Term::ComptimeFunction(t) => children.push((**t).clone()),
+            Term::Pointer(t) | Term::ComptimeFunction(t) | Term::UnsafeFunction(t) => {
+                children.push((**t).clone())
+            }
             Term::Function { parameters, result } => {
                 children.extend(parameters.iter().map(|p| p.ty.clone()));
                 children.push((**result).clone());
@@ -2630,6 +2745,12 @@ impl Builder<'_> {
     fn pattern(&mut self, pattern: &P, depth: usize) -> Result<(), String> {
         self.tick(depth)?;
         match pattern {
+            P::ErrorResult { label, inner } => {
+                if let Some(label) = label {
+                    self.queue.push_back(Task::Type(label.clone()));
+                }
+                self.pattern(inner, depth + 1)?;
+            }
             P::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
             P::Then { first, value, next } => {
                 self.pattern(first, depth + 1)?;
@@ -2662,25 +2783,86 @@ impl Builder<'_> {
         Ok(())
     }
     fn expr(&mut self, expr: &n::Expr, depth: usize) -> Result<(), String> {
-        // Lexical/preparation wrappers need no native recursion. Keep their
-        // visitation order and node fuel, reserving depth for recursive work.
-        let mut pending = vec![expr];
-        while let Some(expr) = pending.pop() {
-            if let K::Block { statements, result } | K::CallPreparation { statements, result } =
-                &expr.kind
-            {
-                self.tick(depth)?;
-                if self.instances.is_some() {
-                    iir::completed_type(&expr.ty, &self.runtime_bindings, &mut self.fuel)?;
+        // Ordinary operation children use a heap frontier. Preserve preorder,
+        // type dependencies and semantic depth, without retaining the large
+        // expr_node frame once per unary/binary operand. Lexical preparation
+        // wrappers still do not consume recursive semantic depth.
+        let mut pending = vec![(expr, depth)];
+        while let Some((expr, depth)) = pending.pop() {
+            match &expr.kind {
+                K::Block { statements, result } | K::CallPreparation { statements, result } => {
+                    if let Some(result) = result {
+                        pending.push((result, depth));
+                    }
+                    pending.extend(statements.iter().rev().map(|expr| (expr, depth)));
                 }
-                self.queue.push_back(Task::Type(expr.ty.clone()));
-                if let Some(result) = result {
-                    pending.push(result);
+                K::AnonymousField { value, .. }
+                | K::Field { value, .. }
+                | K::Let { value, .. }
+                | K::Assign { value, .. }
+                | K::UnsafeScope(value)
+                | K::Discard(value)
+                | K::RequirePredicate(value)
+                | K::EnsurePredicate(value)
+                | K::CheckPredicate(value)
+                | K::BitSlice { value, .. }
+                | K::AddressOf(value)
+                | K::ReadPointer(value)
+                | K::PointerAnonymousField { pointer: value, .. }
+                | K::PointerField { pointer: value, .. }
+                | K::PointerType(value)
+                | K::BitVecType(value)
+                | K::IntegerNegate(value)
+                | K::FloatNegate(value)
+                | K::BitConvert(value)
+                | K::ErrorConvert { value: value, .. }
+                | K::NewtypeConvert(value)
+                | K::Snapshot(value)
+                | K::TakeBits(value)
+                | K::SymbolName(value)
+                | K::EnumName(value)
+                | K::Not(value)
+                | K::Loop { body: value, .. } => pending.push((value, depth + 1)),
+                K::WritePointer {
+                    pointer: a,
+                    value: b,
                 }
-                pending.extend(statements.iter().rev());
-            } else {
-                self.expr_node(expr, depth)?;
+                | K::FunctionResultType {
+                    signature: a,
+                    result: b,
+                }
+                | K::IntegerBinary {
+                    left: a, right: b, ..
+                }
+                | K::FloatBinary {
+                    left: a, right: b, ..
+                }
+                | K::ScalarLess(a, b)
+                | K::ScalarGreater(a, b)
+                | K::ScalarGreaterEqual(a, b)
+                | K::ScalarLessEqual(a, b)
+                | K::TemplateEqual(a, b)
+                | K::ScalarEqual(a, b)
+                | K::TypeEqual(a, b)
+                | K::TypeListIndex(a, b)
+                | K::BitEqual(a, b)
+                | K::BitConcat(a, b)
+                | K::BitIndex(a, b)
+                | K::And(a, b)
+                | K::Or(a, b) => {
+                    pending.push((b, depth + 1));
+                    pending.push((a, depth + 1));
+                }
+                _ => {
+                    self.expr_node(expr, depth)?;
+                    continue;
+                }
             }
+            self.tick(depth)?;
+            if self.instances.is_some() {
+                iir::completed_type(&expr.ty, &self.runtime_bindings, &mut self.fuel)?;
+            }
+            self.queue.push_back(Task::Type(expr.ty.clone()));
         }
         Ok(())
     }
@@ -2693,6 +2875,16 @@ impl Builder<'_> {
         }
         self.queue.push_back(Task::Type(expr.ty.clone()));
         match &expr.kind {
+            K::Intrinsic { tag, inputs, .. } => {
+                nir::intrinsics::checked(expr).map_err(str::to_owned)?;
+                self.queue.push_back(Task::Type(Term::Nominal {
+                    declaration: tag.family,
+                    arguments: vec![],
+                }));
+                for input in inputs {
+                    self.expr(input, depth + 1)?;
+                }
+            }
             K::EffectHandle {
                 computation,
                 handlers,
@@ -2802,14 +2994,15 @@ impl Builder<'_> {
                     }
                 }
             }
-            // A value can retain an ordinary-Type telescope without invoking
-            // its body. Dispatch under that telescope is not a closed demand.
-            // Calls enqueue their direct targets separately below; IIR still
-            // requires complete executable instances.
+            // Stored runtime template identities have no executable body in
+            // IIR. Calls must specialize independently; the final graph checks
+            // that no runtime call retains staged inputs and validates every
+            // stored identity against its source declaration.
             K::Function(_) | K::FunctionInstance { .. }
-                if self.instances.is_none()
-                    && matches!(expr.ty.callable_signature(), Term::Function { parameters, .. }
-                        if parameters.iter().any(|p| p.sort == nir::Sort::Type)) => {}
+                if matches!(expr.ty.callable_signature(), Term::Function { parameters, .. }
+                    if (self.instances.is_none() && parameters.iter().any(|p| p.sort == nir::Sort::Type))
+                        || (!expr.ty.is_comptime_callable() && parameters.iter().any(|p| p.sort != nir::Sort::Runtime))) =>
+                {}
             K::Function(id) => self.queue.push_back(Task::Function(*id, vec![])),
             K::FunctionInstance {
                 declaration,
@@ -2833,6 +3026,12 @@ impl Builder<'_> {
                 let subject = self.output[slot].subject.clone();
                 let method =
                     self.specialize_method(slot, &instance, &subject, *member, method_arguments)?;
+                if !expr.ty.is_comptime_callable()
+                    && matches!(expr.ty.callable_signature(), Term::Function { parameters, .. }
+                        if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))
+                {
+                    return Ok(());
+                }
                 if self.instances.is_some()
                     || !self
                         .package
@@ -2965,6 +3164,7 @@ impl Builder<'_> {
             | K::Field { value, .. }
             | K::Let { value, .. }
             | K::Assign { value, .. }
+            | K::UnsafeScope(value)
             | K::Discard(value)
             | K::RequirePredicate(value)
             | K::EnsurePredicate(value)
@@ -2979,6 +3179,7 @@ impl Builder<'_> {
             | K::IntegerNegate(value)
             | K::FloatNegate(value)
             | K::BitConvert(value)
+            | K::ErrorConvert { value: value, .. }
             | K::NewtypeConvert(value)
             | K::Snapshot(value)
             | K::TakeBits(value)
@@ -3081,6 +3282,7 @@ impl Builder<'_> {
             | K::ScalarGreater(a, b)
             | K::ScalarGreaterEqual(a, b)
             | K::ScalarLessEqual(a, b)
+            | K::TemplateEqual(a, b)
             | K::ScalarEqual(a, b)
             | K::TypeEqual(a, b)
             | K::TypeListIndex(a, b)

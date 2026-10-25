@@ -2,7 +2,12 @@
 use nir::program::Trait;
 use nir::{AssociatedTypeOrigin, DeclarationId, Parameter, Primitive, Sort, Term};
 
-pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<Term, String> {
+pub struct Protocol {
+    pub size: Term,
+    pub comptime: bool,
+}
+
+pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<Protocol, String> {
     let mut candidates = traits.iter().filter(|item| item.declaration == id);
     let interface = candidates
         .next()
@@ -35,6 +40,7 @@ pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<Term, String> {
         return Err("ListPatternView length method is not callable".into());
     };
     let size = result.as_ref().clone();
+    let comptime = length.signature.is_comptime_callable();
     if !matches!(&size, Term::Primitive(p) if *p == Primitive::Usize || p.fixed_integer_layout().is_some_and(|(signed,_)| !signed))
     {
         return Err("ListPatternView length and index require an unsigned size type".into());
@@ -85,7 +91,7 @@ pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<Term, String> {
             parameters,
             result: Box::new(result),
         };
-        if method.signature.is_comptime_callable()
+        if method.signature.is_comptime_callable() != comptime
             || method.signature.callable_signature() != Ok(&expected)
             || !method.by_reference_receiver
             || method.by_value_receiver
@@ -95,5 +101,5 @@ pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<Term, String> {
             return Err(format!("invalid ListPatternView {name} signature"));
         }
     }
-    Ok(size)
+    Ok(Protocol { size, comptime })
 }

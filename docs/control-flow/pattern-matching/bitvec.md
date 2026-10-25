@@ -49,6 +49,31 @@ segment -> id
 
 ## 常见示例
 
+### 取反、替代模式与候选绑定
+
+```flurry
+typealias Bits = .BitVec'builtin<4>;
+typealias Tail = .BitVec'builtin<2>;
+
+fn outside_prefix(value: Bits) -> bool {
+    value match {
+        not (0b10 (_: Tail)) => true,
+        0b10 (_: Tail) => false,
+    }
+}
+
+fn selected_segment(value: Bits) -> Tail {
+    value match {
+        0b (part: Tail) 11 or 0b00 (part: Tail) => part,
+        _ => 0,
+    }
+}
+```
+
+`outside_prefix` 排除二进制 `1000` 至 `1011`，两个分支共同覆盖全部四位值。`selected_segment` 的两个候选分别从高两位和低两位取得 part；按源码顺序选择第一个成功候选。位段检查使用内部的候选局部主语观察，只导出显式声明的位段绑定，不要求不同候选的内部临时绑定相同。
+
+这些位约束也可嵌在结构体或 enum 模式中参与取反和覆盖证明。求补前必须取得精确的位约束区域；未知 guard 只能提供保守的正向覆盖信息，不能反转成补集证据。零宽和跨机器字宽度继续使用 BitVec 自身的宽度，不能截断成机器整数。聚合主语的 Copy 和清理检查仍独立进行。
+
 ```flurry
 use std.prelude.*;
 
@@ -100,6 +125,39 @@ C / C++ / Rust / Zig 没有与「`0b`/`0o`/`0x` + 多段并置、按宽度切开
 | Zig：`packed struct`、`@bitCast` 等 | 按字段/重解释取值，不是进制前缀的分段 pattern |
 
 Flurry 把分段约束写在 **pattern** 里（字面段、`<expr>`、`(pattern : expr)`），并在属性声明的 base / 跨元素布局上做宽度对齐检查。
+
+## guard 中的局部计算
+
+guard 可以保存主语的切片视图和布尔匹配结果，再更新块内变量。先前保存的值不会随变量更新而改变：
+
+```flurry
+fn selected(bits: BitVec<4>) -> bool {
+    bits match {
+        x if do {
+            var part = x[0..2];
+            let low = part;
+            part = x[2..4];
+            var accepted = (low matches 0b01) and (part matches 0b10);
+            let saved = accepted;
+            accepted = not accepted;
+            saved and not accepted
+        } => true,
+        _ => false,
+    }
+}
+```
+
+这里只接纳 `0b1001`。覆盖分析保留切片位置、保存时的布尔条件与后续分支范围；这些条件可以参与取反和布尔等值比较，也适用于零宽和跨机器字的 BitVec。分析预算耗尽或遇到未知计算时不能给出覆盖证明；外部变量和投影位置的写入不属于这里的局部赋值分析。
+
+布尔结果还可继续作为模式主语，例如 `x and (x matches 0b01) is (selected if selected)`，或者在 guard 中写 `(x matches 0b01) match { true => true, false => false }`。后续绑定表示这个布尔结果，而不是原位向量的某一段。匹配与 guard 都按顺序处理；guard 失败后，后续 arm 接收原主语和自己的候选作用域，不能继承失败 arm 的绑定。
+
+直接的 `==`、`!=` 也可参与覆盖分析，例如 `x == 0b1001`、`x[0..2] == x[2..4]`。切片比较按实际位位置建立关系，重叠切片不会被当成两个独立值；`x == x` 对零宽和其他宽度均成立。块内显式标为 BitVec 类型的常量可以保存、赋值并参与比较。外部未知实参、函数调用结果及超出预算的复杂位关系仍不能提供精确覆盖证据。
+
+已知掩码和逐位取反也可保留覆盖依据。例如 `(x and 0b1100) == 0b1000` 接纳高两位为 `10` 的四个四位值；`(x or 0b0011) == 0b1011` 接纳同一集合。分析保存每一位的来源或常量，因而可以继续切片、保存到局部变量、重新赋值，以及与位模式匹配。`x == not x` 在非零宽时恒假，零宽时恒真。
+
+不同输入位之间的组合也可以建立覆盖依据，例如 `(x[0..2] and x[2..4]) == 0b01`，或 `(x[0..2] or x[2..4]) matches 0b10`。分析按结果位组合真假区域，保留它们与原输入的关联；组合结果仍可取反、继续组合、切片及保存到局部变量。关系复杂度可能随组合增长，达到分析预算时保持未知。
+
+BitVec 的 `and`、`or` 求值两个操作数。因此 `(unknown(x) and 0b0000) == 0b0000` 不能因结果掩码固定就获得完整覆盖证明。上述区域分解是静态分析方法，不赋予位运算运行时短路语义，也不允许忽略未知计算。
 
 ## 运行时实现设计引导
 

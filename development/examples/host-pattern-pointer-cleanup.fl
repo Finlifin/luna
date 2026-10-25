@@ -1,0 +1,46 @@
+-- python3 -B development/host_examples.py pattern-pointer-cleanup --opt-level 3
+-- The first acceptable ticket is selected. Rejected alternatives retain their
+-- owners; both tickets must be destroyed exactly once after the match.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+
+struct Ticket { accepted: *bool, retired: *bool }
+impl Retire for Ticket {
+    fn drop(*self) {
+        assumes not self.retired.*.*;
+        self.retired.*.* = true;
+    }
+}
+
+fn inspect(slot: *bool) -> *bool { slot }
+
+fn trial(left: bool, right: bool) -> bool {
+    var left_ready = left;
+    var right_ready = right;
+    var left_retired = false;
+    var right_retired = false;
+
+    let selected = (
+        Ticket {accepted: left_ready.ref, retired: left_retired.ref},
+        Ticket {accepted: right_ready.ref, retired: right_retired.ref},
+    ) match {
+        ((first, second) and inspect(first.accepted) is target if target.*) or
+        ((second, first) and inspect(first.accepted) is target if target.*) => do {
+            target.* = false;
+            true
+        },
+        _ => false,
+    };
+
+    selected == (left or right)
+        and not left_ready
+        and right_ready == (left and right)
+        and left_retired and right_retired
+}
+
+fn run() -> bool {
+    trial(false, false) and trial(true, false)
+        and trial(false, true) and trial(true, true)
+}

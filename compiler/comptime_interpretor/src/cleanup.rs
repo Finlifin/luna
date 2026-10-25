@@ -131,6 +131,13 @@ impl Interpreter<'_> {
             return Ok(false);
         }
         match ty {
+            Term::ErrorResult { errors, result } => {
+                for ty in std::iter::once(result.as_ref()).chain(errors) {
+                    if self.cleanup_value_context(ty, depth + 1, pointers_only)? {
+                        return Ok(true);
+                    }
+                }
+            }
             Term::Pointer(_) if pointers_only => return Ok(true),
             Term::Closure { environment, .. } if pointers_only => {
                 for field in environment {
@@ -232,7 +239,7 @@ impl Interpreter<'_> {
                 .owned_pointer(Term::Primitive(Primitive::Void), &path)
                 .map_err(|e| self.failure(e, None))?;
             if !pointer
-                .inspect(|value| matches!(value, Value::Variant {index,..} if index == tag))
+                .inspect(|value| cleanup_variant(value) == Some(*tag))
                 .map_err(|e| self.failure(e, None))?
             {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, None));
@@ -270,12 +277,7 @@ impl Interpreter<'_> {
                             self.cleanup_path_work(&path)?;
                             let index = storage
                                 .owned_pointer(Term::Primitive(Primitive::Void), &path)
-                                .and_then(|pointer| {
-                                    pointer.inspect(|value| match value {
-                                        Value::Variant { index, .. } => Some(*index),
-                                        _ => None,
-                                    })
-                                })
+                                .and_then(|pointer| pointer.inspect(cleanup_variant))
                                 .map_err(|e| self.failure(e, None))?
                                 .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
                             if index != *tag {
@@ -295,14 +297,25 @@ impl Interpreter<'_> {
                 }
                 Step::IfConstructed { path, steps } => {
                     let path: Vec<_> = base.iter().chain(path).copied().collect();
-                    self.cleanup_path_work(&path)?;
-                    let pointer = storage
-                        .owned_pointer(Term::Primitive(Primitive::Void), &path)
-                        .map_err(|e| self.failure(e, None))?;
-                    if pointer
-                        .is_constructed()
-                        .map_err(|e| self.failure(e, None))?
-                    {
+                    // Release replaces storage with Unit. Test each owning
+                    // prefix before projecting deeper, including capture cells
+                    // whose responsibility is stored separately from the owner.
+                    let mut constructed = true;
+                    for end in 0..=path.len() {
+                        let prefix = &path[..end];
+                        self.cleanup_path_work(prefix)?;
+                        let pointer = storage
+                            .owned_pointer(Term::Primitive(Primitive::Void), prefix)
+                            .map_err(|e| self.failure(e, None))?;
+                        if !pointer
+                            .is_constructed()
+                            .map_err(|e| self.failure(e, None))?
+                        {
+                            constructed = false;
+                            break;
+                        }
+                    }
+                    if constructed {
                         self.cleanup_steps(steps, storage, base, depth + 1)?;
                     }
                 }
@@ -328,10 +341,7 @@ impl Interpreter<'_> {
                         .owned_pointer(Term::Primitive(Primitive::Void), &path)
                         .map_err(|e| self.failure(e, None))?;
                     let index = pointer
-                        .inspect(|value| match value {
-                            Value::Variant { index, .. } => Some(*index),
-                            _ => None,
-                        })
+                        .inspect(cleanup_variant)
                         .map_err(|e| self.failure(e, None))?
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
                     let branch = branches
@@ -354,6 +364,42 @@ impl Interpreter<'_> {
 }
 
 impl<'a> Interpreter<'a> {
+    fn current_cleanup_scopes(
+        &mut self,
+        source: SourceRange,
+    ) -> Result<Vec<&'a iir::cleanup::FunctionSchedule>, Error> {
+        let key = self
+            .cleanup_frame
+            .as_ref()
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+        let work = key
+            .arguments
+            .iter()
+            .try_fold(1usize, |work, argument| {
+                work.checked_add(instance_argument_work(argument, &self.normal_forms)?)
+            })
+            .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+        self.charge_preparation(work).map_err(|mut error| {
+            error.source = Some(source);
+            error
+        })?;
+        let count = self
+            .cleanup_scopes
+            .get(self.cleanup_frame.as_ref().unwrap())
+            .map_or(0, Vec::len);
+        // Only references are copied; still account for the selected contexts.
+        self.charge_preparation(count).map_err(|mut error| {
+            error.source = Some(source);
+            error
+        })?;
+        let scopes = self
+            .cleanup_scopes
+            .get(self.cleanup_frame.as_ref().unwrap())
+            .cloned()
+            .unwrap_or_default();
+        Ok(scopes)
+    }
+
     pub(super) fn cleanup_delivery(
         &mut self,
         expr: &Expr,
@@ -388,11 +434,11 @@ impl<'a> Interpreter<'a> {
         fields: &[usize],
         value: &mut Value,
     ) -> Result<(), Error> {
-        let Some(schedule) = self.cleanup_schedule else {
+        let Some(_schedule) = self.cleanup_schedule else {
             return Ok(());
         };
         let mut matched = false;
-        for scope in &schedule.functions {
+        for scope in self.current_cleanup_scopes(source)? {
             self.tick(Some(source))?;
             if Some(&scope.instance) != self.cleanup_frame.as_ref()
                 || scope.context != self.cleanup_context
@@ -455,12 +501,13 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Vec<Term>, Error> {
         self.copy_work(arguments.len(), source)?;
         for argument in arguments {
-            let work = scoped_term_value_work_with_evidence(
+            let work = scoped_term_value_work_with_evidence_in(
                 argument,
                 &self.normal_forms,
                 &self.abstract_type_parameters,
                 &self.abstract_value_parameters,
                 |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
+                self.target,
             )
             .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
             self.copy_work(work, source)?;
@@ -575,6 +622,19 @@ impl<'a> Interpreter<'a> {
                         })
                         .collect::<Result<_, Error>>()?,
                 )
+            }
+            Value::ErrorResult { ty, error, value } => {
+                self.copy_invocation_type_work(ty, source, preserve_identity)?;
+                Value::ErrorResult {
+                    ty: ty.clone(),
+                    error: *error,
+                    value: Box::new(self.clone_representation(
+                        value,
+                        source,
+                        depth + 1,
+                        preserve_identity,
+                    )?),
+                }
             }
             Value::Newtype { ty, value } => {
                 self.copy_invocation_type_work(ty, source, preserve_identity)?;
@@ -694,12 +754,12 @@ impl<'a> Interpreter<'a> {
         fields: &[usize],
         environment: &mut Environment,
     ) -> Result<(), Error> {
-        let Some(schedule) = self.cleanup_schedule else {
+        let Some(_schedule) = self.cleanup_schedule else {
             return Ok(());
         };
         let mut matched = false;
         let mut found_scope = false;
-        for scope in &schedule.functions {
+        for scope in self.current_cleanup_scopes(source)? {
             self.tick(Some(source))?;
             if Some(&scope.instance) != self.cleanup_frame.as_ref()
                 || scope.context != self.cleanup_context
@@ -766,7 +826,12 @@ impl<'a> Interpreter<'a> {
                 .graph
                 .and_then(|g| g.function(&callee))
                 .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
-            if !self.cleanup_requires_context(&definition.function.signature)? {
+            let mut required = self.cleanup_requires_context(&definition.function.signature)?;
+            for key in &schedule.borrowed_callable_functions {
+                self.tick(Some(source))?;
+                required |= key == &callee;
+            }
+            if !required {
                 return Ok(None);
             }
             let instance = self
@@ -825,11 +890,11 @@ impl<'a> Interpreter<'a> {
         source: SourceRange,
         environment: &mut Environment,
     ) -> Result<(), Error> {
-        let Some(schedule) = self.cleanup_schedule else {
+        let Some(_schedule) = self.cleanup_schedule else {
             return Ok(());
         };
         let mut boundaries = vec![];
-        for scope in &schedule.functions {
+        for scope in self.current_cleanup_scopes(source)? {
             self.tick(Some(source))?;
             if Some(&scope.instance) != self.cleanup_frame.as_ref()
                 || scope.context != self.cleanup_context
@@ -876,12 +941,12 @@ impl<'a> Interpreter<'a> {
         value: &Value,
         bindings: Option<&PatternBindings>,
     ) -> Result<(), Error> {
-        let Some(schedule) = self.cleanup_schedule else {
+        let Some(_schedule) = self.cleanup_schedule else {
             return Ok(());
         };
         let mut needed = false;
         let mut moved = BTreeMap::<LocalId, Vec<Vec<usize>>>::new();
-        for scope in &schedule.functions {
+        for scope in self.current_cleanup_scopes(source)? {
             self.tick(Some(source))?;
             if Some(&scope.instance) != self.cleanup_frame.as_ref()
                 || scope.context != self.cleanup_context
@@ -1182,6 +1247,18 @@ impl<'a> Interpreter<'a> {
         self.budget.steps -= (before - fuel) as u64;
         control.map_err(|_| self.failure(ErrorKind::Unsupported, None))?;
         self.index_cleanup_effect_context()?;
+        for (index, key) in schedule.borrowed_callable_functions.iter().enumerate() {
+            self.tick(None)?;
+            if graph.function(key).is_none() {
+                return Err(self.failure(ErrorKind::InvalidCallPlan, None));
+            }
+            for previous in &schedule.borrowed_callable_functions[..index] {
+                self.tick(None)?;
+                if previous == key {
+                    return Err(self.failure(ErrorKind::InvalidCallPlan, None));
+                }
+            }
+        }
         for function in &graph.functions {
             let mut matches = 0;
             for candidate in &schedule.functions {
@@ -1189,7 +1266,11 @@ impl<'a> Interpreter<'a> {
                 matches +=
                     usize::from(candidate.instance == function.key && candidate.context.is_empty());
             }
-            let contextual = self.cleanup_requires_context(&function.function.signature)?;
+            let mut contextual = self.cleanup_requires_context(&function.function.signature)?;
+            for key in &schedule.borrowed_callable_functions {
+                self.tick(None)?;
+                contextual |= key == &function.key;
+            }
             if matches != usize::from(!contextual) {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, None));
             }
@@ -1327,6 +1408,27 @@ impl<'a> Interpreter<'a> {
                 }
             }
         }
+        let mut scopes: HashMap<&iir::InstanceKey, Vec<&iir::cleanup::FunctionSchedule>> =
+            HashMap::new();
+        let mut sites: HashMap<_, Vec<_>> = HashMap::new();
+        for function in &schedule.functions {
+            self.tick(None)?;
+            for argument in &function.instance.arguments {
+                let work = instance_argument_work(argument, &self.normal_forms)
+                    .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, None))?;
+                self.charge_preparation(work)?;
+            }
+            scopes.entry(&function.instance).or_default().push(function);
+            for site in &function.sites {
+                self.tick(Some(site.source))?;
+                sites
+                    .entry((site.source.start, site.source.end))
+                    .or_default()
+                    .push((function, site));
+            }
+        }
+        self.cleanup_scopes = scopes;
+        self.cleanup_sites = sites;
         self.cleanup_schedule = Some(schedule);
         Ok(self)
     }
@@ -1336,14 +1438,14 @@ impl<'a> Interpreter<'a> {
         value_source: SourceRange,
         value: Value,
     ) -> Result<(), Error> {
-        let Some(schedule) = self.cleanup_schedule else {
+        let Some(_schedule) = self.cleanup_schedule else {
             return Ok(());
         };
         let key = self
             .cleanup_frame
             .clone()
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
-        for function in &schedule.functions {
+        for function in self.current_cleanup_scopes(source)? {
             self.tick(Some(source))?;
             if function.instance != key || function.context != self.cleanup_context {
                 continue;
@@ -1373,7 +1475,7 @@ impl<'a> Interpreter<'a> {
         boundary: iir::cleanup::Boundary,
         environment: &mut Environment,
     ) -> Result<(), Error> {
-        let Some(schedule) = self.cleanup_schedule else {
+        let Some(_schedule) = self.cleanup_schedule else {
             return Ok(());
         };
         let key = self
@@ -1381,7 +1483,7 @@ impl<'a> Interpreter<'a> {
             .clone()
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
         let mut found = None;
-        for candidate in &schedule.functions {
+        for candidate in self.current_cleanup_scopes(source)? {
             self.tick(Some(source))?;
             if candidate.instance == key && candidate.context == self.cleanup_context {
                 found = Some(candidate);
@@ -1390,9 +1492,25 @@ impl<'a> Interpreter<'a> {
         }
         let function =
             found.ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
-        for site in &function.sites {
+        self.tick(Some(source))?;
+        let count = self
+            .cleanup_sites
+            .get(&(source.start, source.end))
+            .map_or(0, Vec::len);
+        self.charge_preparation(count).map_err(|mut error| {
+            error.source = Some(source);
+            error
+        })?;
+        let sites = self
+            .cleanup_sites
+            .get(&(source.start, source.end))
+            .cloned()
+            .unwrap_or_default();
+        for (owner, site) in sites {
             self.tick(Some(source))?;
-            if site.source != source || site.boundary != boundary {
+            // Both references originate in the attached schedule. Identity here
+            // preserves the exact instance and contextual scope selected above.
+            if !std::ptr::eq(owner, function) || site.boundary != boundary {
                 continue;
             }
             let mut ordered: Vec<_> = site.actions.iter().collect();
@@ -1990,5 +2108,137 @@ mod variant_selection_tests {
             recovered.cleanup_steps(&steps, &storage, &[], 0).unwrap();
             assert!(!constructed(&storage));
         }
+    }
+}
+
+// The cleanup IR uses a common sum representation; error results retain their
+// separate Value kind and their error-row identity.
+fn cleanup_variant(value: &Value) -> Option<usize> {
+    match value {
+        Value::Variant { index, .. } => Some(*index),
+        Value::ErrorResult { error: None, .. } => Some(0),
+        Value::ErrorResult {
+            error: Some(index), ..
+        } => index.checked_add(1),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod conditional_storage_tests {
+    use super::*;
+
+    #[test]
+    fn released_parent_skips_child_projection_but_live_invalid_path_still_fails() {
+        let package = nir::program::Package::default();
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let ty = Term::Tuple(vec![Term::Primitive(Primitive::Bool)]);
+        let storage = Storage::new(Value::Tuple(vec![Value::Bool(true)]));
+        let invalid = Program {
+            ty: ty.clone(),
+            guards: vec![],
+            steps: vec![Step::IfConstructed {
+                path: vec![1],
+                steps: vec![],
+            }],
+        };
+        assert_eq!(
+            vm.cleanup_steps(&invalid.steps, &storage, &[], 0)
+                .unwrap_err()
+                .kind,
+            ErrorKind::InvalidPointer
+        );
+        assert_eq!(
+            storage.read().unwrap(),
+            Value::Tuple(vec![Value::Bool(true)])
+        );
+        let cleanup = Program {
+            ty: ty.clone(),
+            guards: vec![],
+            steps: vec![
+                Step::Release { path: vec![], ty },
+                Step::IfConstructed {
+                    path: vec![0],
+                    steps: vec![Step::Release {
+                        path: vec![0],
+                        ty: Term::Primitive(Primitive::Bool),
+                    }],
+                },
+            ],
+        };
+        vm.cleanup_steps(&cleanup.steps, &storage, &[], 0).unwrap();
+        assert_eq!(storage.read().unwrap(), Value::Unit);
+    }
+}
+
+impl Interpreter<'_> {
+    pub(super) fn require_interface_exit_site(&mut self, source: SourceRange) -> Result<(), Error> {
+        if self.cleanup_schedule.is_none() {
+            return Ok(());
+        }
+        let key = self
+            .cleanup_frame
+            .clone()
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+        let mut count = 0;
+        for scope in self.current_cleanup_scopes(source)? {
+            if scope.instance == key && scope.context == self.cleanup_context {
+                for site in &scope.sites {
+                    self.tick(Some(source))?;
+                    count += usize::from(
+                        site.source == source
+                            && site.boundary
+                                == iir::cleanup::Boundary::InterfacePostconditionFailure,
+                    );
+                }
+            }
+        }
+        if count != 1 {
+            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_interface_exit(
+        &mut self,
+        mut exit: super::InterfaceExit,
+        value: &Value,
+        source: SourceRange,
+        caller: &mut Environment,
+    ) -> Result<(), Error> {
+        self.retain_prepared(exit.result_slot, source, value)?;
+        if let Some(binding) = exit.result_binding {
+            exit.environment.insert(binding, value.clone());
+        }
+        for condition in &exit.conditions {
+            if !nir::program::checkable_predicate(condition) {
+                return Err(self.failure(ErrorKind::Type, Some(condition.source)));
+            }
+            let evaluated = match self.eval(condition, &mut exit.environment)? {
+                Flow::Value(value) => value,
+                _ => {
+                    return Err(self.failure(ErrorKind::InvalidControlFlow, Some(condition.source)));
+                }
+            };
+            let Value::Bool(passed) = Self::concrete_value(evaluated, condition.source)? else {
+                return Err(self.failure(ErrorKind::Type, Some(condition.source)));
+            };
+            self.events.push(Event::CheckPredicate {
+                source: condition.source,
+                passed,
+            });
+            if !passed {
+                self.cleanup_site(
+                    source,
+                    iir::cleanup::Boundary::InterfacePostconditionFailure,
+                    caller,
+                )?;
+                return Err(
+                    self.failure(ErrorKind::ProgramContractRejected, Some(condition.source))
+                );
+            }
+        }
+        self.transfer_prepared();
+        Ok(())
     }
 }

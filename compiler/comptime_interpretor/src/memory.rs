@@ -196,6 +196,10 @@ impl Storage {
                 return Ok(pointer);
             }
             match target {
+                Value::ErrorResult { ty, error, value } if *index == 0 => {
+                    fields.push(Projection::ErrorResult(ty.clone(), *error));
+                    target = value;
+                }
                 Value::Newtype { ty, value } if *index == 0 => {
                     fields.push(Projection::Newtype(ty.clone()));
                     target = value;
@@ -262,6 +266,8 @@ impl Storage {
 pub(crate) enum Projection {
     /// Cleanup-only descent; ordinary source field projection cannot create it.
     Newtype(Term),
+    /// Cleanup-only payload projection, guarded by result type and active branch.
+    ErrorResult(Term, Option<usize>),
     Record(DeclarationId, usize),
     Variant(DeclarationId, usize, usize),
     Tuple(usize),
@@ -286,7 +292,7 @@ impl PointerValue {
             if let Projection::AnonymousRecord(name, _) = field {
                 work = work.checked_add(name.len())?;
             }
-            if let Projection::Newtype(ty) = field {
+            if let Projection::Newtype(ty) | Projection::ErrorResult(ty, _) = field {
                 let mut fuel = 100_000;
                 nir::type_computations::charge_term(ty, &mut fuel).ok()?;
                 work = work.checked_add(100_000 - fuel)?;
@@ -327,6 +333,14 @@ impl fmt::Display for PointerValue {
                     write!(f, " (variant-field {declaration} {tag} {index})")?
                 }
                 Projection::Tuple(index) => write!(f, " (tuple-field {index})")?,
+                Projection::ErrorResult(ty, branch) => {
+                    write!(f, " (error-payload (type {ty}) (branch ")?;
+                    match branch {
+                        None => f.write_str("success")?,
+                        Some(index) => write!(f, "(error {index})")?,
+                    };
+                    f.write_str("))")?;
+                }
                 Projection::Newtype(id) => write!(f, " (newtype-representation {id})")?,
                 Projection::AnonymousRecord(name, index) => write!(
                     f,
@@ -366,11 +380,11 @@ impl PointerValue {
                 | Value::Tuple(fields) => fields.len(),
                 Value::AnonymousRecord(fields) => fields.len(),
                 Value::Closure(closure) => closure.capture_order.len(),
-                Value::Newtype { .. } => 1,
+                Value::ErrorResult { .. } | Value::Newtype { .. } => 1,
                 _ => return Err(ErrorKind::InvalidPointer),
             });
             path.push(match field {
-                Projection::Newtype(_) => 0,
+                Projection::ErrorResult(..) | Projection::Newtype(_) => 0,
                 Projection::Record(_, index)
                 | Projection::Variant(_, _, index)
                 | Projection::AnonymousRecord(_, index)
@@ -387,6 +401,15 @@ impl PointerValue {
                 }
             });
             target = match field {
+                Projection::ErrorResult(expected, branch) => {
+                    let Value::ErrorResult { ty, error, value } = target else {
+                        return Err(ErrorKind::InvalidPointer);
+                    };
+                    if ty != expected || error != branch {
+                        return Err(ErrorKind::InvalidPointer);
+                    }
+                    value.as_mut()
+                }
                 Projection::Newtype(expected) => {
                     let Value::Newtype { ty, value } = target else {
                         return Err(ErrorKind::InvalidPointer);
@@ -745,7 +768,7 @@ mod record_storage_tests {
             } else {
                 value
             };
-            let environment = BTreeMap::from([(id, value)]);
+            let environment = crate::Environment::from([(id, value)]);
             let mut vm =
                 super::super::Interpreter::for_comptime(&package, Default::default()).unwrap();
             vm.budget.steps = 1;
@@ -1267,5 +1290,35 @@ mod newtype_storage_tests {
         )
         .unwrap();
         assert_eq!(payload.read(), Err(ErrorKind::InvalidPointer));
+    }
+}
+
+#[cfg(test)]
+mod error_result_projection_tests {
+    use super::*;
+    #[test]
+    fn cleanup_payload_pointer_keeps_result_identity_and_branch() {
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let ty = Term::error_result(vec![boolean.clone()], boolean.clone());
+        let packet = |ty: Term, error| Value::ErrorResult {
+            ty,
+            error,
+            value: Box::new(Value::Bool(true)),
+        };
+        let storage = Storage::new(packet(ty.clone(), None));
+        let root = storage.owned_pointer(ty.clone(), &[]).unwrap();
+        let payload = storage.owned_pointer(boolean.clone(), &[0]).unwrap();
+        assert_eq!(payload.read().unwrap(), Value::Bool(true));
+        assert!(payload.to_string().contains("(error-payload"));
+        assert!(storage.owned_pointer(boolean.clone(), &[1]).is_err());
+        root.write(packet(ty.clone(), Some(0)), |_| true).unwrap();
+        assert_eq!(payload.read().unwrap_err(), ErrorKind::InvalidPointer);
+        let failure = storage.owned_pointer(boolean.clone(), &[0]).unwrap();
+        let wider = Term::error_result(
+            vec![boolean.clone(), Term::Primitive(nir::Primitive::U8)],
+            boolean,
+        );
+        root.write(packet(wider, Some(0)), |_| true).unwrap();
+        assert_eq!(failure.read().unwrap_err(), ErrorKind::InvalidPointer);
     }
 }

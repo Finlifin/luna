@@ -2,7 +2,7 @@
 use super::*;
 
 impl Walker<'_> {
-    // A complete Bool/fixed-integer write summary cannot replace a pointer
+    // A complete Bool/machine-integer write summary cannot replace a pointer
     // cell or an enum tag. Unknown calls and aggregate/pointer writes cannot
     // establish this guarantee; scalar range facts still require invalidation.
     pub(super) fn call_preserves_pointer_bindings(
@@ -16,7 +16,7 @@ impl Walker<'_> {
             self.limits.step(1)?;
             if access.write {
                 let ty = self.scalar_type_view(&access.ty)?;
-                if !matches!(ty, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some())
+                if !matches!(ty, Term::Primitive(p) if p == nir::Primitive::Bool || self.integer_layout(p).is_some())
                 {
                     return Ok(false);
                 }
@@ -75,7 +75,7 @@ impl Walker<'_> {
                 continue;
             };
             let view = self.scalar_type_view(ty)?;
-            if !matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some())
+            if !matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || self.integer_layout(p).is_some())
             {
                 continue;
             }

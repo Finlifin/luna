@@ -1,0 +1,7 @@
+-- luna host-direct-effect.fl --build run --output /tmp/flurry-direct-effect
+-- Expected native output: (bool true)
+effect read()->bool;
+fn run()->bool {
+    let original=false;
+    (read()# {read()=>not read()#,})# {read()=>original,}
+}

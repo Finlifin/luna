@@ -1,5 +1,8 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 trait Mapper where A {
-    fn pair(self, other: B) -> (A, B) where B;
+    fn pair(self, other: B) -> Tuple<A, B> where B;
     fn identity(value: B) -> B where B;
 }
 
@@ -8,7 +11,7 @@ struct Holder where X {
 }
 
 impl Mapper<X> for Holder<X> where X {
-    fn pair(self, other: Y) -> (X, Y) where Y {
+    fn pair(self, other: Y) -> Tuple<X, Y> where Y {
         (self.value, other)
     }
     fn identity(value: Y) -> Y where Y {
@@ -22,7 +25,7 @@ fn apply(action: fn(T) -> T, value: T) -> T where T {
 
 fn entry() -> bool {
     -- A is fixed by the interface; B follows the function type context.
-    let pair: fn(Holder<.u8'builtin>, bool) -> (.u8'builtin, bool) =
+    let pair: fn(Holder<.u8'builtin>, bool) -> Tuple<.u8'builtin, bool> =
         Holder<.u8'builtin>.as(Mapper<.u8'builtin>).pair;
     let (number, flag) = pair(Holder<.u8'builtin> { value: 9 }, true);
 

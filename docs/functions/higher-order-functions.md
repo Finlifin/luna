@@ -33,6 +33,27 @@ lambda_param -> lambda parameter
 
 函数值的取得与调用分开。例如条件表达式可以选择一个与目标相容的普通函数，随后再用它调用。选择时的 runtime 条件不会把函数变成 comptime 函数。函数名字、函数值和调用结果也不能因为共享一段源码就当成同一种对象。
 
+### 依赖函数类型
+
+显式的 `comptime Type` 输入可以被后续输入和返回类型引用：
+
+```flurry
+typealias IdentityCallback = fn(comptime T: Type, value: T) -> T;
+
+fn keep(comptime T: Type, value: T) -> T { value }
+
+fn example() -> bool {
+    let callback: IdentityCallback = keep;
+    callback(bool, true)
+}
+```
+
+这些名字属于该签名的局部作用域，按参数顺序绑定。嵌套函数类型可以引用外层输入，也可以用自己的同名参数遮蔽它；签名之外不能引用这些名字。形成类型后，名字被抽象为对应层级的参数位置，因此一致重命名不改变类型身份。`comptime fn` 类型遵循相同的绑定规则并保留自身阶段。
+
+显式 comptime 值输入也可以作为 normal-form 参数。例如 `fn(comptime flag: bool, value: Tagged<flag>) -> Tagged<flag>` 保留 `Tagged` 的头和对 `flag` 的依赖，并不展开 `Tagged` 的函数体。值参数的域可以依赖更早的 Type 输入；嵌套函数类型引用外层值时，值与其域都按原绑定层级解释。
+
+当前编译器已接入上述 Type 依赖、显式 comptime 值向 normal-form 参数的传递、命名位置参数和对应的普通／comptime 函数值调用。普通 runtime 输入不能因此充当静态 Type 或 comptime 值依据。任意依赖值计算，以及可选、隐式等函数类型参数协议仍需独立接入，不由这里的命名语法隐式启用。
+
 ### 环境参数化
 
 环境参数化的目的是让高阶函数的签名能同时接受带捕获和无捕获的回调，而不需要类型擦除或隐式堆分配。

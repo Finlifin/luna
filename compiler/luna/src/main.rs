@@ -18,59 +18,235 @@ fn main() -> ExitCode {
     };
 
     let result = match command {
+        Command::PackageStream { capacity } => {
+            luna::package_stream::serve(&mut io::stdin().lock(), &mut io::stdout().lock(), capacity)
+        }
+        Command::Host {
+            host_fma,
+            host_sqrt,
+            host_copysign,
+            host_intrinsics,
+            options,
+            entry,
+            fuel,
+            output_kind,
+            discard_result,
+            inline_functions,
+            optimization,
+            protocols,
+        } => frontend::compile_bound_for_native_host(
+            &options,
+            protocols.as_ref().map(|(copy, _)| copy.as_str()),
+            protocols.as_ref().map(|(_, drop)| drop.as_str()),
+            host_fma.as_deref(),
+            host_sqrt.as_deref(),
+            host_copysign.as_deref(),
+            &host_intrinsics,
+        )
+        .and_then(|(artifact, bindings)| {
+            let frontend::Artifact::Nir(package) = artifact else {
+                return Err("host pipeline requires NIR".into());
+            };
+            let ir = if discard_result {
+                luna::host::llvm_ir_discarding_result(
+                    &package,
+                    None,
+                    &entry,
+                    fuel,
+                    (
+                        bindings.copy.ok_or("host Copy binding is missing")?,
+                        bindings.drop.ok_or("host Drop binding is missing")?,
+                    ),
+                    inline_functions,
+                )?
+            } else if inline_functions
+                || protocols.is_some()
+                || bindings.copy.is_some()
+                || bindings.drop.is_some()
+            {
+                let lower = if inline_functions {
+                    luna::host::llvm_ir_inlined_with_protocols
+                } else {
+                    luna::host::llvm_ir_with_protocols
+                };
+                lower(
+                    &package,
+                    &entry,
+                    fuel,
+                    bindings.copy.ok_or("host Copy binding is missing")?,
+                    bindings.drop.ok_or("host Drop binding is missing")?,
+                )?
+            } else {
+                luna::host::llvm_ir(&package, &entry, fuel)?
+            };
+            let toolchain = luna::host::Toolchain {
+                optimization: optimization.unwrap_or_default(),
+                ..Default::default()
+            };
+            if matches!(
+                output_kind,
+                cli::HostOutput::Llvm | cli::HostOutput::Assembly
+            ) {
+                let ir = if output_kind == cli::HostOutput::Assembly {
+                    toolchain.assembly(&ir)?
+                } else if optimization.is_some() {
+                    toolchain.optimized_ir(&ir)?
+                } else {
+                    ir
+                };
+                if let Some(path) = &options.output {
+                    output::write_file(&options.input, path, &ir)
+                } else {
+                    output::write_stdout(&ir)
+                }
+            } else {
+                let kind = match output_kind {
+                    cli::HostOutput::Object => luna::host::BinaryOutput::Object,
+                    cli::HostOutput::Bitcode => luna::host::BinaryOutput::Bitcode,
+                    _ => luna::host::BinaryOutput::Executable,
+                };
+                let bytes = luna::host::binary(&ir, &toolchain, kind)?;
+                let publish = if kind == luna::host::BinaryOutput::Executable {
+                    output::write_executable
+                } else {
+                    output::write_object
+                };
+                publish(
+                    &options.input,
+                    options.output.as_ref().ok_or("host output missing")?,
+                    &bytes,
+                )
+            }
+        }),
         Command::Help => output::write_stdout(cli::HELP),
+        Command::Packages(request)
+            if matches!(request.action, luna::package_cli::Action::Build { .. }) =>
+        {
+            request.build().and_then(|bytes| {
+                let publish = if matches!(
+                    request.action,
+                    luna::package_cli::Action::Build {
+                        output: luna::host::BinaryOutput::Executable,
+                        ..
+                    }
+                ) {
+                    output::write_executable
+                } else {
+                    output::write_object
+                };
+                publish(
+                    &request.options.input,
+                    request
+                        .options
+                        .output
+                        .as_ref()
+                        .ok_or("host output missing")?,
+                    &bytes,
+                )
+            })
+        }
+        Command::Packages(request) => request.run().and_then(|dump| {
+            if let Some(path) = &request.options.output {
+                output::write_file(&request.options.input, path, &dump)
+            } else {
+                output::write_stdout(&dump)
+            }
+        }),
         Command::Invoke {
             options,
             entry,
             fuel,
-        } => frontend::compile(&options)
-            .and_then(|artifact| {
-                let frontend::Artifact::Nir(mut package) = artifact else {
-                    return Err("comptime invocation requires NIR".into());
-                };
-                // Optional program optimization follows frontend validation.
-                // Unknown retains checked NIR; predicates still evaluate once.
-                elaboration::verification::optimization::elide_proven_checks(
-                    &mut package,
-                    &mut elaboration::verification::Limits::default(),
-                );
-                luna::invocation::invoke_in_package(&package, 0, &entry, fuel)
-                    .map(|value| value.to_string())
-            })
-            .and_then(|value| {
-                if let Some(path) = &options.output {
-                    output::write_file(&options.input, path, &value)
-                } else {
-                    output::write_stdout(&value)
-                }
-            }),
+            protocols,
+        } => frontend::compile_bound_with_resource_protocols(
+            &options,
+            protocols.as_ref().map(|(copy, _)| copy.as_str()),
+            protocols.as_ref().map(|(_, drop)| drop.as_str()),
+        )
+        .and_then(|(artifact, bindings)| {
+            luna::package_cli::Action::Invoke {
+                entry,
+                fuel,
+                protocols,
+            }
+            .run(artifact, &bindings, 0)
+        })
+        .and_then(|value| {
+            if let Some(path) = &options.output {
+                output::write_file(&options.input, path, &value)
+            } else {
+                output::write_stdout(&value)
+            }
+        }),
+        Command::Test {
+            host_fma,
+            host_sqrt,
+            host_copysign,
+            host_intrinsics,
+            timeout,
+            optimization,
+            native,
+            list_only,
+            filter,
+            options,
+            inline_functions,
+            protocols,
+            fuel,
+        } => (if native {
+            frontend::compile_bound_for_native_tests
+        } else {
+            frontend::compile_bound_with_host_protocols
+        })(
+            &options,
+            protocols.as_ref().map(|(copy, _)| copy.as_str()),
+            protocols.as_ref().map(|(_, drop)| drop.as_str()),
+            host_fma.as_deref(),
+            host_sqrt.as_deref(),
+            host_copysign.as_deref(),
+            &host_intrinsics,
+        )
+        .and_then(|(artifact, bindings)| {
+            luna::package_cli::Action::Tests {
+                host_fma,
+                host_sqrt,
+                host_copysign,
+                host_intrinsics,
+                timeout,
+                optimization,
+                native,
+                list_only,
+                filter,
+                fuel,
+                inline: inline_functions,
+                protocols,
+            }
+            .run(artifact, &bindings, 0)
+        })
+        .and_then(|dump| {
+            if let Some(path) = &options.output {
+                output::write_file(&options.input, path, &dump)
+            } else {
+                output::write_stdout(&dump)
+            }
+        }),
         Command::Interpret {
             options,
             inline_functions,
             entry,
             protocols,
             fuel,
-        } => frontend::compile_with_resource_protocols(
+        } => frontend::compile_bound_with_resource_protocols(
             &options,
             protocols.as_ref().map(|(copy, _)| copy.as_str()),
             protocols.as_ref().map(|(_, drop)| drop.as_str()),
         )
-        .and_then(|artifact| {
-            let frontend::Artifact::Nir(package) = artifact else {
-                return Err("reference execution requires NIR".into());
-            };
-            match protocols {
-                Some((copy, drop)) if inline_functions => {
-                    luna::execution::interpret_inline_with_protocols_in_package(
-                        &package, 0, &entry, &copy, &drop, fuel,
-                    )
-                }
-                Some((copy, drop)) => luna::execution::interpret_with_protocols_in_package(
-                    &package, 0, &entry, &copy, &drop, fuel,
-                ),
-                None => luna::execution::interpret_in_package(&package, 0, &entry, fuel),
+        .and_then(|(artifact, bindings)| {
+            luna::package_cli::Action::Interpret {
+                entry,
+                fuel,
+                inline: inline_functions,
+                protocols,
             }
-            .map(|value| value.to_string())
+            .run(artifact, &bindings, 0)
         })
         .and_then(|value| {
             if let Some(path) = &options.output {
@@ -104,24 +280,19 @@ fn main() -> ExitCode {
             copy_protocol,
             drop_protocol,
             fuel,
-        } => frontend::compile_with_resource_protocols(
+        } => frontend::compile_bound_with_resource_protocols(
             &options,
             Some(&copy_protocol),
             drop_protocol.as_deref(),
         )
-        .and_then(|artifact| {
-            let frontend::Artifact::Nir(package) = artifact else {
-                return Err("resource analysis requires NIR".into());
-            };
-            luna::resources::analyze_with_protocols_in_package(
-                &package,
-                0,
-                &entry,
-                &copy_protocol,
-                drop_protocol.as_deref(),
+        .and_then(|(artifact, bindings)| {
+            luna::package_cli::Action::Analyze {
+                entry,
                 fuel,
-            )
-            .map(|analysis| analysis.to_string())
+                copy: copy_protocol,
+                drop: drop_protocol,
+            }
+            .run(artifact, &bindings, 0)
         })
         .and_then(|dump| {
             if let Some(path) = &options.output {

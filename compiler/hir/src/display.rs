@@ -11,8 +11,11 @@ use rustc_span::Span;
 use symbol::{DefId, PathAnchor};
 
 use crate::common::{Arg, FnParam, PathSegment, TyParam, TyParamKind};
-use crate::expr::{ClosureParam, ObjectEntry};
-use crate::item::{EffectGroupDef, EffectModifiers, FnModifiers, UseKind, UsePath};
+use crate::expr::{ClosureParam, FnTypeModifiers, ObjectEntry};
+use crate::item::{
+    EffectGroupDef, EffectModifiers, FnModifiers, TestTemplateInterface, TestTemplatePort, UseKind,
+    UsePath,
+};
 use crate::pattern::BoundType;
 use crate::*;
 
@@ -210,6 +213,30 @@ impl Display for Package<'_> {
                 f.write_str("))")?;
             }
         }
+        f.write_str(") (lexical-parents")?;
+        let mut parents = self.lexical_parents.iter().collect::<Vec<_>>();
+        parents.sort_unstable_by_key(|(child, _)| child.def_id.raw());
+        for (child, parent) in parents {
+            write!(
+                f,
+                " (lexical-parent (child (owner-id {})) (parent (owner-id {})))",
+                child.def_id.raw(),
+                parent.def_id.raw()
+            )?;
+        }
+        f.write_str(") (staged-parameter-definitions")?;
+        let mut staged = self.staged_parameter_definitions.iter().collect::<Vec<_>>();
+        staged.sort_unstable_by_key(|(binding, _)| {
+            (binding.owner.def_id.raw(), binding.local_id.raw())
+        });
+        for (binding, definition) in staged {
+            write!(
+                f,
+                " (staged-input (binding {}) (definition {}))",
+                Id(*binding),
+                Definition(*definition)
+            )?;
+        }
         f.write_str(") (definition-attributes")?;
         for attribute in &self.definition_attributes {
             write!(f, " {attribute}")?;
@@ -240,16 +267,16 @@ impl Display for AttributeTarget {
     }
 }
 
-impl Display for DeferredDefinitionAttribute {
+impl Display for DeferredDefinitionAttribute<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(key) = &self.configuration_key {
             return form!(f, "deferred-configuration", "target" => self.target,
                 "lexical-owner" => Owner(self.lexical_owner), "key" => Quoted(key),
-                "expression" => Quoted(&self.expression), "span" => Location(self.span));
+                "expression" => Quoted(&self.expression), "hir-expression" => self.value, "span" => Location(self.span));
         }
         form!(f, "deferred-attribute", "target" => self.target,
             "lexical-owner" => Owner(self.lexical_owner),
-            "expression" => Quoted(&self.expression), "span" => Location(self.span))
+            "expression" => Quoted(&self.expression), "hir-expression" => self.value, "span" => Location(self.span))
     }
 }
 
@@ -263,6 +290,27 @@ impl Display for ItemKind<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fn(sig, body) => form!(f, "fn", "signature" => sig, "body" => body),
+            Self::FunctionTemplateInstance {
+                template,
+                signature,
+                explicit_parameters,
+                parameters,
+                modifiers,
+                body,
+            } => {
+                form!(f, "function-template-instance", "template" => template,
+                    "signature" => Maybe(signature.as_ref()),
+                    "explicit-parameters" => Maybe(explicit_parameters.map(List)),
+                    "parameters" => List(parameters), "modifiers" => modifiers, "body" => body)
+            }
+            Self::TestTemplateInstance {
+                interface,
+                template,
+                ports,
+                body,
+            } => {
+                form!(f, "test-template-instance", "template" => template, "interface" => Maybe(interface.as_ref()), "ports" => List(ports), "body" => body)
+            }
             Self::Struct(def) => form!(f, "struct", "definition" => def),
             Self::Enum(def) => form!(f, "enum", "definition" => def),
             Self::Mod(def) => form!(f, "mod", "items" => Owners(&def.items)),
@@ -288,6 +336,18 @@ impl Display for ItemKind<'_> {
     }
 }
 
+impl Display for TestTemplatePort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        form!(f, "test-template-port", "name" => Name(self.name), "binding" => Id(self.binding), "formal" => Maybe(self.formal.map(Id)))
+    }
+}
+
+impl Display for crate::item::FunctionTemplateInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        form!(f, "function-template-input", "name" => Name(self.name), "binding" => Id(self.binding), "formal" => Maybe(self.formal.map(Id)))
+    }
+}
+
 impl Display for EffectModifiers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         form!(f, "effect-modifiers", "async" => self.is_async, "inline" => self.is_inline, "direct-passing" => self.is_direct_passing)
@@ -301,9 +361,21 @@ impl Display for EffectGroupDef<'_> {
     }
 }
 
+impl Display for FnTypeModifiers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        form!(f, "fn-type-modifiers",
+            "pure" => self.is_pure,
+            "comptime" => self.is_comptime,
+            "inline" => self.is_inline,
+            "unsafe" => self.is_unsafe,
+            "spec" => self.is_spec,
+            "verified" => self.is_verified)
+    }
+}
+
 impl Display for FnModifiers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        form!(f, "modifiers", "inline" => self.is_inline, "quote" => self.is_quote, "normal-form-head" => self.is_normal_form_head, "pure" => self.is_pure, "comptime" => self.is_comptime)
+        form!(f, "modifiers", "test" => self.is_test, "test-template" => self.is_test_template, "function-template" => self.is_function_template, "inline" => self.is_inline, "quote" => self.is_quote, "normal-form-head" => self.is_normal_form_head, "pure" => self.is_pure, "comptime" => self.is_comptime, "unsafe" => self.is_unsafe)
     }
 }
 
@@ -311,7 +383,8 @@ impl Display for FnSig<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         form!(f, "fn-signature", "params" => List(self.params), "return-type" => Maybe(self.return_ty),
             "return-bind" => Maybe(self.return_bind.map(Name)), "return-binding" => Maybe(self.return_binding), "modifiers" => self.modifiers,
-            "clause-params" => List(self.clause_params), "constraints" => List(self.clause_constraints), "span" => Location(self.span))
+            "clause-params" => List(self.clause_params), "template-body-binding" => Maybe(self.test_template_body().ok().flatten().map(|parameter| parameter.hir_id)),
+            "constraints" => List(self.clause_constraints), "span" => Location(self.span))
     }
 }
 
@@ -365,7 +438,7 @@ impl Display for FieldDef<'_> {
 
 impl Display for EnumDef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        form!(f, "enum-definition", "variants" => List(self.variants), "configurations" => List(&self.configurations), "clause-params" => List(self.clause_params), "constraints" => List(self.clause_constraints), "nested-items" => Owners(&self.nested_items))
+        form!(f, "enum-definition", "intrinsic" => self.is_intrinsic, "variants" => List(self.variants), "configurations" => List(&self.configurations), "clause-params" => List(self.clause_params), "constraints" => List(self.clause_constraints), "nested-items" => Owners(&self.nested_items))
     }
 }
 
@@ -650,6 +723,7 @@ impl Display for ExprKind<'_> {
                 form!(f, "if", "condition" => cond, "then" => then, "else" => Maybe(*otherwise))
             }
             Self::When(arms) => form!(f, "when", "arms" => List(arms)),
+            Self::UnsafeBlock(block) => form!(f, "unsafe-block-expr", "block" => block),
             Self::Block(block) => form!(f, "block-expr", "block" => block),
             Self::For {
                 label,
@@ -736,6 +810,9 @@ impl Display for ExprKind<'_> {
             Self::TyOptional(ty) => form!(f, "ty-optional", "type" => ty),
             Self::TyComptimeFn(params) => form!(f, "ty-comptime-fn", "params" => List(params)),
             Self::TyFn(params) => form!(f, "ty-fn", "params" => List(params)),
+            Self::TyModifiedFn(modifiers, params) => {
+                form!(f, "ty-modified-fn", "modifiers" => modifiers, "params" => List(params))
+            }
             Self::TyNFFn(params) => form!(f, "ty-nf-fn", "params" => List(params)),
             Self::TyFnArrow(params, ret) => {
                 form!(f, "ty-fn-arrow", "params" => params, "return-type" => ret)
@@ -765,6 +842,7 @@ impl Display for ExprKind<'_> {
             Self::Exist => form!(f, "exist"),
             Self::Builtin(name) => form!(f, "builtin", "name" => Quoted(name)),
             Self::TakeOld(value) => form!(f, "take-old", "value" => value),
+            Self::TakeIntrinsic(value) => form!(f, "take-intrinsic", "tag" => value),
             Self::TakeTagName(value) => form!(f, "take-tag-name", "value" => value),
             Self::TakeTupleEnumerate(value) => form!(f, "take-tuple-enumerate", "value" => value),
             Self::TakeBitVec(value) => form!(f, "take-bit-vec", "value" => value),
@@ -952,5 +1030,11 @@ impl Display for FieldPat<'_> {
 impl Display for crate::expr::ClosureEnvironmentBinding<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         form!(f, "environment-binding", "name" => Name(self.name), "type" => self.ty, "source" => Maybe(self.value))
+    }
+}
+
+impl Display for TestTemplateInterface<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        form!(f, "test-template-interface", "parameter" => Id(self.parameter), "type" => self.ty)
     }
 }

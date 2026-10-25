@@ -1,0 +1,28 @@
+-- Returning a code identity is distinct from returning a data pointer.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+
+effect inspect(pointer: *bool) -> bool;
+fn subject(pointer: *bool) -> #inspect bool { inspect(pointer)# }
+fn outcome() -> bool { true }
+
+typealias Answer = %{previous: *bool} fn() -> bool;
+fn update(pointer: *bool) -> Answer {
+    subject(pointer)# {
+        inspect(value) => do {
+            value.* = true;
+            let previous = value;
+            return || {return previous.*;};
+        },
+    };
+    let previous = pointer;
+    || previous.*
+}
+
+fn run() -> bool {
+    var seen = false;
+    let selected = update(seen.ref);
+    selected() and seen
+}

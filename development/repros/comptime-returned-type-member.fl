@@ -1,0 +1,7 @@
+struct Outer {pub struct Inner where T {pub typealias Payload=T;}}
+struct Packet {selected: .Type'builtin}
+comptime fn packet() -> Packet {Packet {selected: Outer}}
+fn run() -> bool {
+    let checked: packet().selected.Inner<bool>.Payload = true;
+    checked
+}

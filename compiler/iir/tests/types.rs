@@ -301,6 +301,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
                 phase: FunctionPhase::Comptime,
                 inline: false,
                 pure: true,
+                is_unsafe: false,
                 signature: Term::Function {
                     parameters: vec![],
                     result: Box::new(list.clone()),
@@ -428,6 +429,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
         methods: vec![nir::program::MethodContract {
             is_quote: false,
             pure: false,
+            is_unsafe: false,
             declaration: id(5),
             name: "check".into(),
             signature: Term::Function {
@@ -661,6 +663,7 @@ fn captured_comptime_values_must_materialize_before_iir_validation() {
                 phase: FunctionPhase::Runtime,
                 inline: false,
                 pure: true,
+                is_unsafe: false,
                 signature: Term::Function {
                     parameters: vec![],
                     result: Box::new(boolean.clone()),

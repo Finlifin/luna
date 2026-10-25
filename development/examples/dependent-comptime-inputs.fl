@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 typealias Char = 'x''type;
 
@@ -23,6 +26,6 @@ comptime fn Select(flag: bool) -> Type {
     if flag { bool } else { Char }
 }
 
-fn run() -> (bool, Char, bool) {
+fn run() -> Tuple<bool, Char, bool> {
     (forward(bool, true), identity(Select(false), 'x'), reordered(true, bool, false))
 }

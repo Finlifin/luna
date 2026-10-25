@@ -1,17 +1,20 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Type = .Type'builtin;
 typealias Bool = true'type;
 typealias Char = 'a''type;
 comptime fn SelectType(value: Type) -> Type {
-    if value == Bool { (Bool, Bool) } else { (Char, Char) }
+    if value == Bool { Tuple<Bool, Bool> } else { Tuple<Char, Char> }
 }
 comptime fn Compare(left: Type, right: Type) -> Bool { left == right }
 comptime fn Different(left: Type, right: Type) -> Bool { left != right }
-comptime fn run() -> (Bool, Bool, Bool) {
+comptime fn run() -> Tuple<Bool, Bool, Bool> {
     (Compare(Bool, Bool), Compare(Bool, Char), Different(Bool, Char))
 }
 typealias SelectedBool = SelectType(Bool);
 typealias SelectedChar = SelectType(Char);
-fn keep(value: SelectedBool) -> (Bool, Bool) { value }
-fn keep_char(value: SelectedChar) -> (Char, Char) { value }
+fn keep(value: SelectedBool) -> Tuple<Bool, Bool> { value }
+fn keep_char(value: SelectedChar) -> Tuple<Char, Char> { value }
 pure comptime fn Opaque<T> -> Type { T }
 comptime fn unresolved() -> Bool { Compare(Opaque<Bool>, Bool) }

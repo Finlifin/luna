@@ -1,0 +1,18 @@
+fn selected(value: bool) -> bool { value }
+
+fn run() -> bool {
+    typealias Flag = bool;
+
+    -- Each block owns a different declaration named selected.
+    let first = do {
+        inline fn selected(value: Flag) -> Flag { not value }
+        selected(false)
+    };
+    let second = do {
+        quote fn selected(value: Flag) -> Flag { value }
+        selected(true)
+    };
+
+    -- The block-local functions have not replaced this outer declaration.
+    first and second and not selected(false)
+}

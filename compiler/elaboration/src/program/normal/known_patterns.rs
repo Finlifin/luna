@@ -53,6 +53,27 @@ where
         use n::Pattern as Pat;
         match pattern {
             Pat::CodeEvidence { .. } => None,
+            Pat::ErrorResult { label, inner } => {
+                if value.has_pending_error_branch() {
+                    return None;
+                }
+                let Term::ErrorValue {
+                    label: actual,
+                    value,
+                    ..
+                } = value
+                else {
+                    return None;
+                };
+                match (label.as_ref(), actual.as_deref()) {
+                    (None, None) => self.inspect(inner, value, depth + 1, budget, bindings),
+                    (Some(a), Some(b)) if a == b => {
+                        self.inspect(inner, value, depth + 1, budget, bindings)
+                    }
+                    (None, Some(_)) | (Some(_), None) => Some(false),
+                    _ => None,
+                }
+            }
             Pat::Observe { .. } | Pat::NominalType { .. } => None,
             Pat::Wild => Some(true),
             Pat::Unit => match value {
@@ -158,7 +179,8 @@ where
                         Term::Primitive(_)
                         | Term::Pointer(_)
                         | Term::Function { .. }
-                        | Term::ComptimeFunction(_),
+                        | Term::ComptimeFunction(_)
+                        | Term::UnsafeFunction(_),
                     ) => return Some(false),
                     _ => return None,
                 };
@@ -252,6 +274,7 @@ where
                     | Term::Pointer(_)
                     | Term::Function { .. }
                     | Term::ComptimeFunction(_)
+                    | Term::UnsafeFunction(_)
                     | Term::Closure { .. } => return Some(false),
                     // Bound/hole/rigid/associated subjects do not yet establish
                     // a head. Unknown must not allow a later arm to win.
@@ -474,6 +497,47 @@ mod tests {
                     .collect::<Vec<_>>(),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn unresolved_inner_error_result_does_not_select_a_known_success_pattern() {
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let inner = Term::error_result(vec![boolean.clone()], boolean.clone());
+        let input = Term::error_value(
+            vec![Term::Primitive(nir::Primitive::Char)],
+            inner,
+            None,
+            Term::Rigid {
+                declaration: nir::DeclarationId {
+                    package: 1,
+                    local: 100,
+                },
+                sort: nir::Sort::ComptimeValue,
+            },
+        )
+        .unwrap();
+        for label in [None, Some(boolean)] {
+            let pattern = n::Pattern::ErrorResult {
+                label,
+                inner: Box::new(n::Pattern::Wild),
+            };
+            let result = PatternInspector {
+                tuple_head: None,
+                evaluate:
+                    |_: &n::Expr,
+                     _: usize,
+                     _: &mut comptime_runtime::Budget,
+                     _: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| None,
+            }
+            .inspect(
+                &pattern,
+                &input,
+                0,
+                &mut Default::default(),
+                &mut BTreeMap::new(),
+            );
+            assert_eq!(result, None);
         }
     }
 }

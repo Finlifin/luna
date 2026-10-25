@@ -22,6 +22,17 @@ impl std::fmt::Display for Error {
 }
 
 pub fn validate(value: &Term, domain: &Term, fuel: &mut usize) -> Result<(), Error> {
+    validate_in(value, domain, None, fuel)
+}
+
+/// Validate target-dependent scalar domains only with explicit target facts.
+/// Aggregate/abstract domain admission remains the invocation's responsibility.
+pub fn validate_in(
+    value: &Term,
+    domain: &Term,
+    target: Option<crate::target::TargetData>,
+    fuel: &mut usize,
+) -> Result<(), Error> {
     crate::type_computations::charge_term(value, fuel).map_err(|_| Error::Budget)?;
     crate::type_computations::charge_term(domain, fuel).map_err(|_| Error::Budget)?;
     if value.sort() != Sort::ComptimeValue {
@@ -45,9 +56,11 @@ pub fn validate(value: &Term, domain: &Term, fuel: &mut usize) -> Result<(), Err
         ));
     }
     if let (Some(actual), Term::Primitive(expected)) = (value.scalar_index_domain(), domain) {
-        if let (Term::Integer(value), Some((signed, width))) =
-            (value, expected.fixed_integer_layout())
-        {
+        let layout = match target {
+            Some(target) => target.integer_layout(*expected),
+            None => expected.fixed_integer_layout(),
+        };
+        if let (Term::Integer(value), Some((signed, width))) = (value, layout) {
             let fits = if signed {
                 value.to_signed(width).is_ok()
             } else {

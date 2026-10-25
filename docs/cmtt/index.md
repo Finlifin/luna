@@ -246,7 +246,7 @@ fn selected() -> .char'builtin {
 }
 ```
 
-这里 `true` 提供 `T = bool`，回调主体随后确定 `U = char`。部分函数上下文同样用于普通无捕获 lambda 和收集包内的函数字段，例如参数包类型 `(comptime fn(bool) -> U, bool)`；嵌套元组与具名整包供应也保留此上下文。准备回调的表达式仍按源码顺序执行，推断不调用回调主体，未调用正文仍检查执行阶段。
+这里 `true` 提供 `T = bool`，回调主体随后确定 `U = char`。部分函数上下文同样用于普通无捕获 lambda 和收集包内的函数字段，例如参数包类型 `Tuple<comptime fn(bool) -> U, bool>`；嵌套元组与具名整包供应也保留此上下文。准备回调的表达式仍按源码顺序执行，推断不调用回调主体，未调用正文仍检查执行阶段。
 
 直接收集变参时，每个元素检查完成后都会更新调用候选，后续元素立即获得新的类型上下文。例如下面的 lambda 确定 `U = u8`，随后 `200` 就按 `u8` 检查：
 
@@ -254,7 +254,7 @@ fn selected() -> .char'builtin {
 comptime fn narrow(value: bool) -> .u8'builtin {
     if value { 200 } else { 0 }
 }
-comptime fn collect(...items: (comptime fn(bool) -> U, U))
+comptime fn collect(...items: Tuple<comptime fn(bool) -> U, U>)
     -> < |- U > where U {
     let (action, value) = items;
     let result = action(true);
@@ -316,11 +316,11 @@ fn configured_code() -> .u8'builtin {
 
 预检先从 `config` 的返回类型取得字段布局，并据此检查代码字面量；`config()` 仍在其原实参位置求值一次。泛型结构体按类型实参实例化字段类型，匿名记录按字段名读取类型，字段本身若是元组包也可为展开提供宽度和元素类型。当前只读取内建拥有型字段布局，不据此调用 getter、选择方法或读取指针目标。实际字段访问继续检查生产函数的阶段、约束和契约。
 
-对于已知函数类型的计算结果，调用的返回类型也可继续传递证据。例如下面的 `factory()()` 先提供 `(bool,)` 接口，因而可以为更早的 tactic lambda 确定参数类型：
+对于已知函数类型的计算结果，调用的返回类型也可继续传递证据。例如下面的 `factory()()` 先提供 `Tuple<bool>` 接口，因而可以为更早的 tactic lambda 确定参数类型：
 
 ```flurry
-comptime fn packet() -> (bool,) { (false,) }
-comptime fn factory() -> comptime fn() -> (bool,) { packet }
+comptime fn packet() -> Tuple<bool> { (false,) }
+comptime fn factory() -> comptime fn() -> Tuple<bool> { packet }
 comptime fn transform_packet(lambda action: comptime fn(T) -> T, value: T)
     -> < |- T > where T {
     let result = action(value);
@@ -339,7 +339,7 @@ fn packet_result() -> bool {
 类型信息预检不调用实参生产函数，不执行回调，也不对数值字面量提前选用默认类型；显式目标代码接口仍可指定 u8 等类型。字面 tuple、已有局部包的类型，以及返回类型不依赖尚未实例化形参的生产函数签名，都可在展开前提供元素类型：
 
 ```flurry
-comptime fn packet() -> (bool,) { (false,) }
+comptime fn packet() -> Tuple<bool> { (false,) }
 
 fn from_packet() -> bool {
     const code = transform(not _0, ...packet());
@@ -453,7 +453,7 @@ fn packed() -> bool {
 
 pack 的元素类型先决定整个收集包的类型，再为 inspect 的回调提供参数类型；各元素的实际生产过程仍在原位置执行一次。
 
-例如 `transform(not _0, identity(...packet()))` 可以从 packet 的 `(bool,)` 返回接口取得元素类型，推断 identity 的结果为 bool，再检查回调。这里不会为了推断而调用 packet；它的执行阶段和参数契约仍在正常准备实参时检查。类型尚未取得的计算型包不会被假设成某种元素类型。
+例如 `transform(not _0, identity(...packet()))` 可以从 packet 的 `Tuple<bool>` 返回接口取得元素类型，推断 identity 的结果为 bool，再检查回调。这里不会为了推断而调用 packet；它的执行阶段和参数契约仍在正常准备实参时检查。类型尚未取得的计算型包不会被假设成某种元素类型。
 
 
 属性收集也可以提供匿名记录类型，字段名和顺序随类型证据保留：
@@ -471,7 +471,7 @@ fn configured() -> bool {
 这里只读取属性表达式已有的类型，或不依赖目标类型的字面量类型；不会提前计算属性。属性入口使用普通调用的选择规则，实际调用仍检查重复属性、字段访问、契约和执行阶段。
 
 
-producer 不会在检查 transform 的回调前执行。泛型生产函数若返回固定的 bool 或 `(bool,)`，其结果也可参与推断；若结果仍包含该生产函数未实例化的类型参数，则不能把它当作调用者的类型证据。
+producer 不会在检查 transform 的回调前执行。泛型生产函数若返回固定的 bool 或 `Tuple<bool>`，其结果也可参与推断；若结果仍包含该生产函数未实例化的类型参数，则不能把它当作调用者的类型证据。
 
 这里先从 packet 的返回类型取得 bool，再检查前面的回调。packet 仍在其原源码位置执行一次；它的前置条件、阶段检查及状态更新不会被类型预检跳过。预检可以读取块尾表达式的返回类型，并沿块内简单按值绑定、内建元组解构以及结构体／匿名记录字段解构传递已知类型。静态类型注解可以提供数字字面量所需的目标类型；没有注解时，只读取初始化表达式已有的类型证据，不提前选择数字默认类型。嵌套块按各自的绑定身份处理，预检结束或出错后恢复外层类型环境。整个过程不执行块内语句。需要实例化泛型或代入生产函数形参才能取得的包类型，仍可能要求显式类型实参或代码接口注解；这尚不是任意表达式之间的完整双向推断调度。
 
@@ -499,7 +499,7 @@ fn annotated_block() -> .u8'builtin {
 match 分支同样可以使用已知 subject 类型，为内建元组和记录模式中的绑定取得类型。预检按分支隔离绑定，只有各分支结果类型相同才向外提供证据。例如下面的两个 `action` 属于各自的分支，但具有同一函数类型：
 
 ```flurry
-comptime fn narrow_pair() -> (comptime fn(.u8'builtin) -> .u8'builtin, bool) {
+comptime fn narrow_pair() -> Tuple<comptime fn(.u8'builtin) -> .u8'builtin, bool> {
     (narrow, true)
 }
 fn matched_callback() -> .u8'builtin {
@@ -634,7 +634,7 @@ fn checked() -> bool {
 ```flurry
 comptime fn inspect_number(
     lambda action: comptime fn(T) -> bool,
-    ...items: (T, .u8'builtin)
+    ...items: Tuple<T, .u8'builtin>
 ) -> < |- bool > where T {
     let (value, number) = items;
     let result = action(value) and number == 200;
@@ -681,7 +681,7 @@ where .inverted: bool = false {
     }
 }
 
-fn apply(value: bool) -> (bool, bool) {
+fn apply(value: bool) -> Tuple<bool, bool> {
     const direct = configured();
     const inverse = configured<.inverted = true>();
     (~[input = value]<direct>, ~[input = value]<inverse>)
@@ -770,7 +770,7 @@ comptime fn choose(code: < |- U >, first: T) -> < |- U >
 where T, .flag: bool = is_bool(T), .U: Type = Width(flag) {
     code
 }
-fn widths() -> (.u8'builtin, .u16'builtin) {
+fn widths() -> Tuple<.u8'builtin, .u16'builtin> {
     const narrow = choose('(200), true);
     const wide = choose('(500), 'a');
     (~<narrow>, ~<wide>)
@@ -904,7 +904,7 @@ fn run() -> bool { ~<invert_times(3)> }
 范围端点先取得完成的 comptime Integer 值，按升序迭代；支持 `..=`，空范围和反向范围执行零次。循环索引及不可反驳模式产生的绑定在每次迭代中独立建立，不能被赋值，离开迭代后不泄漏。可以用 `inline for index if index != 1 in 0..count` 过滤，也支持嵌套循环、带标签的 break/continue 和提前返回代码。空范围仍检查模式、守卫和循环体，包括模式内部 `and … is …` 调用的执行阶段；即使生成器未被调用，其中的 runtime 调用也会被拒绝。实际构造不执行空范围的模式计算、守卫或循环体，合法但不终止的 comptime 模式计算因此不会在空范围被调用。定义侧只从已检查的整数常量边界取得非空证据，不调用端点函数，也不为抽象索引选取样本值。范围确定非空、守卫确定为真且循环体所有路径都返回代码时，可以省略尾返回，例如 `inline for index in 0..1 {return '(true);}`。空范围、未知边界、可能不命中的守卫，以及 body 中正常完成、break 或 continue 的路径，仍要求相应的后续代码返回；指向外层循环的转移按原目标传播。展开次数、端点算术、模式选择和代码复制共享构造预算；当前每个范围最多展开 100,000 次。生成器也支持非空 tuple 的 `tuple_enumerate`，见下例。
 
 ```flurry
-pure comptime fn toggleSelected(values: (bool, bool, bool)) -> <|-bool> {
+pure comptime fn toggleSelected(values: Tuple<bool, bool, bool>) -> <|-bool> {
     var code = '(false);
     inline for (index, element) if index != 0 in values'tuple_enumerate {
         if element { code = '(not ~<code>); }
@@ -1347,7 +1347,7 @@ pure comptime fn checked_input(input: Input, .copy: Input = input) -> <|- bool>
 变参入口完成收集后，契约可以通过纯结构解构观察整个参数包：
 
 ~~~flurry
-pure comptime fn all_ready(...items: (bool, bool)) -> <|- bool>
+pure comptime fn all_ready(...items: Tuple<bool, bool>) -> <|- bool>
     where requires do { let (first, second) = items; first and second } {
     '(true)
 }
@@ -1377,7 +1377,7 @@ pure comptime fn checked_state(input: State) -> <|- bool>
 
 
 
-这尚不是完整 CMTT 实现。代码值目前保存在 elaboration 的代码环境中；值子句的完整推断、方法生成器、异构代码容器与 `Any`/`any` 证据、上下文多态、依赖 runtime identity 的类型替换、模式生成函数的完整参数／控制流协议与 arm/template 接入尚未接通，均不能据此宣称可用。局部模式代码已支持显式接口、别名、默认／显式成功输出连接及基本位置数据参数的模式生成函数，见[模式代码](patterns-and-arms.md)。普通局部 `const` 已支持可冻结数据、Type 和不可反驳的聚合解构；带 guard／else 的 runtime 局部 const、外部活跃指针及循环闭包图尚未接通；普通局部常量已可保存函数声明身份及拥有的闭包环境快照，并保留图内共享闭包身份。以下章节描述完整语言契约，不能为了适配这个实现子集而缩减。
+这尚不是完整 CMTT 实现。代码值目前保存在 elaboration 的代码环境中；值子句的完整推断、方法生成器、异构代码容器与 `Any`/`any` 证据、上下文多态、依赖 runtime identity 的类型替换、模式生成函数的完整参数／控制流协议与 arm/template 接入尚未接通，均不能据此宣称可用。局部模式代码已支持显式接口、别名、默认／显式成功输出连接及基本位置数据参数的模式生成函数，见[模式代码](patterns-and-arms.md)。普通局部 `const` 已支持可冻结数据、Type 和不可反驳的聚合解构；数据 const 的模式／guard 已可在编译期选择并转入 runtime 发散 else；quoted code 仍要求无条件绑定，外部活跃指针及循环闭包图尚未接通；普通局部常量已可保存函数声明身份及拥有的闭包环境快照，并保留图内共享闭包身份。以下章节描述完整语言契约，不能为了适配这个实现子集而缩减。
 
 ## Intro
 

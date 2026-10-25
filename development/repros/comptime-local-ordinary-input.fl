@@ -1,0 +1,9 @@
+comptime fn outer(flag: bool) -> bool {
+    comptime fn local() -> bool { flag }
+    local()
+}
+fn run() -> bool {
+    const yes = outer(true);
+    const no = outer(false);
+    yes and not no
+}

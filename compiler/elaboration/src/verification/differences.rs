@@ -1,6 +1,8 @@
 //! Bounded transitive closure for integer difference constraints. Node zero is
 //! the mathematical constant 0; each other node is a versioned program value.
 //! Matrix entry [a][b] means a - b <= entry, including inferred paths.
+mod shortest_paths;
+
 use super::*;
 use std::collections::BTreeSet;
 
@@ -28,6 +30,23 @@ impl DifferenceBounds {
             let Some((left, right, bound)) = difference(row, limits)? else {
                 continue;
             };
+            // Existing interval edges through node zero already imply this
+            // pair when upper(left) - lower(right) <= bound. Retain the original
+            // polynomial in Facts (joins may widen bounds), but do not inflate
+            // this temporary closure with redundant constant/copy identities.
+            if let (Some(a), Some(b)) = (left, right) {
+                let interval = |id, limits: &mut Limits| match facts.bound(id, limits) {
+                    Ok(bound) => Ok(Some(bound)),
+                    Err(Unknown::MissingBound(_)) => Ok(None),
+                    Err(error) => Err(error),
+                };
+                if let (Some(a), Some(b)) = (interval(a, limits)?, interval(b, limits)?) {
+                    let independent = a.upper.subtract(&b.lower, &mut limits.arithmetic)?;
+                    if !limits.compare(&independent, &bound)?.is_gt() {
+                        continue;
+                    }
+                }
+            }
             has_pair |= left.is_some() && right.is_some();
             ids.extend(left);
             ids.extend(right);
@@ -66,28 +85,7 @@ impl DifferenceBounds {
             graph.tighten(i, 0, limits.integer(&bound.upper)?, limits)?;
             graph.tighten(0, i, bound.lower.negate(&mut limits.arithmetic)?, limits)?;
         }
-        // Each step composes a-b <= u and b-c <= v into a-c <= u+v.
-        for k in 0..size {
-            for a in 0..size {
-                for b in 0..size {
-                    limits.step(1)?;
-                    let (Some(left), Some(right)) = (&graph.bounds[a][k], &graph.bounds[k][b])
-                    else {
-                        continue;
-                    };
-                    let bound = left.add(right, &mut limits.arithmetic)?;
-                    graph.tighten(a, b, bound, limits)?;
-                }
-            }
-            if (0..size).any(|i| {
-                graph.bounds[i][i]
-                    .as_ref()
-                    .is_some_and(Integer::is_negative)
-            }) {
-                graph.inconsistent = true;
-                break;
-            }
-        }
+        graph.close_sparse(limits)?;
         Ok(Some(graph))
     }
     fn tighten(
@@ -475,11 +473,11 @@ pub(super) fn join_guarantees(
             let mut row = Polynomial::variable(x, limits)?
                 .subtract(&Polynomial::variable(y, limits)?, limits)?;
             row.insert(vec![], &upper.negate(&mut limits.arithmetic)?, limits)?;
-            if !super::relations::contains_relation(&joined.inequalities, &row, limits)? {
+            if !joined.inequalities.contains(&row, limits)? {
                 if joined.inequalities.len() >= limits.max_terms {
                     return Ok(());
                 }
-                joined.inequalities.push(row);
+                joined.inequalities.insert(row, limits)?;
             }
         }
     }
@@ -531,4 +529,110 @@ pub(super) fn project_guarantees(
         }
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod redundancy_tests {
+    use super::*;
+
+    #[test]
+    fn independent_pairs_keep_cross_component_interval_paths_with_bounded_work() {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let mut ids = Vec::new();
+        for local in 0..24 {
+            ids.push(
+                facts
+                    .assign(
+                        PlaceId { owner: 2, local },
+                        Interval::new(Integer::zero(), Integer::from_u128(255), &mut limits)
+                            .unwrap(),
+                    )
+                    .unwrap(),
+            );
+        }
+        for pair in ids.chunks_exact(2) {
+            let left = Polynomial::variable(pair[0], &mut limits).unwrap();
+            let right = Polynomial::variable(pair[1], &mut limits).unwrap();
+            facts
+                .inequalities
+                .push(left.subtract(&right, &mut limits).unwrap());
+            facts
+                .inequalities
+                .push(right.subtract(&left, &mut limits).unwrap());
+        }
+        limits.arithmetic.steps = 30_000;
+        let graph = DifferenceBounds::build(&facts, &mut limits)
+            .unwrap()
+            .unwrap();
+        assert!(!graph.contradiction());
+        for (a, id_a) in ids.iter().enumerate() {
+            for (b, id_b) in ids.iter().enumerate() {
+                let i = graph.nodes.binary_search(&Some(*id_a)).unwrap();
+                let j = graph.nodes.binary_search(&Some(*id_b)).unwrap();
+                assert_eq!(
+                    graph.bounds[i][j],
+                    Some(Integer::from_u128(if a / 2 == b / 2 { 0 } else { 255 }))
+                );
+            }
+        }
+        // The optimization never grants work after exhaustion; a subsequent
+        // independent query may recover with a fresh caller allowance.
+        limits.arithmetic.steps = 0;
+        assert!(DifferenceBounds::build(&facts, &mut limits).is_err());
+        assert!(
+            DifferenceBounds::build(&facts, &mut Limits::default())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn interval_implied_copy_edges_are_skipped_without_losing_join_relations() {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let mut ids = Vec::new();
+        for local in 0..24 {
+            ids.push(
+                facts
+                    .assign(
+                        PlaceId { owner: 1, local },
+                        Interval::singleton(&Integer::zero(), &mut limits).unwrap(),
+                    )
+                    .unwrap(),
+            );
+        }
+        for pair in ids.windows(2) {
+            let left = Polynomial::variable(pair[0], &mut limits).unwrap();
+            let right = Polynomial::variable(pair[1], &mut limits).unwrap();
+            facts
+                .inequalities
+                .push(left.subtract(&right, &mut limits).unwrap());
+            facts
+                .inequalities
+                .push(right.subtract(&left, &mut limits).unwrap());
+        }
+        limits.arithmetic.steps = 5_000;
+        assert!(
+            DifferenceBounds::build(&facts, &mut limits)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(facts.inequalities.len(), 46);
+        // Model a widened interval box after a join. The retained relations
+        // must now participate in closure; filtering the stored rows is unsound.
+        limits = Limits::default();
+        for (_, interval) in facts.current.values_mut() {
+            *interval =
+                Some(Interval::new(Integer::zero(), Integer::from_u128(255), &mut limits).unwrap());
+        }
+        let graph = DifferenceBounds::build(&facts, &mut limits)
+            .unwrap()
+            .unwrap();
+        let first = graph.nodes.binary_search(&Some(ids[0])).unwrap();
+        let last = graph.nodes.binary_search(&Some(ids[23])).unwrap();
+        assert_eq!(graph.bounds[first][last], Some(Integer::zero()));
+        assert_eq!(graph.bounds[last][first], Some(Integer::zero()));
+        assert!(!graph.contradiction());
+    }
 }

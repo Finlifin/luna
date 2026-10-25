@@ -1,0 +1,13 @@
+-- The builtin root re-exports Result to its child modules.
+-- Panic-dependent methods retain their original failure contract.
+impl Result<T, E> where T, E {
+    pub fn unwrap(self) -> T = self match {
+        .Ok(v)  => v,
+        .Err(_) => panic("called Result.unwrap() on an Err value"),
+    };
+
+    pub fn unwrap_err(self) -> E = self match {
+        .Ok(_)  => panic("called Result.unwrap_err() on an Ok value"),
+        .Err(e) => e,
+    };
+}

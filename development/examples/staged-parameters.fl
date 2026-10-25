@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- Compile-time inputs select an instance; ordinary inputs still arrive at runtime.
 comptime fn prefer_first() -> bool {
     true
@@ -25,7 +28,7 @@ where T
 
 typealias Byte = .u8'builtin;
 
-fn run() -> (bool, Byte) {
+fn run() -> Tuple<bool, Byte> {
     (
         choose(true, false),
         opposite<Byte>(true, 3, 8),

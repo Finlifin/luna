@@ -1,11 +1,11 @@
 //! Explicit, bounded invocation of completed comptime declarations.
 pub use crate::memoization::Invocation as MemoizedInvocation;
-use comptime_interpretor::{Budget, ContractOutcome, Interpreter, Value};
+use comptime_interpretor::{Budget, Interpreter, Value};
 use nir::program::{FunctionPhase, Package};
 use nir::{DeclarationId, Term};
 
 pub fn invoke(package: &Package, entry: &str, fuel: u64) -> Result<Value, String> {
-    invoke_selected(package, entry, None, fuel)
+    invoke_selected(package, entry, None, None, fuel)
 }
 
 /// Invoke an entry belonging to a driver-selected semantic package identity.
@@ -15,13 +15,36 @@ pub fn invoke_in_package(
     entry: &str,
     fuel: u64,
 ) -> Result<Value, String> {
-    invoke_selected(package, entry, Some(identity), fuel)
+    invoke_selected(package, entry, Some(identity), None, fuel)
 }
 
-fn invoke_selected(
+pub fn invoke_with_protocols(
+    package: &Package,
+    entry: &str,
+    copy: &str,
+    drop: &str,
+    fuel: u64,
+) -> Result<Value, String> {
+    invoke_selected(
+        package,
+        entry,
+        None,
+        Some((
+            crate::resources::Selection::Name(copy),
+            crate::resources::Selection::Name(drop),
+        )),
+        fuel,
+    )
+}
+
+pub(crate) fn invoke_selected(
     package: &Package,
     entry: &str,
     identity: Option<u64>,
+    protocols: Option<(
+        crate::resources::Selection<'_>,
+        crate::resources::Selection<'_>,
+    )>,
     fuel: u64,
 ) -> Result<Value, String> {
     if fuel == 0 {
@@ -60,41 +83,8 @@ fn invoke_selected(
     let package = prepared.as_ref();
     let context = elaboration::ptc::Context::from_package(package)
         .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
-    let mut index = elaboration::implementation::Index::default();
-    index.set_nominal_layouts(
-        package.structs.clone(),
-        package.enums.clone(),
-        package.newtypes.clone(),
-    );
-    for (id, domain) in package
-        .declaration_parameter_domains(&mut 100_000)
-        .map_err(|error| format!("invocation declaration domains: {error}"))?
-    {
-        index
-            .register_parameter_domain(id, domain)
-            .map_err(|error| format!("invocation declaration domains: {error}"))?;
-    }
-
-    for implementation in package
-        .implementations
-        .iter()
-        .filter(|i| i.interface.is_some())
-    {
-        index
-            .insert(
-                elaboration::implementation::ImplementationHead {
-                    parameter_types: implementation.parameter_types.clone(),
-                    declaration: implementation.declaration,
-                    interface: implementation.interface,
-                    interface_arguments: implementation.interface_arguments.clone(),
-                    subject: implementation.subject.clone(),
-                    type_parameters: implementation.type_parameters.clone(),
-                    requirements: implementation.requirements.clone(),
-                },
-                elaboration::ptc::Budget::default(),
-            )
-            .map_err(|error| format!("invocation implementation index: {error:?}"))?;
-    }
+    let index = crate::implementation_world::index(&package, preparation_budget)
+        .map_err(|error| format!("invocation implementation index: {error}"))?;
     let world = elaboration::capabilities::World {
         index: &index,
         implementations: &package.implementations,
@@ -102,13 +92,42 @@ fn invoke_selected(
         assumptions: &[],
         context: &context,
     };
-    let solver = |predicate: &nir::program::TypePredicate| {
-        use elaboration::ptc::{Budget, Outcome};
-        match world.check_predicate(predicate, Budget::default()) {
-            Ok(Outcome::Entailed(_)) => ContractOutcome::Satisfied,
-            Ok(Outcome::NotEntailed(_)) => ContractOutcome::Rejected,
-            _ => ContractOutcome::Unknown,
-        }
+    let resources = protocols
+        .map(|(copy, drop)| {
+            crate::resources::ProtocolContext::selected(
+                package,
+                copy,
+                Some(drop),
+                preparation_budget,
+            )
+        })
+        .transpose()?;
+    let copy_failure = std::cell::RefCell::new(None::<String>);
+    let pointer_copy = |ty: &Term, remaining: &mut u64| {
+        let Some(resources) = &resources else {
+            return false;
+        };
+        let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
+        let before = fuel;
+        let evidence = elaboration::verification::copy::acquire(
+            package,
+            &resources.world(package),
+            resources.copy,
+            resources.drop.expect("paired protocols"),
+            ty,
+            elaboration::ptc::Budget {
+                steps: fuel,
+                ..Default::default()
+            },
+            &mut fuel,
+        );
+        *remaining = remaining.saturating_sub((before - fuel) as u64);
+        let allowed = evidence.is_ok();
+        *copy_failure.borrow_mut() = evidence.err();
+        allowed
+    };
+    let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
+        crate::implementation_world::solve_metered(&world, predicate, preparation_budget, remaining)
     };
     let budget = Budget {
         steps: fuel,
@@ -120,13 +139,20 @@ fn invoke_selected(
     };
     let mut interpreter = interpreter
         .map_err(|error| format!("cannot prepare comptime invocation: {error}"))?
-        .with_type_solver(&solver);
+        .with_budgeted_type_solver(&solver)
+        .with_budgeted_pointer_copy_permission(&pointer_copy);
     let result = if graph.is_some() {
         interpreter.invoke_instance(&roots[0], vec![])
     } else {
         interpreter.invoke(declaration, vec![])
     };
-    result.map_err(|error| format!("comptime invocation of '{entry}' failed: {error}"))
+    result.map_err(|error| {
+        let mut message = format!("comptime invocation of '{entry}' failed: {error}");
+        if let Some(reason) = copy_failure.borrow().as_ref() {
+            message.push_str(&format!("; pointer Copy evidence: {reason}"));
+        }
+        message
+    })
 }
 
 /// Prepare the normal zero-supplied-argument call plan, preserving default scope.
@@ -212,6 +238,7 @@ pub(crate) fn prepare_entry_in_package<'a>(
             phase,
             inline: false,
             pure: false,
+            is_unsafe: false,
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,

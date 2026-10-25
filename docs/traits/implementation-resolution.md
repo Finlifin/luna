@@ -199,6 +199,20 @@ Tuple<Vec<Tuple<i32, i32>>, i32>
 
 内存效果、runtime 可达关系与程序状态规格交给程序验证层；即使它们伴随类型或接口交付，也不作为 PTC 的类型命题提交。
 
+已绑定 Tuple 的实现头可以从具体主体推导整个类型列表输入：
+
+~~~flurry
+trait SingleBool {}
+impl SingleBool for Tuple<...Es>
+where Es: meta.List<Type>, requires Tuple<...Es> == Tuple<bool> {}
+
+fn only(value: T) -> T where T :- SingleBool { value }
+~~~
+
+匹配 `Tuple<bool>` 时，`Es` 的候选是 `[bool]`；它仍是一个列表值参数。随后验证原始 Tuple 类型关系、列表的声明域和 requires，不能因为成功收集元素就跳过条件。`Tuple<>` 或 `Tuple<bool, bool>` 不满足这份实现。此推导依赖已绑定的 Tuple 表示契约，不扩展到任意不透明范式头，也不把 Tuple 头展开成结构类型。
+
+实现选择和证据重放都需要相应的 `meta.List<Type>` 表示元数据。缺失、撤销或重复的元数据不能授权列表实参；元数据变化使旧选择结果失效。包归属检查独立执行：本地工厂名字或成功的参数推导不会把外部 trait 的实现权交给调用者。
+
 递归查询使用目标与替换状态检测环。重复目标不是成功证明；持续生成新目标的搜索受预算控制，耗尽返回未决或诊断，不返回“不实现”。
 
 ### 成本与缓存

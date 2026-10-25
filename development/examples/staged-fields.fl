@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 struct Flags { enabled: bool, tracing: bool }
 struct Configuration { flags: Flags, ready: bool }
 
@@ -15,6 +18,6 @@ fn configured(comptime enabled: bool) -> bool {
     })
 }
 
-fn run() -> (bool, bool) {
+fn run() -> Tuple<bool, bool> {
     (configured(false), configured(true))
 }

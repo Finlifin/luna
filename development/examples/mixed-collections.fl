@@ -1,8 +1,11 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- Run with: luna mixed-collections.fl --interpret run
 -- Positional packets and named properties retain independent collection roles.
-fn packet() -> (bool, bool) { (true, false) }
+fn packet() -> Tuple<bool, bool> { (true, false) }
 
-fn collect(...items: (bool, bool), ...properties: T) -> ((bool, bool), T)
+fn collect(...items: Tuple<bool, bool>, ...properties: T) -> Tuple<Tuple<bool, bool>, T>
 where T
 {
     (items, properties)

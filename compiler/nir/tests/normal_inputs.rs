@@ -537,3 +537,177 @@ fn residual_normal_inputs_require_exact_domains_without_weakening_closed_admissi
             .is_err()
     );
 }
+
+#[test]
+fn error_inputs_validate_payload_domain_and_full_branch_membership() {
+    let ty = Term::error_result(vec![primitive(P::Char)], primitive(P::Bool));
+    assert!(supported_input_type(&ty, &[]));
+    let descriptor = head(ty.clone());
+    let input = |label, value| Term::ErrorValue {
+        ty: Box::new(ty.clone()),
+        label,
+        value: Box::new(value),
+    };
+    for value in [
+        input(None, Term::Bool(true)),
+        input(Some(Box::new(primitive(P::Char))), Term::Char('a')),
+    ] {
+        descriptor.check_closed_arguments(&[value]).unwrap();
+    }
+    for value in [
+        input(None, Term::Char('a')),
+        input(Some(Box::new(primitive(P::Char))), Term::Bool(true)),
+        input(Some(Box::new(primitive(P::Bool))), Term::Bool(true)),
+    ] {
+        assert!(descriptor.check_closed_arguments(&[value]).is_err());
+    }
+    assert!(!supported_input_type(
+        &Term::error_result(
+            vec![primitive(P::Char)],
+            Term::Pointer(Box::new(primitive(P::Bool)))
+        ),
+        &[]
+    ));
+}
+
+#[test]
+fn residual_error_success_requires_the_unflattened_inner_domain() {
+    let boolean = primitive(P::Bool);
+    let inner = Term::error_result(vec![boolean.clone()], boolean.clone());
+    let outer = Term::error_result(vec![primitive(P::Char)], inner.clone());
+    let descriptor = head(outer);
+    let pending = Term::Rigid {
+        declaration: id(100),
+        sort: Sort::ComptimeValue,
+    };
+    let argument = Term::error_value(
+        vec![primitive(P::Char)],
+        inner.clone(),
+        None,
+        pending.clone(),
+    )
+    .unwrap();
+    assert!(argument.has_pending_error_branch());
+    assert!(
+        descriptor
+            .check_closed_arguments(std::slice::from_ref(&argument))
+            .is_err()
+    );
+    let check = |domain: &Term| {
+        descriptor.check_arguments_with_evidence_budgeted(
+            std::slice::from_ref(&argument),
+            |_| false,
+            |_, _, _| None,
+            |value, expected| value == &pending && expected == domain,
+            &mut 10000,
+        )
+    };
+    check(&inner).unwrap();
+    assert!(check(&boolean).is_err());
+}
+
+#[test]
+fn associated_input_domains_preserve_type_and_value_binder_scope() {
+    let domain = Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(7),
+            member: id(8),
+        }),
+        subject: Box::new(Term::Rigid {
+            declaration: id(1),
+            sort: Sort::Type,
+        }),
+        arguments: vec![Term::Rigid {
+            declaration: id(2),
+            sort: Sort::ComptimeValue,
+        }],
+    };
+    let supported = |prior: &[nir::DeclarationParameter]| {
+        nir::normal_forms::supported_input_type_in_scope(&domain, prior, |_| false, |_| false)
+    };
+    let subject = nir::DeclarationParameter {
+        declaration: id(1),
+        sort: Sort::Type,
+    };
+    let index = nir::DeclarationParameter {
+        declaration: id(2),
+        sort: Sort::ComptimeValue,
+    };
+    assert!(supported(&[subject, index]));
+    assert!(!supported(&[]));
+    assert!(!supported(&[subject]));
+    assert!(!supported(&[index]));
+    assert!(!supported(&[
+        subject,
+        nir::DeclarationParameter {
+            declaration: id(2),
+            sort: Sort::Type
+        }
+    ]));
+}
+
+#[test]
+fn platform_normal_inputs_validate_target_ranges_recursively() {
+    use nir::target::TargetData;
+    for (domain, integer, accepted32, accepted64) in [
+        (
+            P::Usize,
+            comptime_runtime::Integer::from_u128(1u128 << 32),
+            false,
+            true,
+        ),
+        (
+            P::Isize,
+            comptime_runtime::Integer::from_i128(-2147483649),
+            false,
+            true,
+        ),
+        (
+            P::Usize,
+            comptime_runtime::Integer::from_i128(-1),
+            false,
+            false,
+        ),
+        (
+            P::Isize,
+            comptime_runtime::Integer::from_i128(-2147483648),
+            true,
+            true,
+        ),
+    ] {
+        let descriptor = head(record("count", primitive(domain)));
+        let arguments = [value("count", Term::Integer(integer))];
+        assert!(descriptor.check_closed_arguments(&arguments).is_err());
+        for (width, accepted) in [(32, accepted32), (64, accepted64)] {
+            let target = Some(TargetData::new(width).unwrap());
+            let mut exhausted = 0;
+            assert!(
+                descriptor
+                    .check_closed_arguments_budgeted_in(
+                        &arguments,
+                        |_| false,
+                        |_, _, _| None,
+                        &mut exhausted,
+                        target
+                    )
+                    .is_err()
+            );
+            let mut fuel = 10000;
+            assert_eq!(
+                descriptor
+                    .check_closed_arguments_budgeted_in(
+                        &arguments,
+                        |_| false,
+                        |_, _, _| None,
+                        &mut fuel,
+                        target
+                    )
+                    .is_ok(),
+                accepted
+            );
+            assert!(fuel < 10000);
+            // Reusing a descriptor after checking another target cannot cache its range.
+            assert!(descriptor.check_closed_arguments(&arguments).is_err());
+        }
+    }
+}

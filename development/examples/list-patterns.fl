@@ -1,0 +1,22 @@
+typealias Type = .Type'builtin;
+typealias Size = .u64'builtin;
+
+pub trait ListView {
+    assoc Element: Type;
+    fn list_pattern_view_get_len(*self) -> Size;
+    fn list_pattern_view_get_element(*self, comptime index: Size) -> Element;
+}
+
+struct Repeated { length: Size, value: bool }
+impl ListView for Repeated {
+    assoc Element: Type = bool;
+    fn list_pattern_view_get_len(*self) -> Size { self.length.* }
+    fn list_pattern_view_get_element(*self, comptime index: Size) -> bool {
+        self.value.*
+    }
+}
+
+pub fn evaluate() -> bool {
+    let values = Repeated { length: 2, value: true };
+    values match { [first, second] => first and second, _ => false }
+}

@@ -191,6 +191,61 @@ impl Checker<'_, '_> {
         .map(Some)
     }
 
+    // A category hint only. All structurally possible, accessible containers
+    // must agree; actual invocation still selects and checks the method anew.
+    fn computed_code_method_hint(
+        &mut self,
+        base: &Expr<'_>,
+        projection: hir::HirId,
+    ) -> Option<OwnerId> {
+        let mut pending = vec![base];
+        let mut containers = BTreeSet::new();
+        while let Some(value) = pending.pop() {
+            self.required_steps = self.required_steps.checked_sub(1)?;
+            match value.kind {
+                H::ResolvedDef { def_id, .. } => {
+                    containers.insert(def_id);
+                }
+                H::NFApplication(head, _) => pending.push(head),
+                H::Block(block) => pending.push(block.expr?),
+                H::If(_, yes, Some(no)) => {
+                    pending.push(yes.expr?);
+                    pending.push(no);
+                }
+                H::When(arms) if arms.iter().any(|arm| arm.cond.is_none()) => {
+                    pending.extend(arms.iter().map(|arm| arm.body))
+                }
+                H::Match(_, arms) if !arms.is_empty() => {
+                    pending.extend(arms.iter().map(|arm| arm.body))
+                }
+                _ => return None,
+            }
+        }
+        let candidates = self.package.member_access.get(&projection)?;
+        let mut found = None;
+        let mut category = None;
+        for container in containers {
+            let mut selected = None;
+            for (parent, member) in candidates.iter() {
+                self.required_steps = self.required_steps.checked_sub(1)?;
+                if *parent == container && selected.replace(*member).is_some() {
+                    return None;
+                }
+            }
+            let owner = self.package.definition_owner(selected?)?;
+            let pattern = self.is_pattern_generator(owner);
+            if !pattern && !self.is_code_generator(owner) {
+                return None;
+            }
+            if category.is_some_and(|previous| previous != pattern) {
+                return None;
+            }
+            category = Some(pattern);
+            found.get_or_insert(owner);
+        }
+        found
+    }
+
     pub(in crate::program::cmtt) fn generic_code_method_hint(
         &mut self,
         callee: &Expr<'_>,
@@ -246,6 +301,9 @@ impl Checker<'_, '_> {
                     && (self.is_code_generator(owner) || self.is_pattern_generator(owner)))
                 .then_some(owner)
             });
+        }
+        if let Some(owner) = self.computed_code_method_hint(base, head.hir_id) {
+            return Some(owner);
         }
         let subject = if self.is_static_method_subject(base) {
             self.generator_static_type_hint(base, 0, None).ok()??
@@ -340,7 +398,10 @@ impl Checker<'_, '_> {
         // Resolution can already bind a nested nominal member directly. Its
         // identity is still checked against the admitted implementation world.
         let candidate = match head.kind {
-            H::Projection(base, name) if self.is_static_method_subject(base) => {
+            H::Projection(base, name)
+                if self.is_static_method_subject(base)
+                    || self.local_field_domain(base)? == Some(p(P::Type)) =>
+            {
                 Some((self.type_expr(base)?, name.name, None, None))
             }
             H::Projection(base, name) => {

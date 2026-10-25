@@ -1,0 +1,49 @@
+-- A handler reads and updates request storage, then either returns from its
+-- installer, resumes the request, or completes its arm normally.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+
+struct Watch { retired: *bool, value: *bool, original: bool }
+impl Retire for Watch {
+    fn drop(*self) {
+        assumes not self.retired.*.*;
+        assumes self.value.*.* != self.original.*;
+        self.retired.*.* = true;
+    }
+}
+
+effect inspect(pointer: *bool, retired: *bool) -> bool;
+fn subject(pointer: *bool, retired: *bool) -> #inspect bool {
+    inspect(pointer, retired)#
+}
+
+fn update(pointer: *bool, retired: *bool, early: bool, explicit_resume: bool) -> bool {
+    let completed = subject(pointer, retired)# {
+        inspect(value, closed) => do {
+            let previous = value.*;
+            let owner = Watch {retired: closed, value: value, original: previous};
+            value.* = not previous;
+            if early { return previous; }
+            if explicit_resume { resume previous; }
+            previous
+        },
+    };
+    not completed
+}
+
+fn trial(seed: bool, early: bool, explicit_resume: bool) -> bool {
+    var seen = seed;
+    var retired = false;
+    let result = update(seen.ref, retired.ref, early, explicit_resume);
+    let expected = if early { seed } else { not seed };
+    result == expected and seen == not seed and retired
+}
+
+fn run() -> bool {
+    trial(false, false, false) and trial(false, false, true)
+        and trial(false, true, false) and trial(false, true, true)
+        and trial(true, false, false) and trial(true, false, true)
+        and trial(true, true, false) and trial(true, true, true)
+}

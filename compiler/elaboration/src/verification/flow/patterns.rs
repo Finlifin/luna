@@ -55,7 +55,11 @@ impl State {
         self.domains.extend(other.domains);
         Ok(self)
     }
-    fn keep(&mut self, existing: &BTreeSet<PlaceId>, limits: &mut Limits) -> Result<(), Unknown> {
+    pub(super) fn keep(
+        &mut self,
+        existing: &BTreeSet<PlaceId>,
+        limits: &mut Limits,
+    ) -> Result<(), Unknown> {
         limits.step(
             self.domains
                 .len()
@@ -394,7 +398,7 @@ impl Walker<'_> {
                 None => self.unknown_value(ty)?,
             };
             if field.range.is_none() {
-                field.range = domain(ty, self.limits)?;
+                field.range = domain_in(ty, self.target(), self.limits)?;
             }
             // Variant-qualified paths keep different payloads distinct even
             // when the active tag was not known before entering this arm.
@@ -1082,8 +1086,10 @@ impl Walker<'_> {
 impl Walker<'_> {
     /// Validate branches at an arbitrary request point. The handled body may
     /// mutate captures before any request, and may request zero or many times.
-    /// Branch facts therefore start from declared domains and never become
-    /// unconditional facts after the installation.
+    /// Written or escaped captures therefore start from declared domains.
+    /// A mutable declaration alone does not invalidate an unwritten local.
+    /// Stable lexical scalars retain installation facts; branch results never
+    /// become unconditional facts after the installation.
     pub(super) fn effect_handler_arms(
         &mut self,
         handler: &nir::program::EffectHandler,
@@ -1095,7 +1101,7 @@ impl Walker<'_> {
         };
         let ty = Term::Tuple(parameters.iter().map(|p| p.ty.clone()).collect());
         let mut pending = state.fork(self.limits)?;
-        pending.havoc(self.limits)?;
+        pending.havoc_with_private_scalars(self.handler_unstable_locals.as_ref(), self.limits)?;
         let input = self.unknown_value(&ty)?;
         let input = self.materialize_aggregate(input, &ty, &mut pending)?;
         let existing: BTreeSet<_> = pending.domains.keys().copied().collect();
@@ -1114,5 +1120,82 @@ impl Walker<'_> {
         }
         // Any residual path uses the separately checked outer fallback.
         Ok(())
+    }
+}
+
+/// Writes in pattern computations run in the handler just like its guard and
+/// body. Include all three roots when deciding which caller facts may survive
+/// a request; nested computations are deliberately conservative.
+pub(super) fn handler_arm_writes(
+    arm: &nir::program::MatchArm,
+    fuel: &mut usize,
+) -> Result<BTreeSet<LocalId>, String> {
+    let roots = nir::visit::pattern_observations(&arm.pattern, fuel)?;
+    let mut writes = BTreeSet::new();
+    for value in roots
+        .into_iter()
+        .chain(arm.guard.iter())
+        .chain(std::iter::once(&arm.body))
+    {
+        nir::visit::expression(value, fuel, |expr, _| {
+            if let K::Assign { place, .. }
+            | K::BitAssign { place, .. }
+            | K::BitUpdate { place, .. } = &expr.kind
+            {
+                writes.insert(place.root);
+            }
+            Ok(())
+        })?;
+    }
+    Ok(writes)
+}
+
+#[cfg(test)]
+mod handler_write_tests {
+    use super::*;
+
+    #[test]
+    fn handler_writes_include_pattern_guard_and_body_and_budget_retry() {
+        use nir::program::{MatchArm, Pattern, Place};
+        let source = nir::program::SourceRange { start: 0, end: 1 };
+        let unit = Expr {
+            source,
+            ty: Term::Primitive(nir::Primitive::Void),
+            kind: K::Unit,
+        };
+        let binding = |index| LocalId { owner: 1, index };
+        // This fixture tests the structural footprint, independently of typing
+        // the computed pattern or proving its observation contract.
+        let assignment = |index| Expr {
+            source,
+            ty: unit.ty.clone(),
+            kind: K::Assign {
+                place: Place {
+                    root: binding(index),
+                    fields: vec![],
+                },
+                value: Box::new(unit.clone()),
+            },
+        };
+        let arm = MatchArm {
+            pattern: Pattern::Then {
+                first: Box::new(Pattern::Wild),
+                value: Box::new(assignment(0)),
+                next: Box::new(Pattern::Wild),
+            },
+            guard: Some(assignment(1)),
+            body: assignment(2),
+        };
+        assert!(handler_arm_writes(&arm, &mut 0).is_err());
+        assert_eq!(
+            handler_arm_writes(&arm, &mut 100).unwrap(),
+            [binding(0), binding(1), binding(2)].into_iter().collect()
+        );
+        let empty = MatchArm {
+            pattern: Pattern::Wild,
+            guard: None,
+            body: unit,
+        };
+        assert!(handler_arm_writes(&empty, &mut 100).unwrap().is_empty());
     }
 }

@@ -41,6 +41,10 @@ fn closed(
     }
     let children: Vec<&Term> = match ty {
         Term::Nominal { arguments, .. } | Term::Tuple(arguments) => arguments.iter().collect(),
+        Term::ErrorValue { ty, label, value } => std::iter::once(ty.as_ref())
+            .chain(label.as_deref())
+            .chain(std::iter::once(value.as_ref()))
+            .collect(),
         Term::NominalValue { ty, fields, .. } => {
             std::iter::once(ty.as_ref()).chain(fields.iter()).collect()
         }

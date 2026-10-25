@@ -3,7 +3,10 @@
 #[allow(dead_code)]
 mod support;
 use comptime_interpretor::{Budget, Interpreter, Value};
-use support::{calls, compile, compile_with_protocols, id};
+use support::{
+    calls, compile_with_tuple as compile, compile_with_tuple_protocols as compile_with_protocols,
+    id,
+};
 
 #[test]
 fn effect_packet_defaults_provide_callback_context() {
@@ -12,7 +15,7 @@ fn effect_packet_defaults_provide_callback_context() {
         "true, ...packet(|value| false)",
     ] {
         let source = format!("effect enum Actions where T,.U:.Type'builtin=T {{apply(value:T,action:fn(U)->bool)->bool,}}
-            fn packet(value:T)->(T,) where T {{(value,)}}
+            fn packet(value:T)->Tuple<T> where T {{(value,)}}
             fn run()->bool {{Actions.apply({input})# {{Actions<bool>.apply(value,action)=>not action(value),}}}}");
         let package = compile(&source);
         assert_eq!(
@@ -29,7 +32,7 @@ fn ordinary_generic_spread_calls_discharge_effects_in_result_context() {
         let package = compile(&format!(
             "effect read()->bool;
             fn echo(value:T)->#read T where T {{read()#;value}}
-            fn packet()->(bool,) {{(true,)}}
+            fn packet()->Tuple<bool> {{(true,)}}
             fn request()->#read bool {{{call}}}
             fn run()->bool {{request()# {{read()=>false,}}}}"
         ));
@@ -50,10 +53,10 @@ fn effect_packets_receive_partial_nested_callback_context() {
     ] {
         let source = format!(
             "typealias Byte=.u8'builtin;
-            typealias Arguments=(fn(Byte)->bool,Byte);
-            fn packet(value:T)->(T,) where T {{(value,)}}
+            typealias Arguments=Tuple<fn(Byte)->bool,Byte>;
+            fn packet(value:T)->Tuple<T> where T {{(value,)}}
             effect echo(value:T)->T where T;
-            fn apply(values:(fn(Byte)->T,Byte))->T where T {{
+            fn apply(values:Tuple<fn(Byte)->T,Byte>)->T where T {{
                 let (callback,value)=values;callback(value)
             }}
             fn subject()->#[echo<Arguments>] bool {{
@@ -75,8 +78,8 @@ fn later_packet_evidence_checks_early_closures_without_reordering_producers() {
     let package = compile(
         "typealias Byte=.u8'builtin;
         effect apply(action:fn(T)->U,value:T)->U where T,U;
-        fn callbacks(value:T)->(T,) where T {(value,)}
-        fn values()->(Byte,) {(9,)}
+        fn callbacks(value:T)->Tuple<T> where T {(value,)}
+        fn values()->Tuple<Byte> {(9,)}
         fn run()->bool {
             apply(...callbacks(|value| value==9), ...values())#
                 {apply<Byte,bool>(action,value)=>action(value),}
@@ -107,10 +110,10 @@ fn partial_effect_packet_context_rejects_wrong_domains_and_literal_overflow() {
     for value in ["(|value:bool| value,9)", "(|value| value==9,256)"] {
         let source = format!(
             "typealias Byte=.u8'builtin;
-            typealias Arguments=(fn(Byte)->bool,Byte);
-            fn packet(value:T)->(T,) where T {{(value,)}}
+            typealias Arguments=Tuple<fn(Byte)->bool,Byte>;
+            fn packet(value:T)->Tuple<T> where T {{(value,)}}
             effect echo(value:T)->T where T;
-            fn apply(values:(fn(Byte)->T,Byte))->T where T {{
+            fn apply(values:Tuple<fn(Byte)->T,Byte>)->T where T {{
                 let (callback,value)=values;callback(value)
             }}
             fn subject()->#[echo<Arguments>] bool {{
@@ -128,7 +131,7 @@ fn partial_effect_packet_context_rejects_wrong_domains_and_literal_overflow() {
 fn effect_packets_keep_partial_record_field_contexts() {
     let source = "typealias Byte=.u8'builtin;
         fn record(...fields:T)->T where T {fields}
-        fn wrap(value:T)->(T,) where T {(value,)}
+        fn wrap(value:T)->Tuple<T> where T {(value,)}
         fn exemplar(value:Byte)->T where T {exemplar<T>(value)}
         fn check(value:Byte)->bool {value==9}
         fn zero()->Byte {0}
@@ -160,7 +163,7 @@ fn operation_spreads_preserve_once_only_source_order_including_empty_packets() {
     let package = compile(
         "effect combine(a:bool,b:bool,c:bool)->bool;
         fn first()->bool {true}
-        fn packet()->(bool,bool) {(true,false)}
+        fn packet()->Tuple<bool,bool> {(true,false)}
         fn empty(...items:T)->T where T {items}
         fn handle(a:bool,b:bool,c:bool)->bool {a and b and not c}
         fn run()->bool {
@@ -194,7 +197,7 @@ fn generic_operations_and_groups_infer_spread_inputs_and_callback_contexts() {
         let package = compile(&format!(
             "effect apply(value:T,action:fn(T)->U)->U where T,U;
             effect enum Channel where T,U {{apply(value:T,action:fn(T)->U)->U,}}
-            fn packet()->(bool,) {{(false,)}}
+            fn packet()->Tuple<bool> {{(false,)}}
             fn run()->bool {{
                 {head}(...packet(), |value| not value)#
                     {{apply<bool,bool>(value,action)=>action(value),
@@ -215,7 +218,7 @@ fn literal_and_computed_packets_receive_numeric_result_context() {
         let package = compile(&format!(
             "typealias Byte=.u8'builtin;
             effect echo(value:T)->T where T;
-            fn packet(value:T)->(T,) where T {{(value,)}}
+            fn packet(value:T)->Tuple<T> where T {{(value,)}}
             fn request()->#[echo<Byte>] Byte {{echo(...{packet})#}}
             fn run()->bool {{(request()# {{echo<Byte>(value)=>value,}})==7}}"
         ));
@@ -234,7 +237,7 @@ fn operation_packets_preserve_bound_tuple_identity() {
         pure comptime fn List<T>->Type {T}
         pure comptime fn Tuple<...Es:List<Type>>->Type {bool}
         effect combine(a:bool,b:bool)->bool;
-        fn packet()->(bool,bool) {(true,false)}
+        fn packet()->Tuple<bool,bool> {(true,false)}
         fn run()->bool {combine(...packet())# {combine(a,b)=>a and not b,}}",
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -279,7 +282,7 @@ fn operation_spreads_reject_wrong_width_types_and_unavailable_instances() {
     assert!(
         compile_with_protocols(
             "effect echo(value:T)->T where T;
-         fn packet()->(bool,) {(true,)}
+         fn packet()->Tuple<bool> {(true,)}
          fn run()->#[echo<'x''type>] bool {echo(...packet())#}",
             &Default::default()
         )
@@ -322,7 +325,7 @@ fn spread_fields_preserve_computation_types_in_nir() {
         "effect read()->bool;
         effect retain(value:#read bool)->#read bool;
         fn source()->#read bool {read()#}
-        fn packet()->(#read bool,) {(source(),)}
+        fn packet()->Tuple<#read bool> {(source(),)}
         fn request()->#[retain,read] bool {retain(...packet())#}
         fn run()->bool {
             request()# {retain(value)=>value,read()=>true,}
@@ -369,7 +372,7 @@ fn generic_spread_result_discharge_keeps_computation_inputs() {
         "effect read()->bool;
         effect retain(value:#read T)->#read T where T;
         fn source()->#read bool {read()#}
-        fn packet()->(#read bool,) {(source(),)}
+        fn packet()->Tuple<#read bool> {(source(),)}
         fn request()->#[retain<bool>,read] bool {retain(...packet())#}",
     );
     let function = package
@@ -406,7 +409,7 @@ fn affine_packets_deliver_and_clean_each_field_once_with_and_without_inlining() 
         impl Retire for Left {fn drop(*self) {left_clean();}}
         impl Retire for Right {fn drop(*self) {right_clean();}}
         inline effect receive(left:Left,right:Right)->bool;
-        fn packet()->(Left,Right) {(Left {},Right {})}
+        fn packet()->Tuple<Left,Right> {(Left {},Right {})}
         fn run()->bool {
             receive(...packet())# {receive(first,second)=>true,}
         }";
@@ -598,7 +601,7 @@ fn prepared_never_pattern_binding_cleans_only_initialized_inputs() {
             struct Held {{}} fn held_clean() {{}}
             impl Retire for Held {{fn drop(*self) {{held_clean();}}}}
             fn first()->Held {{Held {{}}}}
-            inline fn pair(a:Held,b:bool)->(Held,bool) {{(a,b)}}
+            inline fn pair(a:Held,b:bool)->Tuple<Held,bool> {{(a,b)}}
             fn guard()->bool {{false}}
             fn run()->bool {{{body}}}"
         );
@@ -612,4 +615,25 @@ fn prepared_never_pattern_binding_cleans_only_initialized_inputs() {
             assert!(!events.iter().any(|name| name == "pair" || name == "guard"));
         }
     }
+}
+
+#[test]
+fn callback_partial_result_context_retains_complete_generic_effect_arguments() {
+    for modifier in ["", "inline "] {
+        let source = format!(
+            "effect echo(value:T)->T where T;
+            {modifier}fn apply(action:fn()->#[echo<bool>] U)->#[echo<bool>] U where U {{action()}}
+            fn run()->bool {{apply(|| {{echo<bool>(true)#}})# {{echo<bool>(value)=>value}}}}"
+        );
+        assert_eq!(support::run_iir(&source, "run", vec![]), Value::Bool(true));
+    }
+}
+
+#[test]
+fn callback_partial_effect_context_preserves_explicit_result_checks() {
+    let source = "effect read()->bool;
+        fn apply(action:fn()->#read T)->#read T where T {action()}
+        fn run()->bool {apply(|| {read()#;'x'})# {read()=>true}}";
+    let failure = compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
 }

@@ -5,6 +5,134 @@ use nir::effects::{Abi, Operation};
 use nir::program::{Expr, ExprKind as K, Function, FunctionPhase, Pattern};
 use nir::{Primitive, Sort, Term};
 
+/// Potential effect-control exits of an evaluated residual expression.
+/// Calls with a nonempty effect row retain this boundary even when evidence
+/// is forwarded through another function or a runtime-selected callable.
+/// This classifies where cleanup can be published, not whether a particular
+/// handler actually exits or whether its control ABI is implemented.
+/// Publication and native cleanup admission must use the same classification.
+pub fn suspension_boundary(expr: &Expr) -> bool {
+    match &expr.kind {
+        K::EffectRequest {
+            abi: Abi::Direct, ..
+        } => true,
+        K::Call { callee, .. } => matches!(callee.ty.callable_signature(),
+            Term::Function {result, ..} if matches!(result.as_ref(),
+                Term::Computation {effects, ..} if !effects.is_empty())),
+        K::EffectHandle { handlers, .. } => handlers.iter().any(|h| h.abi == Abi::DirectPassing),
+        _ => false,
+    }
+}
+
+/// Concrete pointer-free installation payloads. This is a layout contract,
+/// not Copy evidence; resource admission must prove delivery separately.
+pub fn data_passing_signature(
+    package: &Package,
+    signature: &Term,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    let Term::Function { parameters, result } = signature else {
+        return Ok(false);
+    };
+    if !parameters.is_empty() {
+        return Ok(false);
+    }
+    passing_data(package, result, fuel, 0)
+}
+fn passing_data(
+    package: &Package,
+    ty: &Term,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<bool, String> {
+    spend(fuel)?;
+    if depth >= 128 {
+        return Err("IIR effect data depth exhausted".into());
+    }
+    nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
+    match ty {
+        Term::Primitive(_) => Ok(
+            nir::program::intrinsic_pointer_value(ty) || *ty == Term::Primitive(Primitive::Void)
+        ),
+        Term::ErrorResult { errors, result } => {
+            for error in errors {
+                if !passing_data(package, error, fuel, depth + 1)? {
+                    return Ok(false);
+                }
+            }
+            if **result == Term::Primitive(Primitive::Never) {
+                return Ok(true);
+            }
+            passing_data(package, result, fuel, depth + 1)
+        }
+        Term::Tuple(fields) => {
+            for field in fields {
+                if !passing_data(package, field, fuel, depth + 1)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Term::Record(fields) => {
+            for (_, field) in fields {
+                if !passing_data(package, field, fuel, depth + 1)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Term::NormalForm { head, .. } => {
+            for definition in &package.normal_forms {
+                spend(fuel)?;
+                if definition.declaration == *head {
+                    if let Some(fields) = definition.tuple_elements(ty) {
+                        for field in fields {
+                            if !passing_data(package, field, fuel, depth + 1)? {
+                                return Ok(false);
+                            }
+                        }
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
+        }
+        Term::Nominal { .. } => {
+            for instance in &package.nominals {
+                spend(fuel)?;
+                if instance.ty != *ty {
+                    continue;
+                }
+                match &instance.definition {
+                    crate::NominalDefinition::Struct(definition) => {
+                        for (_, field) in &definition.fields {
+                            if !passing_data(package, field, fuel, depth + 1)? {
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    crate::NominalDefinition::Enum(definition) => {
+                        for variant in &definition.variants {
+                            spend(fuel)?;
+                            for field in &variant.fields {
+                                if !passing_data(package, field, fuel, depth + 1)? {
+                                    return Ok(false);
+                                }
+                            }
+                        }
+                    }
+                    crate::NominalDefinition::Newtype(definition) => {
+                        return passing_data(package, &definition.representation, fuel, depth + 1);
+                    }
+                }
+                return Ok(true);
+            }
+            Err("IIR effect data nominal layout missing".into())
+        }
+        _ => Ok(false),
+    }
+}
+
 fn spend(fuel: &mut usize) -> Result<(), String> {
     *fuel = fuel
         .checked_sub(1)
@@ -38,7 +166,7 @@ fn data_type(package: &Package, ty: &Term, fuel: &mut usize, depth: usize) -> Re
             }
             data_type(package, row_result(result).1, fuel, depth + 1)?;
         }
-        Term::ComptimeFunction(inner) | Term::Pointer(inner) => {
+        Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) | Term::Pointer(inner) => {
             data_type(package, inner, fuel, depth + 1)?
         }
         Term::Tuple(_) | Term::Record(_) => {
@@ -169,7 +297,8 @@ fn pattern(
                 depth + 1,
             )?;
         }
-        Pattern::Observe { inner, .. }
+        Pattern::ErrorResult { inner, .. }
+        | Pattern::Observe { inner, .. }
         | Pattern::Binding { inner, .. }
         | Pattern::Remap { pattern: inner, .. } => {
             pattern(package, inner, row, resume, runtime, fuel, depth + 1)?
@@ -620,22 +749,128 @@ fn mapped(
     }
 }
 
+/// A concrete operation contract. Row position is deliberately not stored here:
+/// repeated occurrences have the same contract but separate runtime entries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Contract {
+    pub operation: Operation,
+    pub abi: Abi,
+    pub signature: Term,
+}
+impl std::fmt::Display for Contract {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(effect-contract {} (abi {}) (signature {}))",
+            self.operation, self.abi, self.signature
+        )
+    }
+}
+
+/// Borrowed, validated contracts for one immutable concrete graph. This table
+/// describes the operation ABI; it does not select handler occurrences, grant
+/// Copy permission, or authorize a control/resource transfer.
+pub struct Contracts<'a> {
+    graph: &'a Package,
+    entries: Vec<Contract>,
+}
+impl<'a> Contracts<'a> {
+    pub fn acquire(graph: &'a Package, fuel: &mut usize) -> Result<Self, String> {
+        graph.validate(fuel)?;
+        Ok(Self {
+            graph,
+            entries: collect_contracts(graph, fuel)?,
+        })
+    }
+
+    pub fn belongs_to(&self, graph: &Package) -> bool {
+        std::ptr::eq(self.graph, graph)
+    }
+
+    pub fn get(&self, operation: &Operation, fuel: &mut usize) -> Result<&Contract, String> {
+        for argument in &operation.arguments {
+            self.graph.validate_type(argument, fuel)?;
+        }
+        for entry in &self.entries {
+            spend(fuel)?;
+            for argument in &entry.operation.arguments {
+                self.graph.validate_type(argument, fuel)?;
+            }
+            if &entry.operation == operation {
+                return Ok(entry);
+            }
+        }
+        Err(format!(
+            "IIR effect operation contract missing: {operation}"
+        ))
+    }
+
+    /// Preserve the exact row order and multiplicity. A declaration identity
+    /// alone cannot identify either a generic operation or its row occurrence.
+    pub fn row(&self, row: &[Operation], fuel: &mut usize) -> Result<Vec<&Contract>, String> {
+        *fuel = fuel
+            .checked_sub(row.len())
+            .ok_or("IIR effect row lookup budget exhausted")?;
+        row.iter()
+            .map(|operation| self.get(operation, fuel))
+            .collect()
+    }
+}
+impl std::fmt::Display for Contracts<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(effect-contracts")?;
+        for entry in &self.entries {
+            write!(f, " {entry}")?;
+        }
+        f.write_str(")")
+    }
+}
+
 pub(crate) fn validate_contracts(package: &Package, fuel: &mut usize) -> Result<(), String> {
-    let mut contracts: std::collections::HashMap<Operation, (Abi, Term)> =
-        std::collections::HashMap::new();
+    collect_contracts(package, fuel).map(|_| ())
+}
+
+fn collect_contracts(package: &Package, fuel: &mut usize) -> Result<Vec<Contract>, String> {
+    // The index accelerates lookup; only first source traversal order is exposed
+    // in the resulting table/dump, never hash iteration or pointer ordering.
+    let mut index = std::collections::HashMap::<Operation, usize>::new();
+    let mut contracts: Vec<Contract> = Vec::new();
+    for contract in &package.effect_contracts {
+        spend(fuel)?;
+        operation(package, &contract.operation, &contract.signature, fuel)?;
+        if contract.abi == Abi::DirectPassing
+            && !matches!(&contract.signature, Term::Function {parameters, ..} if parameters.is_empty())
+        {
+            return Err("IIR direct passing operation contract has parameters".into());
+        }
+        if index
+            .insert(contract.operation.clone(), contracts.len())
+            .is_some()
+        {
+            return Err("duplicate IIR declared effect contract".into());
+        }
+        contracts.push(contract.clone());
+    }
     for instance in &package.functions {
         visit::expressions(&instance.function, fuel, |expr, fuel| {
             let mut insert = |op: &Operation, abi: Abi, signature: &Term| -> Result<(), String> {
                 spend(fuel)?;
-                if let Some((prior_abi, prior)) = contracts.get(op) {
-                    if *prior_abi != abi || prior != signature {
+                // Validate/charge the complete key before hashing or comparing it.
+                operation(package, op, signature, fuel)?;
+                if let Some(&position) = index.get(op) {
+                    let prior = &contracts[position];
+                    if prior.abi != abi || &prior.signature != signature {
                         return Err(
                             "IIR effect occurrence has conflicting operation contracts".into()
                         );
                     }
                 } else {
-                    operation(package, op, signature, fuel)?;
-                    contracts.insert(op.clone(), (abi, signature.clone()));
+                    index.insert(op.clone(), contracts.len());
+                    contracts.push(Contract {
+                        operation: op.clone(),
+                        abi,
+                        signature: signature.clone(),
+                    });
                 }
                 Ok(())
             };
@@ -656,7 +891,7 @@ pub(crate) fn validate_contracts(package: &Package, fuel: &mut usize) -> Result<
             Ok(())
         })?;
     }
-    Ok(())
+    Ok(contracts)
 }
 
 #[cfg(test)]

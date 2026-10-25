@@ -1317,9 +1317,13 @@ fn affine_capture_can_transfer_through_one_higher_order_invocation() {
 
 #[test]
 fn repeated_owned_capture_consumption_cannot_be_declared_pure() {
-    let source = "trait Copy {} trait Drop {fn drop(*self);} struct Token {flag:bool} fn invoke(action:%{token:Token} fn()->Token)->(Token,Token) {(action(),action())} pure fn run()->(Token,Token) {let token=Token {flag:true};invoke(|| token)}";
+    let source = "pure comptime fn TupleElements<T>->.Type'builtin {T}
+        pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>>->.Type'builtin {bool}
+        trait Copy {} trait Drop {fn drop(*self);} struct Token {flag:bool} fn invoke(action:%{token:Token} fn()->Token)->Tuple<Token,Token> {(action(),action())} pure fn run()->Tuple<Token,Token> {let token=Token {flag:true};invoke(|| token)}";
     let selectors = luna::protocols::type_constructors::Selectors {
         copy: Some("input::Copy"),
+        meta_list: Some("input::TupleElements"),
+        tuple: Some("input::Tuple"),
         drop: Some("input::Drop"),
         ..Default::default()
     };

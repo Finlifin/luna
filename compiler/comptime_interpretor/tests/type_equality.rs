@@ -25,6 +25,7 @@ fn function(local: u32, body: Expr) -> Function {
         phase: FunctionPhase::Comptime,
         inline: false,
         pure: false,
+        is_unsafe: false,
         preconditions: vec![],
         postconditions: vec![],
         result_binding: None,

@@ -183,10 +183,8 @@ impl Variant {
                 .ok_or(Error::Invalid(
                     "enum payload lies outside the whole representation",
                 ))?;
-            if field.width == 0 || !names.insert(field.name.clone()) {
-                return Err(Error::Invalid(
-                    "enum payload has zero width or duplicate name",
-                ));
+            if !names.insert(field.name.clone()) {
+                return Err(Error::Invalid("enum payload has duplicate name"));
             }
             if occupied
                 .slice(field.start, end, budget)?
@@ -212,6 +210,14 @@ impl Variant {
             value,
             fields,
         })
+    }
+    /// Fixed bits in this validated representation; payload slots are zero.
+    pub fn fixed_value(&self) -> &BitVec {
+        &self.value
+    }
+    /// Discrimination mask, excluding the payload slots.
+    pub fn fixed_mask(&self) -> &BitVec {
+        &self.mask
     }
     pub fn name(&self) -> &str {
         &self.name
@@ -273,9 +279,19 @@ impl Representation {
         self.layout.variants()
     }
     pub fn validate(&self) -> Result<(), &'static str> {
+        self.validate_in(None)
+    }
+
+    pub fn validate_in(
+        &self,
+        target: Option<crate::target::TargetData>,
+    ) -> Result<(), &'static str> {
         if let Some(base) = self.base_type {
-            if !base
-                .fixed_integer_layout()
+            if !target
+                .map_or_else(
+                    || base.fixed_integer_layout(),
+                    |target| target.integer_layout(base),
+                )
                 .is_some_and(|(signed, width)| !signed && width as usize == self.width())
             {
                 return Err("enum base type disagrees with its encoding width");

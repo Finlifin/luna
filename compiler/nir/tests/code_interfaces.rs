@@ -287,6 +287,7 @@ fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
     let method = nir::program::MethodContract {
         is_quote: false,
         pure: true,
+        is_unsafe: false,
         type_arguments: vec![],
         type_parameters: vec![],
         capabilities: vec![],
@@ -333,6 +334,17 @@ fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
         ordinary.program_summary(&[], &[]).unwrap().phase,
         nir::program::FunctionPhase::Comptime
     );
+    ordinary.is_unsafe = true;
+    ordinary.signature =
+        Term::UnsafeFunction(Box::new(ordinary.signature.ordinary().unwrap().clone())).into();
+    let summary = ordinary.program_summary(&[], &[]).unwrap();
+    assert!(summary.is_unsafe);
+    assert!(summary.callable_type().is_comptime_callable());
+    assert_eq!(
+        &summary.callable_type(),
+        ordinary.signature.ordinary().unwrap()
+    );
+    assert!(ordinary.to_string().contains("(unsafe true)"));
     assert!(method.program_summary(&[], &[]).is_err());
 }
 

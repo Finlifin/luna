@@ -3,6 +3,8 @@
 //! verifier. Unsupported constructs return an explicit analysis limitation.
 mod bit_indices;
 mod copies;
+mod finite_domains;
+mod intrinsics;
 mod memory_contracts;
 mod nominal;
 mod operators;
@@ -89,6 +91,7 @@ pub enum Reason {
     MissingPreconditionProof,
     MissingPostconditionProof,
     Phase(&'static str),
+    IntegerFormation(String),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -133,6 +136,11 @@ impl fmt::Display for Error {
                 "program postcondition is not proven on this return path"
             )?,
             Reason::Phase(message) => write!(f, "{message:?}")?,
+            Reason::IntegerFormation(message) => write!(
+                f,
+                "(integer-formation {})",
+                Literal::String(message.clone())
+            )?,
         }
         f.write_str("))")
     }
@@ -268,6 +276,7 @@ enum Scalar {
     Constant(Integer),
 }
 struct State {
+    target: Option<nir::target::TargetData>,
     frame: u64,
     facts: Facts,
     domains: BTreeMap<PlaceId, Option<Interval>>,
@@ -290,6 +299,7 @@ impl State {
             domains.insert(*place, bound.as_ref().map(|b| b.copy(limits)).transpose()?);
         }
         Ok(Self {
+            target: self.target,
             frame: self.frame,
             facts: self.facts.fork(limits)?,
             domains,
@@ -392,7 +402,10 @@ fn mutable_capture_paths(
             return Err(Unknown::ConditionDepthLimit);
         }
         match ty {
-            Term::Primitive(_) | Term::Function { .. } | Term::ComptimeFunction(_) => Ok(false),
+            Term::Primitive(_)
+            | Term::Function { .. }
+            | Term::UnsafeFunction(_)
+            | Term::ComptimeFunction(_) => Ok(false),
             Term::Record(fields) => {
                 for (_, ty) in fields {
                     if may_alias(ty, limits, depth + 1)? {
@@ -587,6 +600,13 @@ fn syntactic_place(
     Ok(None)
 }
 fn domain(ty: &Term, limits: &mut Limits) -> Result<Option<Interval>, Unknown> {
+    domain_in(ty, None, limits)
+}
+fn domain_in(
+    ty: &Term,
+    target: Option<nir::target::TargetData>,
+    limits: &mut Limits,
+) -> Result<Option<Interval>, Unknown> {
     let Term::Primitive(primitive) = ty else {
         return Ok(None);
     };
@@ -598,8 +618,11 @@ fn domain(ty: &Term, limits: &mut Limits) -> Result<Option<Interval>, Unknown> {
             limits,
         )?));
     }
-    primitive
-        .fixed_integer_layout()
+    target
+        .map_or_else(
+            || primitive.fixed_integer_layout(),
+            |target| target.integer_layout(*primitive),
+        )
         .map(|(signed, width)| Interval::machine(width as u16, signed, limits))
         .transpose()
 }
@@ -650,7 +673,7 @@ fn bind_place(
     ) {
         state.aggregates.insert(place, Value::unknown(ty, limits)?);
     }
-    let domain = domain(ty, limits)?;
+    let domain = domain_in(ty, state.target, limits)?;
     let bound = match (bound, &domain) {
         (Some(bound), _) => Some(bound),
         (None, Some(domain)) => Some(domain.copy(limits)?),
@@ -678,6 +701,69 @@ pub fn analyze_in_package(
 ) -> Result<Report, Error> {
     analyze_impl(function, Some(package), limits)
 }
+
+/// Recheck program contracts, machine arithmetic and bit endpoints after
+/// staging has exposed concrete types and callable targets. The package must
+/// include the residual runtime-instance overlay. Bodies without these
+/// obligations retain their independent resource-verification path.
+pub fn validate_residual_contracts(
+    package: &nir::program::Package,
+    function: &Function,
+    limits: &mut Limits,
+) -> Result<(), Error> {
+    let mut required = !function.preconditions.is_empty() || !function.postconditions.is_empty();
+    let mut invalid_target = false;
+    iir::visit::expressions(function, &mut limits.arithmetic.steps, |expr, fuel| {
+        required |= nir::program::machine_integer_type_in(expr, package.target).is_some()
+            || matches!(
+                expr.kind,
+                K::RequirePredicate(_)
+                    | K::EnsurePredicate(_)
+                    | K::BitIndex(..)
+                    | K::BitWindow { .. }
+                    | K::BitUpdate { .. }
+                    | K::BitWritePointer { .. }
+            );
+        let K::Call { callee, .. } = &expr.kind else {
+            return Ok(());
+        };
+        let (declaration, arguments) = match &callee.kind {
+            K::Function(declaration) => (*declaration, &[][..]),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => (*declaration, arguments.as_slice()),
+            _ => return Ok(()),
+        };
+        *fuel = fuel
+            .checked_sub(
+                package
+                    .runtime_instances
+                    .len()
+                    .saturating_add(package.functions.len())
+                    .saturating_add(package.quote_templates.len()),
+            )
+            .ok_or("residual contract lookup budget exhausted")?;
+        let Some((target, _)) = package.runtime_body(declaration, arguments) else {
+            invalid_target = true;
+            return Err("residual contract target is missing or ambiguous".into());
+        };
+        required |= !target.preconditions.is_empty();
+        Ok(())
+    })
+    .map_err(|_| Error {
+        source: function.body.source,
+        reason: if invalid_target {
+            Reason::InvalidSignature
+        } else {
+            Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into())
+        },
+    })?;
+    if required {
+        analyze_in_package(package, function, limits)?;
+    }
+    Ok(())
+}
 fn analyze_impl(
     function: &Function,
     package: Option<&nir::program::Package>,
@@ -692,6 +778,7 @@ fn analyze_impl(
         return Err(error(Reason::InvalidSignature));
     }
     let mut state = State {
+        target: package.and_then(|package| package.target),
         frame: 0,
         facts: Facts::default(),
         domains: BTreeMap::new(),
@@ -766,17 +853,7 @@ fn analyze_impl(
         if let K::EffectHandle { handlers, .. } = &expr.kind {
             for handler in handlers {
                 for arm in &handler.arms {
-                    for value in arm.guard.iter().chain(std::iter::once(&arm.body)) {
-                        nir::visit::expression(value, fuel, |expr, _| {
-                            if let K::Assign { place, .. }
-                            | K::BitAssign { place, .. }
-                            | K::BitUpdate { place, .. } = &expr.kind
-                            {
-                                addressed_locals.insert(place.root);
-                            }
-                            Ok(())
-                        })?;
-                    }
+                    addressed_locals.extend(patterns::handler_arm_writes(arm, fuel)?);
                 }
             }
         }
@@ -809,6 +886,7 @@ fn analyze_impl(
         }
     }
     let mut walker = Walker {
+        handler_unstable_locals: Some(addressed_locals.union(&written_locals).copied().collect()),
         addressed_locals,
         written_locals,
         type_context,
@@ -899,6 +977,9 @@ struct CallMemoryPlan {
 
 struct Walker<'a> {
     addressed_locals: BTreeSet<LocalId>,
+    // Handler arms can run at arbitrary request points, so preserve only
+    // lexical scalars neither written nor address-exposed anywhere in the body.
+    handler_unstable_locals: Option<BTreeSet<LocalId>>,
     written_locals: BTreeSet<LocalId>,
     type_context: crate::ptc::Context,
     // Type bindings are separate from symbolic program-state frames.
@@ -923,6 +1004,16 @@ struct Walker<'a> {
     single_pass_exits: BTreeMap<LocalId, Vec<State>>,
 }
 impl Walker<'_> {
+    fn target(&self) -> Option<nir::target::TargetData> {
+        self.package.and_then(|package| package.target)
+    }
+    fn integer_layout(&self, primitive: nir::Primitive) -> Option<(bool, u32)> {
+        self.target().map_or_else(
+            || primitive.fixed_integer_layout(),
+            |target| target.integer_layout(primitive),
+        )
+    }
+
     fn unknown_value(&mut self, ty: &Term) -> Result<Value, Reason> {
         self.unknown_value_at(ty, 0)
     }
@@ -960,6 +1051,7 @@ impl Walker<'_> {
         }
         let ty = self.scalar_type_view(ty)?;
         let mut value = Value::unknown(&ty, self.limits)?;
+        value.range = domain_in(&ty, self.target(), self.limits)?;
         if let (Term::Nominal { declaration, .. }, Some(package)) = (&ty, self.package) {
             self.limits.step(package.enums.len())?;
             if package.enums.iter().any(|definition| {
@@ -1227,7 +1319,7 @@ impl Walker<'_> {
         let view = self.scalar_type_view(ty)?;
         let pointer_slot = matches!(view, Term::Pointer(_));
         if !pointer_slot
-            && !matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some())
+            && !matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || self.integer_layout(p).is_some())
         {
             return self.unknown_value(ty);
         }
@@ -3080,8 +3172,8 @@ impl Walker<'_> {
         if !state.facts.is_reachable() || self.assuming_postcondition {
             return Ok(());
         }
-        if let Some(primitive) = nir::program::machine_integer_type(expr) {
-            let (signed, width) = primitive.fixed_integer_layout().unwrap();
+        if let Some(primitive) = nir::program::machine_integer_type_in(expr, self.target()) {
+            let (signed, width) = self.integer_layout(primitive).unwrap();
             let target = Interval::machine(width as u16, signed, self.limits)?;
             if !range
                 .map(|range| range.within(&target, self.limits))
@@ -3163,6 +3255,7 @@ impl Walker<'_> {
             K::Not(_)
             | K::And(..)
             | K::Or(..)
+            | K::TemplateEqual(..)
             | K::ScalarEqual(..)
             | K::ScalarLess(..)
             | K::ScalarLessEqual(..)
@@ -3292,19 +3385,40 @@ impl Walker<'_> {
         } else {
             None
         };
-        let target = match &callee.kind {
-            K::Function(id)
-            | K::FunctionInstance {
-                declaration: id, ..
-            } => self.package.and_then(|p| {
-                p.functions
-                    .iter()
-                    .chain(&p.quote_templates)
-                    .find(|f| f.declaration == *id)
-            }),
-            K::TraitMethod { .. } => method_summary.as_ref(),
+        let direct = match &callee.kind {
+            K::Function(id) => Some((*id, &[][..])),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => Some((*declaration, arguments.as_slice())),
             _ => None,
         };
+        let selected_target = match (direct, self.package) {
+            (Some((declaration, arguments)), Some(package)) => {
+                self.limits.step(
+                    package
+                        .runtime_instances
+                        .len()
+                        .saturating_add(package.functions.len())
+                        .saturating_add(package.quote_templates.len()),
+                )?;
+                Some(
+                    package
+                        .runtime_body(declaration, arguments)
+                        .ok_or(Reason::InvalidSignature)?,
+                )
+            }
+            _ => match &callee.kind {
+                K::TraitMethod { .. } => method_summary.as_ref().map(|f| (f, &[][..])),
+                _ => None,
+            },
+        };
+        let target = selected_target.map(|(function, _)| function);
+        // A residual instance already substituted both clause and ordinary
+        // staged inputs. Its key identifies it, but must not substitute again.
+        let target_arguments = selected_target
+            .map(|(_, arguments)| arguments)
+            .unwrap_or(&[]);
         let mut preconditions = Vec::new();
         let mut postconditions = Vec::new();
         let result_binding = target.and_then(|f| f.result_binding);
@@ -3336,7 +3450,8 @@ impl Walker<'_> {
                 return Err(Reason::InvalidSignature);
             }
             for condition in &target.preconditions {
-                let condition = if let K::FunctionInstance { arguments, .. } = &callee.kind {
+                let condition = if !target_arguments.is_empty() || !binders.is_empty() {
+                    let arguments = target_arguments;
                     if arguments.iter().any(|ty| ty.check_scope(&[]).is_err()) {
                         condition.instantiate_parameters_in_scope(
                             &binders,
@@ -3353,7 +3468,8 @@ impl Walker<'_> {
                 preconditions.push(condition);
             }
             for condition in &target.postconditions {
-                let condition = if let K::FunctionInstance { arguments, .. } = &callee.kind {
+                let condition = if !target_arguments.is_empty() || !binders.is_empty() {
+                    let arguments = target_arguments;
                     if arguments.iter().any(|ty| ty.check_scope(&[]).is_err()) {
                         condition.instantiate_parameters_in_scope(
                             &binders,
@@ -3525,6 +3641,7 @@ impl Walker<'_> {
         let mut returned_addresses = BTreeMap::new();
         let mut returned_places = BTreeMap::new();
         let mut defaults = State {
+            target: self.target(),
             frame: self.fresh_frame()?,
             facts: Facts::default(),
             domains: BTreeMap::new(),
@@ -3905,7 +4022,7 @@ impl Walker<'_> {
                     continue;
                 }
                 let view = self.scalar_type_view(ty)?;
-                if !matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some())
+                if !matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || self.integer_layout(p).is_some())
                 {
                     continue;
                 }
@@ -4259,6 +4376,7 @@ impl Walker<'_> {
                     return Err(Reason::InvalidSignature);
                 }
                 let mut invocation = State {
+                    target: self.target(),
                     frame: self.fresh_frame()?,
                     facts: Facts::default(),
                     domains: BTreeMap::new(),
@@ -4531,7 +4649,7 @@ impl Walker<'_> {
             }) => {
                 self.limits.step(1)?;
                 let view = self.scalar_type_view(&expr.ty)?;
-                if !matches!(view, Term::Primitive(p) if p.fixed_integer_layout().is_some() || matches!(p, nir::Primitive::Bool | nir::Primitive::Integer))
+                if !matches!(view, Term::Primitive(p) if self.integer_layout(p).is_some() || matches!(p, nir::Primitive::Bool | nir::Primitive::Integer))
                     && !matches!(
                         view,
                         Term::Tuple(_) | Term::Record(_) | Term::Nominal { .. }
@@ -4595,7 +4713,7 @@ impl Walker<'_> {
                 let Term::Primitive(primitive) = &expr.ty else {
                     return Err(Reason::InvalidSignature);
                 };
-                if let Some((signed, width)) = primitive.fixed_integer_layout() {
+                if let Some((signed, width)) = self.integer_layout(*primitive) {
                     if signed {
                         number.to_signed(width).map_err(Unknown::from)?;
                     } else {
@@ -4612,6 +4730,39 @@ impl Walker<'_> {
                     Literal::SignedInteger(n) => Some(Integer::from_i128(*n)),
                     Literal::UnsignedInteger(n) => Some(Integer::from_u128(*n)),
                     Literal::Integer(text) => Some(self.integer_spelling(text)?),
+                    Literal::PendingInteger { spelling, negative } => {
+                        if let Term::Primitive(domain) = expr.ty {
+                            let target = self.target();
+                            let formed = nir::integer_formation::form(
+                                spelling,
+                                *negative,
+                                domain,
+                                target,
+                                &mut self.limits.arithmetic,
+                            )
+                            .map_err(|cause| {
+                                Reason::IntegerFormation(
+                                    nir::integer_formation::FormationError {
+                                        source: expr.source,
+                                        target: expr.ty.clone(),
+                                        layout: target,
+                                        cause,
+                                    }
+                                    .to_string(),
+                                )
+                            })?;
+                            Some(match formed {
+                                Literal::SignedInteger(value) => Integer::from_i128(value),
+                                Literal::UnsignedInteger(value) => Integer::from_u128(value),
+                                Literal::Integer(text) => self.integer_spelling(&text)?,
+                                _ => return Err(Reason::InvalidSignature),
+                            })
+                        } else {
+                            // The caller has not selected a concrete domain;
+                            // do not turn a pending proxy into value evidence.
+                            None
+                        }
+                    }
                     Literal::Bool(value) => {
                         result.condition = Some(Condition::Bool(*value));
                         let encoded = Integer::from_u128(u128::from(*value));
@@ -4888,13 +5039,13 @@ impl Walker<'_> {
                 source,
                 spelling,
                 negative,
-            } if matches!(domain, Some(Term::Primitive(primitive)) if primitive.fixed_integer_layout().is_some()) =>
+            } if matches!(domain, Some(Term::Primitive(primitive)) if self.integer_layout(*primitive).is_some()) =>
             {
                 let ty = domain.unwrap();
                 let Term::Primitive(primitive) = ty else {
                     unreachable!()
                 };
-                let (signed, bits) = primitive.fixed_integer_layout().unwrap();
+                let (signed, bits) = self.integer_layout(*primitive).unwrap();
                 let mut value = self.integer_spelling(spelling)?;
                 if *negative {
                     value = value
@@ -5080,12 +5231,17 @@ impl Walker<'_> {
                 }
                 // Installation-time providers can mutate captured storage even
                 // when the subject never requests an operation. Entry facts
-                // therefore cannot flow into that subject unchanged.
+                // therefore cannot flow into that subject unchanged. Stable
+                // by-value scalars remain valid: the full-function scan rules
+                // out both writes and address exposure for those bindings.
                 if handlers
                     .iter()
                     .any(|handler| handler.abi == nir::effects::Abi::DirectPassing)
                 {
-                    state.havoc(self.limits)?;
+                    state.havoc_with_private_scalars(
+                        self.handler_unstable_locals.as_ref(),
+                        self.limits,
+                    )?;
                 }
                 let completed = self.child(computation, state, depth)?;
                 result = self.completed_effect_result(completed, &expr.ty, state)?;
@@ -5131,6 +5287,11 @@ impl Walker<'_> {
                             Reason::MissingPostconditionProof
                         }
                     };
+                    // Predicate-local pattern bindings and constructor ghosts
+                    // cannot escape a void proof obligation. Keep caller roots
+                    // and project surviving observations when leaving its scope.
+                    self.limits.step(state.domains.len())?;
+                    let existing = state.domains.keys().copied().collect();
                     let checked = self.child(predicate, state, depth)?;
                     let condition = checked.condition.ok_or_else(&failure)?;
                     let proof = state
@@ -5141,6 +5302,7 @@ impl Walker<'_> {
                         .replay(&state.facts, self.limits)
                         .map_err(|_| failure())?;
                     state.facts.assume(&condition, true, self.limits)?;
+                    state.keep(&existing, self.limits)?;
                 }
             }
             K::CheckPredicate(condition) => {
@@ -5216,11 +5378,18 @@ impl Walker<'_> {
     ) -> Result<Value, Reason> {
         let mut result = Value::default();
         match &expr.kind {
+            K::Intrinsic { inputs, .. } => {
+                result = self.intrinsic_value(expr, inputs, state, depth)?;
+            }
             K::BitWindow { value, start, end } => {
                 self.bit_window(expr, value, start, end, state, depth)?;
             }
             K::BitIndex(value, index) => self.bit_index(expr, value, index, state, depth)?,
-            K::BitSlice { value, .. }
+            // IEEE arithmetic supplies no exact integer/polynomial evidence.
+            // Still visit operands in source order: their calls, writes and
+            // machine arithmetic remain verification obligations.
+            K::FloatNegate(value)
+            | K::BitSlice { value, .. }
             | K::TakeBits(value)
             | K::SymbolName(value)
             | K::EnumName(value)
@@ -5228,7 +5397,9 @@ impl Walker<'_> {
                 self.child(value, state, depth)?;
                 result = self.unknown_value(&expr.ty)?;
             }
-            K::BitEqual(left, right) | K::BitConcat(left, right) => {
+            K::FloatBinary { left, right, .. }
+            | K::BitEqual(left, right)
+            | K::BitConcat(left, right) => {
                 self.child(left, state, depth)?;
                 self.child(right, state, depth)?;
                 result = self.unknown_value(&expr.ty)?;
@@ -5418,7 +5589,7 @@ impl Walker<'_> {
                         let view = self.scalar_type_view(&value.ty)?;
                         let observed = if let Some((path, version)) = address {
                             if state.facts.value(path.root) == Some(version)
-                                && matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some())
+                                && matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || self.integer_layout(p).is_some())
                             {
                                 let transfer = self.prepare_copy(&replacement, state)?;
                                 Some((path, transfer))
@@ -5486,6 +5657,9 @@ impl Walker<'_> {
             }
             K::Closure { .. } => {
                 result = self.closure_expression(expr, state, depth)?;
+            }
+            K::UnsafeScope(value) => {
+                result = self.child(value, state, depth)?;
             }
             K::Discard(value) => {
                 self.child(value, state, depth)?;
@@ -5844,18 +6018,75 @@ pub fn validate_machine_operations(package: &nir::program::Package) -> Result<()
         if !owners.contains(&function.declaration) {
             continue;
         }
-        analyze_in_package(package, function, &mut Limits::default())?;
-        for (_, default) in &function.defaults {
-            let mut function = function.clone();
-            function.body = default.clone();
-            function.defaults.clear();
-            // Defaults execute before call preconditions have been discharged.
-            function.preconditions.clear();
-            function.postconditions.clear();
-            function.result_binding = None;
-            function.entry_snapshots.clear();
-            analyze_in_package(package, &function, &mut Limits::default())?;
+        let mut limits = Limits::default();
+        let instances = finite_domains::integer_instances(function, &mut limits)?;
+        for instance in instances
+            .as_deref()
+            .unwrap_or(std::slice::from_ref(function))
+        {
+            // An unspecified target is not the compiler host. A generic
+            // platform case is portable only if its program obligations hold
+            // at EVERY layout admitted by TargetData. These are private proof
+            // copies; neither the source package target nor its literals change.
+            let mut platform = false;
+            if instances.is_some() && package.target.is_none() {
+                nir::visit::expressions(instance, &mut limits.arithmetic.steps, |expr, _| {
+                    platform |= matches!(
+                        expr.ty,
+                        Term::Primitive(nir::Primitive::Usize | nir::Primitive::Isize)
+                    );
+                    Ok(())
+                })
+                .map_err(|_| Error {
+                    source: instance.body.source,
+                    reason: Reason::Unsupported,
+                })?;
+            }
+            if platform {
+                let mut proof_package = package.clone();
+                for width in (8..=128).step_by(8) {
+                    proof_package.target = Some(nir::target::TargetData::new(width).unwrap());
+                    let mut proof = instance.clone();
+                    finite_domains::complete_literals(
+                        std::slice::from_mut(&mut proof),
+                        proof_package.target,
+                        &mut limits,
+                    )?;
+                    validate_machine_function(&proof_package, &proof)?;
+                }
+            } else {
+                let mut proof = instance.clone();
+                if instances.is_some() {
+                    finite_domains::complete_literals(
+                        std::slice::from_mut(&mut proof),
+                        package.target,
+                        &mut limits,
+                    )?;
+                }
+                validate_machine_function(package, &proof)?;
+            }
         }
+    }
+    Ok(())
+}
+
+// Each universally checked body has the same bounded analysis budget as a
+// monomorphic declaration. Type/layout enumeration is separately finite.
+fn validate_machine_function(
+    package: &nir::program::Package,
+    function: &Function,
+) -> Result<(), Error> {
+    analyze_in_package(package, function, &mut Limits::default())?;
+    for (_, default) in &function.defaults {
+        let mut function = function.clone();
+        function.body = default.clone();
+        function.defaults.clear();
+        // Defaults execute before call preconditions have been discharged.
+        function.preconditions.clear();
+        function.postconditions.clear();
+        function.result_binding = None;
+        function.entry_snapshots.clear();
+        analyze_in_package(package, &function, &mut Limits::default())?;
     }
     Ok(())
 }
@@ -6324,14 +6555,27 @@ fn combine_polynomials(
     }
 }
 impl Walker<'_> {
-    fn refine_polynomial(&mut self, value: &mut Value, state: &State) -> Result<(), Reason> {
+    fn refine_polynomial(
+        &mut self,
+        expr: &Expr,
+        value: &mut Value,
+        state: &State,
+    ) -> Result<(), Reason> {
         if !state.facts.is_reachable() {
             return Ok(());
         }
         let Some(p) = &value.polynomial else {
             return Ok(());
         };
-        let range = match p.enclosure(&state.facts, self.limits) {
+        let enclosed =
+            if let Some(primitive) = nir::program::machine_integer_type_in(expr, self.target()) {
+                let (signed, width) = self.integer_layout(primitive).unwrap();
+                let target = Interval::machine(width as u16, signed, self.limits)?;
+                p.enclosure_for_target(&target, &state.facts, self.limits)
+            } else {
+                p.enclosure(&state.facts, self.limits)
+            };
+        let range = match enclosed {
             Ok((range, _)) => range,
             Err(Unknown::MissingBound(_)) if state.facts.relation_is_current(p, self.limits)? => {
                 // No finite enclosure is not loss of the expression identity.
@@ -6548,6 +6792,7 @@ fn exportable_postcondition(
             | K::SymbolName(a)
             | K::EnumName(a)
             | K::BitConvert(a)
+            | K::UnsafeScope(a)
             | K::Discard(a) => work.push(a),
             K::IntegerBinary {
                 left: a, right: b, ..
@@ -6556,6 +6801,7 @@ fn exportable_postcondition(
                 left: a, right: b, ..
             }
             | K::ScalarEqual(a, b)
+            | K::TemplateEqual(a, b)
             | K::ScalarLess(a, b)
             | K::ScalarLessEqual(a, b)
             | K::ScalarGreater(a, b)
@@ -6685,6 +6931,7 @@ mod memory_summary_cache_tests {
                 phase: nir::program::FunctionPhase::Runtime,
                 inline: false,
                 pure: false,
+                is_unsafe: false,
                 preconditions: vec![],
                 postconditions: vec![],
                 result_binding: None,
@@ -6716,6 +6963,7 @@ mod memory_summary_cache_tests {
         limits.arithmetic.steps = 200;
         let mut walker = Walker {
             addressed_locals: BTreeSet::new(),
+            handler_unstable_locals: None,
             written_locals: BTreeSet::new(),
             type_context: crate::ptc::Context::with_scope(vec![]),
             input_frames: vec![],
@@ -6828,6 +7076,7 @@ mod conditional_origin_tests {
         let mut limits = Limits::default();
         let mut walker = Walker {
             addressed_locals: BTreeSet::new(),
+            handler_unstable_locals: None,
             written_locals: BTreeSet::new(),
             type_context: crate::ptc::Context::with_scope(vec![]),
             input_frames: vec![],
@@ -6866,6 +7115,7 @@ mod conditional_origin_tests {
             conditions: BTreeMap::from([(0, vec![(vec![], 1)])]),
         };
         let mut state = State {
+            target: None,
             frame: 0,
             facts: Facts::default(),
             domains: BTreeMap::new(),
@@ -7272,6 +7522,7 @@ mod tuple_storage_tests {
             let mut limits = Limits::default();
             let mut walker = Walker {
                 addressed_locals: BTreeSet::new(),
+                handler_unstable_locals: None,
                 written_locals: BTreeSet::new(),
                 type_context: crate::ptc::Context::with_scope(vec![]),
                 input_frames: vec![],
@@ -7303,6 +7554,7 @@ mod tuple_storage_tests {
                     .is_err()
             );
             let mut state = State {
+                target: None,
                 frame: 0,
                 facts: Facts::default(),
                 domains: BTreeMap::new(),

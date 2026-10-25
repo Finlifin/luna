@@ -261,6 +261,13 @@ impl fmt::Display for SignatureTask {
     }
 }
 
+pub(crate) enum ProofSolver<'a> {
+    Unmetered(&'a dyn Fn(&nir::program::TypePredicate) -> comptime_interpretor::ContractOutcome),
+    Budgeted(
+        &'a dyn Fn(&nir::program::TypePredicate, &mut u64) -> comptime_interpretor::ContractOutcome,
+    ),
+}
+
 /// One package and one committed inference world. No Clone/trial operation is
 /// offered: speculative inference does not roll back interpreter side effects.
 pub struct Session<'a> {
@@ -298,7 +305,7 @@ impl<'a> Session<'a> {
             assumptions,
             parameters,
             &[],
-            solver,
+            solver.map(ProofSolver::Unmetered),
             None,
         )
     }
@@ -309,9 +316,7 @@ impl<'a> Session<'a> {
         assumptions: &[nir::program::TraitRequirement],
         parameters: &[DeclarationId],
         value_parameters: &[(DeclarationId, Term)],
-        solver: Option<
-            &'a dyn Fn(&nir::program::TypePredicate) -> comptime_interpretor::ContractOutcome,
-        >,
+        solver: Option<ProofSolver<'a>>,
         pointer_copy: Option<&'a dyn Fn(&Term, &mut u64) -> bool>,
     ) -> Result<Self, Error> {
         if context.parent.is_some() {
@@ -326,7 +331,10 @@ impl<'a> Session<'a> {
         budget.steps = interpreter.remaining_steps();
         scope.map_err(Error::Invocation)?;
         if let Some(solver) = solver {
-            interpreter = interpreter.with_type_solver(solver);
+            interpreter = match solver {
+                ProofSolver::Unmetered(solver) => interpreter.with_type_solver(solver),
+                ProofSolver::Budgeted(solver) => interpreter.with_budgeted_type_solver(solver),
+            };
         }
         if let Some(permission) = pointer_copy {
             interpreter = interpreter.with_budgeted_pointer_copy_permission(permission);

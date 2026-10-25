@@ -103,6 +103,7 @@ pub fn expression_entry(
         phase: crate::program::FunctionPhase::Comptime,
         inline: false,
         pure: false,
+        is_unsafe: false,
         preconditions: vec![],
         postconditions: vec![],
         result_binding: None,
@@ -434,6 +435,21 @@ pub fn instantiate_parameters_bounded(
     frames: &[Vec<Sort>],
     fuel: &mut usize,
 ) -> Result<Term, Error> {
+    charge_parameter_substitution(root, parameters, arguments, fuel)?;
+    root.instantiate_parameters_in_scope(parameters, arguments, frames)
+        .map_err(Error::Scope)
+}
+
+/// Bound declaration substitution before allocating its result. This accepts
+/// signature fragments whose enclosing binder frames remain with the caller;
+/// it is not scope or sort admission. The substitution and owning signature
+/// must still perform their ordinary checks.
+pub fn charge_parameter_substitution(
+    root: &Term,
+    parameters: &[crate::DeclarationParameter],
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<(), Error> {
     if parameters.len() != arguments.len() {
         return Err(Error::Scope(TypeError::ArgumentCount {
             expected: parameters.len(),
@@ -451,11 +467,10 @@ pub fn instantiate_parameters_bounded(
         .map(|(parameter, argument)| (parameter.declaration, argument))
         .collect();
     charge_expanded_term(root, fuel, 128, &replacements)?;
-    root.instantiate_parameters_in_scope(parameters, arguments, frames)
-        .map_err(Error::Scope)
+    Ok(())
 }
 
-fn charge_expanded_term(
+pub(crate) fn charge_expanded_term(
     root: &Term,
     fuel: &mut usize,
     max_depth: usize,
@@ -576,6 +591,13 @@ fn visit_expanded_term(
                     push(ty)?;
                 }
             }
+            Term::ErrorValue { ty, label, value } => {
+                push(ty)?;
+                if let Some(label) = label {
+                    push(label)?;
+                }
+                push(value)?;
+            }
             Term::NominalValue { ty, fields, .. } => {
                 push(ty)?;
                 for field in fields {
@@ -587,7 +609,9 @@ fn visit_expanded_term(
                     push(ty)?;
                 }
             }
-            Term::Pointer(ty) | Term::ComptimeFunction(ty) => push(ty.as_ref())?,
+            Term::Pointer(ty) | Term::ComptimeFunction(ty) | Term::UnsafeFunction(ty) => {
+                push(ty.as_ref())?
+            }
             Term::Function { parameters, result } => {
                 push(result.as_ref())?;
                 for parameter in parameters {

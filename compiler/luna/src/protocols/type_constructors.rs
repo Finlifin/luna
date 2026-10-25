@@ -3,9 +3,15 @@ use elaboration::program::Protocols;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Selectors<'a> {
+    pub host_fma: Option<&'a str>,
+    pub host_sqrt: Option<&'a str>,
+    pub host_copysign: Option<&'a str>,
+    pub host_intrinsics: &'a [(nir::intrinsics::Operation, String)],
     pub copy: Option<&'a str>,
     pub drop: Option<&'a str>,
     pub index: Option<&'a str>,
+    pub ordering: Option<&'a str>,
+    pub equality: Option<&'a str>,
     pub list_pattern: Option<&'a str>,
     pub literal_into: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
@@ -15,6 +21,104 @@ pub struct Selectors<'a> {
     pub optional: Option<&'a str>,
 }
 
+impl Selectors<'_> {
+    /// Binding source declarations is an elaboration action, never a syntax dump.
+    pub(crate) fn validate_stage(self, emit: crate::cli::Emit) -> Result<(), String> {
+        if emit == crate::cli::Emit::Nir {
+            return Ok(());
+        }
+        if !self.host_intrinsics.is_empty()
+            || [
+                self.host_fma,
+                self.host_sqrt,
+                self.host_copysign,
+                self.copy,
+                self.drop,
+                self.index,
+                self.ordering,
+                self.equality,
+                self.list_pattern,
+                self.literal_into,
+                self.splice,
+                self.meta_list,
+                self.tuple,
+                self.optional,
+            ]
+            .into_iter()
+            .chain(self.arithmetic)
+            .any(|selector| selector.is_some())
+        {
+            return Err("source protocol/type binding requires NIR elaboration (--emit nir or an execution/analysis command)".into());
+        }
+        Ok(())
+    }
+}
+
+fn resolve_host_tag(
+    hir: &hir::Package<'_>,
+    packages: &[(u32, u64, &str)],
+    label: &str,
+    selector: &str,
+) -> Result<(nir::DeclarationId, String), String> {
+    let parts: Vec<_> = selector.split("::").collect();
+    if parts.len() < 3 || parts.iter().any(|part| part.is_empty()) {
+        return Err(format!(
+            "host {label} selector requires package::module::Enum::variant (module optional)"
+        ));
+    }
+    let providers: Vec<_> = packages
+        .iter()
+        .filter(|(_, _, name)| *name == parts[0])
+        .collect();
+    let [provider] = providers.as_slice() else {
+        return Err(format!("host {label} package is missing or ambiguous"));
+    };
+    let owner = super::source::resolve_module_path(hir, provider.0, &parts[1..parts.len() - 1])
+        .ok_or(format!(
+            "host {label} enum selector is missing or ambiguous"
+        ))?;
+    let Some(hir::ItemKind::Enum(family)) = hir.item(owner).map(|item| &item.kind) else {
+        return Err(format!("host {label} selector requires an enum"));
+    };
+    if !family.is_intrinsic {
+        return Err(format!("host {label} enum requires intrinsic_enum"));
+    }
+    let variant = parts[parts.len() - 1];
+    if !family
+        .variants
+        .iter()
+        .any(|v| v.ident.name.as_str() == variant && matches!(v.kind, hir::VariantKind::Unit))
+    {
+        return Err(format!(
+            "host {label} selector requires a declared unit variant"
+        ));
+    }
+    let definition = hir
+        .owner_definition(owner)
+        .ok_or(format!("host {label} declaration identity missing"))?;
+    let binding = (
+        nir::DeclarationId {
+            package: provider.1,
+            local: definition.index,
+        },
+        variant.to_owned(),
+    );
+    Ok(binding)
+}
+
+fn validate_host_bindings(protocols: &Protocols) -> Result<(), String> {
+    let mut selected = std::collections::BTreeMap::new();
+    for (binding, operation) in protocols.host_bindings() {
+        if selected
+            .insert(binding, operation)
+            .is_some_and(|previous| previous != operation)
+        {
+            return Err("one intrinsic tag cannot bind both distinct target operations".into());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_source(
     hir: &hir::Package<'_>,
     packages: &[(u32, u64, &str)],
@@ -22,6 +126,37 @@ pub(crate) fn resolve_source(
     identities: &Protocols,
 ) -> Result<Protocols, String> {
     let mut result = super::splice::resolve_source(hir, packages, selectors.splice, identities)?;
+    for (label, selector, target) in [
+        ("FMA", selectors.host_fma, &mut result.host_fma),
+        ("sqrt", selectors.host_sqrt, &mut result.host_sqrt),
+        (
+            "copysign",
+            selectors.host_copysign,
+            &mut result.host_copysign,
+        ),
+    ] {
+        let Some(selector) = selector else {
+            continue;
+        };
+        let binding = resolve_host_tag(hir, packages, label, selector)?;
+        if target.as_ref().is_some_and(|previous| previous != &binding) {
+            return Err(format!(
+                "host {label} selector conflicts with driver binding"
+            ));
+        }
+        *target = Some(binding);
+    }
+    for (operation, selector) in selectors.host_intrinsics {
+        let binding = resolve_host_tag(hir, packages, "intrinsic", selector)?;
+        if !result
+            .host_intrinsics
+            .iter()
+            .any(|(existing, bound)| existing == &binding && bound == operation)
+        {
+            result.host_intrinsics.push((binding, *operation));
+        }
+    }
+    validate_host_bindings(&result)?;
     for (label, selector, target) in elaboration::arithmetic::Operator::ALL
         .into_iter()
         .zip(result.arithmetic.iter_mut())
@@ -34,6 +169,8 @@ pub(crate) fn resolve_source(
         })
         .chain([
             ("Index".into(), selectors.index, &mut result.index),
+            ("Ord".into(), selectors.ordering, &mut result.ordering),
+            ("Eq".into(), selectors.equality, &mut result.equality),
             (
                 "ListPatternView".into(),
                 selectors.list_pattern,
@@ -207,6 +344,23 @@ pub(crate) fn validate(
     protocols: &Protocols,
 ) -> Result<(), String> {
     use nir::normal_forms::{Kind, Role};
+    validate_host_bindings(protocols)?;
+    for ((id, name), operation) in protocols.host_bindings() {
+        let mut families = package
+            .enums
+            .iter()
+            .filter(|family| family.declaration == *id);
+        let family = families.next().ok_or("host intrinsic family missing")?;
+        if families.next().is_some() {
+            return Err("host intrinsic family ambiguous".into());
+        }
+        let index = family
+            .variants
+            .iter()
+            .position(|variant| variant.name == *name)
+            .ok_or("host intrinsic variant missing")?;
+        nir::intrinsics::Registry::for_family(family, index, operation).map_err(str::to_owned)?;
+    }
     if let Some(id) = protocols.optional {
         let definitions = package
             .enums
@@ -256,9 +410,12 @@ pub(crate) fn validate(
 /// an input program. Package-set clients may supply their own driver identities.
 #[derive(Default)]
 pub(crate) struct SysrootBindings {
+    host_intrinsics: Vec<(nir::intrinsics::Operation, String)>,
     copy: Option<String>,
     drop: Option<String>,
     index: Option<String>,
+    ordering: Option<String>,
+    equality: Option<String>,
     list_pattern: Option<String>,
     literal_into: Option<String>,
     arithmetic: [Option<String>; 7],
@@ -314,8 +471,33 @@ impl SysrootBindings {
                 version = true;
                 continue;
             }
+            if let Some(name) = key.strip_prefix("host-intrinsic.") {
+                let operation = nir::intrinsics::Operation::from_name(name)
+                    .ok_or_else(|| fail("unknown host intrinsic operation"))?;
+                if result
+                    .host_intrinsics
+                    .iter()
+                    .any(|(op, _)| *op == operation)
+                {
+                    return Err(fail("duplicate host intrinsic operation"));
+                }
+                if value.split("::").count() < 3
+                    || value.split("::").any(|part| {
+                        part.is_empty()
+                            || part
+                                .chars()
+                                .any(|ch| ch.is_whitespace() || matches!(ch, '=' | '\"' | '\''))
+                    })
+                {
+                    return Err(fail("expected an unquoted package::Enum::variant selector"));
+                }
+                result.host_intrinsics.push((operation, value.to_owned()));
+                continue;
+            }
             let target = match key {
                 "index-protocol" => &mut result.index,
+                "ord-protocol" => &mut result.ordering,
+                "eq-protocol" => &mut result.equality,
                 "list-pattern-protocol" => &mut result.list_pattern,
                 "literal-into-protocol" => &mut result.literal_into,
                 "copy-protocol" => &mut result.copy,
@@ -356,12 +538,44 @@ impl SysrootBindings {
         }
         Ok(result)
     }
+    /// Merge defaults by operation, retaining explicit selectors verbatim so
+    /// duplicate/conflicting user bindings still reach normal validation.
+    pub(crate) fn merged_host_intrinsics(
+        &self,
+        explicit: Selectors<'_>,
+        identities: &Protocols,
+    ) -> Vec<(nir::intrinsics::Operation, String)> {
+        use nir::intrinsics::Operation as O;
+        let mut merged = explicit.host_intrinsics.to_vec();
+        for (operation, selector) in &self.host_intrinsics {
+            let dedicated = match operation {
+                O::FusedMultiplyAdd => explicit.host_fma.is_some(),
+                O::SquareRoot => explicit.host_sqrt.is_some(),
+                O::CopySign => explicit.host_copysign.is_some(),
+                _ => false,
+            };
+            if !dedicated
+                && !explicit
+                    .host_intrinsics
+                    .iter()
+                    .any(|(op, _)| op == operation)
+                && !identities.host_bindings().any(|(_, op)| op == *operation)
+            {
+                merged.push((*operation, selector.clone()));
+            }
+        }
+        merged
+    }
     pub(crate) fn apply<'a>(
         &'a self,
         explicit: Selectors<'a>,
         identities: &Protocols,
     ) -> Selectors<'a> {
         Selectors {
+            host_fma: explicit.host_fma,
+            host_sqrt: explicit.host_sqrt,
+            host_copysign: explicit.host_copysign,
+            host_intrinsics: explicit.host_intrinsics,
             copy: explicit.copy.or_else(|| {
                 identities
                     .copy
@@ -381,6 +595,20 @@ impl SysrootBindings {
                     .index
                     .is_none()
                     .then_some(self.index.as_deref())
+                    .flatten()
+            }),
+            ordering: explicit.ordering.or_else(|| {
+                identities
+                    .ordering
+                    .is_none()
+                    .then_some(self.ordering.as_deref())
+                    .flatten()
+            }),
+            equality: explicit.equality.or_else(|| {
+                identities
+                    .equality
+                    .is_none()
+                    .then_some(self.equality.as_deref())
                     .flatten()
             }),
             list_pattern: explicit.list_pattern.or_else(|| {
@@ -503,5 +731,199 @@ mod literal_binding_tests {
             None
         );
         assert!(SysrootBindings::parse("version = 1\nliteral-into-protocol = input::One\nliteral-into-protocol = input::Two\n").is_err());
+    }
+}
+
+#[cfg(test)]
+mod repository_bindings_tests {
+    use super::*;
+
+    #[test]
+    fn sysroot_host_intrinsics_preserve_explicit_and_driver_authority() {
+        use nir::intrinsics::Operation as O;
+        let config = SysrootBindings::parse("version = 1\nhost-intrinsic.sqrt = math::Ops::sqrt\nhost-intrinsic.abs = math::Ops::abs\n").unwrap();
+        assert_eq!(
+            config
+                .merged_host_intrinsics(Selectors::default(), &Protocols::default())
+                .len(),
+            2
+        );
+        let explicit = [(O::WrappingAbsoluteValue, "input::Ops::abs".into())];
+        let selectors = Selectors {
+            host_sqrt: Some("input::Ops::root"),
+            host_intrinsics: &explicit,
+            ..Default::default()
+        };
+        assert_eq!(
+            config.merged_host_intrinsics(selectors, &Protocols::default()),
+            explicit
+        );
+        let identities = Protocols {
+            host_sqrt: Some((
+                nir::DeclarationId {
+                    package: 1,
+                    local: 2,
+                },
+                "sqrt".into(),
+            )),
+            host_intrinsics: vec![(
+                (
+                    nir::DeclarationId {
+                        package: 1,
+                        local: 3,
+                    },
+                    "abs".into(),
+                ),
+                O::WrappingAbsoluteValue,
+            )],
+            ..Default::default()
+        };
+        assert!(
+            config
+                .merged_host_intrinsics(Selectors::default(), &identities)
+                .is_empty()
+        );
+        for line in [
+            "host-intrinsic.unknown = math::Ops::x",
+            "host-intrinsic.sqrt = math::sqrt",
+            "host-intrinsic.sqrt = math::Ops::",
+            "host-intrinsic.sqrt = math:: Ops::sqrt",
+            "host-intrinsic.sqrt = math::Ops::sqrt\nhost-intrinsic.sqrt = other::Ops::sqrt",
+        ] {
+            assert!(
+                SysrootBindings::parse(&format!("version = 1\n{line}\n")).is_err(),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_sysroot_binds_its_optional_and_operator_declarations() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+        let bindings = SysrootBindings::load(&root).unwrap();
+        for &operation in nir::intrinsics::Operation::ALL {
+            assert!(bindings.host_intrinsics.contains(&(
+                operation,
+                format!("math::target::Scalar::{}", operation.name())
+            )));
+        }
+
+        assert_eq!(bindings.copy.as_deref(), Some("builtin::resources::Copy"));
+        assert_eq!(bindings.drop.as_deref(), Some("builtin::resources::Drop"));
+        assert_eq!(
+            bindings.optional.as_deref(),
+            Some("builtin::option::Option")
+        );
+        assert_eq!(bindings.meta_list.as_deref(), Some("meta::List"));
+        assert_eq!(bindings.tuple.as_deref(), Some("builtin::tuple::Tuple"));
+        assert_eq!(bindings.index.as_deref(), Some("builtin::ops::Index"));
+        assert_eq!(
+            bindings.ordering.as_deref(),
+            Some("builtin::comparison::Ord")
+        );
+        assert_eq!(
+            bindings.equality.as_deref(),
+            Some("builtin::comparison::Eq")
+        );
+        for (operator, declaration) in [
+            (elaboration::arithmetic::Operator::Add, "Add"),
+            (elaboration::arithmetic::Operator::Subtract, "Sub"),
+            (elaboration::arithmetic::Operator::Multiply, "Mul"),
+            (elaboration::arithmetic::Operator::Divide, "Div"),
+            (elaboration::arithmetic::Operator::Remainder, "Rem"),
+        ] {
+            assert_eq!(
+                bindings.arithmetic[operator as usize].as_deref(),
+                Some(format!("builtin::ops::{declaration}").as_str())
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::*;
+    use crate::cli::Emit;
+
+    #[test]
+    fn explicit_api_selectors_cannot_be_silently_ignored_by_syntax_exports() {
+        let selectors = [
+            Selectors {
+                host_fma: Some("input::Ops::fma"),
+                ..Default::default()
+            },
+            Selectors {
+                copy: Some("Copy"),
+                ..Default::default()
+            },
+            Selectors {
+                drop: Some("Drop"),
+                ..Default::default()
+            },
+            Selectors {
+                list_pattern: Some("input::ListPatternView"),
+                ..Default::default()
+            },
+            Selectors {
+                arithmetic: [Some("input::Operator"); 7],
+                ..Default::default()
+            },
+        ];
+        let options = crate::cli::Options {
+            input: "absent.fl".into(),
+            emit: Emit::Hir,
+            output: None,
+            sysroot: None,
+            index_protocol: None,
+            ord_protocol: None,
+            eq_protocol: None,
+            list_pattern_protocol: None,
+            literal_into_protocol: None,
+            arithmetic_protocols: Default::default(),
+            splice_protocol: None,
+            meta_list_type: None,
+            tuple_type: None,
+            optional_type: None,
+        };
+        for selector in selectors {
+            // Validate before filesystem access, including selectors supplied
+            // directly by the driver rather than through Options.
+            let error = crate::frontend::compile_in_package_with_source_protocols(
+                &options,
+                0,
+                &Default::default(),
+                selector,
+            )
+            .err()
+            .unwrap();
+            assert!(error.contains("requires NIR"), "{error}");
+            let error = crate::packages::compile_stage_with_selectors(
+                &[],
+                &[],
+                0,
+                None,
+                Emit::Hir,
+                None,
+                &Default::default(),
+                selector,
+            )
+            .err()
+            .unwrap();
+            assert!(error.contains("requires NIR"), "{error}");
+            assert!(selector.validate_stage(Emit::Nir).is_ok());
+        }
+        let error = crate::packages::compile_stage_with_selectors(
+            &[],
+            &[],
+            0,
+            None,
+            Emit::Ast,
+            None,
+            &Default::default(),
+            Default::default(),
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("not AST"), "{error}");
     }
 }

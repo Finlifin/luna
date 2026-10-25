@@ -261,7 +261,7 @@ impl<'a> Search<'a> {
         })
     }
 
-    fn distinct_type_classes(
+    pub(super) fn distinct_type_classes(
         &mut self,
         a: usize,
         b: usize,

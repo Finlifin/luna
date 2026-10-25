@@ -40,6 +40,9 @@ fn index_overlap(
         if depth >= max_depth.min(128) {
             return Err("index overlap depth exhausted".into());
         }
+        if left.has_pending_error_branch() || right.has_pending_error_branch() {
+            continue;
+        }
         if left.sort() == Sort::Type && right.sort() == Sort::Type {
             relations.push(Formula::equal(left.clone(), right.clone()));
             continue;
@@ -65,6 +68,29 @@ fn index_overlap(
             }
             pending.push((a, b, depth + 1));
             pending.extend(af.iter().zip(bf).rev().map(|(a, b)| (a, b, depth + 1)));
+            continue;
+        }
+        if let (
+            Term::ErrorValue {
+                ty: a,
+                label: al,
+                value: av,
+            },
+            Term::ErrorValue {
+                ty: b,
+                label: bl,
+                value: bv,
+            },
+        ) = (left, right)
+        {
+            if al.is_some() != bl.is_some() {
+                return Ok(vec![Formula::False]);
+            }
+            pending.push((a, b, depth + 1));
+            if let (Some(a), Some(b)) = (al, bl) {
+                pending.push((a, b, depth + 1));
+            }
+            pending.push((av, bv, depth + 1));
             continue;
         }
         if let (Term::TupleValue(a), Term::TupleValue(b)) = (left, right) {
@@ -97,7 +123,10 @@ fn index_overlap(
                 || term.scalar_index_domain().is_some()
                 || matches!(
                     term,
-                    Term::RecordValue(_) | Term::TupleValue(_) | Term::NominalValue { .. }
+                    Term::ErrorValue { .. }
+                        | Term::RecordValue(_)
+                        | Term::TupleValue(_)
+                        | Term::NominalValue { .. }
                 )
         };
         if known(left) && known(right) && left != right {
@@ -182,6 +211,13 @@ fn separation_goal(
                 | Term::TypeListValue(arguments)
                 | Term::TypeListConcat(arguments)
                 | Term::TupleValue(arguments) => terms.extend(arguments),
+                Term::ErrorValue { ty, label, value } => {
+                    terms.push(ty);
+                    if let Some(label) = label {
+                        terms.push(label);
+                    }
+                    terms.push(value);
+                }
                 Term::NominalValue { ty, fields, .. } => {
                     terms.push(ty);
                     terms.extend(fields);
@@ -189,10 +225,16 @@ fn separation_goal(
                 Term::Record(fields) | Term::RecordValue(fields) => {
                     terms.extend(fields.iter().map(|(_, ty)| ty))
                 }
-                Term::Pointer(inner) | Term::ComptimeFunction(inner) => terms.push(inner),
+                Term::Pointer(inner)
+                | Term::ComptimeFunction(inner)
+                | Term::UnsafeFunction(inner) => terms.push(inner),
                 Term::Function { parameters, result } => {
                     terms.extend(parameters.iter().map(|p| &p.ty));
                     terms.push(result);
+                }
+                Term::ErrorResult { errors, result } => {
+                    terms.push(result);
+                    terms.extend(errors);
                 }
                 Term::Computation { effects, result } => {
                     terms.push(result);
@@ -384,6 +426,27 @@ impl CoherenceReport {
     }
 }
 impl Index {
+    // Reserve traversal/report work for every pair, but distribute proof work
+    // only among same-interface, same-precision obligations. Unrelated traits
+    // must not starve a small number of actual solver queries.
+    fn coherence_allowance(&self, budget: Budget) -> Option<(usize, usize)> {
+        let count = self.entries.len();
+        let pairs = count.checked_mul(count.saturating_sub(1))? / 2;
+        let remaining = budget
+            .steps
+            .checked_sub(count.checked_mul(2)?.checked_add(pairs)?)?;
+        let mut groups = std::collections::BTreeMap::new();
+        let mut obligations = 0usize;
+        for entry in self.entries.values() {
+            if let Some(interface) = entry.head.interface {
+                let size = groups.entry((interface, entry.precision)).or_insert(0usize);
+                obligations = obligations.checked_add(*size)?;
+                *size += 1;
+            }
+        }
+        Some((pairs, remaining / obligations.max(1)))
+    }
+
     /// Verify coverage, ordering, world freshness and every disjointness tree;
     /// editing the report's public diagnostic entries cannot forge acceptance.
     pub fn verify_type_coherence(
@@ -395,14 +458,12 @@ impl Index {
         if !self.type_coherence_is_current(report) || !report.is_proved() {
             return false;
         }
-        let count = self.entries.len();
-        let Some(pairs) = count.checked_mul(count.saturating_sub(1)).map(|n| n / 2) else {
+        let Some((pairs, allowance)) = self.coherence_allowance(budget) else {
             return false;
         };
-        if report.pairs.len() != pairs || pairs.saturating_add(count) > budget.steps {
+        if report.pairs.len() != pairs {
             return false;
         }
-        let allowance = (budget.steps - count) / pairs.max(1);
         let entries: Vec<_> = self.entries.values().collect();
         let mut reported = report.pairs.iter();
         for (i, a) in entries.iter().enumerate() {
@@ -451,30 +512,35 @@ impl Index {
             open_interfaces: Vec::new(),
             complete: true,
         };
-        let count = self.entries.len();
-        let Some(pair_count) = count.checked_mul(count.saturating_sub(1)).map(|n| n / 2) else {
+        let Some((_, allowance)) = self.coherence_allowance(budget) else {
             report.complete = false;
             return report;
         };
-        if pair_count.saturating_add(count) > budget.steps {
-            report.complete = false;
-            return report;
-        }
-        let allowance = (budget.steps - count) / pair_count.max(1);
         let entries: Vec<_> = self.entries.values().collect();
         for (i, a) in entries.iter().enumerate() {
             if a.head.interface.is_none() {
                 report.open_interfaces.push(a.head.declaration);
             }
             for b in &entries[i + 1..] {
-                let assessment = a.head.assess_type_overlap(
-                    &b.head,
-                    context,
-                    Budget {
-                        steps: allowance,
-                        ..budget
-                    },
-                );
+                let assessment = if a.head.interface.is_none() || b.head.interface.is_none() {
+                    PairAssessment::Unresolved("open interface head".into())
+                } else if a.head.interface != b.head.interface {
+                    PairAssessment::DifferentInterfaces
+                } else if a.precision != b.precision {
+                    PairAssessment::OrderedPrecision {
+                        left: a.precision,
+                        right: b.precision,
+                    }
+                } else {
+                    a.head.assess_type_overlap(
+                        &b.head,
+                        context,
+                        Budget {
+                            steps: allowance,
+                            ..budget
+                        },
+                    )
+                };
                 report
                     .pairs
                     .push((a.head.declaration, b.head.declaration, assessment));
@@ -515,5 +581,46 @@ impl fmt::Display for CoherenceReport {
             write!(f, " (pair {a} {b} {result})")?;
         }
         write!(f, "))")
+    }
+}
+
+#[cfg(test)]
+mod pending_error_indices {
+    use super::*;
+    #[test]
+    fn incomplete_inner_branch_does_not_prove_implementation_disjointness() {
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let inner = Term::error_result(vec![boolean.clone()], boolean.clone());
+        let pending = Term::error_value(
+            vec![Term::Primitive(nir::Primitive::Char)],
+            inner.clone(),
+            None,
+            Term::Rigid {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 100,
+                },
+                sort: Sort::ComptimeValue,
+            },
+        )
+        .unwrap();
+        for label in [None, Some(Box::new(boolean.clone()))] {
+            let completed = Term::error_value(
+                vec![Term::Primitive(nir::Primitive::Char)],
+                inner.clone(),
+                None,
+                Term::ErrorValue {
+                    ty: Box::new(inner.clone()),
+                    label,
+                    value: Box::new(Term::Bool(true)),
+                },
+            )
+            .unwrap();
+            assert!(
+                index_overlap(&pending, &completed, &mut 10000, 64)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 }

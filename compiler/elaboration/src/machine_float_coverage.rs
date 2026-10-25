@@ -87,6 +87,10 @@ impl Domain {
                 binding: *binding,
                 inner: Box::new(self.pattern_subject(inner, boolean_subject, fuel, depth + 1)?),
             },
+            Pattern::Observe { binding, inner } => Pattern::Observe {
+                binding: *binding,
+                inner: Box::new(self.pattern_subject(inner, boolean_subject, fuel, depth + 1)?),
+            },
             Pattern::Or(choices) => Pattern::Or(
                 choices
                     .iter()
@@ -363,6 +367,11 @@ impl Domain {
                 binding: *binding,
                 value: Box::new(self.expr(value, fuel, depth + 1)?),
             },
+            K::Assign { place, value } if place.fields.is_empty() => K::Assign {
+                place: place.clone(),
+                value: Box::new(self.expr(value, fuel, depth + 1)?),
+            },
+            K::Discard(value) => K::Discard(Box::new(self.expr(value, fuel, depth + 1)?)),
             K::Block { statements, result } => K::Block {
                 statements: statements
                     .iter()

@@ -13,6 +13,81 @@ enum Work<'a> {
     Expr(&'a Expr, bool, bool), // direct callee, comptime execution context
     Pattern(&'a Pattern, bool),
 }
+fn validate_parameter_frame(
+    function: &crate::program::Function,
+    quote: bool,
+) -> Result<&[crate::Parameter], Error> {
+    let messages = if quote {
+        [
+            "quote template parameter frame has no callable signature",
+            "quote template parameter frame arity mismatch",
+            "duplicate quote template parameter identity",
+            "invalid quote template parameter default slot",
+        ]
+    } else {
+        [
+            "function parameter frame has no callable signature",
+            "function parameter frame arity mismatch",
+            "duplicate function parameter identity",
+            "invalid function parameter default slot",
+        ]
+    };
+    let fail = |index: usize| Error {
+        source: function.body.source,
+        message: messages[index],
+    };
+    let Term::Function { parameters, .. } = function.signature.callable_signature() else {
+        return Err(fail(0));
+    };
+    if parameters.len() != function.parameters.len() {
+        return Err(fail(1));
+    }
+    let mut bindings = BTreeSet::new();
+    if function
+        .parameters
+        .iter()
+        .any(|binding| !bindings.insert(*binding))
+    {
+        return Err(fail(2));
+    }
+    let mut defaults = BTreeSet::new();
+    if function
+        .defaults
+        .iter()
+        .any(|(slot, _)| *slot >= parameters.len() || !defaults.insert(*slot))
+    {
+        return Err(fail(3));
+    }
+    let positions: BTreeMap<_, _> = function
+        .parameters
+        .iter()
+        .enumerate()
+        .map(|(slot, binding)| (*binding, slot))
+        .collect();
+    let mut fuel = 100_000;
+    for (slot, value) in &function.defaults {
+        let free = crate::free_bindings::collect(value, &mut fuel).map_err(|reason| Error {
+            source: value.source,
+            message: if reason.contains("exhausted") {
+                "function default binding analysis budget exhausted"
+            } else {
+                "invalid function default binding scope"
+            },
+        })?;
+        if free.iter().any(|binding| {
+            positions
+                .get(binding)
+                .is_none_or(|position| position >= slot)
+        }) {
+            return Err(Error {
+                source: value.source,
+                message: "function default references an unavailable parameter binding",
+            });
+        }
+    }
+    Ok(parameters)
+}
+
 pub fn validate(package: &Package) -> Result<(), Error> {
     machine_arithmetic_functions(package).map(|_| ())
 }
@@ -43,10 +118,12 @@ pub fn machine_arithmetic_functions(
             source: SourceRange { start: 0, end: 0 },
             message: "invalid enum parameter domains",
         })?;
-        definition.validate_encoding().map_err(|message| Error {
-            source: SourceRange { start: 0, end: 0 },
-            message,
-        })?;
+        definition
+            .validate_encoding_in(package.target)
+            .map_err(|message| Error {
+                source: SourceRange { start: 0, end: 0 },
+                message,
+            })?;
     }
     for definition in &package.implementations {
         definition.parameter_binders().map_err(|_| Error {
@@ -73,15 +150,20 @@ pub fn machine_arithmetic_functions(
                 message: "invalid or duplicate quote template identity",
             });
         }
-        if matches!(template.signature.callable_signature(),Term::Function {parameters,..}
-            if parameters.iter().any(|parameter|parameter.sort!=Sort::Runtime))
+        let parameters = validate_parameter_frame(template, true)?;
+        if parameters
+            .iter()
+            .any(|parameter| parameter.sort != Sort::Runtime)
         {
             staged_quote_ids.insert(template.declaration);
         }
     }
     let mut identity_ids = std::collections::BTreeSet::new();
     for identity in &package.runtime_function_identities {
-        if !matches!(identity.signature, Term::Function { .. })
+        if !matches!(
+            identity.signature.callable_signature(),
+            Term::Function { .. }
+        ) || identity.signature.is_comptime_callable()
             || !identity_ids.insert(identity.declaration)
             || package
                 .functions
@@ -98,17 +180,31 @@ pub fn machine_arithmetic_functions(
         source: SourceRange { start: 0, end: 0 },
         message,
     })?;
+    for function in &package.functions {
+        validate_parameter_frame(function, false)?;
+    }
     let functions: BTreeMap<_, _> = package
         .functions
         .iter()
         .chain(&package.quote_templates)
-        .map(|f| (f.declaration, (f.phase, !f.preconditions.is_empty())))
-        .chain(
-            package
-                .runtime_function_identities
-                .iter()
-                .map(|f| (f.declaration, (Phase::Runtime, false))),
-        )
+        .map(|f| {
+            (
+                f.declaration,
+                (f.phase, !f.preconditions.is_empty(), f.is_unsafe),
+            )
+        })
+        .chain(package.runtime_function_identities.iter().map(|f| {
+            (
+                f.declaration,
+                (Phase::Runtime, false, f.signature.is_unsafe_callable()),
+            )
+        }))
+        .collect();
+    let parameter_frames: BTreeMap<_, _> = package
+        .functions
+        .iter()
+        .chain(&package.quote_templates)
+        .map(|function| (function.declaration, function.parameters.as_slice()))
         .collect();
     let mut storage_cache = std::collections::HashMap::new();
     let mut runtime_storage = |ty: &crate::Term,
@@ -167,6 +263,7 @@ pub fn machine_arithmetic_functions(
             runtime_storage(&function.signature, function.body.source, &[])?;
         }
         let fail = |source, message| Error { source, message };
+
         if function
             .result_binding
             .is_some_and(|binding| function.parameters.contains(&binding))
@@ -261,6 +358,7 @@ pub fn machine_arithmetic_functions(
                         }
                         work.push(Work::Pattern(pattern, ct));
                     }
+                    Pattern::ErrorResult { inner, .. } => work.push(Work::Pattern(inner, ct)),
                     Pattern::Record { fields, .. }
                     | Pattern::AnonymousRecord { fields, .. }
                     | Pattern::Variant { fields, .. }
@@ -291,10 +389,47 @@ pub fn machine_arithmetic_functions(
                     if written.is_some_and(|id| frozen.contains(&id)) {
                         return Err(fail(expr.source, "entry snapshots are immutable"));
                     }
-                    let machine = crate::program::machine_integer_type(expr).is_some();
+                    let machine =
+                        crate::program::machine_integer_type_in(expr, package.target).is_some();
+                    // An admitted generic operation is checked after its owned
+                    // type parameter is substituted. Do not confuse that open
+                    // domain with the concrete comptime Integer domain, or let
+                    // a result annotation hide a differently typed operand.
+                    let owned_integer_domain = |ty: &Term| {
+                        matches!(ty,
+                        Term::Rigid { declaration, sort: crate::Sort::Type }
+                        if function.type_parameters.contains(declaration))
+                    };
+                    let agrees = |ty: &Term, domain: &Term| {
+                        ty == domain || *ty == Term::Primitive(crate::Primitive::Never)
+                    };
+                    let deferred_integer = match &expr.kind {
+                        K::IntegerNegate(value) => {
+                            owned_integer_domain(&value.ty) && expr.ty == value.ty
+                        }
+                        K::IntegerBinary { left, right, .. } => {
+                            // A diverging operand supplies no numeric domain,
+                            // and no operation executes after its exit.
+                            let domain = if left.ty == Term::Primitive(crate::Primitive::Never) {
+                                &right.ty
+                            } else {
+                                &left.ty
+                            };
+                            owned_integer_domain(domain)
+                                && agrees(&left.ty, domain)
+                                && agrees(&right.ty, domain)
+                                && (expr.ty == *domain
+                                    || (expr.ty == Term::Primitive(crate::Primitive::Never)
+                                        && (left.ty == Term::Primitive(crate::Primitive::Never)
+                                            || right.ty
+                                                == Term::Primitive(crate::Primitive::Never))))
+                        }
+                        _ => false,
+                    };
                     // Comptime positions are checked concretely by invocation;
                     // residual runtime positions need a static program proof.
                     if machine
+                        || deferred_integer
                         || (!ct
                             && matches!(
                                 expr.kind,
@@ -310,6 +445,7 @@ pub fn machine_arithmetic_functions(
                         runtime_storage(&expr.ty, expr.source, &caller_frames)?;
                         if !machine
                             && matches!(expr.kind, K::IntegerNegate(_) | K::IntegerBinary { .. })
+                            && !deferred_integer
                         {
                             return Err(Error {
                                 source: expr.source,
@@ -318,8 +454,15 @@ pub fn machine_arithmetic_functions(
                         }
                     }
                     let error = |message| fail(expr.source, message);
-                    if let Some(message) = crate::program::pointer_operation_error(expr) {
+                    if let Some(message) =
+                        crate::program::pointer_operation_error_in(expr, package.target)
+                    {
                         return Err(error(message));
+                    }
+                    if let K::UnsafeScope(body) = &expr.kind {
+                        if body.ty != expr.ty {
+                            return Err(error("unsafe scope changes its body type"));
+                        }
                     }
                     if let K::AddressOf(place) = &expr.kind {
                         let mut place = place.as_ref();
@@ -333,6 +476,25 @@ pub fn machine_arithmetic_functions(
                         }
                     }
                     match &expr.kind {
+                        K::Intrinsic {
+                            tag,
+                            inputs,
+                            binding,
+                        } => {
+                            if ct {
+                                return Err(error("target intrinsic cannot execute at comptime"));
+                            }
+                            crate::intrinsics::validate_tag(package, *tag).map_err(error)?;
+                            if let Some(binding) = binding {
+                                binding
+                                    .validate_template(*tag, inputs, &expr.ty)
+                                    .map_err(error)?;
+                                binding
+                                    .validate_target_layout(package.target)
+                                    .map_err(error)?;
+                            }
+                            work.extend(inputs.iter().map(|e| Work::Expr(e, false, ct)));
+                        }
                         K::EffectHandle {
                             computation,
                             handlers,
@@ -395,9 +557,20 @@ pub fn machine_arithmetic_functions(
                             let target = functions
                                 .get(id)
                                 .ok_or_else(|| error("function phase declaration is missing"))?;
+                            if expr.ty.is_unsafe_callable() != target.2 {
+                                return Err(error(
+                                    "function value type does not preserve its declaration responsibility",
+                                ));
+                            }
                             if target.1 {
                                 machine_owners.insert(function.declaration);
-                                if !_callee {
+                                // Runtime staged identities are specialized back
+                                // to their declaration before executable calls;
+                                // specialization retains the declaration contract.
+                                let retained_template = target.0 == Phase::Runtime
+                                    && matches!(expr.ty.callable_signature(), Term::Function { parameters, .. }
+                                        if parameters.iter().any(|p| p.sort != Sort::Runtime));
+                                if !_callee && !retained_template {
                                     return Err(error(
                                         "function value would erase program preconditions; callable program contracts are not implemented",
                                     ));
@@ -418,9 +591,7 @@ pub fn machine_arithmetic_functions(
                                     "comptime result invocation and runtime splicing are not yet implemented"
                                 }));
                             }
-                            if matches!(expr.ty, crate::Term::ComptimeFunction(_))
-                                != (target.0 == Phase::Comptime)
-                            {
+                            if expr.ty.is_comptime_callable() != (target.0 == Phase::Comptime) {
                                 return Err(error(
                                     "function value type does not preserve its declaration phase",
                                 ));
@@ -492,7 +663,13 @@ pub fn machine_arithmetic_functions(
                             }
                             if !method.program.is_empty() {
                                 machine_owners.insert(function.declaration);
-                                if !_callee && !method.program.preconditions.is_empty() {
+                                let retained_template = !method.signature.is_comptime_callable()
+                                    && matches!(method.signature.callable_signature(), Ok(Term::Function { parameters, .. })
+                                        if parameters.iter().any(|p| p.sort != Sort::Runtime));
+                                if !_callee
+                                    && !method.program.preconditions.is_empty()
+                                    && !retained_template
+                                {
                                     return Err(error(
                                         "trait method value would erase program contracts; callable program contracts are not implemented",
                                     ));
@@ -544,7 +721,9 @@ pub fn machine_arithmetic_functions(
                             }
                         }
                         K::Call {
-                            callee, arguments, ..
+                            callee,
+                            arguments,
+                            parameter_bindings,
                         } => {
                             if ct != callee.ty.is_comptime_callable()
                                 && !matches!(
@@ -561,11 +740,76 @@ pub fn machine_arithmetic_functions(
                             else {
                                 return Err(error("call target has no callable signature"));
                             };
+                            if arguments.len() != parameters.len() {
+                                return Err(error(
+                                    "call argument count does not match parameter frame",
+                                ));
+                            }
+                            if !parameter_bindings.is_empty()
+                                && (parameter_bindings.len() != parameters.len()
+                                    || parameter_bindings.iter().collect::<BTreeSet<_>>().len()
+                                        != parameter_bindings.len())
+                            {
+                                return Err(error("invalid call parameter binding frame"));
+                            }
+                            if !parameter_bindings.is_empty() {
+                                let target = match &callee.kind {
+                                    K::Function(id)
+                                    | K::FunctionInstance {
+                                        declaration: id, ..
+                                    } => parameter_frames.get(id),
+                                    _ => None,
+                                };
+                                if target
+                                    .is_some_and(|target| *target != parameter_bindings.as_slice())
+                                {
+                                    return Err(error(
+                                        "call parameter bindings differ from target declaration",
+                                    ));
+                                }
+                            }
+                            let mut supplied = BTreeSet::new();
+                            let mut available = BTreeSet::new();
+                            let mut last_default = None;
                             for argument in arguments {
                                 let parameter =
                                     parameters.get(argument.parameter).ok_or_else(|| {
                                         error("call argument parameter index out of range")
                                     })?;
+                                if !supplied.insert(argument.parameter) {
+                                    return Err(error("duplicate call argument parameter slot"));
+                                }
+                                if argument.is_default {
+                                    if parameter_bindings.is_empty()
+                                        || last_default
+                                            .is_some_and(|last| last >= argument.parameter)
+                                    {
+                                        return Err(error(
+                                            "invalid call default argument order or binding frame",
+                                        ));
+                                    }
+                                    // Staged defaults can retain substituted caller
+                                    // symbols until specialization. Runtime defaults
+                                    // execute in the prepared parameter frame only.
+                                    if parameter.sort == Sort::Runtime {
+                                        let free = crate::free_bindings::collect(
+                                            &argument.value, &mut preparation_fuel,
+                                        ).map_err(|_| error("invalid call default binding scope or exhausted analysis budget"))?;
+                                        if !free.is_subset(&available) {
+                                            return Err(error(
+                                                "call default references an unavailable parameter binding",
+                                            ));
+                                        }
+                                    }
+                                    last_default = Some(argument.parameter);
+                                } else if last_default.is_some() {
+                                    return Err(error(
+                                        "explicit call argument follows a default argument",
+                                    ));
+                                }
+                                if let Some(binding) = parameter_bindings.get(argument.parameter) {
+                                    available.insert(*binding);
+                                }
                                 // Staged arguments execute before this runtime invocation.
                                 // This changes execution phase only; the frontend separately
                                 // proves that referenced inputs are available at that stage.
@@ -583,7 +827,47 @@ pub fn machine_arithmetic_functions(
                             work.push(Work::Expr(left, false, true));
                             work.push(Work::Expr(right, false, true));
                         }
-                        K::Closure { captures, body, .. } => {
+                        K::Closure {
+                            captures,
+                            parameters,
+                            body,
+                        } => {
+                            let Term::Function {
+                                parameters: inputs, ..
+                            } = expr.ty.callable_signature()
+                            else {
+                                return Err(error("closure has no callable signature"));
+                            };
+                            if inputs.len() != parameters.len() {
+                                return Err(error("closure parameter frame arity mismatch"));
+                            }
+                            let mut identities = BTreeSet::new();
+                            if parameters.iter().any(|id| !identities.insert(*id))
+                                || captures
+                                    .iter()
+                                    .any(|capture| !identities.insert(capture.binding))
+                            {
+                                return Err(error(
+                                    "duplicate closure parameter or capture identity",
+                                ));
+                            }
+                            if let Term::Closure { environment, .. } = &expr.ty {
+                                if environment.len() != captures.len() {
+                                    return Err(error(
+                                        "closure capture environment arity mismatch",
+                                    ));
+                                }
+                            } else if matches!(
+                                expr.ty,
+                                Term::Function { .. }
+                                    | Term::ComptimeFunction(_)
+                                    | Term::UnsafeFunction(_)
+                            ) && !captures.is_empty()
+                            {
+                                return Err(error(
+                                    "closure captures are missing from its callable type",
+                                ));
+                            }
                             if ct != expr.ty.is_comptime_callable() {
                                 return Err(error(
                                     "closure type does not preserve its execution phase",
@@ -838,6 +1122,7 @@ pub fn machine_arithmetic_functions(
                         | K::Let { value, .. }
                         | K::Assign { value, .. }
                         | K::BitAssign { value, .. }
+                        | K::UnsafeScope(value)
                         | K::Discard(value)
                         | K::BitSlice { value, .. }
                         | K::PointerType(value)
@@ -845,6 +1130,7 @@ pub fn machine_arithmetic_functions(
                         | K::IntegerNegate(value)
                         | K::FloatNegate(value)
                         | K::BitConvert(value)
+                        | K::ErrorConvert { value: value, .. }
                         | K::NewtypeConvert(value)
                         | K::TakeBits(value)
                         | K::SymbolName(value)
@@ -869,6 +1155,7 @@ pub fn machine_arithmetic_functions(
                         | K::ScalarGreater(a, b)
                         | K::ScalarGreaterEqual(a, b)
                         | K::ScalarLessEqual(a, b)
+                        | K::TemplateEqual(a, b)
                         | K::ScalarEqual(a, b)
                         | K::TypeEqual(a, b)
                         | K::TypeListIndex(a, b)
@@ -891,8 +1178,12 @@ pub fn machine_arithmetic_functions(
                             let Term::Pointer(storage) = &pointer.ty else {
                                 return Err(error("bit writeback requires a pointer"));
                             };
-                            if let Some(message) = crate::program::bit_update_error(
-                                storage, selections, &value.ty, &expr.ty,
+                            if let Some(message) = crate::program::bit_update_error_in(
+                                storage,
+                                selections,
+                                &value.ty,
+                                &expr.ty,
+                                package.target,
                             ) {
                                 return Err(error(message));
                             }
@@ -915,11 +1206,12 @@ pub fn machine_arithmetic_functions(
                                 preparation_fuel.checked_sub(selections.len()).ok_or_else(
                                     || error("bit selection validation budget exhausted"),
                                 )?;
-                            if let Some(message) = crate::program::bit_update_error(
+                            if let Some(message) = crate::program::bit_update_error_in(
                                 storage_type,
                                 selections,
                                 &value.ty,
                                 &expr.ty,
+                                package.target,
                             ) {
                                 return Err(error(message));
                             }
@@ -935,7 +1227,7 @@ pub fn machine_arithmetic_functions(
                             let never = Term::Primitive(Primitive::Never);
                             if matches!(value.ty, Term::Primitive(p) if !matches!(p, Primitive::BitVec(_)))
                                 || [start, end].iter().any(|e|matches!(e.ty, Term::Primitive(p)
-                                    if !matches!(p, Primitive::Integer | Primitive::Never) && p.fixed_integer_layout().is_none()))
+                                    if !matches!(p, Primitive::Integer | Primitive::Never) && package.target.map_or_else(|| p.fixed_integer_layout(), |target| target.integer_layout(p)).is_none()))
                                 || if start.ty == never || end.ty == never {expr.ty != never}
                                     else {!matches!(expr.ty, Term::Primitive(Primitive::BitVec(_)))} {
                                 return Err(error("invalid dynamic BitVec slice operand or result type"));
@@ -950,7 +1242,7 @@ pub fn machine_arithmetic_functions(
                             // premises in the mandatory program verifier.
                             let bad_value = matches!(value.ty, Term::Primitive(p) if !matches!(p, Primitive::BitVec(_)));
                             let bad_index = matches!(index.ty, Term::Primitive(p)
-                                if !matches!(p, Primitive::Integer | Primitive::Never) && p.fixed_integer_layout().is_none());
+                                if !matches!(p, Primitive::Integer | Primitive::Never) && package.target.map_or_else(|| p.fixed_integer_layout(), |target| target.integer_layout(p)).is_none());
                             if bad_value
                                 || bad_index
                                 || expr.ty
@@ -1096,8 +1388,13 @@ pub fn machine_arithmetic_functions(
                             }
                         }
                         K::ComptimeValue(value) => {
-                            crate::comptime_values::validate(value, &expr.ty, &mut 100_000)
-                                .map_err(|error| fail(expr.source, error.message()))?;
+                            crate::comptime_values::validate_in(
+                                value,
+                                &expr.ty,
+                                package.target,
+                                &mut 100_000,
+                            )
+                            .map_err(|error| fail(expr.source, error.message()))?;
                         }
                         K::TypeValue(_)
                         | K::TypeListValue(_)
@@ -1110,6 +1407,14 @@ pub fn machine_arithmetic_functions(
                 }
             }
         }
+    }
+    for function in package
+        .functions
+        .iter()
+        .chain(&package.quote_templates)
+        .chain(&interface_summaries)
+    {
+        crate::call_safety::validate(function, &mut 100_000).map_err(|_| Error {source: function.body.source, message: "unsafe function call requires an unsafe boundary or declaration telescope is invalid"})?;
     }
     Ok(machine_owners)
 }
@@ -1124,15 +1429,43 @@ pub fn validate_runtime_storage(
     package: &Package,
     frames: &[Vec<crate::Sort>],
 ) -> Result<(), &'static str> {
+    validate_runtime_storage_inner(ty, package, frames, None, &mut 100_000)
+}
+
+/// Validate storage against already instantiated nominal fields. The resolver
+/// must return the exact layout for the requested type, or None if unavailable.
+/// It never receives opaque normal-form heads for body reduction.
+pub fn validate_runtime_storage_with_nominals(
+    ty: &Term,
+    package: &Package,
+    frames: &[Vec<crate::Sort>],
+    resolve: &dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
+    validate_runtime_storage_inner(ty, package, frames, Some(resolve), fuel)
+}
+
+type NominalStorageResolver<'a> = Option<&'a dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>>;
+fn validate_runtime_storage_inner(
+    ty: &Term,
+    package: &Package,
+    frames: &[Vec<crate::Sort>],
+    resolve: NominalStorageResolver<'_>,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
+    crate::type_computations::charge_term(ty, fuel)
+        .map_err(|_| "runtime storage inspection budget exhausted")?;
     if ty.sort() != crate::Sort::Type || ty.check_scope(frames).is_err() {
         return Err("runtime storage requires a Type in the declared input scope");
     }
-    match comptime_storage(
+    match comptime_storage_resolved(
         ty,
         package,
         frames,
         &mut std::collections::HashSet::new(),
         0,
+        resolve,
+        fuel,
     ) {
         Ok(false) => Ok(()),
         Ok(true) => Err("comptime-only value cannot inhabit runtime storage; Splice is required"),
@@ -1149,7 +1482,20 @@ fn comptime_storage(
     seen: &mut std::collections::HashSet<(crate::Term, Vec<Vec<crate::Sort>>)>,
     depth: usize,
 ) -> Result<bool, ()> {
+    comptime_storage_resolved(ty, package, frames, seen, depth, None, &mut 100_000)
+}
+
+fn comptime_storage_resolved(
+    ty: &Term,
+    package: &Package,
+    frames: &[Vec<crate::Sort>],
+    seen: &mut std::collections::HashSet<(Term, Vec<Vec<crate::Sort>>)>,
+    depth: usize,
+    resolve: NominalStorageResolver<'_>,
+    fuel: &mut usize,
+) -> Result<bool, ()> {
     use crate::{Primitive as P, Term as T};
+    crate::type_computations::charge_term(ty, fuel).map_err(|_| ())?;
     if depth > 128 {
         return Err(());
     }
@@ -1193,9 +1539,35 @@ fn comptime_storage(
             vec![(**signature).clone()]
         }
         T::Primitive(P::Integer | P::Float | P::Type) | T::ComptimeFunction(_) => return Ok(true),
+        T::NormalForm { head, .. } => {
+            match package
+                .normal_forms
+                .iter()
+                .find(|definition| definition.declaration == *head)
+            {
+                Some(definition) if definition.role == crate::normal_forms::Role::TypeList => {
+                    return Ok(true);
+                }
+                Some(definition) if definition.role == crate::normal_forms::Role::Tuple => {
+                    // Inspect only the trusted tuple representation contract.
+                    // An unresolved generic list remains deferred until concrete
+                    // instantiation; ordinary factory bodies are never unfolded.
+                    definition.tuple_elements(ty).unwrap_or_default().to_vec()
+                }
+                _ => vec![],
+            }
+        }
+        T::ErrorResult { errors, result } => errors
+            .iter()
+            .cloned()
+            .chain(std::iter::once((**result).clone()))
+            .collect(),
+        // Effect identities describe control requirements, not stored values.
+        // The computation's returned payload still obeys the storage phase.
+        T::Computation { result, .. } => vec![(**result).clone()],
         T::Tuple(items) => items.clone(),
         T::Record(fields) => fields.iter().map(|(_, ty)| ty.clone()).collect(),
-        T::Pointer(inner) => vec![(**inner).clone()],
+        T::Pointer(inner) | T::UnsafeFunction(inner) => vec![(**inner).clone()],
         T::Function { parameters, result } => {
             let mut nested = frames.to_vec();
             nested.push(parameters.iter().map(|p| p.sort).collect());
@@ -1205,7 +1577,15 @@ fn comptime_storage(
                 .map(|p| &p.ty)
                 .chain(std::iter::once(result.as_ref()))
             {
-                if comptime_storage(child, package, &nested, seen, depth + 1)? {
+                if comptime_storage_resolved(
+                    child,
+                    package,
+                    &nested,
+                    seen,
+                    depth + 1,
+                    resolve,
+                    fuel,
+                )? {
                     return Ok(true);
                 }
             }
@@ -1223,7 +1603,9 @@ fn comptime_storage(
             declaration,
             arguments,
         } => {
-            if let Some(def) = package
+            if let Some(resolve) = resolve {
+                resolve(ty, fuel).ok_or(())?
+            } else if let Some(def) = package
                 .structs
                 .iter()
                 .find(|d| d.declaration == *declaration)
@@ -1255,7 +1637,7 @@ fn comptime_storage(
         _ => vec![],
     };
     for child in &children {
-        if comptime_storage(child, package, frames, seen, depth + 1)? {
+        if comptime_storage_resolved(child, package, frames, seen, depth + 1, resolve, fuel)? {
             return Ok(true);
         }
     }

@@ -1482,6 +1482,29 @@ fn conditional_implementation_nested_disjunctions_share_the_solver() {
         assumptions: &[],
         context: &ctx,
     };
+    let mut exhausted = Budget {
+        steps: 0,
+        ..Budget::default()
+    };
+    assert!(
+        world
+            .resolve_instance_metered(&id(100).into(), &subject, &mut exhausted)
+            .is_err()
+    );
+    // Repeated independent queries share one caller allowance. Successful
+    // proofs charge work, rather than consuming each reserved proof slot.
+    let mut shared = Budget::default();
+    for _ in 0..8 {
+        let before = shared.steps;
+        let resolution = world
+            .resolve_instance_metered(&id(100).into(), &subject, &mut shared)
+            .unwrap();
+        assert_eq!(resolution.types.selection, Selection::Selected(id(20)));
+        assert!(shared.steps < before);
+        world
+            .verify_condition_support(&resolution, Budget::default())
+            .unwrap();
+    }
     let resolution = world.resolve(id(100), &subject, Budget::default()).unwrap();
     assert_eq!(resolution.types.selection, Selection::Selected(id(20)));
     world
@@ -2442,5 +2465,160 @@ fn nominal_capability_sources_and_subject_facts_require_layout_evidence() {
             Some(&package)
         )
         .is_empty()
+    );
+}
+
+#[test]
+fn assumption_lookup_accounts_for_wide_type_inputs_and_recovers() {
+    let index = Index::default();
+    let context = context();
+    let subject = Term::Tuple(vec![Term::Primitive(Primitive::Bool); 256]);
+    let requested = requirement(101, subject);
+    let assumptions = vec![requested.clone()];
+    let world = World {
+        index: &index,
+        implementations: &[],
+        traits: &[],
+        assumptions: &assumptions,
+        context: &context,
+    };
+    assert!(
+        world
+            .given(
+                &requested,
+                Budget {
+                    steps: 32,
+                    ..Default::default()
+                }
+            )
+            .is_none()
+    );
+    assert!(world.given(&requested, Budget::default()).is_some());
+    assert!(
+        world
+            .given(
+                &requested,
+                Budget {
+                    steps: 0,
+                    ..Default::default()
+                }
+            )
+            .is_none()
+    );
+    assert!(world.given(&requested, Budget::default()).is_some());
+}
+
+#[test]
+fn metered_assumption_lookup_returns_consumed_allowance_on_failure_and_success() {
+    let index = Index::default();
+    let context = context();
+    let requested = requirement(101, Term::Tuple(vec![Term::Primitive(Primitive::Bool); 64]));
+    let assumptions = vec![requested.clone()];
+    let world = World {
+        index: &index,
+        implementations: &[],
+        traits: &[],
+        assumptions: &assumptions,
+        context: &context,
+    };
+    let mut small = Budget {
+        steps: 16,
+        ..Default::default()
+    };
+    assert!(world.given_metered(&requested, &mut small).is_none());
+    assert!(small.steps < 16);
+    let mut enough = Budget::default();
+    let before = enough.steps;
+    assert!(world.given_metered(&requested, &mut enough).is_some());
+    assert!(enough.steps + 64 < before);
+    assert!(world.given_metered(&requested, &mut enough).is_some());
+}
+
+#[test]
+fn candidate_search_returns_budget_even_when_no_implementation_matches() {
+    let index = Index::default();
+    let subject = Term::Tuple(vec![Term::Primitive(Primitive::Bool); 128]);
+    let mut small = Budget {
+        steps: 8,
+        ..Default::default()
+    };
+    assert!(
+        index
+            .candidates_metered(Some(id(101)), &[], &subject, &mut small)
+            .is_err()
+    );
+    assert!(small.steps < 8);
+    let mut enough = Budget::default();
+    let before = enough.steps;
+    let result = index
+        .candidates_metered(Some(id(101)), &[], &subject, &mut enough)
+        .unwrap();
+    assert!(result.declarations().is_empty());
+    assert!(enough.steps + 128 < before);
+}
+
+#[test]
+fn repeated_boolean_contract_checks_share_budget_and_keep_world_local_facts() {
+    use elaboration::ptc::{Formula, Outcome};
+    use nir::program::TypePredicate as Q;
+    let ctx = context();
+    let traits = vec![marker(100), marker(101), marker(102)];
+    let subject = Term::Primitive(Primitive::Bool);
+    let implementations = vec![implementation(20, 101, subject.clone(), vec![], vec![])];
+    let ix = index(&implementations);
+    let world = World {
+        index: &ix,
+        implementations: &implementations,
+        traits: &traits,
+        assumptions: &[],
+        context: &ctx,
+    };
+    let malformed = elaboration::ptc::TraitQuery::from(&requirement(999, subject.clone()));
+    let mut rejected = Budget::default();
+    let before = rejected.steps;
+    assert!(
+        world
+            .decide_trait_metered(&malformed, &mut rejected)
+            .is_err()
+    );
+    assert!(rejected.steps < before);
+    let predicate = Q::And(vec![
+        Q::Not(Box::new(Q::Trait(requirement(100, subject.clone())))),
+        Q::Or(vec![
+            Q::Trait(requirement(101, subject.clone())),
+            Q::Trait(requirement(102, subject)),
+        ]),
+    ]);
+    let mut exhausted = Budget {
+        steps: 0,
+        ..Budget::default()
+    };
+    assert!(!matches!(
+        world.check_predicate_metered(&predicate, &mut exhausted),
+        Ok(Outcome::Entailed(_))
+    ));
+    assert_eq!(exhausted.steps, 0);
+    let mut shared = Budget::default();
+    for _ in 0..4 {
+        let before = shared.steps;
+        assert!(matches!(
+            world.check_predicate_metered(&predicate, &mut shared),
+            Ok(Outcome::Entailed(_))
+        ));
+        assert!(shared.steps < before);
+    }
+    // Returned implementation facts must not become unconditional PTC facts.
+    assert!(!matches!(
+        ctx.prove(Formula::from_predicate(&predicate), Budget::default()),
+        Outcome::Entailed(_)
+    ));
+    let absent =
+        elaboration::ptc::TraitQuery::from(&requirement(100, Term::Primitive(Primitive::Bool)));
+    assert_eq!(
+        world
+            .decide_trait(&absent, Budget::default())
+            .unwrap()
+            .truth(),
+        elaboration::capabilities::TraitTruth::Excluded
     );
 }

@@ -1,16 +1,12 @@
 //! Reusable invocation of one concrete pure comptime function in an owned
 //! compilation snapshot. Callers supply fully prepared arguments; defaults and
-//! input evaluation are outside this cache. Resource authorization remains the
-//! caller's responsibility, as for the uncached interpreter entry.
+//! input evaluation are outside this cache. Optional paired source Copy/Drop
+//! bindings authorize pointer transfers in this immutable compilation snapshot.
 use crate::comptime_keys::{Protocol, Snapshot};
 use comptime_executor::{Cache, Context, Error, KeyProtocol, Outcome, QueryId, Scope};
-use comptime_interpretor::{Budget, ContractOutcome, Interpreter, Value};
-use elaboration::{
-    capabilities::World,
-    implementation::{ImplementationHead, Index},
-    ptc,
-};
-use intrinsic::LangItems;
+use comptime_interpretor::{Budget, Interpreter, Value};
+use elaboration::{capabilities::World, implementation::Index, ptc};
+use intrinsic::{LangItem, LangItemDef, LangItems};
 use nir::{
     DeclarationId, Term,
     program::{FunctionPhase, Package, TypePredicate},
@@ -22,6 +18,7 @@ pub struct Invocation {
     arguments: Vec<Term>,
     signature: Term,
     items: LangItems,
+    resources: Option<(DeclarationId, DeclarationId)>,
     schemas: Vec<Schema>,
     requirements: Vec<TypePredicate>,
     capacity: usize,
@@ -106,6 +103,24 @@ impl Invocation {
         capacity: usize,
         budget: ptc::Budget,
     ) -> Result<Self, String> {
+        let resources = match (items.get(LangItem::Copy), items.get(LangItem::Drop)) {
+            (None, None) => None,
+            (Some(LangItemDef::UserDef(copy)), Some(LangItemDef::UserDef(drop))) => {
+                crate::resources::ProtocolContext::selected(
+                    package,
+                    crate::resources::Selection::Identity(copy),
+                    Some(crate::resources::Selection::Identity(drop)),
+                    budget,
+                )?;
+                Some((copy, drop))
+            }
+            _ => {
+                return Err(
+                    "memoized pointer transfers require paired source Copy and Drop bindings"
+                        .into(),
+                );
+            }
+        };
         let mut matches = package
             .functions
             .iter()
@@ -130,27 +145,8 @@ impl Invocation {
             .chain(std::iter::once(result.as_ref()))
             .all(|ty| ty.check_scope(&[]).is_ok());
         let context = ptc::Context::from_package(package)?;
-        let mut index = Index::default();
-        for i in package
-            .implementations
-            .iter()
-            .filter(|i| i.interface.is_some())
-        {
-            index
-                .insert(
-                    ImplementationHead {
-                        parameter_types: i.parameter_types.clone(),
-                        declaration: i.declaration,
-                        interface: i.interface,
-                        interface_arguments: i.interface_arguments.clone(),
-                        subject: i.subject.clone(),
-                        type_parameters: i.type_parameters.clone(),
-                        requirements: i.requirements.clone(),
-                    },
-                    budget,
-                )
-                .map_err(|e| format!("memoization implementation index: {e:?}"))?;
-        }
+        let index = crate::implementation_world::index(&package, budget)
+            .map_err(|error| format!("memoization implementation index: {error}"))?;
         let world = World {
             index: &index,
             context: &context,
@@ -236,6 +232,7 @@ impl Invocation {
             arguments,
             signature,
             items: items.clone(),
+            resources,
             schemas,
             requirements: deferred,
             capacity,
@@ -322,6 +319,7 @@ impl Invocation {
             execute(
                 &self.package,
                 &world,
+                self.resources,
                 self.budget,
                 self.declaration,
                 &self.arguments,
@@ -336,6 +334,7 @@ impl Invocation {
             execute(
                 &self.package,
                 &world,
+                self.resources,
                 self.budget,
                 self.declaration,
                 &self.arguments,
@@ -477,6 +476,7 @@ impl std::fmt::Display for Invocation {
 fn execute(
     package: &Package,
     world: &World<'_>,
+    resources: Option<(DeclarationId, DeclarationId)>,
     budget: ptc::Budget,
     declaration: DeclarationId,
     arguments: &[Term],
@@ -487,10 +487,8 @@ fn execute(
     inputs: Vec<Snapshot>,
     context: &mut Context,
 ) -> Result<Outcome<Value>, Error<String>> {
-    let solver = |predicate: &TypePredicate| match world.check_predicate(predicate, budget) {
-        Ok(ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,
-        Ok(ptc::Outcome::NotEntailed(_)) => ContractOutcome::Rejected,
-        _ => ContractOutcome::Unknown,
+    let solver = |predicate: &TypePredicate, remaining: &mut u64| {
+        crate::implementation_world::solve_metered(world, predicate, budget, remaining)
     };
     cache.query_pure_admitted(
         QueryId {
@@ -518,8 +516,34 @@ fn execute(
                 Some(graph) => Interpreter::from_iir_for_comptime_metered(graph, &mut vm_budget),
                 None => Interpreter::for_comptime(prepared.as_ref(), vm_budget),
             };
+            let copy_failure = std::cell::RefCell::new(None::<String>);
+            let pointer_copy = |ty: &Term, remaining: &mut u64| {
+                let Some((copy, drop)) = resources else {
+                    return false;
+                };
+                let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
+                let before = fuel;
+                let evidence = elaboration::verification::copy::acquire(
+                    package,
+                    world,
+                    copy,
+                    drop,
+                    ty,
+                    ptc::Budget {
+                        steps: fuel,
+                        ..budget
+                    },
+                    &mut fuel,
+                );
+                *remaining = remaining.saturating_sub((before - fuel) as u64);
+                let allowed = evidence.is_ok();
+                *copy_failure.borrow_mut() = evidence.err();
+                allowed
+            };
             let mut vm = match prepared_vm {
-                Ok(vm) => vm.with_type_solver(&solver),
+                Ok(vm) => vm
+                    .with_budgeted_type_solver(&solver)
+                    .with_budgeted_pointer_copy_permission(&pointer_copy),
                 Err(error) => {
                     context
                         .spend::<String>((steps - vm_budget.steps) as usize)
@@ -544,7 +568,7 @@ fn execute(
                                 depth: 128,
                             },
                         )?
-                        .with_type_solver(&solver);
+                        .with_budgeted_type_solver(&solver);
                         let result = admission.validate_immutable_input(&value, result_type);
                         admission_work = before - admission.remaining_steps();
                         result
@@ -562,7 +586,12 @@ fn execute(
             context
                 .spend::<String>((steps - vm.remaining_steps() + admission_work) as usize)
                 .map_err(|e| e.to_string())?;
-            result.map_err(|e: comptime_interpretor::Error| e.to_string())
+            result.map_err(
+                |e: comptime_interpretor::Error| match copy_failure.borrow().as_ref() {
+                    Some(reason) => format!("{e}; pointer Copy evidence: {reason}"),
+                    None => e.to_string(),
+                },
+            )
         },
     )
 }

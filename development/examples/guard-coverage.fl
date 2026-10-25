@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Int = .Integer'builtin;
 typealias Bool = true'type;
 typealias Byte = .u8'builtin;
@@ -19,10 +22,10 @@ comptime fn reverse(value: Byte) -> Bool {
 comptime fn reflexive(value: Int) -> Bool {
     value match { n if n <= n => true }
 }
-comptime fn run() -> (Bool, Bool, Bool, Bool, Bool, Bool) {
+comptime fn run() -> Tuple<Bool, Bool, Bool, Bool, Bool, Bool> {
     (sign(-1), zero(0), zero(1), middle(15), reverse(255), reflexive(7))
 }
-comptime fn ordered_or(value: (Int, Int)) -> Bool {
+comptime fn ordered_or(value: Tuple<Int, Int>) -> Bool {
     value match { (a, b) or (b, a) if a < 0 => true, _ => false }
 }
 comptime fn check_ordered_or() -> Bool { ordered_or((1, -1)) }

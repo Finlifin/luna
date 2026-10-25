@@ -362,6 +362,7 @@ fn a_function_named_tuple_does_not_supply_a_pure_normal_form_head() {
         phase: FunctionPhase::Runtime,
         inline: false,
         pure: false,
+        is_unsafe: false,
         type_parameters: vec![],
         requirements: vec![],
         capabilities: vec![],

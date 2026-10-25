@@ -1,0 +1,29 @@
+-- A computed tuple pattern in a quote contract, with explicit Copy evidence.
+-- Run: python3 -B development/host_examples.py quote-contract-patterns --release-driver --compare-optimization
+use tuples.Tuple;
+
+-- This local protocol is explicitly bound as Copy by the runner. Defining a
+-- local trait implementation for the external Tuple is legal; claiming an
+-- implementation of resources.Copy in this package would violate ownership.
+trait Duplicate {}
+impl Duplicate for Tuple<bool, bool> {}
+
+trait Checked {
+    quote fn keep(self, pair: Tuple<bool, bool>) -> bool
+    where requires do {
+        let (first, second) and (first, second) is (left, right) = pair;
+        first and second
+    };
+}
+
+struct Holder {}
+impl Checked for Holder {
+    quote fn keep(self, values: Tuple<bool, bool>) -> bool { true }
+}
+
+fn invoke(flag: bool) -> bool {
+    assumes flag;
+    Holder {}.as(Checked).keep((flag, true))
+}
+
+fn run() -> bool { invoke(true) }

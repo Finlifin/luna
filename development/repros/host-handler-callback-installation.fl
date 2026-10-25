@@ -1,0 +1,17 @@
+-- Each installation observes the current callback; outside writes do not
+-- invalidate a completed installation's candidate snapshot.
+trait Duplicate {}
+trait Retire {fn drop(*self);}
+impl Duplicate for bool {}
+fn identity(value: bool) -> bool {value}
+fn invert(value: bool) -> bool {not value}
+effect step() -> bool;
+fn subject() -> #step bool {step()#}
+fn run() -> bool {
+    var callback = identity;
+    callback = invert;
+    let first = subject()# {step() => callback(false),};
+    callback = identity;
+    let second = subject()# {step() => callback(false),};
+    first and not second
+}

@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Bits4 = .BitVec'builtin<4>;
 typealias Bits8 = .BitVec'builtin<8>;
 comptime fn high() -> Bits4 { 10 }
@@ -19,6 +22,6 @@ fn complete(value: .BitVec'builtin<1>) -> true'type {
         0b < none() > => false,
     }
 }
-fn run() -> (true'type, true'type, Bits4, true'type, true'type, true'type) {
+fn run() -> Tuple<true'type, true'type, Bits4, true'type, true'type, true'type> {
     (matched(165), matched(164), captured(171), empty(10), complete(1), complete(0))
 }

@@ -1,0 +1,36 @@
+-- The library_protocols native test loads this with the actual Tuple, meta,
+-- resources and tuple_resources modules in the resource trait's owning package.
+use tuples.Tuple;
+
+fn forward(value: T) -> T where T :- resources.Once { value }
+
+struct Tracked { retired: *bool }
+impl resources.Drop for Tracked {
+    fn drop(*self) {
+        assumes not self.retired.*.*;
+        self.retired.*.* = true;
+    }
+}
+fn retire(value: Tracked) {}
+
+fn run() -> bool {
+    let empty: Tuple<> = forward(());
+    var called = false;
+    let single: Tuple<bool> = forward((do {
+        assumes not called;
+        called = true;
+        true
+    },));
+    let (flag,) = single;
+    var first = false;
+    var second = false;
+    let packet: Tuple<Tracked, Tuple<Tracked, Tuple<>>> = forward((
+        Tracked {retired: first.ref},
+        (Tracked {retired: second.ref}, empty),
+    ));
+    let (head, (tail, ())) = packet;
+    retire(head);
+    assumes first and not second;
+    retire(tail);
+    called and flag and first and second
+}

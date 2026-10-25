@@ -1,0 +1,12 @@
+-- Regression: retain function-value formation until the abstract declaration
+-- width is supplied. Also covered by pure_bitvec and staged-bitvec.
+fn ones() -> defer .BitVec'builtin<N> where N: .Integer'builtin { not 0 }
+
+fn factory() -> defer (fn() -> .BitVec'builtin<N>) where N: .Integer'builtin {
+    ones<N>
+}
+
+fn run() -> bool {
+    let callback = factory<65>();
+    callback() == not 0
+}

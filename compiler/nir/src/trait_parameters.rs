@@ -52,6 +52,13 @@ impl Term {
                     }
                     pending.extend(fields.iter().map(|(_, value)| (value, depth + 1)));
                 }
+                Self::ErrorValue { ty, label, value } => {
+                    pending.push((ty, depth + 1));
+                    if let Some(label) = label {
+                        pending.push((label, depth + 1));
+                    }
+                    pending.push((value, depth + 1));
+                }
                 Self::TupleValue(fields) | Self::NominalValue { fields, .. } => {
                     if fields.len() > remaining.saturating_sub(pending.len()) {
                         return false;
@@ -102,6 +109,27 @@ impl Term {
                 }
                 pending.push((a, b, depth + 1));
                 pending.extend(af.iter().zip(bf).rev().map(|(a, b)| (a, b, depth + 1)));
+            } else if let (
+                Self::ErrorValue {
+                    ty: a,
+                    label: al,
+                    value: av,
+                },
+                Self::ErrorValue {
+                    ty: b,
+                    label: bl,
+                    value: bv,
+                },
+            ) = (left, right)
+            {
+                if al.is_some() != bl.is_some() {
+                    return None;
+                }
+                pending.push((a, b, depth + 1));
+                if let (Some(a), Some(b)) = (al, bl) {
+                    pending.push((a, b, depth + 1));
+                }
+                pending.push((av, bv, depth + 1));
             } else if let (Self::TupleValue(a), Self::TupleValue(b)) = (left, right) {
                 if a.len() != b.len() || a.len() > remaining.saturating_sub(pending.len()) {
                     return None;
@@ -151,6 +179,10 @@ impl Term {
             if left.sort() == Sort::Type || right.sort() == Sort::Type {
                 continue;
             }
+            if left.has_pending_error_branch() || right.has_pending_error_branch() {
+                // Unknown inner branches cannot establish disjoint indices.
+                continue;
+            }
             match (left, right) {
                 (
                     Self::NominalValue {
@@ -171,6 +203,27 @@ impl Term {
                         return false;
                     }
                     pending.extend(a.iter().zip(b));
+                }
+                (
+                    Self::ErrorValue {
+                        label: a,
+                        value: av,
+                        ..
+                    },
+                    Self::ErrorValue {
+                        label: b,
+                        value: bv,
+                        ..
+                    },
+                ) => {
+                    if a.is_some() != b.is_some() {
+                        return true;
+                    }
+                    // Distinct-looking labels may be equal by type evidence.
+                    // Payload mismatches refute only an identical branch domain.
+                    if a == b {
+                        pending.push((av, bv));
+                    }
                 }
                 (Self::TupleValue(a), Self::TupleValue(b)) => {
                     if a.len() != b.len() {
@@ -424,6 +477,7 @@ impl Trait {
         equivalent: &mut impl FnMut(&Term, &Term, &mut usize) -> bool,
         layouts: Option<&crate::program::Package>,
     ) -> Result<(), String> {
+        let target = layouts.and_then(|package| package.target);
         let binders = self.parameter_binders(fuel)?;
         if arguments.len() != binders.len() {
             return Err("trait interface argument count mismatch".into());
@@ -460,8 +514,11 @@ impl Trait {
             } else {
                 domain
             };
-            if matches!(argument, Term::NominalValue { .. } | Term::TupleValue(_)) {
-                crate::nominal_parameters::validate_symbolic_value(
+            if matches!(
+                argument,
+                Term::ErrorValue { .. } | Term::NominalValue { .. } | Term::TupleValue(_)
+            ) {
+                crate::nominal_parameters::validate_symbolic_value_in(
                     argument,
                     &domain,
                     fuel,
@@ -495,31 +552,90 @@ impl Trait {
                                 actual == *expected || equivalent(&actual, expected, fuel)
                             })
                     },
+                    target,
                 )
                 .map_err(|e| e.to_string())?;
                 continue;
             }
             if matches!(argument, Term::RecordValue(_)) && argument.is_symbolic_index_value() {
-                validate_record_index_with(argument, &domain, fuel, |value, expected, fuel| {
-                    let Term::Rigid {
-                        declaration,
-                        sort: Sort::ComptimeValue,
-                    } = value
-                    else {
-                        return false;
-                    };
-                    declared_value_domain(*declaration, declarations, domains, scope, fuel)
-                        .is_ok_and(|actual| {
-                            actual == *expected || equivalent(&actual, expected, fuel)
-                        })
-                })?;
+                validate_record_index_with_admission_in(
+                    argument,
+                    &domain,
+                    fuel,
+                    |value, expected, fuel| {
+                        if matches!(value, Term::NominalValue { .. }) {
+                            crate::nominal_parameters::validate_symbolic_value_in(
+                                value,
+                                expected,
+                                fuel,
+                                |ty, variant, fuel| {
+                                    let package = layouts.ok_or_else(|| {
+                                        crate::NominalAdmissionError::from(
+                                            "nominal record index requires declaration layouts",
+                                        )
+                                    })?;
+                                    crate::normal_forms::nominal_value_fields_budgeted(
+                                        package, ty, variant, fuel,
+                                    )
+                                    .ok_or_else(|| {
+                                        if *fuel == 0 {
+                                            crate::NominalAdmissionError::Budget
+                                        } else {
+                                            crate::NominalAdmissionError::from(
+                                                "invalid nominal record index layout",
+                                            )
+                                        }
+                                    })
+                                },
+                                |value, expected, fuel| {
+                                    let Term::Rigid {
+                                        declaration,
+                                        sort: Sort::ComptimeValue,
+                                    } = value
+                                    else {
+                                        return false;
+                                    };
+                                    declared_value_domain(
+                                        *declaration,
+                                        declarations,
+                                        domains,
+                                        scope,
+                                        fuel,
+                                    )
+                                    .is_ok_and(|actual| {
+                                        actual == *expected || equivalent(&actual, expected, fuel)
+                                    })
+                                },
+                                target,
+                            )?;
+                            return Ok(true);
+                        }
+                        let Term::Rigid {
+                            declaration,
+                            sort: Sort::ComptimeValue,
+                        } = value
+                        else {
+                            return Ok(false);
+                        };
+                        Ok(
+                            declared_value_domain(*declaration, declarations, domains, scope, fuel)
+                                .is_ok_and(|actual| {
+                                    actual == *expected || equivalent(&actual, expected, fuel)
+                                }),
+                        )
+                    },
+                    target,
+                )?;
                 continue;
             }
             // Fixed-width proxies freeze to the same exact integer payload as
             // Integer. The declared domain supplies width and signedness; the
             // payload must fit exactly, without truncation or host-size guesses.
             if let (Term::Integer(value), Term::Primitive(primitive)) = (argument, &domain) {
-                if let Some((signed, width)) = primitive.fixed_integer_layout() {
+                if let Some((signed, width)) = target.map_or_else(
+                    || primitive.fixed_integer_layout(),
+                    |target| target.integer_layout(*primitive),
+                ) {
                     let fits = if signed {
                         value.to_signed(width).is_ok()
                     } else {
@@ -596,6 +712,28 @@ pub fn validate_record_index_with(
     fuel: &mut usize,
     mut symbolic: impl FnMut(&Term, &Term, &mut usize) -> bool,
 ) -> Result<(), crate::nominal_parameters::AdmissionError> {
+    validate_record_index_with_admission(value, domain, fuel, |value, domain, fuel| {
+        Ok(symbolic(value, domain, fuel))
+    })
+}
+
+/// Ordered structural index validation with fallible declaration-backed leaf admission.
+pub fn validate_record_index_with_admission(
+    value: &Term,
+    domain: &Term,
+    fuel: &mut usize,
+    admit: impl FnMut(&Term, &Term, &mut usize) -> Result<bool, crate::NominalAdmissionError>,
+) -> Result<(), crate::NominalAdmissionError> {
+    validate_record_index_with_admission_in(value, domain, fuel, admit, None)
+}
+
+pub fn validate_record_index_with_admission_in(
+    value: &Term,
+    domain: &Term,
+    fuel: &mut usize,
+    mut admit: impl FnMut(&Term, &Term, &mut usize) -> Result<bool, crate::NominalAdmissionError>,
+    target: Option<crate::target::TargetData>,
+) -> Result<(), crate::NominalAdmissionError> {
     let mut pending = vec![(value, domain)];
     while let Some((value, domain)) = pending.pop() {
         *fuel = fuel
@@ -619,11 +757,42 @@ pub fn validate_record_index_with(
             }
             continue;
         }
+        if let Term::ErrorValue {
+            value: payload_value,
+            ..
+        } = value
+        {
+            let payload = crate::error_results::frozen_payload_domain(value, domain, fuel)
+                .map_err(|error| {
+                    if error == crate::error_results::Error::Budget {
+                        crate::NominalAdmissionError::Budget
+                    } else {
+                        crate::NominalAdmissionError::from(
+                            "trait error index domain or branch mismatch",
+                        )
+                    }
+                })?;
+            pending.push((payload_value, payload));
+            continue;
+        }
+        if let (Term::TupleValue(values), Term::Tuple(types)) = (value, domain) {
+            if values.len() != types.len() {
+                return Err("trait tuple index arity mismatch".into());
+            }
+            *fuel = fuel
+                .checked_sub(values.len())
+                .ok_or(crate::nominal_parameters::AdmissionError::Budget)?;
+            pending.extend(values.iter().zip(types));
+            continue;
+        }
         if *domain == Term::Primitive(Primitive::Type) && value.sort() == Sort::Type {
             continue;
         }
         if let (Term::Integer(value), Term::Primitive(primitive)) = (value, domain) {
-            if let Some((signed, width)) = primitive.fixed_integer_layout() {
+            if let Some((signed, width)) = target.map_or_else(
+                || primitive.fixed_integer_layout(),
+                |target| target.integer_layout(*primitive),
+            ) {
                 if if signed {
                     value.to_signed(width).is_ok()
                 } else {
@@ -634,7 +803,7 @@ pub fn validate_record_index_with(
                 return Err("trait integer argument is outside its declared domain".into());
             }
         }
-        if symbolic(value, domain, fuel) {
+        if admit(value, domain, fuel)? {
             continue;
         }
         if value.scalar_index_domain().map(Term::Primitive).as_ref() != Some(domain) {

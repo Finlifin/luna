@@ -1,0 +1,24 @@
+-- Build with --copy-protocol Duplicate --drop-protocol Retire --build run.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for Message {}
+
+typealias Symbol = .Symbol'builtin;
+enum Message {
+    .base_type Symbol,
+    .discrete_tag true,
+    ready = .wire_ready,
+    waiting: .wire_waiting,
+    closed = .wire_closed,
+}
+
+fn forward(value: Message) -> Message { value }
+fn ready(value: Message) -> bool {
+    value match { .ready => true, _ => false }
+}
+fn run() -> bool {
+    let a = forward(Message.ready);
+    let b = forward(Message.waiting);
+    ready(a) and not ready(b) and Message.closed'tag_name == "closed"
+}

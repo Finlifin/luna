@@ -8,6 +8,14 @@ pub(crate) fn forwarded_parameters(
     handler: &nir::program::EffectHandler,
     fuel: &mut usize,
 ) -> Result<Option<BTreeSet<usize>>, String> {
+    let result = local_forwarded_parameters(handler, fuel)?;
+    Ok(result.filter(|origins| !origins.is_empty()))
+}
+
+fn local_forwarded_parameters(
+    handler: &nir::program::EffectHandler,
+    fuel: &mut usize,
+) -> Result<Option<BTreeSet<usize>>, String> {
     let result = forwarded_parameters_inner(handler, fuel);
     if result.is_none() && *fuel == 0 {
         return Err("effect transfer proof budget exhausted".into());
@@ -28,7 +36,21 @@ fn forwarded_parameters_inner(
         let parameter = arm_forwarded_parameters(arm, fuel)?;
         common = join_origins(common, parameter, fuel)?;
     }
-    (!common.is_empty()).then_some(common)
+    Some(common)
+}
+
+/// An empty local completion set is bottom, not unknown. Only publish a
+/// nonempty transfer after composing the required outer handler evidence.
+pub(crate) fn with_handler_fallback(
+    handler: &nir::program::EffectHandler,
+    outer: Option<&BTreeSet<usize>>,
+    fuel: &mut usize,
+) -> Result<Option<BTreeSet<usize>>, String> {
+    if handler.fallback.is_none() {
+        return forwarded_parameters(handler, fuel);
+    }
+    let local = local_forwarded_parameters(handler, fuel)?;
+    Ok(with_fallback(local, outer, fuel)?.filter(|origins| !origins.is_empty()))
 }
 
 fn arm_forwarded_parameters(
@@ -319,6 +341,179 @@ mod transfer_tests {
             forwarded_parameters(&handler, &mut 200).unwrap(),
             Some(BTreeSet::from([0, 1]))
         );
+        // Lexical returns do not deliver their operand to a request. A whole
+        // arm that returns can coexist with another arm that forwards input 0.
+        let lexical = |value| Expr {
+            source,
+            ty: Term::Primitive(nir::Primitive::Never),
+            kind: K::Return(Some(Box::new(value))),
+        };
+        handler.arms = vec![arm(first), arm(second)];
+        handler.arms[1].body = lexical(local(second));
+        assert_eq!(
+            forwarded_parameters(&handler, &mut 200).unwrap(),
+            Some(BTreeSet::from([0]))
+        );
+        handler.arms[0].body = lexical(local(first));
+        assert_eq!(forwarded_parameters(&handler, &mut 200).unwrap(), None);
+        // Evaluation of a return operand can resume first; keep that delivery.
+        handler.arms[1].body = lexical(resume(second));
+        assert_eq!(
+            forwarded_parameters(&handler, &mut 200).unwrap(),
+            Some(BTreeSet::from([1]))
+        );
+        assert!(forwarded_parameters(&handler, &mut 1).is_err());
+        assert_eq!(
+            forwarded_parameters(&handler, &mut 200).unwrap(),
+            Some(BTreeSet::from([1]))
+        );
+        let call = Expr {
+            source,
+            ty: ty.clone(),
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(ty.clone()),
+                    },
+                    kind: K::Function(nir::DeclarationId {
+                        package: 0,
+                        local: 99,
+                    }),
+                }),
+                arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        };
+        handler.arms[0].body = local(first);
+        handler.arms[1].body = lexical(call.clone());
+        assert_eq!(
+            forwarded_parameters(&handler, &mut 200).unwrap(),
+            Some(BTreeSet::from([0]))
+        );
+        // The same call on a completion path is still opaque, not an identity.
+        handler.arms[1].body = call.clone();
+        assert_eq!(forwarded_parameters(&handler, &mut 200).unwrap(), None);
+        handler.fallback = Some(0);
+        let outer = BTreeSet::from([1]);
+        // An unknown local completion cannot borrow the outer handler's proof.
+        assert_eq!(
+            with_handler_fallback(&handler, Some(&outer), &mut 300).unwrap(),
+            None
+        );
+        handler.arms[1].body = lexical(call);
+        assert_eq!(
+            with_handler_fallback(&handler, Some(&outer), &mut 300).unwrap(),
+            Some(BTreeSet::from([0, 1]))
+        );
+        handler.arms[0].body = lexical(local(first));
+        assert_eq!(
+            with_handler_fallback(&handler, Some(&outer), &mut 300).unwrap(),
+            Some(outer.clone())
+        );
+        assert_eq!(
+            with_handler_fallback(&handler, None, &mut 300).unwrap(),
+            None
+        );
+        assert!(with_handler_fallback(&handler, Some(&outer), &mut 0).is_err());
+        assert_eq!(
+            with_handler_fallback(&handler, Some(&outer), &mut 300).unwrap(),
+            Some(outer)
+        );
+        handler.fallback = None;
+        assert_eq!(forwarded_parameters(&handler, &mut 300).unwrap(), None);
+        handler.arms = vec![arm(first)];
+        let product = |fields| Expr {
+            source,
+            ty: Term::Tuple(vec![ty.clone(), ty.clone()]),
+            kind: K::Tuple(fields),
+        };
+        let constructed = product(vec![local(first), local(second)]);
+        handler.arms[0].body = Expr {
+            source,
+            ty: ty.clone(),
+            kind: K::Block {
+                statements: vec![Expr {
+                    source,
+                    ty: Term::Primitive(nir::Primitive::Void),
+                    kind: K::Let {
+                        binding: LocalId {
+                            owner: 0,
+                            index: 99,
+                        },
+                        value: Box::new(constructed.clone()),
+                    },
+                }],
+                result: Some(Box::new(local(first))),
+            },
+        };
+        assert_eq!(
+            forwarded_parameters(&handler, &mut 300).unwrap(),
+            Some(BTreeSet::from([0]))
+        );
+        handler.arms[0].body = constructed;
+        assert_eq!(forwarded_parameters(&handler, &mut 300).unwrap(), None);
+        // Evaluated fields are not delivered. Only resume supplies the result,
+        // and no field after a nonlocal exit may contribute an origin.
+        handler.arms[0].body = product(vec![local(first), resume(second)]);
+        assert_eq!(
+            forwarded_parameters(&handler, &mut 300).unwrap(),
+            Some(BTreeSet::from([1]))
+        );
+        handler.arms[0].body = product(vec![lexical(local(first)), resume(second)]);
+        assert_eq!(forwarded_parameters(&handler, &mut 300).unwrap(), None);
+        let observed = Expr {
+            source,
+            ty: ty.clone(),
+            kind: K::ReadPointer(Box::new(Expr {
+                source,
+                ty: Term::Pointer(Box::new(ty.clone())),
+                kind: K::Local(LocalId {
+                    owner: 0,
+                    index: 98,
+                }),
+            })),
+        };
+        handler.arms = vec![arm(first)];
+        handler.arms[0].guard = Some(observed.clone());
+        assert_eq!(
+            forwarded_parameters(&handler, &mut 300).unwrap(),
+            Some(BTreeSet::from([0]))
+        );
+        handler.arms[0].guard = None;
+        handler.arms[0].body = observed.clone();
+        // The observed scalar itself is not the whole forwarded input.
+        assert_eq!(forwarded_parameters(&handler, &mut 300).unwrap(), None);
+        handler.arms[0].body = local(first);
+        let mut produced = observed;
+        if let K::ReadPointer(pointer) = &mut produced.kind {
+            pointer.kind = K::AddressOf(Box::new(local(second)));
+        }
+        // Exposing an input's storage address requires separate evidence.
+        handler.arms[0].guard = Some(produced);
+        assert_eq!(forwarded_parameters(&handler, &mut 300).unwrap(), None);
+        handler.arms[0].guard = None;
+        let loop_id = LocalId {
+            owner: 0,
+            index: 100,
+        };
+        for exit in [K::Break(loop_id), K::Continue(loop_id)] {
+            let terminal = Expr {
+                source,
+                ty: Term::Primitive(nir::Primitive::Never),
+                kind: exit,
+            };
+            handler.arms = vec![arm(first), arm(second)];
+            handler.arms[1].body = terminal.clone();
+            assert_eq!(
+                forwarded_parameters(&handler, &mut 300).unwrap(),
+                Some(BTreeSet::from([0]))
+            );
+            // No later expression can supply a completion after the loop exit.
+            handler.arms[0].body = product(vec![terminal, resume(second)]);
+            assert_eq!(forwarded_parameters(&handler, &mut 300).unwrap(), None);
+        }
     }
 }
 
@@ -346,7 +541,7 @@ impl TransferFlow {
         } else {
             self.resumed
         };
-        (!result.is_empty()).then_some(result)
+        Some(result)
     }
     fn join(self, other: Self, fuel: &mut usize) -> Option<Self> {
         let normal = match (self.continues, other.continues) {
@@ -393,10 +588,48 @@ fn transfer_flow(
             };
             Some(TransferFlow::normal(origins))
         }
+        K::UnsafeScope(value) => transfer_flow(value, inputs, fuel, depth + 1),
         K::Discard(value) => {
             let mut flow = transfer_flow(value, inputs, fuel, depth + 1)?;
             flow.normal = None;
             Some(flow)
+        }
+        K::Return(value) => {
+            // A lexical return delivers to the installer, never to the
+            // suspended request. Its operand may itself resume, so preserve
+            // those exits while excluding the lexical value from completion.
+            // Provenance and lifetime of that value are checked separately.
+            let mut flow = if let Some(value) = value {
+                let mut resumes = false;
+                nir::visit::expression_in_scope(value, fuel, |node, _| {
+                    resumes |= matches!(node.kind, K::EffectResume(_));
+                    Ok(())
+                })
+                .ok()?;
+                if resumes {
+                    transfer_flow(value, inputs, fuel, depth + 1)?
+                } else {
+                    // Arbitrary checked construction/calls on a lexical-exit
+                    // path cannot contribute a normal completion operand.
+                    // Nested closures and handler arms own separate resumes.
+                    TransferFlow::normal(None)
+                }
+            } else {
+                TransferFlow::normal(None)
+            };
+            flow.normal = None;
+            flow.continues = false;
+            Some(flow)
+        }
+        K::Break(_) | K::Continue(_) => {
+            // These exit to a lexical loop, not to the suspended request.
+            // Loop-target validity and unwind ownership are checked separately.
+            // Local loop expressions are not inferred by this transfer walk.
+            Some(TransferFlow {
+                resumed: BTreeSet::new(),
+                normal: None,
+                continues: false,
+            })
         }
         K::EffectResume(value) => {
             let flow = transfer_flow(value, inputs, fuel, depth + 1)?;
@@ -451,6 +684,33 @@ fn transfer_flow(
             let mut combined = combined?;
             combined.resumed = join_origins(subject.resumed, combined.resumed, fuel)?;
             Some(combined)
+        }
+        K::Tuple(fields)
+        | K::Record { fields, .. }
+        | K::AnonymousRecord { fields }
+        | K::Variant { fields, .. } => {
+            // Construction evaluates fields in order but is not a transfer of
+            // any whole input. A local constructed owner may precede a later
+            // identity delivery; its cleanup remains the resource checker's
+            // responsibility. Calls and slot-address exposure still need their
+            // own state-transform evidence and are not admitted by this walk.
+            let mut resumed = BTreeSet::new();
+            for field in fields {
+                let flow = transfer_flow(field, inputs, fuel, depth + 1)?;
+                resumed = join_origins(resumed, flow.resumed, fuel)?;
+                if !flow.continues {
+                    return Some(TransferFlow {
+                        resumed,
+                        normal: None,
+                        continues: false,
+                    });
+                }
+            }
+            Some(TransferFlow {
+                resumed,
+                normal: None,
+                continues: true,
+            })
         }
         K::Field { .. } | K::AnonymousField { .. } => {
             // A direct projection may be observed, but it is not the complete
@@ -542,7 +802,9 @@ fn copy_inputs(
 }
 
 // This is deliberately an origin-preservation check, not a purity inference:
-// no calls, stores, pointer reads, or user-defined operations are inferred safe.
+// No calls, stores, or user-defined operations are inferred safe. Primitive
+// reads through existing pointer positions do not change operand identity;
+// this proof grants no permission to read or extend the lifetime of a target.
 // The enclosing resource/memory analyses still check types and observations.
 fn observe_scalar(value: &Expr, fuel: &mut usize, depth: usize) -> Option<()> {
     if depth >= 128 || !matches!(value.ty, nir::Term::Primitive(_)) {
@@ -551,12 +813,14 @@ fn observe_scalar(value: &Expr, fuel: &mut usize, depth: usize) -> Option<()> {
     *fuel = fuel.checked_sub(1)?;
     match &value.kind {
         K::Literal(_) | K::Unit | K::Local(_) => Some(()),
+        K::ReadPointer(pointer) => observe_place(pointer, fuel, depth + 1),
         K::Field { .. } | K::AnonymousField { .. } => observe_place(value, fuel, depth + 1),
         K::Not(value) | K::IntegerNegate(value) | K::FloatNegate(value) => {
             observe_scalar(value, fuel, depth + 1)
         }
         K::And(left, right)
         | K::Or(left, right)
+        | K::TemplateEqual(left, right)
         | K::ScalarEqual(left, right)
         | K::ScalarLess(left, right)
         | K::ScalarLessEqual(left, right)
@@ -590,7 +854,7 @@ fn observe_scalar(value: &Expr, fuel: &mut usize, depth: usize) -> Option<()> {
             }
             Some(())
         }
-        K::Discard(value) => observe_scalar(value, fuel, depth + 1),
+        K::UnsafeScope(value) | K::Discard(value) => observe_scalar(value, fuel, depth + 1),
         K::Block { statements, result } => {
             for statement in statements {
                 spend(fuel, 1)?;

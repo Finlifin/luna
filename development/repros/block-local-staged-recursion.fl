@@ -1,0 +1,7 @@
+fn outer(comptime flag: bool) -> bool {
+    fn local(recur: bool) -> bool {
+        if recur { local(false) } else { flag }
+    }
+    local(true)
+}
+fn run() -> bool { outer(true) and not outer(false) }

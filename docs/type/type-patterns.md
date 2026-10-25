@@ -131,14 +131,14 @@ comptime fn KnownContents() -> bool {
 pure comptime fn Wrap<T> -> Type { T }
 
 comptime fn NestedContents() -> bool {
-    Wrap<(Box<bool, true>, bool)> match {
+    Wrap<Tuple<Box<bool, true>, bool>> match {
         Wrap<(Box<Kind, contents>, _)> => Kind == bool and contents,
         _ => false,
     }
 }
 ```
 
-Wrap 的 Type 参数为元组提供类型上下文；此处元组表达式构造的是类型。嵌套的 Box 据此获得 bool 参数。绑定 Tuple 协议时，这一操作只读取协议定义的元素视图，仍保留 Tuple 的头；其它工厂的返回体不充当元组视图。元组元素数量不匹配时，不把部分元素冒充成功候选的上下文。
+这里显式以 `Tuple<Box<bool, true>, bool>` 构造类型，括号 `(Box<bool, true>, bool)` 只会构造包含两个 Type 值的 tuple，不能作为 Wrap 的 Type 实参。模式中的括号按 tuple 结构视图观察元素，嵌套的 Box 据此获得 bool 参数。绑定 Tuple 协议时，这一操作只读取协议定义的元素视图，仍保留 Tuple 的头；其它工厂的返回体不充当元组视图。元组元素数量不匹配时，不把部分元素冒充成功候选的上下文。
 
 前面的完成值参数也可以决定后面的 nominal 参数类型。例如，布尔参数决定 Config 的实例身份：
 

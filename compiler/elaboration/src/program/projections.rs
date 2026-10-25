@@ -3,6 +3,210 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    /// Local Type values acquire their container identity during elaboration.
+    /// Reuse the resolver's use-site candidate set, including access checks;
+    /// ordinary value receivers must keep the field/method projection path.
+    /// Hand the completed intermediate type back to this selection operation:
+    /// discarding it makes type checking recursively re-elaborate every prefix.
+    /// This evidence is local to the operation, not a cache across environments.
+    fn local_type_receiver(
+        &mut self,
+        projection: &Expr<'_>,
+        completed: &mut Option<Term>,
+    ) -> Result<bool, Error> {
+        if self
+            .package
+            .member_projections
+            .contains_key(&projection.hir_id)
+            || self
+                .package
+                .deferred_member_projections
+                .contains_key(&projection.hir_id)
+        {
+            return Ok(false);
+        }
+        let H::Projection(base, _) = projection.kind else {
+            return Ok(false);
+        };
+        self.required_steps = self
+            .required_steps
+            .checked_sub(1)
+            .ok_or_else(|| error(projection.span, "type member receiver budget exhausted"))?;
+        match base.kind {
+            H::ResolvedLocal(_, binding) | H::ResolvedFnParam(_, binding) => {
+                let binding = local(binding);
+                Ok(self.locals.get(&binding) == Some(&p(P::Type))
+                    || self
+                        .generator_data
+                        .get(&binding)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|value| value.ty == p(P::Type)))
+            }
+            H::Projection(..) | H::NFApplication(..) => {
+                // Resolve each intermediate type member with its own use-site
+                // permissions. A value member cannot become a Type receiver.
+                *completed = self.projected_member_type(base)?;
+                if completed.is_none() && matches!(base.kind, H::Projection(..)) {
+                    *completed = self.observed_field_type(base)?;
+                    if completed.is_none() && self.local_field_domain(base)? == Some(p(P::Type)) {
+                        *completed = Some(self.type_expr(base)?);
+                    }
+                }
+                Ok(completed.is_some())
+            }
+            H::Block(_) | H::If(..) | H::When(_) | H::Match(..) => {
+                // Like a local Type receiver, this establishes only its domain.
+                // Type positions complete its identity; expression positions
+                // must retain the receiver's evaluation prefix instead.
+                Ok(self.local_field_domain(base)? == Some(p(P::Type)))
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Spelling alone does not distinguish a data field from Type.vars.
+    /// For computed receivers, prepare first and inspect the result domain.
+    /// Only a Type-valued receiver is invoked here; data receivers are invoked
+    /// later as part of the complete ordinary projection computation.
+    pub(super) fn metatype_namespace_receiver(&mut self, base: &Expr<'_>) -> Result<bool, Error> {
+        if let Some(domain) = self.local_field_domain(base)? {
+            return if domain == p(P::Type) {
+                self.type_expr(base).map(|ty| ty == p(P::Type))
+            } else {
+                Ok(false)
+            };
+        }
+        if self.is_type_head(base) {
+            return self.type_expr(base).map(|ty| ty == p(P::Type));
+        }
+        let prepared = self.prepare_required_expression(base, None, None, Vec::new(), false)?;
+        if prepared.result_type != p(P::Type) {
+            return Ok(false);
+        }
+        let (value, _) = prepared.invoke(&mut self.required_steps, base.span)?;
+        Ok(matches!(value, comptime_interpretor::Value::Type(ty) if ty == p(P::Type)))
+    }
+
+    /// Classify a data-field path by local or comptime call result domains,
+    /// without interpreting its values. This only disambiguates builtin namespace
+    /// syntax; ordinary projection still performs the actual field checks.
+    pub(super) fn local_field_domain(&mut self, expr: &Expr<'_>) -> Result<Option<Term>, Error> {
+        let mut root = expr;
+        let mut fields = Vec::new();
+        while let H::Projection(base, field) = root.kind {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(expr.span, "field domain observation budget exhausted"))?;
+            if fields.len() >= 128 {
+                return Ok(None);
+            }
+            fields.push(field.name);
+            root = base;
+        }
+        let call_domain;
+        let domain = match root.kind {
+            H::ResolvedLocal(_, binding) | H::ResolvedFnParam(_, binding) => {
+                self.locals.get(&local(binding))
+            }
+            H::Application(..) | H::ExtendedApplication(..) => {
+                call_domain = self.comptime_call_result(root)?;
+                call_domain.as_ref()
+            }
+            H::Block(_) | H::If(..) | H::When(_) | H::Match(..) => {
+                // Discover only the checked domain. The speculative branch
+                // never publishes local storage, captures or control evidence,
+                // and no invocation is performed to classify this receiver.
+                // Keep the caller's phase: classifying a runtime value must
+                // not demand a comptime invocation. A Type result still goes
+                // through required evaluation when its identity is needed.
+                call_domain = self
+                    .checking_attempt(true, false, |checker| checker.expr(root, None))?
+                    .map(|checked| checked.ty);
+                call_domain.as_ref()
+            }
+            _ => None,
+        };
+        let Some(domain) = domain else {
+            return Ok(None);
+        };
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let charged = nir::type_computations::charge_term(domain, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        charged.map_err(|e| error(expr.span, e.to_string()))?;
+        let mut domain = domain.clone();
+        for name in fields.into_iter().rev() {
+            let shape = self.structural_type(&domain, expr.span)?;
+            domain = match &shape {
+                Term::Record(fields) => {
+                    let Some((_, field)) = fields.iter().find(|(field, _)| field == name.as_str())
+                    else {
+                        return Ok(None);
+                    };
+                    self.copy_alias_type(field, expr.span)?
+                }
+                Term::Nominal {
+                    declaration,
+                    arguments,
+                } => {
+                    self.ensure_nominal_type(&shape, expr.span)?;
+                    let Some(definition) = self.structs.get(declaration) else {
+                        return Ok(None);
+                    };
+                    let Some((_, field)) = definition
+                        .fields
+                        .iter()
+                        .find(|(field, _)| field == name.as_str())
+                    else {
+                        return Ok(None);
+                    };
+                    self.instantiate_input_types(
+                        field,
+                        &definition.type_parameters,
+                        arguments,
+                        expr.span,
+                    )?
+                }
+                // Type-valued intermediate expressions may select members,
+                // constants or metatype namespaces. Leave those to type_expr.
+                _ => return Ok(None),
+            };
+        }
+        Ok(Some(domain))
+    }
+
+    /// Only inspect a field path rooted in an available observed local. Source
+    /// calls, dereferences and computed receivers keep their ordinary required
+    /// invocation path; discovering a container must not run a producer twice.
+    pub(super) fn observed_field_type(&mut self, expr: &Expr<'_>) -> Result<Option<Term>, Error> {
+        if !matches!(expr.kind, H::Projection(..)) {
+            return Ok(None);
+        }
+        let mut root = expr;
+        while let H::Projection(base, _) = root.kind {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(expr.span, "field type observation budget exhausted"))?;
+            root = base;
+        }
+        let H::ResolvedLocal(_, binding) = root.kind else {
+            return Ok(None);
+        };
+        if !self.locals.contains_key(&local(binding))
+            || self.locals.get(&local(binding)) == Some(&p(P::Type))
+            || !self.partial_staged_bindings.contains_key(&local(binding))
+        {
+            return Ok(None);
+        }
+        let value = self.expr(expr, None)?;
+        if !matches!(value.kind, K::Field { .. } | K::AnonymousField { .. }) {
+            return Ok(None);
+        }
+        self.observed_expression_type(&value, expr.span)
+    }
+
     pub(super) fn projected_constant_owner(
         &mut self,
         expr: &Expr<'_>,
@@ -10,7 +214,9 @@ impl Checker<'_, '_> {
         let H::Projection(base, _) = expr.kind else {
             return Ok(None);
         };
-        if !self.type_member_base(base)? {
+        let mut completed_subject = None;
+        let local_receiver = self.local_type_receiver(expr, &mut completed_subject)?;
+        if completed_subject.is_none() && !self.type_member_base(base)? {
             return Ok(None);
         }
         let selected =
@@ -20,12 +226,20 @@ impl Checker<'_, '_> {
                 .package
                 .deferred_member_projections
                 .get(&expr.hir_id)
+                .or_else(|| {
+                    local_receiver
+                        .then(|| self.package.member_access.get(&expr.hir_id))
+                        .flatten()
+                })
                 .cloned()
             {
                 let Term::Nominal {
                     declaration: parent,
                     ..
-                } = self.type_expr(base)?
+                } = (match completed_subject.take() {
+                    Some(subject) => subject,
+                    None => self.type_expr(base)?,
+                })
                 else {
                     return Ok(None);
                 };
@@ -60,6 +274,11 @@ impl Checker<'_, '_> {
 
     fn type_member_base(&mut self, mut base: &Expr<'_>) -> Result<bool, Error> {
         loop {
+            if matches!(base.kind, H::Projection(..))
+                && self.local_field_domain(base)? == Some(p(P::Type))
+            {
+                return Ok(true);
+            }
             match base.kind {
                 H::Projection(inner, _) | H::NFApplication(inner, _) => base = inner,
                 H::Application(..) | H::ExtendedApplication(..) => {
@@ -71,8 +290,42 @@ impl Checker<'_, '_> {
     }
 
     fn completed_type_call(&mut self, base: &Expr<'_>) -> Result<bool, Error> {
+        Ok(self.comptime_call_result(base)? == Some(p(P::Type)))
+    }
+
+    fn comptime_call_result(&mut self, base: &Expr<'_>) -> Result<Option<Term>, Error> {
+        let Some(domain) = self.declared_comptime_call_result(base)? else {
+            return Ok(None);
+        };
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let dependent = nir::type_computations::has_rigid_parameters_bounded(&domain, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        if !dependent.map_err(|failure| error(base.span, failure.to_string()))? {
+            return Ok(Some(domain));
+        }
+        // The declared result is still in the callee's telescope. Complete
+        // ordinary call argument/default inference before inspecting fields.
+        // Preparation supplies the instantiated domain without invoking the
+        // producer; the eventual required computation keeps its effects.
+        let prepared = self.prepare_required_expression(base, None, None, Vec::new(), false)?;
+        Ok(Some(prepared.result_type))
+    }
+
+    fn declared_comptime_call_result(&mut self, base: &Expr<'_>) -> Result<Option<Term>, Error> {
+        fn copy_result(ty: &Term, remaining: &mut u64, span: Span) -> Result<Option<Term>, Error> {
+            let Term::Function { result, .. } = ty.callable_signature() else {
+                return Ok(None);
+            };
+            let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
+            let before = fuel;
+            let charged = nir::type_computations::charge_term(result, &mut fuel);
+            *remaining -= (before - fuel) as u64;
+            charged.map_err(|failure| error(span, failure.to_string()))?;
+            Ok(Some((**result).clone()))
+        }
         let (H::Application(head, _) | H::ExtendedApplication(head, _)) = base.kind else {
-            return Ok(false);
+            return Ok(None);
         };
         let head = if let H::NFApplication(head, _) = head.kind {
             head
@@ -88,8 +341,10 @@ impl Checker<'_, '_> {
                 .map(|value| value.ty.clone())
                 .or_else(|| self.locals.get(&id).cloned())
                 .or_else(|| self.signature_comptime_input(id).map(|(_, ty)| ty));
-            return Ok(ty.is_some_and(|ty| ty.is_comptime_callable()
-                && matches!(ty.callable_signature(), Term::Function { result, .. } if **result == p(P::Type))));
+            return match ty.filter(|ty| ty.is_comptime_callable()) {
+                Some(ty) => copy_result(&ty, &mut self.required_steps, base.span),
+                None => Ok(None),
+            };
         }
         let def_id = match head.kind {
             H::ResolvedDef { def_id, .. } => def_id,
@@ -103,31 +358,31 @@ impl Checker<'_, '_> {
                     .cloned()
                 {
                     if !self.type_member_base(container)? {
-                        return Ok(false);
+                        return Ok(None);
                     }
                     let Term::Nominal {
                         declaration: parent,
                         ..
                     } = self.type_expr(container)?
                     else {
-                        return Ok(false);
+                        return Ok(None);
                     };
                     let Some(member) = candidates.iter().find_map(|(container, member)| {
                         let owner = self.package.definition_owner(*container)?;
                         (declaration(self.package, &self.package_identities, owner) == parent)
                             .then_some(*member)
                     }) else {
-                        return Ok(false);
+                        return Ok(None);
                     };
                     member
                 } else {
-                    return Ok(false);
+                    return Ok(None);
                 }
             }
-            _ => return Ok(false),
+            _ => return Ok(None),
         };
         let Some(owner) = self.package.definition_owner(def_id) else {
-            return Ok(false);
+            return Ok(None);
         };
         if self
             .package
@@ -135,16 +390,24 @@ impl Checker<'_, '_> {
             .is_some_and(|item| matches!(item.kind, ItemKind::Const(..)))
         {
             let value = self.constant_value(owner, base.span)?;
-            return Ok(value.ty.is_comptime_callable()
-                && matches!(value.ty.callable_signature(), Term::Function { result, .. } if **result == p(P::Type)));
+            return if value.ty.is_comptime_callable() {
+                copy_result(&value.ty, &mut self.required_steps, base.span)
+            } else {
+                Ok(None)
+            };
         }
         if !self.package.item(owner).is_some_and(|item| matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if sig.modifiers.is_comptime)) {
-            return Ok(false);
+            return Ok(None);
         }
         self.ensure_signature(owner, base.span)?;
-        Ok(
-            matches!(self.signatures.get(&owner).or_else(|| self.interface_signatures.get(&owner)), Some(Term::Function { result, .. }) if **result == p(P::Type)),
-        )
+        match self
+            .signatures
+            .get(&owner)
+            .or_else(|| self.interface_signatures.get(&owner))
+        {
+            Some(ty) => copy_result(ty, &mut self.required_steps, base.span),
+            None => Ok(None),
+        }
     }
 
     pub(super) fn instantiate_formation_environment(
@@ -202,10 +465,34 @@ impl Checker<'_, '_> {
         if !self.type_member_base(base)? {
             return Ok(None);
         }
+        // Expression elaboration still needs the container's preparation code;
+        // a completed logical Type cannot replace that evaluation prefix.
+        let mut receiver_type = None;
+        // A local Type root permits a staged constructor chain. Do not probe
+        // arbitrary value-field chains: speculative expression checking could
+        // repeat comptime work before the ordinary projection path runs.
+        let mut root = projection;
+        loop {
+            match root.kind {
+                H::Projection(inner, _)
+                    if matches!(inner.kind, H::Projection(..) | H::NFApplication(..)) =>
+                {
+                    root = inner;
+                }
+                H::NFApplication(head, _) => root = head,
+                _ => break,
+            }
+        }
+        let local_receiver = self.local_type_receiver(root, &mut receiver_type)?;
         let (member, prepared) = if let Some(candidates) = self
             .package
             .deferred_member_projections
             .get(&projection.hir_id)
+            .or_else(|| {
+                local_receiver
+                    .then(|| self.package.member_access.get(&projection.hir_id))
+                    .flatten()
+            })
             .cloned()
         {
             let Some((parent_id, instance, arguments)) = self.prepared_alias_container(base)?
@@ -673,15 +960,26 @@ impl Checker<'_, '_> {
         &mut self,
         base: &Expr<'_>,
     ) -> Result<Option<(DeclarationId, n::Expr, Vec<n::Expr>)>, Error> {
-        let mut value = if self.completed_type_call(base)? {
+        let mut value = if self.completed_type_call(base)?
+            || (matches!(
+                base.kind,
+                H::Block(_) | H::If(..) | H::When(_) | H::Match(..)
+            ) && self.local_field_domain(base)? == Some(p(P::Type)))
+        {
+            // These computations produce a comptime Type value. Complete the
+            // whole computation before exposing its nominal arguments; do not
+            // assume its last expression is already a literal TypeValue.
             n::Expr {
                 source: source(base.span),
                 ty: p(P::Type),
                 kind: K::TypeValue(self.type_expr(base)?),
             }
         } else {
-            self.expr(base, Some(&p(P::Type)))?
+            self.expr(base, None)?
         };
+        if value.ty != p(P::Type) && !is_never(&value.ty) {
+            return Ok(None);
+        }
         let ty = value.ty.clone();
         let mut statements = Vec::new();
         loop {
@@ -772,19 +1070,28 @@ impl Checker<'_, '_> {
             _ => return Ok(None),
         };
         let mut completed_subject = None;
+        let local_receiver = self.local_type_receiver(projection, &mut completed_subject)?;
         let member = if let Some(candidates) = self
             .package
             .deferred_member_projections
             .get(&projection.hir_id)
+            .or_else(|| {
+                local_receiver
+                    .then(|| self.package.member_access.get(&projection.hir_id))
+                    .flatten()
+            })
             .cloned()
         {
             let H::Projection(base, _) = projection.kind else {
                 unreachable!()
             };
-            if !self.type_member_base(base)? {
+            if completed_subject.is_none() && !self.type_member_base(base)? {
                 return Ok(None);
             }
-            let subject = self.type_expr(base)?;
+            let subject = match completed_subject.take() {
+                Some(subject) => subject,
+                None => self.type_expr(base)?,
+            };
             let Term::Nominal {
                 declaration: parent,
                 ..

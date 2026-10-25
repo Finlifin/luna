@@ -1,0 +1,13 @@
+-- The runtime default forwards the preceding comptime selector.
+-- Expected: run() is true, with each default formed for its call's mode.
+-- Regression: definition-side checking must not demand the concrete mode
+-- before an invocation supplies it; every inline branch still needs checking.
+fn invert(comptime mode: bool, value: bool) -> bool {
+    inline if mode { not value } else { value }
+}
+fn take(comptime mode: bool, value: bool, .next: bool = invert(mode, value)) -> bool {
+    next
+}
+fn run() -> bool {
+    take(true, false) and not take(false, false)
+}

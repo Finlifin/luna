@@ -151,6 +151,7 @@ pub enum TokenKind {
     Spec,      // spec
     Static,    // static
     Struct,    // struct
+    Template,  // template
     Test,      // test
     Trait,     // trait
     True,      // true
@@ -322,6 +323,7 @@ impl TokenKind {
             TokenKind::Spec => "spec",
             TokenKind::Static => "static",
             TokenKind::Struct => "struct",
+            TokenKind::Template => "template",
             TokenKind::Test => "test",
             TokenKind::Trait => "trait",
             TokenKind::True => "true",
@@ -438,6 +440,7 @@ impl Token {
         map.insert("spec", TokenKind::Spec);
         map.insert("static", TokenKind::Static);
         map.insert("struct", TokenKind::Struct);
+        map.insert("template", TokenKind::Template);
         map.insert("test", TokenKind::Test);
         map.insert("trait", TokenKind::Trait);
         map.insert("true", TokenKind::True);

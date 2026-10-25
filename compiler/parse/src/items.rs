@@ -409,7 +409,11 @@ impl Parser<'_> {
                         p.current_span(),
                     ));
                 }
-                return Ok(inner); // The clause itself carries the info
+                return Ok(
+                    NodeBuilder::new(NodeKind::OptionalTypeParam, p.current_span())
+                        .add_single_child(inner)
+                        .build(&mut p.ast),
+                );
             }
 
             // id : type (type bound decl clause)
@@ -1050,6 +1054,9 @@ impl Parser<'_> {
         self.scoped_with_expected_prefix(TokenKind::Fn.as_ref(), |p| {
             p.eat_tokens(1);
             let id = p.try_id()?;
+            if p.eat_token(TokenKind::Use) {
+                return p.finish_function_template_instance(id, None);
+            }
             if !p.peek(TokenKind::LParen.as_ref()) {
                 return Err(ParseError::invalid_syntax(
                     "expected `(` after function name".to_string(),
@@ -1061,6 +1068,10 @@ impl Parser<'_> {
                 &[Rule::comma("parameter", |p| p.try_param())],
                 (TokenKind::LParen, TokenKind::RParen),
             )?;
+
+            if p.eat_token(TokenKind::Use) {
+                return p.finish_function_template_instance(id, Some(params));
+            }
 
             let return_type = p.try_return_type()?;
 
@@ -1139,6 +1150,46 @@ impl Parser<'_> {
                     p.next_token_span(),
                 ))
             }
+        })
+    }
+
+    fn finish_function_template_instance(
+        &mut self,
+        id: NodeIndex,
+        params: Option<Vec<NodeIndex>>,
+    ) -> ParseResult {
+        if id == 0 {
+            return Err(ParseError::invalid_syntax(
+                "function template instance requires a name".into(),
+                self.peek_next_token().kind,
+                self.next_token_span(),
+            ));
+        }
+        let template = self.try_expr_without_extended_call()?;
+        if template == 0 || !self.peek(TokenKind::LBrace.as_ref()) {
+            return Err(ParseError::invalid_syntax(
+                "expected template expression and function body after `use`".into(),
+                self.peek_next_token().kind,
+                self.next_token_span(),
+            ));
+        }
+        let body = self.try_block()?;
+        Ok(match params {
+            None => NodeBuilder::new(NodeKind::FunctionTemplateInstance, self.current_span())
+                .add_single_child(id)
+                .add_single_child(template)
+                .add_single_child(body)
+                .build(&mut self.ast),
+            Some(params) => NodeBuilder::new(
+                NodeKind::FunctionTemplateInstanceWithParams,
+                self.current_span(),
+            )
+            .add_single_child(id)
+            .add_multiple_children(params)
+            .add_single_child(template)
+            .add_multiple_children(Vec::new())
+            .add_single_child(body)
+            .build(&mut self.ast),
         })
     }
 
@@ -1707,11 +1758,91 @@ impl Parser<'_> {
         })
     }
 
+    // template test id clauses block
+    pub fn try_test_template(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Template.as_ref(), |p| {
+            p.eat_tokens(1);
+            if !p.eat_token(TokenKind::Test) {
+                let declaration = p.try_statement_or_definition()?;
+                let mut inner = declaration;
+                while matches!(
+                    p.ast.get_node_kind(inner),
+                    Some(NodeKind::Attribute | NodeKind::AttributeSetTrue)
+                ) {
+                    inner = p.ast.get_children(inner)[1];
+                }
+                if p.ast.get_node_kind(inner) != Some(NodeKind::Function)
+                    || p.ast.get_children(inner)[0] == 0
+                {
+                    return Err(ParseError::invalid_syntax(
+                        "expected a function or test declaration after `template`".into(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+                return Ok(
+                    NodeBuilder::new(NodeKind::FunctionTemplateDef, p.current_span())
+                        .add_single_child(declaration)
+                        .build(&mut p.ast),
+                );
+            }
+            let id = p.try_id()?;
+            if id == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "test template requires a name".into(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            let clauses = p.try_clauses()?;
+            if !p.peek(TokenKind::LBrace.as_ref()) {
+                return Err(ParseError::invalid_syntax(
+                    "expected test template body".into(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            let body = p.try_block()?;
+            Ok(
+                NodeBuilder::new(NodeKind::TestTemplateDef, p.current_span())
+                    .add_single_child(id)
+                    .add_multiple_children(clauses)
+                    .add_single_child(body)
+                    .build(&mut p.ast),
+            )
+        })
+    }
+
     // test id? block
     pub fn try_test(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Test.as_ref(), |p| {
             p.eat_tokens(1); // eat the 'test'
             let id = p.try_id()?;
+            if p.eat_token(TokenKind::Use) {
+                if id == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "test template instance requires a name".into(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+                let template = p.try_expr_without_extended_call()?;
+                if template == 0 || !p.peek(TokenKind::LBrace.as_ref()) {
+                    return Err(ParseError::invalid_syntax(
+                        "expected template expression and test body after `use`".into(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+                let body = p.try_block()?;
+                return Ok(
+                    NodeBuilder::new(NodeKind::TestTemplateInstance, p.current_span())
+                        .add_single_child(id)
+                        .add_single_child(template)
+                        .add_single_child(body)
+                        .build(&mut p.ast),
+                );
+            }
             if !p.peek(TokenKind::LBrace.as_ref()) {
                 return Err(ParseError::invalid_syntax(
                     "expected a block after `test` declaration".to_string(),

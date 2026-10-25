@@ -214,11 +214,15 @@ fn unknown_bounds_do_not_publish_an_arithmetic_or_type_fact() {
         square.prove_within(&interval(0, 4), &facts, &mut limits),
         Outcome::Proven(_)
     ));
-    // Cross-term relationships still need stronger evidence. Although x*x+x
-    // is nonnegative for integers, separate term intervals do not establish it.
+    // Finite integer reasoning now establishes this correlation. A stronger
+    // false bound must still remain unknown, without publishing a new fact.
     let correlated = square.add(&x, &mut limits).unwrap();
-    assert_eq!(
+    assert!(matches!(
         correlated.prove_within(&interval(0, 6), &facts, &mut limits),
+        Outcome::Proven(_)
+    ));
+    assert_eq!(
+        correlated.prove_within(&interval(1, 6), &facts, &mut limits),
         Outcome::Unknown(Unknown::InsufficientBounds)
     );
     let other = ValueId {
@@ -2004,6 +2008,7 @@ fn captured_integer_facts_check_domains_budgets_and_symbolic_inputs() {
             phase: FunctionPhase::Runtime,
             inline: false,
             pure: false,
+            is_unsafe: false,
             signature: Term::Function {
                 parameters: vec![],
                 result: Box::new(ty.clone()),
@@ -2296,6 +2301,7 @@ fn checked_nonzero_division_preserves_both_signs_and_machine_obligations() {
             phase: FunctionPhase::Runtime,
             inline: false,
             pure: false,
+            is_unsafe: false,
             signature: Term::Function {
                 parameters: vec![Parameter {
                     sort: Sort::Runtime,
@@ -2374,5 +2380,1737 @@ fn checked_nonzero_division_preserves_both_signs_and_machine_obligations() {
                 .reason,
             flow::Reason::MissingMachineProof
         );
+    }
+}
+
+#[test]
+fn monotone_cubic_ranges_preserve_correlations_and_replay_dependencies() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (id, x) = variable(&mut facts, 0, 1, 10, &mut limits);
+    let cube = x
+        .multiply(&x, &mut limits)
+        .unwrap()
+        .multiply(&x, &mut limits)
+        .unwrap();
+    let expression = cube.subtract(&x, &mut limits).unwrap();
+    let Outcome::Proven(proof) = expression.prove_within(&interval(0, 990), &facts, &mut limits)
+    else {
+        panic!("monotone cubic")
+    };
+    assert_eq!(proof.enclosure(), &interval(0, 990));
+    proof.replay(&facts, &mut Limits::default()).unwrap();
+    let negative = constant(-1, &mut limits)
+        .multiply(&expression, &mut limits)
+        .unwrap();
+    assert!(matches!(
+        negative.prove_within(&interval(-990, 0), &facts, &mut limits),
+        Outcome::Proven(_)
+    ));
+    facts.assign(id.place, interval(0, 10)).unwrap();
+    assert!(proof.replay(&facts, &mut Limits::default()).is_err());
+}
+
+#[test]
+fn monotonic_range_refinement_does_not_ignore_interior_extrema() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (_, x) = variable(&mut facts, 0, 0, 2, &mut limits);
+    let square = x.multiply(&x, &mut limits).unwrap();
+    let linear = constant(2, &mut limits).multiply(&x, &mut limits).unwrap();
+    let expression = square.subtract(&linear, &mut limits).unwrap();
+    assert!(matches!(
+        expression.prove_within(&interval(0, 0), &facts, &mut limits),
+        Outcome::Unknown(_)
+    ));
+    assert!(matches!(
+        expression.prove_within(&interval(-4, 4), &facts, &mut limits),
+        Outcome::Proven(_)
+    ));
+}
+
+#[test]
+fn monotone_multivariate_cubics_use_each_coordinate_and_recover_after_budget_failure() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (_, x) = variable(&mut facts, 0, 1, 4, &mut limits);
+    let (_, y) = variable(&mut facts, 1, 1, 3, &mut limits);
+    let mut expression = Polynomial::default();
+    for variable in [x, y] {
+        let cube = variable
+            .multiply(&variable, &mut limits)
+            .unwrap()
+            .multiply(&variable, &mut limits)
+            .unwrap();
+        expression = expression
+            .add(&cube.subtract(&variable, &mut limits).unwrap(), &mut limits)
+            .unwrap();
+    }
+    let target = interval(0, 84);
+    let mut exhausted = Limits::default();
+    exhausted.arithmetic.steps = 1;
+    assert!(matches!(
+        expression.prove_within(&target, &facts, &mut exhausted),
+        Outcome::Unknown(Unknown::Arithmetic(ArithmeticError::BudgetExhausted))
+    ));
+    let Outcome::Proven(proof) = expression.prove_within(&target, &facts, &mut limits) else {
+        panic!("multivariate cubic")
+    };
+    proof.replay(&facts, &mut Limits::default()).unwrap();
+    for x in 1..=4 {
+        for y in 1..=3 {
+            let exact = Integer::from_i128(x * x * x - x + y * y * y - y);
+            assert!(&exact >= proof.enclosure().lower() && &exact <= proof.enclosure().upper());
+        }
+    }
+}
+
+#[test]
+fn monotone_polynomial_predicates_preserve_truth_boundaries_and_versions() {
+    use elaboration::verification::{Comparison, Condition};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (id, x) = variable(&mut facts, 0, 1, 10, &mut limits);
+    let cube = x
+        .multiply(&x, &mut limits)
+        .unwrap()
+        .multiply(&x, &mut limits)
+        .unwrap();
+    let condition = |relation| Condition::PolynomialCompare {
+        left: cube.clone(),
+        relation,
+        right: x.clone(),
+    };
+    for (relation, truth) in [(Comparison::GreaterEqual, true), (Comparison::Less, false)] {
+        let proof = facts
+            .prove_condition(&condition(relation), truth, &mut limits)
+            .unwrap();
+        proof.replay(&facts, &mut limits).unwrap();
+    }
+    for relation in [Comparison::Greater, Comparison::Equal, Comparison::NotEqual] {
+        for truth in [false, true] {
+            assert!(
+                facts
+                    .prove_condition(&condition(relation), truth, &mut limits)
+                    .is_err()
+            );
+        }
+    }
+    let proof = facts
+        .prove_condition(&condition(Comparison::GreaterEqual), true, &mut limits)
+        .unwrap();
+    facts.assign(id.place, interval(-2, 2)).unwrap();
+    assert!(proof.replay(&facts, &mut Limits::default()).is_err());
+}
+
+#[test]
+fn integer_grid_monotonicity_proves_ranges_missed_by_real_derivatives() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (_, x) = variable(&mut facts, 0, 0, 10, &mut limits);
+    let square = x.multiply(&x, &mut limits).unwrap();
+    let cube = square.multiply(&x, &mut limits).unwrap();
+    for (power, upper) in [(square, 90), (cube, 990)] {
+        let expression = power.subtract(&x, &mut limits).unwrap();
+        let Outcome::Proven(proof) =
+            expression.prove_within(&interval(0, upper), &facts, &mut limits)
+        else {
+            panic!("integer monotonicity")
+        };
+        proof.replay(&facts, &mut limits).unwrap();
+        assert_eq!(proof.enclosure(), &interval(0, upper));
+        let negative = constant(-1, &mut limits)
+            .multiply(&expression, &mut limits)
+            .unwrap();
+        assert!(matches!(
+            negative.prove_within(&interval(-upper, 0), &facts, &mut limits),
+            Outcome::Proven(_)
+        ));
+    }
+}
+
+#[test]
+fn discrete_monotonicity_checks_only_steps_inside_the_original_interval() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (id, x) = variable(&mut facts, 0, 0, 2, &mut limits);
+    let square = x.multiply(&x, &mut limits).unwrap();
+    let linear = constant(3, &mut limits).multiply(&x, &mut limits).unwrap();
+    let expression = linear.subtract(&square, &mut limits).unwrap();
+    let Outcome::Proven(proof) = expression.prove_within(&interval(0, 2), &facts, &mut limits)
+    else {
+        panic!("finite step domain")
+    };
+    assert_eq!(facts.bound(id, &mut limits).unwrap(), &interval(0, 2));
+    proof.replay(&facts, &mut limits).unwrap();
+    assert!(matches!(
+        expression.prove_within(&interval(0, 1), &facts, &mut limits),
+        Outcome::Unknown(_)
+    ));
+}
+
+#[test]
+fn small_integer_polynomial_range_proofs_agree_with_exhaustive_values() {
+    for (low, high) in [(-2, 0), (-1, 1), (0, 2), (1, 3)] {
+        for a in -2..=2 {
+            for b in -2..=2 {
+                for c in -1..=1 {
+                    let mut limits = Limits::default();
+                    let mut facts = Facts::default();
+                    let (_, x) = variable(&mut facts, 0, low, high, &mut limits);
+                    let square = x.multiply(&x, &mut limits).unwrap();
+                    let cube = square.multiply(&x, &mut limits).unwrap();
+                    let expression = constant(a, &mut limits)
+                        .multiply(&cube, &mut limits)
+                        .unwrap()
+                        .add(
+                            &constant(b, &mut limits)
+                                .multiply(&square, &mut limits)
+                                .unwrap(),
+                            &mut limits,
+                        )
+                        .unwrap()
+                        .add(
+                            &constant(c, &mut limits).multiply(&x, &mut limits).unwrap(),
+                            &mut limits,
+                        )
+                        .unwrap();
+                    let samples = (low..=high)
+                        .map(|x| a * x * x * x + b * x * x + c * x)
+                        .collect::<Vec<_>>();
+                    let min = *samples.iter().min().unwrap();
+                    let max = *samples.iter().max().unwrap();
+                    let Outcome::Proven(proof) =
+                        expression.prove_within(&interval(min, max), &facts, &mut limits)
+                    else {
+                        panic!("finite domain {a} {b} {c} over [{low},{high}]");
+                    };
+                    {
+                        proof.replay(&facts, &mut Limits::default()).unwrap();
+                        for value in &samples {
+                            let value = Integer::from_i128(*value);
+                            assert!(
+                                &value >= proof.enclosure().lower()
+                                    && &value <= proof.enclosure().upper()
+                            );
+                        }
+                    }
+                    for wrong in [interval(min - 1, max - 1), interval(min + 1, max + 1)] {
+                        assert!(
+                            matches!(
+                                expression.prove_within(&wrong, &facts, &mut Limits::default()),
+                                Outcome::Unknown(_)
+                            ),
+                            "unsound {a} {b} {c} over [{low},{high}]"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn finite_boxes_prove_interior_extrema_and_retain_input_versions() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (id, x) = variable(&mut facts, 0, 0, 4, &mut limits);
+    let (_, y) = variable(&mut facts, 1, -2, 2, &mut limits);
+    let complement = constant(4, &mut limits).subtract(&x, &mut limits).unwrap();
+    let expression = x
+        .multiply(&complement, &mut limits)
+        .unwrap()
+        .multiply(&y, &mut limits)
+        .unwrap();
+    let Outcome::Proven(proof) = expression.prove_within(&interval(-8, 8), &facts, &mut limits)
+    else {
+        panic!("interior extremum of multivariate cubic");
+    };
+    assert_eq!(proof.enclosure(), &interval(-8, 8));
+    proof.replay(&facts, &mut Limits::default()).unwrap();
+    assert!(matches!(
+        expression.prove_within(&interval(-7, 7), &facts, &mut Limits::default()),
+        Outcome::Unknown(_)
+    ));
+    let mut exhausted = Limits::default();
+    exhausted.arithmetic.steps = 1;
+    assert!(matches!(
+        expression.prove_within(&interval(-8, 8), &facts, &mut exhausted),
+        Outcome::Unknown(_)
+    ));
+    proof.replay(&facts, &mut Limits::default()).unwrap();
+    facts.assign(id.place, interval(0, 4)).unwrap();
+    assert!(proof.replay(&facts, &mut Limits::default()).is_err());
+}
+
+#[test]
+fn finite_box_volume_limit_never_accepts_a_partial_enumeration() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (_, x) = variable(&mut facts, 0, 0, 256, &mut limits);
+    let complement = constant(256, &mut limits)
+        .subtract(&x, &mut limits)
+        .unwrap();
+    let (_, y) = variable(&mut facts, 1, -1, 1, &mut limits);
+    let expression = x
+        .multiply(&x, &mut limits)
+        .unwrap()
+        .multiply(&complement, &mut limits)
+        .unwrap()
+        .add(
+            &y.multiply(&y, &mut limits)
+                .unwrap()
+                .multiply(&x, &mut limits)
+                .unwrap(),
+            &mut limits,
+        )
+        .unwrap();
+    let maximum = (0i128..=256).map(|x| x * x * (256 - x)).max().unwrap();
+    // The extremum is inside a box larger than the enumeration cap. A
+    // prefix or just the endpoints would incorrectly certify a smaller range.
+    assert!(matches!(
+        expression.prove_within(&interval(0, maximum + 256), &facts, &mut limits),
+        Outcome::Unknown(_)
+    ));
+    assert!(matches!(
+        expression.prove_within(&interval(0, 0), &facts, &mut Limits::default()),
+        Outcome::Unknown(_)
+    ));
+}
+
+#[test]
+fn finite_box_cap_counts_the_cartesian_product_including_endpoints() {
+    for (x_upper, expected) in [(15, true), (16, false)] {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let (_, x) = variable(&mut facts, 0, 0, x_upper, &mut limits);
+        let (_, y) = variable(&mut facts, 1, 0, 15, &mut limits);
+        let complement = constant(15, &mut limits).subtract(&x, &mut limits).unwrap();
+        let expression = x
+            .multiply(&complement, &mut limits)
+            .unwrap()
+            .multiply(&y, &mut limits)
+            .unwrap();
+        let outcome = expression.prove_within(&interval(0, 840), &facts, &mut limits);
+        assert_eq!(matches!(outcome, Outcome::Proven(_)), expected);
+        if let Outcome::Proven(proof) = outcome {
+            assert_eq!(proof.enclosure(), &interval(0, 840));
+            proof.replay(&facts, &mut Limits::default()).unwrap();
+        }
+    }
+}
+
+#[test]
+fn quadratic_vertices_are_exact_over_large_signed_integer_domains() {
+    for (a, b, c) in [(1, 1, 0), (1, -1, 3), (-1, 1, 5), (-2, -3, -4), (3, 5, 7)] {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let (id, x) = variable(&mut facts, 0, -1000, 1000, &mut limits);
+        let square = x.multiply(&x, &mut limits).unwrap();
+        let expression = constant(a, &mut limits)
+            .multiply(&square, &mut limits)
+            .unwrap()
+            .add(
+                &constant(b, &mut limits).multiply(&x, &mut limits).unwrap(),
+                &mut limits,
+            )
+            .unwrap()
+            .add(&constant(c, &mut limits), &mut limits)
+            .unwrap();
+        let values = (-1000..=1000)
+            .map(|x| a * x * x + b * x + c)
+            .collect::<Vec<_>>();
+        let low = *values.iter().min().unwrap();
+        let high = *values.iter().max().unwrap();
+        let Outcome::Proven(proof) =
+            expression.prove_within(&interval(low, high), &facts, &mut limits)
+        else {
+            panic!("quadratic {a} {b} {c}");
+        };
+        assert_eq!(proof.enclosure(), &interval(low, high));
+        proof.replay(&facts, &mut Limits::default()).unwrap();
+        for wrong in [interval(low + 1, high), interval(low, high - 1)] {
+            assert!(matches!(
+                expression.prove_within(&wrong, &facts, &mut Limits::default()),
+                Outcome::Unknown(_)
+            ));
+        }
+        facts.assign(id.place, interval(-1000, 1000)).unwrap();
+        assert!(proof.replay(&facts, &mut Limits::default()).is_err());
+    }
+}
+
+#[test]
+fn separable_quadratics_bound_large_boxes_and_keep_each_dependency() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (x_id, x) = variable(&mut facts, 0, 0, 500, &mut limits);
+    let (y_id, y) = variable(&mut facts, 1, 0, 501, &mut limits);
+    let (_, z) = variable(&mut facts, 2, -3, 7, &mut limits);
+    let first = x
+        .multiply(
+            &constant(500, &mut limits)
+                .subtract(&x, &mut limits)
+                .unwrap(),
+            &mut limits,
+        )
+        .unwrap();
+    let second = y
+        .multiply(
+            &constant(501, &mut limits)
+                .subtract(&y, &mut limits)
+                .unwrap(),
+            &mut limits,
+        )
+        .unwrap();
+    let expression = first
+        .subtract(&second, &mut limits)
+        .unwrap()
+        .add(&z, &mut limits)
+        .unwrap()
+        .add(&constant(11, &mut limits), &mut limits)
+        .unwrap();
+    let Outcome::Proven(proof) =
+        expression.prove_within(&interval(-62742, 62518), &facts, &mut limits)
+    else {
+        panic!("independent quadratic components");
+    };
+    assert_eq!(proof.enclosure(), &interval(-62742, 62518));
+    proof.replay(&facts, &mut Limits::default()).unwrap();
+    for wrong in [interval(-62741, 62518), interval(-62742, 62517)] {
+        assert!(matches!(
+            expression.prove_within(&wrong, &facts, &mut Limits::default()),
+            Outcome::Unknown(_)
+        ));
+    }
+    for id in [x_id, y_id] {
+        let mut changed = facts.fork(&mut Limits::default()).unwrap();
+        changed.assign(id.place, interval(0, 500)).unwrap();
+        assert!(proof.replay(&changed, &mut Limits::default()).is_err());
+    }
+}
+
+#[test]
+fn separable_quadratic_ranges_match_independent_cartesian_enumeration() {
+    for a in [-2, 1, 3] {
+        for b in [-3, 0, 2] {
+            let mut limits = Limits::default();
+            let mut facts = Facts::default();
+            let (_, x) = variable(&mut facts, 0, -12, 13, &mut limits);
+            let (_, y) = variable(&mut facts, 1, -14, 11, &mut limits);
+            let square_x = x.multiply(&x, &mut limits).unwrap();
+            let square_y = y.multiply(&y, &mut limits).unwrap();
+            let expression = constant(a, &mut limits)
+                .multiply(&square_x, &mut limits)
+                .unwrap()
+                .add(
+                    &constant(b, &mut limits).multiply(&x, &mut limits).unwrap(),
+                    &mut limits,
+                )
+                .unwrap()
+                .subtract(&square_y, &mut limits)
+                .unwrap()
+                .add(&y, &mut limits)
+                .unwrap();
+            let values = (-12i128..=13)
+                .flat_map(|x| (-14i128..=11).map(move |y| a * x * x + b * x - y * y + y))
+                .collect::<Vec<_>>();
+            let low = *values.iter().min().unwrap();
+            let high = *values.iter().max().unwrap();
+            let Outcome::Proven(proof) =
+                expression.prove_within(&interval(low, high), &facts, &mut limits)
+            else {
+                panic!("separable oracle {a} {b}");
+            };
+            assert_eq!(proof.enclosure(), &interval(low, high));
+            proof.replay(&facts, &mut Limits::default()).unwrap();
+            assert!(matches!(
+                expression.prove_within(&interval(low + 1, high), &facts, &mut Limits::default()),
+                Outcome::Unknown(_)
+            ));
+            assert!(matches!(
+                expression.prove_within(&interval(low, high - 1), &facts, &mut Limits::default()),
+                Outcome::Unknown(_)
+            ));
+        }
+    }
+}
+
+#[test]
+fn cubic_coordinate_elimination_keeps_quadratic_interior_extrema() {
+    for (y_low, y_high, low, high) in [
+        (0, 1000, 0, 62_500_000),
+        (-1000, 0, -62_500_000, 0),
+        (-1000, 1000, -62_500_000, 62_500_000),
+    ] {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let (_, x) = variable(&mut facts, 0, 0, 500, &mut limits);
+        let (y_id, y) = variable(&mut facts, 1, y_low, y_high, &mut limits);
+        let arch = x
+            .multiply(
+                &constant(500, &mut limits)
+                    .subtract(&x, &mut limits)
+                    .unwrap(),
+                &mut limits,
+            )
+            .unwrap();
+        let expression = arch.multiply(&y, &mut limits).unwrap();
+        let Outcome::Proven(proof) =
+            expression.prove_within(&interval(low, high), &facts, &mut limits)
+        else {
+            panic!("mixed monotone and quadratic coordinates");
+        };
+        assert_eq!(proof.enclosure(), &interval(low, high));
+        proof.replay(&facts, &mut Limits::default()).unwrap();
+        for wrong in [interval(low + 1, high), interval(low, high - 1)] {
+            assert!(matches!(
+                expression.prove_within(&wrong, &facts, &mut Limits::default()),
+                Outcome::Unknown(_)
+            ));
+        }
+        facts.assign(y_id.place, interval(y_low, y_high)).unwrap();
+        assert!(proof.replay(&facts, &mut Limits::default()).is_err());
+    }
+}
+
+#[test]
+fn cubic_monotonicity_uses_quadratic_finite_difference_without_sampling() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (_, x) = variable(&mut facts, 0, -1000, 1000, &mut limits);
+    // p(x+1)-p(x)=3*x*x-3*x+1 is positive at every integer.
+    let square = x.multiply(&x, &mut limits).unwrap();
+    let expression = square
+        .multiply(&x, &mut limits)
+        .unwrap()
+        .subtract(
+            &constant(3, &mut limits)
+                .multiply(&square, &mut limits)
+                .unwrap(),
+            &mut limits,
+        )
+        .unwrap()
+        .add(
+            &constant(3, &mut limits).multiply(&x, &mut limits).unwrap(),
+            &mut limits,
+        )
+        .unwrap();
+    let Outcome::Proven(proof) =
+        expression.prove_within(&interval(-1_003_003_000, 997_003_000), &facts, &mut limits)
+    else {
+        panic!("nonnegative quadratic finite difference");
+    };
+    proof.replay(&facts, &mut Limits::default()).unwrap();
+}
+
+#[test]
+fn integer_derivative_samples_do_not_certify_real_monotonicity() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (_, x) = variable(&mut facts, 0, 0, 1, &mut limits);
+    let square = x.multiply(&x, &mut limits).unwrap();
+    let cube = square.multiply(&x, &mut limits).unwrap();
+    // p'(0)=p'(1)=1, yet p(1)-p(0)=-1. Applying integer vertex
+    // bounds to the derivative would incorrectly infer increasing behavior.
+    let expression = constant(4, &mut limits)
+        .multiply(&cube, &mut limits)
+        .unwrap()
+        .subtract(
+            &constant(6, &mut limits)
+                .multiply(&square, &mut limits)
+                .unwrap(),
+            &mut limits,
+        )
+        .unwrap()
+        .add(&x, &mut limits)
+        .unwrap();
+    assert!(matches!(
+        expression.prove_within(&interval(0, 1), &facts, &mut limits),
+        Outcome::Unknown(_)
+    ));
+    assert!(matches!(
+        expression.prove_within(&interval(-1, 0), &facts, &mut Limits::default()),
+        Outcome::Proven(_)
+    ));
+}
+
+#[test]
+fn quadratic_square_sums_preserve_cross_term_correlations_over_large_boxes() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (_, x) = variable(&mut facts, 0, -1000, 1000, &mut limits);
+    let (_, y) = variable(&mut facts, 1, -1000, 1000, &mut limits);
+    let (z_id, z) = variable(&mut facts, 2, -1000, 1000, &mut limits);
+    let xy = x.subtract(&y, &mut limits).unwrap();
+    let yz = y.add(&z, &mut limits).unwrap();
+    let expression = xy
+        .multiply(&xy, &mut limits)
+        .unwrap()
+        .add(&yz.multiply(&yz, &mut limits).unwrap(), &mut limits)
+        .unwrap()
+        .add(&constant(7, &mut limits), &mut limits)
+        .unwrap();
+    let Outcome::Proven(proof) =
+        expression.prove_within(&interval(7, 8_000_007), &facts, &mut limits)
+    else {
+        panic!("sum of correlated squares");
+    };
+    proof.replay(&facts, &mut Limits::default()).unwrap();
+    let negative = constant(-1, &mut limits)
+        .multiply(&expression, &mut limits)
+        .unwrap();
+    assert!(matches!(
+        negative.prove_within(&interval(-8_000_007, -7), &facts, &mut limits),
+        Outcome::Proven(_)
+    ));
+    assert!(matches!(
+        expression.prove_within(&interval(8, 8_000_007), &facts, &mut limits),
+        Outcome::Unknown(_)
+    ));
+    facts.assign(z_id.place, interval(-1000, 1000)).unwrap();
+    assert!(proof.replay(&facts, &mut Limits::default()).is_err());
+}
+
+#[test]
+fn quadratic_cross_term_certificates_agree_with_concrete_counterexamples() {
+    for (a, b, c) in [
+        (1, 2, 1),
+        (1, -2, 1),
+        (1, 3, 1),
+        (-1, 2, -1),
+        (0, 2, 1),
+        (1, 2, 0),
+        (1, -3, 1),
+    ] {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let (_, x) = variable(&mut facts, 0, -1000, 1000, &mut limits);
+        let (_, y) = variable(&mut facts, 1, -1000, 1000, &mut limits);
+        let xx = x.multiply(&x, &mut limits).unwrap();
+        let xy = x.multiply(&y, &mut limits).unwrap();
+        let yy = y.multiply(&y, &mut limits).unwrap();
+        let expression = constant(a, &mut limits)
+            .multiply(&xx, &mut limits)
+            .unwrap()
+            .add(
+                &constant(b, &mut limits).multiply(&xy, &mut limits).unwrap(),
+                &mut limits,
+            )
+            .unwrap()
+            .add(
+                &constant(c, &mut limits).multiply(&yy, &mut limits).unwrap(),
+                &mut limits,
+            )
+            .unwrap();
+        let values = (-2i128..=2)
+            .flat_map(|x| (-2i128..=2).map(move |y| a * x * x + b * x * y + c * y * y))
+            .collect::<Vec<_>>();
+        let nonnegative = expression.prove_within(&interval(0, 10_000_000), &facts, &mut limits);
+        if values.iter().any(|value| *value < 0) {
+            assert!(
+                matches!(nonnegative, Outcome::Unknown(_)),
+                "unsound lower: {a} {b} {c}"
+            );
+        } else {
+            assert!(
+                matches!(nonnegative, Outcome::Proven(_)),
+                "missing lower: {a} {b} {c}"
+            );
+        }
+        let nonpositive =
+            expression.prove_within(&interval(-10_000_000, 0), &facts, &mut Limits::default());
+        if values.iter().any(|value| *value > 0) {
+            assert!(
+                matches!(nonpositive, Outcome::Unknown(_)),
+                "unsound upper: {a} {b} {c}"
+            );
+        } else {
+            assert!(
+                matches!(nonpositive, Outcome::Proven(_)),
+                "missing upper: {a} {b} {c}"
+            );
+        }
+    }
+}
+
+#[test]
+fn semidefinite_certificates_cover_weighted_affine_square_sums_and_singular_pivots() {
+    for offset in [0, 1, -3] {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let (x_id, x) = variable(&mut facts, 0, -1000, 1000, &mut limits);
+        let (_, y) = variable(&mut facts, 1, -1000, 1000, &mut limits);
+        let (_, z) = variable(&mut facts, 2, -1000, 1000, &mut limits);
+        let first = constant(2, &mut limits)
+            .multiply(&x, &mut limits)
+            .unwrap()
+            .subtract(&y, &mut limits)
+            .unwrap()
+            .add(&constant(offset, &mut limits), &mut limits)
+            .unwrap();
+        let second = constant(3, &mut limits)
+            .multiply(&y, &mut limits)
+            .unwrap()
+            .add(&z, &mut limits)
+            .unwrap()
+            .subtract(&constant(2, &mut limits), &mut limits)
+            .unwrap();
+        let expression = first
+            .multiply(&first, &mut limits)
+            .unwrap()
+            .add(&second.multiply(&second, &mut limits).unwrap(), &mut limits)
+            .unwrap();
+        let Outcome::Proven(proof) =
+            expression.prove_within(&interval(0, 30_000_000), &facts, &mut limits)
+        else {
+            panic!("affine square sum offset {offset}");
+        };
+        proof.replay(&facts, &mut Limits::default()).unwrap();
+        let negative = constant(-1, &mut limits)
+            .multiply(&expression, &mut limits)
+            .unwrap();
+        assert!(matches!(
+            negative.prove_within(&interval(-30_000_000, 0), &facts, &mut limits),
+            Outcome::Proven(_)
+        ));
+        let mut tiny = Limits::default();
+        tiny.arithmetic.steps = 10;
+        assert!(matches!(
+            expression.prove_within(&interval(0, 30_000_000), &facts, &mut tiny),
+            Outcome::Unknown(_)
+        ));
+        proof.replay(&facts, &mut Limits::default()).unwrap();
+        facts.assign(x_id.place, interval(-1000, 1000)).unwrap();
+        assert!(proof.replay(&facts, &mut Limits::default()).is_err());
+    }
+}
+
+#[test]
+fn semidefinite_certificates_reject_linear_zero_pivots_and_indefinite_perturbations() {
+    for (a, b, c) in [(2, -1, 0), (2, -1, 1), (3, 2, -2), (-1, 4, 3)] {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let (_, x) = variable(&mut facts, 0, -1000, 1000, &mut limits);
+        let (_, y) = variable(&mut facts, 1, -1000, 1000, &mut limits);
+        let affine = constant(a, &mut limits)
+            .multiply(&x, &mut limits)
+            .unwrap()
+            .add(
+                &constant(b, &mut limits).multiply(&y, &mut limits).unwrap(),
+                &mut limits,
+            )
+            .unwrap()
+            .add(&constant(c, &mut limits), &mut limits)
+            .unwrap();
+        let square = affine.multiply(&affine, &mut limits).unwrap();
+        for shift in [0, -1, -10] {
+            let expression = square
+                .add(&constant(shift, &mut limits), &mut limits)
+                .unwrap();
+            let outcome = expression.prove_within(&interval(0, 100_000_000), &facts, &mut limits);
+            let counterexample = (-10i128..=10)
+                .any(|x| (-10i128..=10).any(|y| (a * x + b * y + c).pow(2) + shift < 0));
+            if counterexample {
+                assert!(
+                    matches!(outcome, Outcome::Unknown(_)),
+                    "accepted negative value {a} {b} {c} {shift}"
+                );
+            } else if shift == 0 {
+                assert!(
+                    matches!(outcome, Outcome::Proven(_)),
+                    "missing square certificate"
+                );
+            }
+        }
+        let xy = x.multiply(&y, &mut limits).unwrap();
+        let zero_pivot = xy.add(&x, &mut limits).unwrap();
+        assert!(matches!(
+            zero_pivot.prove_within(&interval(0, 100_000_000), &facts, &mut limits),
+            Outcome::Unknown(_)
+        ));
+    }
+}
+
+#[test]
+fn semidefinite_range_targets_shift_lower_and_upper_certificates_independently() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (_, x) = variable(&mut facts, 0, -1000, 1000, &mut limits);
+    let (id, y) = variable(&mut facts, 1, -1000, 1000, &mut limits);
+    let affine = constant(2, &mut limits)
+        .multiply(&x, &mut limits)
+        .unwrap()
+        .subtract(&y, &mut limits)
+        .unwrap()
+        .add(&constant(1, &mut limits), &mut limits)
+        .unwrap();
+    let square = affine.multiply(&affine, &mut limits).unwrap();
+    for (expression, low, high) in [
+        (
+            square.add(&constant(7, &mut limits), &mut limits).unwrap(),
+            7,
+            10_000_000,
+        ),
+        (
+            constant(100, &mut limits)
+                .subtract(&square, &mut limits)
+                .unwrap(),
+            -10_000_000,
+            100,
+        ),
+    ] {
+        let Outcome::Proven(proof) =
+            expression.prove_within(&interval(low, high), &facts, &mut limits)
+        else {
+            panic!("shifted semidefinite range");
+        };
+        proof.replay(&facts, &mut Limits::default()).unwrap();
+        assert!(matches!(
+            expression.prove_within(&interval(8, 99), &facts, &mut Limits::default()),
+            Outcome::Unknown(_)
+        ));
+        let mut changed = facts.fork(&mut Limits::default()).unwrap();
+        changed.assign(id.place, interval(-1000, 1000)).unwrap();
+        assert!(proof.replay(&changed, &mut Limits::default()).is_err());
+    }
+    // Both bounds need refinement. Proving the lower bound cannot let its
+    // constant shift manufacture a successful upper bound for an impossible box.
+    let shifted = square.add(&constant(7, &mut limits), &mut limits).unwrap();
+    for target in [interval(7, 8), interval(8, 10_000_000)] {
+        assert!(matches!(
+            shifted.prove_within(&target, &facts, &mut Limits::default()),
+            Outcome::Unknown(_)
+        ));
+    }
+}
+
+#[test]
+fn cubic_extrema_match_exhaustive_integer_domains_beyond_the_enumeration_cap() {
+    for (low, high) in [(-200, 200), (-300, -1), (0, 300), (5, 350)] {
+        for a in [-3, -1, 1, 3] {
+            for b in [-5, 0, 5] {
+                for c in [-7, 0, 7] {
+                    let mut limits = Limits::default();
+                    let mut facts = Facts::default();
+                    let (_, x) = variable(&mut facts, 0, low, high, &mut limits);
+                    let square = x.multiply(&x, &mut limits).unwrap();
+                    let cube = square.multiply(&x, &mut limits).unwrap();
+                    let expression = constant(a, &mut limits)
+                        .multiply(&cube, &mut limits)
+                        .unwrap()
+                        .add(
+                            &constant(b, &mut limits)
+                                .multiply(&square, &mut limits)
+                                .unwrap(),
+                            &mut limits,
+                        )
+                        .unwrap()
+                        .add(
+                            &constant(c, &mut limits).multiply(&x, &mut limits).unwrap(),
+                            &mut limits,
+                        )
+                        .unwrap()
+                        .add(&constant(11, &mut limits), &mut limits)
+                        .unwrap();
+                    let values = (low..=high)
+                        .map(|x| a * x * x * x + b * x * x + c * x + 11)
+                        .collect::<Vec<_>>();
+                    let minimum = *values.iter().min().unwrap();
+                    let maximum = *values.iter().max().unwrap();
+                    let Outcome::Proven(proof) =
+                        expression.prove_within(&interval(minimum, maximum), &facts, &mut limits)
+                    else {
+                        panic!("cubic {a} {b} {c}, [{low},{high}]");
+                    };
+                    assert_eq!(proof.enclosure(), &interval(minimum, maximum));
+                    proof.replay(&facts, &mut Limits::default()).unwrap();
+                    for wrong in [
+                        interval(minimum + 1, maximum),
+                        interval(minimum, maximum - 1),
+                    ] {
+                        assert!(matches!(
+                            expression.prove_within(&wrong, &facts, &mut Limits::default()),
+                            Outcome::Unknown(_)
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cubic_interior_extrema_preserve_budget_and_input_versions() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (id, x) = variable(&mut facts, 0, 0, 300, &mut limits);
+    let complement = constant(300, &mut limits)
+        .subtract(&x, &mut limits)
+        .unwrap();
+    let expression = x
+        .multiply(&x, &mut limits)
+        .unwrap()
+        .multiply(&complement, &mut limits)
+        .unwrap();
+    let target = interval(0, 4_000_000);
+    let Outcome::Proven(proof) = expression.prove_within(&target, &facts, &mut limits) else {
+        panic!("interior maximum")
+    };
+    assert_eq!(proof.enclosure(), &target);
+    let mut tiny = Limits::default();
+    tiny.arithmetic.steps = 10;
+    assert!(matches!(
+        expression.prove_within(&target, &facts, &mut tiny),
+        Outcome::Unknown(_)
+    ));
+    proof.replay(&facts, &mut Limits::default()).unwrap();
+    facts.assign(id.place, interval(0, 300)).unwrap();
+    assert!(proof.replay(&facts, &mut Limits::default()).is_err());
+}
+
+#[test]
+fn independent_cubic_components_prove_large_cartesian_domains() {
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (x_id, x) = variable(&mut facts, 0, 0, 300, &mut limits);
+    let (y_id, y) = variable(&mut facts, 1, 0, 300, &mut limits);
+    let (_, z) = variable(&mut facts, 2, -2, 3, &mut limits);
+    let cx = constant(300, &mut limits)
+        .subtract(&x, &mut limits)
+        .unwrap();
+    let cy = constant(300, &mut limits)
+        .subtract(&y, &mut limits)
+        .unwrap();
+    let px = x
+        .multiply(&x, &mut limits)
+        .unwrap()
+        .multiply(&cx, &mut limits)
+        .unwrap();
+    let py = y
+        .multiply(&y, &mut limits)
+        .unwrap()
+        .multiply(&cy, &mut limits)
+        .unwrap();
+    let expression = px
+        .subtract(&py, &mut limits)
+        .unwrap()
+        .add(&z, &mut limits)
+        .unwrap()
+        .add(&constant(7, &mut limits), &mut limits)
+        .unwrap();
+    let target = interval(-3_999_995, 4_000_010);
+    let Outcome::Proven(proof) = expression.prove_within(&target, &facts, &mut limits) else {
+        panic!("independent cubic extrema")
+    };
+    assert_eq!(proof.enclosure(), &target);
+    proof.replay(&facts, &mut Limits::default()).unwrap();
+    for wrong in [
+        interval(-3_999_994, 4_000_010),
+        interval(-3_999_995, 4_000_009),
+    ] {
+        assert!(matches!(
+            expression.prove_within(&wrong, &facts, &mut Limits::default()),
+            Outcome::Unknown(_)
+        ));
+    }
+    for id in [x_id, y_id] {
+        let mut changed = facts.fork(&mut Limits::default()).unwrap();
+        changed.assign(id.place, interval(0, 300)).unwrap();
+        assert!(proof.replay(&changed, &mut Limits::default()).is_err());
+    }
+}
+
+#[test]
+fn independent_cubic_components_match_concrete_cartesian_extrema() {
+    for a in [-2, 1, 3] {
+        for b in [-3, 0, 2] {
+            let mut limits = Limits::default();
+            let mut facts = Facts::default();
+            let (_, x) = variable(&mut facts, 0, -12, 13, &mut limits);
+            let (_, y) = variable(&mut facts, 1, -14, 11, &mut limits);
+            let xx = x.multiply(&x, &mut limits).unwrap();
+            let xxx = xx.multiply(&x, &mut limits).unwrap();
+            let yy = y.multiply(&y, &mut limits).unwrap();
+            let yyy = yy.multiply(&y, &mut limits).unwrap();
+            let expression = constant(a, &mut limits)
+                .multiply(&xxx, &mut limits)
+                .unwrap()
+                .add(
+                    &constant(b, &mut limits).multiply(&xx, &mut limits).unwrap(),
+                    &mut limits,
+                )
+                .unwrap()
+                .subtract(&yyy, &mut limits)
+                .unwrap()
+                .add(&y, &mut limits)
+                .unwrap();
+            let values = (-12i128..=13)
+                .flat_map(|x| {
+                    (-14i128..=11).map(move |y| a * x * x * x + b * x * x - y * y * y + y)
+                })
+                .collect::<Vec<_>>();
+            let low = *values.iter().min().unwrap();
+            let high = *values.iter().max().unwrap();
+            let Outcome::Proven(proof) =
+                expression.prove_within(&interval(low, high), &facts, &mut limits)
+            else {
+                panic!("cartesian cubic oracle")
+            };
+            assert_eq!(proof.enclosure(), &interval(low, high));
+            for wrong in [interval(low + 1, high), interval(low, high - 1)] {
+                assert!(matches!(
+                    expression.prove_within(&wrong, &facts, &mut Limits::default()),
+                    Outcome::Unknown(_)
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn unbounded_quadratic_predicates_prove_global_signs_without_inventing_intervals() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let x_id = facts.invalidate(PlaceId { owner: 1, local: 0 }).unwrap();
+    let y_id = facts.invalidate(PlaceId { owner: 1, local: 1 }).unwrap();
+    let x = Polynomial::variable(x_id, &mut limits).unwrap();
+    let y = Polynomial::variable(y_id, &mut limits).unwrap();
+    let affine = constant(2, &mut limits)
+        .multiply(&x, &mut limits)
+        .unwrap()
+        .subtract(&y, &mut limits)
+        .unwrap()
+        .add(&constant(1, &mut limits), &mut limits)
+        .unwrap();
+    let square = affine.multiply(&affine, &mut limits).unwrap();
+    let positive = square.add(&constant(1, &mut limits), &mut limits).unwrap();
+    for (expression, relation, truth) in [
+        (&square, C::GreaterEqual, true),
+        (&square, C::Less, false),
+        (&positive, C::Greater, true),
+        (&positive, C::LessEqual, false),
+        (&positive, C::Equal, false),
+        (&positive, C::NotEqual, true),
+    ] {
+        let condition = Condition::PolynomialCompare {
+            left: expression.clone(),
+            relation,
+            right: constant(0, &mut limits),
+        };
+        let proof = facts
+            .prove_condition(&condition, truth, &mut Limits::default())
+            .unwrap();
+        proof.replay(&facts, &mut Limits::default()).unwrap();
+        assert!(
+            facts
+                .prove_condition(&condition, !truth, &mut Limits::default())
+                .is_err()
+        );
+        let mut changed = facts.fork(&mut Limits::default()).unwrap();
+        changed.invalidate(y_id.place).unwrap();
+        assert!(proof.replay(&changed, &mut Limits::default()).is_err());
+    }
+    for relation in [C::Greater, C::Equal, C::NotEqual] {
+        let condition = Condition::PolynomialCompare {
+            left: square.clone(),
+            relation,
+            right: constant(0, &mut limits),
+        };
+        for truth in [true, false] {
+            assert!(
+                facts
+                    .prove_condition(&condition, truth, &mut Limits::default())
+                    .is_err(),
+                "{relation:?} {truth}"
+            );
+        }
+    }
+    assert!(matches!(
+        facts.bound(x_id, &mut limits),
+        Err(Unknown::MissingBound(_))
+    ));
+    assert!(matches!(
+        facts.bound(y_id, &mut limits),
+        Err(Unknown::MissingBound(_))
+    ));
+}
+
+#[test]
+fn unbounded_negative_quadratic_certificates_preserve_strictness_and_budget_recovery() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let id = facts.invalidate(PlaceId { owner: 1, local: 0 }).unwrap();
+    let x = Polynomial::variable(id, &mut limits).unwrap();
+    let negative = constant(-1, &mut limits)
+        .subtract(&x.multiply(&x, &mut limits).unwrap(), &mut limits)
+        .unwrap();
+    for (relation, truth) in [
+        (C::Less, true),
+        (C::GreaterEqual, false),
+        (C::NotEqual, true),
+        (C::Equal, false),
+    ] {
+        let condition = Condition::PolynomialCompare {
+            left: negative.clone(),
+            relation,
+            right: constant(0, &mut limits),
+        };
+        let mut tiny = Limits::default();
+        tiny.arithmetic.steps = 1;
+        assert!(facts.prove_condition(&condition, truth, &mut tiny).is_err());
+        facts
+            .prove_condition(&condition, truth, &mut Limits::default())
+            .unwrap()
+            .replay(&facts, &mut Limits::default())
+            .unwrap();
+    }
+}
+
+#[test]
+fn unbounded_integer_quadratic_signs_match_lattice_extrema() {
+    use elaboration::verification::{Comparison as C, Condition};
+    for a in [-3, -2, -1, 1, 2, 3] {
+        for b in -5..=5 {
+            for c in -2..=2 {
+                let mut limits = Limits::default();
+                let mut facts = Facts::default();
+                let id = facts.invalidate(PlaceId { owner: 1, local: 0 }).unwrap();
+                let x = Polynomial::variable(id, &mut limits).unwrap();
+                let square = x.multiply(&x, &mut limits).unwrap();
+                let expression = constant(a, &mut limits)
+                    .multiply(&square, &mut limits)
+                    .unwrap()
+                    .add(
+                        &constant(b, &mut limits).multiply(&x, &mut limits).unwrap(),
+                        &mut limits,
+                    )
+                    .unwrap()
+                    .add(&constant(c, &mut limits), &mut limits)
+                    .unwrap();
+                // Every vertex lies within [-3,3], and the outer samples expose
+                // the unbounded tail's sign for all coefficients in this family.
+                for relation in [
+                    C::GreaterEqual,
+                    C::Greater,
+                    C::LessEqual,
+                    C::Less,
+                    C::Equal,
+                    C::NotEqual,
+                ] {
+                    let condition = Condition::PolynomialCompare {
+                        left: expression.clone(),
+                        relation,
+                        right: constant(0, &mut limits),
+                    };
+                    for truth in [true, false] {
+                        let all = (-20i128..=20).all(|x| {
+                            let value = a * x * x + b * x + c;
+                            (match relation {
+                                C::GreaterEqual => value >= 0,
+                                C::Greater => value > 0,
+                                C::LessEqual => value <= 0,
+                                C::Less => value < 0,
+                                C::Equal => value == 0,
+                                C::NotEqual => value != 0,
+                            }) == truth
+                        });
+                        let proof =
+                            facts.prove_condition(&condition, truth, &mut Limits::default());
+                        if !all {
+                            assert!(proof.is_err(), "unsound {a} {b} {c} {relation:?} {truth}");
+                        }
+                        // A nonzero quadratic may have no integer root while changing
+                        // sign, which the extremum-only inequality rule need not solve.
+                        else if !matches!(relation, C::Equal | C::NotEqual) {
+                            proof
+                                .unwrap_or_else(|e| {
+                                    panic!("missing {a} {b} {c} {relation:?}: {e:?}")
+                                })
+                                .replay(&facts, &mut Limits::default())
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn facts_dump_distinguishes_current_and_stale_retained_conditions() {
+    use elaboration::verification::{Comparison, Condition};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (id, _) = variable(&mut facts, 0, -2, 2, &mut limits);
+    let condition = Condition::Compare {
+        value: id,
+        relation: Comparison::NotEqual,
+        constant: Integer::zero(),
+    };
+    facts.assume(&condition, true, &mut limits).unwrap();
+    let proof = facts
+        .prove_condition(&condition, true, &mut limits)
+        .unwrap();
+    let before = facts.to_string();
+    assert!(before.contains("(established (truth true)"), "{before}");
+    assert!(!before.contains("stale-condition"));
+    proof.replay(&facts, &mut limits).unwrap();
+    let fresh = facts.assign(id.place, interval(-2, 2)).unwrap();
+    let after = facts.to_string();
+    assert!(after.contains("(stale-condition (truth true)"), "{after}");
+    assert!(!after.contains("(established (truth true)"));
+    assert_eq!(
+        after,
+        facts.to_string(),
+        "dump order must stay deterministic"
+    );
+    assert!(
+        after.contains(&id.to_string()),
+        "retained old identity must remain visible"
+    );
+    assert!(
+        after.contains(&fresh.to_string()),
+        "current identity must remain visible"
+    );
+    assert!(proof.replay(&facts, &mut limits).is_err());
+    let fresh_condition = Condition::Compare {
+        value: fresh,
+        relation: Comparison::NotEqual,
+        constant: Integer::zero(),
+    };
+    assert!(
+        facts
+            .prove_condition(&fresh_condition, true, &mut limits)
+            .is_err(),
+        "formatting must not publish old facts"
+    );
+    let mut depth = 0;
+    for ch in after.chars() {
+        if ch == '(' {
+            depth += 1;
+        } else if ch == ')' {
+            depth -= 1;
+            assert!(depth >= 0);
+        }
+    }
+    assert_eq!(depth, 0);
+}
+
+#[test]
+fn integer_residue_certificates_preserve_versions_and_budget_recovery() {
+    use elaboration::verification::{Comparison as C, Condition};
+    for bounded in [false, true] {
+        let mut facts = Facts::default();
+        let mut limits = Limits::default();
+        let place = PlaceId { owner: 1, local: 0 };
+        let id = if bounded {
+            facts.assign(place, interval(-1000, 1000)).unwrap()
+        } else {
+            facts.invalidate(place).unwrap()
+        };
+        let x = Polynomial::variable(id, &mut limits).unwrap();
+        let square = x.multiply(&x, &mut limits).unwrap();
+        // Mixed signs, unlike a sign-definite interval certificate.
+        let p = square
+            .multiply(&constant(6, &mut limits), &mut limits)
+            .unwrap()
+            .add(
+                &x.multiply(&constant(-4, &mut limits), &mut limits).unwrap(),
+                &mut limits,
+            )
+            .unwrap()
+            .add(&constant(-1, &mut limits), &mut limits)
+            .unwrap();
+        for relation in [C::Equal, C::NotEqual] {
+            let condition = Condition::PolynomialCompare {
+                left: p.clone(),
+                relation,
+                right: constant(0, &mut limits),
+            };
+            let truth = relation == C::NotEqual;
+            let mut exhausted = Limits::default();
+            exhausted.arithmetic.steps = 0;
+            assert!(
+                facts
+                    .prove_condition(&condition, truth, &mut exhausted)
+                    .is_err()
+            );
+            let proof = facts
+                .prove_condition(&condition, truth, &mut limits)
+                .unwrap();
+            proof.replay(&facts, &mut limits).unwrap();
+            assert!(
+                facts
+                    .prove_condition(&condition, !truth, &mut limits)
+                    .is_err()
+            );
+            let mut changed = facts.fork(&mut limits).unwrap();
+            changed.invalidate(place).unwrap();
+            assert!(proof.replay(&changed, &mut limits).is_err());
+            assert!(
+                changed
+                    .prove_condition(&condition, truth, &mut limits)
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn multivariate_integer_residue_proofs_agree_with_concrete_witnesses() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let x = Polynomial::variable(
+        facts.invalidate(PlaceId { owner: 1, local: 0 }).unwrap(),
+        &mut limits,
+    )
+    .unwrap();
+    let y = Polynomial::variable(
+        facts.invalidate(PlaceId { owner: 1, local: 1 }).unwrap(),
+        &mut limits,
+    )
+    .unwrap();
+    let xy = x.multiply(&y, &mut limits).unwrap();
+    for a in [-6_i128, -2, 2, 6] {
+        for b in [-4_i128, -1, 1, 4] {
+            for c in -3_i128..=3 {
+                let p = xy
+                    .multiply(&constant(a, &mut limits), &mut limits)
+                    .unwrap()
+                    .add(
+                        &y.multiply(&constant(b, &mut limits), &mut limits).unwrap(),
+                        &mut limits,
+                    )
+                    .unwrap()
+                    .add(&constant(c, &mut limits), &mut limits)
+                    .unwrap();
+                let condition = Condition::PolynomialCompare {
+                    left: p,
+                    relation: C::NotEqual,
+                    right: constant(0, &mut limits),
+                };
+                let proof = facts.prove_condition(&condition, true, &mut Limits::default());
+                let has_zero = (-10..=10).any(|x| (-10..=10).any(|y| a * x * y + b * y + c == 0));
+                if has_zero {
+                    assert!(proof.is_err(), "{a}xy + {b}y + {c}");
+                }
+                if a % 2 == 0 && b % 2 == 0 && c % 2 != 0 {
+                    proof
+                        .unwrap()
+                        .replay(&facts, &mut Limits::default())
+                        .unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn modular_nonzero_certificates_match_exhaustive_integer_witnesses() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut facts = Facts::default();
+    let mut limits = Limits::default();
+    let id = facts.invalidate(PlaceId { owner: 1, local: 0 }).unwrap();
+    let x = Polynomial::variable(id, &mut limits).unwrap();
+    let square = x.multiply(&x, &mut limits).unwrap();
+    let cube = square.multiply(&x, &mut limits).unwrap();
+    for a in -2_i128..=2 {
+        for b in -2_i128..=2 {
+            for c in -2_i128..=2 {
+                for d in -2_i128..=2 {
+                    let p = cube
+                        .multiply(&constant(a, &mut limits), &mut limits)
+                        .unwrap()
+                        .add(
+                            &square
+                                .multiply(&constant(b, &mut limits), &mut limits)
+                                .unwrap(),
+                            &mut limits,
+                        )
+                        .unwrap()
+                        .add(
+                            &x.multiply(&constant(c, &mut limits), &mut limits).unwrap(),
+                            &mut limits,
+                        )
+                        .unwrap()
+                        .add(&constant(d, &mut limits), &mut limits)
+                        .unwrap();
+                    let condition = Condition::PolynomialCompare {
+                        left: p,
+                        relation: C::NotEqual,
+                        right: constant(0, &mut limits),
+                    };
+                    let proof = facts.prove_condition(&condition, true, &mut Limits::default());
+                    if (-20..=20).any(|v| a * v * v * v + b * v * v + c * v + d == 0) {
+                        assert!(proof.is_err(), "{a} {b} {c} {d}");
+                    } else if [2_i128, 3, 5]
+                        .iter()
+                        .any(|m| (0..*m).all(|v| (a * v * v * v + b * v * v + c * v + d) % m != 0))
+                    {
+                        proof
+                            .unwrap_or_else(|e| panic!("{a} {b} {c} {d}: {e:?}"))
+                            .replay(&facts, &mut Limits::default())
+                            .unwrap();
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn modular_certificates_do_not_survive_budget_exhaustion_or_input_rewrite() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut facts = Facts::default();
+    let mut limits = Limits::default();
+    let place = PlaceId { owner: 1, local: 0 };
+    let id = facts.invalidate(place).unwrap();
+    let x = Polynomial::variable(id, &mut limits).unwrap();
+    let p = x
+        .multiply(&x, &mut limits)
+        .unwrap()
+        .multiply(&x, &mut limits)
+        .unwrap()
+        .subtract(&x, &mut limits)
+        .unwrap()
+        .add(&constant(1, &mut limits), &mut limits)
+        .unwrap();
+    let condition = Condition::PolynomialCompare {
+        left: p,
+        relation: C::NotEqual,
+        right: constant(0, &mut limits),
+    };
+    for steps in [0, 1, 10, 30] {
+        let mut tiny = Limits::default();
+        tiny.arithmetic.steps = steps;
+        assert!(facts.prove_condition(&condition, true, &mut tiny).is_err());
+    }
+    let proof = facts
+        .prove_condition(&condition, true, &mut limits)
+        .unwrap();
+    proof.replay(&facts, &mut limits).unwrap();
+    facts.invalidate(place).unwrap();
+    assert!(proof.replay(&facts, &mut limits).is_err());
+    assert!(
+        facts
+            .prove_condition(&condition, true, &mut limits)
+            .is_err()
+    );
+}
+
+#[test]
+fn prime_power_residue_certificates_and_search_cutoffs_are_sound() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let x = Polynomial::variable(
+        facts.invalidate(PlaceId { owner: 1, local: 0 }).unwrap(),
+        &mut limits,
+    )
+    .unwrap();
+    let square = x.multiply(&x, &mut limits).unwrap();
+    // Each has roots modulo 2, 3 and 5. Their obstructions require 4, 8,
+    // and 9 respectively; intervals straddle zero and cannot prove nonzero.
+    for (offset, modulus) in [(6_i128, 4_i128), (21, 8), (24, 9)] {
+        for m in [2_i128, 3, 5] {
+            assert!((0..m).any(|v| (v * v - offset).rem_euclid(m) == 0));
+        }
+        assert!((0..modulus).all(|v| (v * v - offset).rem_euclid(modulus) != 0));
+        let condition = Condition::PolynomialCompare {
+            left: square
+                .subtract(&constant(offset, &mut limits), &mut limits)
+                .unwrap(),
+            relation: C::NotEqual,
+            right: constant(0, &mut limits),
+        };
+        facts
+            .prove_condition(&condition, true, &mut Limits::default())
+            .unwrap()
+            .replay(&facts, &mut Limits::default())
+            .unwrap();
+    }
+    for count in [8, 9] {
+        let mut facts = Facts::default();
+        let mut p = constant(1, &mut limits);
+        for local in 0..count {
+            let x = Polynomial::variable(
+                facts.invalidate(PlaceId { owner: 2, local }).unwrap(),
+                &mut limits,
+            )
+            .unwrap();
+            let term = x
+                .multiply(&x, &mut limits)
+                .unwrap()
+                .subtract(&x, &mut limits)
+                .unwrap();
+            p = p.add(&term, &mut limits).unwrap();
+        }
+        let condition = Condition::PolynomialCompare {
+            left: p,
+            relation: C::NotEqual,
+            right: constant(0, &mut limits),
+        };
+        let result = facts.prove_condition(&condition, true, &mut Limits::default());
+        if count == 8 {
+            result
+                .unwrap()
+                .replay(&facts, &mut Limits::default())
+                .unwrap();
+        } else {
+            assert!(
+                result.is_err(),
+                "unsearched assignments must not produce evidence"
+            );
+        }
+    }
+}
+
+#[test]
+fn bounded_residue_domains_prove_relative_nonzero_and_reject_stale_evidence() {
+    use elaboration::verification::{Comparison as C, Condition};
+    for (lo, hi) in [(1, 2), (-2, -1)] {
+        let mut facts = Facts::default();
+        let mut limits = Limits::default();
+        let xid = facts.invalidate(PlaceId { owner: 1, local: 0 }).unwrap();
+        let x = Polynomial::variable(xid, &mut limits).unwrap();
+        let (yid, y) = variable(&mut facts, 1, lo, hi, &mut limits);
+        let p = x
+            .multiply(&x, &mut limits)
+            .unwrap()
+            .subtract(&y.multiply(&y, &mut limits).unwrap(), &mut limits)
+            .unwrap()
+            .subtract(&constant(1, &mut limits), &mut limits)
+            .unwrap();
+        let condition = Condition::PolynomialCompare {
+            left: p,
+            relation: C::NotEqual,
+            right: constant(0, &mut limits),
+        };
+        let proof = facts
+            .prove_condition(&condition, true, &mut limits)
+            .unwrap();
+        proof.replay(&facts, &mut limits).unwrap();
+        facts.assign(yid.place, interval(-2, 2)).unwrap();
+        assert!(proof.replay(&facts, &mut limits).is_err());
+        assert!(
+            facts
+                .prove_condition(&condition, true, &mut limits)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn nonzero_factor_evidence_is_required_on_every_joined_path() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (xid, x) = variable(&mut facts, 0, -5, 5, &mut limits);
+    let (yid, y) = variable(&mut facts, 1, -5, 5, &mut limits);
+    let product = x
+        .multiply(&x, &mut limits)
+        .unwrap()
+        .multiply(&y, &mut limits)
+        .unwrap();
+    let condition = Condition::PolynomialCompare {
+        left: product,
+        relation: C::NotEqual,
+        right: constant(0, &mut limits),
+    };
+    facts
+        .assume(
+            &Condition::Compare {
+                value: xid,
+                relation: C::NotEqual,
+                constant: Integer::zero(),
+            },
+            true,
+            &mut limits,
+        )
+        .unwrap();
+    let only_x = facts.fork(&mut limits).unwrap();
+    assert!(
+        facts
+            .prove_condition(&condition, true, &mut limits)
+            .is_err()
+    );
+    facts
+        .assume(
+            &Condition::Compare {
+                value: yid,
+                relation: C::NotEqual,
+                constant: Integer::zero(),
+            },
+            true,
+            &mut limits,
+        )
+        .unwrap();
+    let mut exhausted = Limits::default();
+    exhausted.arithmetic.steps = 0;
+    assert!(
+        facts
+            .prove_condition(&condition, true, &mut exhausted)
+            .is_err()
+    );
+    let proof = facts
+        .prove_condition(&condition, true, &mut limits)
+        .unwrap();
+    proof.replay(&facts, &mut limits).unwrap();
+    let joined = facts.join(&only_x, &mut limits).unwrap();
+    assert!(proof.replay(&joined, &mut limits).is_err());
+    assert!(
+        joined
+            .prove_condition(&condition, true, &mut limits)
+            .is_err()
+    );
+    facts.assign(yid.place, interval(-5, 5)).unwrap();
+    assert!(proof.replay(&facts, &mut limits).is_err());
+}
+
+#[test]
+fn common_factor_entailment_respects_truth_versions_and_joined_facts() {
+    use elaboration::verification::{Comparison as C, Condition};
+    for (relation, truth) in [
+        (C::NotEqual, true),
+        (C::Equal, false),
+        (C::Greater, true),
+        (C::Less, true),
+    ] {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let xid = facts.invalidate(PlaceId { owner: 1, local: 0 }).unwrap();
+        let yid = facts.invalidate(PlaceId { owner: 1, local: 1 }).unwrap();
+        let x = Polynomial::variable(xid, &mut limits).unwrap();
+        let y = Polynomial::variable(yid, &mut limits).unwrap();
+        let empty = facts.fork(&mut limits).unwrap();
+        let known = Condition::PolynomialCompare {
+            left: x.multiply(&y, &mut limits).unwrap(),
+            relation,
+            right: constant(0, &mut limits),
+        };
+        facts.assume(&known, truth, &mut limits).unwrap();
+        for value in [xid, yid] {
+            for (relation, truth) in [(C::NotEqual, true), (C::Equal, false)] {
+                let query = Condition::Compare {
+                    value,
+                    relation,
+                    constant: Integer::zero(),
+                };
+                let proof = facts.prove_condition(&query, truth, &mut limits).unwrap();
+                proof.replay(&facts, &mut limits).unwrap();
+                let joined = facts.join(&empty, &mut limits).unwrap();
+                assert!(proof.replay(&joined, &mut limits).is_err());
+                let mut changed = facts.fork(&mut limits).unwrap();
+                // Rewriting the other factor also invalidates the premise.
+                changed
+                    .invalidate(if value == xid { yid.place } else { xid.place })
+                    .unwrap();
+                assert!(proof.replay(&changed, &mut limits).is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn monomial_sign_proofs_match_independent_signed_samples() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let relations = [
+        C::Equal,
+        C::NotEqual,
+        C::Less,
+        C::LessEqual,
+        C::Greater,
+        C::GreaterEqual,
+    ];
+    for left_domain in [
+        None,
+        Some(C::Equal),
+        Some(C::NotEqual),
+        Some(C::Less),
+        Some(C::LessEqual),
+        Some(C::Greater),
+        Some(C::GreaterEqual),
+    ] {
+        for right_domain in [
+            None,
+            Some(C::Equal),
+            Some(C::NotEqual),
+            Some(C::Less),
+            Some(C::LessEqual),
+            Some(C::Greater),
+            Some(C::GreaterEqual),
+        ] {
+            for power in [1, 2] {
+                for coefficient in [-1, 1] {
+                    let mut facts = Facts::default();
+                    let mut limits = Limits::default();
+                    let xid = facts.invalidate(PlaceId { owner: 1, local: 0 }).unwrap();
+                    let yid = facts.invalidate(PlaceId { owner: 1, local: 1 }).unwrap();
+                    for (id, domain) in [(xid, left_domain), (yid, right_domain)] {
+                        if let Some(relation) = domain {
+                            facts
+                                .assume(
+                                    &Condition::Compare {
+                                        value: id,
+                                        relation,
+                                        constant: Integer::zero(),
+                                    },
+                                    true,
+                                    &mut limits,
+                                )
+                                .unwrap();
+                        }
+                    }
+                    let x = Polynomial::variable(xid, &mut limits).unwrap();
+                    let y = Polynomial::variable(yid, &mut limits).unwrap();
+                    let mut p = x.clone();
+                    if power == 2 {
+                        p = p.multiply(&x, &mut limits).unwrap();
+                    }
+                    p = p
+                        .multiply(&y, &mut limits)
+                        .unwrap()
+                        .multiply(&constant(coefficient, &mut limits), &mut limits)
+                        .unwrap();
+                    let holds = |value: i128, relation: C| match relation {
+                        C::Equal => value == 0,
+                        C::NotEqual => value != 0,
+                        C::Less => value < 0,
+                        C::LessEqual => value <= 0,
+                        C::Greater => value > 0,
+                        C::GreaterEqual => value >= 0,
+                    };
+                    for relation in relations {
+                        let query = Condition::PolynomialCompare {
+                            left: p.clone(),
+                            relation,
+                            right: constant(0, &mut limits),
+                        };
+                        let samples = (-2_i128..=2)
+                            .filter(|v| left_domain.is_none_or(|r| holds(*v, r)))
+                            .flat_map(|x| {
+                                (-2_i128..=2)
+                                    .filter(move |v| right_domain.is_none_or(|r| holds(*v, r)))
+                                    .map(move |y| holds(coefficient * x.pow(power) * y, relation))
+                            })
+                            .collect::<Vec<_>>();
+                        for truth in [false, true] {
+                            let result =
+                                facts.prove_condition(&query, truth, &mut Limits::default());
+                            if samples.iter().all(|&actual| actual == truth) {
+                                result.unwrap_or_else(|e|panic!("{left_domain:?} {right_domain:?} {power} {coefficient} {relation:?} {truth}: {e:?}"))
+                                    .replay(&facts,&mut Limits::default()).unwrap();
+                            } else {
+                                assert!(result.is_err());
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

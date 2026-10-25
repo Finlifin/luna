@@ -37,6 +37,14 @@ pub struct CallableContext {
 /// to the candidate and are never published as NIR types.
 #[derive(Clone, Debug)]
 pub enum InputContext {
+    ErrorResult {
+        errors: Vec<Term>,
+        result: Box<InputContext>,
+    },
+    Computation {
+        effects: Vec<nir::effects::Operation>,
+        result: Box<InputContext>,
+    },
     Known(Term),
     Tuple(Vec<InputContext>),
     NormalTuple {
@@ -585,6 +593,32 @@ impl CallCandidate {
             }
             *fuel -= 1;
             match context {
+                InputContext::ErrorResult { errors, result } => {
+                    for label in errors {
+                        crate::associated::charge_projection_copy(label, fuel)
+                            .map_err(Error::TypeView)?;
+                        engine
+                            .check_context_type(label)
+                            .map_err(Error::Obligations)?;
+                    }
+                    Ok(Term::error_result(
+                        errors.clone(),
+                        build(result, engine, components, nesting, depth + 1, fuel)?,
+                    ))
+                }
+                InputContext::Computation { effects, result } => {
+                    let row =
+                        Term::computation(effects.clone(), Term::Primitive(nir::Primitive::Void));
+                    crate::associated::charge_projection_copy(&row, fuel)
+                        .map_err(Error::TypeView)?;
+                    engine
+                        .check_context_type(&row)
+                        .map_err(Error::Obligations)?;
+                    Ok(Term::computation(
+                        effects.clone(),
+                        build(result, engine, components, nesting, depth + 1, fuel)?,
+                    ))
+                }
                 InputContext::Known(ty) => leaf(Some(ty), engine, components, nesting, fuel),
                 InputContext::Unknown => leaf(None, engine, components, nesting, fuel),
                 InputContext::UnknownValue => {
@@ -1009,6 +1043,37 @@ impl CallCandidate {
             )
         };
         match template {
+            Term::ErrorResult { errors, result } => {
+                let mut completed = Vec::new();
+                for label in errors {
+                    let InputContext::Known(label) = field_context(label)? else {
+                        return Ok(InputContext::Unknown);
+                    };
+                    completed.push(label);
+                }
+                Ok(InputContext::ErrorResult {
+                    errors: completed,
+                    result: Box::new(field_context(*result)?),
+                })
+            }
+            Term::Computation {
+                mut effects,
+                result,
+            } => {
+                for effect in &mut effects {
+                    for argument in &mut effect.arguments {
+                        let InputContext::Known(completed) = field_context(argument.clone())?
+                        else {
+                            return Ok(InputContext::Unknown);
+                        };
+                        *argument = completed;
+                    }
+                }
+                Ok(InputContext::Computation {
+                    effects,
+                    result: Box::new(field_context(*result)?),
+                })
+            }
             Term::Nominal {
                 declaration,
                 arguments,

@@ -1,0 +1,41 @@
+-- Run: python3 -B development/host_examples.py memory-result-contracts --release-driver --compare-optimization
+-- The runner explicitly supplies 1000000 total compilation steps; the default 100000 is insufficient.
+-- Returned values and written memory share an explicit postcondition.
+typealias Byte = .u8'builtin;
+struct Cell { value: Byte }
+
+fn set(p: *Byte, flag: bool) -> result: Byte
+where ensures result == p.* and p.* < 255 {
+    p.* = if flag { 41 } else { 42 };
+    p.*
+}
+
+fn field(p: *Cell) -> result: Byte
+where ensures p.value.* == 41 and result == p.value.* {
+    p.value.* = 41;
+    p.value.*
+}
+
+fn alias(p: *Byte, .q: *Byte = p) -> result: Byte
+where ensures q.* == 41 and result == q.* {
+    q.* = 41;
+    q.*
+}
+
+fn equal(flag: bool) -> result: bool where ensures result {
+    var value: Byte = 255;
+    let got = set(value.ref, flag);
+    got == value
+}
+
+fn run() -> bool {
+    let value: Byte = 255;
+    let cell = Cell { value: 255 };
+    let a: Byte = set(value.ref, true) + 1;
+    let b: Byte = value + 1;
+    let c: Byte = field(cell.ref) + 1;
+    let d: Byte = cell.value + 1;
+    let e: Byte = alias(value.ref) + 1;
+    a == 42 and b == 42 and c == 42 and d == 42 and e == 42
+        and equal(true) and equal(false)
+}

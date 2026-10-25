@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Bool = true'type;
 trait Read {
     comptime fn read(self) -> Bool;
@@ -11,7 +14,7 @@ impl Flag {
     comptime fn direct(self) -> Bool { self.value }
 }
 comptime fn generic(value: T) -> Bool where T :- Read { value.read() }
-comptime fn run() -> (Bool, Bool, Bool, Bool) {
+comptime fn run() -> Tuple<Bool, Bool, Bool, Bool> {
     let value = Flag { value: true };
     (value.direct(), value.as(Read).read(), value.as(Read).inverted(), generic(value))
 }

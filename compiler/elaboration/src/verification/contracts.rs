@@ -68,7 +68,9 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                 .iter()
                 .any(|identity| identity.declaration == *body)
                 && !method.signature.is_comptime_callable()
-                && method.program.preconditions.is_empty()
+                && (method.program.preconditions.is_empty()
+                    || matches!(method.signature.callable_signature(), Ok(Term::Function { parameters, .. })
+                        if parameters.iter().any(|p| p.sort != nir::Sort::Runtime)))
             {
                 continue;
             }

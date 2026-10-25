@@ -38,11 +38,11 @@ fn bound_meta_list_values_do_not_depend_on_tuple_declarations() {
 
 #[test]
 fn nominal_and_alias_arguments_expand_literal_and_computed_packets() {
-    let package=compile(&format!("{TYPE}
+    let package=execution_support::compile_with_tuple(&format!("{TYPE}
         struct Pair where A,B {{first:A,second:B}}
         enum Choice where A,B {{first(A),second(B)}}
         typealias Alias<A,B> = Pair<A,B>;
-        comptime fn packet()->(Type,Type) {{(bool,.u8'builtin)}}
+        comptime fn packet()->Tuple<Type,Type> {{(bool,.u8'builtin)}}
         typealias P=Alias<...packet()>;
         fn run()->bool {{let p:P=Pair<...(bool,.u8'builtin)> {{first:true,second:7}};
             let c:Choice<...packet()> = .first(p.first);c match {{.first(flag)=>flag,.second(_)=>false}}}}"));
@@ -54,9 +54,9 @@ fn nominal_and_alias_arguments_expand_literal_and_computed_packets() {
 
 #[test]
 fn generic_function_and_method_instances_expand_without_erasing_identity() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
-        comptime fn packet()->(Type,) {{(bool,)}}
+        comptime fn packet()->Tuple<Type> {{(bool,)}}
         fn keep(value:T)->T where T {{value}}
         struct Helpers {{}}
         impl Helpers {{fn keep(value:T)->T where T {{value}}}}
@@ -72,10 +72,10 @@ fn generic_function_and_method_instances_expand_without_erasing_identity() {
 
 #[test]
 fn residual_type_factories_prepare_packets_once_in_source_order() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
         struct Pair where A,B {{first:A,second:B}}
-        comptime fn packet(T:Type)->(Type,) {{(T,)}}
+        comptime fn packet(T:Type)->Tuple<Type> {{(T,)}}
         comptime fn Last()->Type {{bool}}
         comptime fn Build(T:Type)->Type {{Pair<...packet(T),Last()>}}
         comptime fn Run()->Type {{Build(.u8'builtin)}}"
@@ -94,10 +94,10 @@ fn residual_type_factories_prepare_packets_once_in_source_order() {
 
 #[test]
 fn opaque_head_spreads_do_not_invoke_the_head_body() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
         pure comptime fn Identity<T>->Type {{T}}
-        comptime fn packet(T:Type)->(Type,) {{(T,)}}
+        comptime fn packet(T:Type)->Tuple<Type> {{(T,)}}
         typealias Static=Identity<...(bool,)>;
         comptime fn Build(T:Type)->Type {{Identity<...packet(T)>}}
         comptime fn Run()->Type {{Build(bool)}}"
@@ -180,11 +180,11 @@ fn empty_packets_execute_before_definition_scoped_defaults() {
 
 #[test]
 fn residual_alias_spreads_keep_parameter_values_and_default_order() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
         struct Pair where A,B {{first:A,second:B}}
         typealias Alias<A,.B:Type=A> = Pair<A,B>;
-        comptime fn packet(T:Type)->(Type,) {{(T,)}}
+        comptime fn packet(T:Type)->Tuple<Type> {{(T,)}}
         comptime fn Build(T:Type)->Type {{Alias<...packet(T)>}}
         comptime fn Run()->Type {{Build(bool)}}"
     ));
@@ -196,10 +196,10 @@ fn residual_alias_spreads_keep_parameter_values_and_default_order() {
 
 #[test]
 fn later_spread_operands_do_not_change_prepared_earlier_types() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
         struct Pair where A,B {{first:A,second:B}}
-        comptime fn packet(T:Type)->(Type,) {{(T,)}}
+        comptime fn packet(T:Type)->Tuple<Type> {{(T,)}}
         comptime fn Run()->Type {{var T=bool;Pair<...packet(T),do {{T=.u8'builtin;T}}>}}"
     ));
     let result = luna::invocation::invoke(&package, "Run", 100_000).unwrap();
@@ -259,7 +259,7 @@ fn packet_unpacking_uses_bound_tuple_view_without_unfolding() {
         pure comptime fn List<T>->Type {{T}}
         pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
         struct Pair where A,B {{first:A,second:B}}
-        comptime fn packet(T:Type)->(Type,Type) {{(T,bool)}}
+        comptime fn packet(T:Type)->Tuple<Type,Type> {{(T,bool)}}
         comptime fn Build(T:Type)->Type {{Pair<...packet(T)>}}
         comptime fn Run()->Type {{Build(.u8'builtin)}}
         typealias Concrete=Pair<...packet(bool)>;"
@@ -293,9 +293,9 @@ fn empty_literal_expansion_can_use_all_defaults() {
 
 #[test]
 fn computed_packets_preserve_symbolic_generic_type_inputs() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}struct Holder where T {{value:T}}
-        comptime fn packet(T:Type)->(Type,) {{(T,)}}
+        comptime fn packet(T:Type)->Tuple<Type> {{(T,)}}
         fn forward(value:T)->Holder<...packet(T)> where T {{Holder<...packet(T)> {{value:value}}}}
         fn run()->bool {{forward(true).value}}"
     ));
@@ -309,9 +309,10 @@ fn computed_packets_preserve_symbolic_generic_type_inputs() {
 fn runtime_type_factories_cannot_be_run_as_required_packet_producers() {
     let source = format!(
         "{TYPE}struct Holder where T {{value:T}}
-        fn packet()->(Type,) {{(bool,)}} typealias Bad=Holder<...packet()>;"
+        fn packet()->Tuple<Type> {{(bool,)}} typealias Bad=Holder<...packet()>;"
     );
-    let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+    let error =
+        execution_support::compile_with_tuple_protocols(&source, &Default::default()).unwrap_err();
     assert!(
         error.contains("runtime") || error.contains("phase") || error.contains("comptime"),
         "{error}"
@@ -320,8 +321,8 @@ fn runtime_type_factories_cannot_be_run_as_required_packet_producers() {
 
 #[test]
 fn residual_packet_exit_skips_following_arguments() {
-    let package=compile(&format!("{TYPE}struct Pair where A,B {{first:A,second:B}}
-        comptime fn packet()->(Type,) {{(bool,)}}
+    let package=execution_support::compile_with_tuple(&format!("{TYPE}struct Pair where A,B {{first:A,second:B}}
+        comptime fn packet()->Tuple<Type> {{(bool,)}}
         comptime fn Later()->Type {{.u8'builtin}}
         comptime fn Build(flag:bool)->Type {{Pair<...do {{if flag {{return bool;}}packet()}},Later()>}}
         comptime fn Run()->Type {{Build(true)}}"));
@@ -339,8 +340,8 @@ fn residual_packet_exit_skips_following_arguments() {
 
 #[test]
 fn staged_type_inputs_survive_packet_expansion_in_signatures() {
-    let package=compile(&format!("{TYPE}struct Holder where T {{value:T}}
-        comptime fn packet(T:Type)->(Type,) {{(T,)}}
+    let package=execution_support::compile_with_tuple(&format!("{TYPE}struct Holder where T {{value:T}}
+        comptime fn packet(T:Type)->Tuple<Type> {{(T,)}}
         fn forward(comptime T:Type,value:T)->Holder<...packet(T)> {{Holder<...packet(T)> {{value:value}}}}
         fn run()->bool {{forward(bool,true).value}}"));
     assert_eq!(
@@ -351,9 +352,9 @@ fn staged_type_inputs_survive_packet_expansion_in_signatures() {
 
 #[test]
 fn scoped_types_nested_inside_packet_fields_restore_the_original_telescope() {
-    let package=compile(&format!("{TYPE}struct Holder where T {{value:T}}
-        comptime fn packet(T:Type)->(Type,) {{let Pair:Type=(T,T);(Pair,)}}
-        fn forward(comptime T:Type,value:(T,T))->Holder<...packet(T)> {{Holder<...packet(T)> {{value:value}}}}
+    let package=execution_support::compile_with_tuple(&format!("{TYPE}struct Holder where T {{value:T}}
+        comptime fn packet(T:Type)->Tuple<Type> {{let Pair:Type=Tuple<T,T>;(Pair,)}}
+        fn forward(comptime T:Type,value:Tuple<T,T>)->Holder<...packet(T)> {{Holder<...packet(T)> {{value:value}}}}
         fn run()->bool {{let holder=forward(bool,(true,false));let (first,second)=holder.value;first and not second}}"));
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -363,9 +364,12 @@ fn scoped_types_nested_inside_packet_fields_restore_the_original_telescope() {
 
 #[test]
 fn documented_type_spread_example_executes() {
-    let package = compile(include_str!(
-        "../../../development/examples/type-spreads.fl"
-    ));
+    let package = execution_support::compile_splice_fixture(
+        include_str!("../../../development/examples/type-spreads.fl"),
+        &Default::default(),
+        None,
+    )
+    .unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -374,14 +378,14 @@ fn documented_type_spread_example_executes() {
 
 #[test]
 fn receiver_generic_prefix_is_distinct_from_expanded_method_inputs() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
         struct Holder where T {{value:T}}
         impl Holder<T> where T {{
             fn replace(self,value:U)->Holder<U> where U {{Holder<U> {{value:value}}}}
             fn defaulted(self,value:U)->Holder<U> where .U:Type=bool {{Holder<U> {{value:value}}}}
         }}
-        comptime fn packet()->(Type,) {{(bool,)}}
+        comptime fn packet()->Tuple<Type> {{(bool,)}}
         fn run()->bool {{let a=Holder<.u8'builtin> {{value:7}}.replace<...packet()>(true);
             let b=Holder<.u8'builtin> {{value:9}}.defaulted<...()>(false);
             a.value and not b.value}}"
@@ -394,12 +398,12 @@ fn receiver_generic_prefix_is_distinct_from_expanded_method_inputs() {
 
 #[test]
 fn trait_method_spreads_preserve_interface_arguments_and_method_constraints() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
         trait Transform where T {{fn apply(self,value:U)->U where U;}}
         struct Holder {{}}
         impl Transform<.u8'builtin> for Holder {{fn apply(self,value:U)->U where U {{value}}}}
-        comptime fn packet()->(Type,) {{(bool,)}}
+        comptime fn packet()->Tuple<Type> {{(bool,)}}
         fn run()->bool {{Holder {{}}.as(Transform<.u8'builtin>).apply<...packet()>(true)}}"
     ));
     assert_eq!(
@@ -481,9 +485,9 @@ fn mixed_head_literal_expansion_keeps_constraints_and_value_type_checks() {
 
 #[test]
 fn mixed_head_spreads_retain_composite_dependent_literal_context() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}pure comptime fn Tagged<T,value:T>->Type {{T}}
-        comptime fn Run()->Type {{Tagged<...((.u8'builtin,bool),(7,true))>}}"
+        comptime fn Run()->Type {{Tagged<...(Tuple<.u8'builtin,bool>,(7,true))>}}"
     ));
     let result = luna::invocation::invoke(&package, "Run", 100_000).unwrap();
     assert_eq!(
@@ -492,10 +496,14 @@ fn mixed_head_spreads_retain_composite_dependent_literal_context() {
             head: id(&package, "Tagged"),
             sort: nir::Sort::Type,
             arguments: vec![
-                nir::Term::Tuple(vec![
-                    nir::Term::Primitive(nir::Primitive::U8),
-                    nir::Term::Primitive(nir::Primitive::Bool)
-                ]),
+                nir::Term::NormalForm {
+                    head: id(&package, "Tuple"),
+                    sort: nir::Sort::Type,
+                    arguments: vec![nir::Term::TypeListValue(vec![
+                        nir::Term::Primitive(nir::Primitive::U8),
+                        nir::Term::Primitive(nir::Primitive::Bool)
+                    ])]
+                },
                 nir::Term::TupleValue(vec![
                     nir::Term::Integer(comptime_runtime::Integer::from_u128(7)),
                     nir::Term::Bool(true)
@@ -544,9 +552,12 @@ fn mixed_head_spread_exit_does_not_execute_later_operands() {
 
 #[test]
 fn computed_mixed_packets_supply_dependent_head_inputs_once() {
-    let package = compile(include_str!(
-        "../../../development/examples/mixed-type-spreads.fl"
-    ));
+    let package = execution_support::compile_splice_fixture(
+        include_str!("../../../development/examples/mixed-type-spreads.fl"),
+        &Default::default(),
+        None,
+    )
+    .unwrap();
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let result = vm.invoke(id(&package, "Run"), vec![]).unwrap();
     assert_eq!(calls(&package, &vm), vec!["Run", "packet"]);
@@ -570,10 +581,10 @@ fn computed_mixed_packets_supply_dependent_head_inputs_once() {
 
 #[test]
 fn mixed_packet_preparation_interleaves_with_named_inputs_and_defaults() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}typealias Byte=.u8'builtin;
         comptime fn flag()->bool {{false}}
-        comptime fn packet()->(Type,Byte) {{(Byte,7)}}
+        comptime fn packet()->Tuple<Type,Byte> {{(Byte,7)}}
         comptime fn default_flag()->bool {{true}}
         pure comptime fn Tagged<T,value:T,.flag:bool=default_flag()>->Type {{T}}
         comptime fn Before()->Type {{Tagged<.flag=flag(),...packet()>}}
@@ -621,10 +632,10 @@ fn empty_mixed_packets_execute_before_defaults_and_after_last_explicit_input() {
 
 #[test]
 fn multiple_mixed_packets_keep_prepared_values_when_later_inputs_mutate() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}typealias Integer=.Integer'builtin;
         pure comptime fn Sized<n:Integer,other:Integer>->Type {{bool}}
-        comptime fn packet(n:Integer)->(Integer,) {{(n,)}}
+        comptime fn packet(n:Integer)->Tuple<Integer> {{(n,)}}
         comptime fn Run()->Type {{var n:Integer=3;Sized<...packet(n),...do {{n=9;packet(n)}}>}}"
     ));
     let result = luna::invocation::invoke(&package, "Run", 100_000).unwrap();
@@ -643,10 +654,10 @@ fn multiple_mixed_packets_keep_prepared_values_when_later_inputs_mutate() {
 
 #[test]
 fn mixed_packet_exit_skips_later_arguments_and_defaults() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}typealias Integer=.Integer'builtin;
         pure comptime fn Sized<n:Integer,.flag:bool=default_flag()>->Type {{bool}}
-        comptime fn packet()->(Integer,) {{(7,)}}
+        comptime fn packet()->Tuple<Integer> {{(7,)}}
         comptime fn default_flag()->bool {{true}}
         comptime fn Build(exit:bool)->Type {{Sized<...do {{if exit {{return bool;}}packet()}}>}}
         comptime fn Run()->Type {{Build(true)}}"
@@ -661,14 +672,14 @@ fn mixed_packet_exit_skips_later_arguments_and_defaults() {
 
 #[test]
 fn mixed_packets_do_not_bypass_dependent_value_type_validation() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}pure comptime fn Tagged<T,value:T>->Type {{T}}
-        comptime fn packet()->(Type,bool) {{(.u8'builtin,true)}}
+        comptime fn packet()->Tuple<Type,bool> {{(.u8'builtin,true)}}
         comptime fn Run()->Type {{Tagged<...packet()>}}"
     ));
     assert!(luna::invocation::invoke(&package, "Run", 100_000).is_err());
-    let error=compile_with_protocols(&format!("{TYPE}pure comptime fn Tagged<T,value:T>->Type {{T}}
-        comptime fn packet()->(Type,bool) {{(.u8'builtin,true)}} typealias Bad=Tagged<...packet()>;"),&Default::default()).unwrap_err();
+    let error=execution_support::compile_with_tuple_protocols(&format!("{TYPE}pure comptime fn Tagged<T,value:T>->Type {{T}}
+        comptime fn packet()->Tuple<Type,bool> {{(.u8'builtin,true)}} typealias Bad=Tagged<...packet()>;"),&Default::default()).unwrap_err();
     assert!(
         error.contains("comptime") || error.contains("type"),
         "{error}"
@@ -677,11 +688,11 @@ fn mixed_packets_do_not_bypass_dependent_value_type_validation() {
 
 #[test]
 fn runtime_packet_producers_remain_forbidden_in_mixed_head_construction() {
-    let error = compile_with_protocols(
+    let error = execution_support::compile_with_tuple_protocols(
         &format!(
             "{TYPE}typealias Integer=.Integer'builtin;
         pure comptime fn Sized<n:Integer>->Type {{bool}}
-        fn packet()->(Integer,) {{(7,)}}
+        fn packet()->Tuple<Integer> {{(7,)}}
         comptime fn Run()->Type {{Sized<...packet()>}}"
         ),
         &Default::default(),
@@ -695,9 +706,9 @@ fn runtime_packet_producers_remain_forbidden_in_mixed_head_construction() {
 
 #[test]
 fn computed_type_packet_contextualizes_following_literals() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}pure comptime fn Tagged<T,value:T>->Type {{T}}
-        comptime fn packet()->(Type,) {{(.u8'builtin,)}}
+        comptime fn packet()->Tuple<Type> {{(.u8'builtin,)}}
         comptime fn Run()->Type {{Tagged<...packet(),7>}}"
     ));
     let result = luna::invocation::invoke(&package, "Run", 100_000).unwrap();
@@ -716,10 +727,10 @@ fn computed_type_packet_contextualizes_following_literals() {
 
 #[test]
 fn mixed_packet_values_can_precede_their_late_named_type() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}typealias Byte=.u8'builtin;
         pure comptime fn Tagged<.T:Type=bool,value:T>->Type {{T}}
-        comptime fn packet()->(Byte,) {{(7,)}}
+        comptime fn packet()->Tuple<Byte> {{(7,)}}
         comptime fn Pick()->Type {{Byte}}
         comptime fn Run()->Type {{Tagged<...packet(),.T=Pick()>}}"
     ));
@@ -734,10 +745,10 @@ fn mixed_packet_values_can_precede_their_late_named_type() {
 
 #[test]
 fn mixed_packet_preparations_are_local_to_each_loop_iteration() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}typealias Integer=.Integer'builtin;
         pure comptime fn Sized<n:Integer>->Type {{bool}}
-        comptime fn packet(n:Integer)->(Integer,) {{(n,)}}
+        comptime fn packet(n:Integer)->Tuple<Integer> {{(n,)}}
         comptime fn Run()->Type {{var n:Integer=3;var result:Type=bool;
             while n > 0 {{result=Sized<...packet(n)>;n=n - 1;}}result}}"
     ));
@@ -754,10 +765,10 @@ fn mixed_packet_preparations_are_local_to_each_loop_iteration() {
 #[test]
 fn malformed_packet_plans_reject_and_valid_plans_remain_reusable() {
     use nir::program::{ExprKind as K, Pattern};
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}typealias Integer=.Integer'builtin;
         pure comptime fn Sized<n:Integer>->Type {{bool}}
-        comptime fn packet()->(Integer,) {{(7,)}}
+        comptime fn packet()->Tuple<Integer> {{(7,)}}
         comptime fn Run()->Type {{Sized<...packet()>}}"
     ));
     for defect in 0..3 {
@@ -807,15 +818,15 @@ fn malformed_packet_plans_reject_and_valid_plans_remain_reusable() {
 #[test]
 fn mixed_packets_in_type_annotations_do_not_request_runtime_splice() {
     let source = format!(
-        "{TYPE}typealias Integer=.Integer'builtin;
+        "{TYPE}pure comptime fn TupleElements<T>->Type {{T}} pure comptime fn Tuple<...Es:TupleElements<Type>>->Type {{bool}} typealias Integer=.Integer'builtin;
         trait Splice {{assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}}
         pure comptime fn Sized<n:Integer>->Type {{bool}}
-        comptime fn packet()->(Integer,) {{(7,)}}
+        comptime fn packet()->Tuple<Integer> {{(7,)}}
         fn pass(value:Sized<...packet()>)->Sized<...packet()> {{value}}
         fn run()->bool {{true}}"
     );
     let package =
-        execution_support::compile_with_bindings(&source, &Default::default(), Some("Splice"))
+        execution_support::compile_splice_fixture(&source, &Default::default(), Some("Splice"))
             .unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -825,12 +836,12 @@ fn mixed_packets_in_type_annotations_do_not_request_runtime_splice() {
 
 #[test]
 fn generic_mixed_producers_specialize_their_preparation_types_per_instance() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}typealias Byte=.u8'builtin;
         pure comptime fn Tagged<T,value:T>->Type {{T}}
-        comptime fn packet(value:T)->(Type,T) where T {{(T,value)}}
+        comptime fn packet(value:T)->Tuple<Type,T> where T {{(T,value)}}
         comptime fn Build(value:T)->Type where T {{Tagged<...packet(value)>}}
-        comptime fn Run()->(Type,Type) {{let byte:Byte=7;(Build(true),Build(byte))}}"
+        comptime fn Run()->Tuple<Type,Type> {{let byte:Byte=7;(Build(true),Build(byte))}}"
     ));
     let value = luna::invocation::invoke(&package, "Run", 100_000).unwrap();
     let make = |arguments| {
@@ -862,7 +873,7 @@ fn computed_mixed_packets_use_the_bound_tuple_view() {
         pure comptime fn List<T>->Type {{T}}
         pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
         pure comptime fn Tagged<T,value:T>->Type {{T}}
-        comptime fn packet()->(Type,Byte) {{(Byte,7)}}
+        comptime fn packet()->Tuple<Type,Byte> {{(Byte,7)}}
         comptime fn Run()->Type {{Tagged<...packet()>}}"
     );
     let selectors = luna::protocols::type_constructors::Selectors {
@@ -954,12 +965,16 @@ fn packet_context_rejects_overflow_without_reinterpreting_typed_values() {
         let source = format!(
             "{TYPE}typealias Byte=.u8'builtin;
             pure comptime fn Sized<n:Byte>->Type {{bool}}
-            comptime fn typed()->(.Integer'builtin,) {{(7,)}}
+            comptime fn typed()->Tuple<.Integer'builtin> {{(7,)}}
             comptime fn Run()->Type {{Sized<...{packet}>}}"
         );
-        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(&source, &Default::default())
+            .unwrap_err();
         assert!(
-            error.contains("range") || error.contains("fit") || error.contains("type mismatch"),
+            error.contains("range")
+                || error.contains("fit")
+                || error.contains("type mismatch")
+                || error.contains("unresolved type equality"),
             "{packet}: {error}"
         );
     }
@@ -1087,9 +1102,9 @@ fn variadic_return_signatures_determine_packet_partition() {
 #[test]
 fn required_packet_layout_preserves_context_execution_and_obligations() {
     for requirement in [
-        "T == (Byte,bool)",
-        "(Byte,bool) == T",
-        "T == (Byte,bool) and (Byte,bool) == T",
+        "T == Tuple<Byte,bool>",
+        "Tuple<Byte,bool> == T",
+        "T == Tuple<Byte,bool> and Tuple<Byte,bool> == T",
     ] {
         let source = format!(
             "{TYPE}typealias Byte=.u8'builtin;
@@ -1097,7 +1112,7 @@ fn required_packet_layout_preserves_context_execution_and_obligations() {
             comptime fn take(a:Byte,b:bool,c:Byte,d:bool)->bool {{a == 7 and b and c == 7 and d}}
             comptime fn Run()->bool {{take(...packet(),...packet())}}"
         );
-        let package = compile(&source);
+        let package = execution_support::compile_with_tuple(&source);
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert_eq!(
             vm.invoke(id(&package, "Run"), vec![]).unwrap(),
@@ -1112,17 +1127,21 @@ fn required_packet_layout_preserves_context_execution_and_obligations() {
             &format!("requires {requirement}"),
             &format!("requires ({requirement}) and false"),
         );
-        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+        assert!(
+            execution_support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err()
+        );
         let invalid = source.replace("c:Byte", "c:bool");
-        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+        assert!(
+            execution_support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err()
+        );
     }
 }
 
 #[test]
 fn type_only_spreads_contextualize_result_inferred_factories() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
-        comptime fn packet()->T where T, requires T == (Type,Type) {{(bool,.u8'builtin)}}
+        comptime fn packet()->T where T, requires T == Tuple<Type,Type> {{(bool,.u8'builtin)}}
         struct Pair where A,B {{first:A,second:B}}
         typealias Alias<A,B> = Pair<A,B>;
         typealias Selected=Alias<...packet()>;
@@ -1146,15 +1165,15 @@ fn type_only_spreads_contextualize_result_inferred_factories() {
 fn explicit_packet_type_hints_do_not_repeat_producers() {
     let source = format!(
         "{TYPE}typealias Byte=.u8'builtin;
-        comptime fn first()->(Byte,bool) {{(7,true)}}
-        comptime fn second()->(Byte,bool) {{(9,false)}}
+        comptime fn first()->Tuple<Byte,bool> {{(7,true)}}
+        comptime fn second()->Tuple<Byte,bool> {{(9,false)}}
         comptime fn packet(value:T)->T where T {{value}}
         comptime fn take(a:Byte,b:bool,c:Byte,d:bool)->bool {{a == 7 and b and c == 9 and not d}}
         comptime fn Run()->bool {{take(
-            ...packet<(Byte,bool)>(do {{let pair=first();pair}}),
-            ...packet<(Byte,bool)>(do {{let pair=second();pair}}))}}"
+            ...packet<Tuple<Byte,bool>>(do {{let pair=first();pair}}),
+            ...packet<Tuple<Byte,bool>>(do {{let pair=second();pair}}))}}"
     );
-    let package = compile(&source);
+    let package = execution_support::compile_with_tuple(&source);
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         vm.invoke(id(&package, "Run"), vec![]).unwrap(),
@@ -1168,9 +1187,9 @@ fn explicit_packet_type_hints_do_not_repeat_producers() {
 
 #[test]
 fn type_spread_context_is_available_to_function_and_method_instances() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
-        comptime fn packet()->T where T, requires T == (Type,) {{(bool,)}}
+        comptime fn packet()->T where T, requires T == Tuple<Type> {{(bool,)}}
         fn keep(value:T)->T where T {{value}}
         struct Holder where T {{value:T}}
         impl Holder<T> where T {{fn choose(self,value:U)->U where U {{value}}}}
@@ -1185,9 +1204,9 @@ fn type_spread_context_is_available_to_function_and_method_instances() {
 
 #[test]
 fn type_spread_context_skips_defaults_and_known_empty_inputs() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
-        comptime fn packet()->T where T, requires T == (Type,) {{(bool,)}}
+        comptime fn packet()->T where T, requires T == Tuple<Type> {{(bool,)}}
         struct Holder where .Ignored:Type=.u8'builtin,T {{value:T}}
         typealias Selected=Holder<...(),...packet(),.Ignored=bool>;
         comptime fn Run()->Type {{Holder<...(),...packet(),.Ignored=bool>}}
@@ -1202,9 +1221,9 @@ fn type_spread_context_skips_defaults_and_known_empty_inputs() {
 
 #[test]
 fn trait_type_spreads_can_infer_packet_types_without_executing_runtime_code() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
-        comptime fn packet()->T where T, requires T == (Type,) {{(bool,)}}
+        comptime fn packet()->T where T, requires T == Tuple<Type> {{(bool,)}}
         trait Pick where T {{fn pick(self,value:T)->T;}}
         struct Holder {{}}
         impl Pick<...packet()> for Holder {{fn pick(self,value:bool)->bool {{value}}}}
@@ -1218,9 +1237,9 @@ fn trait_type_spreads_can_infer_packet_types_without_executing_runtime_code() {
 
 #[test]
 fn type_packet_result_context_preserves_opaque_normal_heads() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
-        comptime fn packet()->T where T, requires T == (Type,) {{(bool,)}}
+        comptime fn packet()->T where T, requires T == Tuple<Type> {{(bool,)}}
         pure comptime fn Identity<T>->Type {{T}}
         typealias Chosen=Identity<...packet()>;
         comptime fn Run()->Type {{Identity<...packet()>}}"
@@ -1241,20 +1260,21 @@ fn type_packet_result_context_preserves_opaque_normal_heads() {
 fn type_packet_result_context_does_not_override_producer_requirements() {
     let source = format!(
         "{TYPE}
-        comptime fn packet()->T where T, requires T == (Type,) {{(bool,)}}
+        comptime fn packet()->T where T, requires T == Tuple<Type> {{(bool,)}}
         struct Pair where A,B {{first:A,second:B}}
         typealias Bad=Pair<...packet()>;"
     );
-    let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+    let error =
+        execution_support::compile_with_tuple_protocols(&source, &Default::default()).unwrap_err();
     assert!(error.contains("requirement"), "{error}");
 }
 
 #[test]
 fn projected_type_factories_expand_packets_once_and_reuse_dynamic_defaults() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
         struct Holder where T {{pub newtype Wrapped<U,.V:Type=U> = U;}}
-        comptime fn packet(T:Type)->(Type,) {{(T,)}}
+        comptime fn packet(T:Type)->Tuple<Type> {{(T,)}}
         comptime fn Build(T:Type)->Type {{Holder<bool>.Wrapped<...packet(T)>}}
         comptime fn Run()->Type {{Build(.u8'builtin)}}"
     ));
@@ -1280,11 +1300,11 @@ fn projected_type_factories_expand_packets_once_and_reuse_dynamic_defaults() {
 
 #[test]
 fn dynamic_projection_base_and_member_packets_keep_separate_input_order() {
-    let package = compile(&format!(
+    let package = execution_support::compile_with_tuple(&format!(
         "{TYPE}
         struct Holder where T {{pub newtype Wrapped<U> = U;}}
-        comptime fn outer(T:Type)->(Type,) {{(T,)}}
-        comptime fn member()->(Type,) {{(bool,)}}
+        comptime fn outer(T:Type)->Tuple<Type> {{(T,)}}
+        comptime fn member()->Tuple<Type> {{(bool,)}}
         comptime fn Build(T:Type)->Type {{Holder<...outer(T)>.Wrapped<...member()>}}
         comptime fn Run()->Type {{Build(.u8'builtin)}}"
     ));
@@ -1345,9 +1365,9 @@ fn collected_packet_width_counts_source_arguments_not_tuple_fields() {
             vec!["Run", "pack", "pack", "pack", "pack", "combine"],
         ),
     ] {
-        let package = compile(&format!("typealias Byte=.u8'builtin;
+        let package = execution_support::compile_with_tuple(&format!("typealias Byte=.u8'builtin;
             comptime fn pack(...items:T)->T where T {{items}}
-            comptime fn combine(pair:(Byte,bool),flag:bool)->bool {{let (number,enabled)=pair;number == 255 and enabled and flag}}
+            comptime fn combine(pair:Tuple<Byte,bool>,flag:bool)->bool {{let (number,enabled)=pair;number == 255 and enabled and flag}}
             comptime fn Run()->bool {{combine({arguments})}}"));
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert_eq!(
@@ -1606,7 +1626,7 @@ fn computed_prefix_packets_share_the_named_type_list_input_plan() {
                 pure comptime fn List<T>->Type {{T}}
                 pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
                 pure comptime fn Product<T,value:T,...Es:List<Type>>->Type {{T}}
-                comptime fn packet()->(Type,bool) {{(bool,true)}}
+                comptime fn packet()->Tuple<Type,bool> {{(bool,true)}}
                 comptime fn empty(...items:T)->T where T {{items}}
                 comptime fn tail()->List<Type> {{[bool]}}
                 comptime fn Build()->Type {{Product<{arguments}>}}
@@ -1620,8 +1640,17 @@ fn computed_prefix_packets_share_the_named_type_list_input_plan() {
                     tuple: bound_tuple.then_some("input::Tuple"),
                     ..Default::default()
                 },
-            )
-            .unwrap();
+            );
+            if !bound_tuple {
+                let error =
+                    package.expect_err("an unbound opaque Tuple head cannot supply tuple layout");
+                assert!(
+                    error.contains("structural type view remains unresolved"),
+                    "{error}"
+                );
+                continue;
+            }
+            let package = package.unwrap();
             let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
             let Value::Type(nir::Term::NormalForm { arguments, .. }) =
                 vm.invoke(id(&package, "Build"), vec![]).unwrap()
@@ -1647,14 +1676,16 @@ fn computed_prefix_packets_keep_exit_order_and_dependent_checks() {
         execution_support::compile_with_source_bindings(
             &format!(
                 "{TYPE} pure comptime fn List<T>->Type {{T}}
+        pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
             pure comptime fn Product<T,value:T,...Es:List<Type>>->Type {{T}}
-            comptime fn packet()->(Type,bool) {{{packet}}}
+            comptime fn packet()->Tuple<Type,bool> {{{packet}}}
             comptime fn tail()->List<Type> {{[bool]}}
             comptime fn Build()->Type {{Product<{arguments}>}}"
             ),
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
                 meta_list: Some("input::List"),
+                tuple: Some("input::Tuple"),
                 ..Default::default()
             },
         )
@@ -1691,8 +1722,9 @@ fn named_type_list_packets_compose_with_dependent_defaults() {
     let source = format!(
         "{TYPE}
         pure comptime fn List<T>->Type {{T}}
+        pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
         pure comptime fn Product<T,value:T,.copy:T=value,...Es:List<Type>>->Type {{T}}
-        comptime fn packet()->(Type,bool) {{(bool,true)}}
+        comptime fn packet()->Tuple<Type,bool> {{(bool,true)}}
         comptime fn tail()->List<Type> {{[bool]}}
         comptime fn replacement()->bool {{false}}
         comptime fn Default()->Type {{Product<...packet(),.Es=tail()>}}
@@ -1704,6 +1736,7 @@ fn named_type_list_packets_compose_with_dependent_defaults() {
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
             meta_list: Some("input::List"),
+            tuple: Some("input::Tuple"),
             ..Default::default()
         },
     )
@@ -1747,8 +1780,9 @@ fn named_type_list_packets_retain_generic_type_alias_parameters() {
     let source = format!(
         "{TYPE}
         pure comptime fn List<T>->Type {{T}}
+        pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
         pure comptime fn Product<A,B,.C:Type=B,...Es:List<Type>>->Type {{A}}
-        comptime fn packet()->(Type,Type) where T {{(T,bool)}}
+        comptime fn packet()->Tuple<Type,Type> where T {{(T,bool)}}
         typealias Alias<T> = Product<...packet<T>(),.Es=[T]>;
         fn keep(value:Alias<T>)->Product<T,bool,.C=bool,.Es=[T]> where T {{value}}
         comptime fn Result()->Type {{Alias<.u8'builtin>}}"
@@ -1758,6 +1792,7 @@ fn named_type_list_packets_retain_generic_type_alias_parameters() {
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
             meta_list: Some("input::List"),
+            tuple: Some("input::Tuple"),
             ..Default::default()
         },
     )
@@ -1894,7 +1929,7 @@ fn defaulted_type_collectors_spread_lists_once_in_source_order() {
             "{TYPE} pure comptime fn List<T>->Type {{T}}
             pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
             pure comptime fn Product<T,value:T,.copy:T=value,...Es:List<Type>>->Type {{T}}
-            comptime fn packet()->(Type,bool) {{(bool,true)}}
+            comptime fn packet()->Tuple<Type,bool> {{(bool,true)}}
             comptime fn items()->List<Type> {{[bool,.u8'builtin]}}
             comptime fn empty()->List<Type> {{[]}}
             comptime fn replacement()->bool {{false}}
@@ -1973,7 +2008,7 @@ fn required_prefix_heads_collect_after_computed_packets() {
         "{TYPE} pure comptime fn List<T>->Type {{T}}
         pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
         pure comptime fn Product<T,value:T,...Es:List<Type>>->Type {{T}}
-        comptime fn packet()->(Type,bool) {{(bool,true)}}
+        comptime fn packet()->Tuple<Type,bool> {{(bool,true)}}
         comptime fn items()->List<Type> {{[.u8'builtin]}}
         comptime fn Build()->Type {{Product<...packet(),...items(),bool>}}
         comptime fn Empty()->Type {{Product<...packet()>}}
@@ -2332,18 +2367,20 @@ fn generic_invocation_transports_residual_nominal_type_lists() {
     let source = format!(
         "{TYPE}
         pure comptime fn List<T>->Type {{T}}
+        pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
         newtype Indexed<value:bool> = bool;
         newtype Tagged<value:.char'builtin> = bool;
         comptime fn TaggedType()->Type {{Tagged<'x'>}}
         comptime fn pack(value:bool)->List<Type> {{[Indexed<value>,Indexed<value>]}}
         comptime fn pass(values:List<Type>)->List<Type> {{values}}
-        comptime fn pass_packet(values:(List<Type>,))->(List<Type>,) {{values}}"
+        comptime fn pass_packet(values:Tuple<List<Type>>)->Tuple<List<Type>> {{values}}"
     );
     let package = execution_support::compile_with_source_bindings(
         &source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
             meta_list: Some("input::List"),
+            tuple: Some("input::Tuple"),
             ..Default::default()
         },
     )

@@ -1,9 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-pub const USAGE: &str = "Usage: luna <input.fl> [--emit hir|ast|nir | --invoke-comptime <name> | --instantiate <name> | --interpret <name> [--inline-functions] [--copy-protocol <trait> --drop-protocol <trait>] | --analyze-resources <name> --copy-protocol <trait> [--drop-protocol <trait>]] [--fuel <steps>] [--output <path>] [--sysroot <library-path>] [--splice-protocol <trait|package::trait>] [--meta-list-type <package::definition> --tuple-type <package::definition>] [--optional-type <package::definition>] [--add-protocol <package::trait>] [--index-protocol <package::trait>] [--literal-into-protocol <package::trait>]\n       luna --help";
+pub const USAGE: &str = "Usage: luna <input.fl> [--emit hir|ast|nir | --build <entry> | --emit-llvm <entry> | --emit-bitcode <entry> | --emit-object <entry> | --emit-asm <entry> | --test | --test-native | --list-tests | --invoke-comptime <name> | --instantiate <name> | --interpret <name> [--inline-functions] [--copy-protocol <trait> --drop-protocol <trait>] | --analyze-resources <name> --copy-protocol <trait> [--drop-protocol <trait>]] [--fuel <steps>] [--output <path>] [--host-fma <package::Enum::variant>] [--host-sqrt <package::Enum::variant>] [--host-copysign <package::Enum::variant>] [--host-intrinsic <operation=package::Enum::variant>] [--sysroot <library-path>] [--splice-protocol <trait|package::trait>] [--meta-list-type <package::definition> --tuple-type <package::definition>] [--optional-type <package::definition>] [--add-protocol <package::trait>] [--index-protocol <package::trait>] [--ord-protocol <package::trait>] [--eq-protocol <package::trait>] [--list-pattern-protocol <package::trait>] [--literal-into-protocol <package::trait>]\n       luna --packages-v1 --package <id> <identity> <name> <entry> ... --primary <id> [--dependency <requester> <alias> <provider>] [--builtin <id>] [--with-inputs] [--emit hir|nir] [--output <path>]\n       luna --packages-stream-v1 [--cache-entries <count>]\n       luna --help";
 
-pub const HELP: &str = "Luna single-file frontend\n\nUsage: luna <input.fl> [--emit hir|ast|nir | --invoke-comptime <name> | --instantiate <name> | --interpret <name> [--inline-functions] [--copy-protocol <trait> --drop-protocol <trait>] | --analyze-resources <name> --copy-protocol <trait> [--drop-protocol <trait>]] [--fuel <steps>] [--output <path>] [--sysroot <library-path>] [--splice-protocol <trait|package::trait>] [--meta-list-type <package::definition> --tuple-type <package::definition>] [--optional-type <package::definition>] [--add-protocol <package::trait>] [--index-protocol <package::trait>] [--literal-into-protocol <package::trait>]\n       luna --help\n\n  --emit hir|ast|nir     Dump HIR (default), AST, or type-elaborated NIR\n  --invoke-comptime <name>  Invoke one unambiguous comptime function without supplied arguments\n  --instantiate <name>  Dump the concrete IIR dependency graph of a runtime entry\n  --interpret <name>  Reference-execute IIR; both protocol options enable checked cleanup\n  --inline-functions  Expand eligible inline fn calls (requires --interpret and both protocols)\n  --analyze-resources <name>  Report ownership obligations (does not lower Drop or certify full safety)\n  --copy-protocol <trait>  Explicit source Copy identity for analysis or checked execution\n  --drop-protocol <trait>  Source Drop identity; analyze plans or execute them with --interpret\n  --fuel <steps>    Positive per-stage/per-query work budget (default: 100000)\n  --output <path>    Write the dump or result to a file (default: stdout)\n  --sysroot <path>   Use a library directory containing builtin/ and std/\n                     NIR reads optional language-items.conf defaults; explicit bindings override them\n  --splice-protocol <trait|package::trait>  Bind runtime conversion of comptime constants (qualified module paths supported)\n  --meta-list-type  Bind List by package::definition or package::module::definition\n  --tuple-type      Bind Tuple by package::definition or package::module::definition (requires List)\n  --optional-type   Bind optional enum by package::definition or package::module::definition\n  --add-protocol / --sub-protocol / --mul-protocol / --div-protocol / --rem-protocol / --neg-protocol / --not-protocol\n                    Bind arithmetic by package::trait or package::module::trait\n  --index-protocol  Bind Index by package::trait or package::module::trait\n  --literal-into-protocol  Bind literal suffix conversion by package::trait or package::module::trait\n  --help            Show this help\n  --                Treat remaining arguments as input paths\n\nA main.fl/lib.fl input scans its parent as the source root; other inputs compile alone.\n\nExit status: 0 on success, 1 on compilation, invocation or I/O errors, 2 on invalid usage.\n";
+pub const HELP: &str = "Luna source frontend\n\nUsage: luna <input.fl> [--emit hir|ast|nir | --build <entry> | --emit-llvm <entry> | --emit-bitcode <entry> | --emit-object <entry> | --emit-asm <entry> | --test | --test-native | --list-tests | --invoke-comptime <name> | --instantiate <name> | --interpret <name> [--inline-functions] [--copy-protocol <trait> --drop-protocol <trait>] | --analyze-resources <name> --copy-protocol <trait> [--drop-protocol <trait>]] [--fuel <steps>] [--output <path>] [--host-fma <package::Enum::variant>] [--host-sqrt <package::Enum::variant>] [--host-copysign <package::Enum::variant>] [--host-intrinsic <operation=package::Enum::variant>] [--sysroot <library-path>] [--splice-protocol <trait|package::trait>] [--meta-list-type <package::definition> --tuple-type <package::definition>] [--optional-type <package::definition>] [--add-protocol <package::trait>] [--index-protocol <package::trait>] [--ord-protocol <package::trait>] [--eq-protocol <package::trait>] [--list-pattern-protocol <package::trait>] [--literal-into-protocol <package::trait>]\n       luna --help\n\n  --build <entry>    Build a native host executable (requires --output; paired Copy/Drop options verify resources)\n  --emit-bitcode <entry> Emit verified, optimized LLVM bitcode (requires --output)\n  --emit-object <entry>  Emit a relocatable host object without linking (requires --output)\n  --emit-asm <entry>   Emit host assembly without linking (stdout or --output)\n  --emit-llvm <entry>  Emit LLVM IR for the supported host subset\n  --host-fma <package::Enum::variant>  Bind one host FMA tag for build, LLVM output or native tests (nested module paths supported)\n  --host-sqrt <package::Enum::variant>  Bind one host square-root tag\n  --host-copysign <package::Enum::variant>  Bind one host sign-copy tag\n  --host-intrinsic <operation=package::Enum::variant>  Repeatable explicit scalar math binding: fma/sqrt/copysign/floor/ceil/trunc/roundeven/round/fabs/sin/cos/exp/exp2/log/log2/log10/pow/minimum/maximum/bitreverse/ctpop/ctlz/cttz/bswap/fshl/fshr/minimumnum/maximumnum/isnan/isinf/isfinite/isnormal/issubnormal/signbit/add_sat/sub_sat/min/max/abs/bit_and/bit_or/bit_xor\n  --opt-level 0|1|2|3  LLVM optimization (build default: 0; explicit level optimizes LLVM dumps)\n  --emit hir|ast|nir     Dump HIR (default), AST, or type-elaborated NIR\n  --invoke-comptime <name>  Invoke a comptime function; paired Copy/Drop options enable pointer transfers\n  --instantiate <name>  Dump the concrete IIR dependency graph of a runtime entry\n  --test            Reference-execute ordinary tests in the primary package\n  --test-native     LLVM-compile and run tests\n  --test-timeout-ms <ms>  Native runtime deadline per test (default: 10000)\n  --list-tests      Discover primary-package tests without executing them\n  --test-filter <text>  Select labels containing this text (--test, --test-native or --list-tests)\n  --interpret <name>  Reference-execute IIR; both protocol options enable checked cleanup\n  --discard-result  Retire the host entry result using paired Copy/Drop protocols\n  --inline-functions  Expand eligible inline fn calls (requires --interpret, --build, --emit-object, --emit-bitcode, --emit-asm, --emit-llvm or tests and both protocols)\n  --analyze-resources <name>  Report ownership obligations (does not lower Drop or certify full safety)\n  --copy-protocol <trait>  Explicit source Copy identity for analysis, execution or comptime pointer transfers\n  --drop-protocol <trait>  Source Drop identity; analyze plans or execute them with --interpret\n  --fuel <steps>    Positive per-stage/per-query work budget (default: 100000)\n  --output <path>    Write the dump or result to a file (default: stdout)\n  --sysroot <path>   Use a library directory containing builtin/ and std/\n                     NIR reads optional language-items.conf defaults; explicit bindings override them\n  --splice-protocol <trait|package::trait>  Bind runtime conversion of comptime constants (qualified module paths supported)\n  --meta-list-type  Bind List by package::definition or package::module::definition\n  --tuple-type      Bind Tuple by package::definition or package::module::definition (requires List)\n  --optional-type   Bind optional enum by package::definition or package::module::definition\n  --add-protocol / --sub-protocol / --mul-protocol / --div-protocol / --rem-protocol / --neg-protocol / --not-protocol\n                    Bind arithmetic by package::trait or package::module::trait\n  --list-pattern-protocol  Bind ListPatternView by package::module::trait\n  --eq-protocol     Bind Eq equality operators by package::module::trait\n  --ord-protocol    Bind Ord ordering operators by package::module::trait\n  --index-protocol  Bind Index by package::trait or package::module::trait\n  --literal-into-protocol  Bind literal suffix conversion by package::trait or package::module::trait\n  --help            Show this help\n  --                Treat remaining arguments as input paths\n\nA main.fl/lib.fl input scans its parent as the source root; other inputs compile alone.\n\nExplicit package compilation: luna --packages-v1 --package <id> <identity> <name> <entry> ... --primary <id>\n  --dependency <requester> <alias> <provider>  Supply a direct dependency (repeatable)\n  --builtin <id>                             Designate an explicitly supplied builtin package\n  --with-inputs                              Wrap the result with observed source inputs\n  --emit hir|nir and --output <path>          Select output (HIR by default)\n  --interpret, --invoke-comptime, --instantiate, --analyze-resources, --emit-llvm, --emit-asm, --emit-object, --emit-bitcode, --build and tests also accept package sets.\n  Action budgets and resource protocol flags follow the ordinary CLI rules.\n  Source protocol/type selector options are also accepted; no sysroot is injected.\n  IDs are decimal u32 resolution IDs and u64 semantic identities; entry paths are OS paths.\n\nResident frontend: luna --packages-stream-v1 [--cache-entries <count>]\n  Read LF-terminated hex argument frames from stdin; emit one response per frame.\n  Default cache capacity is 8; 0 disables retention. Only HIR/NIR compilation is accepted.\n  Framing and response details: development/package-cli.md.\n\nExit status: 0 on success, 1 on compilation, invocation or I/O errors, 2 on invalid usage.\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emit {
@@ -12,9 +12,12 @@ pub enum Emit {
     Nir,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
+    pub list_pattern_protocol: Option<String>,
     pub index_protocol: Option<String>,
+    pub ord_protocol: Option<String>,
+    pub eq_protocol: Option<String>,
     pub literal_into_protocol: Option<String>,
     pub arithmetic_protocols: [Option<String>; 7],
     pub input: PathBuf,
@@ -27,15 +30,57 @@ pub struct Options {
     pub optional_type: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostOutput {
+    Llvm,
+    Assembly,
+    Object,
+    Bitcode,
+    Executable,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
+    PackageStream {
+        capacity: usize,
+    },
     Help,
+    Packages(Box<crate::package_cli::Request>),
     Compile(Options),
+    Host {
+        host_fma: Option<String>,
+        host_sqrt: Option<String>,
+        host_copysign: Option<String>,
+        host_intrinsics: Vec<(nir::intrinsics::Operation, String)>,
+        options: Options,
+        entry: String,
+        fuel: u64,
+        output_kind: HostOutput,
+        discard_result: bool,
+        inline_functions: bool,
+        optimization: Option<crate::host::OptimizationLevel>,
+        protocols: Option<(String, String)>,
+    },
     AnalyzeResources {
         options: Options,
         entry: String,
         copy_protocol: String,
         drop_protocol: Option<String>,
+        fuel: u64,
+    },
+    Test {
+        host_fma: Option<String>,
+        host_sqrt: Option<String>,
+        host_copysign: Option<String>,
+        host_intrinsics: Vec<(nir::intrinsics::Operation, String)>,
+        timeout: std::time::Duration,
+        optimization: Option<crate::host::OptimizationLevel>,
+        native: bool,
+        list_only: bool,
+        filter: Option<String>,
+        options: Options,
+        inline_functions: bool,
+        protocols: Option<(String, String)>,
         fuel: u64,
     },
     Interpret {
@@ -51,6 +96,7 @@ pub enum Command {
         fuel: u64,
     },
     Invoke {
+        protocols: Option<(String, String)>,
         options: Options,
         entry: String,
         fuel: u64,
@@ -59,6 +105,40 @@ pub enum Command {
 
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
     let args: Vec<_> = args.into_iter().collect();
+    if args
+        .first()
+        .is_some_and(|argument| argument == "--packages-stream-v1")
+    {
+        return match args.as_slice() {
+            [_] => Ok(Command::PackageStream { capacity: 8 }),
+            [_, option] if option == "--help" => Ok(Command::Help),
+            [_, option, value] if option == "--cache-entries" => {
+                let value = value
+                    .to_str()
+                    .ok_or("cache capacity must be an unsigned decimal integer")?;
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("cache capacity must be an unsigned decimal integer".into());
+                }
+                Ok(Command::PackageStream {
+                    capacity: value
+                        .parse()
+                        .map_err(|_| "cache capacity is out of range")?,
+                })
+            }
+            _ => Err("usage: --packages-stream-v1 [--cache-entries <count>]".into()),
+        };
+    }
+
+    if args
+        .first()
+        .is_some_and(|argument| argument == "--packages-v1")
+    {
+        if args.len() == 2 && args[1] == "--help" {
+            return Ok(Command::Help);
+        }
+        return crate::package_cli::parse(args.into_iter().skip(1))
+            .map(|request| Command::Packages(Box::new(request)));
+    }
     if args.len() == 1 && args[0] == "--help" {
         return Ok(Command::Help);
     }
@@ -69,7 +149,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     let mut sysroot = None;
     let mut splice_protocol = None;
     let mut meta_list_type = None;
+    let mut list_pattern_protocol = None;
     let mut index_protocol = None;
+    let mut ord_protocol = None;
+    let mut eq_protocol = None;
     let mut literal_into_protocol = None;
     let mut tuple_type = None;
     let mut optional_type = None;
@@ -77,8 +160,20 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     let mut positional = false;
     let mut entry = None;
     let mut instantiate = None;
+    let mut host = None;
+    let mut host_fma = None;
+    let mut host_sqrt = None;
+    let mut host_copysign = None;
+    let mut host_intrinsics = Vec::new();
+    let mut optimization = None;
     let mut interpret = None;
+    let mut tests = false;
+    let mut native_tests = false;
+    let mut list_only = false;
+    let mut test_filter = None;
+    let mut test_timeout = None;
     let mut inline_functions = false;
+    let mut discard_result = false;
     let mut resources = None;
     let mut copy_protocol = None;
     let mut drop_protocol = None;
@@ -91,6 +186,97 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                     continue;
                 }
                 Some("--help") => return Err("--help must be used alone".into()),
+                Some(
+                    flag @ ("--build" | "--emit-llvm" | "--emit-object" | "--emit-asm"
+                    | "--emit-bitcode"),
+                ) => {
+                    if host.is_some() {
+                        return Err("only one host action is allowed".into());
+                    }
+                    let name = option_value(&mut args, flag)?
+                        .into_string()
+                        .map_err(|_| "entry must be UTF-8")?;
+                    host = Some((
+                        name,
+                        match flag {
+                            "--emit-llvm" => HostOutput::Llvm,
+                            "--emit-asm" => HostOutput::Assembly,
+                            "--emit-object" => HostOutput::Object,
+                            "--emit-bitcode" => HostOutput::Bitcode,
+                            _ => HostOutput::Executable,
+                        },
+                    ));
+                    continue;
+                }
+                Some("--host-fma") => {
+                    if host_fma.is_some() {
+                        return Err("--host-fma may only be specified once".into());
+                    }
+                    host_fma = Some(
+                        option_value(&mut args, "--host-fma")?
+                            .into_string()
+                            .map_err(|_| "host FMA selector must be UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--host-sqrt") => {
+                    if host_sqrt.is_some() {
+                        return Err("--host-sqrt may only be specified once".into());
+                    }
+                    host_sqrt = Some(
+                        option_value(&mut args, "--host-sqrt")?
+                            .into_string()
+                            .map_err(|_| "host sqrt selector must be UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--host-copysign") => {
+                    if host_copysign.is_some() {
+                        return Err("--host-copysign may only be specified once".into());
+                    }
+                    host_copysign = Some(
+                        option_value(&mut args, "--host-copysign")?
+                            .into_string()
+                            .map_err(|_| "host copysign selector must be UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--host-intrinsic") => {
+                    let value = option_value(&mut args, "--host-intrinsic")?
+                        .into_string()
+                        .map_err(|_| "host intrinsic selector must be UTF-8")?;
+                    let (operation, selector) = value
+                        .split_once('=')
+                        .ok_or("--host-intrinsic requires operation=package::Enum::variant")?;
+                    let operation =
+                        nir::intrinsics::Operation::from_name(operation).ok_or_else(|| {
+                            let names = nir::intrinsics::Operation::ALL
+                                .iter()
+                                .map(|operation| operation.name())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            format!("unknown host intrinsic operation (expected one of: {names})")
+                        })?;
+                    if selector.is_empty() {
+                        return Err("host intrinsic selector must not be empty".into());
+                    }
+                    host_intrinsics.push((operation, selector.to_owned()));
+                    continue;
+                }
+                Some("--opt-level") => {
+                    if optimization.is_some() {
+                        return Err("--opt-level may only be specified once".into());
+                    }
+                    use crate::host::OptimizationLevel::*;
+                    optimization = Some(match option_value(&mut args, "--opt-level")?.to_str() {
+                        Some("0") => O0,
+                        Some("1") => O1,
+                        Some("2") => O2,
+                        Some("3") => O3,
+                        _ => return Err("--opt-level requires 0, 1, 2 or 3".into()),
+                    });
+                    continue;
+                }
                 Some("--emit") => {
                     if emit.is_some() {
                         return Err("--emit may only be specified once".into());
@@ -142,6 +328,12 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                     );
                     continue;
                 }
+                Some("--discard-result") => {
+                    if std::mem::replace(&mut discard_result, true) {
+                        return Err("--discard-result may only be specified once".into());
+                    }
+                    continue;
+                }
                 Some("--inline-functions") => {
                     if inline_functions {
                         return Err("--inline-functions may only be specified once".into());
@@ -158,6 +350,50 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                             .into_string()
                             .map_err(|_| "entry name must be valid UTF-8")?,
                     );
+                    continue;
+                }
+                Some("--test-filter") => {
+                    if test_filter.is_some() {
+                        return Err("--test-filter may only be specified once".into());
+                    }
+                    test_filter = Some(
+                        args.next()
+                            .filter(|value| !is_option(value))
+                            .ok_or("--test-filter requires a value")?
+                            .into_string()
+                            .map_err(|_| "test filter must be UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--test-timeout-ms") => {
+                    if test_timeout.is_some() {
+                        return Err("--test-timeout-ms supplied more than once".into());
+                    }
+                    let value = option_value(&mut args, "--test-timeout-ms")?;
+                    let text = value
+                        .to_str()
+                        .ok_or("--test-timeout-ms must be a positive integer")?;
+                    let milliseconds =
+                        if !text.is_empty() && text.bytes().all(|c| c.is_ascii_digit()) {
+                            text.parse::<u64>().ok().filter(|value| *value > 0)
+                        } else {
+                            None
+                        }
+                        .ok_or("--test-timeout-ms must be a positive integer in milliseconds")?;
+                    test_timeout = Some(std::time::Duration::from_millis(milliseconds));
+                    continue;
+                }
+                Some("--test" | "--test-native" | "--list-tests") => {
+                    if interpret.is_some() {
+                        return Err(
+                            "--test/--list-tests conflicts with --interpret or another test action"
+                                .into(),
+                        );
+                    }
+                    list_only = arg == "--list-tests";
+                    native_tests = arg == "--test-native";
+                    tests = true;
+                    interpret = Some("$tests".to_owned());
                     continue;
                 }
                 Some("--instantiate") => {
@@ -202,6 +438,17 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                     output = Some(PathBuf::from(option_value(&mut args, "--output")?));
                     continue;
                 }
+                Some("--list-pattern-protocol") => {
+                    if list_pattern_protocol.is_some() {
+                        return Err("--list-pattern-protocol may only be specified once".into());
+                    }
+                    list_pattern_protocol = Some(
+                        option_value(&mut args, "--list-pattern-protocol")?
+                            .into_string()
+                            .map_err(|_| "ListPatternView protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
                 Some("--index-protocol") => {
                     if index_protocol.is_some() {
                         return Err("--index-protocol may only be specified once".into());
@@ -210,6 +457,28 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                         option_value(&mut args, "--index-protocol")?
                             .into_string()
                             .map_err(|_| "Index protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--ord-protocol") => {
+                    if ord_protocol.is_some() {
+                        return Err("--ord-protocol may only be specified once".into());
+                    }
+                    ord_protocol = Some(
+                        option_value(&mut args, "--ord-protocol")?
+                            .into_string()
+                            .map_err(|_| "Ord protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--eq-protocol") => {
+                    if eq_protocol.is_some() {
+                        return Err("--eq-protocol may only be specified once".into());
+                    }
+                    eq_protocol = Some(
+                        option_value(&mut args, "--eq-protocol")?
+                            .into_string()
+                            .map_err(|_| "Eq protocol selector must be valid UTF-8")?,
                     );
                     continue;
                 }
@@ -301,23 +570,90 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             return Err("exactly one input path is required".into());
         }
     }
-    if inline_functions
-        && (interpret.is_none() || copy_protocol.is_none() || drop_protocol.is_none())
-    {
+    if test_timeout.is_some() && !native_tests {
+        return Err("--test-timeout-ms requires --test-native".into());
+    }
+    if !host_intrinsics.is_empty() && host.is_none() && !native_tests {
         return Err(
-            "--inline-functions requires --interpret with --copy-protocol and --drop-protocol"
+            "--host-intrinsic requires --build, --emit-object, --emit-bitcode, --emit-asm, --emit-llvm or --test-native".into(),
+        );
+    }
+    if host_fma.is_some() && host.is_none() && !native_tests {
+        return Err(
+            "--host-fma requires --build, --emit-object, --emit-bitcode, --emit-asm, --emit-llvm or --test-native"
                 .into(),
         );
+    }
+    if host_sqrt.is_some() && host.is_none() && !native_tests {
+        return Err(
+            "--host-sqrt requires --build, --emit-object, --emit-bitcode, --emit-asm, --emit-llvm or --test-native"
+                .into(),
+        );
+    }
+    if host_copysign.is_some() && host.is_none() && !native_tests {
+        return Err(
+            "--host-copysign requires --build, --emit-object, --emit-bitcode, --emit-asm, --emit-llvm or --test-native".into(),
+        );
+    }
+    if optimization.is_some() && host.is_none() && !native_tests {
+        return Err(
+            "--opt-level requires --build, --emit-object, --emit-bitcode, --emit-asm, --emit-llvm or --test-native"
+                .into(),
+        );
+    }
+    if let Some((_, output_kind)) = &host {
+        if tests
+            || resources.is_some()
+            || interpret.is_some()
+            || instantiate.is_some()
+            || entry.is_some()
+            || emit.is_some()
+        {
+            return Err("host actions cannot be combined with other actions".into());
+        }
+        if matches!(
+            output_kind,
+            HostOutput::Object | HostOutput::Bitcode | HostOutput::Executable
+        ) && output.is_none()
+        {
+            return Err(match output_kind {
+                HostOutput::Object => "--emit-object requires --output <object>",
+                HostOutput::Bitcode => "--emit-bitcode requires --output <bitcode>",
+                _ => "--build requires --output <executable>",
+            }
+            .into());
+        }
+    }
+    // A sysroot can supply the pair after argument parsing. Execution must
+    // still reject missing identities; merely naming a sysroot grants nothing.
+    let resource_pair_pending =
+        sysroot.is_some() || (copy_protocol.is_some() && drop_protocol.is_some());
+    if discard_result && (host.is_none() || !resource_pair_pending) {
+        return Err("--discard-result requires --build, --emit-object, --emit-bitcode, --emit-asm or --emit-llvm with Copy/Drop bindings from --sysroot or --copy-protocol and --drop-protocol".into());
+    }
+    if inline_functions
+        && ((interpret.is_none() && host.is_none() && !tests) || !resource_pair_pending)
+    {
+        return Err(
+            "--inline-functions requires --interpret, --build, --emit-object, --emit-bitcode, --emit-asm, --emit-llvm or tests with Copy/Drop bindings from --sysroot or --copy-protocol and --drop-protocol"
+                .into(),
+        );
+    }
+    if list_only && inline_functions {
+        return Err("--list-tests cannot be combined with --inline-functions".into());
+    }
+    if test_filter.is_some() && !tests {
+        return Err("--test-filter requires --test, --test-native or --list-tests".into());
     }
     if resources.is_some()
         && (interpret.is_some() || instantiate.is_some() || entry.is_some() || emit.is_some())
     {
         return Err("--analyze-resources cannot be combined with --interpret, --instantiate, --invoke-comptime or --emit".into());
     }
-    if interpret.is_some() {
+    if interpret.is_some() || entry.is_some() || host.is_some() {
         if copy_protocol.is_some() != drop_protocol.is_some() {
             return Err(
-                "resource-checked --interpret requires both --copy-protocol and --drop-protocol"
+                "resource-checked invocation requires both --copy-protocol and --drop-protocol"
                     .into(),
             );
         }
@@ -340,7 +676,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     if entry.is_some() && emit.is_some() {
         return Err("--invoke-comptime cannot be combined with --emit".into());
     }
-    if resources.is_none()
+    if host.is_none()
+        && resources.is_none()
         && entry.is_none()
         && instantiate.is_none()
         && interpret.is_none()
@@ -353,7 +690,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     }
     let options = Options {
         input: input.ok_or_else(|| "an input path is required".to_string())?,
-        emit: if resources.is_some()
+        emit: if host.is_some()
+            || resources.is_some()
             || entry.is_some()
             || instantiate.is_some()
             || interpret.is_some()
@@ -369,30 +707,28 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
         tuple_type,
         optional_type,
         arithmetic_protocols,
+        list_pattern_protocol,
         index_protocol,
+        ord_protocol,
+        eq_protocol,
         literal_into_protocol,
     };
-    if options.literal_into_protocol.is_some() && options.emit != Emit::Nir {
-        return Err(
-            "--literal-into-protocol requires --emit nir or an execution/analysis command".into(),
-        );
-    }
-    if options.index_protocol.is_some() && options.emit != Emit::Nir {
-        return Err("--index-protocol requires --emit nir or an execution/analysis command".into());
-    }
-    if options.splice_protocol.is_some() && options.emit != Emit::Nir {
-        return Err(
-            "--splice-protocol requires --emit nir or an execution/analysis command".into(),
-        );
-    }
-    if (options.meta_list_type.is_some()
-        || options.tuple_type.is_some()
-        || options.optional_type.is_some())
-        && options.emit != Emit::Nir
-    {
-        return Err(
-            "type constructor bindings require --emit nir or an execution/analysis command".into(),
-        );
+    crate::frontend::source_protocols(&options).validate_stage(options.emit)?;
+    if let Some((entry, output_kind)) = host {
+        return Ok(Command::Host {
+            host_fma,
+            host_sqrt,
+            host_copysign,
+            host_intrinsics,
+            options,
+            entry,
+            output_kind,
+            discard_result,
+            inline_functions,
+            optimization,
+            protocols: copy_protocol.zip(drop_protocol),
+            fuel: fuel.unwrap_or(100_000),
+        });
     }
     if let Some(entry) = resources {
         return Ok(Command::AnalyzeResources {
@@ -400,6 +736,23 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             entry,
             copy_protocol: copy_protocol.expect("validated protocol option"),
             drop_protocol,
+            fuel: fuel.unwrap_or(100_000),
+        });
+    }
+    if tests {
+        return Ok(Command::Test {
+            host_fma,
+            host_sqrt,
+            host_copysign,
+            host_intrinsics,
+            timeout: test_timeout.unwrap_or(std::time::Duration::from_secs(10)),
+            optimization,
+            native: native_tests,
+            list_only,
+            filter: test_filter,
+            options,
+            inline_functions,
+            protocols: copy_protocol.zip(drop_protocol),
             fuel: fuel.unwrap_or(100_000),
         });
     }
@@ -421,6 +774,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     }
     Ok(match entry {
         Some(entry) => Command::Invoke {
+            protocols: copy_protocol.zip(drop_protocol),
             options,
             entry,
             fuel: fuel.unwrap_or(100_000),
@@ -462,6 +816,9 @@ mod tests {
                 splice_protocol: None,
                 meta_list_type: None,
                 index_protocol: None,
+                ord_protocol: None,
+                eq_protocol: None,
+                list_pattern_protocol: None,
                 literal_into_protocol: None,
                 arithmetic_protocols: Default::default(),
                 tuple_type: None,
@@ -491,6 +848,9 @@ mod tests {
                 splice_protocol: None,
                 meta_list_type: None,
                 index_protocol: None,
+                ord_protocol: None,
+                eq_protocol: None,
+                list_pattern_protocol: None,
                 literal_into_protocol: None,
                 arithmetic_protocols: Default::default(),
                 tuple_type: None,
@@ -553,6 +913,7 @@ mod invocation_tests {
     #[test]
     fn invocation_selects_nir_and_validates_its_own_options() {
         let Command::Invoke {
+            protocols: _,
             options,
             entry,
             fuel,

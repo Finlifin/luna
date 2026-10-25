@@ -1,13 +1,16 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Bool = true'type;
 typealias F32 = .f32'builtin;
 typealias F64 = .f64'builtin;
-comptime fn single(a: F32, b: F32) -> (Bool, Bool, Bool, Bool, Bool, Bool) {
+comptime fn single(a: F32, b: F32) -> Tuple<Bool, Bool, Bool, Bool, Bool, Bool> {
     (a == b, a != b, a < b, a <= b, a > b, a >= b)
 }
-comptime fn double(a: F64, b: F64) -> (Bool, Bool, Bool, Bool, Bool, Bool) {
+comptime fn double(a: F64, b: F64) -> Tuple<Bool, Bool, Bool, Bool, Bool, Bool> {
     (a == b, a != b, a < b, a <= b, a > b, a >= b)
 }
-comptime fn contextual(value: F32) -> (Bool, Bool, Bool, Bool) {
+comptime fn contextual(value: F32) -> Tuple<Bool, Bool, Bool, Bool> {
     (1.5 == value, -1.5 != value, 1.5 < value, value >= 1.5)
 }
 comptime fn generic(a: T, b: T) -> Bool where T, requires T == F32 { a >= b }
@@ -20,6 +23,6 @@ comptime fn ordered() -> Bool {
     (do { seen = true; 1.0 }) > (do { if seen { 0.0 } else { 2.0 } })
 }
 comptime fn early() -> Bool { (do { return true; }) >= 1.0 }
-comptime fn run() -> (Bool, Bool, Bool, Bool) {
+comptime fn run() -> Tuple<Bool, Bool, Bool, Bool> {
     (specialized(), pattern(-0.0, 0.0), ordered(), early())
 }

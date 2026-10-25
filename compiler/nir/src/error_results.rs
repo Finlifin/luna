@@ -1,7 +1,11 @@
 //! Checked closed error-row layouts and branch remapping, independent of effect
-//! continuations. These are representation plans, not executable NIR values yet.
+//! continuations. NIR keeps explicit construction and transport operations.
 //! Type identity evidence comes from elaboration: structural inequality alone
 //! must never prove that two symbolic error labels are distinct.
+pub mod specialize;
+mod transport;
+pub use transport::{RepresentationTransport, transport_plan};
+
 use crate::{Sort, Term};
 use std::fmt;
 
@@ -250,10 +254,16 @@ impl ResultType {
         for error in &self.errors.labels {
             charge(error, fuel)?;
         }
-        Ok(Term::error_result(
-            self.errors.labels.clone(),
-            self.success.clone(),
-        ))
+        // This is a checked physical layout, whose tags refer to Row order.
+        // Do not silently apply the source type constructor's canonical order.
+        Ok(if self.errors.labels.is_empty() {
+            self.success.clone()
+        } else {
+            Term::ErrorResult {
+                errors: self.errors.labels.clone(),
+                result: Box::new(self.success.clone()),
+            }
+        })
     }
     pub fn plain(success: Term, fuel: &mut usize) -> Result<Self, Error> {
         type_input(&success, fuel)?;
@@ -503,5 +513,148 @@ impl fmt::Display for InstantiatedResult {
             "(instantiated-error-result {} (occurrences {}))",
             self.result, self.occurrences
         )
+    }
+}
+
+/// Keep success injection, error construction and row transport distinguishable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Conversion {
+    Success,
+    Failure,
+    Embed,
+    Product,
+}
+impl fmt::Display for Conversion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::Embed => "embed",
+            Self::Product => "product",
+        })
+    }
+}
+
+/// Validate a conversion without assigning tags to unresolved generic labels.
+/// The caller supplies positive equality evidence; failure is never disequality.
+pub fn validate_conversion(
+    conversion: Conversion,
+    input: &Term,
+    output: &Term,
+    fuel: &mut usize,
+    equal: &mut impl FnMut(&Term, &Term) -> bool,
+) -> Result<(), Error> {
+    validate_conversion_with_tuple(conversion, input, output, fuel, equal, &|_| false)
+}
+
+pub fn validate_conversion_with_tuple(
+    conversion: Conversion,
+    input: &Term,
+    output: &Term,
+    fuel: &mut usize,
+    equal: &mut impl FnMut(&Term, &Term) -> bool,
+    is_tuple: &impl Fn(crate::DeclarationId) -> bool,
+) -> Result<(), Error> {
+    if conversion == Conversion::Product {
+        transport_plan(input, output, true, fuel, equal, is_tuple)?;
+        return Ok(());
+    }
+    type_input(input, fuel)?;
+    type_input(output, fuel)?;
+    let Term::ErrorResult { errors, result } = output else {
+        return Err(Error::InvalidType);
+    };
+    if errors.is_empty() {
+        return Err(Error::InvalidType);
+    }
+    let mut member = |label: &Term, fuel: &mut usize| -> Result<bool, Error> {
+        for candidate in errors {
+            charge(label, fuel)?;
+            charge(candidate, fuel)?;
+            if label == candidate || equal(label, candidate) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    match conversion {
+        Conversion::Product => unreachable!(),
+        Conversion::Failure => {
+            if !member(input, fuel)? {
+                return Err(Error::MissingLabel);
+            }
+        }
+        Conversion::Success => {
+            if matches!(input, Term::ErrorResult { .. }) {
+                return Err(Error::InvalidType);
+            }
+            if input != result.as_ref() && !equal(input, result) {
+                return Err(Error::IncompatibleSuccess);
+            }
+        }
+        Conversion::Embed => {
+            let Term::ErrorResult {
+                errors: source,
+                result: success,
+            } = input
+            else {
+                return Err(Error::InvalidType);
+            };
+            for label in source {
+                if !member(label, fuel)? {
+                    return Err(Error::MissingLabel);
+                }
+            }
+            if success.as_ref() != &Term::Primitive(crate::Primitive::Never)
+                && success != result
+                && !equal(success, result)
+            {
+                return Err(Error::IncompatibleSuccess);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Domain of a frozen payload, retaining an unresolved inner success result.
+/// Canonicalizing the enclosing type must not erase this domain evidence.
+pub fn frozen_payload_domain<'a>(
+    value: &'a Term,
+    expected: &Term,
+    fuel: &mut usize,
+) -> Result<&'a Term, Error> {
+    let Term::ErrorValue { ty, label, .. } = value else {
+        return Err(Error::InvalidType);
+    };
+    type_input(ty, fuel)?;
+    type_input(expected, fuel)?;
+    let Term::ErrorResult { errors, result } = ty.as_ref() else {
+        return Err(Error::InvalidType);
+    };
+    let Term::ErrorResult {
+        errors: target_errors,
+        result: target_result,
+    } = expected
+    else {
+        return Err(Error::InvalidType);
+    };
+    if errors.is_empty() || target_errors.is_empty() {
+        return Err(Error::InvalidType);
+    }
+    if Term::error_result(errors.clone(), result.as_ref().clone())
+        != Term::error_result(target_errors.clone(), target_result.as_ref().clone())
+    {
+        return Err(Error::InvalidType);
+    }
+    match label {
+        None => Ok(result),
+        Some(label) => {
+            charge(label, fuel)?;
+            if errors.contains(label) {
+                Ok(label)
+            } else {
+                Err(Error::MissingLabel)
+            }
+        }
     }
 }

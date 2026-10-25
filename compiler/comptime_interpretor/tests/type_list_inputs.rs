@@ -59,6 +59,7 @@ fn package() -> Package {
             phase: FunctionPhase::Comptime,
             inline: false,
             pure: true,
+            is_unsafe: false,
             type_parameters: vec![],
             requirements: vec![],
             capabilities: vec![],

@@ -145,7 +145,7 @@ impl PreparedRequired {
             }
             Some(context)
         };
-        let type_solver = |predicate: &n::TypePredicate| {
+        let type_solver = |predicate: &n::TypePredicate, remaining: &mut u64| {
             use comptime_interpretor::ContractOutcome;
             let restored;
             let (predicate, proof_context) = if scoped_parameters.is_empty() {
@@ -168,7 +168,16 @@ impl PreparedRequired {
                 assumptions: &invocation_assumptions,
                 context: proof_context,
             };
-            match world.check_predicate(predicate, crate::ptc::Budget::default()) {
+            let mut proof_budget = crate::ptc::Budget {
+                steps: crate::ptc::Budget::default()
+                    .steps
+                    .min(usize::try_from(*remaining).unwrap_or(usize::MAX)),
+                ..Default::default()
+            };
+            let before = proof_budget.steps;
+            let outcome = world.check_predicate_metered(predicate, &mut proof_budget);
+            *remaining = remaining.saturating_sub((before - proof_budget.steps) as u64);
+            match outcome {
                 Ok(crate::ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,
                 Ok(crate::ptc::Outcome::NotEntailed(_)) => ContractOutcome::Rejected,
                 _ => ContractOutcome::Unknown,
@@ -229,7 +238,9 @@ impl PreparedRequired {
                 &invocation_assumptions,
                 &abstract_parameters,
                 &abstract_value_parameters,
-                Some(&type_solver),
+                Some(crate::type_computations::ProofSolver::Budgeted(
+                    &type_solver,
+                )),
                 Some(&pointer_copy),
             );
             *steps = budget.steps;
@@ -291,7 +302,7 @@ impl PreparedRequired {
             },
         )
         .map_err(|e| error(span, format!("required comptime preparation failed: {e}")))?;
-        interpreter = interpreter.with_type_solver(&type_solver);
+        interpreter = interpreter.with_budgeted_type_solver(&type_solver);
         interpreter = interpreter.with_budgeted_pointer_copy_permission(&pointer_copy);
         let scope = interpreter
             .authorize_abstract_type_parameters(&abstract_parameters)
@@ -401,6 +412,7 @@ mod tests {
                 phase: n::FunctionPhase::Comptime,
                 inline: false,
                 pure: true,
+                is_unsafe: false,
                 preconditions: vec![],
                 postconditions: vec![],
                 result_binding: None,
@@ -436,6 +448,41 @@ mod tests {
             context: crate::ptc::Context::default(),
             in_signature: false,
             copy_authority: None,
+        }
+    }
+
+    #[test]
+    fn required_value_and_type_proofs_consume_the_invocation_budget() {
+        for type_result in [false, true] {
+            let make = || {
+                let mut prepared = literal_preparation(type_result);
+                prepared.package.functions[0].requirements = vec![n::TypePredicate::And(
+                    (0..64)
+                        .map(|_| {
+                            n::TypePredicate::Not(Box::new(n::TypePredicate::Equal(
+                                p(P::Bool),
+                                p(P::U8),
+                            )))
+                        })
+                        .collect(),
+                )];
+                prepared
+            };
+            let mut baseline = 100_000;
+            literal_preparation(type_result)
+                .invoke(&mut baseline, Span::default())
+                .unwrap();
+            let mut enough = 100_000;
+            make().invoke(&mut enough, Span::default()).unwrap();
+            assert!(
+                enough + 64 < baseline,
+                "baseline={baseline}, with proof={enough}"
+            );
+            let mut limited = 32;
+            assert!(make().invoke(&mut limited, Span::default()).is_err());
+            assert!(limited < 32);
+            let mut recovery = 100_000;
+            make().invoke(&mut recovery, Span::default()).unwrap();
         }
     }
 
@@ -1118,6 +1165,7 @@ pub(super) fn implementation_index(
     span: Span,
 ) -> Result<crate::implementation::Index, Error> {
     let mut index = crate::implementation::Index::default();
+    index.set_normal_form_metadata(package.normal_forms.clone());
     index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
     for (id, domain) in package
         .declaration_parameter_domains(&mut 100_000)

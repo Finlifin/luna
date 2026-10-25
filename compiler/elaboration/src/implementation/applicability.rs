@@ -264,6 +264,13 @@ pub(super) fn validate(
                 pending.push((Work::Term(subject), depth + 1));
                 pending.extend(arguments.iter().map(|t| (Work::Term(t), depth + 1)));
             }
+            Work::Term(Term::ErrorValue { ty, label, value }) => {
+                pending.push((Work::Term(ty), depth + 1));
+                if let Some(label) = label {
+                    pending.push((Work::Term(label), depth + 1));
+                }
+                pending.push((Work::Term(value), depth + 1));
+            }
             Work::Term(Term::NominalValue { ty, fields, .. }) => {
                 if fields.len().saturating_add(1) > fuel {
                     return Err("input budget exhausted".into());
@@ -300,7 +307,7 @@ pub(super) fn validate(
                 }
                 pending.extend(items.iter().map(|t| (Work::Term(t), depth + 1)));
             }
-            Work::Term(Term::Pointer(t) | Term::ComptimeFunction(t)) => {
+            Work::Term(Term::Pointer(t) | Term::ComptimeFunction(t) | Term::UnsafeFunction(t)) => {
                 pending.push((Work::Term(t), depth + 1))
             }
             Work::Term(Term::Symbol(name) | Term::String(name)) => {
@@ -314,6 +321,13 @@ pub(super) fn validate(
                 }
                 pending.extend(parameters.iter().map(|p| (Work::Term(&p.ty), depth + 1)));
                 pending.push((Work::Term(result), depth + 1));
+            }
+            Work::Term(Term::ErrorResult { errors, result }) => {
+                if errors.len().saturating_add(1) > fuel {
+                    return Err("input budget exhausted".into());
+                }
+                pending.push((Work::Term(result), depth + 1));
+                pending.extend(errors.iter().map(|ty| (Work::Term(ty), depth + 1)));
             }
             Work::Term(Term::Computation { effects, result }) => {
                 fuel = fuel
@@ -525,10 +539,46 @@ impl ImplementationHead {
         if allowance == 0 {
             return Err(TypeAssessment::Pending("candidate budget exhausted".into()));
         }
-        let budget = Budget {
+        let mut budget = Budget {
             steps: allowance,
             max_depth: budget.max_depth,
         };
+        // Known outer structure can refute a candidate before all of its
+        // parameters are inferred: Tuple versus a known non-tuple constructor, or an explicit error
+        // prefix versus an ordinary type. Require a replayable PTC proof;
+        // grant neither injectivity nor disjointness to opaque factories.
+        let nominal = |ty: &Term| {
+            matches!(ty,
+            Term::Nominal { declaration, .. } if context.is_nominal_constructor(*declaration))
+        };
+        let ordinary = |ty: &Term| {
+            nominal(ty)
+                || context.is_tuple_type(ty)
+                || matches!(
+                    ty,
+                    Term::Primitive(_)
+                        | Term::Tuple(_)
+                        | Term::Record(_)
+                        | Term::Pointer(_)
+                        | Term::Function { .. }
+                        | Term::ComptimeFunction(_)
+                        | Term::UnsafeFunction(_)
+                )
+        };
+        let non_tuple =
+            |ty: &Term| ordinary(ty) && !context.is_tuple_type(ty) && !matches!(ty, Term::Tuple(_));
+        if (context.is_tuple_type(subject) && non_tuple(&self.subject))
+            || (context.is_tuple_type(&self.subject) && non_tuple(subject))
+            || (matches!(&self.subject, Term::ErrorResult { .. }) && ordinary(subject))
+            || (matches!(subject, Term::ErrorResult { .. }) && ordinary(&self.subject))
+        {
+            if let Outcome::Entailed(proof) = context.prove_metered(
+                Formula::equal(self.subject.clone(), subject.clone()).negate(),
+                &mut budget,
+            ) {
+                return Err(TypeAssessment::Excluded(proof));
+            }
+        }
         let (shape, eligibility_proof) = match subject {
             subject if context.is_tuple_type(subject) => (subject.clone(), None),
             Term::Rigid { .. } | Term::NormalForm { .. } | Term::AssociatedType { .. } => {
@@ -554,12 +604,14 @@ impl ImplementationHead {
         if !matches!(
             shape,
             Term::Primitive(_)
+                | Term::ErrorResult { .. }
                 | Term::Nominal { .. }
                 | Term::Tuple(_)
                 | Term::Record(_)
                 | Term::Pointer(_)
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)
+                | Term::UnsafeFunction(_)
         ) && !context.is_tuple_type(&shape)
         {
             return Err(TypeAssessment::Pending(
@@ -744,6 +796,36 @@ impl ImplementationHead {
                             continue;
                         }
                     }
+                    if template.has_pending_error_branch() || actual.has_pending_error_branch() {
+                        if template == actual {
+                            continue;
+                        }
+                        return Err(TypeAssessment::Pending(
+                            "error value branch awaits a completed inner result".into(),
+                        ));
+                    }
+                    if let (
+                        Term::ErrorValue {
+                            ty: a,
+                            label: al,
+                            value: av,
+                        },
+                        Term::ErrorValue {
+                            ty: b,
+                            label: bl,
+                            value: bv,
+                        },
+                    ) = (template, actual)
+                    {
+                        if al.is_some() == bl.is_some() {
+                            pending.push((a, b));
+                            if let (Some(a), Some(b)) = (al, bl) {
+                                pending.push((a, b));
+                            }
+                            pending.push((av, bv));
+                            continue;
+                        }
+                    }
                     if let (Term::TupleValue(left), Term::TupleValue(right)) = (template, actual) {
                         if left.len() == right.len() {
                             if left.len() > fuel.saturating_sub(pending.len()) {
@@ -778,7 +860,10 @@ impl ImplementationHead {
                         && template.scalar_index_domain().is_none()
                         && !matches!(
                             template,
-                            Term::RecordValue(_) | Term::TupleValue(_) | Term::NominalValue { .. }
+                            Term::ErrorValue { .. }
+                                | Term::RecordValue(_)
+                                | Term::TupleValue(_)
+                                | Term::NominalValue { .. }
                         )
                     {
                         return Err(TypeAssessment::Pending(
@@ -815,7 +900,18 @@ impl ImplementationHead {
             };
             relations.push((template, I::Stable(actual.clone())));
         }
-        let (mut candidate, ids) = match root.match_many(&relations, budget) {
+        // Pool input observation, alias resolution, matching, dependency scanning
+        // and freezing with one proof slot per relation. These slots remain
+        // within the existing head partition and do not enlarge its total.
+        let mut inference_budget = Budget {
+            steps: budget
+                .steps
+                .saturating_mul(relations.len().saturating_add(5))
+                .min(remaining),
+            ..budget
+        };
+        let (mut candidate, ids) = match root.match_many_metered(&relations, &mut inference_budget)
+        {
             Ok(candidate) => candidate,
             Err(reason) => {
                 return Err(TypeAssessment::Pending(format!(
@@ -823,7 +919,7 @@ impl ImplementationHead {
                 )));
             }
         };
-        candidate.advance(ids.len(), budget);
+        candidate.advance_metered(ids.len(), &mut inference_budget);
         let mut proofs = Vec::new();
         let mut pending = false;
         for id in ids {
@@ -1026,13 +1122,33 @@ impl Index {
         arguments: &[Term],
         subject: &Term,
         budget: Budget,
+        assess: impl FnMut(&ImplementationHead, Budget) -> (TypeAssessment, Applicability),
+    ) -> Result<TypeResolution, Error> {
+        self.resolve_assessed_with_search_budget(
+            interface,
+            arguments,
+            subject,
+            &mut { budget },
+            assess,
+        )
+    }
+    pub(crate) fn resolve_assessed_with_search_budget(
+        &self,
+        interface: DeclarationId,
+        arguments: &[Term],
+        subject: &Term,
+        budget: &mut Budget,
         mut assess: impl FnMut(&ImplementationHead, Budget) -> (TypeAssessment, Applicability),
     ) -> Result<TypeResolution, Error> {
-        let search_budget = Budget {
+        let mut search_budget = Budget {
             steps: budget.steps / 2,
             max_depth: budget.max_depth,
         };
-        let mut candidates = self.candidates(Some(interface), arguments, subject, search_budget)?;
+        let reserved = search_budget.steps;
+        let searched =
+            self.candidates_metered(Some(interface), arguments, subject, &mut search_budget);
+        budget.steps = budget.steps.saturating_sub(reserved - search_budget.steps);
+        let mut candidates = searched?;
         // Stable rigid arguments identify one symbolic interface instance.
         // Unlike a raw structural search, this path proves each candidate's
         // complete argument relation before permitting selection.
@@ -1043,7 +1159,9 @@ impl Index {
             candidates.fixed_interface = true;
         }
         let candidate_budget = Budget {
-            steps: (budget.steps - search_budget.steps) / candidates.declarations.len().max(1),
+            // Search has already charged its actual work above. Unused search
+            // allowance belongs to the remaining candidate budget.
+            steps: budget.steps / candidates.declarations.len().max(1),
             max_depth: budget.max_depth,
         };
         let mut assessments = BTreeMap::new();
@@ -1289,12 +1407,14 @@ impl ImplementationHead {
         if !matches!(
             shape,
             Term::Primitive(_)
+                | Term::ErrorResult { .. }
                 | Term::Nominal { .. }
                 | Term::Tuple(_)
                 | Term::Record(_)
                 | Term::Pointer(_)
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)
+                | Term::UnsafeFunction(_)
         ) && !context.is_tuple_type(&shape)
         {
             return Err(ProofError::Invalid);
@@ -1397,6 +1517,39 @@ fn validate_head_arguments_with_domains(
             fuel,
         )?;
         nir::type_computations::charge_term(argument, fuel)?;
+        if let Term::TypeListValue(elements) = argument {
+            let package = layouts.ok_or_else(|| {
+                nir::NominalAdmissionError::from(
+                    "type-list argument requires normal-form representation evidence",
+                )
+            })?;
+            let Term::NormalForm {
+                head: declaration, ..
+            } = &domain
+            else {
+                return Err("type-list argument domain is not a bound meta.List<Type>".into());
+            };
+            let mut found = None;
+            for head in &package.normal_forms {
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or(nir::NominalAdmissionError::Budget)?;
+                if head.declaration == *declaration {
+                    if found.is_some() {
+                        return Err("ambiguous type-list representation evidence".into());
+                    }
+                    found = Some(head);
+                }
+            }
+            if binder.sort != Sort::ComptimeValue
+                || !found.is_some_and(|head| head.is_type_list_instance(&domain))
+                || elements.iter().any(|element| element.sort() != Sort::Type)
+                || argument.check_scope(&[]).is_err()
+            {
+                return Err("type-list argument lacks matching meta.List<Type> evidence".into());
+            }
+            continue;
+        }
         if binder.sort == nir::Sort::ComptimeValue
             && *argument
                 == (nir::Term::Rigid {
@@ -1426,7 +1579,7 @@ fn validate_head_arguments_with_domains(
             }
         }
         if binder.sort == Sort::ComptimeValue && matches!(argument, Term::RecordValue(_)) {
-            nir::validate_record_index_with(argument, &domain, fuel, |value, expected, fuel| {
+            let mut symbolic = |value: &Term, expected: &Term, fuel: &mut usize| {
                 let Term::Rigid {
                     declaration,
                     sort: Sort::ComptimeValue,
@@ -1444,10 +1597,50 @@ fn validate_head_arguments_with_domains(
                     || context.is_some_and(|(context, depth)| {
                         equivalent_domains(context, actual, expected, depth, fuel)
                     })
-            })?;
+            };
+            nir::validate_record_index_with_admission_in(
+                argument,
+                &domain,
+                fuel,
+                |value, expected, fuel| {
+                    if matches!(value, Term::NominalValue { .. }) {
+                        nir::validate_declaration_arguments_with_evidence_in(
+                            &[binder.declaration],
+                            std::slice::from_ref(expected),
+                            std::slice::from_ref(value),
+                            fuel,
+                            |ty, variant, fuel| {
+                                let package = layouts.ok_or_else(|| {
+                                    nir::NominalAdmissionError::from(
+                                        "nominal record index requires declaration layouts",
+                                    )
+                                })?;
+                                nir::normal_forms::nominal_value_fields_budgeted(
+                                    package, ty, variant, fuel,
+                                )
+                                .ok_or_else(|| {
+                                    if *fuel == 0 {
+                                        nir::NominalAdmissionError::Budget
+                                    } else {
+                                        nir::NominalAdmissionError::from(
+                                            "invalid nominal record index layout",
+                                        )
+                                    }
+                                })
+                            },
+                            &mut symbolic,
+                            layouts.and_then(|package| package.target),
+                        )?;
+                        Ok(true)
+                    } else {
+                        Ok(symbolic(value, expected, fuel))
+                    }
+                },
+                layouts.and_then(|package| package.target),
+            )?;
             continue;
         }
-        nir::validate_declaration_arguments_with_layouts(
+        nir::validate_declaration_arguments_with_layouts_in(
             &[binder.declaration],
             &[domain],
             std::slice::from_ref(argument),
@@ -1467,6 +1660,7 @@ fn validate_head_arguments_with_domains(
                         }
                     })
             },
+            layouts.and_then(|package| package.target),
         )?;
     }
     Ok(())

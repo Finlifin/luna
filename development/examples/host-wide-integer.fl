@@ -1,0 +1,11 @@
+-- The result crosses the host machine word boundary without truncation.
+typealias Wide = .u128'builtin;
+
+fn double(value: Wide) -> Wide
+where requires value <= 18446744073709551616 {
+    value * 2
+}
+
+fn run() -> Wide {
+    double(18446744073709551616)
+}

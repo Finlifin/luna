@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Type = .Type'builtin;
 typealias Bool = true'type;
 typealias Int = .Integer'builtin;
@@ -12,7 +15,7 @@ comptime fn NamedLength(value: Type) -> Int {
 comptime fn ElementType(value: Type) -> Type {
     value match { Array<Element, _> => Element, _ => value }
 }
-comptime fn run() -> (Int, Int, Int, Bool) {
+comptime fn run() -> Tuple<Int, Int, Int, Bool> {
     (Length(Array<Bool, 4>), NamedLength(Array<Bool, 7>),
      Length(Other<Bool, 9>), ElementType(Array<Bool, 4>) == Bool)
 }
@@ -20,7 +23,7 @@ comptime fn InnerLength(value: Type) -> Int {
     value match { Array<Array<'Bool, inner>, _> => inner, _ => 0 }
 }
 comptime fn nested() -> Int { InnerLength(Array<Array<Bool, 5>, 8>) }
-pure comptime fn Tagged<value: (Int, Bool)> -> Type { Bool }
+pure comptime fn Tagged<value: Tuple<Int, Bool>> -> Type { Bool }
 comptime fn TagNumber(value: Type) -> Int {
     value match { Tagged<(number, true)> => number, _ => 0 }
 }
@@ -52,16 +55,16 @@ comptime fn NamedContents(value: Type) -> Bool {
     value match { Box<value: contents, T: 'Bool> => contents, _ => false }
 }
 comptime fn TupleContents(value: Type) -> Int {
-    value match { Box< < (Int, Bool) > , (number, true)> => number, _ => 0 }
+    value match { Box< < Tuple<Int, Bool> > , (number, true)> => number, _ => 0 }
 }
-comptime fn dependent_values() -> (Bool, Bool, Int, Bool) {
+comptime fn dependent_values() -> Tuple<Bool, Bool, Int, Bool> {
     (BoolContents(Box<Bool, true>), NamedContents(Box<Bool, true>),
-     TupleContents(Box<(Int, Bool), (23, true)>), BoolContents(Box<Int, 1>))
+     TupleContents(Box<Tuple<Int, Bool>, (23, true)>), BoolContents(Box<Int, 1>))
 }
 
 comptime fn Contents(value: Type, fallback: T) -> T where T {
     value match { Box<'T, contents> => contents, _ => fallback }
 }
-comptime fn generic_contents() -> (Bool, Int) {
+comptime fn generic_contents() -> Tuple<Bool, Int> {
     (Contents<Bool>(Box<Bool, true>, false), Contents<Int>(Box<Int, 29>, 0))
 }

@@ -1,4 +1,4 @@
-typealias Unit = ();
+typealias Unit = .void'builtin;
 typealias Type = .Type'builtin;
 typealias Int = .Integer'builtin;
 pure comptime fn Token<value: Unit> -> Type { .u8'builtin }

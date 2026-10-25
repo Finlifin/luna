@@ -444,7 +444,7 @@ sub_assignment -> expr -= expr
 mul_assignment -> expr *= expr
 div_assignment -> expr /= expr
 rem_assignment -> expr %= expr
-const_decl -> const_def
+const_decl -> const pattern (: expr)? = expr (else block)?
 assumes_statement -> assumes expr
 attributed_statement -> ^expr statement
 
@@ -529,7 +529,8 @@ prefix_pattern -> symbol
 error_pattern -> error pattern
 not_pattern -> not pattern
 list_pattern -> [pattern*]
-list_rest_pattern -> ...id
+-- rest 仅可位于列表模式末尾；_ 忽略剩余部分。
+list_rest_pattern -> ... (id | _)
 tuple_pattern -> (pattern, pattern*)
 struct_pattern -> { (property_pattern | pattern)* }
 property_pattern -> id : pattern

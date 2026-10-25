@@ -1,0 +1,11 @@
+-- Invocation observes the function field; the owning record remains complete.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+struct Actions { call: fn() -> bool }
+impl Retire for Actions { fn drop(*self) {} }
+fn ready() -> bool { true }
+fn run() -> bool {
+    let actions = Actions {call:ready};
+    actions.call() and actions.call()
+}

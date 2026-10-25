@@ -41,12 +41,16 @@ impl Solver<'_, '_> {
         ) {
             return unknown(goal);
         }
-        let proof_budget = Budget {
+        let mut proof_budget = Budget {
             steps: (budget.steps / 4).min(self.remaining),
             ..budget
         };
-        self.remaining -= proof_budget.steps;
-        let direct = self.world.context.prove(goal.clone(), proof_budget);
+        let before = proof_budget.steps;
+        let direct = self
+            .world
+            .context
+            .prove_metered(goal.clone(), &mut proof_budget);
+        self.remaining -= before - proof_budget.steps;
         if matches!(direct, Outcome::Entailed(_) | Outcome::IllFormed(_)) {
             return direct;
         }
@@ -86,12 +90,13 @@ impl Solver<'_, '_> {
                 Err(reason) => return Outcome::IllFormed(reason),
             }
         }
-        let proof_budget = Budget {
-            steps: proof_budget.steps.min(self.remaining),
+        let mut proof_budget = Budget {
+            steps: (budget.steps / 4).min(self.remaining),
             ..proof_budget
         };
-        self.remaining -= proof_budget.steps;
-        let outcome = context.prove(goal, proof_budget);
+        let before = proof_budget.steps;
+        let outcome = context.prove_metered(goal, &mut proof_budget);
+        self.remaining -= before - proof_budget.steps;
         if let Outcome::Entailed(proof) = &outcome {
             support.push(ConditionSupport {
                 context,

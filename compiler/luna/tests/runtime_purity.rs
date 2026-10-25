@@ -5,6 +5,44 @@ mod execution_support;
 use execution_support::{calls, compile, compile_with_protocols, id};
 
 #[test]
+fn finite_scalar_type_domains_check_every_resource_behavior_case() {
+    let prefix="trait Copy {} trait Drop {fn drop(*self);} impl Copy for bool {} impl Copy for .f32'builtin {} impl Copy for .f64'builtin {}
+        trait Read {fn read(self,p:*bool)->bool;}
+        impl Read for .f32'builtin {fn read(self,p:*bool)->bool {true}}
+        impl Read for .f64'builtin {fn read(self,p:*bool)->bool {true}}
+        pure fn choose(value:T,p:*bool)->bool where T :- Read, requires T == .f32'builtin or T == .f64'builtin {value.as(Read).read(p)}";
+    let selectors = luna::protocols::type_constructors::Selectors {
+        copy: Some("input::Copy"),
+        drop: Some("input::Drop"),
+        ..Default::default()
+    };
+    execution_support::compile_with_source_bindings(prefix, &Default::default(), selectors)
+        .unwrap();
+    for source in [
+        prefix.replace(
+            "impl Read for .f32'builtin {fn read(self,p:*bool)->bool {true}}",
+            "impl Read for .f32'builtin {fn read(self,p:*bool)->bool {p.* = false;true}}",
+        ),
+        prefix.replace(
+            "impl Read for .f64'builtin {fn read(self,p:*bool)->bool {true}}",
+            "impl Read for .f64'builtin {fn read(self,p:*bool)->bool {p.* = false;true}}",
+        ),
+        prefix.replace(", requires T == .f32'builtin or T == .f64'builtin", ""),
+    ] {
+        let error = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            selectors,
+        )
+        .unwrap_err();
+        assert!(error.contains("P4 evidence"), "{error}");
+    }
+    // A failed alternative must not persist as an assumption for a fresh check.
+    execution_support::compile_with_source_bindings(prefix, &Default::default(), selectors)
+        .unwrap();
+}
+
+#[test]
 fn pure_scalar_functions_keep_their_runtime_phase_and_execute() {
     let package = compile(
         "pure fn smaller(left:.u8'builtin,right:.u8'builtin)->.u8'builtin {var result=left;if right < left {result=right;}result} fn run()->.u8'builtin {smaller(7,3)}",
@@ -86,6 +124,10 @@ fn pure_is_not_a_license_for_external_effects_or_unknown_cleanup() {
     for source in [
         "pure fn write(p:*bool)->bool {p.* = true;true}",
         "pure fn read(p:*bool)->bool {p.*}",
+        "pure fn write(p:*bool)->bool {unsafe {p.* = true;true}}",
+        "pure fn read(p:*bool)->bool {unsafe {p.*}}",
+        "pure unsafe fn read(p:*bool)->bool {p.*}",
+        "pure unsafe fn write(p:*bool)->bool {p.* = true;true}",
         "pure fn call(action:fn()->bool)->bool {action()}",
         "struct Owned {} pure fn discard()->bool {let value=Owned {};true}",
         "fn write(p:*bool)->bool {p.* = true;true} pure fn caller(p:*bool)->bool {write(p)}",
@@ -184,8 +226,8 @@ fn pure_generic_identity_transfers_owned_values_without_inventing_copy() {
 
 #[test]
 fn pure_branches_transfer_all_owned_inputs_on_every_return() {
-    let package = compile(
-        "struct Ticket {flag:bool} pure fn reorder(first:T,second:T,flag:bool)->(T,T) where T {if flag {return (first,second);}else{(second,first)}} fn run()->bool {let (a,b)=reorder(Ticket {flag:true},Ticket {flag:false},false);not a.flag and b.flag}",
+    let package = execution_support::compile_with_tuple(
+        "struct Ticket {flag:bool} pure fn reorder(first:T,second:T,flag:bool)->Tuple<T,T> where T {if flag {return (first,second);}else{(second,first)}} fn run()->bool {let (a,b)=reorder(Ticket {flag:true},Ticket {flag:false},false);not a.flag and b.flag}",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -207,13 +249,14 @@ fn pure_helpers_and_constructors_preserve_owned_responsibility() {
 #[test]
 fn pure_transfer_rejects_duplication_and_implicit_retirement() {
     for source in [
-        "pure fn duplicate(value:T)->(T,T) where T {(value,value)}",
+        "pure fn duplicate(value:T)->Tuple<T,T> where T {(value,value)}",
         "pure fn forget(value:T) where T {}",
         "pure fn choose(first:T,second:T,flag:bool)->T where T {if flag {first} else {second}}",
         "fn forget(value:T)->bool where T {true} pure fn caller(value:T)->bool where T {forget(value)}",
         "struct Ticket {} pure fn leak()->bool {let value=Ticket {};true}",
     ] {
-        let error = compile_with_protocols(source, &Default::default()).unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(source, &Default::default())
+            .unwrap_err();
         assert!(error.contains("P4 evidence"), "{source}: {error}");
     }
 }
@@ -227,7 +270,7 @@ fn pure_enum_forwarding_and_normal_tuple_construction_keep_transfer_paths() {
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
-    let source = "typealias Type=.Type'builtin;pure comptime fn List<T>->Type {T} pure comptime fn Tuple<...Es:List<Type>>->Type {bool} pure fn swap(a:A,b:B)->(B,A) where A,B {(b,a)} struct Ticket {flag:bool} fn run()->bool {let (a,b)=swap(Ticket {flag:true},Ticket {flag:false});not a.flag and b.flag}";
+    let source = "typealias Type=.Type'builtin;pure comptime fn List<T>->Type {T} pure comptime fn Tuple<...Es:List<Type>>->Type {bool} pure fn swap(a:A,b:B)->Tuple<B,A> where A,B {(b,a)} struct Ticket {flag:bool} fn run()->bool {let (a,b)=swap(Ticket {flag:true},Ticket {flag:false});not a.flag and b.flag}";
     let package = execution_support::compile_with_source_bindings(
         source,
         &Default::default(),
@@ -262,24 +305,25 @@ fn extracting_payloads_still_requires_evidence_for_wrapper_cleanup() {
 
 #[test]
 fn pure_nominal_copy_requires_bound_protocol_and_representation_evidence() {
-    let source = "trait Copy {} trait Drop {fn drop(*self);} struct Flag {value:bool} impl Copy for Flag {} pure fn duplicate(value:Flag)->(Flag,Flag) {(value,value)} fn run()->bool {let (first,second)=duplicate(Flag {value:true});first.value and second.value}";
+    let source = "trait Copy {} trait Drop {fn drop(*self);} struct Flag {value:bool} impl Copy for Flag {} pure fn duplicate(value:Flag)->Tuple<Flag,Flag> {(value,value)} fn run()->bool {let (first,second)=duplicate(Flag {value:true});first.value and second.value}";
     let selectors = luna::protocols::type_constructors::Selectors {
         copy: Some("input::Copy"),
         drop: Some("input::Drop"),
         ..Default::default()
     };
     let package =
-        execution_support::compile_with_source_bindings(source, &Default::default(), selectors)
+        execution_support::compile_with_tuple_selectors(source, &Default::default(), selectors)
             .unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
-    let unbound = compile_with_protocols(source, &Default::default()).unwrap_err();
+    let unbound =
+        execution_support::compile_with_tuple_protocols(source, &Default::default()).unwrap_err();
     assert!(unbound.contains("P4 evidence"), "{unbound}");
     let with_drop = format!("{source} impl Drop for Flag {{fn drop(*self) {{}}}}");
     let error =
-        execution_support::compile_with_source_bindings(&with_drop, &Default::default(), selectors)
+        execution_support::compile_with_tuple_selectors(&with_drop, &Default::default(), selectors)
             .unwrap_err();
     assert!(error.contains("P4 evidence"), "{error}");
 }
@@ -296,9 +340,9 @@ fn pure_copy_checks_all_nested_fields_and_enum_variants() {
         "enum Flag {empty,owned(Owned)}",
     ] {
         let source = format!(
-            "trait Copy {{}} trait Drop {{fn drop(*self);}} struct Owned {{}} {definition} impl Copy for Flag {{}} pure fn duplicate(value:Flag)->(Flag,Flag) {{(value,value)}}"
+            "trait Copy {{}} trait Drop {{fn drop(*self);}} struct Owned {{}} {definition} impl Copy for Flag {{}} pure fn duplicate(value:Flag)->Tuple<Flag,Flag> {{(value,value)}}"
         );
-        let error = execution_support::compile_with_source_bindings(
+        let error = execution_support::compile_with_tuple_selectors(
             &source,
             &Default::default(),
             selectors,
@@ -346,7 +390,7 @@ fn trivial_retirement_checks_nested_destructors_and_all_variants() {
         let source = format!(
             "trait Drop {{fn drop(*self);}} struct Owned {{flag:bool}} impl Drop for Owned {{fn drop(*self) {{let observed=self.flag.*;}}}} {wrapper} pure fn retire(value:Wrapper) {{}}"
         );
-        let error = execution_support::compile_with_source_bindings(
+        let error = execution_support::compile_with_tuple_selectors(
             &source,
             &Default::default(),
             selectors,
@@ -354,9 +398,9 @@ fn trivial_retirement_checks_nested_destructors_and_all_variants() {
         .unwrap_err();
         assert!(error.contains("P4 evidence"), "{error}");
     }
-    let duplicate = "trait Drop {fn drop(*self);} struct Owned {} pure fn duplicate(value:Owned)->(Owned,Owned) {(value,value)}";
+    let duplicate = "trait Drop {fn drop(*self);} struct Owned {} pure fn duplicate(value:Owned)->Tuple<Owned,Owned> {(value,value)}";
     let error =
-        execution_support::compile_with_source_bindings(duplicate, &Default::default(), selectors)
+        execution_support::compile_with_tuple_selectors(duplicate, &Default::default(), selectors)
             .unwrap_err();
     assert!(error.contains("P4 evidence"), "{error}");
 }
@@ -1332,5 +1376,231 @@ fn closure_capture_code_evidence_preserves_absent_enum_payloads() {
         )
         .unwrap_err();
         assert!(error.contains("P4 evidence"), "{error}");
+    }
+}
+
+#[test]
+fn pure_error_construction_propagation_and_catches_keep_runtime_behavior() {
+    let package=compile_error_purity("enum Failure {Bad,}
+        pure fn input(failed:bool)->!Failure bool {if failed {error Failure.Bad}else{true}}
+        pure fn propagate(failed:bool)->!Failure bool {input(failed)!}
+        pure fn recover(failed:bool)->bool {propagate(failed)! {catch _=>{},.Bad=>{},catch _=>false,}}
+        fn run()->bool {recover(false) and not recover(true)}").unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn pure_error_payload_computation_cannot_hide_external_writes() {
+    let failure = compile_with_protocols(
+        "fn mutate(target:*bool)->bool {target.* = true;false}
+        pure fn bad(target:*bool)->!bool bool {error mutate(target)}",
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(
+        failure.contains("pure") || failure.contains("purity"),
+        "{failure}"
+    );
+}
+
+fn compile_error_purity(source: &str) -> Result<nir::program::Package, String> {
+    execution_support::compile_with_tuple_selectors(
+        &format!("trait Copy {{}} trait Drop {{fn drop(*self);}} {source}"),
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            copy: Some("input::Copy"),
+            drop: Some("input::Drop"),
+            ..Default::default()
+        },
+    )
+}
+
+#[test]
+fn pure_error_callable_payloads_survive_row_reordering_and_pattern_projection() {
+    let package=compile_error_purity("typealias Action=fn()->bool;
+        enum Code {Run(Action)} enum Other {Missing,}
+        fn good()->bool {true}
+        pure fn make()->![Code,Other] bool {error Code.Run(good)}
+        pure fn reordered()->![Other,Code] bool {make()}
+        pure fn invoke()->bool {reordered() match {value! => value,error Code.Run(action)=>action(),error Other.Missing=>false,}}
+        fn run()->bool {invoke()}").unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn pure_error_transport_does_not_make_impure_callbacks_pure() {
+    let source="typealias Action=fn(*bool)->bool;
+        fn dirty(target:*bool)->bool {target.* = true;true}
+        pure fn make()->!Action Action {error dirty}
+        pure fn invoke(target:*bool)->bool {make() match {action! => action(target),error action=>action(target),}}";
+    let failure = compile_error_purity(source).unwrap_err();
+    assert!(
+        failure.contains("invoke") && failure.contains("P4 evidence"),
+        "{failure}"
+    );
+    compile_error_purity(
+        "typealias Action=fn(*bool)->bool;
+        fn dirty(target:*bool)->bool {target.* = true;true}
+        pure fn make()->!Action Action {error dirty}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn pure_error_loop_tracks_callback_updates_across_iterations() {
+    let package=compile_error_purity("typealias Action=fn()->bool;fn good()->bool {true}
+        pure fn run()->bool {var packet:!Action Action=error good;var again=true;var answer=false;
+            while again {packet match {action! => {answer=action();},error action=>{answer=action();}};
+                packet=good;again=false;}answer}").unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+    let failure=compile_error_purity("typealias Action=fn(*bool)->bool;
+        fn good(target:*bool)->bool {true} fn dirty(target:*bool)->bool {target.* = true;true}
+        pure fn bad(target:*bool)->bool {var packet:!Action Action=error good;var first=true;var again=true;
+            while again {packet match {action! => {action(target);},error action=>{action(target);}};
+                if first {packet=error dirty;first=false;}else{packet=good;again=false;}}true}").unwrap_err();
+    assert!(failure.contains("P4 evidence"), "{failure}");
+}
+
+#[test]
+fn pure_error_transfer_does_not_authorize_impure_payload_cleanup() {
+    let common = "struct Owned {target:*bool} impl Drop for Owned {fn drop(*self) {self.target.*.* = true;}}";
+    compile_error_purity(&format!(
+        "{common}
+        pure fn wrap(value:Owned)->!Owned bool {{error value}}
+        pure fn forward(value:!Owned bool)->!Owned bool {{value!}}"
+    ))
+    .unwrap();
+    let failure = compile_error_purity(&format!(
+        "{common}
+        pure fn discard(value:!Owned bool)->bool {{value! {{_=>true,}}}}"
+    ))
+    .unwrap_err();
+    assert!(
+        failure.contains("discard") && failure.contains("P4 evidence"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn pure_error_constructor_does_not_invent_identity_for_unknown_callback() {
+    let failure = compile_error_purity(
+        "typealias Action=fn(*bool)->bool;
+        pure fn invoke(action:Action,target:*bool)->bool {
+            let packet:!Action Action=error action;
+            packet match {callback! => callback(target),error callback=>callback(target),}}",
+    )
+    .unwrap_err();
+    assert!(failure.contains("P4 evidence"), "{failure}");
+}
+
+#[test]
+fn pure_error_runtime_defaults_check_payload_effects() {
+    let package = compile_error_purity(
+        "fn accept(.value:!bool bool=error true)->bool {
+            value match {result! => result,error result=>result,}}
+        fn run()->bool {accept()}",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+    let failure = compile_error_purity(
+        "fn dirty(target:*bool)->bool {target.* = true;true}
+        fn accept(target:*bool,.value:!bool bool=error dirty(target))->bool {true}",
+    )
+    .unwrap_err();
+    assert!(
+        failure.contains("default") || failure.contains("finite"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn pure_error_cleanup_precision_keeps_unmoved_sibling_obligations() {
+    let common = "struct Owned {target:*bool} impl Drop for Owned {fn drop(*self) {self.target.*.* = true;}}";
+    compile_error_purity(&format!(
+        "{common}
+        pure fn transfer(value:Tuple<Owned,bool>)->!Owned bool {{let (owner,flag)=value;error owner}}"
+    ))
+    .unwrap();
+    let failure = compile_error_purity(&format!(
+        "{common}
+        pure fn lose(value:Tuple<Owned,Owned>)->!Owned bool {{let (first,second)=value;error first}}"
+    ))
+    .unwrap_err();
+    assert!(
+        failure.contains("lose") && failure.contains("P4 evidence"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn pure_product_error_transport_preserves_callable_field_identity() {
+    use comptime_interpretor::Value;
+    let source="enum Failure where T {Bad(T)} enum Other {Bad}
+        pure fn sample()->![Other,Failure<bool>] bool {error Failure<bool>.Bad(true)}
+        pure fn action()->bool {true}
+        pure fn forward(value:Tuple<![Failure<T>,Other] bool,fn()->bool>)->Tuple<![Failure<T>,Other] bool,fn()->bool> where T {value}
+        pure fn run()->bool {let (result,callback)=forward((sample(),action));
+            result! {Failure<bool>.Bad(_)=>callback(),Other.Bad=>false}}";
+    let package = compile_error_purity(source).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn owned_defaults_preserve_symbolic_copy_parameter_domains() {
+    let source = "trait Copy {} trait Drop {fn drop(*self);}
+        struct Flag where tag:bool {value:bool}
+        impl Copy for Flag<tag> where tag:bool {}
+        struct Owned {}
+        impl Drop for Owned {fn drop(*self) {}}
+        fn consume(value:Owned, flag:Flag<tag>)->bool where tag:bool {flag.value}
+        fn take(flag:Flag<which>, .result:bool=consume(Owned{},flag))->bool
+            where which:bool {result and flag.value}
+        fn run()->bool {take(Flag<true>{value:true})}";
+    let package = execution_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            copy: Some("input::Copy"),
+            drop: Some("input::Drop"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        luna::execution::interpret_with_protocols(&package, "run", "Copy", "Drop", 100_000,)
+            .unwrap(),
+        Value::Bool(true)
+    );
+    for replacement in ["", "impl Copy for Flag<false> {}"] {
+        let rejected = source.replace("impl Copy for Flag<tag> where tag:bool {}", replacement);
+        let error = execution_support::compile_with_source_bindings(
+            &rejected,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                copy: Some("input::Copy"),
+                drop: Some("input::Drop"),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("P3 stability/termination evidence"),
+            "{error}"
+        );
     }
 }

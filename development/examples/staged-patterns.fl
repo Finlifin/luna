@@ -1,3 +1,6 @@
+-- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- Match chooses the instance input; no matching remains in the runtime body.
 fn selected(comptime value: bool) -> bool {
     value
@@ -21,7 +24,7 @@ fn has_identity_head() -> bool where T {
     })
 }
 
-fn run() -> (bool, bool, bool, bool) {
+fn run() -> Tuple<bool, bool, bool, bool> {
     (opposite(false), opposite(true),
      has_identity_head<Identity<bool>>(), has_identity_head<bool>())
 }

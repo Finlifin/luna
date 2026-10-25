@@ -446,6 +446,9 @@ fn pattern_scan(
                 *scope = common;
             }
         }
+        P::ErrorResult { inner, .. } => {
+            pattern_scan(inner, scope, free, fuel, depth + 1, dependencies)?
+        }
         P::NominalType { fields, .. }
         | P::Record { fields, .. }
         | P::AnonymousRecord { fields, .. }

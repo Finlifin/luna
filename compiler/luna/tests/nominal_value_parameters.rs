@@ -127,15 +127,15 @@ fn effect_groups_admit_dependent_nominal_and_default_inputs() {
 fn effect_group_value_inference_accepts_computed_packets() {
     let source = "struct Flag where tag:bool {value:bool}
         effect enum Channel where tag:bool {read(value:Flag<tag>)->bool,}
-        fn packet()->(Flag<true>,) {(Flag<true>{value:true},)}
+        fn packet()->Tuple<Flag<true>> {(Flag<true>{value:true},)}
         fn run()->bool {Channel.read(...packet())# {Channel<true>.read(value)=>value.value,}}";
-    let package = support::compile(source);
+    let package = support::compile_with_tuple(source);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
     assert!(
-        support::compile_with_protocols(
+        support::compile_with_tuple_protocols(
             &source.replace("Channel<true>.read(value)", "Channel<false>.read(value)"),
             &Default::default(),
         )
@@ -981,7 +981,7 @@ fn comptime_nominal_constructor_rejects_wrong_domains_and_runtime_escape() {
 fn comptime_nominal_mixed_packets_execute_once() {
     let source = "typealias Type=.Type'builtin;
         newtype Flags<a:bool,b:bool> = bool;
-        comptime fn packet(pointer:*bool)->(bool,bool) {
+        comptime fn packet(pointer:*bool)->Tuple<bool,bool> {
             pointer.* = not pointer.*;
             (pointer.*,not pointer.*)
         }
@@ -992,27 +992,33 @@ fn comptime_nominal_mixed_packets_execute_once() {
         }
         fn read(value:Flags<true,false>)->bool {value.as(bool)}
         fn run()->bool {read(true.as(Build()))}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn comptime_nominal_mixed_packet_domains_and_width_are_checked() {
     let source = "typealias Type=.Type'builtin;
         newtype Flag<T,tag:bool> = T;
-        comptime fn packet()->(Type,bool) {(bool,true)}
+        comptime fn packet()->Tuple<Type,bool> {(bool,true)}
         comptime fn Build()->Type {Flag<...packet()>}
         fn read(value:Flag<bool,true>)->bool {value.as(bool)}
         fn run()->bool {read(true.as(Build()))}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     for invalid in [
         source.replace(
-            "(Type,bool) {(bool,true)}",
-            "(Type,.char'builtin) {(bool,'x')}",
+            "Tuple<Type,bool> {(bool,true)}",
+            "Tuple<Type,.char'builtin> {(bool,'x')}",
         ),
         source.replace("Flag<...packet()>", "Flag<...packet(),false>"),
         source.replace("Flag<...packet()>", "Flag<...true>"),
     ] {
-        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+        assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
     }
 }
 
@@ -1034,7 +1040,7 @@ fn comptime_nominal_empty_packets_keep_effects_and_named_defaults() {
 fn comptime_nominal_multiple_packets_and_named_inputs_preserve_source_order() {
     let source = "typealias Type=.Type'builtin;
         newtype Flags<a:bool,b:bool,.last:bool=false> = bool;
-        comptime fn packet(pointer:*bool)->(bool,) {
+        comptime fn packet(pointer:*bool)->Tuple<bool> {
             pointer.* = not pointer.*;(pointer.*,)
         }
         comptime fn Build()->Type {
@@ -1043,18 +1049,24 @@ fn comptime_nominal_multiple_packets_and_named_inputs_preserve_source_order() {
         }
         fn read(value:Flags<true,false,.last=true>)->bool {value.as(bool)}
         fn run()->bool {read(true.as(Build()))}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn comptime_nominal_member_packets_reuse_parent_defaults() {
     let source = "typealias Type=.Type'builtin;
         struct Holder where tag:bool {pub newtype Wrapped<value:bool,.other:bool=tag> = bool;}
-        comptime fn packet(value:bool)->(bool,) {(value,)}
+        comptime fn packet(value:bool)->Tuple<bool> {(value,)}
         comptime fn Build(tag:bool)->Type {Holder<tag>.Wrapped<...packet(not tag)>}
         fn read(value:Holder<false>.Wrapped<true,.other=false>)->bool {value.as(bool)}
         fn run()->bool {read(true.as(Build(false)))}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -1063,7 +1075,7 @@ fn comptime_nominal_packets_preserve_bound_tuple_normal_form() {
         pure comptime fn List<T>->Type {T}
         pure comptime fn Tuple<...Es:List<Type>>->Type {bool}
         newtype Flags<a:bool,b:bool> = bool;
-        comptime fn packet()->(bool,bool) {(true,false)}
+        comptime fn packet()->Tuple<bool,bool> {(true,false)}
         comptime fn Build()->Type {Flags<...packet()>}
         fn read(value:Flags<true,false>)->bool {value.as(bool)}
         fn run()->bool {read(true.as(Build()))}";
@@ -1101,13 +1113,16 @@ fn comptime_nominal_dependent_value_domains_wait_for_dynamic_types() {
 fn comptime_nominal_dependent_packet_domains_are_checked_at_invocation() {
     let source = "typealias Type=.Type'builtin;
         newtype Tagged<T,value:T> = T;
-        comptime fn packet(ty:Type)->(Type,bool) {(ty,true)}
+        comptime fn packet(ty:Type)->Tuple<Type,bool> {(ty,true)}
         comptime fn Build(ty:Type)->Type {Tagged<...packet(ty)>}
         fn read(value:Tagged<bool,true>)->bool {value.as(bool)}
         fn run()->bool {read(true.as(Build(bool)))}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let invalid = source.replace("Build(bool)", "Build(.char'builtin)");
-    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&invalid, &Default::default()).is_err());
 }
 
 #[test]
@@ -4856,23 +4871,29 @@ fn method_value_clauses_instantiate_domains_from_captured_types() {
 #[test]
 fn value_clause_inference_survives_runtime_argument_spreads() {
     let source = "struct Flag where enabled:bool {}
-        fn packet(value:Flag<flag>)->(Flag<flag>,bool) where flag:bool {(value,true)}
+        fn packet(value:Flag<flag>)->Tuple<Flag<flag>,bool> where flag:bool {(value,true)}
         fn read(value:Flag<flag>, tail:bool)->bool where flag:bool {flag and tail}
         fn run()->bool {read(...packet(Flag<true>{})) and not read(...packet(Flag<false>{}))}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn method_value_clause_inference_survives_runtime_argument_spreads() {
     let source = "struct Flag where enabled:bool {}
-        fn packet(value:Flag<flag>)->(Flag<flag>,bool) where flag:bool {(value,true)}
+        fn packet(value:Flag<flag>)->Tuple<Flag<flag>,bool> where flag:bool {(value,true)}
         struct Host where outer:bool {
             pub fn read(value:Flag<flag>,tail:bool)->bool where flag:bool {outer and flag and tail}
         }
         fn run()->bool {Host<true>.read(...packet(Flag<true>{}))
             and not Host<true>.read(...packet(Flag<false>{}))
             and not Host<false>.read(...packet(Flag<true>{}))}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -4880,18 +4901,21 @@ fn value_clause_inference_survives_property_collection() {
     let source = "struct Flag where enabled:bool {}
         fn packet(...fields:T)->T where T {fields}
         fn exemplar()->Flag<flag> where flag:bool {Flag<flag>{}}
-        fn read(...items:(bool,),...fields:(packet {value:exemplar<flag>()})'type)->bool where flag:bool {flag}
+        fn read(...items:Tuple<bool>,...fields:(packet {value:exemplar<flag>()})'type)->bool where flag:bool {flag}
         fn run()->bool {(read {true,value:Flag<true>{}}) and not (read {true,value:Flag<false>{}})}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn value_clause_argument_spreads_reject_conflicting_instance_inputs() {
     let source = "struct Flag where enabled:bool {}
-        fn packet()->(Flag<true>,Flag<false>) {(Flag<true>{},Flag<false>{})}
+        fn packet()->Tuple<Flag<true>,Flag<false>> {(Flag<true>{},Flag<false>{})}
         fn read(a:Flag<flag>,b:Flag<flag>)->bool where flag:bool {flag}
         fn run()->bool {read(...packet())}";
-    assert!(support::compile_with_protocols(source, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(source, &Default::default()).is_err());
 }
 
 #[test]
@@ -4920,30 +4944,39 @@ fn value_clauses_flow_through_nested_comptime_calls() {
 fn value_clauses_infer_for_dependent_result_signatures() {
     let source = "typealias Type=.Type'builtin;
         struct Flag where enabled:bool {}
-        fn read(comptime T:Type,value:Flag<flag>,result:T)->(T,bool) where flag:bool {(result,flag)}
+        fn read(comptime T:Type,value:Flag<flag>,result:T)->Tuple<T,bool> where flag:bool {(result,flag)}
         fn run()->bool {let (a,yes)=read(bool,Flag<true>{},true);
             let (b,no)=read(bool,Flag<false>{},false);a and yes and not b and not no}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
-    let spread = source.replace("fn run()", "fn packet(value:Flag<flag>,result:bool)->(Flag<flag>,bool) where flag:bool {(value,result)} fn run()")
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    let spread = source.replace("fn run()", "fn packet(value:Flag<flag>,result:bool)->Tuple<Flag<flag>,bool> where flag:bool {(value,result)} fn run()")
         .replace("read(bool,Flag<true>{},true)", "read(bool,...packet(Flag<true>{},true))")
         .replace("read(bool,Flag<false>{},false)", "read(bool,...packet(Flag<false>{},false))");
-    assert_eq!(support::run_iir(&spread, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&spread, "run", vec![]),
+        Value::Bool(true)
+    );
     let wrong = source.replace(
         "read(bool,Flag<true>{},true)",
         "read(bool,Flag<true>{},'x')",
     );
-    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&wrong, &Default::default()).is_err());
 }
 
 #[test]
 fn open_value_clause_inference_settles_dependent_defaults() {
     let source = "typealias Type=.Type'builtin;
         struct Flag where enabled:bool {}
-        fn read(comptime T:Type,value:Flag<flag>,result:T)->(T,bool)
+        fn read(comptime T:Type,value:Flag<flag>,result:T)->Tuple<T,bool>
         where flag:bool,.fallback:bool=flag {(result,fallback)}
         fn run()->bool {let (a,yes)=read(bool,Flag<true>{},true);
             let (b,no)=read(bool,Flag<false>{},false);a and yes and not b and not no}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -4963,21 +4996,27 @@ fn dependent_methods_route_computed_packets_with_value_captures() {
     let source = "typealias Type=.Type'builtin;
         struct Flag where enabled:bool {}
         struct Host where outer:bool {
-            pub fn read(comptime T:Type,value:Flag<flag>,result:T)->(T,bool)
+            pub fn read(comptime T:Type,value:Flag<flag>,result:T)->Tuple<T,bool>
             where flag:bool {(result,outer and flag)}
         }
-        fn packet(value:Flag<flag>,result:bool)->(Flag<flag>,bool) where flag:bool {(value,result)}
+        fn packet(value:Flag<flag>,result:bool)->Tuple<Flag<flag>,bool> where flag:bool {(value,result)}
         fn run()->bool {let (a,yes)=Host<true>.read(bool,...packet(Flag<true>{},true));
             let (b,no)=Host<false>.read(bool,...packet(Flag<true>{},false));
             a and yes and not b and not no}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let bound = source
         .replace("pub fn read(comptime", "pub fn read(self,comptime")
         .replace("Host<true>.read", "Host<true>{}.read")
         .replace("Host<false>.read", "Host<false>{}.read");
-    assert_eq!(support::run_iir(&bound, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&bound, "run", vec![]),
+        Value::Bool(true)
+    );
     let wrong = source.replace("read(bool,...packet", "read(.u8'builtin,...packet");
-    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&wrong, &Default::default()).is_err());
 }
 
 #[test]
@@ -4985,15 +5024,18 @@ fn dependent_method_packets_execute_once_after_the_receiver() {
     let source = "typealias Type=.Type'builtin;
         struct Flag where enabled:bool {}
         struct Host where outer:bool {
-            pub fn read(self,comptime T:Type,value:Flag<flag>,result:T)->(T,bool)
+            pub fn read(self,comptime T:Type,value:Flag<flag>,result:T)->Tuple<T,bool>
             where flag:bool {(result,outer and flag)}
         }
         fn receiver(state:*bool)->Host<true> {state.* = true;Host<true>{}}
-        fn packet(state:*bool)->(Flag<true>,bool) {let previous=state.*;state.* = not previous;(Flag<true>{},previous)}
+        fn packet(state:*bool)->Tuple<Flag<true>,bool> {let previous=state.*;state.* = not previous;(Flag<true>{},previous)}
         fn run()->bool {var state=false;
             let (observed,enabled)=receiver(state.ref).read(bool,...packet(state.ref));
             observed and enabled and not state}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -5259,19 +5301,25 @@ fn enum_value_indices_infer_from_variant_payload_types() {
         enum Wrapped where flag:bool {Item(Flag<flag>)}
         fn read(value:Wrapped<flag>)->bool where flag:bool {flag}
         fn run()->bool {read(.Item(Flag<true>{})) and not read(.Item(Flag<false>{}))}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
     let spread = source
         .replace(
             "fn run()",
-            "fn packet(value:Flag<flag>)->(Flag<flag>,) where flag:bool {(value,)} fn run()",
+            "fn packet(value:Flag<flag>)->Tuple<Flag<flag>> where flag:bool {(value,)} fn run()",
         )
         .replace(".Item(Flag<true>{})", ".Item(...packet(Flag<true>{}))")
         .replace(".Item(Flag<false>{})", ".Item(...packet(Flag<false>{}))");
-    assert_eq!(support::run_iir(&spread, "run", vec![]), Value::Bool(true));
+    assert_eq!(
+        support::run_iir_with_tuple(&spread, "run", vec![]),
+        Value::Bool(true)
+    );
     let missing = source
         .replace("{Item(Flag<flag>)}", "{Empty,Item(Flag<flag>)}")
         .replace(".Item(Flag<true>{})", ".Empty");
-    assert!(support::compile_with_protocols(&missing, &Default::default()).is_err());
+    assert!(support::compile_with_tuple_protocols(&missing, &Default::default()).is_err());
 }
 
 #[test]
@@ -5436,9 +5484,9 @@ fn abstract_comptime_parameters_bind_dependent_arguments_and_results() {
 fn aggregate_comptime_inputs_preserve_symbolic_leaves_in_dependent_identity() {
     use comptime_interpretor::{Budget, Interpreter};
     use nir::{DeclarationId, Primitive, Sort, Term};
-    let package=support::compile("struct Packet where state:(bool,bool) {}
-        comptime fn keep(comptime state:(bool,bool),value:Packet<state>)->Packet<state> {value}
-        comptime fn forward(comptime state:(bool,bool),value:Packet<state>)->Packet<state> {keep(state,value)}");
+    let package=support::compile_with_tuple("struct Packet where state:Tuple<bool,bool> {}
+        comptime fn keep(comptime state:Tuple<bool,bool>,value:Packet<state>)->Packet<state> {value}
+        comptime fn forward(comptime state:Tuple<bool,bool>,value:Packet<state>)->Packet<state> {keep(state,value)}");
     let parameter = DeclarationId {
         package: 99,
         local: 1,
@@ -5917,4 +5965,106 @@ fn generic_required_type_calls_materialize_distinct_runtime_instances() {
     }
     let invalid = source.replace("keep<false>(Token<false>", "keep<false>(Token<true>");
     assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn checked_execution_selects_copy_for_nominal_value_indices() {
+    for (definition, value) in [
+        ("struct Config {flag:bool}", "Config{flag:true}"),
+        ("enum Config {off,on(bool)}", "Config.on(true)"),
+        ("newtype Config = bool;", "true.as(Config)"),
+    ] {
+        let source = format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+             {definition}
+             struct Packet where config:Config {{value:bool}}
+             impl Duplicate for Packet<config> where config:Config {{}}
+             fn read(value:Packet<config>)->bool where config:Config {{value.value}}
+             fn run()->bool {{
+                 let packet=Packet<{value}>{{value:true}};
+                 read(packet) and read(packet)
+             }}"
+        );
+        let package = support::compile(&source);
+        for inline in [false, true] {
+            let result = if inline {
+                luna::execution::interpret_inline_with_protocols_in_package(
+                    &package,
+                    0,
+                    "run",
+                    "Duplicate",
+                    "Retire",
+                    100_000,
+                )
+            } else {
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "run",
+                    "Duplicate",
+                    "Retire",
+                    100_000,
+                )
+            };
+            assert_eq!(result.unwrap(), Value::Bool(true), "{definition}");
+        }
+        let without_copy = support::compile(&source.replace(
+            "impl Duplicate for Packet<config> where config:Config {}",
+            "",
+        ));
+        assert!(
+            luna::execution::interpret_with_protocols(
+                &without_copy,
+                "run",
+                "Duplicate",
+                "Retire",
+                100_000,
+            )
+            .is_err(),
+            "layout evidence must not invent Copy: {definition}"
+        );
+    }
+}
+
+#[test]
+fn checked_execution_runs_drop_for_nominal_value_indices() {
+    for (definition, value) in [
+        ("struct Config {flag:bool}", "Config{flag:true}"),
+        ("enum Config {off,on(bool)}", "Config.on(true)"),
+        ("newtype Config = bool;", "true.as(Config)"),
+    ] {
+        let source = format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+             {definition}
+             struct Ticket where config:Config {{closed:*bool}}
+             impl Retire for Ticket<config> where config:Config {{
+                 fn drop(*self) {{self.closed.*.* = true;}}
+             }}
+             inline fn own(closed:*bool) {{
+                 let ticket=Ticket<{value}>{{closed:closed}};
+             }}
+             fn run()->bool {{let closed=false; own(closed.ref); closed}}"
+        );
+        let package = support::compile(&source);
+        for inline in [false, true] {
+            let result = if inline {
+                luna::execution::interpret_inline_with_protocols_in_package(
+                    &package,
+                    0,
+                    "run",
+                    "Duplicate",
+                    "Retire",
+                    100_000,
+                )
+            } else {
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "run",
+                    "Duplicate",
+                    "Retire",
+                    100_000,
+                )
+            };
+            assert_eq!(result.unwrap(), Value::Bool(true), "{definition}");
+        }
+    }
 }

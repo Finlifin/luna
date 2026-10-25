@@ -66,6 +66,16 @@ impl Checker<'_, '_> {
             return Ok(true);
         }
         let fields = match ty {
+            Term::ErrorResult { errors, result } => {
+                // Formation inspects every possible payload. This does not
+                // grant Copy: the complete result and its active payload must
+                // still pass the resource world's Copy/Drop checks.
+                let mut fields = errors.clone();
+                if !is_never(result) {
+                    fields.push((**result).clone());
+                }
+                fields
+            }
             Term::Record(fields) => fields.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>(),
             Term::Nominal {
                 declaration,
@@ -256,7 +266,7 @@ impl Checker<'_, '_> {
             let width = match shape {
                 Term::Primitive(P::BitVec(width)) => width,
                 Term::Primitive(primitive) if take_bits => primitive
-                    .unrestricted_scalar_width()
+                    .unrestricted_scalar_width_in(self.target)
                     .map(|width| width as usize)
                     .ok_or_else(|| {
                         error(

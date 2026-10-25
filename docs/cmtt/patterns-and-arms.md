@@ -164,7 +164,7 @@ comptime fn choose_pattern(
 调用支持 `...packet` 把 tuple 数据包分发到固定参数入口，并可与普通位置、具名实参混用。包生产者按源码顺序只执行一次；即使展开为空，也保留这次执行。已知的目标参数类型可用于检查包内字面量；数据类型参与泛型推导，缺省入口随后按声明顺序补全。
 
 ~~~flurry
-comptime fn settings() -> (bool, bool) { (true, false) }
+comptime fn settings() -> Tuple<bool, bool> { (true, false) }
 comptime fn selected(first: bool, second: bool, .enabled: bool = true)
     -> < bool -| value: bool >
 {
@@ -181,7 +181,7 @@ fn expanded_pattern() -> bool {
 数据变参 `...items` 把剩余位置实参收集为一个 tuple 输入。声明可给固定 tuple 类型，也可用 Type 参数接收推导出的完整 tuple 类型；空集合也是一个 tuple 输入。固定入口提供各元素的检查上下文，后续默认参数可以引用已经完成的收集值。具名 `.items=packet` 则供应整个集合，不能再重复供应其中的元素。注册 Tuple 构造器时，收集结果保留该 normal-form 头。
 
 ~~~flurry
-comptime fn collected(...items: (bool, bool), .copy: (bool, bool) = items)
+comptime fn collected(...items: Tuple<bool, bool>, .copy: Tuple<bool, bool> = items)
     -> < bool -| value: bool >
 {
     let (first, second) = copy;

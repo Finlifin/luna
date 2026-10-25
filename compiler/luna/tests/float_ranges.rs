@@ -25,7 +25,7 @@ fn machine_float_range_patterns_preserve_ordered_bounds() {
                 let source = format!(
                     "typealias Float=.{width}'builtin;
                     trait Duplicate {{}}trait Retire {{fn drop(*self);}}
-                    {phase}fn run()->(bool,bool,bool,bool,bool) {{
+                    {phase}fn run()->Tuple<bool,bool,bool,bool,bool> {{
                         let value:Float={value};let lower:Float={lower};let upper:Float={upper};
                         (value match {{'lower..'upper=>true,_=>false}},
                          value match {{'lower..='upper=>true,_=>false}},
@@ -48,7 +48,7 @@ fn machine_float_range_patterns_preserve_ordered_bounds() {
                     v < hi,
                     v <= hi,
                 ];
-                let package = compile(&source);
+                let package = execution_support::compile_with_tuple(&source);
                 let actual = if comptime {
                     luna::invocation::invoke(&package, "run", 100000)
                 } else {
@@ -181,13 +181,13 @@ fn ordered_ranges_do_not_prove_coverage_of_nan() {
 #[test]
 fn machine_float_ranges_prove_complementary_coverage() {
     for width in ["f32", "f64"] {
-        let package = compile(&format!(
+        let package = execution_support::compile_with_tuple(&format!(
             "typealias Float=.{width}'builtin;
             trait Duplicate {{}}trait Retire {{fn drop(*self);}}
             fn classify(value:Float)->bool {{
                 value match {{0.0..1.0=>true,not (0.0..1.0)=>false}}
             }}
-            fn run()->(bool,bool,bool,bool) {{
+            fn run()->Tuple<bool,bool,bool,bool> {{
                 (classify(0.5),classify(-0.0),classify(1.0),classify(Float.NaN))
             }}"
         ));
@@ -214,15 +214,15 @@ fn machine_float_ranges_prove_complementary_coverage() {
 fn machine_float_coverage_retains_nan_and_tuple_correlations() {
     use execution_support::compile_with_protocols;
     for width in ["f32", "f64"] {
-        let package = compile(&format!(
+        let package = execution_support::compile_with_tuple(&format!(
             "typealias Float=.{width}'builtin;
             fn ordered(value:Float)->bool {{value match {{
                 _ as x if x == x =>true,_ as x if x != x =>false,
             }}}}
-            fn pair(value:(Float,bool))->bool {{value match {{
+            fn pair(value:Tuple<Float,bool>)->bool {{value match {{
                 (0.0..1.0,true)=>true,(0.0..1.0,false)=>false,(not (0.0..1.0),_)=>false,
             }}}}
-            fn run()->(bool,bool,bool,bool,bool) {{
+            fn run()->Tuple<bool,bool,bool,bool,bool> {{
                 (ordered(Float.NaN),ordered(-0.0),pair((0.5,true)),pair((0.5,false)),pair((Float.NaN,true)))
             }}"
         ));
@@ -242,14 +242,16 @@ fn machine_float_coverage_retains_nan_and_tuple_correlations() {
             let source =
                 format!("typealias Float=.{width}'builtin;fn bad(value:Float)->bool {{{body}}}");
             assert!(
-                compile_with_protocols(&source, &Default::default()).is_err(),
+                execution_support::compile_with_tuple_protocols(&source, &Default::default())
+                    .is_err(),
                 "{source}"
             );
         }
         let source = format!(
             "typealias Float=.{width}'builtin;fn decide(value:Float)->bool {{true}} fn bad(value:Float)->bool {{value match {{_ as x if decide(x)=>true,not (_ as x if decide(x))=>false}}}}"
         );
-        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        let error = execution_support::compile_with_tuple_protocols(&source, &Default::default())
+            .unwrap_err();
         assert!(
             error.contains("match exhaustiveness could not be proved"),
             "executable guards must not become symbolic evidence: {error}"
@@ -263,7 +265,7 @@ fn conditional_float_guards_preserve_branch_domains() {
     for width in ["f32", "f64"] {
         for comptime in [false, true] {
             let phase = if comptime { "comptime " } else { "" };
-            let package=compile(&format!(
+            let package=execution_support::compile_with_tuple(&format!(
                 "typealias Float=.{width}'builtin;
                 trait Duplicate {{}}trait Retire {{fn drop(*self);}}
                 {phase}fn ordered(value:Float)->bool {{value match {{
@@ -273,7 +275,7 @@ fn conditional_float_guards_preserve_branch_domains() {
                 {phase}fn all(value:Float)->bool {{value match {{
                     _ as x if if x == x {{if x < 0.0 {{true}} else {{x >= 0.0}}}} else {{true}} =>true,
                 }}}}
-                {phase}fn run()->(bool,bool,bool,bool,bool,bool) {{
+                {phase}fn run()->Tuple<bool,bool,bool,bool,bool,bool> {{
                     (ordered(Float.NaN),ordered(-0.0),ordered(-Float.Infinity),ordered(Float.Infinity),all(Float.NaN),all(0.5))
                 }}"
             ));
@@ -307,7 +309,8 @@ fn conditional_float_guards_preserve_branch_domains() {
                 "typealias Float=.{width}'builtin;fn bad(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}"
             );
             assert!(
-                compile_with_protocols(&source, &Default::default()).is_err(),
+                execution_support::compile_with_tuple_protocols(&source, &Default::default())
+                    .is_err(),
                 "{source}"
             );
         }
@@ -318,7 +321,7 @@ fn conditional_float_guards_preserve_branch_domains() {
 fn local_boolean_guard_evidence_survives_aliases_and_branch_narrowing() {
     use execution_support::compile_with_protocols;
     for width in ["f32", "f64"] {
-        let package=compile(&format!(
+        let package=execution_support::compile_with_tuple(&format!(
             "typealias Float=.{width}'builtin;
             trait Duplicate {{}}trait Retire {{fn drop(*self);}}
             fn ordered(value:Float)->bool {{value match {{
@@ -328,7 +331,7 @@ fn local_boolean_guard_evidence_survives_aliases_and_branch_narrowing() {
             fn all(value:Float)->bool {{value match {{
                 _ as x if do {{let negative=x < 0.0;if negative {{let known=negative;known}} else {{not negative}}}} =>true,
             }}}}
-            fn run()->(bool,bool,bool,bool,bool) {{
+            fn run()->Tuple<bool,bool,bool,bool,bool> {{
                 (ordered(Float.NaN),ordered(-0.0),all(-1.0),all(1.0),all(Float.NaN))
             }}"
         ));
@@ -357,7 +360,8 @@ fn local_boolean_guard_evidence_survives_aliases_and_branch_narrowing() {
                 "typealias Float=.{width}'builtin;fn bad(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}"
             );
             assert!(
-                compile_with_protocols(&source, &Default::default()).is_err(),
+                execution_support::compile_with_tuple_protocols(&source, &Default::default())
+                    .is_err(),
                 "{source}"
             );
         }
@@ -367,13 +371,13 @@ fn local_boolean_guard_evidence_survives_aliases_and_branch_narrowing() {
 #[test]
 fn shared_interval_boolean_locals_preserve_original_subject() {
     use execution_support::compile_with_protocols;
-    let package = compile(
+    let package = execution_support::compile_with_tuple(
         "typealias Signed=.i32'builtin;trait Duplicate {}trait Retire {fn drop(*self);}
         fn negative(value:Signed)->bool {value match {
             _ as x if do {let negative=x < 0;let x:Signed=1;negative == true}=>true,
             _ as x if do {let negative=x < 0;let alias=negative;alias == false}=>false,
         }}
-        fn run()->(bool,bool,bool) {(negative(-1),negative(0),negative(1))}",
+        fn run()->Tuple<bool,bool,bool> {(negative(-1),negative(0),negative(1))}",
     );
     assert_eq!(
         luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 100000)
@@ -388,7 +392,7 @@ fn shared_interval_boolean_locals_preserve_original_subject() {
             "typealias Signed=.i32'builtin;fn decide(x:Signed)->bool {{true}} fn bad(value:Signed)->bool {{value match {{_ as x if {guard}=>true}}}}"
         );
         assert!(
-            compile_with_protocols(&source, &Default::default()).is_err(),
+            execution_support::compile_with_tuple_protocols(&source, &Default::default()).is_err(),
             "{source}"
         );
     }
@@ -398,7 +402,7 @@ fn shared_interval_boolean_locals_preserve_original_subject() {
 fn boolean_guard_comparisons_preserve_predicate_regions() {
     use execution_support::compile_with_protocols;
     for width in ["f32", "f64"] {
-        let package = compile(&format!(
+        let package = execution_support::compile_with_tuple(&format!(
             "typealias Float=.{width}'builtin;
             trait Duplicate {{}}trait Retire {{fn drop(*self);}}
             fn ordered(value:Float)->bool {{value match {{
@@ -409,7 +413,7 @@ fn boolean_guard_comparisons_preserve_predicate_regions() {
                 _ as x if (x < 0.0) == (x >= 0.0)=>true,
                 _ as x if (x < 0.0) != (x >= 0.0)=>false,
             }}}}
-            fn run()->(bool,bool,bool,bool,bool) {{
+            fn run()->Tuple<bool,bool,bool,bool,bool> {{
                 (ordered(Float.NaN),ordered(-0.0),same(Float.NaN),same(-1.0),same(1.0))
             }}"
         ));
@@ -438,7 +442,8 @@ fn boolean_guard_comparisons_preserve_predicate_regions() {
                 "typealias Float=.{width}'builtin;fn bad(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}"
             );
             assert!(
-                compile_with_protocols(&source, &Default::default()).is_err(),
+                execution_support::compile_with_tuple_protocols(&source, &Default::default())
+                    .is_err(),
                 "{source}"
             );
         }
@@ -449,7 +454,7 @@ fn boolean_guard_comparisons_preserve_predicate_regions() {
 fn boolean_matches_in_guards_preserve_selection_and_bound_values() {
     use execution_support::compile_with_protocols;
     for width in ["f32", "f64"] {
-        let package=compile(&format!(
+        let package=execution_support::compile_with_tuple(&format!(
             "typealias Float=.{width}'builtin;
             trait Duplicate {{}}trait Retire {{fn drop(*self);}}
             fn ordered(value:Float)->bool {{value match {{
@@ -459,7 +464,7 @@ fn boolean_matches_in_guards_preserve_selection_and_bound_values() {
             fn all(value:Float)->bool {{value match {{
                 _ as x if (x < 0.0) match {{true as flag if not flag=>false,flag=>flag == (x < 0.0)}}=>true,
             }}}}
-            fn run()->(bool,bool,bool,bool) {{(ordered(Float.NaN),ordered(-0.0),all(-1.0),all(Float.NaN))}}
+            fn run()->Tuple<bool,bool,bool,bool> {{(ordered(Float.NaN),ordered(-0.0),all(-1.0),all(Float.NaN))}}
             "
         ));
         assert_eq!(
@@ -482,7 +487,7 @@ fn boolean_matches_in_guards_preserve_selection_and_bound_values() {
             "typealias Float=.{width}'builtin;fn bad(value:Float)->bool {{value match {{_ as x if (x == x) match {{true=>true,false=>false}}=>true}}}}"
         );
         assert!(
-            compile_with_protocols(&source, &Default::default()).is_err(),
+            execution_support::compile_with_tuple_protocols(&source, &Default::default()).is_err(),
             "{source}"
         );
     }
@@ -492,13 +497,13 @@ fn boolean_matches_in_guards_preserve_selection_and_bound_values() {
 fn constant_matches_in_guards_keep_constant_bindings() {
     use execution_support::compile_with_protocols;
     for kind in ["f32", "f64", "Float"] {
-        let package = compile(&format!(
+        let package = execution_support::compile_with_tuple(&format!(
             "typealias Float=.{kind}'builtin;
             comptime fn zero(value:Float)->bool {{value match {{
                 _ as x if do {{let c:Float=0.0;c match {{1.0=>false,0.0 as bound if bound == x=>true,_=>false}}}}=>true,
                 _ as x if do {{let c:Float=0.0;c match {{1.0=>true,0.0 as bound if bound != x=>true,_=>false}}}}=>false,
             }}}}
-            comptime fn run()->(bool,bool,bool,bool) {{(zero(0.0),zero(-0.0),zero(1.0),zero(0.0000000000000000000000000000001))}}"
+            comptime fn run()->Tuple<bool,bool,bool,bool> {{(zero(0.0),zero(-0.0),zero(1.0),zero(0.0000000000000000000000000000001))}}"
         ));
         assert_eq!(
             luna::invocation::invoke(&package, "run", 100000).unwrap(),
@@ -517,7 +522,8 @@ fn constant_matches_in_guards_keep_constant_bindings() {
                 "typealias Float=.{kind}'builtin;comptime fn bad(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}"
             );
             assert!(
-                compile_with_protocols(&source, &Default::default()).is_err(),
+                execution_support::compile_with_tuple_protocols(&source, &Default::default())
+                    .is_err(),
                 "{source}"
             );
         }
@@ -527,14 +533,14 @@ fn constant_matches_in_guards_keep_constant_bindings() {
 #[test]
 fn constant_match_guard_runtime_preserves_nan_and_signed_zero() {
     for kind in ["f32", "f64"] {
-        let package=compile(&format!(
+        let package=execution_support::compile_with_tuple(&format!(
             "typealias Float=.{kind}'builtin;
             trait Duplicate {{}}trait Retire {{fn drop(*self);}}
             fn zero(value:Float)->bool {{value match {{
                 _ as x if do {{let c:Float=0.0;c match {{0.0 as bound if bound == x=>true,_=>false}}}}=>true,
                 _ as x if do {{let c:Float=0.0;c match {{0.0 as bound if bound != x=>true,_=>false}}}}=>false,
             }}}}
-            fn run()->(bool,bool,bool,bool,bool) {{(zero(0.0),zero(-0.0),zero(1.0),zero(Float.NaN),zero(Float.Infinity))}}"
+            fn run()->Tuple<bool,bool,bool,bool,bool> {{(zero(0.0),zero(-0.0),zero(1.0),zero(Float.NaN),zero(Float.Infinity))}}"
         ));
         assert_eq!(
             luna::execution::interpret_with_protocols(
@@ -565,12 +571,12 @@ fn machine_float_guards_skip_unreachable_calls_but_keep_nan_paths() {
             "x match {_ if x == x=>true,_ if x != x=>true,_=>decide(x)}",
             "not (x == x and (x != x and decide(x)))",
         ] {
-            let package=compile(&format!(
+            let package=execution_support::compile_with_tuple(&format!(
                 "typealias Float=.{kind}'builtin;
                 trait Duplicate {{}}trait Retire {{fn drop(*self);}}
                 fn decide(x:Float)->bool {{false}}
                 fn all(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}
-                fn run()->(bool,bool,bool,bool) {{(all(-1.0),all(-0.0),all(Float.NaN),all(Float.Infinity))}}"
+                fn run()->Tuple<bool,bool,bool,bool> {{(all(-1.0),all(-0.0),all(Float.NaN),all(Float.Infinity))}}"
             ));
             assert_eq!(
                 luna::execution::interpret_with_protocols(
@@ -595,7 +601,8 @@ fn machine_float_guards_skip_unreachable_calls_but_keep_nan_paths() {
                 "typealias Float=.{kind}'builtin;fn decide(x:Float)->bool {{true}} fn bad(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}"
             );
             assert!(
-                compile_with_protocols(&source, &Default::default()).is_err(),
+                execution_support::compile_with_tuple_protocols(&source, &Default::default())
+                    .is_err(),
                 "{source}"
             );
         }
@@ -674,7 +681,7 @@ fn machine_float_coverage_skips_opaque_calls_with_aggregate_inputs() {
     for width in ["f32", "f64"] {
         for (declarations, call) in [
             (
-                "fn decide(packet:(Float,bool))->bool {false}",
+                "fn decide(packet:Tuple<Float,bool>)->bool {false}",
                 "decide((x,true))",
             ),
             (
@@ -710,11 +717,11 @@ fn machine_float_coverage_skips_opaque_calls_with_aggregate_inputs() {
                 fn all(value:Float)->bool {{value match {{
                     _ as x if x == x or (x != x or {call})=>true,
                 }}}}
-                fn run()->(bool,bool,bool,bool,bool) {{
+                fn run()->Tuple<bool,bool,bool,bool,bool> {{
                     (all(-1.0),all(-0.0),all(0.0),all(Float.NaN),all(Float.Infinity))
                 }}"
             );
-            let package = compile(&source);
+            let package = execution_support::compile_with_tuple(&source);
             assert_eq!(
                 luna::execution::interpret_with_protocols(
                     &package,
@@ -744,7 +751,9 @@ fn machine_float_coverage_skips_opaque_calls_with_aggregate_inputs() {
             );
             // NaN must reach the call; its body cannot serve as proof evidence.
             let incomplete = source.replace("x == x or (x != x or", "x < 0.0 or (x >= 0.0 or");
-            let failure = compile_with_protocols(&incomplete, &Default::default()).unwrap_err();
+            let failure =
+                execution_support::compile_with_tuple_protocols(&incomplete, &Default::default())
+                    .unwrap_err();
             assert!(failure.contains("exhaustive"), "{width}: {call}: {failure}");
         }
     }

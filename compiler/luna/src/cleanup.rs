@@ -1,5 +1,8 @@
 //! Publish concrete cleanup operations from checked acquired responsibilities.
 //! Includes source control-flow, default, closure and concrete callback contexts.
+mod method;
+pub use method::{MethodCallCleanup, lower_method_call_cleanup};
+
 use elaboration::{
     capabilities::World,
     ptc::Budget,
@@ -238,6 +241,32 @@ pub fn prepare_source(
     fuel: &mut usize,
     budget: Budget,
 ) -> Result<Executable, String> {
+    prepare_source_impl(package, world, items, entry, fuel, budget, false)
+}
+
+/// Resource-checked source execution also checks contracts exposed by staging.
+/// The public low-level planner remains usable to test rejection cleanup on
+/// deliberately malformed NIR, without claiming source verification.
+pub(crate) fn prepare_checked_source(
+    package: &Package,
+    world: &World<'_>,
+    items: &intrinsic::LangItems,
+    entry: iir::InstanceKey,
+    fuel: &mut usize,
+    budget: Budget,
+) -> Result<Executable, String> {
+    prepare_source_impl(package, world, items, entry, fuel, budget, true)
+}
+
+fn prepare_source_impl(
+    package: &Package,
+    world: &World<'_>,
+    items: &intrinsic::LangItems,
+    entry: iir::InstanceKey,
+    fuel: &mut usize,
+    budget: Budget,
+    validate_contracts: bool,
+) -> Result<Executable, String> {
     use elaboration::verification::moves::{CleanupAction, CleanupReason};
     use iir::cleanup::{
         Action, Boundary, ContextKey, DiscardCleanup, FunctionSchedule, Schedule, Site, Target,
@@ -421,13 +450,33 @@ pub fn prepare_source(
                     // Non-entry pointer calls are checked by the caller's memory
                     // analysis. Only supported, initialization-preserving body
                     // footprints justify these conditional parameter roots.
-                    let footprint = elaboration::verification::memory::infer_in_package(
+                    let footprint = match elaboration::verification::memory::infer_in_package(
                         package,
                         instance.key.declaration,
                         &instance.key.arguments,
                         fuel,
-                    )
-                    .map_err(|reason| format!("borrowed helper {}: {reason}", function.name))?;
+                    ) {
+                        Ok(footprint) => footprint,
+                        // Like owned callbacks, borrowed callbacks need each
+                        // invocation's code premises, never a root schedule.
+                        Err(reason)
+                            if reason
+                                .contains("dynamic call requires a richer memory contract") =>
+                        {
+                            *fuel = fuel
+                                .checked_sub(schedule.borrowed_callable_functions.len() + 1)
+                                .ok_or("borrowed callable schedule budget exhausted")?;
+                            if !schedule.borrowed_callable_functions.contains(&instance.key) {
+                                schedule
+                                    .borrowed_callable_functions
+                                    .push(instance.key.clone());
+                            }
+                            continue;
+                        }
+                        Err(reason) => {
+                            return Err(format!("borrowed helper {}: {reason}", function.name));
+                        }
+                    };
                     if &footprint.signature != function.signature.callable_signature() {
                         return Err(
                             "borrowed helper signature disagrees with memory footprint".into()
@@ -464,6 +513,7 @@ pub fn prepare_source(
                 Vec<moves::CallableParameter>,
                 Vec<moves::EnumParameter>,
                 Vec<moves::EffectResultInput>,
+                Vec<moves::BorrowedCode>,
             )> = vec![];
             while let Some((context, scope, report, observations)) = scopes.pop_front() {
                 let footprint_key = if context.is_empty() {
@@ -476,7 +526,12 @@ pub fn prepare_source(
                 if let Some(footprint_key) = footprint_key.filter(|_| {
                     !report.borrowed_parameters.is_empty() || !report.borrowed_fields.is_empty()
                 }) {
-                    let accesses = report.cleanup_memory_accesses(package, fuel)?;
+                    let accesses =
+                        report
+                            .cleanup_memory_accesses(package, fuel)
+                            .map_err(|reason| {
+                                format!("cleanup memory export for {}: {reason}", scope.name)
+                            })?;
                     let position = if let Some(position) = cleanup_accesses
                         .iter()
                         .position(|(key, _)| key == footprint_key)
@@ -520,6 +575,8 @@ pub fn prepare_source(
                             scope.body.source,
                         )
                         .map_err(|e| e.to_string())?,
+                        moves::copy_borrowed_code(&report.borrowed_code, fuel, scope.body.source)
+                            .map_err(|e| e.to_string())?,
                     ));
                 }
                 if !report.deferred_calls.is_empty() {
@@ -618,6 +675,9 @@ pub fn prepare_source(
                                     prepared_hooks.push((expr.source, slot, value.source));
                                 }
                             }
+                            K::ErrorConvert { value, .. } => {
+                                prepared_hooks.push((expr.source, 0, value.source));
+                            }
                             K::Closure { captures, .. } => {
                                 for (slot, capture) in captures.iter().enumerate() {
                                     prepared_hooks.push((
@@ -644,6 +704,25 @@ pub fn prepare_source(
                                     projection_hooks.push(callee.source);
                                 }
                                 hooks.push((expr.source, Boundary::InterfacePreconditionFailure));
+                                if matches!(callee.kind, K::TraitMethod { .. }) {
+                                    hooks.push((
+                                        expr.source,
+                                        Boundary::InterfacePostconditionFailure,
+                                    ));
+                                    let nir::Term::Function { parameters, .. } =
+                                        callee.ty.callable_signature()
+                                    else {
+                                        return Err(
+                                            "interface result cleanup lacks a callable signature"
+                                                .into(),
+                                        );
+                                    };
+                                    prepared_hooks.push((
+                                        expr.source,
+                                        parameters.len(),
+                                        expr.source,
+                                    ));
+                                }
                                 for argument in arguments {
                                     if argument.is_default {
                                         hooks.push((
@@ -667,16 +746,7 @@ pub fn prepare_source(
                             }
                             _ => (),
                         }
-                        if matches!(
-                            &expr.kind,
-                            K::EffectRequest {
-                                abi: nir::effects::Abi::Direct,
-                                ..
-                            }
-                        ) || matches!(&expr.kind, K::Call { callee, .. }
-                            if matches!(callee.ty.callable_signature(), nir::Term::Function { result, .. }
-                                if matches!(result.as_ref(), nir::Term::Computation { effects, .. } if !effects.is_empty())))
-                        {
+                        if iir::effects::suspension_boundary(expr) {
                             hooks.push((expr.source, Boundary::EffectEscape));
                             hooks.push((expr.source, Boundary::EffectReturn));
                             result_hooks.push(expr.source);
@@ -690,9 +760,6 @@ pub fn prepare_source(
                         if handlers.iter().any(|h|h.abi == nir::effects::Abi::DirectPassing))
                         {
                             hooks.push((expr.source, Boundary::PredicateFailure));
-                            hooks.push((expr.source, Boundary::EffectEscape));
-                            hooks.push((expr.source, Boundary::EffectReturn));
-                            result_hooks.push(expr.source);
                         }
                         let hook = match &expr.kind {
                             K::Block { .. } | K::CallPreparation { .. } => {
@@ -770,7 +837,9 @@ pub fn prepare_source(
                         return Err("named callable context signature mismatch".into());
                     }
                     let mut recursive_target = None;
-                    for (ancestor, callee, callables, enums, effects) in &named_contexts {
+                    for (ancestor, callee, callables, enums, effects, borrowed_code) in
+                        &named_contexts
+                    {
                         *fuel = fuel
                             .checked_sub(ancestor.len() + 1)
                             .ok_or("recursive cleanup context budget exhausted")?;
@@ -779,6 +848,7 @@ pub fn prepare_source(
                             && callables == &call.callables
                             && enums == &call.enums
                             && effects == &call.effects
+                            && borrowed_code == &call.borrowed_code
                         {
                             recursive_target = Some(ancestor.clone());
                             break;
@@ -827,7 +897,7 @@ pub fn prepare_source(
                     }
                     let mut fields = field_borrows(package, &child, fuel)?;
                     let mut independent_invocation = None;
-                    if !fields.is_empty() {
+                    if !fields.is_empty() && call.borrowed_code.is_empty() {
                         let effects = moves::copy_effect_inputs(&call.effects, fuel, call.source)
                             .map_err(|e| e.to_string())?;
                         let allowance = (*fuel / 2).min(4096);
@@ -851,13 +921,18 @@ pub fn prepare_source(
                         }
                     }
                     if !borrows.is_empty() || !fields.is_empty() {
-                        let footprint = moves::infer_callable_memory_with_effect_context(
+                        let footprint = crate::protocols::infer_borrowed_callable_memory(
                             package,
+                            world,
+                            items,
                             key.declaration,
                             &key.arguments,
                             &call.callables,
+                            &call.enums,
                             &call.effects,
+                            &call.borrowed_code,
                             fuel,
+                            budget,
                             call.source,
                         )?;
                         if footprint.signature != child.signature {
@@ -870,7 +945,7 @@ pub fn prepare_source(
                     let invocation = if let Some(report) = independent_invocation {
                         report
                     } else {
-                        crate::protocols::analyze_cleanup_with_field_context(
+                        crate::protocols::analyze_cleanup_with_borrowed_code_context(
                             package,
                             world,
                             items,
@@ -883,6 +958,7 @@ pub fn prepare_source(
                             moves::copy_effect_inputs(&call.effects, fuel, call.source)
                                 .map_err(|e| e.to_string())?,
                             &fields,
+                            &call.borrowed_code,
                         )
                         .map_err(|e| e.to_string())?
                     };
@@ -896,6 +972,7 @@ pub fn prepare_source(
                     if invocation.callable_parameters != call.callables
                         || invocation.enum_parameters != call.enums
                         || invocation.effect_parameters != call.effects
+                        || invocation.borrowed_code != call.borrowed_code
                     {
                         return Err("named callable context lost its input premises".into());
                     }
@@ -955,6 +1032,13 @@ pub fn prepare_source(
                         call: closure.source,
                         definition: closure.definition.source,
                     });
+                    schedule
+                        .closure_definitions
+                        .push(iir::cleanup::ClosureDefinition {
+                            instance: instance.key.clone(),
+                            context: child_context.clone(),
+                            definition: closure.definition,
+                        });
                     scopes.push_back((child_context, child, closure.invocation, vec![]));
                 }
                 for default in report.defaults {
@@ -1003,6 +1087,9 @@ pub fn prepare_source(
                     };
                     if site.interface_precondition {
                         boundary = Boundary::InterfacePreconditionFailure;
+                    }
+                    if site.interface_postcondition {
+                        boundary = Boundary::InterfacePostconditionFailure;
                     }
                     if let Some(origin) = site.result_origin {
                         boundary = Boundary::PostconditionFailure(origin);
@@ -1157,7 +1244,18 @@ pub fn prepare_source(
                             },
                         });
                     }
-                    if actions.is_empty() {
+                    if boundary == Boundary::InterfacePostconditionFailure
+                        && hooks
+                            .iter()
+                            .filter(|(source, kind)| *source == site.source && *kind == boundary)
+                            .count()
+                            != 1
+                    {
+                        return Err(
+                            "interface result cleanup lacks a unique runtime boundary".into()
+                        );
+                    }
+                    if actions.is_empty() && boundary != Boundary::InterfacePostconditionFailure {
                         continue;
                     }
                     if let Some(existing) = sites
@@ -1168,7 +1266,13 @@ pub fn prepare_source(
                         // the exact same ordered cleanup at its caller boundary.
                         // Publish it once; differing programs or order still
                         // require explicit path discrimination.
-                        if boundary == Boundary::PredicateFailure
+                        let failure_alternatives = matches!(
+                            boundary,
+                            Boundary::DefaultFailure(_)
+                                | Boundary::InterfacePreconditionFailure
+                                | Boundary::InterfacePostconditionFailure
+                        );
+                        if (boundary == Boundary::PredicateFailure || failure_alternatives)
                             && existing.actions.len() == actions.len()
                             && existing
                                 .actions
@@ -1177,6 +1281,12 @@ pub fn prepare_source(
                                 .all(|(a, b)| a.target == b.target && a.program == b.program)
                         {
                             continue;
+                        }
+                        if failure_alternatives {
+                            return Err(format!(
+                                "failure cleanup differs across alternatives in {} at {} ({boundary})",
+                                scope.name, site.source
+                            ));
                         }
                         if actions.iter().any(|a| {
                             existing
@@ -1302,6 +1412,32 @@ pub fn prepare_source(
             continue;
         }
         if previous == (roots.len(), types.len()) {
+            // Contract proofs use the final runtime-instance and cleanup-access
+            // overlay. Provisional rounds are never published, and repeating
+            // these proofs while dependencies grow provides no reusable evidence.
+            // Include higher-order bodies even if they have no root schedule.
+            if validate_contracts {
+                for instance in &graph.functions {
+                    let mut contract_limits = elaboration::verification::Limits::default();
+                    contract_limits.arithmetic.steps = *fuel;
+                    let checked = elaboration::verification::flow::validate_residual_contracts(
+                        package,
+                        &instance.function,
+                        &mut contract_limits,
+                    );
+                    *fuel = contract_limits.arithmetic.steps;
+                    checked.map_err(|mut error| {
+                        error.source = error
+                            .source
+                            .original(&graph.expansion_sources)
+                            .unwrap_or(error.source);
+                        format!(
+                            "residual program contract: {}: {error}",
+                            instance.function.name
+                        )
+                    })?;
+                }
+            }
             return Ok(Executable {
                 entry,
                 graph,

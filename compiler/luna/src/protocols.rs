@@ -254,6 +254,35 @@ pub fn analyze_cleanup_with_field_context(
     effects: Vec<elaboration::verification::moves::EffectResultInput>,
     fields: &[elaboration::verification::moves::BorrowedField],
 ) -> Result<elaboration::verification::moves::Report, elaboration::verification::moves::Error> {
+    analyze_cleanup_with_borrowed_code_context(
+        package,
+        world,
+        items,
+        function,
+        fuel,
+        query_budget,
+        borrows,
+        callables,
+        enums,
+        effects,
+        fields,
+        &[],
+    )
+}
+pub fn analyze_cleanup_with_borrowed_code_context(
+    package: &nir::program::Package,
+    world: &World<'_>,
+    items: &LangItems,
+    function: &nir::program::Function,
+    fuel: usize,
+    query_budget: Budget,
+    borrows: &[(usize, nir::Term)],
+    callables: &[elaboration::verification::moves::CallableParameter],
+    enums: &[elaboration::verification::moves::EnumParameter],
+    effects: Vec<elaboration::verification::moves::EffectResultInput>,
+    fields: &[elaboration::verification::moves::BorrowedField],
+    borrowed: &[elaboration::verification::moves::BorrowedCode],
+) -> Result<elaboration::verification::moves::Report, elaboration::verification::moves::Error> {
     use elaboration::verification::{drop::CleanupSession, moves};
     let Some(LangItemDef::UserDef(protocol)) = items.get(LangItem::Drop) else {
         return Err(moves::Error {
@@ -262,7 +291,7 @@ pub fn analyze_cleanup_with_field_context(
         });
     };
     let mut session = CleanupSession::new(package, world, protocol, query_budget);
-    moves::analyze_in_package_with_field_context(
+    moves::analyze_in_package_with_borrowed_code_context(
         package,
         function,
         |ty| copy_delivery(package, world, items, ty, query_budget),
@@ -273,6 +302,7 @@ pub fn analyze_cleanup_with_field_context(
         enums,
         effects,
         fields,
+        borrowed,
     )
 }
 
@@ -296,4 +326,122 @@ pub fn select_comptime_key(
         ));
     };
     elaboration::key_protocols::select(package, world, protocol, ty, operation, budget)
+}
+
+/// Recheck a conditional memory footprint in the same Drop world as cleanup.
+pub fn infer_borrowed_callable_memory(
+    package: &nir::program::Package,
+    world: &World<'_>,
+    items: &LangItems,
+    declaration: nir::DeclarationId,
+    arguments: &[nir::Term],
+    callables: &[elaboration::verification::moves::CallableParameter],
+    enums: &[elaboration::verification::moves::EnumParameter],
+    effects: &[elaboration::verification::moves::EffectResultInput],
+    borrowed: &[elaboration::verification::moves::BorrowedCode],
+    fuel: &mut usize,
+    budget: Budget,
+    source: nir::program::SourceRange,
+) -> Result<elaboration::verification::memory::Summary, String> {
+    use elaboration::verification::{drop::CleanupSession, moves};
+    let Some(LangItemDef::UserDef(protocol)) = items.get(LangItem::Drop) else {
+        return Err("Drop language item is not bound to a source trait".into());
+    };
+    let mut session = CleanupSession::new(package, world, protocol, budget);
+    moves::infer_callable_memory_with_borrowed_cleanup_context(
+        package,
+        declaration,
+        arguments,
+        callables,
+        enums,
+        effects,
+        borrowed,
+        Some(&mut session),
+        fuel,
+        source,
+    )
+}
+
+/// Invocation-scoped resource evidence, including the interface frame used to
+/// derive it. It is not a body-only summary or an executable caller schedule.
+#[derive(Debug)]
+pub struct MethodCleanup {
+    pub invocation: elaboration::verification::memory::MethodInvocation,
+    pub report: elaboration::verification::moves::Report,
+}
+impl std::fmt::Display for MethodCleanup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(method-cleanup {} {})", self.invocation, self.report)
+    }
+}
+
+/// Acquire the interface invocation's entry/result cleanup under the selected
+/// Copy/Drop protocols. Publishing this at a caller still requires prepared
+/// input provenance and rebasing the frame's boundaries to that call site.
+pub fn analyze_method_cleanup(
+    package: &nir::program::Package,
+    world: &World<'_>,
+    items: &LangItems,
+    callee: &nir::program::Expr,
+    fuel: usize,
+    query_budget: Budget,
+) -> Result<MethodCleanup, elaboration::verification::moves::Error> {
+    analyze_method_cleanup_with_context(
+        package,
+        world,
+        items,
+        callee,
+        fuel,
+        query_budget,
+        &[],
+        &[],
+        &[],
+        vec![],
+        &[],
+        &[],
+    )
+}
+
+/// Analyze the interface frame under the actual invocation's resource premises.
+/// Parameter indices refer to the interface signature, including field paths;
+/// the returned report retains these premises and cannot certify other calls.
+/// As for ordinary functions, callers must discharge them against prepared
+/// arguments before publishing an executable schedule.
+/// `Ok` is a frame report, not transitive completion: deferred calls must be
+/// resolved and contextual named/closure reports must be checked recursively.
+pub fn analyze_method_cleanup_with_context(
+    package: &nir::program::Package,
+    world: &World<'_>,
+    items: &LangItems,
+    callee: &nir::program::Expr,
+    mut fuel: usize,
+    query_budget: Budget,
+    borrows: &[(usize, nir::Term)],
+    callables: &[elaboration::verification::moves::CallableParameter],
+    enums: &[elaboration::verification::moves::EnumParameter],
+    effects: Vec<elaboration::verification::moves::EffectResultInput>,
+    fields: &[elaboration::verification::moves::BorrowedField],
+    borrowed: &[elaboration::verification::moves::BorrowedCode],
+) -> Result<MethodCleanup, elaboration::verification::moves::Error> {
+    let invocation =
+        elaboration::verification::memory::prepare_method_invocation(package, callee, &mut fuel)
+            .map_err(|reason| elaboration::verification::moves::Error {
+                source: callee.source,
+                reason,
+            })?;
+    let report = analyze_cleanup_with_borrowed_code_context(
+        package,
+        world,
+        items,
+        &invocation.function,
+        fuel,
+        query_budget,
+        borrows,
+        callables,
+        enums,
+        effects,
+        fields,
+        borrowed,
+    )?;
+    Ok(MethodCleanup { invocation, report })
 }
