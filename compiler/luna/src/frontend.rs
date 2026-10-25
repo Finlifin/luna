@@ -9,12 +9,20 @@ pub enum Artifact {
     Ast(String),
     Hir(String),
     Nir(nir::program::Package),
+    Attributes(Vec<elaboration::program::attributes::EvaluatedAttribute>),
 }
 impl std::fmt::Display for Artifact {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ast(text) | Self::Hir(text) => f.write_str(text),
             Self::Nir(package) => package.fmt(f),
+            Self::Attributes(attributes) => {
+                f.write_str("(attributes")?;
+                for attribute in attributes {
+                    write!(f, " {attribute}")?;
+                }
+                f.write_str(")")
+            }
         }
     }
 }
@@ -341,13 +349,23 @@ pub fn compile_bound_for_target(
     if instance.diag_ctx.has_errors() {
         return Err(instance.diag_ctx.failure_summary("HIR lowering"));
     }
-    if options.emit == Emit::Nir {
+    if matches!(options.emit, Emit::Nir | Emit::Attributes) {
         let protocols = crate::protocols::type_constructors::resolve_source(
             package.package(),
             &[(0, package_identity, "input")],
             selectors,
             protocols,
         )?;
+        if options.emit == Emit::Attributes {
+            let attributes = elaboration::program::attributes::inspect(
+                package.package(),
+                &std::collections::BTreeMap::from([(0, package_identity)]),
+                &protocols,
+                target,
+            )
+            .map_err(|error| format!("attribute inspection failed: {error}"))?;
+            return Ok((Artifact::Attributes(attributes), protocols));
+        }
         let program = elaboration::program::elaborate_packages_for_target(
             package.package(),
             &std::collections::BTreeMap::from([(0, package_identity)]),
@@ -448,7 +466,7 @@ fn compile_sysroot(
             }
         }
     }
-    let defaults = if options.emit == Emit::Nir {
+    let defaults = if matches!(options.emit, Emit::Nir | Emit::Attributes) {
         crate::packages::protect_source_output(
             &root.join("language-items.conf"),
             options.output.as_deref(),

@@ -24,7 +24,7 @@ pub struct Selectors<'a> {
 impl Selectors<'_> {
     /// Binding source declarations is an elaboration action, never a syntax dump.
     pub(crate) fn validate_stage(self, emit: crate::cli::Emit) -> Result<(), String> {
-        if emit == crate::cli::Emit::Nir {
+        if matches!(emit, crate::cli::Emit::Nir | crate::cli::Emit::Attributes) {
             return Ok(());
         }
         if !self.host_intrinsics.is_empty()

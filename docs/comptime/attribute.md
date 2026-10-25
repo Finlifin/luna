@@ -51,6 +51,20 @@ comptime fn reused_metadata() -> .Object'builtin {
 
 常量物化保留条目自己的类型，包括以 Type 为值的条目中的 normal-form 头；不会把该类型函数的返回体当作类型身份。
 
+开发检查入口 `luna input.fl --emit attributes` 会对属性表达式进行类型检查和 comptime 求值，并输出带目标、词法 owner、源码范围及类型的 S-expression 描述。例如：
+
+```flurry
+comptime fn metadata(flag:bool) -> .Object'builtin {
+    let result = {enabled:flag};
+    result
+}
+
+^metadata(true)
+fn sample() {}
+```
+
+这个入口保留 configuration 和前缀对象的应用顺序，尚不合并属性或执行属性消费者。检查成功不表示布局、ABI 等契约已经兑现，普通 NIR 编译仍会拒绝尚未支持的属性。依赖泛型或 runtime 绑定的属性需要相应的具体调用上下文；此检查入口不为它们伪造值。
+
 multi_element 是语法元素列表的通用元记号，base_element 为该列表原本允许的元素。前缀可递归嵌套；这不为任意内部操作数或原始 token 序列增加属性语法。
 
 `property` 是对象或扩展调用中的命名项。`configuration` 写在定义作用域内部，为所属定义编码属性，例如结构体中的 `.packed true`。字段、参数和一般项之间的逗号，遵循[语法风格](../grammar/index.md#分隔符)。

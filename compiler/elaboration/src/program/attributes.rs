@@ -74,7 +74,16 @@ impl Checker<'_, '_> {
                     return Err(error(attribute.span, "missing attribute member target"));
                 }
             }
-            self.signature_owner = Some(attribute.lexical_owner);
+            // Module scope supplies lexical name resolution, not a callable or
+            // type telescope. Required-call preparation must not ask a module
+            // for a definition formation contract.
+            self.signature_owner = (!matches!(
+                self.package
+                    .item(attribute.lexical_owner)
+                    .map(|item| &item.kind),
+                Some(ItemKind::Mod(_))
+            ))
+            .then_some(attribute.lexical_owner);
             self.context = self.definition_context(attribute.lexical_owner);
             self.locals.clear();
             self.result = None;

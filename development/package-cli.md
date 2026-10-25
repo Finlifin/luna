@@ -35,10 +35,13 @@ request must specify `--primary` exactly once. `--builtin ID` may designate one
 supplied package as builtin; it does not load a sysroot or fabricate missing
 packages or dependency edges.
 
-Output stages are `hir` (the default) and `nir`. Ordinary `--output` and the
+Output stages are `hir` (the default), `nir`, and `attributes`. The last stage
+evaluates metadata into typed inspection descriptions with source/target
+provenance; it does not authorize ABI/layout consumers or emit executable NIR.
+Ordinary `--output` and the
 existing source protocol/type selector flags are supported: splice, meta-list,
 tuple, optional, index, list-pattern, literal-into, and the seven arithmetic/unary protocols.
-Explicit source bindings require NIR elaboration (`--emit nir` or an
+Explicit source bindings require elaboration (`--emit nir`, `--emit attributes`, or an
 execution/analysis action); syntax-only export rejects them instead of ignoring
 them. This includes all seven arithmetic/unary selectors. Selectors keep their
 existing `package::module::declaration` rules. Conflicting
@@ -279,7 +282,7 @@ For example, a Python client may encode an existing byte-argument list as:
 frame = b" ".join(arg.hex().encode("ascii") if arg else b"-" for arg in args) + b"\n"
 ```
 
-The stream accepts HIR/NIR compilation and the usual package/type/protocol
+The stream accepts HIR/NIR compilation, attribute inspection, and the usual package/type/protocol
 selectors, including `--with-inputs`. It rejects execution, invocation, tests,
 analysis and `--output`; those retain their existing single-shot entry points.
 Successful compilation results are returned to the caller rather than written

@@ -301,3 +301,28 @@ The first test build automatically cleaned/retried after a storage quota failure
 and then exposed a Vec-versus-slice mistake in the new fixture; that fixture was
 corrected before the final run. Formatting check exited 0 at
 `/tmp/luna-tools-h3kpl7ce/result.json`; `git diff --check` passed.
+
+Source attribute inspection is available through `luna input.fl --emit attributes`
+and the equivalent explicit package request. Frontend/sysroot paths use normal
+source protocol binding, and package output can retain its observed input set.
+The dump is a typed inspection description, not a portable executable package.
+Source tests exposed and fixed a scope distinction: modules retain lexical name
+resolution but must not be installed as callable/type signature owners during
+required-call preparation. Generic/member binding contexts still require their
+concrete invocation context; this entrypoint does not add reflection consumers.
+
+Final verification in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --lib --test frontend_cli --test packages --no-fail-fast
+```
+
+`/tmp/luna-tools-qd3ut1v2/result.json` exited 0: 75 luna unit, 216 frontend CLI
+and 48 package tests passed (339 total). New source coverage verifies comptime
+function calls, configuration/prefix application order, lexical constant
+shadowing, cross-package function resolution with recorded inputs, continued
+ordinary-NIR rejection, and output preservation after inspection failure.
+An intermediate package test incorrectly expected literal paths in the existing
+hex-encoded input protocol; its assertion now checks source resolution/semantic
+identities. Formatting passed at `/tmp/luna-tools-p8d75s7d/result.json`;
+`git diff --check` passed.

@@ -575,6 +575,16 @@ pub(crate) fn compile_observed_for_target(
         selectors,
         protocols,
     )?;
+    if emit == Emit::Attributes {
+        let attributes = elaboration::program::attributes::inspect(
+            hir.package(),
+            &identities,
+            &protocols,
+            target,
+        )
+        .map_err(|error| format!("multi-package attribute inspection failed: {error}"))?;
+        return Ok((Artifact::Attributes(attributes), protocols));
+    }
     let nir = elaboration::program::elaborate_packages_for_target(
         hir.package(),
         &identities,

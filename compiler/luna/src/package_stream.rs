@@ -134,7 +134,7 @@ pub fn serve(
         let (code, reused, payload) = match result {
             Err(error) => (2, false, Payload::Error(error)),
             Ok(request) if request.action != Action::Compile || request.options.output.is_some() =>
-                (2, false, Payload::Error("package stream supports HIR/NIR compilation to replies only; execution actions and --output are not accepted".into())),
+                (2, false, Payload::Error("package stream supports HIR/NIR/attribute inspection to replies only; execution actions and --output are not accepted".into())),
             Ok(request) => match cache.compile(&request) {
                 Err(error) => (1, false, Payload::Error(error)),
                 Ok(outcome) => {

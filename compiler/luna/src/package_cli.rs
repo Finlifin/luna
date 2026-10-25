@@ -361,7 +361,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
         return Err("--with-inputs cannot wrap a native binary artifact; use --emit-llvm for an observed text artifact".into());
     }
     if options.emit == Emit::Ast {
-        return Err("--packages-v1 supports --emit hir or nir".into());
+        return Err("--packages-v1 supports --emit hir, nir or attributes".into());
     }
     Ok(Request {
         packages,

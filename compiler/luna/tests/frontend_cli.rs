@@ -8953,3 +8953,125 @@ fn object_constants_cannot_transport_metadata_into_runtime() {
     assert!(!details(&output).contains("parsing failed"));
     assert!(!details(&output).contains("panicked"));
 }
+
+#[test]
+fn source_attribute_inspection_evaluates_calls_in_application_order() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        comptime fn metadata(flag:bool)->.Object'builtin {
+            let result = {mode:flag}; result
+        }
+        ^metadata(true) ^metadata(false)
+        struct Decorated { .mode false }
+        fn run() {}
+    "#,
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "attributes"]);
+    let dump = success(&output);
+    assert_eq!(dump.matches("(evaluated-attribute ").count(), 3, "{dump}");
+    assert!(dump.contains("(configuration \"mode\")"), "{dump}");
+    assert_eq!(dump.matches("(bool false)").count(), 2, "{dump}");
+    assert_eq!(dump.matches("(bool true)").count(), 1, "{dump}");
+    assert!(
+        dump.rfind("(bool false)").unwrap() < dump.find("(bool true)").unwrap(),
+        "{dump}"
+    );
+    failure(&sandbox.run(&["input.fl", "--emit", "nir"]), 1);
+}
+
+#[test]
+fn source_attribute_inspection_keeps_lexical_constant_bindings() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        const FLAG=false;
+        comptime fn metadata(flag:bool)->.Object'builtin {
+            let result = {mode:flag}; result
+        }
+        mod nested {
+            const FLAG=true;
+            ^metadata(FLAG) fn inner() {}
+        }
+        ^metadata(FLAG) fn outer() {}
+    "#,
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "attributes"]);
+    let dump = success(&output);
+    assert_eq!(dump.matches("(evaluated-attribute ").count(), 2, "{dump}");
+    assert_eq!(dump.matches("(bool true)").count(), 1, "{dump}");
+    assert_eq!(dump.matches("(bool false)").count(), 1, "{dump}");
+}
+
+#[test]
+fn failed_attribute_inspection_preserves_existing_output() {
+    let sandbox = Sandbox::new();
+    for source in [
+        "^true fn run() {}",
+        "^missing() fn run() {}",
+        "fn runtime()->bool {true} ^runtime() fn run() {}",
+    ] {
+        sandbox.write("input.fl", source);
+        fs::write(sandbox.path("result.lisp"), OLD_OUTPUT).unwrap();
+        let output = sandbox.run(&[
+            "input.fl",
+            "--emit",
+            "attributes",
+            "--output",
+            "result.lisp",
+        ]);
+        failure(&output, 1);
+        assert!(
+            !details(&output).contains("parsing failed"),
+            "{}",
+            details(&output)
+        );
+        assert_eq!(fs::read(sandbox.path("result.lisp")).unwrap(), OLD_OUTPUT);
+    }
+}
+
+#[test]
+fn package_attribute_inspection_resolves_provider_functions() {
+    let sandbox = Sandbox::new();
+    sandbox.write("client.fl", "use dep.metadata; ^metadata(true) fn run() {}");
+    sandbox.write(
+        "provider.fl",
+        "pub comptime fn metadata(flag:bool)->.Object'builtin {let result={enabled:flag};result}",
+    );
+    let output = sandbox.run(&[
+        "--packages-v1",
+        "--package",
+        "7",
+        "701",
+        "client",
+        "client.fl",
+        "--package",
+        "9",
+        "901",
+        "provider",
+        "provider.fl",
+        "--primary",
+        "7",
+        "--dependency",
+        "7",
+        "dep",
+        "9",
+        "--emit",
+        "attributes",
+        "--with-inputs",
+    ]);
+    let dump = success(&output);
+    assert_eq!(dump.matches("(evaluated-attribute ").count(), 1, "{dump}");
+    assert!(dump.contains("(property \"enabled\")"), "{dump}");
+    assert!(dump.contains("(bool true)"), "{dump}");
+    assert!(
+        dump.contains("(source (resolution-id 7) (identity 701)"),
+        "{dump}"
+    );
+    assert!(
+        dump.contains("(source (resolution-id 9) (identity 901)"),
+        "{dump}"
+    );
+}
