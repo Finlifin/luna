@@ -4517,8 +4517,7 @@ impl<'a> Interpreter<'a> {
                     self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
                     return Ok(Flow::Value(Value::Type(ty.clone())));
                 }
-                let ty = selected_types::view(ty, &self.associated_values)
-                    .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
+                let ty = self.selected_type_view(ty, Some(expr.source))?;
                 let work = self
                     .type_description_work(&ty)
                     .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
@@ -5589,10 +5588,7 @@ impl<'a> Interpreter<'a> {
                     let selected = if this.associated_values.is_empty() {
                         None
                     } else {
-                        Some(
-                            selected_types::view(&expr.ty, &this.associated_values)
-                                .map_err(|kind| this.failure(kind, Some(expr.source)))?,
-                        )
+                        Some(this.selected_type_view(&expr.ty, Some(expr.source))?)
                     };
                     let Term::Nominal { arguments, .. } = selected.as_ref().unwrap_or(&expr.ty)
                     else {
@@ -5657,10 +5653,7 @@ impl<'a> Interpreter<'a> {
                     let selected = if this.associated_values.is_empty() {
                         None
                     } else {
-                        Some(
-                            selected_types::view(&expr.ty, &this.associated_values)
-                                .map_err(|kind| this.failure(kind, Some(expr.source)))?,
-                        )
+                        Some(this.selected_type_view(&expr.ty, Some(expr.source))?)
                     };
                     let Term::Nominal { arguments, .. } = selected.as_ref().unwrap_or(&expr.ty)
                     else {
@@ -5747,14 +5740,12 @@ impl<'a> Interpreter<'a> {
         else {
             unreachable!()
         };
-        let selected_subject = selected_types::view(subject, &self.associated_values)
-            .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+        let selected_subject = self.selected_type_view(subject, Some(expr.source))?;
         let selected_arguments = interface
             .arguments
             .iter()
-            .map(|argument| selected_types::view(argument, &self.associated_values))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+            .map(|argument| self.selected_type_view(argument, Some(expr.source)))
+            .collect::<Result<Vec<_>, _>>()?;
         let selected_interface = InterfaceInstance {
             declaration: interface.declaration,
             arguments: selected_arguments,
@@ -5844,13 +5835,11 @@ impl<'a> Interpreter<'a> {
                         .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
                     self.check_type_contract(&requirement, expr.source)?;
                 }
-                let selected_subject = selected_types::view(subject, &self.associated_values)
-                    .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+                let selected_subject = self.selected_type_view(subject, Some(expr.source))?;
                 let selected_arguments = interface_arguments
                     .iter()
-                    .map(|argument| selected_types::view(argument, &self.associated_values))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+                    .map(|argument| self.selected_type_view(argument, Some(expr.source)))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let (body, mut arguments) = self
                     .method_bodies
                     .get(&(

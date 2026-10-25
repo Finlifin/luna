@@ -3,6 +3,20 @@
 use super::*;
 type Values<'a> = HashMap<(InterfaceInstance, Term, DeclarationId), &'a Expr>;
 
+impl Interpreter<'_> {
+    pub(super) fn selected_type_view(
+        &mut self,
+        ty: &Term,
+        source: Option<SourceRange>,
+    ) -> Result<Term, Error> {
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let selected = view_budgeted(ty, &self.associated_values, &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        selected.map_err(|kind| self.failure(kind, source))
+    }
+}
+
 pub(super) fn same(a: &Term, b: &Term, values: &Values<'_>) -> bool {
     if a == b {
         return true;
@@ -157,6 +171,17 @@ fn normalize(
             sort: *sort,
             arguments: many(arguments, fuel)?,
         },
+        Term::FunctionValue {
+            declaration,
+            arguments,
+        } => Term::FunctionValue {
+            declaration: *declaration,
+            arguments: many(arguments, fuel)?,
+        },
+        Term::ClosureSnapshot { factory, arguments } => Term::ClosureSnapshot {
+            factory: *factory,
+            arguments: many(arguments, fuel)?,
+        },
         Term::Tuple(items) => Term::Tuple(many(items, fuel)?),
         Term::TupleValue(items) => Term::TupleValue(many(items, fuel)?),
         Term::TypeListValue(items) => Term::TypeListValue(many(items, fuel)?),
@@ -254,7 +279,23 @@ fn normalize(
                 result: Box::new(normalize(result, values, fuel, depth + 1)?),
             }
         }
-        _ => {
+        Term::Primitive(_)
+        | Term::ClosureContextType
+        | Term::Hole { .. }
+        | Term::Bound { .. }
+        | Term::Rigid { .. }
+        | Term::Runtime(_)
+        | Term::Unit
+        | Term::Bool(_)
+        | Term::Char(_)
+        | Term::BitVec(_)
+        | Term::Float32(_)
+        | Term::Float64(_)
+        | Term::String(_)
+        | Term::Symbol(_)
+        | Term::Integer(_)
+        | Term::Float(_)
+        | Term::Value { .. } => {
             let work = match ty {
                 Term::String(s) | Term::Symbol(s) => s.len(),
                 Term::Integer(i) => i.bit_len().div_ceil(32),
@@ -274,6 +315,106 @@ fn normalize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn evaluating_selected_type_chains_consumes_invocation_budget() {
+        let package = Package::default();
+        let selections: Vec<_> = (2..22)
+            .map(|member| {
+                value(if member == 21 {
+                    Term::Primitive(Primitive::Bool)
+                } else {
+                    projection(member + 1)
+                })
+            })
+            .collect();
+        let expression = value(projection(2));
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        for (offset, selection) in selections.iter().enumerate() {
+            vm.associated_values
+                .insert(key(2 + offset as u32), selection);
+        }
+        vm.budget.steps = 30;
+        let result = vm.eval(&expression, &mut Environment::new());
+        let Err(error) = result else {
+            panic!("selection work escaped the invocation budget")
+        };
+        assert_eq!(error.kind, ErrorKind::StepsExhausted);
+        assert_eq!(error.source, Some(expression.source));
+        assert!(vm.remaining_steps() < 30);
+        vm.budget.steps = 10_000;
+        assert!(matches!(
+            vm.eval(&expression, &mut Environment::new()).unwrap(),
+            Flow::Value(Value::Type(Term::Primitive(Primitive::Bool)))
+        ));
+        assert!(vm.events().is_empty());
+    }
+
+    #[test]
+    fn evaluating_selected_type_reports_missing_evidence_at_source() {
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let expression = value(projection(2));
+        let Err(error) = vm.eval(&expression, &mut Environment::new()) else {
+            panic!("missing selection accepted")
+        };
+        assert_eq!(error.kind, ErrorKind::UnmaterializedDispatch);
+        assert_eq!(error.source, Some(expression.source));
+    }
+    #[test]
+    fn callable_value_inputs_resolve_selected_types_without_changing_identity() {
+        let selected = value(Term::Primitive(Primitive::Bool));
+        let values = HashMap::from([(key(2), &selected)]);
+        for input in [
+            Term::FunctionValue {
+                declaration: id(10),
+                arguments: vec![projection(2)],
+            },
+            Term::ClosureSnapshot {
+                factory: id(11),
+                arguments: vec![projection(2)],
+            },
+        ] {
+            let expected = match &input {
+                Term::FunctionValue { declaration, .. } => Term::FunctionValue {
+                    declaration: *declaration,
+                    arguments: vec![Term::Primitive(Primitive::Bool)],
+                },
+                Term::ClosureSnapshot { factory, .. } => Term::ClosureSnapshot {
+                    factory: *factory,
+                    arguments: vec![Term::Primitive(Primitive::Bool)],
+                },
+                _ => unreachable!(),
+            };
+            assert_eq!(view(&input, &values).unwrap(), expected);
+            assert_eq!(
+                view(&input, &HashMap::new()).unwrap_err(),
+                ErrorKind::UnmaterializedDispatch
+            );
+        }
+    }
+
+    #[test]
+    fn callable_value_inputs_cannot_hide_work_from_view_budget() {
+        for input in [
+            Term::FunctionValue {
+                declaration: id(10),
+                arguments: vec![Term::Bool(true); 100],
+            },
+            Term::ClosureSnapshot {
+                factory: id(11),
+                arguments: vec![Term::Bool(true); 100],
+            },
+        ] {
+            assert_eq!(
+                normalize(&input, &HashMap::new(), &mut 3, 0).unwrap_err(),
+                ErrorKind::StepsExhausted
+            );
+            assert_eq!(
+                normalize(&input, &HashMap::new(), &mut 200, 0).unwrap(),
+                input
+            );
+        }
+    }
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 1, local }
     }

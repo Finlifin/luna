@@ -161,3 +161,34 @@ Required integration work:
 
 These are implementation requirements and a recorded gap, not newly introduced
 source APIs or a claim that the SoA example can currently run.
+
+## Associated type observation during invocation
+
+Selected type views now traverse FunctionValue and ClosureSnapshot instance
+arguments, retaining declaration/factory identities. The previous fallback cloned
+these aggregate terms without resolving nested associated Type queries or charging
+their traversal. Normalization now matches every Term variant explicitly so future
+aggregate variants cannot silently enter that fallback.
+
+The interpreter shares one metered selected-type-view entrypoint between reflection,
+Type-value evaluation, record/variant construction, associated-value lookup and
+method dispatch-key construction. Query work uses the current invocation allowance
+instead of a fresh independent view allowance at each explicit transformation.
+Failure retains consumed work and reports its original error category and source.
+This does not yet replace the separate bounded views inside immutable has_type,
+capability and identity-comparison predicates with a fully metered admission API.
+
+Verification in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib --test nominal_types --test type_equality --test normal_values --test function_types --test record_values --test instance_budget
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+178 tests passed, exit 0, `/tmp/luna-tools-hp90ehse/result.json`. Two regressions
+failed before the fix (`/tmp/luna-tools-8dg5aaee/result.json`): nested selected inputs
+remained unresolved and a 100-input callable value fit a three-step view budget.
+Final tests additionally exercise a real TypeValue evaluation with a 20-selection
+chain, exhaustion and retry, and missing-evidence diagnostics retaining the source.
+Formatting passed at `/tmp/luna-tools-k726hsld/result.json`; `git diff --check`
+passed. No source reflection API or builder publication behavior is added here.

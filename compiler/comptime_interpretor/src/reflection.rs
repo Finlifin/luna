@@ -39,11 +39,7 @@ impl fmt::Display for StructReflection {
 
 impl Interpreter<'_> {
     fn reflection_type(&mut self, ty: &Term) -> Result<Term, Error> {
-        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let selected = selected_types::view_budgeted(ty, &self.associated_values, &mut fuel);
-        self.budget.steps -= (before - fuel) as u64;
-        let ty = selected.map_err(|kind| self.failure(kind, None))?;
+        let ty = self.selected_type_view(ty, None)?;
         let work = self
             .type_description_work(&ty)
             .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
