@@ -116,3 +116,73 @@ fn semantic_rejection_preserves_draft_then_publishes_checked_function() {
     assert_eq!(batch.published().to_string(), unchanged);
     assert_eq!(checked.functions.len(), 1);
 }
+
+#[test]
+fn generated_definition_attributes_cannot_bypass_semantic_admission() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    let value = Expr {
+        hir_id: HirId::new(owner, ItemLocalId::new(1)),
+        kind: ExprKind::Lit(Lit {
+            kind: LitKind::Bool(true),
+            span: DUMMY_SP,
+        }),
+        span: DUMMY_SP,
+    };
+    batch
+        .define(
+            OwnerInfo {
+                node: OwnerNode::Item(arena.alloc_item(Item {
+                    owner_id: owner,
+                    ident: Ident::new(Symbol::intern("generated"), DUMMY_SP),
+                    kind: ItemKind::Mod(ModDef { items: vec![] }),
+                    span: DUMMY_SP,
+                })),
+                nodes: OwnerNodes::new(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    for configuration_key in [None, Some("representation".into())] {
+        batch.set_attributes(vec![DeferredDefinitionAttribute {
+            target: AttributeTarget::Definition(owner),
+            lexical_owner: owner,
+            expression: "true".into(),
+            value: &value,
+            configuration_key,
+            span: DUMMY_SP,
+        }]);
+        let before = batch.to_string();
+        let error = publish(
+            &mut batch,
+            &mut 100,
+            &BTreeMap::new(),
+            &Protocols::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, PublicationError::Check(_)), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("elaboration is not implemented for definition")
+        );
+        assert_eq!(batch.to_string(), before);
+        assert_eq!(batch.published().num_defs(), 0);
+        assert!(batch.published().definition_attributes.is_empty());
+        assert!(batch.published().pending_semantics.is_empty());
+    }
+    batch.set_attributes(vec![]);
+    publish(
+        &mut batch,
+        &mut 100,
+        &BTreeMap::new(),
+        &Protocols::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(batch.published().num_defs(), 1);
+}

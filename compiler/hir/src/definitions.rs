@@ -81,6 +81,7 @@ pub struct DefinitionBatch<'package, 'hir> {
     definitions: Vec<Option<Definition<'hir>>>,
     bodies: Vec<(BodyId, Body<'hir>)>,
     body_slots: HashMap<BodyId, usize>,
+    attributes: Vec<crate::DeferredDefinitionAttribute<'hir>>,
 }
 impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
     pub fn new(package: &'package mut Package<'hir>) -> Self {
@@ -90,6 +91,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
             definitions: Vec::new(),
             bodies: Vec::new(),
             body_slots: HashMap::new(),
+            attributes: Vec::new(),
         }
     }
     /// Read-only access to previously published definitions, never draft entries.
@@ -146,6 +148,12 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         }
         Ok(())
     }
+    /// Replace the draft's complete attribute sequence, preserving application
+    /// order and lexical provenance. Targets must belong to this batch; lexical
+    /// contexts may refer to previously published definitions.
+    pub fn set_attributes(&mut self, attributes: Vec<crate::DeferredDefinitionAttribute<'hir>>) {
+        self.attributes = attributes;
+    }
     fn exists(&self, owner: OwnerId) -> bool {
         self.slot(owner)
             .is_some_and(|i| self.definitions[i].is_some())
@@ -172,6 +180,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
             definitions: self.definitions.clone(),
             bodies: self.bodies.clone(),
             body_slots: self.body_slots.clone(),
+            attributes: self.attributes.clone(),
         };
         let owners = batch.publish(fuel).map_err(PublicationError::Structure)?;
         let result = check(&candidate).map_err(PublicationError::Check)?;
@@ -179,6 +188,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         self.definitions.clear();
         self.bodies.clear();
         self.body_slots.clear();
+        self.attributes.clear();
         self.base = self.package.num_defs();
         Ok((owners, result))
     }
@@ -189,6 +199,27 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         let mut identities = BTreeSet::new();
         let mut checked_containers = BTreeSet::new();
         let mut checked_lexical_parents = BTreeSet::new();
+        for attribute in &self.attributes {
+            charge(fuel)?;
+            let owner = match attribute.target {
+                crate::AttributeTarget::Definition(owner) => owner,
+                crate::AttributeTarget::Member(id) => id.owner,
+            };
+            let definition = self
+                .slot(owner)
+                .and_then(|slot| self.definitions[slot].as_ref())
+                .ok_or_else(|| error("attribute target not defined in this batch", owner))?;
+            if !self.exists(attribute.lexical_owner)
+                || attribute.value.hir_id.owner != attribute.lexical_owner
+            {
+                return Err(error("invalid attribute lexical context", owner));
+            }
+            if let crate::AttributeTarget::Member(id) = attribute.target {
+                if id.local_id.raw() == 0 || definition.info.nodes.get(id.local_id).is_none() {
+                    return Err(error("missing attribute member target", owner));
+                }
+            }
+        }
         for (id, body) in &self.bodies {
             charge(fuel)?;
             let owner = id.hir_id.owner;
@@ -349,6 +380,9 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         for (id, body) in self.bodies.drain(..) {
             self.package.insert_body(id, body);
         }
+        self.package
+            .definition_attributes
+            .append(&mut self.attributes);
         self.body_slots.clear();
         self.base = self.package.num_defs();
         Ok(owners)
@@ -409,6 +443,10 @@ impl fmt::Display for DefinitionBatch<'_, '_> {
         bodies.sort_by_key(|(id, _)| (id.hir_id.owner, id.hir_id.local_id));
         for (id, body) in bodies {
             write!(f, " (body (id {id}) {body})")?;
+        }
+        f.write_str(") (attributes")?;
+        for attribute in &self.attributes {
+            write!(f, " {attribute}")?;
         }
         f.write_str("))")
     }

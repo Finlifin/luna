@@ -410,3 +410,63 @@ fn checked_publication_failure_and_unwind_keep_the_original_draft() {
         owner.def_id.raw() + 1
     );
 }
+
+#[test]
+fn generated_attributes_keep_order_and_validate_context_before_publication() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    let value = arena.alloc_expr(Expr {
+        hir_id: HirId::new(owner, ItemLocalId::new(1)),
+        kind: ExprKind::TyVoid,
+        span: DUMMY_SP,
+    });
+    batch
+        .define(module(&arena, owner, vec![]), None, None)
+        .unwrap();
+    let attribute = |name: &str| DeferredDefinitionAttribute {
+        target: AttributeTarget::Definition(owner),
+        lexical_owner: owner,
+        expression: name.into(),
+        value,
+        configuration_key: None,
+        span: DUMMY_SP,
+    };
+    let mut invalid = attribute("invalid context");
+    invalid.lexical_owner = OwnerId::INVALID;
+    batch.set_attributes(vec![invalid]);
+    assert_eq!(
+        batch.publish(&mut 100).unwrap_err().kind,
+        "invalid attribute lexical context"
+    );
+    assert!(batch.published().definition_attributes.is_empty());
+    let mut missing_member = attribute("missing member");
+    missing_member.target = AttributeTarget::Member(value.hir_id);
+    batch.set_attributes(vec![missing_member]);
+    assert_eq!(
+        batch.publish(&mut 100).unwrap_err().kind,
+        "missing attribute member target"
+    );
+    batch.set_attributes(vec![attribute("inner"), attribute("outer")]);
+    let before = batch.to_string();
+    assert!(before.find("inner").unwrap() < before.find("outer").unwrap());
+    assert!(batch.publish(&mut 0).is_err());
+    assert_eq!(batch.to_string(), before);
+    batch.publish(&mut 100).unwrap();
+    let attributes = &batch.published().definition_attributes;
+    assert_eq!(
+        attributes
+            .iter()
+            .map(|a| a.expression.as_str())
+            .collect::<Vec<_>>(),
+        vec!["inner", "outer"]
+    );
+    assert!(std::ptr::eq(attributes[0].value, value));
+    batch.set_attributes(vec![attribute("modify old owner")]);
+    assert_eq!(
+        batch.publish(&mut 100).unwrap_err().kind,
+        "attribute target not defined in this batch"
+    );
+    assert_eq!(batch.published().definition_attributes.len(), 2);
+}

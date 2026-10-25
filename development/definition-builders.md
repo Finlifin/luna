@@ -28,6 +28,10 @@ Publication checks:
 - Indexed HIR nodes agree with their owner/local identities; their parent links
   exist and reach the owner's root without cycles. An indexed root must refer to
   the canonical definition item.
+- Deferred attributes retain their structured expressions, application order,
+  configuration keys and lexical context. Their targets must be draft owners
+  (or indexed members of those owners); their lexical owners must exist and
+  match the expression owner. The complete sequence can be replaced for retry.
 
 Container, lexical-parent, and node-parent traversal reuse validated paths rather
 than repeatedly traversing entire ancestor chains. Body replacement uses an ID
@@ -64,14 +68,21 @@ does not account for the table copy or replace the elaborator's own limits.
 The existing lowering consumer still uses structural publication, because its
 ordinary semantic checking happens later in the driver.
 
+Deferred attribute execution is not implemented. The ordinary elaborator now
+checks the attribute table directly, in addition to lowering's pending-semantics
+markers. This prevents generated HIR without those markers from silently losing
+an attribute or configuration. Checked publication rejects such candidates and
+retains their drafts; structural publication alone preserves the metadata for
+later checking. This does not add a new accepted attribute API.
+
 This is **not** a working `StructBuilder.new/add_field/build` API. There is no
 new runtime/VM builder value, field-reflection API, or source-language builder
 method in this change. The SoA example still cannot run through this feature.
 
 The next integration must transport owned, invocation-local definition drafts
-from the VM to a candidate elaboration world. Generated names, attributes and
-use-site permissions still need their normal resolution/lowering paths; the
-batch alone does not synthesize this metadata. The checked entrypoint runs the
+from the VM to a candidate elaboration world. Generated names and use-site
+permissions still need their normal resolution/lowering paths; the batch can
+transport attribute metadata but does not resolve or execute it. The checked entrypoint runs the
 ordinary semantic passes, but cannot extend an already running checker or resume
 a suspended invocation. Structural registration must never be treated as proof
 of semantic properties. Neither published HIR nor frozen
@@ -118,3 +129,21 @@ the same draft to use Void, checks the returned NIR's package identity and targe
 then rejects another incomplete batch without changing the published package.
 Registration tests also check callback rejection, unwinding and exhausted fuel.
 Formatting exited 0 at `/tmp/luna-tools-9q6kt_f7/result.json`.
+
+Attribute transport and admission follow-up (same working directory):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir -p elaboration -p luna --test definitions --test display --test frontend_cli --no-fail-fast
+```
+
+The final run `/tmp/luna-tools-kdmlu6ch/result.json` exited 0: 2 semantic
+admission, 9 registration, 17 Display and 204 frontend CLI tests (232 total).
+Formatting exited 0 at `/tmp/luna-tools-a41yeld3/result.json`.
+The first attempt hit a link/storage quota failure and could not save its final
+report (`/tmp/luna-tools-9w4h8boq/`, terminal wrapper exit 125, command exit 101).
+Authorized cache cleanup removed about 625 MiB before retry. The intermediate
+run `/tmp/luna-tools-vxv5e75i/result.json` exposed three diagnostic-order
+regressions, fixed by retaining the existing pending-semantics checks before the
+generated-attribute fallback. Four library fixture failures were also repaired:
+the fixtures now copy the split Option/Result unwrap modules and the conversion
+module required by traits. Their original execution assertions remain intact.

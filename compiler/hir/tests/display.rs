@@ -156,7 +156,24 @@ fn generated_definition_drafts_have_structured_escaped_dumps() {
             None,
         )
         .unwrap();
+    let attribute_value = Expr {
+        hir_id: HirId::new(owner, ItemLocalId::new(1)),
+        kind: ExprKind::TyVoid,
+        span: DUMMY_SP,
+    };
+    batch.set_attributes(vec![DeferredDefinitionAttribute {
+        target: AttributeTarget::Definition(owner),
+        lexical_owner: owner,
+        expression: "quote\"\\\nattribute".into(),
+        value: &attribute_value,
+        configuration_key: Some("key\"\\\n".into()),
+        span: DUMMY_SP,
+    }]);
     let completed = parsed(&batch);
+    completed
+        .field("attributes")
+        .field("expression")
+        .text("quote\"\\\nattribute");
     assert_eq!(completed.field("definitions").tag(), "definition");
     assert_eq!(completed.field("definitions").field("item"), &parsed(item));
     assert_eq!(batch.to_string(), batch.to_string());

@@ -265,6 +265,19 @@ pub fn elaborate_packages_for_target(
             format!("elaboration is not implemented for {feature}"),
         ));
     }
+    // Generated HIR need not have gone through source lowering, which normally
+    // supplies pending_semantics markers. Never silently ignore deferred
+    // attributes when a builder supplies their structured representation.
+    if let Some(attribute) = package.definition_attributes.first() {
+        return Err(error(
+            attribute.span,
+            if attribute.configuration_key.is_some() {
+                "elaboration is not implemented for definition configuration"
+            } else {
+                "elaboration is not implemented for definition attribute or modifier"
+            },
+        ));
+    }
     let mut checker = Checker {
         target,
         protocols: protocols.clone(),
