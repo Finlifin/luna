@@ -22,6 +22,20 @@ draft for the same reserved owner and replace its private batch description.
 Previously published definitions remain immutable. This is compiler-side assembly,
 not an implementation of source `StructBuilder.new/add_field/build` yet.
 
+`hir::definitions::assemble_struct` accepts a reserved owner, definition name and
+ordered `TypedField` inputs (name, stable Type and source span). It allocates the
+field/type identities, retains Type data through Arc, and constructs a complete
+canonical root/member/type node index. Identity capacity and total assembly fuel
+are checked before arena allocation. The returned OwnerInfo still goes through
+DefinitionBatch and ordinary semantic admission; duplicate field names and invalid
+Types are not accepted merely because assembly succeeded. The current convenience
+entrypoint constructs fields without defaults or clauses. Contextual default code,
+generic declaration clauses and nested items continue to use the general HIR path.
+
+The VM-reflection integration test now uses this assembly entrypoint to turn field
+descriptions into a checked generated struct, rather than assigning raw local IDs
+in the caller. Field-description dumps use escaped S-expressions.
+
 ## Implemented: atomic HIR registration
 
 `hir::definitions::DefinitionBatch` reserves owner identities and accepts the
@@ -584,3 +598,21 @@ repaired. The new dump test covers stable descriptions and escaped field names.
 Formatting passed at `/tmp/luna-tools-t_4snacv/result.json`; `git diff --check`
 passed. This is a compiler-side value-to-declaration bridge, not source StructBuilder
 or a resumed live invocation. HIR now has an explicit dependency on stable NIR terms.
+
+Indexed struct assembly verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir --test struct_assembly --test definition_nodes --test definitions --test display
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test delivered_types --test definitions
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+All exited 0. `/tmp/luna-tools-crbqrqcz/result.json` passed 32 HIR tests;
+`/tmp/luna-tools-kv_kd7is/result.json` passed 10 semantic publication tests (42 total).
+New checks cover canonical root/field/type indexing, parent relationships, shared
+Type ownership, empty assembly, budget preflight and retry, invalid owners and
+escaped descriptor dumps. The reflected-field integration now uses the public
+assembler; duplicate names and non-Type descriptions are rejected by ordinary
+semantic publication, preserving drafts until repaired. Formatting passed at
+`/tmp/luna-tools-mrq3aon_/result.json`; `git diff --check` passed. No source builder
+syntax, default-code assembler or invocation suspension/resumption is added.

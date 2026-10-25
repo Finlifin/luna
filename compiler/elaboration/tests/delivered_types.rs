@@ -220,13 +220,25 @@ fn reflected_type_values_can_feed_generated_fields_without_source_reconstruction
     let mut package = Package::new();
     let mut batch = DefinitionBatch::new(&mut package);
     let owner = batch.reserve().unwrap();
-    batch
-        .define(
-            description(&arena, owner, reflected.fields[0].ty.clone(), None),
-            None,
-            None,
-        )
-        .unwrap();
+    let fields: Vec<_> = reflected
+        .fields
+        .iter()
+        .map(|field| hir::definitions::TypedField {
+            name: Ident::new(Symbol::intern(&field.name), DUMMY_SP),
+            ty: Arc::new(field.ty.clone()),
+            span: DUMMY_SP,
+        })
+        .collect();
+    let info = hir::definitions::assemble_struct(
+        &arena,
+        owner,
+        Ident::new(Symbol::intern("Generated"), DUMMY_SP),
+        &fields,
+        DUMMY_SP,
+        &mut 100,
+    )
+    .unwrap();
+    batch.define(info, None, None).unwrap();
     let (_, checked) = publish(
         &mut batch,
         &mut 100,
@@ -408,4 +420,77 @@ fn destination_formation_predicates_are_checked_before_delivery() {
         None,
     )
     .unwrap();
+}
+
+#[test]
+fn assembled_structs_use_ordinary_name_and_type_validation() {
+    use hir::definitions::{TypedField, assemble_struct};
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    let field = |name: &str, ty| TypedField {
+        name: Ident::new(Symbol::intern(name), DUMMY_SP),
+        ty: Arc::new(ty),
+        span: DUMMY_SP,
+    };
+    let assemble = |fields: &[TypedField]| {
+        assemble_struct(
+            &arena,
+            owner,
+            Ident::new(Symbol::intern("Generated"), DUMMY_SP),
+            fields,
+            DUMMY_SP,
+            &mut 100,
+        )
+        .unwrap()
+    };
+    batch
+        .define(
+            assemble(&[field("value", boolean()), field("value", boolean())]),
+            None,
+            None,
+        )
+        .unwrap();
+    let before = batch.to_string();
+    let failure = publish(
+        &mut batch,
+        &mut 100,
+        &identities(),
+        &Protocols::default(),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        failure.to_string().contains("duplicate struct field"),
+        "{failure}"
+    );
+    assert_eq!(batch.to_string(), before);
+    assert_eq!(batch.published().num_defs(), 0);
+    batch
+        .define(assemble(&[field("value", Term::Bool(true))]), None, None)
+        .unwrap();
+    assert!(
+        publish(
+            &mut batch,
+            &mut 100,
+            &identities(),
+            &Protocols::default(),
+            None
+        )
+        .is_err()
+    );
+    assert_eq!(batch.published().num_defs(), 0);
+    batch
+        .define(assemble(&[field("value", boolean())]), None, None)
+        .unwrap();
+    let (_, checked) = publish(
+        &mut batch,
+        &mut 100,
+        &identities(),
+        &Protocols::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(checked.structs[0].fields, [("value".into(), boolean())]);
 }

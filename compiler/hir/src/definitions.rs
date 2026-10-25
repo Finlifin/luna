@@ -10,6 +10,8 @@ use symbol::DefId;
 mod members;
 mod nodes;
 pub use nodes::DefinitionNodes;
+mod structs;
+pub use structs::{TypedField, assemble_struct};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
