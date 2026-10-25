@@ -194,6 +194,15 @@ are selected once per query rather than once per variant. Metadata copying and
 payload substitution share the invocation budget; failed queries deliver no
 partial result. Empty enums still check formation predicates and input arity.
 
+Both queries can observe compiler-selected associated Type results, including
+associated types used as nominal arguments or field/payload types. Selection uses
+the existing complete interface/subject/member key and performs no implementation
+search. Query resolution and copying consume the invocation's budget; missing,
+wrong-sort and cyclic selections fail explicitly. Returned subjects retain the
+original query while fields/payloads use admitted selected descriptions. Opaque
+normal-form heads still do not unfold. This does not admit unresolved inference
+state or establish a source spelling for reflection APIs.
+
 This is **not** a working `StructBuilder.new/add_field/build` API. There is no
 new runtime/VM builder value or source-language reflection/builder method yet.
 The internal reflection query does not execute attribute consumers or reflect
@@ -514,3 +523,19 @@ phase rejection with recovery, empty-enum formation and intrinsic classification
 metadata budget failure/retry, opaque payload identity and malformed fields/shapes.
 The focused initial five tests also passed at `/tmp/luna-tools-gur9qs5f/result.json`.
 `git diff --check` passed. Source-level reflection/builder calls remain unconnected.
+
+Selected associated Type reflection verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib --test type_equality --test nominal_types
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+Both exited 0. `/tmp/luna-tools-ubstejkb/result.json` passed 115 interpreter unit,
+23 nominal-type and 3 type-equality tests (141 total). The focused 19 reflection
+tests also passed at `/tmp/luna-tools-c7fonrn_/result.json`. Added checks cover
+selected struct/enum subjects, associated nominal arguments, associated field
+types, original subject retention, missing/wrong-sort/cyclic selection failure,
+repair and shared-budget exhaustion. Formatting passed at
+`/tmp/luna-tools-hzlh4xgt/result.json`; `git diff --check` passed. Tests exercise
+already-selected VM evidence; they do not add source-level implementation search.

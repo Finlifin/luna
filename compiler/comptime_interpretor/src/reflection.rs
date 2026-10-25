@@ -38,6 +38,19 @@ impl fmt::Display for StructReflection {
 }
 
 impl Interpreter<'_> {
+    fn reflection_type(&mut self, ty: &Term) -> Result<Term, Error> {
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let selected = selected_types::view_budgeted(ty, &self.associated_values, &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        let ty = selected.map_err(|kind| self.failure(kind, None))?;
+        let work = self
+            .type_description_work(&ty)
+            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+        self.integer_operation(None, |budget| budget.consume(work))?;
+        self.admit_type(&ty, 0)?;
+        Ok(ty)
+    }
     /// Inspect a completed struct application in this invocation's declaration
     /// world. Formation predicates are checked even for phantom parameters and
     /// empty structs. All substitution/copy work consumes the invocation budget.
@@ -46,11 +59,9 @@ impl Interpreter<'_> {
         if !self.comptime_only {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
-        let work = self
-            .type_description_work(ty)
-            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-        self.integer_operation(None, |budget| budget.consume(work))?;
-        self.admit_type(ty, 0)?;
+        let subject = ty;
+        let selected = self.reflection_type(ty)?;
+        let ty = &selected;
         let Term::Nominal { declaration, .. } = ty else {
             return Err(self.failure(ErrorKind::Type, None));
         };
@@ -96,18 +107,14 @@ impl Interpreter<'_> {
         let mut fields = Vec::with_capacity(types.len());
         for ((name, _), ty) in definition.fields.iter().zip(types) {
             self.integer_operation(None, |budget| budget.consume(name.len().saturating_add(1)))?;
-            let work = self
-                .type_description_work(&ty)
-                .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-            self.integer_operation(None, |budget| budget.consume(work))?;
-            self.admit_type(&ty, 0)?;
+            let ty = self.reflection_type(&ty)?;
             fields.push(ReflectedField {
                 name: name.clone(),
                 ty,
             });
         }
         Ok(StructReflection {
-            subject: ty.clone(),
+            subject: subject.clone(),
             fields,
         })
     }

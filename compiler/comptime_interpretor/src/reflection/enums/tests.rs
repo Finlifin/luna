@@ -228,3 +228,41 @@ fn malformed_payload_shapes_or_non_type_fields_cannot_be_reflected() {
         }
     }
 }
+
+#[test]
+fn selected_associated_enum_subject_keeps_query_and_instantiates_fields() {
+    let package = package();
+    let origin = nir::AssociatedTypeOrigin {
+        interface: id(80),
+        member: id(81),
+    };
+    let query = Term::AssociatedType {
+        origin: Box::new(origin.clone()),
+        arguments: vec![],
+        subject: Box::new(boolean()),
+    };
+    let selection = Expr {
+        source: SourceRange { start: 0, end: 0 },
+        ty: Term::Primitive(Primitive::Type),
+        kind: K::TypeValue(nominal(vec![boolean()])),
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.reflect_enum(&query).unwrap_err().kind,
+        ErrorKind::UnmaterializedDispatch
+    );
+    vm.associated_values.insert(
+        (
+            InterfaceInstance {
+                declaration: origin.interface,
+                arguments: vec![],
+            },
+            boolean(),
+            origin.member,
+        ),
+        &selection,
+    );
+    let view = vm.reflect_enum(&query).unwrap();
+    assert_eq!(view.subject, query);
+    assert_eq!(view.variants[2].fields, [boolean()]);
+}

@@ -68,11 +68,9 @@ impl Interpreter<'_> {
         if !self.comptime_only {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
-        let work = self
-            .type_description_work(ty)
-            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-        self.integer_operation(None, |budget| budget.consume(work))?;
-        self.admit_type(ty, 0)?;
+        let subject = ty;
+        let selected = self.reflection_type(ty)?;
+        let ty = &selected;
         let Term::Nominal {
             declaration,
             arguments,
@@ -156,7 +154,7 @@ impl Interpreter<'_> {
                 )
             };
             self.budget.steps -= (before - fuel) as u64;
-            let fields = fields.ok_or_else(|| {
+            let mut fields = fields.ok_or_else(|| {
                 self.failure(
                     if fuel == 0 {
                         ErrorKind::StepsExhausted
@@ -166,12 +164,8 @@ impl Interpreter<'_> {
                     None,
                 )
             })?;
-            for field in &fields {
-                let work = self
-                    .type_description_work(field)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                self.integer_operation(None, |budget| budget.consume(work))?;
-                self.admit_type(field, 0)?;
+            for field in &mut fields {
+                *field = self.reflection_type(field)?;
             }
             variants.push(ReflectedVariant {
                 name: variant.name.clone(),
@@ -180,7 +174,7 @@ impl Interpreter<'_> {
             });
         }
         Ok(EnumReflection {
-            subject: ty.clone(),
+            subject: subject.clone(),
             is_intrinsic: definition.is_intrinsic,
             variants,
             groups,

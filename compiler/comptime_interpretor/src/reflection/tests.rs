@@ -228,3 +228,108 @@ fn reflection_rejects_non_type_and_unbound_field_descriptions() {
         }
     }
 }
+
+fn associated(member: u32) -> Term {
+    Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(80),
+            member: id(member),
+        }),
+        arguments: vec![],
+        subject: Box::new(p(Primitive::Bool)),
+    }
+}
+fn associated_key(member: u32) -> (InterfaceInstance, Term, DeclarationId) {
+    (
+        InterfaceInstance {
+            declaration: id(80),
+            arguments: vec![],
+        },
+        p(Primitive::Bool),
+        id(member),
+    )
+}
+fn selected_type(ty: Term) -> Expr {
+    Expr {
+        source: SourceRange { start: 0, end: 0 },
+        ty: p(Primitive::Type),
+        kind: K::TypeValue(ty),
+    }
+}
+
+#[test]
+fn selected_associated_subject_and_arguments_keep_original_query_identity() {
+    let package = package();
+    let applied = nominal(vec![p(Primitive::Char)]);
+    let selected = selected_type(applied.clone());
+    let element = selected_type(p(Primitive::Char));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    vm.associated_values.insert(associated_key(81), &selected);
+    vm.associated_values.insert(associated_key(82), &element);
+    let root = vm.reflect_struct(&associated(81)).unwrap();
+    assert_eq!(root.subject, associated(81));
+    assert_eq!(root.fields[0].ty, p(Primitive::Char));
+    let argument = nominal(vec![associated(82)]);
+    let nested = vm.reflect_struct(&argument).unwrap();
+    assert_eq!(nested.subject, argument);
+    assert_eq!(nested.fields, root.fields);
+}
+
+#[test]
+fn missing_invalid_and_cyclic_selection_fail_without_poisoning_later_queries() {
+    let package = package();
+    let cyclic = selected_type(associated(81));
+    let invalid = Expr {
+        source: SourceRange { start: 0, end: 0 },
+        ty: p(Primitive::Bool),
+        kind: K::Literal(Literal::Bool(true)),
+    };
+    let valid = selected_type(nominal(vec![p(Primitive::Bool)]));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.reflect_struct(&associated(81)).unwrap_err().kind,
+        ErrorKind::UnmaterializedDispatch
+    );
+    vm.associated_values.insert(associated_key(81), &invalid);
+    assert_eq!(
+        vm.reflect_struct(&associated(81)).unwrap_err().kind,
+        ErrorKind::Type
+    );
+    vm.associated_values.insert(associated_key(81), &cyclic);
+    assert_eq!(
+        vm.reflect_struct(&associated(81)).unwrap_err().kind,
+        ErrorKind::DepthExhausted
+    );
+    vm.associated_values.insert(associated_key(81), &valid);
+    assert_eq!(
+        vm.reflect_struct(&associated(81)).unwrap().fields[0].ty,
+        p(Primitive::Bool)
+    );
+    vm.budget.steps = 1;
+    assert_eq!(
+        vm.reflect_struct(&associated(81)).unwrap_err().kind,
+        ErrorKind::StepsExhausted
+    );
+}
+
+#[test]
+fn selected_field_queries_are_admitted_after_substitution() {
+    let mut package = package();
+    package.structs[0].fields = vec![("selected".into(), associated(81))];
+    let selected = selected_type(p(Primitive::Bool));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.reflect_struct(&nominal(vec![p(Primitive::Bool)]))
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnmaterializedDispatch
+    );
+    vm.associated_values.insert(associated_key(81), &selected);
+    assert_eq!(
+        vm.reflect_struct(&nominal(vec![p(Primitive::Bool)]))
+            .unwrap()
+            .fields[0]
+            .ty,
+        p(Primitive::Bool)
+    );
+}

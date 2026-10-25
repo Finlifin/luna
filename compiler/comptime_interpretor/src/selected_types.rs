@@ -15,6 +15,22 @@ pub(super) fn same(a: &Term, b: &Term, values: &Values<'_>) -> bool {
 pub(super) fn view(ty: &Term, values: &Values<'_>) -> Result<Term, ErrorKind> {
     normalize(ty, values, &mut 100_000, 0)
 }
+/// Invocation-owned budget for explicit type observation. Admission remains
+/// the caller's responsibility; this uses only already selected evidence.
+pub(super) fn view_budgeted(
+    ty: &Term,
+    values: &Values<'_>,
+    fuel: &mut usize,
+) -> Result<Term, ErrorKind> {
+    charge_copy(ty, fuel)?;
+    normalize(ty, values, fuel, 0)
+}
+fn charge_copy(ty: &Term, fuel: &mut usize) -> Result<(), ErrorKind> {
+    nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel).map_err(|error| match error {
+        nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
+        nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
+    })
+}
 pub(super) fn predicate(
     input: &nir::program::TypePredicate,
     values: &Values<'_>,
@@ -122,6 +138,7 @@ fn normalize(
             let K::TypeValue(ty) = &value.kind else {
                 return Err(ErrorKind::Type);
             };
+            charge_copy(ty, fuel)?;
             normalize(ty, values, fuel, depth + 1)?
         }
         Term::Nominal {
