@@ -84,7 +84,8 @@ impl Interpreter<'_> {
             }
             Value::Object(object) => {
                 for entry in object.entries() {
-                    self.admit_embedded_type_descriptions(entry.value(), depth + 1)?;
+                    self.admit_type(&entry.value().ty, depth + 1)?;
+                    self.admit_embedded_type_descriptions(&entry.value().value, depth + 1)?;
                 }
             }
             _ => {}
@@ -148,7 +149,8 @@ impl Interpreter<'_> {
             }
             Value::Object(object) => {
                 for entry in object.entries() {
-                    self.admit_value_types(entry.value(), depth + 1)?;
+                    self.admit_type(&entry.value().ty, depth + 1)?;
+                    self.admit_value_types(&entry.value().value, depth + 1)?;
                 }
             }
             _ => {} // immutable_copy_work already rejected storage and callables.

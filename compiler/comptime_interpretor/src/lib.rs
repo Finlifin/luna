@@ -105,7 +105,7 @@ pub enum Value {
     AnonymousRecord(Vec<(String, Value)>),
     /// Invocation-local ordered metadata, distinct from an anonymous record.
     /// No normal-term encoding or runtime representation is admitted yet.
-    Object(Object<Value>),
+    Object(Object<ObjectValue>),
     Record {
         arguments: Vec<Term>,
         declaration: DeclarationId,
@@ -123,6 +123,22 @@ pub enum Value {
     },
     RuntimeTraitMethod(Box<TraitMethodIdentity>),
     Closure(Arc<Closure>),
+}
+/// Preserve the original entry domain, including opaque normal-form identity.
+/// Constructing this host representation does not establish its validity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectValue {
+    pub ty: Term,
+    pub value: Value,
+}
+impl fmt::Display for ObjectValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(object-value (type {}) (value {}))",
+            self.ty, self.value
+        )
+    }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct TraitMethodIdentity {
@@ -199,7 +215,14 @@ impl Value {
                 }
                 Value::Object(object) => {
                     for entry in object.entries() {
-                        visit(entry.value(), fuel, depth + 1, closures, storage, visitor)?;
+                        visit(
+                            &entry.value().value,
+                            fuel,
+                            depth + 1,
+                            closures,
+                            storage,
+                            visitor,
+                        )?;
                     }
                 }
                 Value::ErrorResult { value, .. } | Value::Newtype { value, .. } => {
@@ -302,7 +325,16 @@ impl Value {
                         return None;
                     }
                     object.entries().iter().try_fold(0usize, |n, entry| {
-                        let total = n.checked_add(entry.key().map_or(0, str::len))?;
+                        let ty_work = scoped_type_value_work_with_evidence(
+                            &entry.value().ty,
+                            &BTreeMap::new(),
+                            parameters,
+                            value_parameters,
+                            |_, _, _| None,
+                        )?;
+                        let total = n
+                            .checked_add(entry.key().map_or(0, str::len))?
+                            .checked_add(ty_work)?;
                         (total <= 100_000).then_some(total)
                     })?
                 }
@@ -341,7 +373,7 @@ impl Value {
                     object
                         .entries()
                         .iter()
-                        .map(|entry| (entry.value(), depth + 1)),
+                        .map(|entry| (&entry.value().value, depth + 1)),
                 ),
                 _ => {}
             }
@@ -809,12 +841,13 @@ impl Value {
                 Value::AnonymousRecord(fields) => {
                     pending.extend(fields.into_iter().map(|(_, value)| value))
                 }
-                Value::Object(object) => pending.extend(
-                    object
-                        .into_entries()
-                        .into_iter()
-                        .map(ObjectEntry::into_value),
-                ),
+                Value::Object(object) => {
+                    for entry in object.into_entries() {
+                        let typed = entry.into_value();
+                        typed.ty.drop_iteratively();
+                        pending.push(typed.value);
+                    }
+                }
                 Value::Type(ty) => ty.drop_iteratively(),
                 Value::ErrorResult { ty, value, .. } | Value::Newtype { ty, value } => {
                     ty.drop_iteratively();
@@ -2982,6 +3015,13 @@ impl<'a> Interpreter<'a> {
             }
             (Value::BitVec(value), Term::Primitive(Primitive::BitVec(width))) => {
                 value.width() == *width
+            }
+            (Value::Object(object), Term::Primitive(Primitive::Object)) => {
+                self.comptime_only && object.entries().iter().all(|entry| {
+                    let typed = entry.value();
+                    self.type_description_work(&typed.ty).is_some()
+                        && self.has_type_at(&typed.value, &typed.ty, depth + 1)
+                })
             }
             (Value::TypeList(elements), ty) => {
                 self.is_type_list_input(ty)

@@ -8792,3 +8792,20 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
         );
     }
 }
+
+#[test]
+fn object_type_is_available_in_comptime_signatures_but_not_runtime_values() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "typealias Metadata = .Object'builtin; comptime fn forward(value:Metadata)->Metadata {value}");
+    let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(success(&output).contains("Object"));
+    for source in [
+        "typealias Metadata = .Object'builtin; fn forward(value:Metadata)->Metadata {value}",
+        "typealias Metadata = .Object'builtin; struct Holder {value:Metadata} fn forward(value:Holder)->Holder {value}",
+    ] {
+        sandbox.write("input.fl", source);
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        failure(&output, 1);
+        assert!(!details(&output).contains("panicked"));
+    }
+}

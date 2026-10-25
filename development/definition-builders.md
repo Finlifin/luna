@@ -85,7 +85,10 @@ preserved by Object but are unsupported by this named-property projection; this
 does not assign their general language meaning. Dumps escape keys and use stable
 S-expressions.
 
-The interpreter now has `Value::Object`, using this ordered container. Ownership
+The interpreter now has `Value::Object`, using this ordered container. Each entry
+holds an `ObjectValue` with its original NIR type and payload; metadata never
+reconstructs a type from an erased value. Type labels participate in budgeted
+copying and admission, and a forged label/payload pair is rejected. Ownership
 traversal visits all entry payloads, including shared storage and declaration
 references. Immutable-copy accounting covers keys and nested values; embedded
 Type descriptions use normal admission. Comptime representation reads preserve
@@ -95,10 +98,13 @@ representation copying and effect copying reject Objects. Normal-term freezing
 and constant materialization also reject them until an encoding and type bridge
 exist; rejection releases deeply nested Object payloads iteratively.
 
-These are VM representation operations, not a source-level Copy promise. Source
-Object type formation/evaluation, its freezing representation and attribute
-consumer execution remain unimplemented. The new value cannot yet be passed as
-an ordinary typed function input because Object has no NIR type admission path.
+These are VM representation operations, not a source-level Copy promise. NIR now
+has a comptime-only Object primitive, available through `.Object'builtin` and
+ordinary aliases. Typed Objects can be transported through comptime parameters
+and results. Phase checking rejects runtime Object interfaces, including nominal
+containers with Object fields. Object still cannot be a frozen normal-form value
+input. Source Object expressions, its freezing representation and attribute
+consumer execution remain unimplemented.
 
 This is **not** a working `StructBuilder.new/add_field/build` API. There is no
 new runtime/VM builder value, field-reflection API, or source-language builder
@@ -198,3 +204,21 @@ storage deduplication, embedded-type rejection, snapshot restoration, independen
 owned copies, runtime and budget rejection without input mutation, escaped dumps,
 and iterative disposal of 20,000 nested Objects after unsupported freezing.
 Formatting exited 0 at `/tmp/luna-tools-n15wvcu7/result.json`.
+
+Typed Object admission follow-up (same working directory):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor -p nir -p luna --lib --test phases --test frontend_cli --no-fail-fast
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+```
+
+The combined run `/tmp/luna-tools-jpacc7t4/result.json` passed 75 luna unit,
+205 frontend CLI, 5 NIR unit and 28 phase tests. Its interpreter suite had one
+incorrect dump expectation: the newly retained type correctly prints as
+`(primitive bool)`, not `bool`. After correcting that expectation, all 91
+interpreter unit tests passed at `/tmp/luna-tools-sb18seao/result.json` (exit 0).
+This gives 404 distinct passing tests across those runs. New behavior checks
+roundtrip nested typed Objects and opaque normal-form Type payloads through a
+comptime function, reject forged entry labels, recover after rejection, and
+reject runtime Object storage through direct and nominal interfaces.
+Formatting exited 0 at `/tmp/luna-tools-_1187u4v/result.json`.

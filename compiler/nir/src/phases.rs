@@ -1538,7 +1538,9 @@ fn comptime_storage_resolved(
             }
             vec![(**signature).clone()]
         }
-        T::Primitive(P::Integer | P::Float | P::Type) | T::ComptimeFunction(_) => return Ok(true),
+        T::Primitive(P::Integer | P::Float | P::Type | P::Object) | T::ComptimeFunction(_) => {
+            return Ok(true);
+        }
         T::NormalForm { head, .. } => {
             match package
                 .normal_forms

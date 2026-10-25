@@ -556,12 +556,17 @@ impl<'a> Interpreter<'a> {
                 let mut entries = Vec::with_capacity(object.entries().len());
                 for entry in object.entries() {
                     self.copy_work(entry.key().map_or(0, str::len), source)?;
-                    let value = self.clone_representation(
-                        entry.value(),
+                    self.copy_invocation_type_work(&entry.value().ty, source, preserve_identity)?;
+                    let payload = self.clone_representation(
+                        &entry.value().value,
                         source,
                         depth + 1,
                         preserve_identity,
                     )?;
+                    let value = ObjectValue {
+                        ty: entry.value().ty.clone(),
+                        value: payload,
+                    };
                     entries.push(match entry {
                         ObjectEntry::Value(_) => ObjectEntry::Value(value),
                         ObjectEntry::Property { key, .. } => ObjectEntry::Property {

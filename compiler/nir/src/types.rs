@@ -41,6 +41,8 @@ pub enum Primitive {
     /// Concrete intrinsic bit-vector width; symbolic widths require later elaboration.
     BitVec(usize),
     Type,
+    /// Heterogeneous compile-time metadata; no runtime layout.
+    Object,
     Bool,
     Char,
     Str,
@@ -1982,6 +1984,7 @@ impl fmt::Display for Primitive {
         f.write_str(match self {
             Self::BitVec(width) => return write!(f, "(bitvec-type (width {width}))"),
             Self::Type => "Type",
+            Self::Object => "Object",
             Self::Bool => "bool",
             Self::Char => "char",
             Self::Str => "str",

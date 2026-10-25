@@ -4150,6 +4150,7 @@ impl Checker<'_, '_> {
                     "str" => P::Str,
                     "Symbol" => P::Symbol,
                     "Type" => P::Type,
+                    "Object" => P::Object,
                     "Integer" => P::Integer,
                     "Float" => P::Float,
                     "void" => P::Void,
