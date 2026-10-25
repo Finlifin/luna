@@ -204,6 +204,18 @@ instead of refunded. Other analyses (including PTC and template preparation)
 retain their separate limits. This is a reusable invocation-budget boundary,
 not an implementation of source builders, incremental rechecking or live VM
 suspension/resumption.
+
+`Interpreter::for_comptime_in_budget` centralizes that construction reservation.
+It zeroes the caller's available steps before preparation, restores only the
+successful constructor's remaining balance, and leaves the caller's depth
+configuration unchanged. Phase and declaration/premise failures keep their
+original diagnostics. Failed construction consumes the reservation conservatively;
+it does not claim exact failed-work accounting. The required-invocation adapter,
+type-computation session creation and delivered-Type admission all use this
+entrypoint. Adapters reserve their outer counter before passing a temporary
+Budget, so unwinding cannot bypass that reservation. The returned VM owns its
+own counter: callers still synchronize remaining steps after execution; this API
+does not share mutable budget state across concurrently live interpreters.
 The existing lowering consumer still uses structural publication, because its
 ordinary semantic checking happens later in the driver.
 
@@ -803,3 +815,27 @@ contract was relaxed. Overall, 217 distinct tests passed across the final
 applicable runs. Formatting passed at `/tmp/luna-tools-4wu_18rz/result.json` and
 `git diff --check` passed. Source builder dispatch and live VM resumption remain
 unimplemented; PTC and other analysis limits remain separate.
+
+World-construction reservation verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib admission_budget_tests
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor -p elaboration --test runtime_function_identities --test invocation_budget --test delivered_types --test definitions
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+All final commands exited 0. The session-specific test passed at
+`/tmp/luna-tools-ff28ym9s/result.json` (256 unrelated library tests filtered out).
+The combined integration run passed 32 tests at
+`/tmp/luna-tools-iy8tocse/result.json` (33 total). During that build an archive
+hit disk quota; the existing wrapper cleaned rebuildable artifacts and completed
+its single automatic retry. New VM tests compare original diagnostic kinds and
+source locations, verify phase/catalog/premise failures retain the reservation,
+check successful remaining balances and unchanged caller depth, and exercise
+explicit replenishment after correction. The session regression verifies that
+invalid world premises cannot leave the caller's original budget available.
+Existing required invocation and delivered-Type publication tests remain green.
+Formatting passed at `/tmp/luna-tools-nwko06qw/result.json`; `git diff --check`
+passed. Reservation does not measure every constructor validation operation or
+provide a concurrently shared VM counter; source builder dispatch and live-world
+replacement remain separate work.

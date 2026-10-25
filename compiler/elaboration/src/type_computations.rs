@@ -322,9 +322,8 @@ impl<'a> Session<'a> {
         if context.parent.is_some() {
             return Err(Error::SpeculativeContext);
         }
-        let mut interpreter =
-            Interpreter::for_comptime_with_assumptions(package, assumptions, *budget)
-                .map_err(Error::Invocation)?;
+        let mut interpreter = Interpreter::for_comptime_in_budget(package, assumptions, budget)
+            .map_err(Error::Invocation)?;
         let scope = interpreter
             .authorize_abstract_type_parameters(parameters)
             .and_then(|()| interpreter.authorize_abstract_value_parameters(value_parameters));
@@ -1249,5 +1248,55 @@ impl fmt::Display for Session<'_> {
             write!(f, ") {})", pending.state)?;
         }
         write!(f, ")")
+    }
+}
+
+#[cfg(test)]
+mod admission_budget_tests {
+    use super::*;
+
+    #[test]
+    fn failed_session_world_creation_keeps_the_allowance_reserved() {
+        let package = Package::default();
+        let context = InferenceContext::default();
+        let assumptions = [nir::program::TraitRequirement {
+            interface_arguments: vec![],
+            subject: Term::Primitive(nir::Primitive::Bool),
+            interface: DeclarationId {
+                package: 1,
+                local: 999,
+            },
+        }];
+        let mut budget = Budget {
+            steps: 100,
+            depth: 128,
+        };
+        let failed = Session::new_in_scope_with_pointer_copy(
+            &package,
+            &context,
+            &mut budget,
+            &assumptions,
+            &[],
+            &[],
+            None,
+            None,
+        );
+        assert!(matches!(failed, Err(Error::Invocation(_))));
+        assert_eq!(budget.steps, 0);
+        assert_eq!(budget.depth, 128);
+        budget.steps = 100;
+        let session = Session::new_in_scope_with_pointer_copy(
+            &package,
+            &context,
+            &mut budget,
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(session.remaining_steps(), budget.steps);
+        assert_eq!(budget.steps, 100);
     }
 }

@@ -293,15 +293,18 @@ impl PreparedRequired {
             )?;
             return Ok((Value::Type(ty), result_type));
         }
-        let mut interpreter = Interpreter::for_comptime_with_assumptions(
+        let mut preparation_budget = Budget {
+            steps: std::mem::take(steps),
+            depth: 128,
+        };
+        let prepared = Interpreter::for_comptime_in_budget(
             &package,
             &invocation_assumptions,
-            Budget {
-                steps: *steps,
-                depth: 128,
-            },
-        )
-        .map_err(|e| error(span, format!("required comptime preparation failed: {e}")))?;
+            &mut preparation_budget,
+        );
+        *steps = preparation_budget.steps;
+        let mut interpreter = prepared
+            .map_err(|e| error(span, format!("required comptime preparation failed: {e}")))?;
         interpreter = interpreter.with_budgeted_type_solver(&type_solver);
         interpreter = interpreter.with_budgeted_pointer_copy_permission(&pointer_copy);
         let scope = interpreter

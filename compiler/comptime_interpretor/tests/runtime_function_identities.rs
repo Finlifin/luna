@@ -873,3 +873,63 @@ fn dispatch_implementation_index_checks_missing_and_duplicate_identities() {
     world.implementations.pop();
     assert!(Interpreter::for_comptime(&world, Budget::default()).is_ok());
 }
+
+#[test]
+fn world_construction_reservation_retains_failure_and_reports_success_balance() {
+    let mut invalid_phase = package();
+    invalid_phase.runtime_function_identities[0].signature =
+        Term::ComptimeFunction(Box::new(signature(Term::Primitive(Primitive::Bool))));
+    let mut duplicate = package();
+    duplicate.functions.push(duplicate.functions[0].clone());
+    for invalid in [invalid_phase, duplicate] {
+        let mut budget = Budget {
+            steps: 321,
+            depth: 128,
+        };
+        let expected = Interpreter::for_comptime_with_assumptions(&invalid, &[], budget)
+            .err()
+            .unwrap();
+        let failure = Interpreter::for_comptime_in_budget(&invalid, &[], &mut budget)
+            .err()
+            .unwrap();
+        assert_eq!(failure.kind, expected.kind);
+        assert_eq!(failure.source, expected.source);
+        assert_eq!(budget.steps, 0);
+        assert_eq!(budget.depth, 128);
+    }
+    let world = package();
+    let initial = Budget {
+        steps: 321,
+        depth: 128,
+    };
+    let expected = Interpreter::for_comptime(&world, initial)
+        .unwrap()
+        .remaining_steps();
+    let mut budget = initial;
+    let vm = Interpreter::for_comptime_in_budget(&world, &[], &mut budget).unwrap();
+    assert_eq!(budget.steps, expected);
+    assert_eq!(vm.remaining_steps(), expected);
+    assert_eq!(budget.depth, initial.depth);
+}
+
+#[test]
+fn rejected_world_premises_do_not_refund_reserved_allowance() {
+    let world = Package::default();
+    let assumptions = [nir::program::TraitRequirement {
+        interface_arguments: vec![],
+        subject: Term::Primitive(Primitive::Bool),
+        interface: id(999),
+    }];
+    let mut budget = Budget {
+        steps: 100,
+        depth: 64,
+    };
+    assert!(Interpreter::for_comptime_in_budget(&world, &assumptions, &mut budget).is_err());
+    assert_eq!(budget.steps, 0);
+    // Removing the invalid premise does not silently restore the allowance.
+    let vm = Interpreter::for_comptime_in_budget(&world, &[], &mut budget).unwrap();
+    assert_eq!(vm.remaining_steps(), 0);
+    budget.steps = 100;
+    assert!(Interpreter::for_comptime_in_budget(&world, &[], &mut budget).is_ok());
+    assert_eq!(budget.steps, 100);
+}

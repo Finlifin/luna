@@ -39,17 +39,17 @@ pub(super) fn admit(
     if inputs.is_empty() {
         return Ok(());
     }
-    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+    let mut preparation_budget = comptime_interpretor::Budget {
+        steps: std::mem::take(steps),
+        depth: 128,
+    };
+    let prepared = comptime_interpretor::Interpreter::for_comptime_in_budget(
         output,
-        comptime_interpretor::Budget {
-            steps: *steps,
-            depth: 128,
-        },
-    )
-    .map_err(|failure| {
-        // Failed VM construction exposes no remainder: its reserved allowance
-        // cannot be returned to a caller that may retry admission.
-        *steps = 0;
+        &[],
+        &mut preparation_budget,
+    );
+    *steps = preparation_budget.steps;
+    let mut vm = prepared.map_err(|failure| {
         error(
             Span::default(),
             format!("delivered type world admission failed: {failure}"),

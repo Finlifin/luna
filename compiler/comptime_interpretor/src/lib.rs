@@ -1932,6 +1932,23 @@ impl<'a> Interpreter<'a> {
         interpreter.comptime_only = true;
         Ok(interpreter)
     }
+    /// Prepare a comptime world using a caller-owned construction allowance.
+    /// Success reports the remaining steps. Failure (including unwinding) keeps
+    /// the allowance reserved: a failed constructor cannot report a trustworthy
+    /// remainder. This is conservative reservation, not exact failed-work timing.
+    /// Depth configuration is unchanged. After executing the returned VM, callers
+    /// must synchronize remaining_steps again; this does not share a live counter.
+    pub fn for_comptime_in_budget(
+        package: &'a Package,
+        assumptions: &[nir::program::TraitRequirement],
+        budget: &mut Budget,
+    ) -> Result<Self, Error> {
+        let reserved = *budget;
+        budget.steps = 0;
+        let interpreter = Self::for_comptime_with_assumptions(package, assumptions, reserved)?;
+        budget.steps = interpreter.remaining_steps();
+        Ok(interpreter)
+    }
     /// Supply the host's type theory without coupling the interpreter to the
     /// elaborator. The callback receives an instantiated type predicate only.
     pub fn with_type_solver(
