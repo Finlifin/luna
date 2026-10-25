@@ -3115,11 +3115,40 @@ impl Checker<'_, '_> {
                     .collect::<Result<_, _>>()?;
                 K::AnonymousRecord { fields }
             }
-            Value::Object(_) => {
-                return Err(error(
-                    span,
-                    "Object constant materialization is not yet supported",
-                ));
+            Value::Object(object) => {
+                if ty != p(P::Object) {
+                    return Err(error(span, "Object constant identity mismatch"));
+                }
+                let entries = object.into_entries();
+                self.required_steps = self
+                    .required_steps
+                    .checked_sub(entries.len() as u64)
+                    .ok_or_else(|| error(span, "constant materialization budget exhausted"))?;
+                let mut names = Vec::with_capacity(entries.len());
+                let mut fields = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let (name, value) = match entry {
+                        comptime_interpretor::ObjectEntry::Value(value) => (None, value),
+                        comptime_interpretor::ObjectEntry::Property { key, value } => {
+                            self.required_steps = self
+                                .required_steps
+                                .checked_sub(key.len() as u64)
+                                .ok_or_else(|| {
+                                    error(span, "constant materialization budget exhausted")
+                                })?;
+                            (Some(key), value)
+                        }
+                    };
+                    names.push(name);
+                    fields.push(self.constant_nominal_field(
+                        value.value,
+                        value.ty,
+                        span,
+                        depth + 1,
+                        snapshot,
+                    )?);
+                }
+                K::Object { names, fields }
             }
             Value::Pointer(_) => {
                 return Err(error(

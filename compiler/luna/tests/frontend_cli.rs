@@ -8885,3 +8885,71 @@ fn pure_comptime_objects_preserve_type_values_and_nested_data() {
     assert!(dump.contains("(bool true)"), "{dump}");
     assert!(dump.contains("(key \"nested\")"), "{dump}");
 }
+
+#[test]
+fn object_constants_materialize_nested_typed_entries_without_merging() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        typealias Metadata = .Object'builtin;
+        pure comptime fn Identity<T> -> .Type'builtin {T}
+        comptime fn make()->Metadata {
+            let result = {flag:true, false, nested:{ty:Identity<bool>}, flag:false};
+            result
+        }
+        const META:Metadata = make();
+        comptime fn build()->Metadata {
+            const LOCAL = META;
+            LOCAL
+        }
+    "#,
+    );
+    let output = sandbox.run(&["input.fl", "--invoke-comptime", "build"]);
+    let dump = success(&output);
+    assert_eq!(dump.matches("(key \"flag\")").count(), 2, "{dump}");
+    assert!(dump.contains("(key \"nested\")"), "{dump}");
+    assert!(dump.contains("(type (primitive Type))"), "{dump}");
+    assert!(dump.contains("normal-form"), "{dump}");
+    assert_eq!(dump.matches("(bool false)").count(), 2, "{dump}");
+}
+
+#[test]
+fn object_constants_do_not_hide_pointer_escape() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        const BAD = do {
+            let flag = true;
+            let result = {nested:{pointer:flag.ref}};
+            result
+        };
+        comptime fn build()->.Object'builtin {BAD}
+    "#,
+    );
+    let output = sandbox.run(&["input.fl", "--invoke-comptime", "build"]);
+    failure(&output, 1);
+    let diagnostic = details(&output);
+    assert!(
+        diagnostic.contains("storage pointer cannot be materialized")
+            || diagnostic.contains("ExpiredPointer"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn object_constants_cannot_transport_metadata_into_runtime() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        const META = {flag:true};
+        fn run()->.Object'builtin {META}
+    "#,
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+    failure(&output, 1);
+    assert!(!details(&output).contains("parsing failed"));
+    assert!(!details(&output).contains("panicked"));
+}

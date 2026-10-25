@@ -27,7 +27,7 @@ configuration -> .id expr
 
 对象表达式在 AST lowering 中进入专用 HIR Object 节点，并在 comptime 函数中完成类型检查与求值。普通项与命名项按源码次序求值一次，嵌套对象和重复键保留原结构；前端不因存储方便而提前分组、合并或重排这些项。条目中的控制转移会立即传播，不执行后续条目。
 
-实现进展：编译器内部已有 `.Object'builtin` 类型及 VM Object 值；条目保存各自的类型和值，避免从载荷反推类型而丢失身份。类型可以用于 comptime 函数接口，不能用于 runtime 数据接口。当前仍未接通 Object 常量物化及通用属性执行；对象表达式可执行不代表本章属性附着示例已经可执行。
+实现进展：编译器内部已有 `.Object'builtin` 类型及 VM Object 值；条目保存各自的类型和值，避免从载荷反推类型而丢失身份。类型可以用于 comptime 函数接口，不能用于 runtime 数据接口。模块与局部常量可以保存由可物化条目构成的 Object；嵌套对象不会放宽指针等载荷的常量逃逸限制。Object 的 normal-form 参数冻结编码及通用属性执行尚未接通；对象表达式可执行不代表本章属性附着示例已经可执行。
 
 下面的函数可以通过 `--invoke-comptime metadata` 求值；此例只构造元数据，不附着属性：
 
@@ -39,6 +39,17 @@ comptime fn metadata() -> .Object'builtin {
 ```
 
 结果保留两个 `enabled` 条目。属性合并属于后续消费步骤，不能在对象构造时提前执行。
+
+```flurry
+const DEFAULT_METADATA = metadata();
+
+comptime fn reused_metadata() -> .Object'builtin {
+    const local_metadata = DEFAULT_METADATA;
+    local_metadata
+}
+```
+
+常量物化保留条目自己的类型，包括以 Type 为值的条目中的 normal-form 头；不会把该类型函数的返回体当作类型身份。
 
 multi_element 是语法元素列表的通用元记号，base_element 为该列表原本允许的元素。前缀可递归嵌套；这不为任意内部操作数或原始 token 序列增加属性语法。
 

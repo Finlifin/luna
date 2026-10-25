@@ -95,8 +95,11 @@ Type descriptions use normal admission. Comptime representation reads preserve
 storage identity, explicit representation copies create fresh owned cells, and
 owned-graph checkpoints restore cells reachable through Object entries. Runtime
 representation copying and effect copying reject Objects. Normal-term freezing
-and constant materialization also reject them until an encoding and type bridge
-exist; rejection releases deeply nested Object payloads iteratively.
+still rejects them until an encoding exists; rejection releases deeply nested
+Object payloads iteratively. Constant materialization reconstructs a dedicated
+Object expression using each entry's retained type, charging entry/key work and
+sharing the ordinary constant snapshot context across nested payloads. Pointers
+and free storage remain subject to ordinary constant-escape rejection.
 
 These are VM representation operations, not a source-level Copy promise. NIR now
 has a comptime-only Object primitive, available through `.Object'builtin` and
@@ -245,3 +248,19 @@ then exposed invalid test syntax, not an execution failure. Corrected fixtures
 use explicit expression positions and reject parse failures in negative tests.
 Formatting check exited 0 at `/tmp/luna-tools-x_vn8ujt/result.json`;
 `git diff --check` passed.
+
+Object constant materialization follow-up (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli --test comptime_memory --no-fail-fast
+```
+
+The final run `/tmp/luna-tools-n3s70076/result.json` exited 0: 212 frontend CLI
+and 17 comptime memory tests passed (229 total). Three new tests exercise
+module-to-local Object constants with nested opaque normal-form Type payloads,
+duplicate keys and positional entries, nested pointer-escape rejection, and
+runtime interface rejection. The focused run also passed all three at
+`/tmp/luna-tools-edst1xi_/result.json`. Formatting check exited 0 at
+`/tmp/luna-tools-41ejwznb/result.json`; `git diff --check` passed.
+This enables materializable Object constants, not frozen normal-form Object
+arguments, arbitrary storage export, attribute consumers or source builders.
