@@ -3141,7 +3141,7 @@ fn shipped_option_and_result_modules_resolve_contextual_variants() {
 fn shipped_result_methods_execute_both_variants_and_generic_callbacks() {
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in ["primitives", "result"] {
+    for name in ["primitives", "result", "result_unwrap"] {
         fs::copy(
             repository.join(format!("library/builtin/{name}.fl")),
             sandbox.path(format!("{name}.fl")),
@@ -3188,6 +3188,11 @@ fn shipped_result_methods_execute_from_an_importing_package() {
         sandbox.path("library/std/result.fl"),
     )
     .unwrap();
+    fs::copy(
+        repository.join("library/builtin/result_unwrap.fl"),
+        sandbox.path("library/std/result_unwrap.fl"),
+    )
+    .unwrap();
     sandbox.write(
         "library/builtin/lib.fl",
         "pub use primitives.*;pub mod prelude {pub use primitives.*;}",
@@ -3213,7 +3218,7 @@ fn shipped_result_methods_execute_from_an_importing_package() {
 fn shipped_option_methods_execute_with_explicit_optional_binding() {
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in ["primitives", "option"] {
+    for name in ["primitives", "option", "option_unwrap"] {
         fs::copy(
             repository.join(format!("library/builtin/{name}.fl")),
             sandbox.path(format!("{name}.fl")),
@@ -3756,7 +3761,13 @@ fn optional_callback_tails_use_explicit_return_payload_evidence() {
 fn shipped_clone_protocol_preserves_noncopy_sources() {
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in ["primitives", "traits", "resources", "comparison"] {
+    for name in [
+        "primitives",
+        "traits",
+        "resources",
+        "comparison",
+        "conversion",
+    ] {
         fs::copy(
             repository.join(format!("library/builtin/{name}.fl")),
             sandbox.path(format!("{name}.fl")),
