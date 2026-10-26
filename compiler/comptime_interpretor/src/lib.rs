@@ -1036,6 +1036,8 @@ macro_rules! value {
     };
 }
 
+mod invocation_budget;
+
 mod effects;
 
 /// Result from the compiler's type-proposition solver. Unknown never authorizes

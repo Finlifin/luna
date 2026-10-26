@@ -186,3 +186,87 @@ fn cached_instances_preflight_program_contract_copies_on_each_call() {
         assert_eq!(vm.events().iter().filter(|event| matches!(event,Event::InstantiateFunction {declaration,..} if *declaration==id(1))).count(),1);
     }
 }
+
+#[test]
+fn scoped_worlds_keep_consumption_and_do_not_reuse_previous_instances() {
+    let first = package(expression(
+        Term::Primitive(P::Bool),
+        K::Literal(Literal::Bool(true)),
+    ));
+    let second = package(expression(
+        Term::Primitive(P::Bool),
+        K::Literal(Literal::Bool(false)),
+    ));
+    let mut budget = Budget {
+        steps: 100_000,
+        depth: 42,
+    };
+    for (world, expected) in [(&first, true), (&second, false), (&first, true)] {
+        let before = budget.steps;
+        let mut remaining = 0;
+        let value = Interpreter::with_comptime_in_budget(world, &[], &mut budget, |vm| {
+            assert!(vm.events().is_empty());
+            let result = vm.invoke_instantiated(id(1), vec![Term::Primitive(P::Bool)], vec![])?;
+            remaining = vm.remaining_steps();
+            Ok(result)
+        })
+        .unwrap();
+        assert_eq!(value, Value::Bool(expected));
+        assert_eq!(budget.steps, remaining);
+        assert!(budget.steps < before);
+        assert_eq!(budget.depth, 42);
+    }
+}
+
+#[test]
+fn scoped_invocation_errors_and_unwinding_keep_spent_fuel() {
+    let world = package(expression(
+        Term::Primitive(P::Bool),
+        K::Literal(Literal::Bool(true)),
+    ));
+    let mut budget = Budget::default();
+    let mut remaining = 0;
+    let error = Interpreter::with_comptime_in_budget(&world, &[], &mut budget, |vm| {
+        vm.charge_preparation(23)?;
+        let result = vm.invoke_instantiated(id(1), vec![], vec![]);
+        remaining = vm.remaining_steps();
+        result
+    })
+    .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Type);
+    assert_eq!(budget.steps, remaining);
+    let before = budget.steps;
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Interpreter::with_comptime_in_budget::<()>(&world, &[], &mut budget, |vm| {
+            vm.charge_preparation(31)?;
+            remaining = vm.remaining_steps();
+            panic!("host failure after preparation")
+        })
+    }));
+    assert!(panicked.is_err());
+    assert_eq!(budget.steps, remaining);
+    assert!(budget.steps < before);
+    assert_eq!(
+        Interpreter::with_comptime_in_budget(&world, &[], &mut budget, |vm| vm
+            .invoke_instantiated(id(1), vec![Term::Primitive(P::Bool)], vec![]))
+        .unwrap(),
+        Value::Bool(true)
+    );
+    let mut exhausted = Budget {
+        steps: 0,
+        depth: 42,
+    };
+    let mut invalid = world.clone();
+    invalid.functions.push(invalid.functions[0].clone());
+    let mut called = false;
+    assert!(
+        Interpreter::with_comptime_in_budget::<()>(&invalid, &[], &mut exhausted, |_| {
+            called = true;
+            Ok(())
+        })
+        .is_err()
+    );
+    assert!(!called);
+    assert_eq!(exhausted.steps, 0);
+    assert_eq!(exhausted.depth, 42);
+}

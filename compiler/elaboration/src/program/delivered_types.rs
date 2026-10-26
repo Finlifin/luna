@@ -43,37 +43,38 @@ pub(super) fn admit(
         steps: std::mem::take(steps),
         depth: 128,
     };
-    let prepared = comptime_interpretor::Interpreter::for_comptime_in_budget(
+    let result = comptime_interpretor::Interpreter::with_comptime_in_budget(
         output,
         &[],
         &mut preparation_budget,
+        |vm| {
+            let admitted = (|| {
+                for (ty, span) in inputs.values() {
+                    let mut remaining = vm.remaining_steps();
+                    let copied = charge(ty, &mut remaining, *span);
+                    vm.charge_preparation((vm.remaining_steps() - remaining) as usize)
+                        .map_err(|failure| error(*span, failure.to_string()))?;
+                    copied?;
+                    vm.validate_immutable_input(
+                        &comptime_interpretor::Value::Type(ty.as_ref().clone()),
+                        &p(P::Type),
+                    )
+                    .map_err(|failure| {
+                        error(*span, format!("delivered type admission failed: {failure}"))
+                    })?;
+                }
+                Ok(())
+            })();
+            Ok(admitted)
+        },
     );
     *steps = preparation_budget.steps;
-    let mut vm = prepared.map_err(|failure| {
+    result.map_err(|failure| {
         error(
             Span::default(),
             format!("delivered type world admission failed: {failure}"),
         )
-    })?;
-    let result = (|| {
-        for (ty, span) in inputs.values() {
-            let mut remaining = vm.remaining_steps();
-            let copied = charge(ty, &mut remaining, *span);
-            vm.charge_preparation((vm.remaining_steps() - remaining) as usize)
-                .map_err(|failure| error(*span, failure.to_string()))?;
-            copied?;
-            vm.validate_immutable_input(
-                &comptime_interpretor::Value::Type(ty.as_ref().clone()),
-                &p(P::Type),
-            )
-            .map_err(|failure| {
-                error(*span, format!("delivered type admission failed: {failure}"))
-            })?;
-        }
-        Ok(())
-    })();
-    *steps = vm.remaining_steps();
-    result
+    })?
 }
 
 fn charge(ty: &Term, steps: &mut u64, span: Span) -> Result<(), Error> {
