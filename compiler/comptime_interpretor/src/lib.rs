@@ -7844,8 +7844,18 @@ impl<'a> Interpreter<'a> {
             None
         };
         let callee_source = callee.source;
+        // Static function identities carry no owned callee environment. A
+        // synthesized trait-method node can share its enclosing call's source
+        // with a handler-input temporary; retaining the function under that
+        // source would replace the tuple's cleanup lookup with the wrong value.
+        let retain_callee = !matches!(
+            callee.kind,
+            K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
+        );
         let callee = prepared_value!(this.eval_in_position(callee, environment, true));
-        this.retain_residual(callee_source, &callee)?;
+        if retain_callee {
+            this.retain_residual(callee_source, &callee)?;
+        }
         let parameters = match &callee {
             Value::RuntimeFunction { .. } | Value::RuntimeTraitMethod(_) => {
                 return Err(this.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
