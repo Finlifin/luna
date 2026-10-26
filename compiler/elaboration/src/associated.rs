@@ -187,11 +187,16 @@ impl World<'_> {
             declaration: origin.interface,
             arguments: arguments.clone(),
         };
-        let mut allowance = query_budget;
+        // Formation is complete. The final selection can use the remaining
+        // work, then return its unused allowance for evidence validation and
+        // later projections. Repeatedly halving here starves nested adapters
+        // even when the preceding formation checks are inexpensive.
+        let mut allowance = Budget {
+            steps: fuel + query_budget.steps,
+            ..budget
+        };
         let resolution = resolve(&interface, subject, &mut allowance)?;
-        // The query allowance was reserved above, not spent. Keep unused
-        // work available to later projections in the same normalization.
-        fuel += allowance.steps;
+        fuel = allowance.steps;
         let Selection::Selected(selected) = resolution.types.selection else {
             return Err(format!(
                 "associated Type implementation selection is unresolved: {}",
@@ -324,8 +329,25 @@ impl World<'_> {
         ty: &Term,
         budget: Budget,
     ) -> Result<AssociatedTypeNormalization, String> {
-        self.normalize_associated_types_mode(ty, budget, true, None, None)
-            .map(|(value, _, _)| value)
+        self.associated_type_view_metered(ty, &mut { budget })
+    }
+
+    pub(crate) fn associated_type_view_metered(
+        &self,
+        ty: &Term,
+        budget: &mut Budget,
+    ) -> Result<AssociatedTypeNormalization, String> {
+        let result = self.normalize_associated_types_mode(ty, *budget, true, None, None);
+        match result {
+            Ok((value, remaining, _)) => {
+                budget.steps = remaining;
+                Ok(value)
+            }
+            Err(error) => {
+                budget.steps = 0;
+                Err(error)
+            }
+        }
     }
 
     pub(crate) fn associated_type_view_cached(
@@ -563,23 +585,20 @@ impl Normalizer<'_, '_, '_> {
                     if query_steps == 0 {
                         return Err("associated view budget exhausted".into());
                     }
-                    self.spend(query_steps)?;
                     let given = nir::program::TraitRequirement {
                         subject: subject.as_ref().clone(),
                         interface: origin.interface,
                         interface_arguments: arguments.clone(),
                     };
-                    if self
-                        .world
-                        .given(
-                            &given,
-                            Budget {
-                                steps: query_steps,
-                                ..self.budget
-                            },
-                        )
-                        .is_some()
-                    {
+                    let mut given_budget = Budget {
+                        steps: query_steps,
+                        ..self.budget
+                    };
+                    let found = self.world.given_metered(&given, &mut given_budget);
+                    // A failed premise lookup may consume very little work.
+                    // Charging its whole allowance starves nested projections.
+                    self.spend(query_steps - given_budget.steps)?;
+                    if found.is_some() {
                         let contract = self
                             .world
                             .traits

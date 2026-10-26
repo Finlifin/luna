@@ -991,6 +991,17 @@ impl ImplementationHead {
             Ok(requirements) => requirements,
             Err(error) => return Err(TypeAssessment::Invalid(error.to_string())),
         };
+        // Head inference has its own metered partition. Return its unused work
+        // to the positive/negative requirement queries instead of discarding it
+        // at each recursive implementation boundary. Other head operations keep
+        // their reserved slots; the total candidate allowance does not grow.
+        let mut requirement_budget = budget;
+        let requirement_queries = requirements.len().saturating_mul(2);
+        if requirement_queries > 0 {
+            requirement_budget.steps = requirement_budget
+                .steps
+                .saturating_add(inference_budget.steps / requirement_queries);
+        }
         Ok(HeadMatch {
             evidence: TypeEvidence {
                 implementation: self.declaration,
@@ -1000,7 +1011,7 @@ impl ImplementationHead {
                 eligibility_proof,
             },
             requirements,
-            requirement_budget: budget,
+            requirement_budget,
         })
     }
     pub(super) fn assess_subject_types(
@@ -1023,6 +1034,18 @@ impl HeadMatch {
         self,
         mut prove: impl FnMut(Formula, Budget) -> Outcome,
     ) -> TypeAssessment {
+        let per_query = self.requirement_budget;
+        self.discharge_metered_with(|goal, allowance| {
+            let steps = allowance.steps.min(per_query.steps);
+            allowance.steps -= steps;
+            prove(goal, Budget { steps, ..per_query })
+        })
+    }
+
+    pub(crate) fn discharge_metered_with(
+        self,
+        mut prove: impl FnMut(Formula, &mut Budget) -> Outcome,
+    ) -> TypeAssessment {
         let HeadMatch {
             evidence,
             requirements: pending_requirements,
@@ -1037,26 +1060,45 @@ impl HeadMatch {
         } = evidence;
         let mut requirements = Vec::new();
         let mut pending = false;
-        for requirement in &pending_requirements {
+        // The head reserved two query slots per requirement. Positive proofs
+        // usually settle the requirement alone; reuse their unspent work rather
+        // than stranding it in negative queries that will never execute.
+        let Some(mut remaining) = budget
+            .steps
+            .checked_mul(pending_requirements.len())
+            .and_then(|steps| steps.checked_mul(2))
+        else {
+            return TypeAssessment::Pending("requirement budget overflow".into());
+        };
+        for (index, requirement) in pending_requirements.iter().enumerate() {
             let requirement = Formula::from_predicate(requirement);
-            match prove(requirement.clone(), budget) {
+            let reserved = remaining / (pending_requirements.len() - index);
+            let mut allowance = Budget {
+                steps: reserved,
+                ..budget
+            };
+            let outcome = prove(requirement.clone(), &mut allowance);
+            if allowance.steps > reserved {
+                return TypeAssessment::Invalid("requirement proof increased its budget".into());
+            }
+            remaining -= reserved - allowance.steps;
+            match outcome {
                 Outcome::Entailed(proof) => requirements.push(proof),
                 Outcome::IllFormed(reason) => return TypeAssessment::Invalid(reason),
                 _ => {
-                    let assessment = match prove(requirement.negate(), budget) {
-                        Outcome::Entailed(proof) => TypeAssessment::Excluded(proof),
-                        Outcome::IllFormed(reason) => TypeAssessment::Invalid(reason),
-                        _ => TypeAssessment::Pending(
-                            "type relation has not been proved or refuted".into(),
-                        ),
-                    };
-                    if matches!(
-                        assessment,
-                        TypeAssessment::Excluded(_) | TypeAssessment::Invalid(_)
-                    ) {
-                        return assessment;
+                    let before = allowance.steps;
+                    let outcome = prove(requirement.negate(), &mut allowance);
+                    if allowance.steps > before {
+                        return TypeAssessment::Invalid(
+                            "requirement proof increased its budget".into(),
+                        );
                     }
-                    pending = true;
+                    remaining -= before - allowance.steps;
+                    match outcome {
+                        Outcome::Entailed(proof) => return TypeAssessment::Excluded(proof),
+                        Outcome::IllFormed(reason) => return TypeAssessment::Invalid(reason),
+                        _ => pending = true,
+                    }
                 }
             }
         }
@@ -1744,5 +1786,84 @@ mod captured_head_domains {
             Err(nir::NominalAdmissionError::Budget)
         ));
         assert!(validate_head_arguments(&binders, &domains, &symbolic, &mut 1000).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod shared_requirement_budget {
+    use super::*;
+
+    fn matched(requirements: Vec<TypePredicate>) -> HeadMatch {
+        HeadMatch {
+            evidence: TypeEvidence {
+                implementation: DeclarationId {
+                    package: 92,
+                    local: 1,
+                },
+                type_arguments: vec![],
+                head_proofs: vec![],
+                requirement_proofs: vec![],
+                eligibility_proof: None,
+            },
+            requirements,
+            requirement_budget: Budget {
+                steps: 10,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn unused_negative_and_positive_work_reaches_later_requirements() {
+        let context = Context::default();
+        let mut allowances = Vec::new();
+        let assessment =
+            matched(vec![TypePredicate::Bool(true); 2]).discharge_metered_with(|goal, budget| {
+                allowances.push(budget.steps);
+                let cost = if allowances.len() == 1 { 3 } else { 30 };
+                budget.steps = budget
+                    .steps
+                    .checked_sub(cost)
+                    .expect("shared work available");
+                context.prove(goal, Budget::default())
+            });
+        assert!(matches!(assessment, TypeAssessment::Applicable(_)));
+        assert_eq!(allowances, [20, 37]);
+    }
+
+    #[test]
+    fn negative_proof_uses_only_the_unspent_requirement_share() {
+        let context = Context::default();
+        let mut allowances = Vec::new();
+        let assessment =
+            matched(vec![TypePredicate::Bool(false)]).discharge_metered_with(|goal, budget| {
+                allowances.push(budget.steps);
+                budget.steps -= 5;
+                context.prove(goal, Budget::default())
+            });
+        assert!(matches!(assessment, TypeAssessment::Excluded(_)));
+        assert_eq!(allowances, [20, 15]);
+    }
+
+    #[test]
+    fn queries_cannot_mint_work_or_publish_partial_evidence() {
+        let context = Context::default();
+        let predicates = vec![TypePredicate::Bool(true); 2];
+        let inflated = matched(predicates.clone()).discharge_metered_with(|goal, budget| {
+            budget.steps += 1;
+            context.prove(goal, Budget::default())
+        });
+        assert!(matches!(inflated, TypeAssessment::Invalid(_)));
+        let exhausted = matched(predicates.clone()).discharge_metered_with(|goal, budget| {
+            budget.steps = 0;
+            Outcome::Unknown {
+                reason: crate::ptc::UnknownReason::BudgetExhausted,
+                residual: goal,
+            }
+        });
+        assert!(matches!(exhausted, TypeAssessment::Pending(_)));
+        let recovered = matched(predicates)
+            .discharge_metered_with(|goal, budget| context.prove_metered(goal, budget));
+        assert!(matches!(recovered, TypeAssessment::Applicable(_)));
     }
 }

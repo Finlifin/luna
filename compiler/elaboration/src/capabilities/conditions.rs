@@ -8,7 +8,16 @@ use crate::ptc::{Proof, ProofError, TraitQuery, UnknownReason};
 pub struct ConditionSupport {
     context: Context,
     facts: Vec<ConditionFact>,
+    projections: Vec<ConditionProjection>,
     proof: Proof,
+}
+
+/// Candidate-local associated reductions, never equations for opaque heads.
+/// Replay recomputes the view in the same immutable implementation world.
+#[derive(Debug)]
+struct ConditionProjection {
+    source: Term,
+    value: Term,
 }
 
 #[derive(Debug)]
@@ -20,6 +29,31 @@ struct ConditionFact {
 }
 
 impl Solver<'_, '_> {
+    pub(super) fn prove_condition_metered(
+        &mut self,
+        goal: Formula,
+        budget: &mut Budget,
+        depth: usize,
+        support: &mut Vec<ConditionSupport>,
+    ) -> Outcome {
+        let outer = self.remaining;
+        let allowance = budget.steps.min(outer);
+        self.remaining = allowance;
+        let outcome = self.prove_condition(
+            goal,
+            Budget {
+                steps: allowance,
+                ..*budget
+            },
+            depth,
+            support,
+        );
+        let consumed = allowance - self.remaining;
+        self.remaining = outer - consumed;
+        budget.steps -= consumed;
+        outcome
+    }
+
     pub(super) fn prove_condition(
         &mut self,
         goal: Formula,
@@ -58,6 +92,8 @@ impl Solver<'_, '_> {
         pending.extend(self.world.context.assumptions());
         let mut queries = Vec::new();
         let mut seen = HashSet::new();
+        let mut projection_types = Vec::new();
+        let mut seen_types = HashSet::new();
         while let Some(formula) = pending.pop() {
             if self.remaining == 0 {
                 return unknown(goal);
@@ -65,21 +101,35 @@ impl Solver<'_, '_> {
             self.remaining -= 1;
             match formula {
                 Formula::Trait(query) if seen.insert(query) => queries.push(query),
+                Formula::Equal(crate::ptc::Equality(left, right)) => {
+                    for ty in [left, right] {
+                        if ty.sort() == nir::Sort::Type
+                            && !matches!(ty, Term::Primitive(_))
+                            && seen_types.insert(ty)
+                        {
+                            projection_types.push(ty);
+                        }
+                    }
+                }
                 Formula::Not(inner) => pending.push(inner),
                 Formula::And(items) | Formula::Or(items) => pending.extend(items),
                 _ => {}
             }
         }
-        if queries.is_empty() {
+        if queries.is_empty() && projection_types.is_empty() {
             return direct;
         }
-        let allowance = Budget {
-            steps: (budget.steps / 2 / queries.len()).min(self.remaining),
-            ..budget
-        };
+        // Keep a share for the final proof, while returning unused search
+        // work to the following obligations instead of stranding fixed slices.
+        let mut obligations = queries.len() + projection_types.len();
         let mut context = self.world.context.fork();
         let mut facts = Vec::new();
         for query in queries {
+            let allowance = Budget {
+                steps: self.remaining / (obligations + 1),
+                ..budget
+            };
+            obligations -= 1;
             match self.condition_fact(query, allowance, depth + 1) {
                 Ok(Some(fact)) => {
                     let atom = Formula::Trait(query.clone());
@@ -90,8 +140,27 @@ impl Solver<'_, '_> {
                 Err(reason) => return Outcome::IllFormed(reason),
             }
         }
+        let mut projections = Vec::new();
+        for ty in projection_types {
+            let allowance = Budget {
+                steps: self.remaining / (obligations + 1),
+                ..budget
+            };
+            obligations -= 1;
+            // Normalization uses the original world and the active selection
+            // stack. A candidate cannot justify itself with its own equation.
+            if let Ok(value) = self.prerequisite_type(ty, allowance, depth + 1) {
+                if value != *ty {
+                    context.assume(Formula::equal(ty.clone(), value.clone()));
+                    projections.push(ConditionProjection {
+                        source: ty.clone(),
+                        value,
+                    });
+                }
+            }
+        }
         let mut proof_budget = Budget {
-            steps: (budget.steps / 4).min(self.remaining),
+            steps: self.remaining,
             ..proof_budget
         };
         let before = proof_budget.steps;
@@ -101,6 +170,7 @@ impl Solver<'_, '_> {
             support.push(ConditionSupport {
                 context,
                 facts,
+                projections,
                 proof: proof.clone(),
             });
         }
@@ -331,6 +401,24 @@ impl World<'_> {
                         pending.push((nested, depth + 1));
                     }
                 }
+                let mut completed = std::collections::HashMap::new();
+                for projection in &support.projections {
+                    let allowance = Budget {
+                        steps: fuel,
+                        ..budget
+                    };
+                    let (normalized, remaining) = self
+                        .associated_type_view_cached(&projection.source, allowance, &mut completed)
+                        .map_err(|_| ProofError::Invalid)?;
+                    fuel = remaining;
+                    if normalized.value != projection.value {
+                        return Err(ProofError::Invalid);
+                    }
+                    expected.assume(Formula::equal(
+                        projection.source.clone(),
+                        projection.value.clone(),
+                    ));
+                }
                 if expected.assumptions() != support.context.assumptions() {
                     return Err(ProofError::Invalid);
                 }
@@ -359,6 +447,14 @@ impl fmt::Display for ConditionSupport {
                 write!(f, " (resolution {resolution})")?;
             }
             f.write_str(")")?;
+        }
+        f.write_str(") (projections")?;
+        for projection in &self.projections {
+            write!(
+                f,
+                " (projection (source {}) (value {}))",
+                projection.source, projection.value
+            )?;
         }
         f.write_str("))")
     }

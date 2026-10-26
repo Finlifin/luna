@@ -429,22 +429,37 @@ impl Index {
     // Reserve traversal/report work for every pair, but distribute proof work
     // only among same-interface, same-precision obligations. Unrelated traits
     // must not starve a small number of actual solver queries.
-    fn coherence_allowance(&self, budget: Budget) -> Option<(usize, usize)> {
+    fn coherence_allowance(
+        &self,
+        budget: Budget,
+    ) -> Option<(
+        usize,
+        std::collections::BTreeMap<(DeclarationId, usize), usize>,
+    )> {
         let count = self.entries.len();
         let pairs = count.checked_mul(count.saturating_sub(1))? / 2;
         let remaining = budget
             .steps
             .checked_sub(count.checked_mul(2)?.checked_add(pairs)?)?;
         let mut groups = std::collections::BTreeMap::new();
-        let mut obligations = 0usize;
         for entry in self.entries.values() {
             if let Some(interface) = entry.head.interface {
                 let size = groups.entry((interface, entry.precision)).or_insert(0usize);
-                obligations = obligations.checked_add(*size)?;
                 *size += 1;
             }
         }
-        Some((pairs, remaining / obligations.max(1)))
+        // Share proof work across independent interface/precision groups first.
+        // A large scalar protocol must not starve an unrelated generic pair.
+        let active = groups.values().filter(|size| **size > 1).count();
+        let group_budget = remaining / active.max(1);
+        let allowances = groups
+            .into_iter()
+            .filter_map(|(key, size)| {
+                let obligations = size * size.saturating_sub(1) / 2;
+                (obligations > 0).then(|| (key, group_budget / obligations))
+            })
+            .collect();
+        Some((pairs, allowances))
     }
 
     /// Verify coverage, ordering, world freshness and every disjointness tree;
@@ -458,7 +473,7 @@ impl Index {
         if !self.type_coherence_is_current(report) || !report.is_proved() {
             return false;
         }
-        let Some((pairs, allowance)) = self.coherence_allowance(budget) else {
+        let Some((pairs, allowances)) = self.coherence_allowance(budget) else {
             return false;
         };
         if report.pairs.len() != pairs {
@@ -487,7 +502,7 @@ impl Index {
                         proof,
                         context,
                         Budget {
-                            steps: allowance,
+                            steps: allowances[&(a.head.interface.unwrap(), a.precision)],
                             ..budget
                         },
                     )
@@ -512,7 +527,7 @@ impl Index {
             open_interfaces: Vec::new(),
             complete: true,
         };
-        let Some((_, allowance)) = self.coherence_allowance(budget) else {
+        let Some((_, allowances)) = self.coherence_allowance(budget) else {
             report.complete = false;
             return report;
         };
@@ -536,7 +551,7 @@ impl Index {
                         &b.head,
                         context,
                         Budget {
-                            steps: allowance,
+                            steps: allowances[&(a.head.interface.unwrap(), a.precision)],
                             ..budget
                         },
                     )

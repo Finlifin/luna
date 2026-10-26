@@ -131,6 +131,96 @@ fn with_world<R>(
 }
 
 #[test]
+fn implementation_equalities_use_replayable_nested_associated_views() {
+    use elaboration::implementation::Selection;
+    let traits = [contract()];
+    let provider = implementation(ty(P::Bool), ty(P::Bool));
+    let mut wrapper = implementation(holder(rigid(9)), projection(rigid(9), vec![]));
+    wrapper.declaration = id(5);
+    wrapper.type_parameters = vec![id(9)];
+    wrapper.capabilities = vec![TraitRequirement {
+        subject: rigid(9),
+        interface: id(1),
+        interface_arguments: vec![],
+    }];
+    wrapper.requirements = vec![TypePredicate::Equal(
+        projection(rigid(9), vec![]),
+        ty(P::Bool),
+    )];
+    let implementations = [provider.clone(), wrapper.clone()];
+    let subject = holder(holder(ty(P::Bool)));
+    with_world(&traits, &implementations, |world| {
+        let resolution = world.resolve(id(1), &subject, Budget::default()).unwrap();
+        assert_eq!(
+            resolution.types.selection,
+            Selection::Selected(id(5)),
+            "{resolution}"
+        );
+        assert!(resolution.to_string().contains("(projection (source"));
+        world
+            .verify_condition_support(&resolution, Budget::default())
+            .unwrap();
+        assert_eq!(
+            world
+                .normalize_associated_types(&projection(subject.clone(), vec![]), Budget::default())
+                .unwrap()
+                .value,
+            ty(P::Bool)
+        );
+        let mut changed = implementations.clone();
+        changed[0].associated[0].1 = value(ty(P::Char));
+        let stale = World {
+            implementations: &changed,
+            ..*world
+        };
+        assert!(
+            stale
+                .verify_condition_support(&resolution, Budget::default())
+                .is_err()
+        );
+        let tiny = Budget {
+            steps: 4,
+            ..Budget::default()
+        };
+        assert!(
+            world
+                .resolve(id(1), &subject, tiny)
+                .map_or(true, |result| !matches!(
+                    result.types.selection,
+                    Selection::Selected(_)
+                ))
+        );
+    });
+    let mut wrong_provider = provider.clone();
+    wrong_provider.associated[0].1 = value(ty(P::Char));
+    with_world(&traits, &[wrong_provider, wrapper.clone()], |world| {
+        assert!(!matches!(
+            world
+                .resolve(id(1), &subject, Budget::default())
+                .unwrap()
+                .types
+                .selection,
+            Selection::Selected(_)
+        ));
+    });
+    // The selected candidate must not manufacture its own prerequisite value.
+    wrapper.requirements = vec![TypePredicate::Equal(
+        projection(holder(rigid(9)), vec![]),
+        ty(P::Bool),
+    )];
+    with_world(&traits, &[provider, wrapper], |world| {
+        assert!(!matches!(
+            world
+                .resolve(id(1), &subject, Budget::default())
+                .unwrap()
+                .types
+                .selection,
+            Selection::Selected(_)
+        ));
+    });
+}
+
+#[test]
 fn selected_override_and_evidence_are_returned_together() {
     let subject = holder(ty(P::Bool));
     let result = query(

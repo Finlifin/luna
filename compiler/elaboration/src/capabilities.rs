@@ -477,8 +477,8 @@ impl World<'_> {
                     let assessment = match matched {
                         Ok(matched) => {
                             let mut support = Vec::new();
-                            let assessment = matched.discharge_with(|goal, allowance| {
-                                solver.prove_condition(goal, allowance, 0, &mut support)
+                            let assessment = matched.discharge_metered_with(|goal, allowance| {
+                                solver.prove_condition_metered(goal, allowance, 0, &mut support)
                             });
                             if !support.is_empty() {
                                 condition_support.insert(declaration, support);
@@ -578,8 +578,13 @@ impl Solver<'_, '_> {
                     ) {
                         Ok(matched) => {
                             let mut support = Vec::new();
-                            let assessment = matched.discharge_with(|goal, allowance| {
-                                self.prove_condition(goal, allowance, depth + 1, &mut support)
+                            let assessment = matched.discharge_metered_with(|goal, allowance| {
+                                self.prove_condition_metered(
+                                    goal,
+                                    allowance,
+                                    depth + 1,
+                                    &mut support,
+                                )
                             });
                             if !support.is_empty() {
                                 condition_support.insert(head.declaration, support);

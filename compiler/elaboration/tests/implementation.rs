@@ -37,6 +37,75 @@ fn add(index: &mut Index, n: u32, subject: Term) {
 }
 
 #[test]
+fn coherence_budget_keeps_generic_pairs_usable_beside_large_scalar_groups() {
+    check_coherence_group_budget(false);
+}
+
+#[test]
+fn coherence_budget_separates_precision_groups_within_one_interface() {
+    check_coherence_group_budget(true);
+}
+
+fn check_coherence_group_budget(same_interface: bool) {
+    use elaboration::ptc::Context;
+    let mut index = Index::default();
+    for group in 0..3 {
+        for member in 0..20 {
+            let mut subject = node(2000 + member, vec![]);
+            if same_interface {
+                // Concrete groups have precision 2, 3 and 4; the generic pair
+                // below has precision 1 and must keep its own proof allowance.
+                for _ in 0..=group {
+                    subject = node(5000 + member, vec![subject]);
+                }
+            }
+            let mut implementation = head(1000 + group * 20 + member, subject);
+            implementation.type_parameters.clear();
+            if !same_interface {
+                implementation.interface = Some(id(3000 + group));
+            }
+            index.insert(implementation, Budget::default()).unwrap();
+        }
+    }
+    for declaration in [4000, 4001] {
+        let mut implementation = head(
+            declaration,
+            node(declaration + 100, vec![var(1), var(2), var(3), var(4)]),
+        );
+        implementation.type_parameters = (1..=4).map(id).collect();
+        index.insert(implementation, Budget::default()).unwrap();
+    }
+    let context = Context::default();
+    let report = index.check_type_coherence(&context, Budget::default());
+    assert!(report.is_proved(), "{report}");
+    assert!(index.verify_type_coherence(&report, &context, Budget::default()));
+    let mut missing_pair = report.clone();
+    missing_pair.pairs.pop();
+    assert!(!index.verify_type_coherence(&missing_pair, &context, Budget::default()));
+
+    // Enough budget to traverse all entries/pairs, but none left for proofs.
+    let exhausted = Budget {
+        steps: 62 * 2 + 62 * 61 / 2,
+        ..Budget::default()
+    };
+    assert!(!index.check_type_coherence(&context, exhausted).is_proved());
+    assert!(!index.verify_type_coherence(&report, &context, exhausted));
+    let recovered = index.check_type_coherence(&context, Budget::default());
+    assert!(index.verify_type_coherence(&recovered, &context, Budget::default()));
+
+    // Adding a genuinely overlapping generic implementation must still fail.
+    let mut duplicate = head(4002, node(4100, vec![var(1), var(2), var(3), var(4)]));
+    duplicate.type_parameters = (1..=4).map(id).collect();
+    index.insert(duplicate, Budget::default()).unwrap();
+    assert!(
+        !index
+            .check_type_coherence(&context, Budget::default())
+            .is_proved()
+    );
+    assert!(!index.verify_type_coherence(&report, &context, Budget::default()));
+}
+
+#[test]
 fn record_value_indices_retain_type_candidates_and_replay_field_proofs() {
     use elaboration::ptc::{Context, Formula};
     let record = |element| {
