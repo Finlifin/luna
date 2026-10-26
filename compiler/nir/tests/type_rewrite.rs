@@ -457,3 +457,33 @@ fn capture_failure_does_not_rewrite_later_captures_or_clone_shared_body() {
     assert_eq!(current.ty, Term::Primitive(Primitive::Bool));
     assert_eq!(body.ty, rigid());
 }
+
+#[test]
+fn struct_reflection_rewrites_and_visits_its_subject() {
+    for names in [false, true] {
+        let subject = Box::new(expr(K::TypeValue(rigid())));
+        let mut query = expr(if names {
+            K::StructFieldNames(subject)
+        } else {
+            K::StructFieldTypes(subject)
+        });
+        let original = query.clone();
+        let mut visits = 0;
+        query
+            .rewrite_types(&mut |_| {
+                visits += 1;
+                Ok::<_, ()>(Term::Primitive(Primitive::Bool))
+            })
+            .unwrap();
+        assert_eq!(visits, 3);
+        assert!(!query.to_string().contains("(rigid"));
+        assert_ne!(query, original);
+        let mut nodes = 0;
+        nir::visit::expression(&query, &mut 100, |_, _| {
+            nodes += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(nodes, 2);
+    }
+}

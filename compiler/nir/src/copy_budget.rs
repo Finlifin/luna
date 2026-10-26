@@ -484,6 +484,8 @@ fn charge_node(
                     | K::AddressOf(value)
                     | K::ReadPointer(value)
                     | K::ListLength(value)
+                    | K::StructFieldTypes(value)
+                    | K::StructFieldNames(value)
                     | K::BitVecType(value)
                     | K::FloatNegate(value)
                     | K::IntegerNegate(value)

@@ -3,6 +3,22 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Source struct reflection
+
+`meta.struct_field_types(Type)` and `meta.struct_field_names(Type)` expose the
+existing checked struct observation to source comptime functions as List<Type>
+and List<Symbol>. Privileged primitive calls are confined to the meta wrappers;
+ordinary consumers use the public package APIs. NIR retains explicit unary
+struct-field-types/struct-field-names nodes with S-expression dumps, metered
+copy/traversal, type rewriting and comptime phase checks. VM evaluation calls
+reflect_struct and validates the delivered immutable List domain.
+
+Applied generic field types and declaration order are preserved. Results can
+feed ordinary list transformations and variadic normal-form inputs; no struct
+layout or field access permission is implied. A names-only query currently
+performs the full checked field observation too. This adds source reflection,
+not source builder publication or resumption of a live invocation.
+
 ## Callable type reflection
 
 `Interpreter::reflect_callable` observes a legal callable Type in a comptime

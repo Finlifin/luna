@@ -3808,6 +3808,9 @@ impl<'a> Interpreter<'a> {
             K::TypeEqual(..) => self.eval_type_equal(expr, environment),
             K::TemplateEqual(..) => self.eval_template_equal(expr, environment),
             K::ListLength(_) | K::ListConcat(..) => self.eval_list_operation(expr, environment),
+            K::StructFieldTypes(_) | K::StructFieldNames(_) => {
+                self.eval_struct_fields(expr, environment)
+            }
             K::TypeListIndex(..) => self.eval_type_list_index(expr, environment),
             K::TupleType(..) => self.eval_tuple_type(expr, environment),
             K::TypeList(..) => self.eval_type_list(expr, environment),

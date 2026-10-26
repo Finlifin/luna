@@ -9400,6 +9400,9 @@ impl Checker<'_, '_> {
                 }
                 H::Match(value, arms) => self.match_expr(expr, value, arms, expected, partial),
                 H::When(arms) => self.when_expr(expr, arms, expected, partial),
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "struct_field_types" | "struct_field_names")) => {
+                    self.struct_reflection_builtin(expr, callee, args, expected)
+                }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "list_length" | "list_concat")) => {
                     self.list_builtin(expr, callee, args, expected)
                 }
@@ -12044,6 +12047,8 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::BitVecType(_)
         | K::TypeEqual(..)
         | K::ListLength(_)
+        | K::StructFieldTypes(_)
+        | K::StructFieldNames(_)
         | K::ListConcat(..)
         | K::TypeListIndex(..)
         | K::NominalType { .. }

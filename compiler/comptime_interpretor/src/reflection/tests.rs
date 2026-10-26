@@ -333,3 +333,94 @@ fn selected_field_queries_are_admitted_after_substitution() {
         p(Primitive::Bool)
     );
 }
+
+#[test]
+fn source_struct_field_nodes_validate_domains_meter_work_and_recover() {
+    let mut package = package();
+    package.normal_forms.push(nir::normal_forms::Head {
+        declaration: id(10),
+        role: nir::normal_forms::Role::TypeList,
+        requirements: vec![],
+        parameters: vec![nir::normal_forms::Parameter {
+            declaration: id(11),
+            binding: LocalId {
+                owner: 10,
+                index: 0,
+            },
+            kind: nir::normal_forms::Kind::Type,
+            ty: p(Primitive::Type),
+        }],
+    });
+    let source = SourceRange { start: 15, end: 25 };
+    for names in [false, true] {
+        let ty = Term::NormalForm {
+            head: id(10),
+            sort: Sort::Type,
+            arguments: vec![p(if names {
+                Primitive::Symbol
+            } else {
+                Primitive::Type
+            })],
+        };
+        let subject = Box::new(Expr {
+            source,
+            ty: p(Primitive::Type),
+            kind: K::TypeValue(nominal(vec![p(Primitive::Bool)])),
+        });
+        let query = Expr {
+            source,
+            ty: ty.clone(),
+            kind: if names {
+                K::StructFieldNames(subject)
+            } else {
+                K::StructFieldTypes(subject)
+            },
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let before = vm.remaining_steps();
+        let Flow::Value(value) = vm.eval(&query, &mut Environment::new()).unwrap() else {
+            panic!()
+        };
+        assert!(vm.remaining_steps() < before);
+        if names {
+            assert_eq!(
+                value,
+                Value::List {
+                    ty,
+                    values: vec![
+                        Value::Symbol("first\n\"".into()),
+                        Value::Symbol("next".into()),
+                    ]
+                }
+            );
+        } else {
+            assert_eq!(
+                value,
+                Value::TypeList(vec![
+                    p(Primitive::Bool),
+                    Term::Pointer(Box::new(nominal(vec![p(Primitive::Bool)])))
+                ])
+            );
+        }
+        let mut malformed = query.clone();
+        malformed.ty = p(Primitive::Bool);
+        let error = vm.eval(&malformed, &mut Environment::new()).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Type);
+        assert_eq!(error.source, Some(source));
+        vm.budget.steps = 1;
+        assert_eq!(
+            vm.eval(&query, &mut Environment::new()).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+        vm.budget.steps = 100_000;
+        assert!(vm.eval(&query, &mut Environment::new()).is_ok());
+        let mut runtime = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(
+            runtime
+                .eval(&query, &mut Environment::new())
+                .unwrap_err()
+                .kind,
+            ErrorKind::PhaseMismatch
+        );
+    }
+}

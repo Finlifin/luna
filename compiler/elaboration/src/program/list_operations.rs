@@ -23,6 +23,57 @@ impl Checker<'_, '_> {
         }
     }
 
+    pub(super) fn struct_reflection_builtin(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let [Arg::Positional(subject)] = args else {
+            return Err(error(
+                expr.span,
+                "struct reflection requires one positional Type input",
+            ));
+        };
+        if self.runtime_value_context() || self.in_code_body {
+            return Err(error(
+                expr.span,
+                "struct reflection requires comptime invocation",
+            ));
+        }
+        let H::Builtin(name) = &callee.kind else {
+            unreachable!()
+        };
+        let names = name.as_str() == "struct_field_names";
+        let head = self
+            .protocols
+            .meta_list
+            .ok_or_else(|| error(expr.span, "struct reflection requires a bound meta.List<T>"))?;
+        let subject = self.expr(subject, Some(&p(P::Type)))?;
+        let ty = if is_never(&subject.ty) {
+            p(P::Never)
+        } else {
+            Term::NormalForm {
+                head,
+                sort: Sort::Type,
+                arguments: vec![p(if names { P::Symbol } else { P::Type })],
+            }
+        };
+        if let Some(expected) = expected {
+            self.require_expression(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            source: source(expr.span),
+            ty,
+            kind: if names {
+                K::StructFieldNames(Box::new(subject))
+            } else {
+                K::StructFieldTypes(Box::new(subject))
+            },
+        })
+    }
+
     pub(super) fn list_builtin(
         &mut self,
         expr: &Expr<'_>,

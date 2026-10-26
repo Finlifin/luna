@@ -423,3 +423,9 @@ fn nested_shared_closure_rewrite_uses_a_small_worker_stack() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn struct_reflection_charges_subject_copy_before_allocation() {
+    check(&expr(K::StructFieldTypes(Box::new(large()))));
+    check(&expr(K::StructFieldNames(Box::new(large()))));
+}

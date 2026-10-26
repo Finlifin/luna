@@ -138,3 +138,43 @@ Rust 的布局规则区分默认表示和显式表示，C++ 有 sizeof 与类型
 6. 完整成功后发布不可变结果，再允许其他查询依赖它。
 
 图环检查 O(V+E)；具体类型执行与算术另计。发布前的引用必须区分构造句柄与可观察类型结果，不能用缓存命中绕过事务边界。
+
+## 当前源码结构体反射入口
+
+`meta.struct_field_types(T)` 返回 `meta.List<Type>`，
+`meta.struct_field_names(T)` 返回 `meta.List<Symbol>`。二者都是普通
+comptime 函数，输入必须是已应用、具有合法结构信息的结构体类型。
+列表按字段声明顺序排列，空结构体得到空列表；泛型字段使用该次类型
+应用的实参替换。字段类型保留其 normal-form 头，不展开普通类型工厂。
+
+```flurry
+struct Pair where T {
+    first: T,
+    ready: bool,
+}
+
+comptime fn FirstFieldType() -> Type {
+    meta.struct_field_types(Pair<u32>)[0]
+}
+
+typealias First = FirstFieldType();
+
+fn example() -> First {
+    42
+}
+
+comptime fn check_names() -> bool {
+    let names = meta.struct_field_names(Pair<u32>);
+    meta.length(names) == 2 and names[0] == .first and names[1] == .ready
+}
+```
+
+参数表达式按普通调用规则求值一次。非法类型、未知结构、未满足的形成
+条件和预算耗尽都是 invocation 失败，不用空列表掩盖；只有合法的空结构体
+返回空列表。查询不计算布局，也不授予字段访问、Copy 或可见性权限。
+反射函数不能在 runtime 执行；在 comptime 生成 quoted code 也不使该
+代码中的反射操作自动合法。
+
+这两个入口提供源码可用的结构观察。定义 builder 的事务发布、活跃
+invocation 在新声明世界中继续执行，以及更完整的定义描述接口仍是独立
+实现工作，不能把字段列表本身视为已生成的新类型。

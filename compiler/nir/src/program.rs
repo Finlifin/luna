@@ -871,6 +871,8 @@ pub enum ExprKind {
     TypeListIndex(Box<Expr>, Box<Expr>),
     /// Length of a checked immutable comptime list.
     ListLength(Box<Expr>),
+    StructFieldTypes(Box<Expr>),
+    StructFieldNames(Box<Expr>),
     /// Ordered concatenation preserving the complete List<T> identity.
     ListConcat(Box<Expr>, Box<Expr>),
     /// A value selected by an interface member. Its declaration identity remains
@@ -3030,6 +3032,8 @@ impl fmt::Display for ExprKind {
                 write!(f, "(template-equal (left {left}) (right {right}))")
             }
             Self::ListLength(values) => write!(f, "(list-length {values})"),
+            Self::StructFieldTypes(subject) => write!(f, "(struct-field-types {subject})"),
+            Self::StructFieldNames(subject) => write!(f, "(struct-field-names {subject})"),
             Self::ListConcat(left, right) => write!(f, "(list-concat {left} {right})"),
             Self::TypeListIndex(values, index) => {
                 write!(f, "(type-list-index (values {values}) (index {index}))")
@@ -3374,6 +3378,8 @@ impl Expr {
                     | ExprKind::OptionalType(_)
                     | ExprKind::PointerType(_)
                     | ExprKind::ListLength(_)
+                    | ExprKind::StructFieldTypes(_)
+                    | ExprKind::StructFieldNames(_)
                     | ExprKind::BitVecType(_)
                     | ExprKind::IntegerNegate(_)
                     | ExprKind::FloatNegate(_)
@@ -3452,6 +3458,8 @@ impl Expr {
                 | ExprKind::OptionalType(value)
                 | ExprKind::PointerType(value)
                 | ExprKind::ListLength(value)
+                | ExprKind::StructFieldTypes(value)
+                | ExprKind::StructFieldNames(value)
                 | ExprKind::BitVecType(value)
                 | ExprKind::IntegerNegate(value)
                 | ExprKind::FloatNegate(value)
@@ -3829,6 +3837,8 @@ impl Expr {
             | ExprKind::OptionalType(value)
             | ExprKind::PointerType(value)
             | ExprKind::ListLength(value)
+            | ExprKind::StructFieldTypes(value)
+            | ExprKind::StructFieldNames(value)
             | ExprKind::BitVecType(value)
             | ExprKind::IntegerNegate(value)
             | ExprKind::FloatNegate(value)
