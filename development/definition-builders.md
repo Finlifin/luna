@@ -10,6 +10,28 @@ it is not a whole-compiler or historical-version speedup claim.
 
 ## Live concrete enum publication
 
+`representations::IncrementalChecker::prepare_batch` now checks mixed struct/enum
+batches against the committed representation world. Forward payload edges may
+cross kinds; by-value cycles are rejected and pointer recursion remains finite.
+Both descriptor catalogs retain immutable shared batches, and all roots share one
+revision-bound receipt. Failed/dropped candidates cannot retain successful subroot
+proofs; a commit of either kind invalidates competing receipts. Existing struct
+callers keep using `prepare`, which delegates to the mixed path with no enums.
+Receipt Display includes enum identities in the S-expression dump.
+
+This supplies the finite-storage prerequisite for a checked enum publisher; it
+does not yet connect source EnumBuilder dispatch or replace declaration admission.
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p elaboration --test representations`, exit 0, 18 tests
+(`/tmp/luna-tools-t9lb9eou/result.json`). New cases cover cross-kind cycles and
+collisions, pointer recursion, foreign/stale receipts, shared ownership release,
+budget failure/retry and a 256-layer alternating chain with stable per-kind fuel
+cost after the first layer.
+The related `--test checked_struct_publisher --test struct_publisher
+--test generated_enums --no-fail-fast` run passes 14 tests using the same
+`development/check.py --timeout 900 -- test --release -p elaboration` entrypoint
+(`/tmp/luna-tools-juu711o7/result.json`, exit 0). Formatting/diff checks pass.
+
 The comptime VM now exposes `install_generated_enums`, its transactional `_with`
 variant and `install_owned_generated_enums_with`. Its enum catalog retains either
 borrowed descriptors or shared immutable batches, so a running VM can outlive the

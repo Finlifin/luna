@@ -23,6 +23,197 @@ fn definition(local: u32, field: Term) -> Struct {
         fields: vec![("field".into(), field)],
     }
 }
+fn enumeration(local: u32, field: Term) -> nir::program::Enum {
+    nir::program::Enum {
+        declaration: id(local),
+        name: format!("E{local}"),
+        is_intrinsic: false,
+        type_parameters: vec![],
+        parameter_types: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        groups: vec![],
+        encoding: None,
+        symbol_encoding: None,
+        variants: vec![nir::program::Variant {
+            name: "Value".into(),
+            shape: nir::program::VariantShape::Tuple,
+            fields: vec![field],
+        }],
+    }
+}
+
+#[test]
+fn mixed_representation_batches_reject_cross_kind_cycles_without_leaking_proofs() {
+    use elaboration::representations::{FailureKind, IncrementalChecker};
+    let package = nir::program::Package::default();
+    let mut checker = IncrementalChecker::new(&package, &mut 100_000).unwrap();
+    let failure = checker
+        .prepare_batch(
+            vec![definition(4, nominal(3)), definition(1, nominal(2))].into(),
+            vec![
+                enumeration(3, Term::Primitive(Primitive::Bool)),
+                enumeration(2, nominal(1)),
+            ]
+            .into(),
+            &mut 100_000,
+        )
+        .err()
+        .unwrap();
+    assert_eq!(failure.kind, FailureKind::Invalid);
+    // Neither a successful root nor the failed root may survive preparation.
+    assert!(
+        checker
+            .prepare_batch(
+                Arc::from([]),
+                vec![enumeration(3, nominal(3))].into(),
+                &mut 100_000
+            )
+            .is_err()
+    );
+    let prepared = checker
+        .prepare_batch(
+            vec![definition(1, nominal(2))].into(),
+            vec![enumeration(2, Term::Pointer(Box::new(nominal(1))))].into(),
+            &mut 100_000,
+        )
+        .unwrap();
+    assert!(prepared.to_string().contains("(enums"));
+    checker.commit(prepared).unwrap();
+    let later = checker
+        .prepare(vec![definition(4, nominal(2))].into(), &mut 100_000)
+        .unwrap();
+    checker.commit(later).unwrap();
+}
+
+#[test]
+fn enum_representation_receipts_share_revision_and_identity_with_structs() {
+    use elaboration::representations::{FailureKind, IncrementalChecker};
+    let package = nir::program::Package::default();
+    let mut checker = IncrementalChecker::new(&package, &mut 100_000).unwrap();
+    let mut foreign = IncrementalChecker::new(&package, &mut 100_000).unwrap();
+    let enums: Arc<[nir::program::Enum]> =
+        vec![enumeration(2, Term::Primitive(Primitive::Bool))].into();
+    let weak = Arc::downgrade(&enums);
+    let stale = checker
+        .prepare_batch(Arc::from([]), Arc::clone(&enums), &mut 100_000)
+        .unwrap();
+    let receipt = checker
+        .prepare_batch(Arc::from([]), Arc::clone(&enums), &mut 100_000)
+        .unwrap();
+    assert_eq!(
+        foreign.commit(receipt).unwrap_err().kind,
+        FailureKind::Stale
+    );
+    assert!(
+        checker
+            .prepare_batch(
+                vec![definition(2, Term::Primitive(Primitive::Bool))].into(),
+                Arc::clone(&enums),
+                &mut 100_000
+            )
+            .is_err()
+    );
+    let first = checker
+        .prepare(
+            vec![definition(1, Term::Primitive(Primitive::Bool))].into(),
+            &mut 100_000,
+        )
+        .unwrap();
+    checker.commit(first).unwrap();
+    assert_eq!(checker.commit(stale).unwrap_err().kind, FailureKind::Stale);
+    let receipt = checker
+        .prepare_batch(Arc::from([]), enums, &mut 100_000)
+        .unwrap();
+    checker.commit(receipt).unwrap();
+    assert!(weak.upgrade().is_some());
+    assert!(
+        checker
+            .prepare(
+                vec![definition(2, Term::Primitive(Primitive::Bool))].into(),
+                &mut 100_000
+            )
+            .is_err()
+    );
+    drop(checker);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn alternating_enum_and_struct_publication_reuses_prior_representation_proofs() {
+    use elaboration::representations::IncrementalChecker;
+    let package = nir::program::Package::default();
+    let mut checker = IncrementalChecker::new(&package, &mut 100_000).unwrap();
+    let mut costs = [None, None];
+    for local in 1..=256 {
+        let field = if local == 1 {
+            Term::Primitive(Primitive::Bool)
+        } else {
+            nominal(local - 1)
+        };
+        let is_enum = local % 2 == 0;
+        let mut fuel = 100_000;
+        let receipt = if is_enum {
+            checker.prepare_batch(
+                Arc::from([]),
+                vec![enumeration(local, field)].into(),
+                &mut fuel,
+            )
+        } else {
+            checker.prepare(vec![definition(local, field)].into(), &mut fuel)
+        }
+        .unwrap();
+        if local > 1 {
+            let cost = 100_000 - fuel;
+            let previous = &mut costs[usize::from(is_enum)];
+            if let Some(expected) = previous {
+                assert_eq!(cost, *expected);
+            } else {
+                *previous = Some(cost);
+            }
+        }
+        checker.commit(receipt).unwrap();
+    }
+}
+
+#[test]
+fn mixed_representation_budget_failures_are_retryable_and_do_not_publish() {
+    use elaboration::representations::{FailureKind, IncrementalChecker};
+    let package = nir::program::Package::default();
+    let mut checker = IncrementalChecker::new(&package, &mut 100_000).unwrap();
+    let structs: Arc<[Struct]> = vec![definition(1, nominal(2))].into();
+    let enums: Arc<[nir::program::Enum]> =
+        vec![enumeration(2, Term::Primitive(Primitive::Bool))].into();
+    let mut fuel = 100_000;
+    drop(
+        checker
+            .prepare_batch(Arc::clone(&structs), Arc::clone(&enums), &mut fuel)
+            .unwrap(),
+    );
+    let cost = 100_000 - fuel;
+    for budget in 0..cost {
+        let mut remaining = budget;
+        assert_eq!(
+            checker
+                .prepare_batch(Arc::clone(&structs), Arc::clone(&enums), &mut remaining)
+                .err()
+                .unwrap()
+                .kind,
+            FailureKind::Budget
+        );
+        assert!(
+            checker
+                .prepare_batch(
+                    Arc::from([]),
+                    vec![enumeration(2, nominal(2))].into(),
+                    &mut 100_000
+                )
+                .is_err()
+        );
+    }
+    let receipt = checker.prepare_batch(structs, enums, &mut 100_000).unwrap();
+    checker.commit(receipt).unwrap();
+}
 fn check(
     field: Term,
     tuple: Option<DeclarationId>,

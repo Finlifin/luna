@@ -263,6 +263,7 @@ pub struct IncrementalChecker<'a> {
 
 pub struct PreparedRepresentations {
     definitions: Arc<[n::Struct]>,
+    enums: Arc<[n::Enum]>,
     done: HashSet<Term>,
     identity: Arc<()>,
     revision: u64,
@@ -297,11 +298,11 @@ impl<'a> IncrementalChecker<'a> {
                         .map(|def| (def.declaration, Description::Borrowed(def)))
                         .collect(),
                 ),
-                enums: Descriptions::References(
+                enums: Descriptions::Shared(
                     package
                         .enums
                         .iter()
-                        .map(|def| (def.declaration, def))
+                        .map(|def| (def.declaration, Description::Borrowed(def)))
                         .collect(),
                 ),
                 newtypes: Descriptions::References(
@@ -326,8 +327,26 @@ impl<'a> IncrementalChecker<'a> {
         definitions: Arc<[n::Struct]>,
         fuel: &mut usize,
     ) -> Result<PreparedRepresentations, Failure> {
+        self.prepare_batch(definitions, Arc::from([]), fuel)
+    }
+
+    /// Check a mixed concrete batch in one tentative world. Forward edges may
+    /// cross declaration kinds; no successful subroot escapes a rejected batch.
+    /// Ordinary declaration admission is still a separate prerequisite.
+    pub fn prepare_batch(
+        &self,
+        definitions: Arc<[n::Struct]>,
+        enums: Arc<[n::Enum]>,
+        fuel: &mut usize,
+    ) -> Result<PreparedRepresentations, Failure> {
         *fuel = fuel
-            .checked_sub(definitions.len().saturating_mul(3).saturating_add(1))
+            .checked_sub(
+                definitions
+                    .len()
+                    .saturating_add(enums.len())
+                    .saturating_mul(3)
+                    .saturating_add(1),
+            )
             .ok_or(Failure::budget(
                 "struct representation index budget exhausted",
             ))?;
@@ -341,18 +360,33 @@ impl<'a> IncrementalChecker<'a> {
                 return Err(Failure::invalid("struct representation identity collision"));
             }
         }
+        let mut enum_additions = BTreeMap::new();
+        for def in enums.iter() {
+            if self.world.structs.get(&def.declaration).is_some()
+                || self.world.enums.get(&def.declaration).is_some()
+                || self.world.newtypes.get(&def.declaration).is_some()
+                || additions.contains_key(&def.declaration)
+                || enum_additions.insert(def.declaration, def).is_some()
+            {
+                return Err(Failure::invalid("enum representation identity collision"));
+            }
+        }
         let mut candidate = Checker {
             tuple: self.world.tuple,
             structs: Descriptions::Overlay(&self.world.structs, additions),
-            enums: Descriptions::Overlay(&self.world.enums, BTreeMap::new()),
+            enums: Descriptions::Overlay(&self.world.enums, enum_additions),
             newtypes: Descriptions::Overlay(&self.world.newtypes, BTreeMap::new()),
             done: HashSet::new(),
             prior_done: Some(&self.world.done),
         };
-        for def in definitions.iter() {
+        for declaration in definitions
+            .iter()
+            .map(|def| def.declaration)
+            .chain(enums.iter().map(|def| def.declaration))
+        {
             candidate.check(
                 &Term::Nominal {
-                    declaration: def.declaration,
+                    declaration,
                     arguments: vec![],
                 },
                 fuel,
@@ -368,6 +402,7 @@ impl<'a> IncrementalChecker<'a> {
         drop(candidate);
         Ok(PreparedRepresentations {
             definitions,
+            enums,
             done,
             identity: Arc::clone(&self.identity),
             revision: self.revision,
@@ -391,6 +426,15 @@ impl<'a> IncrementalChecker<'a> {
             table.insert(
                 def.declaration,
                 Description::Shared(Arc::clone(&prepared.definitions), index),
+            );
+        }
+        let Descriptions::Shared(table) = &mut self.world.enums else {
+            unreachable!()
+        };
+        for (index, def) in prepared.enums.iter().enumerate() {
+            table.insert(
+                def.declaration,
+                Description::Shared(Arc::clone(&prepared.enums), index),
             );
         }
         self.world.done.extend(prepared.done);
@@ -417,6 +461,10 @@ impl std::fmt::Display for PreparedRepresentations {
             self.revision
         )?;
         for def in self.definitions.iter() {
+            write!(f, " {}", def.declaration)?;
+        }
+        f.write_str(") (enums")?;
+        for def in self.enums.iter() {
             write!(f, " {}", def.declaration)?;
         }
         write!(f, ") (proved {}))", self.done.len())
