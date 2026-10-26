@@ -54,13 +54,41 @@ fn configurations_survive_resolution_and_hir_in_source_order() {
         panic!("wrong stage");
     };
     assert_eq!(package.enums[0].encoding.as_ref().unwrap().width(), 32);
-    assert!(
-        compile(
-            &source.replace(".base_type Word", ".base_type Missing"),
-            Emit::Hir
-        )
-        .is_err()
-    );
+}
+
+#[test]
+fn unknown_configuration_values_are_preserved_in_hir_and_rejected_by_elaboration() {
+    let valid = "typealias Word=.u32'builtin;const WIDTH=32;
+        enum Instruction {.base_type Word,.width WIDTH,.discrete_tag true,add:0b00000000000000000000000000110011,}";
+    compile(valid, Emit::Nir).unwrap();
+    for (configuration, unknown) in [
+        (".base_type Word", ".base_type Missing"),
+        (".width WIDTH", ".width Missing"),
+        (".discrete_tag true", ".discrete_tag Missing"),
+    ] {
+        let source = valid.replace(configuration, unknown);
+        let Artifact::Hir(dump) = compile(&source, Emit::Hir).unwrap() else {
+            panic!("expected HIR before attribute elaboration");
+        };
+        assert!(
+            dump.contains("(unresolved-ident (name \"Missing\"))"),
+            "{dump}"
+        );
+        let failure = compile(&source, Emit::Nir)
+            .err()
+            .expect("unknown configuration value must not become a default");
+        assert!(failure.contains("elaboration failed"), "{failure}");
+    }
+}
+
+#[test]
+fn deferred_configuration_names_do_not_hide_access_errors() {
+    let source = "mod hidden {private typealias Word=.u8'builtin;}
+        enum Instruction {.base_type hidden.Word,.width 8,.discrete_tag true,add:0b00110011,}";
+    assert!(compile(source, Emit::Hir).is_err());
+    let visible = source.replace("private typealias", "pub typealias");
+    assert!(compile(&visible, Emit::Hir).is_ok());
+    compile(&visible, Emit::Nir).unwrap();
 }
 
 #[test]

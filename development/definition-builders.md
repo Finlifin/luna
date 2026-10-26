@@ -50,6 +50,16 @@ use the VM catalog changed here. The assertion is preserved for separate diagnos
 this run is not reported as wholly passing. All 14 encoded-enum, six enum-group,
 12 reflection and 37 builder tests pass. Targeted formatting and diff checks pass.
 
+Follow-up diagnosis: `ast_lowering/src/expr.rs` deliberately preserves unresolved
+attribute/configuration names for elaboration, while still reporting access errors.
+The obsolete assertion has been replaced with phase-specific coverage for all three
+encoding configuration values: valid NIR baseline, unresolved HIR node preserving
+the name, and rejection by NIR elaboration. A private alias is rejected at HIR;
+making that same alias public succeeds through NIR. No compiler behavior changed.
+The same source integration command now passes all 73 tests
+(`/tmp/luna-tools-x2ojsbbn/result.json`, exit 0), resolving the previously reported
+failure without suppressing unknown-name rejection.
+
 ## Nested descriptors during early reflection
 
 Computed nominal applications now use the same descriptor closure as literal
