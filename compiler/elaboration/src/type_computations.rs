@@ -286,6 +286,27 @@ impl<'a> Session<'a> {
     ) -> Result<Self, Error> {
         Self::new_in_scope(package, context, budget, &[], &[], None)
     }
+    /// Configure checked definition publication before any computation is
+    /// queued. All waiters share this interpreter's generated catalog, so a
+    /// completed Type can be consumed by subsequent calls without rebuilding
+    /// the source package. The host owns publication and identity allocation;
+    /// this does not publish definitions into the caller's source checker.
+    pub fn new_with_struct_builder(
+        package: &'a Package,
+        context: &InferenceContext,
+        budget: Budget,
+        builder: &'a dyn Fn(
+            &comptime_interpretor::StructBuildRequest,
+            &mut u64,
+        ) -> Result<
+            comptime_interpretor::PreparedStructBuild<'a>,
+            comptime_interpretor::Error,
+        >,
+    ) -> Result<Self, Error> {
+        let mut session = Self::new(package, context, budget)?;
+        session.interpreter = session.interpreter.with_struct_builder(builder);
+        Ok(session)
+    }
     /// Capture one declaration's Type inputs and proof environment before any
     /// work is queued. The environment cannot change while waiters are active.
     pub fn new_in_scope(

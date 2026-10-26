@@ -3,6 +3,28 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Type-computation sessions
+
+`type_computations::Session::new_with_struct_builder` configures a checked host
+publication callback before any waiters are queued. Calls share the same live
+VM catalog: a generated Type can settle one inference variable, feed a dependent
+builder call, and be reflected by a subsequent computation. Waiting does not
+invoke the callback; completed and failed computations are terminal and do not
+replay publication. A rejected commit rolls back VM admission, and an independent
+later computation can publish successfully in the same session.
+
+The host still owns declaration identity allocation and semantic publication.
+This API does not attach generated owners to an active source checker and does
+not yet enable `typealias` initializers. That integration must cover nominal
+lookup, construction/default lookup and subsequent required-call snapshots;
+rechecking the entire source package would reenter the initializer.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p luna --test builder_invocations`, exit 0, 13 tests passed
+(`/tmp/luna-tools-lby_n72b/result.json`). This includes dependency waiting,
+chained generation and reflection, no replay or fuel use on terminal resume,
+commit rejection, failed-dependency propagation and independent recovery.
+
 ## Default CLI invocation
 
 `--invoke-comptime` now keeps HIR available through the explicit invocation in

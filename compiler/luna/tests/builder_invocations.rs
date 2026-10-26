@@ -527,3 +527,193 @@ fn invalid_invocation_resources_do_not_consume_unused_builder_budget() {
     assert!(error.contains("missing Drop binding"), "{error}");
     assert_eq!(structural, 12345);
 }
+
+#[test]
+fn type_computation_session_shares_generated_catalog_and_never_replays_publication() {
+    use elaboration::type_computations::{Input, Session, State};
+    use elaboration::{InferenceContext, InferenceTerm};
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn ready() -> bool {{true}}
+        comptime fn Generate() -> Type {{.build_struct'builtin(.Generated, [.flag], [bool])}}
+        comptime fn Wrap(ty:Type) -> Type {{.build_struct'builtin(.Wrapped, [.inner], [ty])}}
+        comptime fn Field(ty:Type) -> Type {{.struct_field_types'builtin(ty)[0]}}
+        "
+    ));
+    let (Artifact::Nir(package), _, _) = fixture.invoke("ready", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    let entry = |name: &str| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    let arena = hir::HirArena::new();
+    let publisher = elaboration::definitions::StructPublisher::new(
+        &arena,
+        hir::Package::new(),
+        0,
+        std::collections::BTreeMap::from([(0, 901)]),
+        Default::default(),
+        None,
+        100_000,
+    )
+    .unwrap();
+    let host = |request: &comptime_interpretor::StructBuildRequest, steps: &mut u64| {
+        publisher.prepare(request, steps)
+    };
+    let mut context = InferenceContext::default();
+    let mut session =
+        Session::new_with_struct_builder(&package, &context, Default::default(), &host).unwrap();
+    let first = session
+        .enqueue(&mut context, entry("Generate"), vec![])
+        .unwrap();
+    let second = session
+        .enqueue(
+            &mut context,
+            entry("Wrap"),
+            vec![Input {
+                ty: InferenceTerm::Stable(nir::Term::Primitive(nir::Primitive::Type)),
+                value: InferenceTerm::Meta(first),
+            }],
+        )
+        .unwrap();
+    assert!(matches!(
+        session.resume(&mut context, second).unwrap(),
+        State::Waiting(_)
+    ));
+    assert_eq!(publisher.published_definition_count(), 0);
+    let first_ty = match session.resume(&mut context, first).unwrap() {
+        State::Complete(ty) => ty.clone(),
+        state => panic!("first generation failed: {state}"),
+    };
+    assert_eq!(publisher.published_definition_count(), 1);
+    let second_ty = match session.resume(&mut context, second).unwrap() {
+        State::Complete(ty) => ty.clone(),
+        state => panic!("dependent generation failed: {state}"),
+    };
+    assert_ne!(first_ty, second_ty);
+    assert_eq!(publisher.published_definition_count(), 2);
+    let fuel = session.remaining_steps();
+    assert_eq!(
+        session.resume(&mut context, first).unwrap(),
+        &State::Complete(first_ty.clone())
+    );
+    assert_eq!(
+        session.resume(&mut context, second).unwrap(),
+        &State::Complete(second_ty)
+    );
+    assert_eq!(session.remaining_steps(), fuel);
+    assert_eq!(publisher.published_definition_count(), 2);
+    let reflected = session
+        .enqueue(
+            &mut context,
+            entry("Field"),
+            vec![Input {
+                ty: InferenceTerm::Stable(nir::Term::Primitive(nir::Primitive::Type)),
+                value: InferenceTerm::Meta(second),
+            }],
+        )
+        .unwrap();
+    assert_eq!(
+        session.resume(&mut context, reflected).unwrap(),
+        &State::Complete(first_ty)
+    );
+}
+
+#[test]
+fn failed_type_computation_does_not_replay_builder_or_poison_independent_calls() {
+    use elaboration::type_computations::{Input, Session, State};
+    use elaboration::{InferenceContext, InferenceTerm};
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn ready() -> bool {{true}}
+        comptime fn Generate() -> Type {{.build_struct'builtin(.Generated, [.flag], [bool])}}
+        comptime fn Wrap(ty:Type) -> Type {{.build_struct'builtin(.Wrapped, [.inner], [ty])}}
+        "
+    ));
+    let (Artifact::Nir(package), _, _) = fixture.invoke("ready", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    let entry = |name: &str| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    let arena = hir::HirArena::new();
+    let publisher = elaboration::definitions::StructPublisher::new(
+        &arena,
+        hir::Package::new(),
+        0,
+        std::collections::BTreeMap::from([(0, 901)]),
+        Default::default(),
+        None,
+        100_000,
+    )
+    .unwrap();
+    let attempts = std::cell::Cell::new(0);
+    let host = |request: &comptime_interpretor::StructBuildRequest, steps: &mut u64| {
+        attempts.set(attempts.get() + 1);
+        let mut prepared = publisher.prepare(request, steps)?;
+        if attempts.get() == 1 {
+            // Fail at the commit boundary, after VM admission. Both catalogs
+            // must discard this candidate, and the failed waiter is terminal.
+            prepared.commit = Box::new(|| {
+                Err(comptime_interpretor::Error {
+                    kind: comptime_interpretor::ErrorKind::InvalidCallPlan,
+                    source: None,
+                })
+            });
+        }
+        Ok(prepared)
+    };
+    let mut context = InferenceContext::default();
+    let mut session =
+        Session::new_with_struct_builder(&package, &context, Default::default(), &host).unwrap();
+    let first = session
+        .enqueue(&mut context, entry("Generate"), vec![])
+        .unwrap();
+    assert!(matches!(
+        session.resume(&mut context, first).unwrap(),
+        State::Failed(_)
+    ));
+    assert_eq!(publisher.published_definition_count(), 0);
+    let fuel = session.remaining_steps();
+    assert!(matches!(
+        session.resume(&mut context, first).unwrap(),
+        State::Failed(_)
+    ));
+    assert_eq!(session.remaining_steps(), fuel);
+    assert_eq!(attempts.get(), 1);
+    let dependent = session
+        .enqueue(
+            &mut context,
+            entry("Wrap"),
+            vec![Input {
+                ty: InferenceTerm::Stable(nir::Term::Primitive(nir::Primitive::Type)),
+                value: InferenceTerm::Meta(first),
+            }],
+        )
+        .unwrap();
+    assert!(
+        matches!(session.resume(&mut context, dependent).unwrap(), State::Failed(elaboration::type_computations::Error::DependencyFailed(id)) if *id == first)
+    );
+    assert_eq!(attempts.get(), 1);
+    let repaired = session
+        .enqueue(&mut context, entry("Generate"), vec![])
+        .unwrap();
+    assert!(matches!(
+        session.resume(&mut context, repaired).unwrap(),
+        State::Complete(_)
+    ));
+    assert_eq!(attempts.get(), 2);
+    assert_eq!(publisher.published_definition_count(), 1);
+}
