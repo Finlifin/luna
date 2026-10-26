@@ -132,6 +132,48 @@ class CommitTests(unittest.TestCase):
             self.run_entry('--include-staged')
         self.assertEqual(self.git('diff', '--cached'), '')
 
+    def test_explicit_restage_refreshes_only_the_selected_file(self):
+        self.git('apply', '--cached', str(self.patch_file))
+        (self.root / 'fixed').write_text('bad trailing space \n')
+        self.git('add', 'fixed')
+        self.manifest.write_text('shared\nfixed\n')
+        staged = self.git('diff', '--cached')
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_entry('--include-staged', partial=False)
+        self.assertEqual(self.git('diff', '--cached'), staged)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
+        (self.root / 'fixed').write_text('corrected\n')
+        self.assertEqual(self.run_entry('--include-staged', '--restage', 'fixed', partial=False), 0)
+        self.assertEqual(self.git('show', 'HEAD:fixed'), 'corrected\n')
+        self.assertEqual(self.git('show', 'HEAD:shared'), self.selected)
+        self.assertEqual((self.root / 'shared').read_text(), self.working)
+
+    def test_restage_preview_preserves_index_and_worktree(self):
+        self.git('apply', '--cached', str(self.patch_file))
+        staged = self.git('diff', '--cached')
+        self.assertEqual(self.run_entry('--include-staged', '--restage', 'shared',
+                                        '--dry-run', partial=False), 0)
+        self.assertEqual(self.git('diff', '--cached'), staged)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
+        self.assertEqual((self.root / 'shared').read_text(), self.working)
+
+    def test_restage_rejects_implicit_outside_unstaged_and_duplicate_paths(self):
+        self.git('apply', '--cached', str(self.patch_file))
+        (self.root / 'unstaged').write_text('not selected yet\n')
+        self.manifest.write_text('shared\nunstaged\n')
+        staged = self.git('diff', '--cached')
+        for arguments in [
+            ['--restage', 'shared'],
+            ['--include-staged', '--restage', 'outside'],
+            ['--include-staged', '--restage', 'unstaged'],
+            ['--include-staged', '--restage', '../outside'],
+            ['--include-staged', '--restage', 'shared', '--restage', 'shared'],
+        ]:
+            with self.assertRaises(SystemExit):
+                self.run_entry(*arguments, partial=False)
+            self.assertEqual(self.git('diff', '--cached'), staged)
+            self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
+
     def test_partial_commit_includes_new_file_without_staging_other_files(self):
         added = 'new feature\n'
         (self.root / 'new').write_text(added)

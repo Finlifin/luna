@@ -3,6 +3,8 @@
 
 Does not reset, clean, stash, force, bypass hooks, or change file contents. The
 index must start empty unless --include-staged explicitly adopts only manifest paths.
+After a failed check, --restage PATH refreshes only the named staged file from
+the worktree; other staged selections are preserved, including partial hunks.
 On failure, preserve the index for inspection rather than guessing a rollback.
 """
 import argparse
@@ -29,6 +31,8 @@ def main():
                         help='validate and preview the selection without changing the index or HEAD')
     parser.add_argument('--include-staged', action='store_true',
                         help='preserve and include already staged manifest paths; reject other staged work')
+    parser.add_argument('--restage', action='append', default=[], metavar='PATH',
+                        help='with --include-staged, explicitly refresh this staged manifest file from the worktree')
     args = parser.parse_args()
     if git('branch', '--show-current', capture=True).stdout.strip() != 'dev':
         parser.error('this entrypoint commits only on dev')
@@ -50,6 +54,11 @@ def main():
         parser.error('staged paths outside the manifest; inspect existing staged work first')
     if args.include_staged and args.patch_file:
         parser.error('--include-staged cannot be combined with --patch-file')
+    restage = set(args.restage)
+    if restage and not args.include_staged:
+        parser.error('--restage requires --include-staged')
+    if len(restage) != len(args.restage) or not restage.issubset(staged):
+        parser.error('--restage paths must be unique already staged manifest paths')
     message = args.message_file.resolve()
     if not message.read_text().strip():
         parser.error('commit message is empty')
@@ -72,6 +81,11 @@ def main():
         print('Selected paths:')
         for name in paths:
             print(f'  {name}')
+        if restage:
+            print('Refresh staged files from worktree:')
+            for name in paths:
+                if name in restage:
+                    print(f'  {name}')
         print('Commit message:')
         print(message.read_text())
         git('--literal-pathspecs', 'status', '--short', '--', *paths)
@@ -86,7 +100,7 @@ def main():
     if patch:
         git('apply', '--cached', str(patch))
     else:
-        unstaged = [name for name in paths if name not in staged]
+        unstaged = [name for name in paths if name not in staged or name in restage]
         if unstaged:
             git('--literal-pathspecs', 'add', '--', *unstaged)
     git('diff', '--cached', '--check')
