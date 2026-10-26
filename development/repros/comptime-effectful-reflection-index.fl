@@ -1,0 +1,26 @@
+{-
+  Known limitation: flow checking rejects types[0] after the effectful Type
+  argument, even though Source has one field. Expected run result: true.
+  Load meta and primitives, binding --meta-list-type meta.List.
+-}
+use primitives.Type;
+
+struct Inner { flag: bool }
+struct Source where T { inner: Inner }
+
+comptime fn Generate() -> Type {
+    let selected = bool;
+    var calls: primitives.u32 = 0;
+    let types = meta.struct_field_types(Source<do { calls = calls + 1; selected }>);
+    var builder = meta.StructBuilder.new();
+    builder.add_field(.inner, types[0]);
+    if calls == 1 { builder.Build() } else { bool }
+}
+
+typealias Generated = Generate();
+impl Generated {
+    fn read(self) -> bool { self.inner.flag }
+}
+fn run() -> bool {
+    Generated { inner: Inner { flag: true } }.read()
+}

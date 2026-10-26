@@ -573,7 +573,7 @@ impl Checker<'_, '_> {
                     owner, alias, own_inputs, span, false,
                 )?));
             } else {
-                self.ensure_nominal(owner, span)?;
+                self.ensure_nominal_expression(owner, span)?;
             }
             let ty = if arguments.iter().any(n::NormalFormArgument::is_diverging)
                 || preparations.iter().any(|p| is_never(&p.expression.ty))
@@ -644,6 +644,26 @@ impl Checker<'_, '_> {
         self.context = saved_context;
         self.in_required_comptime = saved_mode;
         result
+    }
+
+    /// Dynamic nominal construction still needs its declaration's reachable
+    /// descriptors. Actual arguments remain evaluated by the generated NIR.
+    pub(super) fn ensure_nominal_expression(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<(), Error> {
+        if self.in_required_comptime {
+            self.ensure_invocation_type(
+                &Term::Nominal {
+                    declaration: declaration(self.package, &self.package_identities, owner),
+                    arguments: vec![],
+                },
+                span,
+            )
+        } else {
+            self.ensure_nominal(owner, span)
+        }
     }
 
     /// Execution can inspect nested types before the global declaration pass.

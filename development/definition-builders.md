@@ -10,6 +10,32 @@ it is not a whole-compiler or historical-version speedup claim.
 
 ## Nested descriptors during early reflection
 
+Computed nominal applications now use the same descriptor closure as literal
+applications, including the dependent-domain input path. Argument expressions
+remain in NIR and execute once in source order. The regression exercises plain
+Type inputs, a later value input whose domain is the earlier Type, and side effects
+encoding invocation order as 12. It consumes the reflected fields through public
+`meta.fold` and executes a method on the resulting generated record.
+
+Validation in `/home/fin/luna`: 34 builder tests pass via
+`python3 -B development/check.py --timeout 900 -- test --release -p luna
+--test builder_invocations` (`/tmp/luna-tools-q9lr2bk5/result.json`, exit 0).
+The same production revision passed 450 elaboration and 389 open-function tests
+in `/tmp/luna-tools-ot8nd0pp/result.json`; that combined run exited 101 because an
+additional builder test initially used incorrect block syntax. Its corrected
+version exposed the separate indexing limitation below. The final builder group
+uses ordinary `meta.fold` and passes all four computed-input cases.
+`python3 -B development/host_examples.py generated-nested-struct --release-driver
+--compare-optimization` passes LLVM O0 and O3
+(`/tmp/luna-host-examples-yqf3ouxq`, exit 0), now with a computed dependent-domain
+source application.
+
+Remaining limitation: directly indexing the reflected type list after an
+effectful argument can fail with `flow-error ... unsupported-construct`.
+`development/repros/comptime-effectful-reflection-index.fl` preserves that case;
+the equivalent builder test failed in `/tmp/luna-tools-vq7x0oy_/result.json`.
+This is not claimed fixed by preparing nominal descriptors.
+
 Required Type expressions now prepare the reachable nominal descriptor graph,
 including nested fields, applied type arguments, parameter domains, enum payloads
 and newtype representations. A budgeted structural walk collects nominal identities;

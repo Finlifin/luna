@@ -1111,6 +1111,59 @@ fn early_public_builder_reflects_nested_and_applied_source_types() {
 }
 
 #[test]
+fn early_public_builder_reflects_computed_nominal_applications() {
+    for (declaration, application, expected_calls) in [
+        ("struct Source where T {inner:Inner}", "Source<ty>", 0),
+        (
+            "struct Source where T, value:T {inner:Inner}",
+            "Source<ty, true>",
+            0,
+        ),
+        (
+            "struct Source where T {inner:Inner}",
+            "Source<do {calls = calls + 1; ty}>",
+            1,
+        ),
+        (
+            "struct Source where T, value:T {inner:Inner}",
+            "Source<do {calls = calls * 10 + 1; ty}, do {calls = calls * 10 + 2; true}>",
+            12,
+        ),
+    ] {
+        let fixture = Fixture::new(&format!(
+            "typealias Type = .Type'builtin;
+            struct Inner {{flag:bool}}
+            {declaration}
+            comptime fn Generate() -> Type {{
+                let ty = bool;
+                var calls: .u32'builtin = 0;
+                let types = meta.struct_field_types({application});
+                let builder = meta.fold(types, meta.StructBuilder.new(), |draft, field| {{
+                    var draft = draft;
+                    draft.add_field(.inner, field);
+                    draft
+                }});
+                if calls == {expected_calls} {{builder.Build()}} else {{bool}}
+            }}
+            typealias Generated = Generate();
+            impl Generated {{fn read(self) -> bool {{self.inner.flag}}}}
+            fn run() -> bool {{Generated {{inner:Inner {{flag:true}}}}.read()}}
+            comptime fn inspect() -> bool {{true}}"
+        ));
+        let (Artifact::Nir(package), _, _) = fixture
+            .invoke_meta("inspect")
+            .unwrap_or_else(|error| panic!("{application}: {error}"))
+        else {
+            panic!("expected NIR")
+        };
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
 fn early_public_builder_preserves_recursive_pointer_field_identity() {
     let fixture = Fixture::new(
         "typealias Type = .Type'builtin;

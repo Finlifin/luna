@@ -9778,7 +9778,7 @@ impl Checker<'_, '_> {
                             kind: K::TypeValue(capture),
                         }));
                         let kind = if dynamic {
-                            self.ensure_nominal(owner, expr.span)?;
+                            self.ensure_nominal_expression(owner, expr.span)?;
                             K::NominalType {
                                 preparations: vec![],
                                 bindings: None,
