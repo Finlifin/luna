@@ -926,3 +926,190 @@ fn public_builder_can_define_a_type_alias_from_reflected_fields() {
     assert_eq!(generated.len(), 1);
     assert_eq!(generated[0].declaration.package, 900);
 }
+
+#[test]
+fn deferred_annotations_publish_once_per_formed_domain() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn Domain(flag:bool)->Type {{
+            let generated=.build_struct'builtin(if flag {{.TrueDomain}} else {{.FalseDomain}}, [.flag], [bool]);
+            bool
+        }}
+        fn keep(comptime flag:bool,value:defer Domain(flag))->bool {{value}}
+        fn yes()->bool {{keep(true,true)}}
+        fn no()->bool {{keep(false,false)}}
+        comptime fn ready()->bool {{true}}"
+    ));
+    let (Artifact::Nir(package), _, _) = fixture.invoke("ready", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    for (entry, expected) in [("yes", true), ("no", false)] {
+        assert_eq!(
+            luna::execution::interpret(&package, entry, 100_000).unwrap(),
+            Value::Bool(expected)
+        );
+    }
+    for name in ["TrueDomain", "FalseDomain"] {
+        assert_eq!(
+            package
+                .structs
+                .iter()
+                .filter(|def| def.name == name)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn deferred_annotation_can_reflect_a_type_generated_after_its_snapshot() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn Field(ty:Type)->Type {{.struct_field_types'builtin(ty)[0]}}
+        fn keep(comptime T:Type,value:defer Field(T))->bool {{value}}
+        comptime fn Make()->Type {{.build_struct'builtin(.Late, [.flag], [bool])}}
+        fn run()->bool {{keep(Make(),true)}}
+        comptime fn ready()->bool {{true}}"
+    ));
+    let (Artifact::Nir(package), _, _) = fixture.invoke("ready", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        package
+            .structs
+            .iter()
+            .filter(|def| def.name == "Late")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn staged_default_generates_fresh_types_and_explicit_input_skips_it() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn Make()->Type {{.build_struct'builtin(.DefaultType, [.flag], [bool])}}
+        fn create(comptime flag:bool,comptime .T:Type=Make())->bool {{flag}}
+        fn generated()->bool {{create(true)}}
+        fn generated_again()->bool {{create(false)}}
+        fn supplied()->bool {{create(false,.T=Original)}}
+        comptime fn ready()->bool {{true}}"
+    ));
+    let (Artifact::Nir(package), _, _) = fixture.invoke("ready", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "generated", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "supplied", 100_000).unwrap(),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "generated_again", 100_000).unwrap(),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        package
+            .structs
+            .iter()
+            .filter(|def| def.name == "DefaultType")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn computed_constructor_publishes_its_type_once() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn Make()->Type {{.build_struct'builtin(.Computed, [.flag], [bool])}}
+        fn run()->bool {{let value=Make() {{flag:true}};value.flag}}
+        comptime fn ready()->bool {{true}}"
+    ));
+    let (Artifact::Nir(package), _, _) = fixture.invoke("ready", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        package
+            .structs
+            .iter()
+            .filter(|def| def.name == "Computed")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn generated_nominals_remain_distinct_in_fresh_type_requirement_contexts() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn Make()->Type {{.build_struct'builtin(.Fresh, [.flag], [bool])}}
+        typealias First=Make();
+        typealias Second=Make();
+        fn distinct(comptime A:Type,comptime B:Type)->bool where requires A != B {{true}}
+        fn run()->bool {{distinct(First,Original) and distinct(First,Second)}}
+        comptime fn ready()->bool {{true}}"
+    ));
+    let (Artifact::Nir(package), _, _) = fixture.invoke("ready", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn generated_type_default_does_not_authorize_fields_on_an_unconstrained_type_parameter() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn Make()->Type {{.build_struct'builtin(.Default, [.flag], [bool])}}
+        fn invalid(comptime .T:Type=Make())->defer T {{T {{flag:true}}}}
+        comptime fn ready()->bool {{true}}"
+    ));
+    let error = fixture
+        .invoke("ready", &mut 100_000, 100_000)
+        .err()
+        .unwrap();
+    assert!(
+        error.contains("construction requires a supported struct type"),
+        "{error}"
+    );
+}
+
+#[test]
+fn explicit_staged_type_input_skips_a_failing_builder_default() {
+    let source = format!(
+        "{PREFIX}
+        comptime fn Bad()->Type {{.build_struct'builtin(.Duplicate, [.flag,.flag], [bool,bool])}}
+        fn choose(comptime .T:Type=Bad())->bool {{true}}
+        comptime fn ready()->bool {{true}}"
+    );
+    let explicit = Fixture::new(&format!("{source} fn run()->bool {{choose(.T=Original)}}"));
+    let (Artifact::Nir(package), _, _) = explicit.invoke("ready", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(package.structs.len(), 1);
+    let omitted = Fixture::new(&format!("{source} fn run()->bool {{choose()}}"));
+    assert!(omitted.invoke("ready", &mut 100_000, 100_000).is_err());
+}

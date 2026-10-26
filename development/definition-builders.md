@@ -22,12 +22,39 @@ the existing required-invocation allowance; explicit calls additionally retain
 their caller-supplied structural allowance. Failed reservations are not reused
 within the publisher. Ordinary source defaults continue to use their HIR owners.
 
-Saved/deferred open-function input computations still use their prior invocation
-path; builder publication in those computations remains unsupported. Concrete
-fields must be closed Types. Generic declaration generation, field defaults,
+Saved/deferred open-function annotations, staged defaults, computed constructors
+and computed projection receivers now use the same checked publication boundary.
+Prepared snapshots record the definition identity frontier. If a caller has
+generated definitions since preparation, annotation computation is prepared again
+from source with completed inputs, without replaying their evaluation or copying
+active inference state into the saved computation. Fresh type-proposition contexts
+also admit checked generated nominal identities.
+
+Explicit staged arguments skip their default suppliers, including suppliers that
+would fail. Omitted defaults can generate fresh, distinct types. A default that
+returns a struct does not authorize field construction on an arbitrary `T: Type`
+inside a generic body; that still requires appropriate evidence.
+
+Concrete fields must be closed Types. Generic declaration generation, field defaults,
 attributes, methods and implementation evidence remain separate work. The
 remaining sections retain earlier validation evidence; this section supersedes
-older statements that all initial required invocations lack a publisher.
+older statements that initial or deferred required invocations lack a publisher.
+
+Deferred publication validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- check --release -p luna`:
+  exit 0 (`/tmp/luna-tools-p1ng0v5j/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna
+  --test builder_invocations --test open_functions --test elaboration
+  --no-fail-fast`: 864 passed (25 builder, 389 open-function, 450 elaboration),
+  exit 0 (`/tmp/luna-tools-55wup078/result.json`).
+
+These tests cover publication once per formed domain, reflection of a type newer
+than the saved snapshot, omitted versus supplied defaults, computed construction,
+distinct generated nominal requirements and rejection of unsupported generic field
+construction. The initial test draft incorrectly constructed fields on an
+unconstrained type parameter; it was corrected and retained as a rejection test,
+without weakening generic checking.
 
 Validation in `/home/fin/luna`, through `python3 -B development/check.py
 --timeout 900 --`:

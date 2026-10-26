@@ -588,6 +588,8 @@ impl Checker<'_, '_> {
                     other => other.clone(),
                 };
                 let ty = self.instantiate_open_annotation(
+                    owner,
+                    slot,
                     &annotation,
                     sig,
                     &symbols,
@@ -1891,7 +1893,12 @@ impl Checker<'_, '_> {
             // prepared until clause specialization supplies those values.
             Ok(Annotation::Pending(Arc::new(prepared)))
         } else {
-            let (value, _) = prepared.invoke(&mut self.required_steps, expr.span)?;
+            let (value, _) = self.invoke_required_publishing(
+                prepared,
+                Vec::new(),
+                expr.hir_id.owner,
+                expr.span,
+            )?;
             let comptime_interpretor::Value::Type(ty) = value else {
                 return Err(error(
                     expr.span,
@@ -6456,6 +6463,8 @@ impl Checker<'_, '_> {
 
     fn instantiate_open_annotation(
         &mut self,
+        owner: OwnerId,
+        slot: usize,
         annotation: &Annotation,
         sig: &hir::item::FnSig<'_>,
         symbols: &[Option<Term>],
@@ -6466,7 +6475,20 @@ impl Checker<'_, '_> {
             .iter()
             .map(|p| (p.sort, Some(p.ty.clone())))
             .collect::<Vec<_>>();
-        self.instantiate_open_annotation_in_scope(annotation, sig, symbols, &domains, span)
+        if !annotation.is_pending() {
+            return self
+                .instantiate_open_annotation_in_scope(annotation, sig, symbols, &domains, span);
+        }
+        self.instantiate_open_annotation_with_live_in_scope(
+            owner,
+            slot,
+            annotation,
+            sig,
+            symbols,
+            &domains,
+            &vec![None; sig.params.len()],
+            span,
+        )
     }
 
     fn instantiate_open_annotation_with_live(
@@ -6510,7 +6532,14 @@ impl Checker<'_, '_> {
                 span,
             )?
             .is_empty();
-        if !annotation.is_pending() || (live.iter().all(Option::is_none) && !callable_input) {
+        // A generated Type supplied by this caller may postdate the frozen
+        // declaration snapshot. Reprepare completed source with these inputs;
+        // never graft current inference state into a saved computation.
+        let late_definitions = matches!(annotation, Annotation::Pending(computation)
+            if computation.package.definition_identity_cursor != self.next_definition_identity);
+        if !annotation.is_pending()
+            || (live.iter().all(Option::is_none) && !callable_input && !late_definitions)
+        {
             return self
                 .instantiate_open_annotation_in_scope(annotation, sig, symbols, parameters, span);
         }
@@ -6649,8 +6678,15 @@ impl Checker<'_, '_> {
                         .substitute_partial(symbols)
                         .map_err(|failure| error(span, failure.to_string()))?;
                 }
+                invocation.bind_inputs(values, span)?;
+                let owner = sig
+                    .params
+                    .first()
+                    .map(|parameter| parameter.hir_id.owner)
+                    .or_else(|| sig.return_ty.map(|value| value.hir_id.owner))
+                    .ok_or_else(|| error(span, "deferred annotation has no source owner"))?;
                 let (value, _) =
-                    invocation.invoke_with_inputs(values, &mut self.required_steps, span)?;
+                    self.invoke_required_publishing(invocation, Vec::new(), owner, span)?;
                 let comptime_interpretor::Value::Type(ty) = value else {
                     return Err(error(span, "deferred annotation did not produce a Type"));
                 };
@@ -8239,6 +8275,8 @@ impl Checker<'_, '_> {
                     )?
                 } else {
                     self.instantiate_open_annotation(
+                        owner,
+                        slot,
                         &definition.parameters[slot].1,
                         sig,
                         symbols,
@@ -8471,6 +8509,8 @@ impl Checker<'_, '_> {
                 parameter.ty.clone()
             } else {
                 self.instantiate_open_annotation(
+                    owner,
+                    slot,
                     &definition.parameters[slot].1,
                     sig,
                     symbols,
@@ -8564,17 +8604,17 @@ impl Checker<'_, '_> {
                 .iter()
                 .map(|(binding, _, _)| *binding)
                 .collect();
-            prepared
-                .invoke_with_live_inputs(
-                    graph
-                        .into_iter()
-                        .filter(|(binding, _, _)| selected.contains(binding))
-                        .map(|(binding, _, value)| (binding, value))
-                        .collect(),
-                    &mut this.required_steps,
-                    default.span,
-                )
-                .map(Some)
+            this.invoke_required_publishing(
+                prepared,
+                graph
+                    .into_iter()
+                    .filter(|(binding, _, _)| selected.contains(binding))
+                    .map(|(binding, _, value)| (binding, value))
+                    .collect(),
+                default.hir_id.owner,
+                default.span,
+            )
+            .map(Some)
         })
     }
 

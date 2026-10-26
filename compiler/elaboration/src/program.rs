@@ -4340,6 +4340,11 @@ impl Checker<'_, '_> {
         for declaration in &self.code_packet_nominals {
             context.admit_nominal_constructor(*declaration);
         }
+        // Checked builder results have no source HIR owner. Their nominal
+        // identity must survive fresh binder and required-invocation contexts.
+        for declaration in self.structs.keys() {
+            context.admit_nominal_constructor(*declaration);
+        }
         // Nominal declaration identity does not depend on obtaining its field
         // layout. World preparation can compare impl heads before unrelated
         // layouts/signatures have been demanded; formation is checked separately.

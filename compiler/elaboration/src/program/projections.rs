@@ -83,7 +83,8 @@ impl Checker<'_, '_> {
         if prepared.result_type != p(P::Type) {
             return Ok(false);
         }
-        let (value, _) = prepared.invoke(&mut self.required_steps, base.span)?;
+        let (value, _) =
+            self.invoke_required_publishing(prepared, Vec::new(), base.hir_id.owner, base.span)?;
         Ok(matches!(value, comptime_interpretor::Value::Type(ty) if ty == p(P::Type)))
     }
 
@@ -586,7 +587,12 @@ impl Checker<'_, '_> {
                 Vec::new(),
                 false,
             )?;
-            let (value, _) = prepared.invoke(&mut self.required_steps, base.span)?;
+            let (value, _) = self.invoke_required_publishing(
+                prepared,
+                Vec::new(),
+                base.hir_id.owner,
+                base.span,
+            )?;
             let comptime_interpretor::Value::Type(Term::Nominal { arguments, .. }) = value else {
                 return Err(error(
                     base.span,

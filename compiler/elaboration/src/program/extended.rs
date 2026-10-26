@@ -84,8 +84,12 @@ impl Checker<'_, '_> {
                     Vec::new(),
                     false,
                 )?;
-                let (comptime_interpretor::Value::Type(ty), _) =
-                    prepared.invoke(&mut self.required_steps, callee.span)?
+                let (comptime_interpretor::Value::Type(ty), _) = self.invoke_required_publishing(
+                    prepared,
+                    Vec::new(),
+                    callee.hir_id.owner,
+                    callee.span,
+                )?
                 else {
                     return Err(error(callee.span, "construction requires a Type value"));
                 };

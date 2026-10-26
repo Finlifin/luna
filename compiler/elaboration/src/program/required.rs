@@ -1124,7 +1124,7 @@ impl Checker<'_, '_> {
         self.invoke_required_publishing(prepared, Vec::new(), expr.hir_id.owner, expr.span)
     }
 
-    fn invoke_required_publishing(
+    pub(super) fn invoke_required_publishing(
         &mut self,
         prepared: PreparedRequired,
         values: Vec<(n::LocalId, Value)>,
@@ -1938,6 +1938,7 @@ impl Checker<'_, '_> {
                 });
             }
             let mut package = n::Package {
+                definition_identity_cursor: self.next_definition_identity,
                 target: self.target,
                 runtime_function_identities,
                 traits,

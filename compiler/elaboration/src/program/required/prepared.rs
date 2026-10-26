@@ -43,7 +43,7 @@ impl PreparedRequired {
     /// Supply only captured, pending declaration inputs. Check the complete
     /// assignment before mutating the snapshot; rejected input routing leaves
     /// the preparation available for a corrected invocation.
-    pub(super) fn bind_inputs(
+    pub(in crate::program) fn bind_inputs(
         &mut self,
         values: Vec<(n::LocalId, Term)>,
         span: Span,
