@@ -213,3 +213,110 @@ fn builder_driver_preserves_dependency_types_preludes_and_primary_entry_identity
     };
     assert_eq!(declaration.package, 901);
 }
+
+impl Fixture {
+    fn invoke_meta(
+        &self,
+        entry: &str,
+    ) -> Result<(Artifact, Value, elaboration::program::Protocols), String> {
+        let mut packages = self.packages();
+        packages.push(SourcePackage {
+            resolution_id: 42,
+            identity: 901,
+            name: "meta".into(),
+            entry: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/meta/lib.fl"),
+        });
+        compile_and_invoke_with_struct_builders(
+            &packages,
+            &[resolve::DependencyEdge {
+                requester: 17,
+                alias: "meta".into(),
+                provider: 42,
+            }],
+            17,
+            None,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("meta.List"),
+                ..Default::default()
+            },
+            None,
+            &[42],
+            entry,
+            &mut 1_000_000,
+            1_000_000,
+        )
+    }
+}
+
+#[test]
+fn public_struct_builder_copies_reflected_fields_through_mutating_methods() {
+    let fixture = Fixture::new(
+        "
+        struct Source {first:bool, second:bool}
+        comptime fn run() -> bool {
+            let names = meta.struct_field_names(Source);
+            let types = meta.struct_field_types(Source);
+            let count = meta.length(names);
+            var index = count - count;
+            var builder = meta.StructBuilder.new(.name = .Columns);
+            while index < count {
+                builder.add_field(names[index], types[index]);
+                index = index + 1;
+            }
+            let generated = builder.Build();
+            let observed = meta.struct_field_names(generated);
+            let fields = meta.struct_field_types(generated);
+            meta.length(observed) == 2 and observed[0] == .first and observed[1] == .second
+                and fields[0] == bool and fields[1] == bool
+        }
+    ",
+    );
+    let (Artifact::Nir(package), value, _) = fixture.invoke_meta("run").unwrap() else {
+        panic!()
+    };
+    assert_eq!(value, Value::Bool(true));
+    let generated = package
+        .structs
+        .iter()
+        .find(|item| item.name == "Columns")
+        .unwrap();
+    assert_eq!(generated.declaration.package, 900);
+    assert_eq!(generated.fields.len(), 2);
+}
+
+#[test]
+fn public_struct_builder_handles_empty_defaults_and_rejects_duplicate_fields() {
+    let fixture = Fixture::new(
+        "
+        comptime fn empty() -> bool {
+            let first = meta.StructBuilder.new().Build();
+            let second = meta.StructBuilder.new().Build();
+            meta.length(meta.struct_field_names(first)) == 0
+                and meta.length(meta.struct_field_types(second)) == 0 and not (first == second)
+        }
+        comptime fn duplicate() -> bool {
+            var builder = meta.StructBuilder.new();
+            builder.add_field(.flag, bool);
+            builder.add_field(.flag, bool);
+            builder.Build(); true
+        }
+        fn runtime() -> bool {true}
+    ",
+    );
+    assert_eq!(fixture.invoke_meta("empty").unwrap().1, Value::Bool(true));
+    assert!(fixture.invoke_meta("duplicate").is_err());
+    assert!(fixture.invoke_meta("runtime").is_err());
+}
+
+#[test]
+fn public_struct_builder_cannot_escape_into_a_runtime_interface() {
+    for source in [
+        "fn bad() -> meta.StructBuilder {meta.StructBuilder.new()}",
+        "fn bad(value: meta.StructBuilder) -> meta.StructBuilder {value}",
+    ] {
+        let fixture = Fixture::new(source);
+        let error = fixture.invoke_meta("bad").err().unwrap();
+        assert!(error.contains("elaboration failed"), "{error}");
+    }
+}

@@ -3,6 +3,39 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Public field-only struct builder
+
+`meta.StructBuilder.new(.name = .Columns)` creates an ordinary comptime draft;
+omitting the name uses `.Generated`. `add_field(*self, name, field_type)` appends
+ordered Symbol and Type lists through field pointers. `Build(self) -> Type`
+delegates to checked publication, preserving opaque Type heads and rejecting
+duplicate fields. Empty drafts are supported. Repeated default names do not
+reuse nominal identity. The library wrapper uses no alternate type registry.
+Ordinary consumers need no direct builtin access. The builder is not added to
+the default prelude; use its qualified name or an explicit import.
+
+This API covers concrete fields without defaults. The explicit builder-enabled
+driver invocation remains necessary; default CLI and required-invocation
+integration, defaults/attributes/clauses and other definition kinds remain open.
+Appending inherits the current List validation cost and is not a constant-time
+draft operation. Runtime signatures cannot carry this comptime-only draft.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations --test source_reflection --test comptime_list_operations --no-fail-fast
+```
+
+Exit 0, 43 tests passed at `/tmp/luna-tools-cr24c7mx/result.json`. Ordinary-package
+tests use the real meta library without direct builtin references, copy reflected
+fields through a loop and mutating builder methods, verify order and destination
+identity, build independent empty types with default names, and reject duplicate
+fields. Runtime construction and pass-through runtime signatures are rejected
+during elaboration. Existing reflection and List tests remain green. Raw VM
+fixtures now use the unique entry name `Generate` so their name-only lookup does
+not accidentally select the newly introduced `Build(self)` method. Targeted
+rustfmt and `git diff --check` passed.
+
 ## Driver compilation followed by a builder invocation
 
 `luna::packages::compile_and_invoke_with_struct_builders` resolves and lowers an
@@ -93,8 +126,9 @@ The compiler-private `build_struct` primitive accepts a Symbol name,
 lowers to a `build-struct` NIR node with an internal argument packet; this packet
 does not define a new source tuple type. Operands execute once in source order,
 and ordinary control flow escapes before any publication request. Runtime and
-quoted runtime contexts reject the primitive. There is no public meta wrapper
-or complete `StructBuilder.new/add_field/build` API yet.
+quoted runtime contexts reject the primitive. The field-only public
+`StructBuilder.new/add_field/Build` wrapper uses this boundary; more general
+definition construction remains incomplete.
 
 `Interpreter::with_struct_builder` supplies a host service receiving an owned
 `StructBuildRequest` and the remaining invocation allowance. The host reserves

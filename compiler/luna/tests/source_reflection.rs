@@ -366,10 +366,10 @@ fn source_struct_build_rejects_runtime_wrong_inputs_and_missing_service() {
         assert!(compile(source).is_err(), "{source}");
     }
     let package = compile(
-        "comptime fn Build() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag], [bool])}",
+        "comptime fn Generate() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag], [bool])}",
     )
     .unwrap();
-    assert!(luna::invocation::invoke(&package, "Build", 500_000).is_err());
+    assert!(luna::invocation::invoke(&package, "Generate", 500_000).is_err());
 }
 
 #[test]
@@ -377,7 +377,7 @@ fn source_struct_build_rejection_does_not_commit_and_can_retry_in_the_same_vm() 
     use comptime_interpretor::{Error, ErrorKind, PreparedStructBuild, StructBuildRequest};
     use std::cell::Cell;
     let package = compile("
-        comptime fn Build() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag], [bool])}
+        comptime fn Generate() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag], [bool])}
         comptime fn Mismatch() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag], [])}
         comptime fn Duplicate() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag, .flag], [bool, bool])}
     ").unwrap();
@@ -447,12 +447,12 @@ fn source_struct_build_rejection_does_not_commit_and_can_retry_in_the_same_vm() 
     for failure in 0..3 {
         mode.set(failure);
         let before = vm.remaining_steps();
-        assert!(vm.invoke(entry("Build"), vec![]).is_err());
+        assert!(vm.invoke(entry("Generate"), vec![]).is_err());
         assert!(vm.remaining_steps() < before);
         assert_eq!(commits.get(), 0);
     }
     mode.set(3);
-    let Value::Type(generated) = vm.invoke(entry("Build"), vec![]).unwrap() else {
+    let Value::Type(generated) = vm.invoke(entry("Generate"), vec![]).unwrap() else {
         panic!("expected Type")
     };
     assert_eq!(
@@ -469,7 +469,7 @@ fn source_struct_build_shares_budget_and_does_not_request_after_early_return() {
     use std::cell::Cell;
     let package = compile(
         "
-        comptime fn Build() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag], [bool])}
+        comptime fn Generate() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag], [bool])}
         comptime fn early() -> bool {
             .build_struct'builtin(do {return true;}, [.flag], [bool]); false
         }
@@ -483,7 +483,7 @@ fn source_struct_build_shares_budget_and_does_not_request_after_early_return() {
     let entry = package
         .functions
         .iter()
-        .find(|item| item.name == "Build")
+        .find(|item| item.name == "Generate")
         .unwrap()
         .declaration;
     let mode = Cell::new(0);
@@ -553,7 +553,7 @@ fn source_builds_chain_through_the_compiler_publisher_and_keep_final_nir() {
     use std::collections::BTreeMap;
     let package = compile(
         "
-        comptime fn Build() -> .Type'builtin {
+        comptime fn Generate() -> .Type'builtin {
             let first = .build_struct'builtin(.First, [.flag], [bool]);
             .build_struct'builtin(.Second, [.nested], [first])
         }
@@ -563,7 +563,7 @@ fn source_builds_chain_through_the_compiler_publisher_and_keep_final_nir() {
     let entry = package
         .functions
         .iter()
-        .find(|item| item.name == "Build")
+        .find(|item| item.name == "Generate")
         .unwrap()
         .declaration;
     let arena = hir::HirArena::new();
