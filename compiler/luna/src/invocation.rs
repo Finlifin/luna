@@ -37,6 +37,18 @@ pub fn invoke_with_protocols(
     )
 }
 
+/// Invoke through the ordinary driver preparation with a checked HIR publisher.
+/// The caller retains the publisher and can recover its latest NIR afterward.
+pub fn invoke_in_package_with_struct_publisher(
+    package: &Package,
+    identity: u64,
+    entry: &str,
+    fuel: u64,
+    publisher: &elaboration::definitions::StructPublisher<'_>,
+) -> Result<Value, String> {
+    invoke_selected_with_publisher(package, entry, Some(identity), None, fuel, Some(publisher))
+}
+
 pub(crate) fn invoke_selected(
     package: &Package,
     entry: &str,
@@ -46,6 +58,20 @@ pub(crate) fn invoke_selected(
         crate::resources::Selection<'_>,
     )>,
     fuel: u64,
+) -> Result<Value, String> {
+    invoke_selected_with_publisher(package, entry, identity, protocols, fuel, None)
+}
+
+fn invoke_selected_with_publisher(
+    package: &Package,
+    entry: &str,
+    identity: Option<u64>,
+    protocols: Option<(
+        crate::resources::Selection<'_>,
+        crate::resources::Selection<'_>,
+    )>,
+    fuel: u64,
+    publisher: Option<&elaboration::definitions::StructPublisher<'_>>,
 ) -> Result<Value, String> {
     if fuel == 0 {
         return Err("invocation fuel must be positive".into());
@@ -141,6 +167,14 @@ pub(crate) fn invoke_selected(
         .map_err(|error| format!("cannot prepare comptime invocation: {error}"))?
         .with_budgeted_type_solver(&solver)
         .with_budgeted_pointer_copy_permission(&pointer_copy);
+    let builder = |request: &comptime_interpretor::StructBuildRequest, remaining: &mut u64| {
+        publisher
+            .expect("builder installed only with publisher")
+            .prepare(request, remaining)
+    };
+    if publisher.is_some() {
+        interpreter = interpreter.with_struct_builder(&builder);
+    }
     let result = if graph.is_some() {
         interpreter.invoke_instance(&roots[0], vec![])
     } else {
@@ -148,6 +182,9 @@ pub(crate) fn invoke_selected(
     };
     result.map_err(|error| {
         let mut message = format!("comptime invocation of '{entry}' failed: {error}");
+        if let Some(reason) = publisher.and_then(|publisher| publisher.last_diagnostic()) {
+            message.push_str(&format!("; definition publication: {reason}"));
+        }
         if let Some(reason) = copy_failure.borrow().as_ref() {
             message.push_str(&format!("; pointer Copy evidence: {reason}"));
         }

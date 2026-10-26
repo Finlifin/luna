@@ -3,6 +3,50 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Driver compilation followed by a builder invocation
+
+`luna::packages::compile_and_invoke_with_struct_builders` resolves and lowers an
+explicit package set, binds its protocols and preludes, performs initial
+elaboration, then invokes a selected comptime entry with a compiler-owned
+publisher. It returns the invocation value, the latest checked NIR artifact and
+bound protocols. If the entry creates no definitions, it returns the initial
+NIR. Source package identities, dependency types, target and prelude configuration
+remain those of the original compilation. Generated identities belong to the
+explicit primary package. On failure no artifact or value escapes; structural
+fuel retains consumed work.
+
+`luna::invocation::invoke_in_package_with_struct_publisher` exposes the invocation
+part for a host already holding the matching HIR publisher and checked NIR. It
+uses ordinary default argument preparation, primary-package entry selection,
+proof callbacks and invocation budgeting. Publication diagnostics accompany
+invocation errors. Generated descriptors are not silently added to existing
+trait/Copy evidence. Builder installation still requires the NIR interpreter;
+an invocation requiring the IIR staging path cannot publish structs through it.
+
+This is a driver API for an explicit invocation after initial elaboration. It
+does not enable builders in typealias initializers or other required invocations
+during that initial elaboration, change the default CLI invocation path, or
+provide the complete public StructBuilder library API. Candidate publication
+still checks the full package. Active-checker integration and incremental
+semantic updates remain separate work.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations --test generated_definitions --test reflected_definitions --test source_reflection --no-fail-fast
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations --no-fail-fast
+```
+
+The final builder suite passed 3 tests at `/tmp/luna-tools-pwzf2_v9/result.json`.
+The other 15 integration tests passed at `/tmp/luna-tools-yo4gx28b/result.json`;
+that earlier run failed the new fixture because it used `.opaque`, a reserved
+word, as an unquoted field symbol. The multi-package fixture also needed unique
+temporary directory counters and an explicit comptime signature for its helper.
+No language rule was relaxed. Final coverage includes default arguments, opaque
+normal-form fields, retained generated NIR, no-build results, unknown/runtime
+entries, exhausted budgets and retry, dependency types, configured preludes and
+primary entry identity. Targeted rustfmt and `git diff --check` passed.
+
 ## Compiler-owned struct publisher
 
 `elaboration::definitions::StructPublisher` provides the reusable host side of
