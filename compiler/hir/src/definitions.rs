@@ -17,6 +17,8 @@ mod implementations;
 pub use implementations::assemble_inherent_impl;
 mod enums;
 pub use enums::assemble_enum;
+mod functions;
+pub use functions::{AssembledFunction, assemble_function, assemble_function_declaration};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
