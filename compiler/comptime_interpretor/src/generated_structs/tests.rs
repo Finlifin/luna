@@ -243,3 +243,59 @@ fn empty_structs_still_check_formation_and_large_contract_preflight() {
     assert!(!vm.structs.contains_key(&id(20)));
     assert!(vm.structs.contains_key(&id(10)));
 }
+
+#[test]
+fn a_small_install_does_not_recharge_the_existing_struct_catalog() {
+    let added = [structure(10_000, vec![("flag", boolean())])];
+    let mut costs = Vec::new();
+    for count in [1, 4096] {
+        let package = Package {
+            structs: (1..=count)
+                .map(|local| structure(local, vec![("flag", boolean())]))
+                .collect(),
+            ..Default::default()
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let before = vm.remaining_steps();
+        vm.install_generated_structs(&added).unwrap();
+        costs.push(before - vm.remaining_steps());
+        assert_eq!(vm.structs.len(), count as usize + 1);
+        assert!(vm.reflect_struct(&ty(count)).is_ok());
+    }
+    assert!(
+        costs[0] > 0 && costs[1] <= costs[0] + 32,
+        "installation costs: {costs:?}"
+    );
+}
+
+#[test]
+fn repeated_installation_and_late_failure_preserve_prior_batches_with_a_bounded_allowance() {
+    let package = Package {
+        structs: (1..=4096)
+            .map(|local| structure(local, vec![("flag", boolean())]))
+            .collect(),
+        ..Default::default()
+    };
+    let additions: Vec<_> = (10_000..10_128)
+        .map(|local| structure(local, vec![("flag", boolean())]))
+        .collect();
+    let failed = [
+        structure(20_000, vec![("previous", ty(10_127))]),
+        structure(20_001, vec![("unknown", ty(99_999))]),
+    ];
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    vm.budget.steps = 10_000;
+    for definition in &additions {
+        vm.install_generated_structs(std::slice::from_ref(definition))
+            .unwrap();
+    }
+    let count = vm.structs.len();
+    assert_eq!(count, 4096 + additions.len());
+    assert!(vm.install_generated_structs(&failed).is_err());
+    assert_eq!(vm.structs.len(), count);
+    assert!(!vm.structs.contains_key(&id(20_000)));
+    assert!(!vm.structs.contains_key(&id(20_001)));
+    assert!(vm.reflect_struct(&ty(1)).is_ok());
+    assert!(vm.reflect_struct(&ty(10_000)).is_ok());
+    assert!(vm.reflect_struct(&ty(10_127)).is_ok());
+}

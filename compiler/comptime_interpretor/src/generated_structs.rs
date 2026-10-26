@@ -3,12 +3,16 @@ use super::*;
 
 struct Installation<'vm, 'world> {
     vm: &'vm mut Interpreter<'world>,
-    previous: Option<BTreeMap<DeclarationId, &'world nir::program::Struct>>,
+    definitions: &'world [nir::program::Struct],
+    inserted: usize,
+    committed: bool,
 }
 impl Drop for Installation<'_, '_> {
     fn drop(&mut self) {
-        if let Some(previous) = self.previous.take() {
-            self.vm.structs = previous;
+        if !self.committed {
+            for definition in &self.definitions[..self.inserted] {
+                self.vm.structs.remove(&definition.declaration);
+            }
         }
     }
 }
@@ -96,19 +100,25 @@ impl<'world> Interpreter<'world> {
                     .map_err(|_| self.failure(ErrorKind::Type, None))?;
             }
         }
-        // Copy only the table of borrowed immutable descriptors, after charging
-        // its entries. No existing definition or live storage is cloned.
-        let table_entries = self.structs.len();
-        self.integer_operation(None, |budget| budget.consume(table_entries))?;
-        let mut candidate = self.structs.clone();
-        for definition in definitions {
-            candidate.insert(definition.declaration, definition);
-        }
-        let previous = std::mem::replace(&mut self.structs, candidate);
+        // Every identity was checked before mutation. Reserve insertion and
+        // rollback work up front; unwinding must remove only this batch even if
+        // admission consumes the rest of the invocation's execution allowance.
+        self.integer_operation(None, |budget| {
+            budget.consume(definitions.len().saturating_mul(2))
+        })?;
         let mut installation = Installation {
             vm: self,
-            previous: Some(previous),
+            definitions,
+            inserted: 0,
+            committed: false,
         };
+        for definition in definitions {
+            installation.inserted += 1;
+            installation
+                .vm
+                .structs
+                .insert(definition.declaration, definition);
+        }
         for definition in definitions {
             let ty = Term::Nominal {
                 declaration: definition.declaration,
@@ -119,7 +129,7 @@ impl<'world> Interpreter<'world> {
                 installation.vm.admit_type(field, 0)?;
             }
         }
-        installation.previous = None;
+        installation.committed = true;
         Ok(())
     }
 

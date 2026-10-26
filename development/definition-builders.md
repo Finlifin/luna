@@ -31,11 +31,15 @@ reservation remains the publisher's responsibility.
 
 The batch checks field names, closed Type descriptions and formation predicates
 in a combined candidate table. Forward references within the batch are allowed;
-pointer-recursive field observation still does not compute layout. Only the table
-of borrowed struct descriptors is copied, after charging its entries. Descriptor,
-field and contract preflight and subsequent admission consume the same invocation
-budget. An error or host-solver unwind restores the old table, including when a
-later descriptor fails. Work and arbitrary external solver effects are not rolled
+pointer-recursive field observation still does not compute layout. A borrowed
+batch journal records inserted identities without cloning the existing catalog.
+Insertion and possible rollback are charged before mutation; descriptor, field
+and contract preflight and subsequent admission use the same invocation budget.
+Rollback removes only the new entries, even when admission exhausted that budget.
+Per-installation work no longer includes copying all previously generated structs;
+ordered-map lookups and formation checking retain their own costs. An error or
+host-solver unwind restores the old table, including when a later descriptor
+fails. Work and arbitrary external solver effects are not rolled
 back. Empty structs still check their formation requirements.
 
 This entrypoint accepts concrete builder results with no declaration parameters.
