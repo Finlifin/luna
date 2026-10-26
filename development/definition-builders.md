@@ -19,6 +19,34 @@ layout or field access permission is implied. A names-only query currently
 performs the full checked field observation too. This adds source reflection,
 not source builder publication or resumption of a live invocation.
 
+## Installing completed structs in an existing VM
+
+`Interpreter::install_generated_structs` admits a batch of immutable, concrete
+NIR struct descriptors after ordinary checked publication. The same NIR comptime
+VM can then reflect or admit values of those identities; it retains its previous
+functions, storage, events, budget and cached instances. Old declarations cannot
+be replaced, and the batch cannot reuse known callable, trait/member, impl,
+normal-form, alias, effect or clause-parameter identities. Global identity
+reservation remains the publisher's responsibility.
+
+The batch checks field names, closed Type descriptions and formation predicates
+in a combined candidate table. Forward references within the batch are allowed;
+pointer-recursive field observation still does not compute layout. Only the table
+of borrowed struct descriptors is copied, after charging its entries. Descriptor,
+field and contract preflight and subsequent admission consume the same invocation
+budget. An error or host-solver unwind restores the old table, including when a
+later descriptor fails. Work and arbitrary external solver effects are not rolled
+back. Empty structs still check their formation requirements.
+
+This entrypoint accepts concrete builder results with no declaration parameters.
+It rejects runtime/IIR interpreters and active abstract normalization scopes.
+The descriptors must outlive the VM. It does not add functions, defaults or impls,
+change trait selection, authorize field access or replace the HIR publisher's
+semantic/resource checks. Existing external type/Copy callbacks remain attached;
+the host remains responsible for providing evidence for newly generated types.
+Source builder dispatch during a running expression is still unimplemented.
+This closes the VM catalog-installation step, not the whole builder pipeline.
+
 ## Callable type reflection
 
 `Interpreter::reflect_callable` observes a legal callable Type in a comptime

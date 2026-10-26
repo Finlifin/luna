@@ -20,6 +20,7 @@ mod normal_inputs;
 mod object_values;
 mod objects;
 pub use objects::ObjectProperty;
+mod generated_structs;
 mod reflection;
 pub use reflection::{
     CallableReflection, EnumReflection, ReflectedField, ReflectedVariant, StructReflection,
@@ -1180,6 +1181,7 @@ enum PointerCopyPermission<'a> {
 }
 
 pub struct Interpreter<'a> {
+    declaration_world: Option<&'a Package>,
     target: Option<nir::target::TargetData>,
     effect_declarations: BTreeMap<DeclarationId, &'a nir::effects::Declaration>,
     effect_state: effects::State,
@@ -1975,6 +1977,7 @@ impl<'a> Interpreter<'a> {
                 source: None,
             })?;
         Ok(Self {
+            declaration_world: Some(package),
             effect_declarations,
             effect_state: effects::State::default(),
             effect_values: None,

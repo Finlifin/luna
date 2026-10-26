@@ -183,3 +183,39 @@ fn ordinary_package_observes_fields_through_meta_without_builtin_access() {
         "(bool true)"
     );
 }
+
+#[test]
+fn existing_source_invocation_can_observe_a_newly_published_struct_in_the_same_vm() {
+    let source = "
+        typealias Type = .Type'builtin;
+        comptime fn First(subject: Type) -> Type {meta.struct_field_types(subject)[0]}
+    ";
+    let baseline = compile(source).unwrap();
+    let published = compile(&format!("{source} struct Generated {{flag:bool}}")).unwrap();
+    let generated = published
+        .structs
+        .iter()
+        .find(|item| item.name == "Generated")
+        .unwrap();
+    let entry = baseline
+        .functions
+        .iter()
+        .find(|item| item.name == "First")
+        .unwrap()
+        .declaration;
+    let ty = nir::Term::Nominal {
+        declaration: generated.declaration,
+        arguments: vec![],
+    };
+    let mut vm =
+        comptime_interpretor::Interpreter::for_comptime(&baseline, Default::default()).unwrap();
+    assert!(vm.invoke(entry, vec![Value::Type(ty.clone())]).is_err());
+    let before = vm.remaining_steps();
+    vm.install_generated_structs(std::slice::from_ref(generated))
+        .unwrap();
+    assert!(vm.remaining_steps() < before);
+    assert_eq!(
+        vm.invoke(entry, vec![Value::Type(ty)]).unwrap(),
+        Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
+    );
+}
