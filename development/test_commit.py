@@ -27,6 +27,7 @@ class CommitTests(unittest.TestCase):
         self.git('config', 'user.name', 'Test')
         self.git('config', 'user.email', 'test@example.invalid')
         self.git('config', 'commit.gpgsign', 'false')
+        self.git('config', 'core.hooksPath', str(self.root / 'no-hooks'))
         self.original = ''.join(f'line {i}\n' for i in range(40))
         (self.root / 'shared').write_text(self.original)
         self.git('add', 'shared')
@@ -107,6 +108,72 @@ class CommitTests(unittest.TestCase):
         self.assertEqual(self.git('show', 'HEAD:new'), added)
         self.assertEqual(self.git('show', 'HEAD:shared'), self.selected)
         self.assertNotIn('manifest', self.git('ls-tree', '--name-only', 'HEAD'))
+
+
+class CommitManifestTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix='luna-commit-test-')
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name) / 'repo'
+        self.root.mkdir()
+        self.git('init', '-b', 'dev')
+        self.git('config', 'user.name', 'Commit Test')
+        self.git('config', 'user.email', 'test@example.invalid')
+        # Do not inherit signing or hook configuration from the user's setup.
+        self.git('config', 'commit.gpgsign', 'false')
+        self.git('config', 'core.hooksPath', str(Path(self.directory.name) / 'no-hooks'))
+        (self.root / 'base').write_text('baseline\n')
+        self.git('add', 'base')
+        self.git('commit', '-m', 'baseline')
+        self.manifest = Path(self.directory.name) / 'manifest'
+        self.message = Path(self.directory.name) / 'message'
+        self.message.write_text('test: commit explicitly selected work\n')
+
+    def git(self, *args):
+        return subprocess.run(['git', *args], cwd=self.root, check=True,
+                              capture_output=True, text=True, timeout=15).stdout
+
+    def invoke(self, paths, dry_run=False):
+        self.manifest.write_text('\n'.join(paths) + '\n')
+        argv = ['commit.py', '--manifest', str(self.manifest), '--message-file', str(self.message)]
+        if dry_run:
+            argv.append('--dry-run')
+        with patch.object(entry, 'ROOT', self.root), patch('sys.argv', argv):
+            return entry.main()
+
+    def test_preview_preserves_head_index_and_worktree(self):
+        (self.root / 'base').write_text('changed\n')
+        (self.root / 'new').write_text('new\n')
+        head = self.git('rev-parse', 'HEAD')
+        status = self.git('status', '--porcelain')
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.invoke(['base', 'new'], dry_run=True), 0)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.git('diff', '--cached'), '')
+        self.assertEqual(self.git('status', '--porcelain'), status)
+        self.assertEqual((self.root / 'base').read_text(), 'changed\n')
+
+    def test_only_selected_files_are_committed(self):
+        (self.root / 'base').write_text('changed\n')
+        (self.root / 'keep-untracked').write_text('unrelated\n')
+        self.assertEqual(self.invoke(['base']), 0)
+        self.assertEqual(self.git('show', 'HEAD:base'), 'changed\n')
+        self.assertIn('?? keep-untracked', self.git('status', '--short'))
+
+    def test_existing_index_and_invalid_manifest_are_not_modified(self):
+        (self.root / 'base').write_text('staged by someone else\n')
+        self.git('add', 'base')
+        previous = self.git('diff', '--cached')
+        head = self.git('rev-parse', 'HEAD')
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.invoke(['base'])
+        self.assertEqual(self.git('diff', '--cached'), previous)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.git('commit', '-m', 'save independently staged work')
+        for paths in [['../outside'], ['.git/config'], ['base', 'base'], ['.']]:
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.invoke(paths)
+            self.assertEqual(self.git('diff', '--cached'), '')
 
 
 if __name__ == '__main__':
