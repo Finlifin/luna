@@ -70,7 +70,7 @@ impl<'a> EnumBatch<'a> {
     }
 }
 
-struct Installation<'vm, 'world> {
+pub(super) struct Installation<'vm, 'world> {
     vm: &'vm mut Interpreter<'world>,
     definitions: EnumBatch<'world>,
     inserted: usize,
@@ -149,7 +149,30 @@ impl<'world> Interpreter<'world> {
             .commit_with(commit)
     }
 
-    fn prepare_generated_enums<'vm>(
+    // Only the private admission session may commit this exact immutable batch
+    // after checking its world identity/revision and prepaying insertion work.
+    pub(super) fn commit_admitted_enums_with<T, E>(
+        &mut self,
+        definitions: Arc<[nir::program::Enum]>,
+        commit: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, EnumPublicationError<E>> {
+        let mut installation = Installation {
+            vm: self,
+            definitions: EnumBatch::Shared(definitions),
+            inserted: 0,
+            committed: false,
+        };
+        for (index, definition) in installation.definitions.iter().enumerate() {
+            installation.inserted += 1;
+            installation.vm.enums.insert(
+                definition.declaration,
+                installation.definitions.definition(index),
+            );
+        }
+        installation.commit_with(commit)
+    }
+
+    pub(super) fn prepare_generated_enums<'vm>(
         &'vm mut self,
         definitions: EnumBatch<'world>,
     ) -> Result<Installation<'vm, 'world>, Error> {

@@ -8,6 +8,36 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Shared declaration admission session
+
+`DefinitionAdmissionSession` retains committed struct and enum descriptions in
+one non-executing VM. `StructAdmissionSession` remains a compatibility alias.
+Struct preparation and `prepare_enums` return opaque immutable receipts sharing
+one world identity and revision. Either kind of successful commit invalidates all
+competing receipts; failed callbacks and unwinding roll back the candidate without
+invalidating other prepared work. Newly committed enum payloads may refer to prior
+structs, and later structs may refer to those enums. Declaration identity collisions
+are checked across both catalogs.
+
+Preparation borrows the current caller's budget and prepays installation work;
+commit needs no new fuel. Dropping a receipt publishes nothing and releases its
+shared batch. This adds enum admission to the reusable checking boundary; it does
+not yet expose a source EnumBuilder or a checked enum publisher, and callers still
+owe finite representation checking independently.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p comptime_interpretor --lib --test struct_admission_session`,
+exit 0, 148 VM tests and 9 admission session tests
+(`/tmp/luna-tools-7g3epk3i/result.json`). New regressions cover alternating kinds,
+cross-kind stale receipts, foreign sessions, ownership release, callback error and
+panic rollback, and every insufficient enum preparation allowance followed by a
+successful prepaid commit.
+Downstream validation with the same wrapper: `test --release -p elaboration
+--test checked_struct_publisher --test representations --test generated_enums
+--test struct_publisher`, exit 0, 32 tests
+(`/tmp/luna-tools-9_op8fl8/result.json`). Targeted Rust formatting and
+`git diff --check` pass.
+
 ## Live concrete enum publication
 
 `representations::IncrementalChecker::prepare_batch` now checks mixed struct/enum

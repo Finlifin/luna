@@ -1,10 +1,20 @@
-//! Reusable, non-executing admission of concrete struct descriptions.
+//! Reusable, non-executing admission of concrete nominal descriptions.
 use super::*;
 
 /// Owns a checked baseline and committed additions, but exposes no execution or
 /// arbitrary VM mutation. A receipt is valid only for this session's revision.
-pub struct StructAdmissionSession<'world> {
+pub struct DefinitionAdmissionSession<'world> {
     vm: Interpreter<'world>,
+    identity: Arc<()>,
+    revision: u64,
+}
+
+/// Compatibility name for existing concrete struct publishers.
+pub type StructAdmissionSession<'world> = DefinitionAdmissionSession<'world>;
+
+/// An enum admission receipt shares the session revision with struct receipts.
+pub struct PreparedEnumAdmission {
+    definitions: Arc<[nir::program::Enum]>,
     identity: Arc<()>,
     revision: u64,
 }
@@ -28,7 +38,7 @@ impl Drop for Allowance<'_, '_, '_> {
     }
 }
 
-impl<'world> StructAdmissionSession<'world> {
+impl<'world> DefinitionAdmissionSession<'world> {
     pub fn new(package: &'world nir::program::Package, budget: &mut Budget) -> Result<Self, Error> {
         Ok(Self {
             vm: Interpreter::for_comptime_in_budget(package, &[], budget)?,
@@ -73,6 +83,63 @@ impl<'world> StructAdmissionSession<'world> {
         })
     }
 
+    /// Prepare an enum batch without exposing tentative entries to later calls.
+    pub fn prepare_enums(
+        &mut self,
+        definitions: Arc<[nir::program::Enum]>,
+        budget: &mut Budget,
+    ) -> Result<PreparedEnumAdmission, Error> {
+        let reserved = std::mem::take(&mut budget.steps);
+        self.vm.budget = Budget {
+            steps: reserved,
+            depth: budget.depth,
+        };
+        let allowance = Allowance {
+            vm: &mut self.vm,
+            budget,
+            reserved,
+        };
+        allowance
+            .vm
+            .charge_preparation(definitions.len().saturating_mul(2))?;
+        drop(
+            allowance
+                .vm
+                .prepare_generated_enums(crate::generated_enums::EnumBatch::Shared(Arc::clone(
+                    &definitions,
+                )))?,
+        );
+        Ok(PreparedEnumAdmission {
+            definitions,
+            identity: Arc::clone(&self.identity),
+            revision: self.revision,
+        })
+    }
+
+    /// A commit of either definition kind invalidates all competing receipts.
+    /// Insertion has already been paid for; failed callbacks preserve revision.
+    pub fn commit_enums_with<T, E>(
+        &mut self,
+        prepared: PreparedEnumAdmission,
+        commit: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, crate::EnumPublicationError<E>> {
+        let next = self.revision.checked_add(1);
+        if !Arc::ptr_eq(&self.identity, &prepared.identity)
+            || self.revision != prepared.revision
+            || next.is_none()
+        {
+            return Err(crate::EnumPublicationError::Admission(Error {
+                kind: ErrorKind::InvalidCallPlan,
+                source: None,
+            }));
+        }
+        let result = self
+            .vm
+            .commit_admitted_enums_with(prepared.definitions, commit)?;
+        self.revision = next.unwrap();
+        Ok(result)
+    }
+
     /// Install an admitted receipt and commit the enclosing publisher atomically.
     /// A stale or foreign receipt never invokes the callback. Callback failure or
     /// unwind removes the tentative entries and leaves the revision unchanged.
@@ -113,9 +180,13 @@ impl<'world> StructAdmissionSession<'world> {
     }
 }
 
-impl fmt::Display for StructAdmissionSession<'_> {
+impl fmt::Display for DefinitionAdmissionSession<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(struct-admission-session (revision {}))", self.revision)
+        write!(
+            f,
+            "(definition-admission-session (revision {}))",
+            self.revision
+        )
     }
 }
 impl fmt::Display for PreparedStructAdmission {
@@ -123,6 +194,20 @@ impl fmt::Display for PreparedStructAdmission {
         write!(
             f,
             "(prepared-struct-admission (revision {}) (definitions",
+            self.revision
+        )?;
+        for definition in self.definitions.iter() {
+            write!(f, " {}", definition.declaration)?;
+        }
+        f.write_str("))")
+    }
+}
+
+impl fmt::Display for PreparedEnumAdmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(prepared-enum-admission (revision {}) (definitions",
             self.revision
         )?;
         for definition in self.definitions.iter() {

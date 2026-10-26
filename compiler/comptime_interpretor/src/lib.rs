@@ -24,7 +24,8 @@ mod generated_enums;
 pub use generated_enums::EnumPublicationError;
 mod generated_structs;
 pub use generated_structs::{
-    PreparedStructAdmission, StructAdmissionSession, StructPublicationError,
+    DefinitionAdmissionSession, PreparedEnumAdmission, PreparedStructAdmission,
+    StructAdmissionSession, StructPublicationError,
 };
 mod struct_build;
 pub use struct_build::{PreparedStructBuild, StructBuildRequest};
