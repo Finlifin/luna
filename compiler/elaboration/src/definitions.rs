@@ -5,6 +5,8 @@
 use crate::program::{self, Protocols};
 use hir::definitions::{DefinitionBatch, PreparedPublication, PublicationError};
 use std::collections::BTreeMap;
+mod struct_publisher;
+pub use struct_publisher::StructPublisher;
 
 /// Publish only after the complete candidate passes ordinary elaboration with
 /// the caller's package identities, protocols and target. Return the checked

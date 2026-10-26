@@ -3,6 +3,45 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Compiler-owned struct publisher
+
+`elaboration::definitions::StructPublisher` provides the reusable host side of
+source construction. It owns the committed HIR package and the latest checked
+NIR, an explicit destination resolution/semantic package identity, protocols,
+target and structural allowance. `prepare` forks the committed package with
+metered table copying, reserves a resolver identity, assembles delivered field
+Types and runs ordinary semantic publication against the private candidate.
+It returns the VM's `PreparedStructBuild`; only the final callback replaces the
+committed package. A discarded, rejected or stale candidate cannot overwrite it.
+`last_diagnostic` retains structural/semantic failures alongside the VM's request
+source location. The service has an S-expression state dump.
+
+Subsequent requests see earlier committed generated definitions, so field Types
+may refer to those identities. `finish` returns the committed HIR and latest
+checked NIR without another elaboration. Until the first successful commit the
+checked output is absent. Only the new concrete descriptor is copied into shared
+VM storage; its name and field-Type copying consume structural fuel. Candidate
+package checking still re-elaborates the full candidate. This service is not an
+incremental active-checker transaction, and ordinary driver invocation does not
+install it automatically yet. Hosts must supply the relevant source world and
+matching package identities; an empty world only supports self-contained fields
+and earlier generated declarations.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test struct_publisher --test delivered_types -p luna --test source_reflection --no-fail-fast
+```
+
+Final run exited 0 at `/tmp/luna-tools-uk1qmfmq/result.json`: 24 tests passed.
+Coverage includes explicit destination identity, discarded/stale candidates,
+semantic rejection and repair, structural-budget exhaustion, chained generated
+Types and their use by a fresh VM from retained NIR. The source integration
+constructs two dependent structs through this production publisher. The first
+run failed to compile the new tests because candidate borrows outlived the
+intended scope; explicit candidate/VM scopes fixed the test lifetime issue.
+Targeted rustfmt and `git diff --check` passed.
+
 ## Source requests during an existing invocation
 
 The compiler-private `build_struct` primitive accepts a Symbol name,

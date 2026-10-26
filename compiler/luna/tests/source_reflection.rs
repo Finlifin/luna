@@ -547,3 +547,63 @@ fn source_struct_build_shares_budget_and_does_not_request_after_early_return() {
         }
     }
 }
+
+#[test]
+fn source_builds_chain_through_the_compiler_publisher_and_keep_final_nir() {
+    use std::collections::BTreeMap;
+    let package = compile(
+        "
+        comptime fn Build() -> .Type'builtin {
+            let first = .build_struct'builtin(.First, [.flag], [bool]);
+            .build_struct'builtin(.Second, [.nested], [first])
+        }
+    ",
+    )
+    .unwrap();
+    let entry = package
+        .functions
+        .iter()
+        .find(|item| item.name == "Build")
+        .unwrap()
+        .declaration;
+    let arena = hir::HirArena::new();
+    let publisher = elaboration::definitions::StructPublisher::new(
+        &arena,
+        hir::Package::new(),
+        0,
+        BTreeMap::from([(0, 79123)]),
+        Default::default(),
+        None,
+        100_000,
+    )
+    .unwrap();
+    let generated = {
+        let builder = |request: &comptime_interpretor::StructBuildRequest, steps: &mut u64| {
+            publisher.prepare(request, steps)
+        };
+        let mut vm = comptime_interpretor::Interpreter::for_comptime(&package, Default::default())
+            .unwrap()
+            .with_struct_builder(&builder);
+        let Value::Type(generated) = vm.invoke(entry, vec![]).unwrap() else {
+            panic!("expected Type")
+        };
+        let nested = vm.reflect_struct(&generated).unwrap().fields[0].ty.clone();
+        assert_eq!(
+            vm.reflect_struct(&nested).unwrap().fields[0].ty,
+            nir::Term::Primitive(nir::Primitive::Bool)
+        );
+        generated
+    };
+    let (hir, checked) = publisher.finish();
+    assert_eq!(hir.num_defs(), 2);
+    let checked = checked.unwrap();
+    let mut next =
+        comptime_interpretor::Interpreter::for_comptime(&checked, Default::default()).unwrap();
+    let nested = next.reflect_struct(&generated).unwrap().fields[0]
+        .ty
+        .clone();
+    assert_eq!(
+        next.reflect_struct(&nested).unwrap().fields[0].ty,
+        nir::Term::Primitive(nir::Primitive::Bool)
+    );
+}
