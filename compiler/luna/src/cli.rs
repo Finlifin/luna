@@ -11,6 +11,7 @@ pub enum Emit {
     Ast,
     Nir,
     Attributes,
+    MergedAttributes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,9 +289,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                         Some("ast") => Emit::Ast,
                         Some("nir") => Emit::Nir,
                         Some("attributes") => Emit::Attributes,
+                        Some("merged-attributes") => Emit::MergedAttributes,
                         _ => {
                             return Err(format!(
-                                "invalid --emit value '{}': expected hir, ast, nir or attributes",
+                                "invalid --emit value '{}': expected hir, ast, nir, attributes or merged-attributes",
                                 value.to_string_lossy()
                             ));
                         }

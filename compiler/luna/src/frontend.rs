@@ -8,13 +8,14 @@ use std::sync::Arc;
 pub enum Artifact {
     Ast(String),
     Hir(String),
+    MergedAttributes(String),
     Nir(nir::program::Package),
     Attributes(Vec<elaboration::program::attributes::EvaluatedAttribute>),
 }
 impl std::fmt::Display for Artifact {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Ast(text) | Self::Hir(text) => f.write_str(text),
+            Self::Ast(text) | Self::Hir(text) | Self::MergedAttributes(text) => f.write_str(text),
             Self::Nir(package) => package.fmt(f),
             Self::Attributes(attributes) => {
                 f.write_str("(attributes")?;
@@ -26,6 +27,30 @@ impl std::fmt::Display for Artifact {
         }
     }
 }
+/// Produce a diagnostic report only; selection does not authorize a consumer.
+pub(crate) fn attribute_artifact(
+    attributes: Vec<elaboration::program::attributes::EvaluatedAttribute>,
+    emit: Emit,
+) -> Result<Artifact, String> {
+    if emit == Emit::Attributes {
+        return Ok(Artifact::Attributes(attributes));
+    }
+    use std::fmt::Write;
+    let selected =
+        elaboration::program::attributes::merge(&attributes, 1024, &mut Default::default())
+            .map_err(|error| error.to_string())?;
+    let mut report = String::from("(attribute-inspection (evaluated");
+    for attribute in &attributes {
+        write!(&mut report, " {attribute}").unwrap();
+    }
+    report.push_str(") (selected");
+    for target in selected {
+        write!(&mut report, " {target}").unwrap();
+    }
+    report.push_str("))");
+    Ok(Artifact::MergedAttributes(report))
+}
+
 pub fn compile(options: &Options) -> Result<Artifact, String> {
     compile_in_package(options, 0)
 }
@@ -349,14 +374,17 @@ pub fn compile_bound_for_target(
     if instance.diag_ctx.has_errors() {
         return Err(instance.diag_ctx.failure_summary("HIR lowering"));
     }
-    if matches!(options.emit, Emit::Nir | Emit::Attributes) {
+    if matches!(
+        options.emit,
+        Emit::Nir | Emit::Attributes | Emit::MergedAttributes
+    ) {
         let protocols = crate::protocols::type_constructors::resolve_source(
             package.package(),
             &[(0, package_identity, "input")],
             selectors,
             protocols,
         )?;
-        if options.emit == Emit::Attributes {
+        if matches!(options.emit, Emit::Attributes | Emit::MergedAttributes) {
             let attributes = elaboration::program::attributes::inspect(
                 package.package(),
                 &std::collections::BTreeMap::from([(0, package_identity)]),
@@ -364,7 +392,7 @@ pub fn compile_bound_for_target(
                 target,
             )
             .map_err(|error| format!("attribute inspection failed: {error}"))?;
-            return Ok((Artifact::Attributes(attributes), protocols));
+            return Ok((attribute_artifact(attributes, options.emit)?, protocols));
         }
         let program = elaboration::program::elaborate_packages_for_target(
             package.package(),
@@ -466,7 +494,10 @@ fn compile_sysroot(
             }
         }
     }
-    let defaults = if matches!(options.emit, Emit::Nir | Emit::Attributes) {
+    let defaults = if matches!(
+        options.emit,
+        Emit::Nir | Emit::Attributes | Emit::MergedAttributes
+    ) {
         crate::packages::protect_source_output(
             &root.join("language-items.conf"),
             options.output.as_deref(),

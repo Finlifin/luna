@@ -725,15 +725,14 @@ fn compile_with_expansion(
         selectors,
         protocols,
     )?;
-    if emit == Emit::Attributes {
-        let attributes = elaboration::program::attributes::inspect(
-            hir.package(),
-            &identities,
-            &protocols,
-            target,
-        )
-        .map_err(|error| format!("multi-package attribute inspection failed: {error}"))?;
-        return Ok((Artifact::Attributes(attributes), protocols));
+    if matches!(emit, Emit::Attributes | Emit::MergedAttributes) {
+        let attributes =
+            elaboration::program::attributes::inspect(package, &identities, &protocols, target)
+                .map_err(|error| format!("multi-package attribute inspection failed: {error}"))?;
+        return Ok((
+            crate::frontend::attribute_artifact(attributes, emit)?,
+            protocols,
+        ));
     }
     let nir = elaboration::program::elaborate_packages_for_target(
         package,
