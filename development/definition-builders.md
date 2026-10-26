@@ -3,6 +3,47 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Publication from a checked snapshot
+
+`definitions::CheckedStructPublisher` publishes concrete, body-free struct
+fields against an immutable checked NIR baseline. It never reruns the source
+checker or invokes a source initializer. Completed-Type admission uses the same
+VM boundary as delivered HIR field types, followed by the shared finite-storage
+check. Unbound, unknown, non-Type and duplicate fields, identity collisions and
+by-value cycles are rejected; legal pointer recursion remains possible.
+
+The enclosing compiler must reserve each supplied declaration identity against
+its complete source world, including declarations absent from the invocation
+snapshot. The publisher does not guess a package identity or allocate from the
+maximum visible NIR declaration. It returns only committed immutable batches;
+merging them into source-checker tables and preserving the source allocation
+frontier remain caller responsibilities. Automatic `typealias` integration is
+still pending.
+
+Preparation retains no candidate on failure or drop. A commit against a changed
+publication revision is rejected, allowing the invoking VM to roll back its
+installation. Later preparation sees earlier committed definitions and can use
+them in fields. Baseline descriptions and committed batches remain borrowed or
+shared; validation still rebuilds its VM and reference indices per request and
+charges this work to the caller's invocation allowance. This is not yet a
+constant-time incremental validation cache. Defaults, attributes, clauses,
+methods and new implementation evidence require their own checking paths.
+
+Validation in `/home/fin/luna`, via `python3 -B development/check.py
+--timeout 900 --`:
+
+- `test --release -p elaboration --test checked_struct_publisher --test
+  representations --test struct_publisher`: 16 passed, exit 0
+  (`/tmp/luna-tools-nng08ogw/result.json`).
+- `test --release -p luna --test builder_invocations --test source_reflection
+  --no-fail-fast`: 26 passed, exit 0
+  (`/tmp/luna-tools-y1m_6zbk/result.json`).
+
+These include generation from a source nominal behind an opaque normal-form
+head, chained generated fields and reflection inside a Type-computation session,
+source-world preservation, candidate drop, stale commit with VM rollback,
+independent recovery, malformed/recursive Type rejection and shared fuel limits.
+
 ## Shared representation validation
 
 `elaboration::representations::Checker` checks completed struct, enum and

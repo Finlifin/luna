@@ -717,3 +717,73 @@ fn failed_type_computation_does_not_replay_builder_or_poison_independent_calls()
     assert_eq!(attempts.get(), 2);
     assert_eq!(publisher.published_definition_count(), 1);
 }
+
+#[test]
+fn checked_snapshot_publisher_generates_from_source_types_without_reelaboration() {
+    use elaboration::type_computations::{Session, State};
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn ready() -> bool {{true}}
+        comptime fn Generate() -> Type {{
+            let first = .build_struct'builtin(.First, [.source], [Identity<Original>]);
+            let second = .build_struct'builtin(.Second, [.nested], [first]);
+            .struct_field_types'builtin(second)[0]
+        }}"
+    ));
+    let (Artifact::Nir(package), _, _) = fixture.invoke("ready", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    let entry = package
+        .functions
+        .iter()
+        .find(|f| f.name == "Generate")
+        .unwrap()
+        .declaration;
+    let publisher = elaboration::definitions::CheckedStructPublisher::new(&package);
+    // This fixture reserves a separate declaration namespace explicitly. The
+    // production caller must reserve identities from its full source world.
+    let next = std::cell::Cell::new(0);
+    let host = |request: &comptime_interpretor::StructBuildRequest, steps: &mut u64| {
+        let local = next.get();
+        next.set(local + 1);
+        publisher.prepare(
+            nir::DeclarationId {
+                package: 901,
+                local,
+            },
+            request,
+            steps,
+        )
+    };
+    let mut context = elaboration::InferenceContext::default();
+    let mut session =
+        Session::new_with_struct_builder(&package, &context, Default::default(), &host).unwrap();
+    let result = session.enqueue(&mut context, entry, vec![]).unwrap();
+    assert_eq!(
+        session.resume(&mut context, result).unwrap(),
+        &State::Complete(nir::Term::Nominal {
+            declaration: nir::DeclarationId {
+                package: 901,
+                local: 0
+            },
+            arguments: vec![],
+        })
+    );
+    assert_eq!(publisher.published_definition_count(), 2);
+    assert_eq!(next.get(), 2);
+    drop(session);
+    let definitions = publisher.into_definitions();
+    assert!(matches!(
+        definitions[0][0].fields[0].1,
+        nir::Term::NormalForm { .. }
+    ));
+    assert_eq!(
+        definitions[1][0].fields[0].1,
+        nir::Term::Nominal {
+            declaration: definitions[0][0].declaration,
+            arguments: vec![],
+        }
+    );
+    assert_eq!(package.structs.len(), 1);
+}

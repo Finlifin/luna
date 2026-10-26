@@ -3,13 +3,26 @@
 use nir::{DeclarationId, Sort, Term, program as n};
 use std::collections::{BTreeMap, HashSet};
 
+enum Descriptions<'a, T> {
+    Table(&'a BTreeMap<DeclarationId, T>),
+    References(BTreeMap<DeclarationId, &'a T>),
+}
+impl<T> Descriptions<'_, T> {
+    fn get(&self, id: &DeclarationId) -> Option<&T> {
+        match self {
+            Self::Table(table) => table.get(id),
+            Self::References(table) => table.get(id).copied(),
+        }
+    }
+}
+
 /// The borrowed world cannot change while successful roots are memoized.
 /// Failed roots leave no active traversal behind and can be checked again.
 pub struct Checker<'a> {
     tuple: Option<DeclarationId>,
-    structs: &'a BTreeMap<DeclarationId, n::Struct>,
-    enums: &'a BTreeMap<DeclarationId, n::Enum>,
-    newtypes: &'a BTreeMap<DeclarationId, nir::newtypes::Newtype>,
+    structs: Descriptions<'a, n::Struct>,
+    enums: Descriptions<'a, n::Enum>,
+    newtypes: Descriptions<'a, nir::newtypes::Newtype>,
     done: HashSet<Term>,
 }
 impl<'a> Checker<'a> {
@@ -21,9 +34,27 @@ impl<'a> Checker<'a> {
     ) -> Self {
         Self {
             tuple,
-            structs,
-            enums,
-            newtypes,
+            structs: Descriptions::Table(structs),
+            enums: Descriptions::Table(enums),
+            newtypes: Descriptions::Table(newtypes),
+            done: HashSet::new(),
+        }
+    }
+
+    /// Combine immutable baseline and generated descriptions without cloning
+    /// their field trees. The caller precharges construction of these indices
+    /// and admits declaration identities before entering this representation check.
+    pub fn from_references(
+        tuple: Option<DeclarationId>,
+        structs: BTreeMap<DeclarationId, &'a n::Struct>,
+        enums: BTreeMap<DeclarationId, &'a n::Enum>,
+        newtypes: BTreeMap<DeclarationId, &'a nir::newtypes::Newtype>,
+    ) -> Self {
+        Self {
+            tuple,
+            structs: Descriptions::References(structs),
+            enums: Descriptions::References(enums),
+            newtypes: Descriptions::References(newtypes),
             done: HashSet::new(),
         }
     }

@@ -1,13 +1,15 @@
 //! Semantic admission of generated definition batches.
 //!
-//! This boundary runs the ordinary package elaborator in fresh candidate state.
-//! Explicit invocation uses the publisher services below; active checker
-//! integration remains separate from these private candidate transactions.
+//! HIR batches use ordinary elaboration in fresh candidate state. Concrete,
+//! body-free structs can instead use completed-Type and representation checks
+//! against a checked snapshot. Active source-checker registration is separate.
 use crate::program::{self, Protocols};
 use hir::definitions::{DefinitionBatch, PreparedPublication, PublicationError};
 use std::collections::BTreeMap;
+mod checked_struct_publisher;
 mod deferred_struct_publisher;
 mod struct_publisher;
+pub use checked_struct_publisher::CheckedStructPublisher;
 pub use deferred_struct_publisher::{DeferredStructPublisher, StructBuildService};
 pub use struct_publisher::StructPublisher;
 
