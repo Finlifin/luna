@@ -44,9 +44,13 @@ comptime fn Mirror() -> Type {
 
 typealias Mirrored = Mirror();
 
+impl Mirrored {
+    fn first_value(self) -> bool { self.first }
+}
+
 fn example() -> bool {
     let value = Mirrored { first: true, second: false };
-    value.first
+    value.first_value()
 }
 ```
 
@@ -64,6 +68,10 @@ fn example() -> bool {
 延迟标注可以反射调用方在原始快照之后生成的类型；恢复计算时使用已完成的输入，
 不重新执行实参。省略默认类型参数时执行其生成器，显式提供该参数时跳过默认计算。
 生成类型的声明身份也保留在后续类型约束检查中。
+生成类型可以作为普通固有 impl 和 trait impl 的目标；准备 impl 头时，也可以调用
+`StructBuilder` 并反射源码结构体。固有方法选择检查完整的同名候选集合，
+不会因准备顺序忽略后面的竞争候选。依赖 trait 选择的计算仍须等待完整实现集合。
+`Once`、`Clone`、`Copy` 等协议仍由普通 impl 提供，生成或反射类型不会自动授予它们。
 默认类型参数不为任意 `T: Type` 提供字段证据，泛型函数体仍须满足其声明约束。
 字段默认代码、属性、泛型子句、方法和 impl
 的构造尚未接入；这里还不是完整 SoA 示例所需的全部 builder 能力。

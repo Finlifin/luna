@@ -4,6 +4,7 @@ use super::*;
 use crate::ptc::{Budget, Formula, Outcome};
 mod associated;
 mod declarations;
+mod early_inherent;
 mod parents;
 mod program_contracts;
 mod signatures;
@@ -1471,6 +1472,9 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Option<n::Expr>, Error> {
         if self.in_required_comptime && !self.interfaces_ready {
+            if interface.is_none() {
+                return self.early_inherent_method(subject, name, span);
+            }
             return Err(error(
                 span,
                 "required comptime evaluation is waiting for the trait implementation world",
@@ -1639,12 +1643,6 @@ impl Checker<'_, '_> {
                     .then_some(owner)
             })
             .unwrap();
-        if self.is_code_generator(owner) || self.is_pattern_generator(owner) {
-            return Err(error(
-                span,
-                "code generator method invocation requires code-method dispatch, which is not yet implemented",
-            ));
-        }
         let arguments = if self.type_parameters[&owner].is_empty() {
             Vec::new()
         } else if self.self_containers.contains_key(&owner) {
@@ -1654,6 +1652,22 @@ impl Checker<'_, '_> {
                 .chain(interface.as_ref().unwrap().arguments.iter().cloned())
                 .collect()
         };
+        self.inherent_method_value(owner, arguments, span)
+    }
+
+    fn inherent_method_value(
+        &mut self,
+        owner: OwnerId,
+        arguments: Vec<Term>,
+        span: Span,
+    ) -> Result<Option<n::Expr>, Error> {
+        let body = declaration(self.package, &self.package_identities, owner);
+        if self.is_code_generator(owner) || self.is_pattern_generator(owner) {
+            return Err(error(
+                span,
+                "code generator method invocation requires code-method dispatch, which is not yet implemented",
+            ));
+        }
         let parameters = &self.type_parameters[&owner];
         if arguments.len() > parameters.len() {
             return Err(error(
@@ -2025,6 +2039,9 @@ impl Checker<'_, '_> {
             }
             _ if !self.is_static_method_subject(view)
                 && (self.default_interface().is_some()
+                    || (self.in_required_comptime
+                        && !self.interfaces_ready
+                        && self.early_inherent_name_available(name.name.as_str()))
                     || self
                         .signature_owner
                         .and_then(|owner| self.capabilities.get(&owner))

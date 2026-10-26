@@ -8,6 +8,38 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Generated types as ordinary implementation subjects
+
+An impl head can now demand a Type produced through public `meta.StructBuilder`
+methods before the complete trait world is ready. Early inherent selection builds
+the complete source candidate set for the requested name, checks coherence and
+replays applicability evidence. It retains receiver type arguments and rejects
+competing later candidates. Trait-dependent candidates still wait for the complete
+implementation world; this path does not publish a partial trait index.
+
+Early reflection and struct construction demand `meta.List` metadata. Nominal
+Type values in the required-expression path also demand their source descriptor
+before invocation. This repairs the public reflection wrapper failure that was
+not exercised by direct intrinsic builder tests.
+
+Generated structs accept ordinary source inherent and trait implementations;
+this does not yet expose a source API for generating methods or impl definitions.
+The native example `development/examples/host-generated-struct-methods.fl` reflects
+two fields, builds a type, provides Once/Clone/Copy and an inherent method, forwards
+the result through a generic function, explicitly clones it and mutates the original.
+Both independent copies retain the earlier field values.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna
+  --test builder_invocations --test elaboration --no-fail-fast`: exit 0,
+  31 builder and 450 elaboration tests passed
+  (`/tmp/luna-tools-bu_wc0p0/result.json`).
+- `python3 -B development/host_examples.py generated-struct-methods
+  --release-driver --compare-optimization`: exit 0, LLVM O0 and O3 both return
+  `(bool true)` (`/tmp/luna-host-examples-0scoftvw`).
+- Targeted Rust formatting and `git diff --check`: exit 0.
+
 ## Generated layouts before behavioral analysis
 
 Body/default/template invocations may publish structs after the initial layout

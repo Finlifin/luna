@@ -387,6 +387,7 @@ fn elaborate_with_attributes(
         self_types: BTreeMap::new(),
         self_containers: BTreeMap::new(),
         interfaces_ready: false,
+        active_early_inherent: BTreeSet::new(),
         checking_method_contract: false,
         pending_contract_projections: Vec::new(),
         checked_traits: Vec::new(),
@@ -1437,6 +1438,7 @@ struct Checker<'a, 'h> {
     self_types: BTreeMap<OwnerId, Term>,
     self_containers: BTreeMap<OwnerId, OwnerId>,
     interfaces_ready: bool,
+    active_early_inherent: BTreeSet<String>,
     checking_method_contract: bool,
     pending_contract_projections: Vec<interfaces::PendingProjection>,
     checked_traits: Vec<n::Trait>,
@@ -10188,6 +10190,11 @@ impl Checker<'_, '_> {
                 self.require_expression(&ty, expected, expr.span)?;
             }
             let value = self.type_expr(expr)?;
+            if self.in_required_comptime {
+                // Early invocations can transport and reflect a nominal Type
+                // before the ordinary declaration pass has built its descriptor.
+                self.ensure_nominal_type(&value, expr.span)?;
+            }
             return Ok(n::Expr {
                 ty,
                 source: source(expr.span),

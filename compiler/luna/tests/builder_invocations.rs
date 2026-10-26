@@ -67,6 +67,93 @@ const PREFIX: &str = "
 ";
 
 #[test]
+fn inherent_builder_can_form_the_subject_of_a_trait_implementation() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        struct Factory {{}}
+        impl Factory {{
+            comptime fn Make() -> Type {{.build_struct'builtin(.Created, [.flag], [bool])}}
+        }}
+        typealias Created = Factory.Make();
+        trait Read {{fn read(self) -> bool;}}
+        impl Read for Created {{fn read(self) -> bool {{self.flag}}}}
+        fn run() -> bool {{Created {{flag:true}}.as(Read).read()}}
+        comptime fn ready() -> bool {{true}}"
+    ));
+    let (Artifact::Nir(package), _, _) = fixture.invoke("ready", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        package
+            .structs
+            .iter()
+            .filter(|def| def.name == "Created")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn early_inherent_builder_cannot_ignore_a_competing_later_candidate() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        struct Factory {{}}
+        impl Factory {{comptime fn Make() -> Type {{.build_struct'builtin(.First, [.flag], [bool])}}}}
+        typealias Created = Factory.Make();
+        trait Read {{fn read(self) -> bool;}}
+        impl Read for Created {{fn read(self) -> bool {{self.flag}}}}
+        impl Factory {{comptime fn Make() -> Type {{.build_struct'builtin(.Second, [.flag], [bool])}}}}
+        comptime fn ready() -> bool {{true}}"
+    ));
+    let failure = fixture
+        .invoke("ready", &mut 100_000, 100_000)
+        .err()
+        .unwrap();
+    assert!(
+        failure.contains("overlap") || failure.contains("coherence"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn early_inherent_builder_retains_receiver_type_arguments() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        struct Factory where T {{}}
+        impl Factory<T> where T {{
+            comptime fn Make() -> Type {{.build_struct'builtin(.Created, [.flag], [T])}}
+        }}
+        typealias Created = Factory<bool>.Make();
+        trait Read {{fn read(self) -> bool;}}
+        impl Read for Created {{fn read(self) -> bool {{self.flag}}}}
+        fn run() -> bool {{Created {{flag:true}}.as(Read).read()}}
+        comptime fn ready() -> bool {{true}}"
+    ));
+    let (Artifact::Nir(package), _, _) = fixture.invoke("ready", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let generated = package
+        .structs
+        .iter()
+        .find(|def| def.name == "Created")
+        .unwrap();
+    assert_eq!(
+        generated.fields[0].1,
+        nir::Term::Primitive(nir::Primitive::Bool)
+    );
+}
+
+#[test]
 fn builder_loop_retains_a_long_chain_of_generated_layouts() {
     let fixture = Fixture::new(&format!(
         "{PREFIX}
@@ -939,11 +1026,13 @@ fn public_builder_can_define_a_type_alias_from_reflected_fields() {
             builder.Build()
         }
         typealias Generated = Columns();
+        trait ReadGenerated {fn first(self) -> bool;}
+        impl ReadGenerated for Generated {fn first(self) -> bool {self.first}}
         comptime fn inspect() -> bool {
             let names=meta.struct_field_names(Generated);
             meta.length(names)==2 and names[0]==.first and names[1]==.second
         }
-        fn run() -> bool {let value=Generated {first:true,second:false};value.first}",
+        fn run() -> bool {let value=Generated {first:true,second:false};value.as(ReadGenerated).first()}",
     );
     let (Artifact::Nir(package), observed, _) = fixture.invoke_meta("inspect").unwrap() else {
         panic!("expected NIR")
@@ -960,6 +1049,33 @@ fn public_builder_can_define_a_type_alias_from_reflected_fields() {
         .collect();
     assert_eq!(generated.len(), 1);
     assert_eq!(generated[0].declaration.package, 900);
+}
+
+#[test]
+fn public_builder_operations_can_run_while_preparing_impl_subjects() {
+    let bodies = [
+        "meta.StructBuilder.new().Build()",
+        "var builder = meta.StructBuilder.new(); builder.add_field(.flag, bool); builder.Build()",
+        "let names = meta.struct_field_names(Source); Source",
+        "let types = meta.struct_field_types(Source); Source",
+        "var builder = meta.StructBuilder.new(); let names = meta.struct_field_names(Source); builder.add_field(names[0], bool); builder.Build()",
+        "var builder = meta.StructBuilder.new(); let types = meta.struct_field_types(Source); builder.add_field(.flag, types[0]); builder.Build()",
+    ];
+    let mut failures = Vec::new();
+    for body in bodies {
+        let fixture = Fixture::new(&format!(
+            "typealias Type = .Type'builtin;
+            struct Source {{flag:bool}}
+            comptime fn Generate() -> Type {{{body}}}
+            typealias Generated = Generate();
+            impl Generated {{fn ping(*self) -> bool {{true}}}}
+            comptime fn inspect() -> bool {{true}}"
+        ));
+        if let Err(failure) = fixture.invoke_meta("inspect") {
+            failures.push(format!("{body}: {failure}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

@@ -2,6 +2,20 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    fn ensure_meta_list_metadata(&mut self, head: DeclarationId, span: Span) -> Result<(), Error> {
+        let owner = self
+            .package
+            .owners()
+            .find_map(|(owner, _)| {
+                matches_declaration(self.package, &self.package_identities, owner, head)
+                    .then_some(owner)
+            })
+            .ok_or_else(|| error(span, "bound meta.List declaration is unavailable"))?;
+        self.ensure_signature(owner, span)?;
+        self.ensure_contract(owner, span)?;
+        self.refresh_list_inference_metadata();
+        Ok(())
+    }
     /// Constant initializers can discover a library signature after their
     /// lexical context was created. Refresh only matching metadata; never
     /// import another declaration's local assumptions or formation facts.
@@ -50,6 +64,7 @@ impl Checker<'_, '_> {
             .protocols
             .meta_list
             .ok_or_else(|| error(expr.span, "struct reflection requires a bound meta.List<T>"))?;
+        self.ensure_meta_list_metadata(head, expr.span)?;
         let subject = self.expr(subject, Some(&p(P::Type)))?;
         let ty = if is_never(&subject.ty) {
             p(P::Never)
@@ -103,6 +118,7 @@ impl Checker<'_, '_> {
                 "struct construction requires a bound meta.List<T>",
             )
         })?;
+        self.ensure_meta_list_metadata(head, expr.span)?;
         let list = |element| Term::NormalForm {
             head,
             sort: Sort::Type,
