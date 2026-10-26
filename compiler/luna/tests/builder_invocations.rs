@@ -1113,3 +1113,48 @@ fn explicit_staged_type_input_skips_a_failing_builder_default() {
     let omitted = Fixture::new(&format!("{source} fn run()->bool {{choose()}}"));
     assert!(omitted.invoke("ready", &mut 100_000, 100_000).is_err());
 }
+
+#[test]
+fn body_generated_types_are_available_during_quote_purity_validation() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        trait Copy {{}} trait Drop {{fn drop(*self);}} impl Copy for bool {{}}
+        comptime fn Make()->Type {{.build_struct'builtin(.BodyType, [.flag], [bool])}}
+        pure quote fn identity(value:bool)->bool {{value}}
+        pure fn run()->bool {{let value=Make() {{flag:true}};identity(value.flag)}}
+        comptime fn ready()->bool {{true}}"
+    ));
+    let (Artifact::Nir(package), _, _) = compile_and_invoke_with_struct_builders(
+        &fixture.packages(),
+        &[],
+        17,
+        None,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input.List"),
+            copy: Some("input.Copy"),
+            drop: Some("input.Drop"),
+            ..Default::default()
+        },
+        None,
+        &[],
+        "ready",
+        &mut 100_000,
+        100_000,
+    )
+    .unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        package
+            .structs
+            .iter()
+            .filter(|def| def.name == "BodyType")
+            .count(),
+        1
+    );
+}

@@ -3,6 +3,28 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Generated layouts before behavioral analysis
+
+Body/default/template invocations may publish structs after the initial layout
+snapshot. Their descriptions now enter the output before contract inheritance,
+default purity and quote expansion. Identity-set merging preserves existing
+descriptions and avoids repeated full-vector searches. Quote-generated internal
+packets remain intact.
+
+The regression binds Copy/Drop, builds a bool-field struct inside a runtime pure
+function and passes its field to a pure quote function. The old synchronization
+order rejects `run` for missing P4 evidence (`/tmp/luna-tools-8630pehm/result.json`);
+the repaired order accepts it and execution returns true. A preliminary test
+without resource protocols had an independent cleanup-evidence problem and was
+replaced with the explicitly bound case.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p luna --test builder_invocations --test quote_functions --
+--skip quote_implementations_supply_ordinary_trait_callable_entries`, exit 0,
+26 builder and 103 quote tests passed (`/tmp/luna-tools-ss1f8l9v/result.json`).
+The excluded test independently expects `.callable` but observes the existing
+`::callable` adapter name; its repair is separate from layout synchronization.
+
 ## Immediate required source invocation
 
 Immediate required calls now install a checked publisher for both Type results

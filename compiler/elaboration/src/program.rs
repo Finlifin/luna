@@ -1222,6 +1222,19 @@ fn elaborate_candidate<'a, 'h>(
         Vec::new()
     };
     checker.expand_test_templates(&mut output)?;
+    // Required invocations in bodies, defaults and templates can publish types
+    // after the initial layout snapshot. Consumers below need their complete
+    // descriptions for contract, purity and quote analysis, not just emission.
+    let mut emitted_structs: BTreeSet<_> = output
+        .structs
+        .iter()
+        .map(|definition| definition.declaration)
+        .collect();
+    for (id, definition) in &checker.structs {
+        if emitted_structs.insert(*id) {
+            output.structs.push(definition.clone());
+        }
+    }
     // Body lowering can create private scalar observation packets after the
     // source declaration layouts were collected above.
     for declaration in &checker.computed_scalar_packets {
@@ -1295,15 +1308,6 @@ fn elaborate_candidate<'a, 'h>(
     )?;
     output.quote_identity_cursor = checker.next_temporary_binding;
     output.definition_identity_cursor = checker.next_definition_identity;
-    for (id, definition) in &checker.structs {
-        if !output
-            .structs
-            .iter()
-            .any(|existing| existing.declaration == *id)
-        {
-            output.structs.push(definition.clone());
-        }
-    }
     if output
         .implementations
         .iter()
