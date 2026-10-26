@@ -175,3 +175,48 @@ comptime fn run()->bool {
 ```sh
 python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_list_operations -p comptime_interpretor --test type_list_inputs --test abstract_values --no-fail-fast
 ```
+
+## 短路查询与筛选
+
+meta 根模块提供以下 comptime 操作。回调类型为 comptime 函数，可携带
+有状态闭包；这些接口不声明 pure，因为回调可以通过捕获的指针写入。
+
+| 接口 | 返回值 | 遍历停止条件 | 空输入 |
+| --- | --- | --- | --- |
+| `any(values, pred)` | bool | 第一个 true | false |
+| `all(values, pred)` | bool | 第一个 false | true |
+| `find(values, pred)` | ?T | 第一个 true，返回该元素 | null |
+| `filter(values, pred)` | List<T> | 处理全部元素，保留 true 对应元素 | 空 List<T> |
+
+参数生产者按调用规则求值一次；元素回调按索引升序执行。每次调用复用
+同一闭包环境，空列表不调用回调，短路后不执行剩余回调。失败立即传播，
+不会跳过出错元素继续查找，也不会把错误当成 false 或 null。
+
+```flurry
+comptime fn selected()->bool {
+    let flags:meta.List<bool> = [false,true,false];
+    let kept=meta.filter(flags,|flag| flag);
+    let first=meta.find(flags,|flag| flag);
+    meta.any(flags,|flag| flag) and not meta.all(flags,|flag| flag)
+        and meta.length(kept) == 1 and kept[0]
+        and (first match {value? => value,null => false})
+}
+```
+
+find 的缺失只属于结果外层：若 T 为 ?Integer，找到一个值为 null 的元素
+返回的是 `??Integer` 的外层有值、内层缺失，与“没有元素匹配”不同。
+filter 不丢弃被保留的 null，不展平嵌套列表，筛选 Type 后仍可展开到
+类型工厂的变参输入。输出保留输入 List 的声明身份和元素域。
+
+遍历的是调用时的输入值；回调通过指针替换调用者的列表不会改变遍历
+序列。filter 与 map 一样暂用逐项 concat，最坏复制成本仍是二次的，
+不将此实现称作线性 builder。any/all/find 不构造结果列表。
+
+本阶段在 `/home/fin/luna` 执行以下检查，退出 0，45 项测试通过。
+报告 `/tmp/luna-tools-5aui1kd2/result.json`。覆盖短路及空输入、生产者
+求值顺序、私有捕获状态、指针替换输入、可选值层次、Type 列表身份、
+回调失败与 VM 恢复、错误阶段及非 bool 回调拒绝，并回归真实库包解析。
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_list_operations --test library_meta_objects --test library_protocols --no-fail-fast
+```

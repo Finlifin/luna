@@ -68,6 +68,65 @@ where T, U, c: (.Type'builtin).vars.Closure {
     output
 }
 
+{-
+  Queries visit a fixed snapshot in order and stop as soon as the answer is
+  known. Empty inputs satisfy all and fail any; find returns an absent outer
+  optional. A matching optional element retains its own presence layer.
+-}
+pub comptime fn any(values: List<T>, pred: %c comptime fn(T) -> bool) -> bool
+where T, c: (.Type'builtin).vars.Closure {
+    let count = length(values);
+    var index: .Integer'builtin = 0;
+    while index < count {
+        if pred(values[index]) { return true; }
+        index = index + 1;
+    }
+    false
+}
+
+pub comptime fn all(values: List<T>, pred: %c comptime fn(T) -> bool) -> bool
+where T, c: (.Type'builtin).vars.Closure {
+    let count = length(values);
+    var index: .Integer'builtin = 0;
+    while index < count {
+        if not pred(values[index]) { return false; }
+        index = index + 1;
+    }
+    true
+}
+
+pub comptime fn find(values: List<T>, pred: %c comptime fn(T) -> bool) -> ?T
+where T, c: (.Type'builtin).vars.Closure {
+    let count = length(values);
+    var index: .Integer'builtin = 0;
+    while index < count {
+        let value = values[index];
+        if pred(value) { return value; }
+        index = index + 1;
+    }
+    null
+}
+
+{-
+  Filtering preserves retained elements and their order. Like map, this
+  baseline uses immutable concatenation and can copy quadratically.
+-}
+pub comptime fn filter(values: List<T>, pred: %c comptime fn(T) -> bool) -> List<T>
+where T, c: (.Type'builtin).vars.Closure {
+    let count = length(values);
+    var output: List<T> = [];
+    var index: .Integer'builtin = 0;
+    while index < count {
+        let value = values[index];
+        if pred(value) {
+            let item: List<T> = [value];
+            output = concat(output, item);
+        }
+        index = index + 1;
+    }
+    output
+}
+
 pub mod prelude {
     pub use .List;
     pub use .Object;

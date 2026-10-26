@@ -379,3 +379,209 @@ fn list_map_can_change_domains_without_flattening_optional_or_nested_values() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn list_queries_short_circuit_and_empty_inputs_never_call_predicates() {
+    let package = compile(
+        "
+        typealias Integer=.Integer'builtin;
+        comptime fn run()->bool {
+            let input:meta.List<Integer> = [1,2,3];
+            let empty:meta.List<Integer> = [];
+            var trace:Integer=0;
+            let slot=trace.ref;
+            let found_any=meta.any(input,|value| {slot.* = slot.* * 10 + value; value == 2});
+            let any_order=trace == 12;
+            trace = 0;
+            let every=meta.all(input,|value| {slot.* = slot.* * 10 + value; value < 2});
+            let all_order=trace == 12;
+            trace = 0;
+            let found=meta.find(input,|value| {slot.* = slot.* * 10 + value; value == 2});
+            let find_order=trace == 12;
+            trace = 0;
+            let no_any=meta.any(empty,|value| {slot.* = 99; true});
+            let yes_all=meta.all(empty,|value| {slot.* = 99; false});
+            let no_find=meta.find(empty,|value| {slot.* = 99; true});
+            let no_filter=meta.filter(empty,|value| {slot.* = 99; true});
+            found_any and not every and any_order and all_order and find_order
+                and (found match {value? => value == 2,null => false})
+                and not no_any and yes_all and trace == 0
+                and (no_find match {_? => false,null => true})
+                and meta.length(no_filter) == 0
+                and meta.length(meta.filter(input,|value| false)) == 0
+                and meta.length(meta.filter(input,|value| true)) == 3
+                and meta.all(input,|value| value > 0)
+                and not meta.any(input,|value| value == 4)
+                and (meta.find(input,|value| value == 4) match {_? => false,null => true})
+        }
+        ",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_filter_preserves_order_identity_and_snapshot_during_callback_writes() {
+    let package = compile(
+        "
+        typealias Integer=.Integer'builtin;
+        typealias Type=.Type'builtin;
+        pure comptime fn Packet<...fields:meta.List<Type>>->Type {Packet<...fields>}
+        comptime fn Generated()->Type {
+            let types:meta.List<Type> = [bool,Integer,bool];
+            Packet<...meta.filter(types,|value| value == bool)>
+        }
+        comptime fn Direct()->Type {Packet<bool,bool>}
+        comptime fn run()->bool {
+            var original:meta.List<Integer> = [1,2,3,4];
+            let slot=original.ref;
+            var order:Integer=0;
+            let order_slot=order.ref;
+            let kept=meta.filter(original,|value| {
+                order_slot.* = order_slot.* * 10 + value;
+                slot.* = [];
+                value == 1 or value == 3
+            });
+            meta.length(original) == 0 and order == 1234
+                and meta.length(kept) == 2 and kept[0] == 1 and kept[1] == 3
+        }
+        ",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+    let generated = luna::invocation::invoke(&package, "Generated", 1_000_000).unwrap();
+    assert!(matches!(
+        generated,
+        Value::Type(nir::Term::NormalForm { .. })
+    ));
+    assert_eq!(
+        generated,
+        luna::invocation::invoke(&package, "Direct", 1_000_000).unwrap()
+    );
+}
+
+#[test]
+fn list_find_distinguishes_a_matched_null_element_from_no_match() {
+    let package = compile(
+        "
+        typealias Integer=.Integer'builtin;
+        comptime fn run()->bool {
+            let values:meta.List<?Integer> = [null,7,null];
+            let matched=meta.find(values,|value| value match {null => true,_? => false});
+            let missing=meta.find(values,|value| false);
+            let kept=meta.filter(values,|value| value match {null => true,_? => false});
+            (matched match {inner? => inner match {null => true,_? => false},null => false})
+                and (missing match {_? => false,null => true})
+                and meta.length(kept) == 2
+                and (kept[0] match {null => true,_? => false})
+                and (kept[1] match {null => true,_? => false})
+        }
+    ",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_query_callback_failure_stops_and_vm_recovers() {
+    for query in ["any", "all", "find", "filter"] {
+        let package = compile(&format!(
+            "
+            typealias Integer=.Integer'builtin;
+            comptime fn pred(index:Integer)->bool {{
+                let table:meta.List<bool> = [{}]; table[index]
+            }}
+            comptime fn fail() {{
+                let input:meta.List<Integer> = [0,2,0];
+                meta.{query}(input,pred);
+            }}
+            comptime fn recover()->bool {{
+                let input:meta.List<bool> = [true]; meta.all(input,|value| value)
+            }}
+        ",
+            if query == "all" { "true" } else { "false" }
+        ))
+        .unwrap();
+        let mut vm = comptime_interpretor::Interpreter::for_comptime(
+            &package,
+            comptime_interpretor::Budget {
+                steps: 1_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, "fail"), vec![])
+                .unwrap_err()
+                .kind,
+            comptime_interpretor::ErrorKind::IndexOutOfBounds
+        );
+        assert_eq!(
+            support::calls(&package, &vm)
+                .iter()
+                .filter(|name| *name == "pred")
+                .count(),
+            2,
+            "{query}"
+        );
+        assert_eq!(
+            vm.invoke(support::id(&package, "recover"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn list_queries_reject_runtime_or_nonboolean_predicates() {
+    for query in ["any", "all", "find", "filter"] {
+        for pred in [
+            "fn pred(value:bool)->bool {value}",
+            "comptime fn pred(value:bool)->Char {'x'}",
+        ] {
+            let source = format!(
+                "{pred} comptime fn bad() {{let input:meta.List<bool> = [true]; meta.{query}(input,pred);}}"
+            );
+            assert!(compile(&source).is_err(), "accepted {source}");
+        }
+    }
+}
+
+#[test]
+fn list_queries_evaluate_producers_once_and_retain_callback_capture_state() {
+    let package = compile(
+        "
+        typealias Integer=.Integer'builtin;
+        comptime fn input(trace:*Integer)->meta.List<Integer> {
+            trace.* = trace.* * 10 + 1; [3,5,7]
+        }
+        comptime fn accepts(value:Integer)->bool {true}
+        comptime fn producer(trace:*Integer)->comptime fn(Integer)->bool {
+            trace.* = trace.* * 10 + 2; accepts
+        }
+        comptime fn run()->bool {
+            var trace:Integer=0;
+            let first=meta.find(input(trace.ref),producer(trace.ref));
+            var visits:Integer=0;
+            let values:meta.List<Integer> = [3,5,7];
+            let second=meta.find(values,|value| {visits = visits + 1; visits == 2});
+            trace == 12 and visits == 0
+                and (first match {value? => value == 3,null => false})
+                and (second match {value? => value == 5,null => false})
+        }
+    ",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
