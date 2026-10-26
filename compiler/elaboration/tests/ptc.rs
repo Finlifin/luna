@@ -682,6 +682,44 @@ fn structural_views_carry_replayable_equality_and_preserve_opaque_heads() {
 }
 
 #[test]
+fn structural_view_work_is_reusable_and_exhaustion_does_not_publish_evidence() {
+    let subject = variable(699);
+    let mut context = Context::default();
+    context.assume(F::equal(subject.clone(), ty(P::Bool)));
+    let budget = Budget {
+        steps: 4096,
+        ..Budget::default()
+    };
+    let (result, used) = context.structural_view_metered(&subject, budget);
+    let (found, proof) = result.unwrap().unwrap();
+    assert_eq!(found, ty(P::Bool));
+    context.verify_proof(&proof, Budget::default()).unwrap();
+    assert!(used > 0 && used < budget.steps / 2, "{used}");
+
+    let (again, next_used) = context.structural_view_metered(
+        &subject,
+        Budget {
+            steps: budget.steps - used,
+            ..budget
+        },
+    );
+    assert_eq!(again.unwrap().unwrap().0, found);
+    assert_eq!(next_used, used);
+    let (exhausted, charged) =
+        context.structural_view_metered(&subject, Budget { steps: 1, ..budget });
+    assert!(exhausted.is_err());
+    assert!(charged <= 1);
+    assert!(context.structural_view(&subject, budget).unwrap().is_some());
+
+    // A failed search must also return unspent work, without exporting the
+    // equality established only in the other context.
+    let (missing, charged) =
+        Context::default().structural_view_metered(&head(699, vec![ty(P::Bool)]), budget);
+    assert!(!matches!(missing, Ok(Some(_))));
+    assert!(charged > 0 && charged < budget.steps / 2, "{charged}");
+}
+
+#[test]
 fn structural_views_follow_proved_transitivity_not_disjunctive_choices() {
     let a = variable(701);
     let b = variable(702);

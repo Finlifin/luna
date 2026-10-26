@@ -932,8 +932,9 @@ fn stable_type_views_resume_obligations_transactionally_and_remain_candidate_loc
     let mut queries = 0;
     assert!(
         candidate
-            .refine_type_views(
-                |ty, _| {
+            .refine_type_views_metered(
+                |ty, budget| {
+                    budget.steps -= 1;
                     queries += 1;
                     if queries == 3 {
                         return Err("failed dependent query".into());
@@ -993,6 +994,64 @@ fn stable_type_views_resume_obligations_transactionally_and_remain_candidate_loc
         )
         .unwrap();
     assert!(candidate.finish().is_err());
+}
+
+#[test]
+fn metered_type_views_share_remaining_allowance_without_minting_work() {
+    let scheme = scheme(
+        vec![primitive(P::Bool), primitive(P::Bool)],
+        primitive(P::Bool),
+        0,
+    );
+    let mut candidate = scheme
+        .infer_partial_types(&[None, None], None, Budget::default())
+        .unwrap();
+    let budget = Budget {
+        steps: 100,
+        ..Budget::default()
+    };
+    let mut available = Vec::new();
+    let mut costs = [1, 35, 14].into_iter();
+    candidate
+        .refine_type_views_metered(
+            |ty, budget| {
+                available.push(budget.steps);
+                budget.steps = budget
+                    .steps
+                    .checked_sub(costs.next().unwrap())
+                    .ok_or("exhausted")?;
+                Ok(ty.clone())
+            },
+            budget,
+        )
+        .unwrap();
+    assert_eq!(available, [50, 49, 14]);
+    assert!(
+        candidate
+            .refine_type_views_metered(
+                |ty, budget| {
+                    budget.steps += 1;
+                    Ok(ty.clone())
+                },
+                budget
+            )
+            .is_err()
+    );
+    assert!(
+        candidate
+            .refine_type_views_metered(
+                |ty, budget| {
+                    budget.steps = budget.steps.checked_sub(51).ok_or("exhausted")?;
+                    Ok(ty.clone())
+                },
+                budget
+            )
+            .is_err()
+    );
+    assert_eq!(
+        candidate.parameter_type(0).unwrap(),
+        Some(primitive(P::Bool))
+    );
 }
 
 #[test]

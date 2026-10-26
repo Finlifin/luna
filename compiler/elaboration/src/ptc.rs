@@ -358,7 +358,7 @@ impl Context {
         self.structural_view_metered(ty, budget).0
     }
 
-    /// Report all traversal work and reserved proof allowances, including failure.
+    /// Report traversal and proof work actually consumed, including failure.
     pub fn structural_view_metered(
         &self,
         ty: &Term,
@@ -430,14 +430,16 @@ impl Context {
                 if allowance == 0 {
                     return Err(UnknownReason::BudgetExhausted);
                 }
-                fuel -= allowance;
-                match self.prove(
+                let mut proof_budget = Budget {
+                    steps: allowance,
+                    max_depth: depth,
+                };
+                let outcome = self.prove_metered(
                     Formula::equal(ty.clone(), candidate.clone()),
-                    Budget {
-                        steps: allowance,
-                        max_depth: depth,
-                    },
-                ) {
+                    &mut proof_budget,
+                );
+                fuel -= allowance - proof_budget.steps;
+                match outcome {
                     Outcome::Entailed(proof) => return Ok(Some((candidate.clone(), proof))),
                     Outcome::Unknown { reason, .. } => unknown = Some(reason),
                     Outcome::NotEntailed(_) | Outcome::IllFormed(_) => {}

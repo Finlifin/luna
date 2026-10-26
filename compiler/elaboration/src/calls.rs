@@ -796,9 +796,44 @@ impl CallCandidate {
         let Term::Function { parameters, .. } = template else {
             return Err(Error::InvalidSignature);
         };
+        let allowance = Budget {
+            steps: budget.steps / 2 / (parameters.len() + 1),
+            ..budget
+        };
+        if allowance.steps == 0 {
+            return Err(Error::TypeView("call type-view budget exhausted".into()));
+        }
+        self.refine_type_views_metered(
+            |ty, remaining| {
+                remaining.steps = remaining
+                    .steps
+                    .checked_sub(allowance.steps)
+                    .ok_or("call type-view budget exhausted")?;
+                resolve(ty, allowance)
+            },
+            budget,
+        )
+    }
+
+    /// Share unused query work between parameter views. All equalities remain
+    /// transactional: a failed later query publishes none of the earlier views.
+    pub fn refine_type_views_metered(
+        &mut self,
+        mut resolve: impl FnMut(&Term, &mut Budget) -> Result<Term, String>,
+        budget: Budget,
+    ) -> Result<(), Error> {
+        let I::Instantiate { template, .. } = &self.signature else {
+            return Err(Error::InvalidSignature);
+        };
+        let Term::Function { parameters, .. } = template else {
+            return Err(Error::InvalidSignature);
+        };
         let count = parameters.len();
-        let query_steps = budget.steps / 2 / (count + 1);
-        if query_steps == 0 {
+        let mut queries = Budget {
+            steps: budget.steps / 2,
+            ..budget
+        };
+        if queries.steps == 0 {
             return Err(Error::TypeView("call type-view budget exhausted".into()));
         }
         let mut fuel = budget.steps / 2;
@@ -814,14 +849,13 @@ impl CallCandidate {
             };
             crate::associated::charge_projection_copy(&before, &mut fuel)
                 .map_err(Error::TypeView)?;
-            let after = resolve(
-                &before,
-                Budget {
-                    steps: query_steps,
-                    ..budget
-                },
-            )
-            .map_err(Error::TypeView)?;
+            let available = queries.steps;
+            let after = resolve(&before, &mut queries).map_err(Error::TypeView)?;
+            if queries.steps > available {
+                return Err(Error::TypeView(
+                    "type-view resolver increased its budget".into(),
+                ));
+            }
             if before != after {
                 crate::associated::charge_projection_copy(&after, &mut fuel)
                     .map_err(Error::TypeView)?;
