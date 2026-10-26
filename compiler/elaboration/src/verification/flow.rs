@@ -4503,6 +4503,24 @@ impl Walker<'_> {
         }
         Ok(result)
     }
+    fn known_branch(
+        &mut self,
+        condition: Option<&Condition>,
+        state: &State,
+    ) -> Result<Option<bool>, Reason> {
+        let Some(condition) = condition else {
+            return Ok(None);
+        };
+        if let Some(truth) = state.facts.known_condition(condition, self.limits)? {
+            return Ok(Some(truth));
+        }
+        match condition.truth_by_enclosure(&state.facts, self.limits, 0) {
+            Ok(truth) => Ok(truth),
+            Err(Unknown::MissingBound(_)) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     #[inline(never)]
     fn branch_expression(
         &mut self,
@@ -4518,6 +4536,20 @@ impl Walker<'_> {
                 else_branch,
             } => {
                 let condition = self.child(condition, state, depth)?.condition;
+                // The condition has already executed. A proved branch needs
+                // neither a duplicate state nor an impossible-branch merge.
+                if let Some(truth) = self.known_branch(condition.as_ref(), state)? {
+                    state
+                        .facts
+                        .assume(condition.as_ref().unwrap(), truth, self.limits)?;
+                    return if truth {
+                        self.child(then_branch, state, depth)
+                    } else if let Some(branch) = else_branch {
+                        self.child(branch, state, depth)
+                    } else {
+                        Ok(Value::default())
+                    };
+                }
                 let mut yes = state.fork(self.limits)?;
                 let mut no = state.fork(self.limits)?;
                 if let Some(condition) = &condition {

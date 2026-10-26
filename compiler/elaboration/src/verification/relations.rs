@@ -240,6 +240,12 @@ impl Facts {
                     self.reachable = false;
                     return Ok(());
                 }
+                // Every point in the current interval box already satisfies
+                // this row. Isolating its variables cannot narrow that box.
+                // Keep the stored row: a later join can widen the intervals.
+                if !limits.compare(&range.upper, &Integer::zero())?.is_gt() {
+                    continue;
+                }
                 for (factors, coefficient) in &row.terms {
                     limits.step(1)?;
                     if factors.len() != 1 {
@@ -1191,6 +1197,58 @@ mod equality_index_tests {
 #[cfg(test)]
 mod propagation_feedback_tests {
     use super::*;
+
+    #[test]
+    fn satisfied_rows_survive_branch_widening_and_stale_values_are_rejected() {
+        let mut limits = Limits::default();
+        let mut root = Facts::default();
+        let domain = Interval::new(Integer::zero(), Integer::from_u128(10), &mut limits).unwrap();
+        let x = root
+            .assign(
+                PlaceId {
+                    owner: 41,
+                    local: 0,
+                },
+                domain.clone(),
+            )
+            .unwrap();
+        let y = root
+            .assign(
+                PlaceId {
+                    owner: 41,
+                    local: 1,
+                },
+                domain,
+            )
+            .unwrap();
+        let xp = Polynomial::variable(x, &mut limits).unwrap();
+        let yp = Polynomial::variable(y, &mut limits).unwrap();
+        root.inequalities
+            .insert(xp.subtract(&yp, &mut limits).unwrap(), &mut limits)
+            .unwrap();
+        let mut branches = Vec::new();
+        for (a, b) in [(1, 2), (9, 10)] {
+            let mut branch = root.fork(&mut limits).unwrap();
+            for (id, value) in [(x, a), (y, b)] {
+                let value = Integer::from_u128(value);
+                branch
+                    .refine(id, Some(&value), Some(&value), &mut limits)
+                    .unwrap();
+            }
+            branch.propagate_relations(&mut limits).unwrap();
+            assert_eq!(branch.inequalities.len(), 1);
+            branches.push(branch);
+        }
+        let mut joined = branches[0].join(&branches[1], &mut limits).unwrap();
+        let difference = yp.subtract(&xp, &mut limits).unwrap();
+        let target = Interval::new(Integer::zero(), Integer::from_u128(10), &mut limits).unwrap();
+        let Outcome::Proven(proof) = difference.prove_within(&target, &joined, &mut limits) else {
+            panic!("retained relation must survive wider joined intervals");
+        };
+        proof.replay(&joined, &mut limits).unwrap();
+        joined.invalidate(x.place).unwrap();
+        assert!(proof.replay(&joined, &mut limits).is_err());
+    }
 
     #[test]
     fn polynomial_contraction_feeds_back_into_transitive_difference_bounds() {

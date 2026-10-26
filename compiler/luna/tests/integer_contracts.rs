@@ -6,6 +6,39 @@ use comptime_interpretor::{Budget, Interpreter, Value};
 use support::{compile, compile_with_protocols, id};
 
 #[test]
+fn established_branches_keep_condition_effects_and_selected_value_facts() {
+    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for .u8'builtin {}
+        typealias Byte = .u8'builtin;
+        fn run() -> bool {
+            var calls: Byte = 0;
+            let first: Byte = if do { calls = calls + 1; true } { 10 } else { 255 };
+            let second: Byte = if do { calls = calls + 1; false } { 255 } else { first + 1 };
+            let third: Byte = if second < 20 { second + 1 } else { 255 };
+            calls == 2 and third == 12
+        }";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 500_000)
+            .unwrap(),
+        Value::Bool(true),
+    );
+    // Neither an unknown input nor a stale value before assignment establishes
+    // which side is reached. A reachable overflowing operation must fail.
+    for body in [
+        "if flag { value + 1 } else { 0 }",
+        "do { var local: Byte = 0; local = value; if flag { local + 1 } else { 0 } }",
+        "do { var local: Byte = 0; if local < 1 { local = value; if local < 255 { 0 } else { local + 1 } } else { 0 } }",
+    ] {
+        let invalid = format!(
+            "typealias Byte = .u8'builtin; fn bad(flag: bool, value: Byte) -> Byte {{ {body} }}"
+        );
+        let error = compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(error.contains("range"), "{error}");
+    }
+}
+
+#[test]
 fn checked_execution_revalidates_residual_empty_window_endpoints() {
     let mut package = compile(
         "trait Duplicate {} trait Retire {fn drop(*self);}
