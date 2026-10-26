@@ -7010,6 +7010,23 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(nir::program::scalar_observation_shape(ty))
     }
+    fn observe_associated_value(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
+        // Selection/initialization is comptime work. An unresolved identity is
+        // not permission to invent owned resources, pointer provenance or a
+        // callable environment. Scalar Copy results need no such runtime state.
+        nir::type_computations::charge_term(ty, &mut self.fuel)
+            .map_err(|_| error(source, "associated value observation budget exhausted"))?;
+        if !nir::program::scalar_observation_shape_in_package(self.package, ty)
+            || (self.delivery)(ty).map_err(|reason| error(source, reason))? != Delivery::Copy
+        {
+            return Err(error(
+                source,
+                "associated value requires materialized resource evidence",
+            ));
+        }
+        Ok(())
+    }
+
     fn observation_value_type(&mut self, ty: &Term, source: SourceRange) -> Result<bool, Error> {
         if let Term::Nominal { declaration, .. } = ty {
             if let Some(package) = self.package {
@@ -7539,6 +7556,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     self.observe_guard(input, flow, depth + 1)?;
                 }
             }
+            K::AssociatedValue { .. } => self.observe_associated_value(&expr.ty, source)?,
             K::ComptimeValue(_) | K::Literal(_) | K::Unit => (),
             K::RequirePredicate(condition)
             | K::EnsurePredicate(condition)
@@ -14288,6 +14306,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     self.report.copies.push((source, p));
                 }
             }
+            K::AssociatedValue { .. } => self.observe_associated_value(&expr.ty, source)?,
             K::ComptimeValue(_)
             | K::Literal(_)
             | K::Unit
