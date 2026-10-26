@@ -51,6 +51,34 @@ the host remains responsible for providing evidence for newly generated types.
 Source builder dispatch during a running expression is still unimplemented.
 This closes the VM catalog-installation step, not the whole builder pipeline.
 
+`install_owned_generated_structs_with` additionally accepts an
+`Arc<[nir::program::Struct]>` created after VM construction. Catalog entries hold
+shared batch handles and indexes, so publishing does not copy field trees and
+the host may release its temporary storage immediately. Existing package
+descriptors retain the borrowed representation. Both forms use the same
+preflight, admission, budget reservation and rollback journal. Failed admission,
+callback errors and callback unwind release the VM's new ownership; committed
+batches remain available until the VM is dropped. A batch's descriptors share
+one allocation and are retained together. This removes the descriptor-lifetime
+obstacle for a future running-invocation builder service without introducing
+source builder dispatch or changing type identity.
+
+Owned-storage validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib --no-fail-fast
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test source_reflection -p elaboration --test delivered_types --no-fail-fast
+```
+
+Both exited 0. The VM suite passed 141 tests at
+`/tmp/luna-tools-_9yu9x_2/result.json`; source reflection and semantic delivery
+passed at `/tmp/luna-tools-grc08vqs/result.json`. New cases verify descriptors
+outlive temporary publisher storage, forward references and subsequent batches,
+release after VM destruction, and release after admission failure, callback
+rejection or unwind followed by retry. An existing source comptime function
+reflects a dynamically installed type after publisher storage is dropped.
+Targeted rustfmt and `git diff --check` passed.
+
 ## Coordinating HIR publication and VM admission
 
 `DefinitionBatch::prepare_checked` checks a private candidate once and returns a

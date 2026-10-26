@@ -127,14 +127,14 @@ impl Interpreter<'_> {
                 result.map_err(|_| self.failure(ErrorKind::StepsExhausted, None))?;
                 if nominal.ty == *ty {
                     if let iir::NominalDefinition::Struct(definition) = &nominal.definition {
-                        selected = Some(definition);
+                        selected = Some(generated_structs::StructDefinition::Borrowed(definition));
                     }
                     break;
                 }
             }
             selected
         } else {
-            self.structs.get(declaration).copied()
+            self.structs.get(declaration).cloned()
         }
         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
         self.integer_operation(None, |budget| budget.consume(definition.fields.len()))?;

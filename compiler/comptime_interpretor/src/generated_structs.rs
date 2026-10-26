@@ -25,9 +25,54 @@ impl<E: fmt::Display> fmt::Display for StructPublicationError<E> {
 }
 impl<E: std::error::Error + 'static> std::error::Error for StructPublicationError<E> {}
 
+// Owned batches let a running invocation retain newly checked descriptors.
+// Cloning a handle shares storage; it never copies field trees or old catalogs.
+#[derive(Clone)]
+pub(super) enum StructBatch<'a> {
+    Borrowed(&'a [nir::program::Struct]),
+    Shared(Arc<[nir::program::Struct]>),
+}
+impl std::ops::Deref for StructBatch<'_> {
+    type Target = [nir::program::Struct];
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(definitions) => definitions,
+            Self::Shared(definitions) => definitions,
+        }
+    }
+}
+#[derive(Clone)]
+pub(super) enum StructDefinition<'a> {
+    Borrowed(&'a nir::program::Struct),
+    Shared {
+        batch: Arc<[nir::program::Struct]>,
+        index: usize,
+    },
+}
+impl std::ops::Deref for StructDefinition<'_> {
+    type Target = nir::program::Struct;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(definition) => definition,
+            Self::Shared { batch, index } => &batch[*index],
+        }
+    }
+}
+impl<'a> StructBatch<'a> {
+    fn definition(&self, index: usize) -> StructDefinition<'a> {
+        match self {
+            Self::Borrowed(definitions) => StructDefinition::Borrowed(&definitions[index]),
+            Self::Shared(batch) => StructDefinition::Shared {
+                batch: Arc::clone(batch),
+                index,
+            },
+        }
+    }
+}
+
 struct Installation<'vm, 'world> {
     vm: &'vm mut Interpreter<'world>,
-    definitions: &'world [nir::program::Struct],
+    definitions: StructBatch<'world>,
     inserted: usize,
     committed: bool,
 }
@@ -85,14 +130,27 @@ impl<'world> Interpreter<'world> {
         definitions: &'world [nir::program::Struct],
         commit: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, StructPublicationError<E>> {
-        self.prepare_generated_structs(definitions)
+        self.prepare_generated_structs(StructBatch::Borrowed(definitions))
+            .map_err(StructPublicationError::Admission)?
+            .commit_with(commit)
+    }
+
+    /// Retain shared checked descriptors created after this VM was started.
+    /// Uses the same admission and transactional callback as borrowed batches.
+    /// No field trees are cloned; rollback releases this VM's ownership.
+    pub fn install_owned_generated_structs_with<T, E>(
+        &mut self,
+        definitions: Arc<[nir::program::Struct]>,
+        commit: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, StructPublicationError<E>> {
+        self.prepare_generated_structs(StructBatch::Shared(definitions))
             .map_err(StructPublicationError::Admission)?
             .commit_with(commit)
     }
 
     fn prepare_generated_structs<'vm>(
         &'vm mut self,
-        definitions: &'world [nir::program::Struct],
+        definitions: StructBatch<'world>,
     ) -> Result<Installation<'vm, 'world>, Error> {
         if !self.comptime_only || self.graph.is_some() || self.cleanup_schedule.is_some() {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
@@ -104,7 +162,7 @@ impl<'world> Interpreter<'world> {
             budget.consume(definitions.len().saturating_add(1))
         })?;
         let mut identities = BTreeSet::new();
-        for definition in definitions {
+        for definition in definitions.iter() {
             if !definition.type_parameters.is_empty()
                 || !definition.parameter_types.is_empty()
                 || !identities.insert(definition.declaration)
@@ -170,18 +228,18 @@ impl<'world> Interpreter<'world> {
         })?;
         let mut installation = Installation {
             vm: self,
-            definitions,
+            definitions: definitions.clone(),
             inserted: 0,
             committed: false,
         };
-        for definition in definitions {
+        for (index, definition) in definitions.iter().enumerate() {
             installation.inserted += 1;
             installation
                 .vm
                 .structs
-                .insert(definition.declaration, definition);
+                .insert(definition.declaration, definitions.definition(index));
         }
-        for definition in definitions {
+        for definition in definitions.iter() {
             let ty = Term::Nominal {
                 declaration: definition.declaration,
                 arguments: vec![],

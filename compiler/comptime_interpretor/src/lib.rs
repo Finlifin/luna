@@ -1226,7 +1226,7 @@ pub struct Interpreter<'a> {
     functions: BTreeMap<DeclarationId, &'a nir::program::Function>,
     runtime_function_identities: BTreeMap<DeclarationId, &'a nir::program::RuntimeFunctionIdentity>,
     normal_forms: BTreeMap<DeclarationId, &'a nir::normal_forms::Head>,
-    structs: BTreeMap<DeclarationId, &'a nir::program::Struct>,
+    structs: BTreeMap<DeclarationId, generated_structs::StructDefinition<'a>>,
     newtypes: BTreeMap<DeclarationId, &'a nir::newtypes::Newtype>,
     alias_contracts: BTreeMap<DeclarationId, &'a nir::type_aliases::Contract>,
     enums: BTreeMap<DeclarationId, &'a nir::program::Enum>,
@@ -1326,7 +1326,13 @@ impl<'a> Interpreter<'a> {
             }
         }
         for definition in &package.structs {
-            if structs.insert(definition.declaration, definition).is_some() {
+            if structs
+                .insert(
+                    definition.declaration,
+                    generated_structs::StructDefinition::Borrowed(definition),
+                )
+                .is_some()
+            {
                 return Err(Error {
                     kind: ErrorKind::InvalidCallPlan,
                     source: None,
@@ -5103,6 +5109,7 @@ impl<'a> Interpreter<'a> {
         } else {
             None
         };
+        let struct_definition = self.structs.get(declaration).cloned();
         let (parameters, domains, requirements, capabilities) = if let Some(def) = alias {
             (
                 def.parameter_binders(),
@@ -5110,7 +5117,7 @@ impl<'a> Interpreter<'a> {
                 &def.requirements,
                 &def.capabilities,
             )
-        } else if let Some(def) = self.structs.get(declaration).copied() {
+        } else if let Some(def) = struct_definition.as_ref() {
             (
                 def.parameter_binders(),
                 &def.parameter_types,
@@ -9006,7 +9013,8 @@ impl Interpreter<'_> {
         if actual != declaration {
             return Ok(Flow::Value(Value::Bool(false)));
         }
-        let (binders, domains) = if let Some(def) = self.structs.get(declaration).copied() {
+        let struct_definition = self.structs.get(declaration).cloned();
+        let (binders, domains) = if let Some(def) = struct_definition.as_ref() {
             (def.parameter_binders(), &def.parameter_types)
         } else if let Some(def) = self.enums.get(declaration).copied() {
             (def.parameter_binders(), &def.parameter_types)

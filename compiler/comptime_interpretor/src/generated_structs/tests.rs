@@ -349,3 +349,82 @@ fn publisher_commit_is_called_once_after_admission_and_failure_uninstalls_the_ba
     assert!(vm.reflect_struct(&ty(20)).is_ok());
     assert!(vm.reflect_struct(&ty(10)).is_ok());
 }
+
+#[test]
+fn owned_publication_retains_dynamic_batches_and_releases_them_with_the_vm() {
+    let package = package();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let first = {
+        let definitions: Arc<[Struct]> = vec![
+            structure(20, vec![("next", Term::Pointer(Box::new(ty(21))))]),
+            structure(21, vec![("flag", boolean())]),
+        ]
+        .into();
+        let witness = Arc::downgrade(&definitions);
+        vm.install_owned_generated_structs_with(definitions, || Ok::<_, ()>(()))
+            .unwrap();
+        witness
+    };
+    assert!(first.upgrade().is_some());
+    assert_eq!(
+        vm.reflect_struct(&ty(20)).unwrap().fields[0].ty,
+        Term::Pointer(Box::new(ty(21)))
+    );
+    let second = {
+        let definitions: Arc<[Struct]> = vec![structure(22, vec![("prior", ty(21))])].into();
+        let witness = Arc::downgrade(&definitions);
+        vm.install_owned_generated_structs_with(definitions, || Ok::<_, ()>(()))
+            .unwrap();
+        witness
+    };
+    assert_eq!(vm.reflect_struct(&ty(22)).unwrap().fields[0].ty, ty(21));
+    assert!(vm.reflect_struct(&ty(10)).is_ok());
+    drop(vm);
+    assert!(first.upgrade().is_none());
+    assert!(second.upgrade().is_none());
+}
+
+#[test]
+fn owned_publication_releases_rejected_batches_and_keeps_previous_types() {
+    let package = package();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let calls = std::cell::Cell::new(0);
+    for failure in 0..3 {
+        let definitions: Arc<[Struct]> = vec![structure(
+            20,
+            vec![("flag", if failure == 0 { ty(99) } else { boolean() })],
+        )]
+        .into();
+        let witness = Arc::downgrade(&definitions);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vm.install_owned_generated_structs_with(definitions, || -> Result<(), &str> {
+                calls.set(calls.get() + 1);
+                if failure == 2 {
+                    panic!("publisher failed")
+                }
+                Err("publisher rejected")
+            })
+        }));
+        match failure {
+            0 => assert!(matches!(
+                outcome,
+                Ok(Err(StructPublicationError::Admission(_)))
+            )),
+            1 => assert!(matches!(
+                outcome,
+                Ok(Err(StructPublicationError::Commit(_)))
+            )),
+            _ => assert!(outcome.is_err()),
+        }
+        assert!(witness.upgrade().is_none());
+        assert!(!vm.structs.contains_key(&id(20)));
+        assert!(vm.reflect_struct(&ty(10)).is_ok());
+    }
+    assert_eq!(calls.get(), 2);
+    vm.install_owned_generated_structs_with(
+        vec![structure(20, vec![("flag", boolean())])].into(),
+        || Ok::<_, ()>(()),
+    )
+    .unwrap();
+    assert!(vm.reflect_struct(&ty(20)).is_ok());
+}

@@ -219,3 +219,44 @@ fn existing_source_invocation_can_observe_a_newly_published_struct_in_the_same_v
         Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
     );
 }
+
+#[test]
+fn source_invocation_retains_generated_descriptors_after_publisher_storage_is_dropped() {
+    let source = "
+        typealias Type = .Type'builtin;
+        comptime fn First(subject: Type) -> Type {meta.struct_field_types(subject)[0]}
+    ";
+    let baseline = compile(source).unwrap();
+    let entry = baseline
+        .functions
+        .iter()
+        .find(|item| item.name == "First")
+        .unwrap()
+        .declaration;
+    let mut vm =
+        comptime_interpretor::Interpreter::for_comptime(&baseline, Default::default()).unwrap();
+    let (ty, witness) = {
+        let published = compile(&format!("{source} struct Generated {{flag:bool}}")).unwrap();
+        let generated = published
+            .structs
+            .into_iter()
+            .find(|item| item.name == "Generated")
+            .unwrap();
+        let ty = nir::Term::Nominal {
+            declaration: generated.declaration,
+            arguments: vec![],
+        };
+        let definitions: std::sync::Arc<[nir::program::Struct]> = vec![generated].into();
+        let witness = std::sync::Arc::downgrade(&definitions);
+        vm.install_owned_generated_structs_with(definitions, || Ok::<_, ()>(()))
+            .unwrap();
+        (ty, witness)
+    };
+    assert_eq!(
+        vm.invoke(entry, vec![Value::Type(ty)]).unwrap(),
+        Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
+    );
+    assert!(witness.upgrade().is_some());
+    drop(vm);
+    assert!(witness.upgrade().is_none());
+}
