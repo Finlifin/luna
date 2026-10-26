@@ -1,5 +1,36 @@
-target
-*.lisp
-test_project
-.metals
+# Cargo build output and local scratch projects.
+target/
+/test_project/
+
+# Local compiler dumps and generated executables. Keep source/fixture files
+# with these extensions trackable elsewhere in the repository.
+/*.lisp
+/mir.dump
+/output
+/output.c
+/output.ll
+/output.o
+
+# Python caches and local environments used by development scripts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Per-run command reports (result.json, stdout.log and stderr.log).
+# Historical evidence explicitly stored under development/runs stays tracked.
+luna-tools-*/
+
+# Per-machine editor settings and temporary files.
+/.vscode/
+.idea/
+.metals/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local agent configuration and the author's external draft link.
+/.codex/
+/.aws/
 /proposal_trace

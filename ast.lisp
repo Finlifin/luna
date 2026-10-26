@@ -1,1 +1,0 @@
-(FileScope (Pub (ConstDecl (Id HELLO) (<invalid node>) (Str "Hello, world!"))) (Pub (StructDef (Id Node) [] (Block ))) (Function (Id manbo) [(TypeBoundParam (Id name) (Id Node))] (<invalid node>) (<invalid node>) [(TypeDeclClause where T)] (Block (LetDecl (Id b) (Id Node) (Id name)))))
