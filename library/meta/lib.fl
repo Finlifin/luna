@@ -1,6 +1,17 @@
--- Compiler-bound immutable comptime sequences. List applications retain their
--- own normal-form head; the driver supplies the value representation.
--- Current compiler value support covers List<Type>.
+{-
+  Compiler-bound comptime data. Object preserves heterogeneous ordered entries.
+  List applications retain their normal-form head; the driver supplies the
+  value representation. List<Type> supports Tuple's variadic type inputs.
+-}
+
+-- Heterogeneous ordered metadata, available only during comptime invocation.
+pub typealias Object = .Object'builtin;
+
 pub pure comptime fn List<T> -> .Type'builtin {
     List<T>
+}
+
+pub mod prelude {
+    pub use .List;
+    pub use .Object;
 }
