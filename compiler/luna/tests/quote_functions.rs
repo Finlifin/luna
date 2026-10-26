@@ -31,9 +31,8 @@ fn compile_with_tuple_option(source: &str, emit: Emit, tuple: bool) -> Result<Ar
         output: None,
         sysroot: None,
         splice_protocol: None,
-        meta_list_type: tuple.then(|| "input::TupleElements".into()),
-        tuple_type: tuple.then(|| "input::Tuple".into()),
-        optional_type: None,
+        meta_list_type: tuple.then(|| "input.TupleElements".into()),
+        tuple_type: tuple.then(|| "input.Tuple".into()),
         index_protocol: None,
         ord_protocol: None,
         eq_protocol: None,
@@ -1782,7 +1781,7 @@ fn quote_implementations_supply_ordinary_trait_callable_entries() {
         let (value, calls) = execute(&source, vec![]);
         assert_eq!(value, comptime_interpretor::Value::Bool(true), "{body}");
         assert!(
-            calls.iter().any(|name| name.ends_with("::callable")),
+            calls.iter().any(|name| name.ends_with(".callable")),
             "{calls:?}"
         );
         assert!(!calls.iter().any(|name| name == "identity"), "{calls:?}");

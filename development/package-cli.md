@@ -35,16 +35,20 @@ request must specify `--primary` exactly once. `--builtin ID` may designate one
 supplied package as builtin; it does not load a sysroot or fabricate missing
 packages or dependency edges.
 
-Output stages are `hir` (the default), `nir`, and `attributes`. The last stage
+Output stages are `hir` (the default), `nir`, `attributes`, and `merged-attributes`. The `attributes` stage
 evaluates metadata into typed inspection descriptions with source/target
 provenance; it does not authorize ABI/layout consumers or emit executable NIR.
+`merged-attributes` additionally applies configuration-first, inner-to-outer
+named-property selection per target. Its S-expression report retains the raw
+objects and selected entry provenance. Positional entries fail this stage;
+raw attribute inspection still accepts them. Neither stage authorizes consumers.
 Ordinary `--output` and the
 existing source protocol/type selector flags are supported: splice, meta-list,
-tuple, optional, index, list-pattern, literal-into, and the seven arithmetic/unary protocols.
-Explicit source bindings require elaboration (`--emit nir`, `--emit attributes`, or an
+tuple, index, list-pattern, literal-into, and the seven arithmetic/unary protocols.
+Explicit source bindings require elaboration (`--emit nir`, `--emit attributes`, `--emit merged-attributes`, or an
 execution/analysis action); syntax-only export rejects them instead of ignoring
 them. This includes all seven arithmetic/unary selectors. Selectors keep their
-existing `package::module::declaration` rules. Conflicting
+existing `package.module.declaration` rules. Conflicting
 or repeated ordinary options retain the single-entry CLI's validation.
 
 The same package request also accepts `--interpret <entry>`,
@@ -60,7 +64,7 @@ tests, LLVM emission and native builds. Resource selectors are resolved in the s
 elaboration; qualified names refer to declared package names, not import aliases. The
 resolved declaration identity is carried into execution and resource analysis;
 it is not looked up again by leaf name. This also applies to ordinary
-single-input/sysroot actions (`input::module::Trait`, `builtin::Trait`, etc.).
+single-input/sysroot actions (`input.module.Trait`, `builtin.Trait`, etc.).
 Manifest defaults do not enable cleanup analysis by themselves: an analysis
 without `--drop-protocol` remains an ownership-obligation report.
 
@@ -136,7 +140,7 @@ List patterns can bind a source-defined protocol explicitly:
 
 ```sh
 luna development/examples/list-patterns.fl --interpret evaluate \
-  --list-pattern-protocol input::ListView
+  --list-pattern-protocol input.ListView
 ```
 
 This returns `(bool true)`. The same flag accepts a supplied provider name in
@@ -323,14 +327,14 @@ require void results, or enable host actions in the resident frontend stream.
 
 ### Host FMA 显式绑定
 
-`--build` 和 `--emit-llvm` 接受 `--host-fma package::module::Enum::variant`，module 可省略。选择的 enum 必须标记 intrinsic_enum，变体为 unit。解析沿编译包集合的源声明身份进行，绑定在纯度检查前生效；不以 primary 包替代选择器中的包，不把同名标签合并。选择器保存在 Request Action 中，参与现有完整请求缓存键。当前每个命令只接受一个 FMA 绑定，不支持以该选项启动解释器或 native tests。
+`--build` 和 `--emit-llvm` 接受 `--host-fma package.module.Enum.variant`，module 可省略。选择的 enum 必须标记 intrinsic_enum，变体为 unit。解析沿编译包集合的源声明身份进行，绑定在纯度检查前生效；不以 primary 包替代选择器中的包，不把同名标签合并。选择器保存在 Request Action 中，参与现有完整请求缓存键。当前每个命令只接受一个 FMA 绑定，不支持以该选项启动解释器或 native tests。
 
 ## Sysroot LLVM intrinsic defaults
 
 For single-input compilation with `--sysroot`, version 1 of
-`language-items.conf` accepts `host-intrinsic.<operation> = package::Enum::variant`
+`language-items.conf` accepts `host-intrinsic.<operation> = package.Enum.variant`
 (with optional module components). `library/language-items.conf` binds all current
-scalar operations to the real `math::target::Scalar` declarations.
+scalar operations to the real `builtin.math_intrinsics.target.Scalar` declarations.
 
 Defaults are merged by operation. `--host-intrinsic operation=selector` and the
 `--host-fma`, `--host-sqrt`, `--host-copysign` aliases override only that operation;
@@ -340,6 +344,22 @@ non-intrinsic enums and invalid variants retain the ordinary binding diagnostics
 The package-set protocol itself does not load this file. AST/HIR-only sysroot
 commands do not resolve these semantic defaults.
 
-The single-input sysroot loader discovers `math/lib.fl` when present, alongside
-the existing optional packages. A present math directory without `lib.fl` is an
-error; an absent package does not authorize an unresolved manifest selector.
+Math is a module in `builtin/math_intrinsics.fl`, exported through `builtin.prelude`.
+The single-input sysroot loader has six package slots and does not load a
+separate math package. Repository manifest selectors use
+`builtin.math_intrinsics.target.Scalar.<operation>`. Explicit package-set tests may
+load the same source as a package named math and bind that package's identities;
+this does not change sysroot defaults. Missing declarations do not authorize
+an unresolved manifest selector.
+
+The sysroot loader registers the available builtin, meta, build, attrs and
+verification package identities as default prelude providers. Each contributes
+an ordinary package-visible glob to every other package; std is a consumer,
+not a default provider. Same-declaration re-exports coalesce, local declarations
+win, and unrelated same-name declarations remain ambiguous. A designated
+provider must define its prelude. Names alone do not grant this role.
+
+The resolver exposes `build_package_set_with_preludes` for explicitly designated
+provider IDs. The existing package-set CLI still designates only builtin through
+its existing option; additional provider registration currently enters through
+the sysroot path, not by guessing roles from arbitrary package names.

@@ -273,6 +273,8 @@ fn visit(
         | K::ReadPointer(value)
         | K::PointerAnonymousField { pointer: value, .. }
         | K::PointerField { pointer: value, .. }
+        | K::OptionalPresent(value)
+        | K::OptionalType(value)
         | K::PointerType(value)
         | K::BitVecType(value)
         | K::IntegerNegate(value)
@@ -412,6 +414,7 @@ fn visit(
         | K::Literal(_)
         | K::Local(_)
         | K::Function(_)
+        | K::OptionalAbsent
         | K::Unit
         | K::Break(_)
         | K::Continue(_) => {}
@@ -440,7 +443,8 @@ fn visit_pattern(
             visit_pattern(pattern, limits, depth, action)?;
             visit(condition, limits, depth, action)?;
         }
-        Pattern::ErrorResult { inner: pattern, .. }
+        Pattern::OptionalPresent(pattern)
+        | Pattern::ErrorResult { inner: pattern, .. }
         | Pattern::Observe { inner: pattern, .. }
         | Pattern::Remap { pattern, .. }
         | Pattern::Binding { inner: pattern, .. } => visit_pattern(pattern, limits, depth, action)?,
@@ -458,7 +462,7 @@ fn visit_pattern(
                 visit_pattern(field, limits, depth, action)?;
             }
         }
-        Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
+        Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
     }
     Ok(())
 }

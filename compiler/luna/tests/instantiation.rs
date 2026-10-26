@@ -150,7 +150,6 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             tuple_type: None,
-            optional_type: None,
         },
         identity,
     );

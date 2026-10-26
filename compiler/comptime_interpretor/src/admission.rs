@@ -68,7 +68,14 @@ impl Interpreter<'_> {
         }
         self.tick(None)?;
         match value {
-            Value::Type(_) | Value::TypeList(_) => self.admit_value_types(value, depth)?,
+            Value::Type(_) | Value::TypeList(_) | Value::List { .. } => {
+                self.admit_value_types(value, depth)?
+            }
+            Value::Optional { value, .. } => {
+                if let Some(value) = value {
+                    self.admit_embedded_type_descriptions(value, depth + 1)?;
+                }
+            }
             Value::ErrorResult { value, .. } | Value::Newtype { value, .. } => {
                 self.admit_embedded_type_descriptions(value, depth + 1)?
             }
@@ -99,6 +106,18 @@ impl Interpreter<'_> {
         }
         self.tick(None)?;
         match value {
+            Value::List { ty, values } => {
+                self.admit_type(ty, depth + 1)?;
+                for value in values {
+                    self.admit_value_types(value, depth + 1)?;
+                }
+            }
+            Value::Optional { ty, value } => {
+                self.admit_type(ty, depth + 1)?;
+                if let Some(value) = value {
+                    self.admit_value_types(value, depth + 1)?;
+                }
+            }
             Value::ErrorResult { ty, value, .. } | Value::Newtype { ty, value } => {
                 self.admit_type(ty, depth + 1)?;
                 self.admit_value_types(value, depth + 1)?;
@@ -286,16 +305,18 @@ impl Interpreter<'_> {
                     .unwrap_or(usize::MAX)
                     .min(100_000);
                 let before = fuel;
-                let checked = metadata.check_arguments_with_evidence_budgeted_in(
+                let checked = metadata.check_arguments_in_scope_with_collections_budgeted_in(
                     arguments,
                     |head| {
                         self.normal_forms
                             .get(&head)
                             .is_some_and(|head| head.role == nir::normal_forms::Role::Tuple)
                     },
+                    |head| self.normal_forms.get(&head)
+                        .is_some_and(|head| head.role == nir::normal_forms::Role::TypeList),
                     |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
                     |value, domain| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
-                    &mut fuel, self.target);
+                    &[], &mut fuel, self.target);
                 self.budget.steps -= (before - fuel) as u64;
                 checked.map_err(|_| {
                     self.failure(
@@ -329,6 +350,12 @@ impl Interpreter<'_> {
                     self.admit_type(ty, depth + 1)?;
                 }
             }
+            Term::OptionalValue { ty, value } => {
+                self.admit_type(ty, depth + 1)?;
+                if let Some(value) = value {
+                    self.admit_type(value, depth + 1)?;
+                }
+            }
             Term::ErrorValue { ty, label, value } => {
                 self.admit_type(ty, depth + 1)?;
                 if let Some(label) = label {
@@ -347,9 +374,10 @@ impl Interpreter<'_> {
                     self.admit_type(ty, depth + 1)?;
                 }
             }
-            Term::Pointer(ty) | Term::ComptimeFunction(ty) | Term::UnsafeFunction(ty) => {
-                self.admit_type(ty, depth + 1)?
-            }
+            Term::Optional(ty)
+            | Term::Pointer(ty)
+            | Term::ComptimeFunction(ty)
+            | Term::UnsafeFunction(ty) => self.admit_type(ty, depth + 1)?,
             Term::Function { parameters, result } => {
                 for p in parameters {
                     self.admit_type(&p.ty, depth + 1)?;

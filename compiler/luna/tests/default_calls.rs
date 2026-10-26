@@ -95,8 +95,8 @@ fn inline_suppliers_in_defaults_are_checked_before_inputs_are_available() {
         &with_resources,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            copy: Some("input::resources::Copy"),
-            drop: Some("input::resources::Drop"),
+            copy: Some("input.resources.Copy"),
+            drop: Some("input.resources.Drop"),
             ..Default::default()
         },
     )
@@ -349,8 +349,8 @@ fn runtime_defaults_forward_declared_staged_inputs_without_guessing_values() {
 #[test]
 fn computed_code_patterns_in_defaults_require_known_finite_behavior() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let source = "trait Copy {} trait Drop {fn drop(*self);}
@@ -412,8 +412,8 @@ fn finite_call_chains_supply_defaults_at_runtime_in_declaration_order() {
 #[test]
 fn guard_default_code_values_preserve_their_own_identity() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let source = "trait Copy {} trait Drop {fn drop(*self);}
@@ -654,8 +654,8 @@ fn tuple_supplier_analysis_preserves_the_bound_normal_form() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -757,8 +757,8 @@ fn finite_factory_defaults_preserve_generic_and_callable_results() {
 #[test]
 fn finite_factory_locals_have_checked_cleanup() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -808,8 +808,8 @@ fn finite_factory_locals_have_checked_cleanup() {
 #[test]
 fn finite_factory_cleanup_rejects_mutation_divergence_and_invalid_moves() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for (drop_body, factory_body) in [
@@ -848,8 +848,8 @@ fn finite_factory_cleanup_rejects_mutation_divergence_and_invalid_moves() {
 #[test]
 fn finite_factories_transfer_private_owners_to_helpers() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -902,8 +902,8 @@ fn finite_factories_transfer_private_owners_to_helpers() {
 #[test]
 fn finite_owned_calls_preserve_caller_and_affine_boundaries() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for suffix in [
@@ -941,8 +941,8 @@ fn finite_owned_calls_preserve_caller_and_affine_boundaries() {
 #[test]
 fn finite_factories_can_capture_private_owners() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -994,8 +994,8 @@ fn finite_factories_can_capture_private_owners() {
 #[test]
 fn finite_owned_capture_checks_transfer_invocation_and_retirement() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -1033,8 +1033,8 @@ fn finite_owned_capture_checks_transfer_invocation_and_retirement() {
 #[test]
 fn finite_factories_verify_owned_result_postcondition_cleanup() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -1078,8 +1078,8 @@ fn finite_factories_verify_owned_result_postcondition_cleanup() {
 #[test]
 fn finite_postconditions_require_safe_result_retirement() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for drop_body in ["self.target.*.* = true;", "spin();"] {
@@ -1105,8 +1105,8 @@ fn finite_postconditions_require_safe_result_retirement() {
 #[test]
 fn finite_postcondition_cleanup_keeps_generic_instances_separate() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let prefix="trait Copy {} trait Drop {fn drop(*self);}
@@ -1155,8 +1155,8 @@ fn finite_closure_factories_preserve_returned_code() {
             fn run()->bool {{take()}}"
         );
         let selectors = luna::protocols::type_constructors::Selectors {
-            copy: Some("input::Copy"),
-            drop: Some("input::Drop"),
+            copy: Some("input.Copy"),
+            drop: Some("input.Drop"),
             ..Default::default()
         };
         let package = execution_support::compile_with_source_bindings(

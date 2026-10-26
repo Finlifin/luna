@@ -259,6 +259,8 @@ enum AggregateKind {
     Record(nir::DeclarationId),
     Variant(nir::DeclarationId, usize),
     EnumTag(nir::DeclarationId),
+    Optional(bool),
+    OptionalTag,
 }
 impl fmt::Display for AggregateKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -268,6 +270,8 @@ impl fmt::Display for AggregateKind {
             Self::Record(id) => write!(f, "(record {id})"),
             Self::Variant(id, index) => write!(f, "(variant {id} {index})"),
             Self::EnumTag(id) => write!(f, "(enum-tag {id})"),
+            Self::Optional(present) => write!(f, "(optional {present})"),
+            Self::OptionalTag => f.write_str("(optional-tag)"),
         }
     }
 }
@@ -669,7 +673,10 @@ fn bind_place(
     state.aggregates.remove(&place);
     if matches!(
         ty,
-        Term::Nominal { .. } | Term::Tuple(_) | Term::Primitive(nir::Primitive::Integer)
+        Term::Optional(_)
+            | Term::Nominal { .. }
+            | Term::Tuple(_)
+            | Term::Primitive(nir::Primitive::Integer)
     ) {
         state.aggregates.insert(place, Value::unknown(ty, limits)?);
     }
@@ -816,15 +823,15 @@ fn analyze_impl(
                 | Term::AssociatedType { .. }
                 | Term::Hole { .. }
         ) {
-            limits.step(4096).map_err(|e| error(Reason::Unknown(e)))?;
-            view = type_context
-                .structural_view(
-                    &ty.ty,
-                    crate::ptc::Budget {
-                        steps: 4096,
-                        ..Default::default()
-                    },
-                )
+            let (resolved, used) = type_context.structural_view_metered(
+                &ty.ty,
+                crate::ptc::Budget {
+                    steps: limits.arithmetic.steps.min(4096),
+                    ..Default::default()
+                },
+            );
+            limits.step(used).map_err(|e| error(Reason::Unknown(e)))?;
+            view = resolved
                 .ok()
                 .flatten()
                 .map(|(ty, _)| ty)
@@ -1143,16 +1150,18 @@ impl Walker<'_> {
         ) {
             return Ok(ty.clone());
         }
-        self.limits.step(4096)?;
-        Ok(self
-            .type_context
-            .structural_view(
-                ty,
-                crate::ptc::Budget {
-                    steps: 4096,
-                    ..Default::default()
-                },
-            )
+        // A query limit is not its cost. Charge the metered work, including
+        // failed lookups, so repeated generic scalar observations do not
+        // consume the entire allowance when no structural view is available.
+        let (view, used) = self.type_context.structural_view_metered(
+            ty,
+            crate::ptc::Budget {
+                steps: self.limits.arithmetic.steps.min(4096),
+                ..Default::default()
+            },
+        );
+        self.limits.step(used)?;
+        Ok(view
             .ok()
             .flatten()
             .map(|(view, _)| view)
@@ -3360,17 +3369,16 @@ impl Walker<'_> {
                 .find(|m| m.declaration == *member)
                 .ok_or(Reason::InvalidSignature)?;
             let parameters: Vec<_> = definition
-                .binders_with_self(&mut 100_000)
+                .binders_with_self(&mut self.limits.arithmetic.steps)
                 .map_err(|_| Reason::InvalidSignature)?
                 .into_iter()
                 .chain(
-                    method
-                        .type_parameters
-                        .iter()
-                        .map(|id| nir::DeclarationParameter {
-                            declaration: *id,
-                            sort: nir::Sort::Type,
-                        }),
+                    super::memory::memory_binders(
+                        self.package,
+                        &method.type_parameters,
+                        &mut self.limits.arithmetic.steps,
+                    )
+                    .map_err(|_| Reason::InvalidSignature)?,
                 )
                 .collect();
             let arguments: Vec<_> = std::iter::once(subject.clone())
@@ -5825,7 +5833,7 @@ impl Walker<'_> {
                     self.child(argument, state, depth)?;
                 }
             }
-            K::PointerType(value) | K::BitVecType(value) => {
+            K::OptionalType(value) | K::PointerType(value) | K::BitVecType(value) => {
                 self.child(value, state, depth)?;
             }
             K::FunctionResultType {
@@ -5849,6 +5857,32 @@ impl Walker<'_> {
                 self.child(right, state, depth)?;
                 // This layer tracks the evaluation, not type-theory equality.
                 // Its Bool result remains unknown without program evidence.
+            }
+            K::OptionalAbsent | K::OptionalPresent(_) => {
+                let Term::Optional(payload_type) = &expr.ty else {
+                    return Err(Reason::InvalidSignature);
+                };
+                let mut fields = Vec::new();
+                if let K::OptionalPresent(payload) = &expr.kind {
+                    if payload.ty != **payload_type {
+                        return Err(Reason::InvalidSignature);
+                    }
+                    let mut field = self.child(payload, state, depth)?;
+                    if matches!(payload.ty, Term::Pointer(_)) && field.pointer_target.is_none() {
+                        field.pointer_origins = self
+                            .pointer_value_origins(&field, state)?
+                            .map(|targets| (state.frame, targets));
+                    }
+                    field.evidence = self.prepare_copy(&field, state)?;
+                    fields.push(field.snapshot(self.limits, 0)?);
+                }
+                result.fields = Some(fields);
+                result.nominal_type = Some(std::sync::Arc::new(expr.ty.clone()));
+                result.aggregate_kind = Some(AggregateKind::Optional(matches!(
+                    expr.kind,
+                    K::OptionalPresent(_)
+                )));
+                result = self.materialize_aggregate(result, &expr.ty, state)?;
             }
             K::Tuple(values)
             | K::AnonymousRecord { fields: values }
@@ -6137,7 +6171,10 @@ impl Value {
         Ok(Self {
             unbounded_integer: *ty == Term::Primitive(nir::Primitive::Integer),
             range: domain(ty, limits)?,
-            nominal_type: if matches!(ty, Term::Nominal { .. } | Term::Record(_) | Term::Tuple(_)) {
+            nominal_type: if matches!(
+                ty,
+                Term::Optional(_) | Term::Nominal { .. } | Term::Record(_) | Term::Tuple(_)
+            ) {
                 Some(std::sync::Arc::new(ty.clone()))
             } else {
                 None
@@ -6801,7 +6838,7 @@ fn exportable_postcondition(
                 }
             }
             K::Local(id) if Some(*id) == binding || snapshots.iter().any(|s| s.binding == *id) => {}
-            K::Literal(_) | K::Unit => {}
+            K::Literal(_) | K::OptionalAbsent | K::Unit => {}
             // The selected associated constant has the same identity in the
             // callee's result contract and the caller's observation frame.
             // Its initializer is not executed by proof export.
@@ -7430,7 +7467,9 @@ fn invariant_conditional_targets(
                             AggregateKind::AnonymousRecord | AggregateKind::Tuple => {
                                 nir::program::FieldOwner::Anonymous
                             }
-                            AggregateKind::EnumTag(_) => return None,
+                            AggregateKind::EnumTag(_)
+                            | AggregateKind::Optional(_)
+                            | AggregateKind::OptionalTag => return None,
                         };
                         container.fields.push((owner, *index));
                         guarded = guarded.fields.as_ref()?.get(*index)?;

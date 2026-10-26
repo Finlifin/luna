@@ -301,6 +301,9 @@ fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>
         return Ok(Layout::Fields(fields.to_vec()));
     }
     match ty {
+        // Optional cleanup uses a private absent/present switch. Only the
+        // present branch owns a payload, including any nested optional value.
+        Term::Optional(payload) => Ok(Layout::Variants(vec![vec![], vec![(**payload).clone()]])),
         // Cleanup switch tags are local representation positions: success first,
         // then the retained error-row order. This is not error type identity.
         Term::ErrorResult { errors, result } => Ok(Layout::Variants(

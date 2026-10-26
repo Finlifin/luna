@@ -726,7 +726,7 @@ pub fn pointer_input_layout(
             }
             return Ok(());
         }
-        if matches!(ty, Term::ErrorResult { .. })
+        if matches!(ty, Term::ErrorResult { .. } | Term::Optional(_))
             || matches!(ty,Term::Nominal {declaration,..} if package.is_some_and(|p|p.enums.iter().any(|e|e.declaration==*declaration)))
         {
             for (tag, variant) in owned_variants(package, ty, fuel)?.into_iter().enumerate() {
@@ -881,6 +881,8 @@ pub(crate) fn owned_constructor<'a>(
         K::Tuple(fields) | K::AnonymousRecord { fields } | K::Record { fields, .. } => {
             Ok((fields, None))
         }
+        K::OptionalAbsent => Ok((&[], Some(0))),
+        K::OptionalPresent(value) => Ok((std::slice::from_ref(value.as_ref()), Some(1))),
         K::Variant { fields, index, .. } => Ok((fields, Some(*index))),
         K::ErrorConvert { conversion, value } => {
             use nir::error_results::Conversion;
@@ -935,6 +937,10 @@ pub(crate) fn owned_variant_pattern<'p>(
             }
             (*index, fields.as_slice())
         }
+        Pattern::OptionalAbsent if matches!(ty, Term::Optional(_)) => (0, &[][..]),
+        Pattern::OptionalPresent(inner) if matches!(ty, Term::Optional(_)) => {
+            (1, std::slice::from_ref(inner.as_ref()))
+        }
         Pattern::ErrorResult { label, inner } => {
             let Term::ErrorResult { errors, .. } = ty else {
                 return Err("error pattern requires an error result".into());
@@ -977,6 +983,23 @@ pub(crate) fn owned_variants(
     fuel: &mut usize,
 ) -> Result<Vec<nir::program::Variant>, String> {
     bound_type(ty, fuel)?;
+    if let Term::Optional(payload) = ty {
+        *fuel = fuel
+            .checked_sub(2)
+            .ok_or("optional variant layout budget exhausted")?;
+        return Ok(vec![
+            nir::program::Variant {
+                name: "absent".into(),
+                shape: nir::program::VariantShape::Unit,
+                fields: vec![],
+            },
+            nir::program::Variant {
+                name: "present".into(),
+                shape: nir::program::VariantShape::Tuple,
+                fields: vec![(**payload).clone()],
+            },
+        ]);
+    }
     if let Term::ErrorResult { errors, result } = ty {
         return Ok(std::iter::once(result.as_ref())
             .chain(errors.iter())
@@ -1351,7 +1374,7 @@ fn extend_storage_projection(
                 Term::Nominal { declaration, .. } => {
                     nir::program::FieldOwner::Nominal(*declaration)
                 }
-                Term::ErrorResult { .. } => nir::program::FieldOwner::Anonymous,
+                Term::ErrorResult { .. } | Term::Optional(_) => nir::program::FieldOwner::Anonymous,
                 _ => return Err("storage variant owner has no variant layout".into()),
             };
             let selected = owned_variants(package, &result.ty, fuel)?
@@ -1419,7 +1442,7 @@ fn owned_callable_bottom(
             leaves.insert(path, CallableResult::NoReturn);
             continue;
         }
-        if matches!(&ty, Term::ErrorResult { .. })
+        if matches!(&ty, Term::ErrorResult { .. } | Term::Optional(_))
             || matches!(&ty,Term::Nominal {declaration,..} if package.is_some_and(|p|p.enums.iter().any(|e|e.declaration==*declaration)))
         {
             for (variant, definition) in owned_variants(package, &ty, fuel)?.into_iter().enumerate()
@@ -2021,6 +2044,7 @@ fn storage_representation(
             return Ok(code);
         }
         let fields = match ty {
+            Term::Optional(payload) => vec![(**payload).clone()],
             Term::ErrorResult { errors, result } => {
                 let mut fields = errors.clone();
                 if !matches!(result.as_ref(), Term::Primitive(nir::Primitive::Never)) {
@@ -2129,6 +2153,7 @@ pub(crate) fn require_pointer_free_owned(
                 ..
             } => fields.clone(),
             Term::Record(fields) => fields.iter().map(|(_, ty)| ty.clone()).collect(),
+            Term::Optional(payload) => vec![(**payload).clone()],
             Term::ErrorResult { errors, result } => {
                 let mut fields = errors.clone();
                 fields.push((**result).clone());
@@ -2413,7 +2438,8 @@ impl<'a> Infer<'a, '_> {
             let parameter = parameters
                 .get(input.parameter)
                 .ok_or("prepared code parameter is missing")?;
-            let expected = owned_path_type(self.package, &parameter.ty, &input.fields, self.fuel)?;
+            let mut expected =
+                owned_path_type(self.package, &parameter.ty, &input.fields, self.fuel)?;
             if !matches!(
                 expected,
                 Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
@@ -2453,7 +2479,11 @@ impl<'a> Infer<'a, '_> {
                                 "prepared closure evidence requires a closure definition".into()
                             );
                         };
-                        if self.ty(&definition.ty)? != expected {
+                        let actual = self.ty(&definition.ty)?;
+                        if actual != expected {
+                            expected = self.completed_type_view(&expected)?;
+                        }
+                        if actual != expected {
                             return Err(
                                 "prepared closure signature disagrees with parameter".into()
                             );
@@ -2551,6 +2581,26 @@ impl<'a> Infer<'a, '_> {
         let ty = self.type_view(ty)?;
         require_pointer_free_owned(self.package, &ty, self.fuel, depth)
     }
+    fn completed_type_view(&mut self, ty: &Term) -> Result<Term, String> {
+        if let Some(value) = self.type_views.get(ty) {
+            bound_type(value, self.fuel)?;
+            return Ok(value.clone());
+        }
+        let package = self
+            .package
+            .ok_or("completed type view requires a package")?;
+        // Complete nested associated views within the invocation's budget,
+        // while reserving work for the remaining provenance checks.
+        let allowance = *self.fuel / 2;
+        *self.fuel -= allowance;
+        let mut remaining = allowance;
+        let value = crate::materialization::normalize_concrete_type(package, ty, &mut remaining);
+        *self.fuel += remaining;
+        let value = value?;
+        self.type_views.insert(ty.clone(), value.clone());
+        Ok(value)
+    }
+
     fn type_view(&mut self, ty: &Term) -> Result<Term, String> {
         if !matches!(
             ty,
@@ -3275,13 +3325,15 @@ impl<'a> Infer<'a, '_> {
                 }
                 Ok(true)
             }
-            K::Variant { index, fields, .. } => {
+            K::Variant { .. } | K::OptionalPresent(_) | K::OptionalAbsent => {
+                let (fields, tag) = owned_constructor(value, self.fuel)?;
+                let index = tag.ok_or("sum constructor is missing its branch")?;
                 let ty = self.ty(&value.ty)?;
                 owned_path_type(self.package, &ty, path, self.fuel)?;
                 if path.len() < 3 || path[0] != VARIANT_FIELD {
                     return Ok(false);
                 }
-                if path[1] != *index {
+                if path[1] != index {
                     return Ok(true);
                 }
                 match fields.get(path[2]) {
@@ -4043,7 +4095,10 @@ impl<'a> Infer<'a, '_> {
                 }
                 Ok(())
             }
-            Pattern::Variant { .. } | Pattern::ErrorResult { .. } => {
+            Pattern::OptionalAbsent
+            | Pattern::OptionalPresent(_)
+            | Pattern::Variant { .. }
+            | Pattern::ErrorResult { .. } => {
                 let (tag, patterns, fields) =
                     owned_variant_pattern(self.package, pattern, ty, self.fuel)?;
                 let index = &tag;
@@ -5088,7 +5143,7 @@ impl<'a> Infer<'a, '_> {
     ) -> Result<(), String> {
         self.step(depth)?;
         match pattern {
-            Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => Ok(()),
+            Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => Ok(()),
             // Computed results are subsequently traversed by bind_owned_callees,
             // which owns guard/computation effects. This pass installs only
             // subject pointer bindings before that traversal.
@@ -5180,7 +5235,7 @@ impl<'a> Infer<'a, '_> {
     ) -> Result<(), String> {
         self.step(depth)?;
         match pattern {
-            Pattern::ErrorResult { inner, .. } => {
+            Pattern::OptionalPresent(inner) | Pattern::ErrorResult { inner, .. } => {
                 self.check_guard_pattern(inner, bindings, depth + 1)
             }
             Pattern::CodeEvidence { .. } => Err("unresolved pattern-code evidence".into()),
@@ -5235,7 +5290,7 @@ impl<'a> Infer<'a, '_> {
                 }
                 Ok(())
             }
-            Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => Ok(()),
+            Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => Ok(()),
         }
     }
     fn check_guard(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
@@ -5254,11 +5309,17 @@ impl<'a> Infer<'a, '_> {
                             | Term::Tuple(_)
                             | Term::NormalForm { .. }
                             | Term::ErrorResult { .. }
+                            | Term::Optional(_)
                     )
                 };
                 constructed = matches!(
                     node.kind,
-                    K::Tuple(_) | K::AnonymousRecord { .. } | K::Record { .. } | K::Variant { .. }
+                    K::Tuple(_)
+                        | K::AnonymousRecord { .. }
+                        | K::Record { .. }
+                        | K::Variant { .. }
+                        | K::OptionalPresent(_)
+                        | K::OptionalAbsent
                 ) || matches!(&node.kind, K::Call { arguments, .. } if owned(&node.ty) || arguments.iter().any(|argument| owned(&argument.value.ty)));
                 Ok(!constructed)
             })?;
@@ -6257,6 +6318,8 @@ impl<'a> Infer<'a, '_> {
             K::AnonymousRecord { .. }
             | K::Record { .. }
             | K::Variant { .. }
+            | K::OptionalPresent(_)
+            | K::OptionalAbsent
             | K::Tuple(_)
             | K::ErrorConvert { .. } => {
                 let (fields, variant) = owned_constructor(expr, self.fuel)?;
@@ -6370,8 +6433,12 @@ impl<'a> Infer<'a, '_> {
                         return Err("memory field projection declaration mismatch".into());
                     }
                 }
-                let field = owned_path_type(self.package, &parent, &[*index], self.fuel)?;
-                if field != self.ty(&expr.ty)? {
+                let mut field = owned_path_type(self.package, &parent, &[*index], self.fuel)?;
+                let actual = self.ty(&expr.ty)?;
+                if field != actual {
+                    field = self.completed_type_view(&field)?;
+                }
+                if field != actual {
                     return Err("memory field projection type mismatch".into());
                 }
                 let view = self.type_view(&field)?;
@@ -6994,26 +7061,7 @@ impl<'a> Infer<'a, '_> {
                     let matches = if next.signature == signature {
                         true
                     } else {
-                        let normalized = if let Some(value) = self.type_views.get(&signature) {
-                            bound_type(value, self.fuel)?;
-                            value.clone()
-                        } else {
-                            // As with structural views, give this type query a
-                            // bounded slice rather than half of all remaining
-                            // memory-analysis work through proof reservation.
-                            let allowance = (*self.fuel).min(4096);
-                            *self.fuel -= allowance;
-                            let mut remaining = allowance;
-                            let value = crate::materialization::normalize_concrete_type(
-                                package,
-                                &signature,
-                                &mut remaining,
-                            );
-                            *self.fuel += remaining;
-                            let value = value?;
-                            self.type_views.insert(signature.clone(), value.clone());
-                            value
-                        };
+                        let normalized = self.completed_type_view(&signature)?;
                         next.signature == normalized
                     };
                     if !matches {
@@ -7627,17 +7675,15 @@ fn selected_method_callee(
     } else {
         crate::materialization::resolve_method_instance(package, callee, fuel)?
     };
-    let body = package
-        .functions
-        .iter()
-        .chain(&package.quote_templates)
-        .find(|function| function.declaration == method.body)
-        .ok_or("selected memory method body is unavailable")?;
+    // Use the same residual body as memory inference. Selecting the original
+    // generic signature here reintroduces associated projections that the
+    // concrete instance has already resolved.
+    let (body, body_arguments) = package.runtime_body_checked(method.body, &method.arguments)?;
     bound_type(&body.signature, fuel)?;
     let binders = memory_binders(Some(package), &body.type_parameters, fuel)?;
     let signature = body
         .signature
-        .instantiate_parameters(&binders, &method.arguments)
+        .instantiate_parameters(&binders, body_arguments)
         .map_err(|reason| reason.to_string())?;
     Ok(Expr {
         source: callee.source,
@@ -8000,8 +8046,15 @@ pub(crate) fn bound_type(ty: &Term, fuel: &mut usize) -> Result<(), String> {
                 pending.push((subject, depth + 1));
                 pending.extend(arguments.iter().map(|ty| (ty, depth + 1)));
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
-                pending.push((inner, depth + 1))
+            Term::Optional(inner)
+            | Term::Pointer(inner)
+            | Term::ComptimeFunction(inner)
+            | Term::UnsafeFunction(inner) => pending.push((inner, depth + 1)),
+            Term::OptionalValue { ty, value } => {
+                pending.push((ty, depth + 1));
+                if let Some(value) = value {
+                    pending.push((value, depth + 1));
+                }
             }
             Term::ErrorValue { ty, label, value } => {
                 pending.push((ty, depth + 1));
@@ -8199,6 +8252,7 @@ fn derive_with_borrowed(
             | Term::NormalForm { .. }
             | Term::Closure { .. }
             | Term::ErrorResult { .. }
+            | Term::Optional(_)
     ) && pointer_representation(Some(package), result_value, fuel)?
         .is_none()
     {
@@ -10263,5 +10317,70 @@ mod pointer_root_tests {
             dump.chars().filter(|c| *c == '(').count(),
             dump.chars().filter(|c| *c == ')').count()
         );
+    }
+}
+
+#[cfg(test)]
+mod optional_layout_tests {
+    use super::*;
+
+    #[test]
+    fn nested_optional_pointer_inputs_require_both_presence_guards() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let ty = Term::Optional(Box::new(Term::Optional(Box::new(Term::Pointer(Box::new(
+            boolean.clone(),
+        ))))));
+        let leaves = pointer_input_layout(None, &ty, &mut 10000).unwrap();
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(
+            leaves[0].input_fields,
+            vec![VARIANT_FIELD, 1, 0, VARIANT_FIELD, 1, 0]
+        );
+        assert_eq!(leaves[0].storage_fields, vec![0, 0]);
+        assert_eq!(leaves[0].guards, vec![(vec![], 1), (vec![0], 1)]);
+        assert_eq!(leaves[0].pointee, boolean);
+        let projection =
+            project_owned_storage(None, &ty, &leaves[0].input_fields, &mut 10000).unwrap();
+        assert_eq!(projection.guards, leaves[0].guards);
+        assert_eq!(projection.ty, Term::Pointer(Box::new(boolean)));
+        assert!(project_owned_storage(None, &ty, &[VARIANT_FIELD, 0, 0], &mut 10000).is_err());
+        assert!(require_pointer_free_owned(None, &ty, &mut 10000, 0).is_err());
+        assert!(pointer_input_layout(None, &ty, &mut 0).is_err());
+    }
+
+    #[test]
+    fn optional_owned_paths_keep_each_layer_and_absence_has_no_payload() {
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let inner = Term::Optional(Box::new(boolean.clone()));
+        let outer = Term::Optional(Box::new(inner.clone()));
+        let absent = Pattern::OptionalAbsent;
+        let present = Pattern::OptionalPresent(Box::new(Pattern::Wild));
+        let (tag, patterns, fields) =
+            owned_variant_pattern(None, &absent, &outer, &mut 1000).unwrap();
+        assert_eq!(tag, 0);
+        assert!(patterns.is_empty() && fields.is_empty());
+        let (tag, patterns, fields) =
+            owned_variant_pattern(None, &present, &outer, &mut 1000).unwrap();
+        assert_eq!(tag, 1);
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(fields, vec![inner.clone()]);
+        assert_eq!(
+            owned_path_type(None, &outer, &[VARIANT_FIELD, 1, 0], &mut 1000).unwrap(),
+            inner
+        );
+        assert_eq!(
+            owned_path_type(
+                None,
+                &outer,
+                &[VARIANT_FIELD, 1, 0, VARIANT_FIELD, 1, 0],
+                &mut 1000
+            )
+            .unwrap(),
+            boolean
+        );
+        assert!(owned_path_type(None, &outer, &[VARIANT_FIELD, 0, 0], &mut 1000).is_err());
+        assert!(owned_variant_pattern(None, &present, &boolean, &mut 1000).is_err());
+        assert!(owned_variants(None, &outer, &mut 0).is_err());
+        assert!(owned_variants(None, &outer, &mut 1000).is_ok());
     }
 }

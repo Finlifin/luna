@@ -265,6 +265,23 @@ impl Builder<'_> {
                     body: closure.body().clone(),
                 }
             }
+            Value::Optional { ty: actual, value } => {
+                if actual != *ty {
+                    return Err("staged optional identity mismatch".into());
+                }
+                let Term::Optional(payload) = ty else {
+                    return Err("staged optional type missing".into());
+                };
+                match value {
+                    None => K::OptionalAbsent,
+                    Some(value) => K::OptionalPresent(Box::new(self.freeze_staged_value(
+                        *value,
+                        payload,
+                        source,
+                        depth + 1,
+                    )?)),
+                }
+            }
             Value::ErrorResult {
                 ty: actual,
                 error,
@@ -345,6 +362,28 @@ impl Builder<'_> {
             Value::SignedInteger(v) => K::Literal(n::Literal::SignedInteger(v)),
             Value::UnsignedInteger(v) => K::Literal(n::Literal::UnsignedInteger(v)),
             Value::Type(v) => K::TypeValue(v),
+            Value::List { ty: actual, values } => {
+                if actual != *ty {
+                    return Err("staged list type identity mismatch".into());
+                }
+                let element = self
+                    .package
+                    .normal_forms
+                    .iter()
+                    .find_map(|head| head.list_element(ty))
+                    .cloned()
+                    .ok_or("staged list requires trusted meta.List")?;
+                self.fuel = self
+                    .fuel
+                    .checked_sub(values.len())
+                    .ok_or("staged list budget exhausted")?;
+                K::TypeList(
+                    values
+                        .into_iter()
+                        .map(|value| self.freeze_staged_value(value, &element, source, depth + 1))
+                        .collect::<Result<_, _>>()?,
+                )
+            }
             Value::TypeList(types) => {
                 if !nir::normal_forms::type_list_input_type(ty)
                     || !self.package.normal_forms.iter().any(|head| {

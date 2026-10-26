@@ -108,6 +108,7 @@ pub(crate) fn effect_transfer_layout(
     if !matches!(
         ty,
         Term::Pointer(_)
+            | Term::Optional(_)
             | Term::Function { .. }
             | Term::UnsafeFunction(_)
             | Term::Closure { .. }
@@ -178,6 +179,13 @@ fn effect_storage_layout(
         fields.to_vec()
     } else {
         match ty {
+            Term::Optional(payload) => {
+                if **payload == Term::Primitive(Primitive::Never) {
+                    vec![]
+                } else {
+                    vec![(**payload).clone()]
+                }
+            }
             Term::Closure { environment, .. } if allow_code => environment.clone(),
             Term::Record(fields) => fields.iter().map(|(_, ty)| ty.clone()).collect(),
             Term::ErrorResult { errors, result } => {
@@ -510,7 +518,7 @@ impl<'a> Infer<'a, '_> {
     ) -> Result<(), String> {
         self.step(depth)?;
         match pattern {
-            Pattern::ErrorResult { .. } => {
+            Pattern::OptionalAbsent | Pattern::OptionalPresent(_) | Pattern::ErrorResult { .. } => {
                 // Data-only classification includes both success and error
                 // payloads. Retain the selected row label and payload type
                 // instead of falling back to scalar/pointer binding.
@@ -1406,9 +1414,9 @@ fn infer_handler_arm_memory_with_captures(
                         .ok_or("handler field budget exhausted")?;
                     pending.extend(fields);
                 }
-                Pattern::ErrorResult { inner: pattern, .. } | Pattern::Guard { pattern, .. } => {
-                    pending.push(pattern)
-                }
+                Pattern::OptionalPresent(pattern)
+                | Pattern::ErrorResult { inner: pattern, .. }
+                | Pattern::Guard { pattern, .. } => pending.push(pattern),
                 Pattern::Then { first, next, .. } => {
                     pending.push(first);
                     pending.push(next);
@@ -1416,7 +1424,7 @@ fn infer_handler_arm_memory_with_captures(
                 Pattern::CodeEvidence { .. } => {
                     return Err("handler has unresolved pattern code".into());
                 }
-                Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
+                Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
             }
         }
         Ok(())

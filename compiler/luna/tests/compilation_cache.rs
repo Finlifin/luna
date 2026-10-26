@@ -126,7 +126,7 @@ fn request_keys_and_lru_capacity_bound_reuse() {
     assert!(cache.compile(&a).unwrap().reused);
     assert!(!cache.compile(&b).unwrap().reused);
     let mut invalid = a.clone();
-    invalid.options.tuple_type = Some("missing::Tuple".into());
+    invalid.options.tuple_type = Some("missing.Tuple".into());
     assert!(cache.compile(&invalid).is_err());
     assert_eq!(cache.len(), 2);
     cache.clear();
@@ -192,6 +192,72 @@ fn dependency_contents_and_edges_participate_in_reuse() {
     assert!(cache.is_empty());
     files.write("provider.fl", "pub fn answer()->bool {true}");
     assert!(!cache.compile(&request).unwrap().reused);
+}
+
+#[test]
+fn merged_attributes_track_constructor_changes_and_recover_from_invalid_objects() {
+    let files = Files::new();
+    files.write("client.fl", "^attrs.abi(.c) fn run() {}");
+    let constructor = include_str!("../../../library/attrs/lib.fl");
+    files.write("attrs.fl", constructor);
+    let mut request = files.request("client.fl");
+    request.options.emit = luna::cli::Emit::MergedAttributes;
+    request.packages.push(luna::packages::SourcePackage {
+        resolution_id: 2,
+        identity: 202,
+        name: "attrs".into(),
+        entry: files.0.join("attrs.fl"),
+    });
+    request.dependencies.push((1, "attrs".into(), 2));
+    let mut cache = CompilationCache::new(2);
+    let first = cache.compile(&request).unwrap();
+    let report = first.compilation.artifact.to_string();
+    assert!(report.contains("(key \"abi\") (entry 0)"), "{report}");
+    assert!(cache.compile(&request).unwrap().reused);
+
+    files.write(
+        "attrs.fl",
+        &constructor.replace("{abi: name}", "{abi: name, abi: .changed}"),
+    );
+    let changed = cache.compile(&request).unwrap();
+    assert!(!changed.reused);
+    let changed_report = changed.compilation.artifact.to_string();
+    assert!(
+        changed_report.contains("(key \"abi\") (entry 1)"),
+        "{changed_report}"
+    );
+    assert!(
+        changed_report.contains("(symbol \"changed\")"),
+        "{changed_report}"
+    );
+    assert_eq!(first.compilation.artifact.to_string(), report);
+
+    files.write("attrs.fl", &constructor.replace("{abi: name}", "{name}"));
+    let failure = cache
+        .compile(&request)
+        .err()
+        .expect("positional metadata must fail merging");
+    assert!(failure.contains("positional"), "{failure}");
+    assert!(
+        cache.is_empty(),
+        "a failed replacement must evict the stale selection"
+    );
+    let mut raw = request.clone();
+    raw.options.emit = luna::cli::Emit::Attributes;
+    assert!(!cache.compile(&raw).unwrap().reused);
+    assert!(cache.compile(&raw).unwrap().reused);
+    assert!(
+        cache.compile(&request).is_err(),
+        "raw inspection cannot satisfy a merged request"
+    );
+
+    files.write("attrs.fl", constructor);
+    let recovered = cache.compile(&request).unwrap();
+    assert!(!recovered.reused);
+    assert_eq!(recovered.compilation.artifact.to_string(), report);
+    assert!(cache.compile(&request).unwrap().reused);
+    assert!(!cache.compile(&raw).unwrap().reused);
+    assert!(cache.compile(&raw).unwrap().reused);
 }
 
 #[cfg(unix)]

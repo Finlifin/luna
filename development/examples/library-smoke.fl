@@ -1,6 +1,6 @@
 -- Compiled against the actual sysroot and its language-item manifest.
 fn run() -> bool {
-    let present: ?bool = .Some(true);
-    let absent: ?bool = .None;
-    present.unwrap_or(false) and absent.unwrap_or(true)
+    let present: ?bool = true;
+    let absent: ?bool = null;
+    present.as(OptionalOps<bool>).unwrap_or(false) and absent.as(OptionalOps<bool>).unwrap_or(true)
 }

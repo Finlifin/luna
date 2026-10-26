@@ -609,8 +609,8 @@ fn pattern_variadic_collections_preserve_the_registered_tuple_head() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -2874,8 +2874,8 @@ fn generator_data_uses_the_bound_tuple_head_and_anonymous_record_schema() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -3793,8 +3793,8 @@ fn generator_variadic_collection_uses_the_registered_tuple_constructor() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -4100,8 +4100,8 @@ fn generator_explicit_registered_tuple_results_determine_layout() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -4140,8 +4140,8 @@ fn generator_spread_packets_retain_registered_tuple_identity() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -5263,8 +5263,7 @@ fn compile_bit_generator(source: &str) -> Result<nir::program::Package, String> 
         impl Operation<Bits1> for Bits1 {assoc Output:.Type'builtin=Bits1;
             pure comptime fn add(self,rhs:Bits1)->Bits1 {self or rhs}}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
-    selectors.arithmetic[elaboration::arithmetic::Operator::Add as usize] =
-        Some("input::Operation");
+    selectors.arithmetic[elaboration::arithmetic::Operator::Add as usize] = Some("input.Operation");
     support::compile_with_source_bindings(
         &format!("{prelude} {source}"),
         &Default::default(),
@@ -5795,8 +5794,8 @@ fn generator_local_type_lists_drive_registered_tuple_instantiation() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -5832,8 +5831,8 @@ fn generator_type_list_aliases_support_named_and_empty_collection_inputs() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -5859,8 +5858,8 @@ fn generator_type_list_evidence_does_not_run_unknown_element_functions() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -6396,8 +6395,8 @@ fn generic_variadic_producer_hints_preserve_registered_tuple_heads() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -6660,8 +6659,8 @@ fn static_normal_tuple_inputs_support_generic_producer_inference() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -6765,8 +6764,8 @@ fn static_normal_tuple_evidence_uses_completed_type_lists() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -7369,8 +7368,8 @@ fn generator_collection_evidence_preserves_registered_tuple_identity() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -7425,8 +7424,8 @@ fn generator_partial_collections_propagate_nested_evidence_and_keep_tuple_heads(
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: registered.then_some("input::List"),
-                tuple: registered.then_some("input::Tuple"),
+                meta_list: registered.then_some("input.List"),
+                tuple: registered.then_some("input.Tuple"),
                 ..Default::default()
             },
         );
@@ -7663,8 +7662,8 @@ fn generator_collection_fields_preserve_source_order_and_registered_tuple_heads(
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -7730,8 +7729,8 @@ fn generator_named_literal_packets_keep_order_and_tuple_identity() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )

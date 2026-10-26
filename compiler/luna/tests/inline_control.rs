@@ -1537,8 +1537,8 @@ fn tuple_enumeration_recognizes_the_bound_tuple_normal_form() {
          fn pending(value:Tuple<bool,.u8'builtin>) {let view=value'tuple_enumerate;}",
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -3522,7 +3522,7 @@ fn aggregate_default_calls_preserve_nested_pointer_fields() {
         fn run()->bool {let a:Byte=20;let p=a.ref;
             read(p.ref)==23 and deep(p.ref)==23 and chain(p.ref)==23 and forward(p.ref)==23}",
         &Default::default(), luna::protocols::type_constructors::Selectors {
-            copy: Some("input::Copy"), drop: Some("input::Drop"), ..Default::default()
+            copy: Some("input.Copy"), drop: Some("input.Drop"), ..Default::default()
         }
     )
     .unwrap();
@@ -3626,8 +3626,8 @@ fn readonly_tuple_results_keep_normal_form_and_pointer_origins() {
             first.* + 3 == 13 and second.* + 3 == 23 and checked(p.ref,q.ref)==23}",
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -3658,8 +3658,8 @@ fn readonly_tuple_results_do_not_swap_field_bounds() {
             ),
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -3850,8 +3850,8 @@ fn loop_saved_tuple_pointer_fields_preserve_disjoint_ranges() {
         fn run()->bool {checked(true) and checked(false)}",
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -3874,8 +3874,8 @@ fn loop_saved_tuple_fields_track_parent_replacement_and_siblings() {
             &format!("{prefix}{body}"),
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -4478,7 +4478,7 @@ fn inline_type_tuple_patterns_use_protocol_views_and_definite_mismatches() {
         &format!("{source} pure comptime fn List<T>->Type {{T}} pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}"),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list:Some("input::List"),tuple:Some("input::Tuple"),..Default::default()
+            meta_list:Some("input.List"),tuple:Some("input.Tuple"),..Default::default()
         },
     ).unwrap();
     for package in [&fixture_bound, &bound] {
@@ -4644,7 +4644,7 @@ fn tuple_enumeration_executes_with_the_bound_tuple_head() {
         fn walk(value:Tuple<bool,.u8'builtin>) {inline for (index,element) in value'tuple_enumerate {let held=element;visit();}}
         fn run()->bool {walk((true,7));true}",
         &Default::default(),
-        luna::protocols::type_constructors::Selectors {meta_list:Some("input::List"),tuple:Some("input::Tuple"),..Default::default()}
+        luna::protocols::type_constructors::Selectors {meta_list:Some("input.List"),tuple:Some("input.Tuple"),..Default::default()}
     ).unwrap();
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(

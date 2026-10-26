@@ -3036,3 +3036,98 @@ fn coherence_proof_budget_is_not_diluted_by_unrelated_interfaces() {
     assert!(!index.check_type_coherence(&context, budget).is_proved());
     assert!(!index.verify_type_coherence(&report, &context, budget));
 }
+
+#[test]
+fn optional_candidates_preserve_payload_inference_and_distinct_outer_heads() {
+    use elaboration::ptc::Context;
+    let optional = |t| Term::Optional(Box::new(t));
+    let opaque = Term::NormalForm {
+        head: id(500),
+        sort: Sort::Type,
+        arguments: vec![optional(var(1))],
+    };
+    assert_eq!(
+        Key::from_type(&opaque, Budget::default())
+            .unwrap()
+            .precision(),
+        0
+    );
+    let mut generic = head(200, optional(var(1)));
+    generic.type_parameters = vec![id(1)];
+    let concrete = optional(ty(P::Bool));
+    let mut index = Index::default();
+    index.insert(generic.clone(), Budget::default()).unwrap();
+    add(&mut index, 201, Term::Pointer(Box::new(var(1))));
+    let candidates = index
+        .candidates(Some(id(100)), &[], &concrete, Budget::default())
+        .unwrap();
+    assert!(candidates.declarations().contains(&id(200)));
+    assert!(!candidates.declarations().contains(&id(201)));
+    let context = Context::default();
+    let matched = generic
+        .match_types(&concrete, &[], &context, Budget::default())
+        .unwrap();
+    generic
+        .verify_head_match(&matched, &concrete, &[], &context, Budget::default())
+        .unwrap();
+    assert!(
+        generic
+            .verify_head_match(
+                &matched,
+                &optional(ty(P::Char)),
+                &[],
+                &context,
+                Budget::default()
+            )
+            .is_err()
+    );
+    assert!(
+        Key::from_type(&concrete, Budget::default())
+            .unwrap()
+            .to_string()
+            .contains("optional")
+    );
+}
+
+#[test]
+fn optional_value_indices_infer_type_leaves_and_replay_presence() {
+    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    let context = Context::default();
+    let wrap = |value| Term::OptionalValue {
+        ty: Box::new(Term::Optional(Box::new(ty(P::Type)))),
+        value,
+    };
+    let mut h = head(801, ty(P::Bool));
+    h.type_parameters = vec![id(1)];
+    h.parameter_types = vec![ty(P::Type)];
+    h.interface_arguments = vec![wrap(Some(Box::new(var(1))))];
+    let query = vec![wrap(Some(Box::new(ty(P::Char))))];
+    let result = h.assess_types(&ty(P::Bool), &query, &context, Budget::default());
+    let TypeAssessment::Applicable(evidence) = result else {
+        panic!("{result:?}")
+    };
+    assert_eq!(evidence.type_arguments, vec![ty(P::Char)]);
+    h.verify_type_evidence(&evidence, &ty(P::Bool), &query, &context, Budget::default())
+        .unwrap();
+    let absent = vec![wrap(None)];
+    assert!(!matches!(
+        h.assess_types(&ty(P::Bool), &absent, &context, Budget::default()),
+        TypeAssessment::Applicable(_)
+    ));
+    assert!(
+        h.verify_type_evidence(
+            &evidence,
+            &ty(P::Bool),
+            &absent,
+            &context,
+            Budget::default()
+        )
+        .is_err()
+    );
+    assert_eq!(
+        Key::from_type(&wrap(Some(Box::new(var(1)))), Budget::default())
+            .unwrap()
+            .precision(),
+        0
+    );
+}

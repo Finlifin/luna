@@ -756,7 +756,10 @@ impl Walker<'_> {
     pub(super) fn result_root(&mut self, ty: &Term) -> Result<Option<PlaceId>, Reason> {
         let integer = matches!(ty, Term::Primitive(p) if self.integer_layout(*p).is_some() || matches!(p, nir::Primitive::Bool | nir::Primitive::Integer));
         if !integer
-            && !matches!(ty, Term::Tuple(_) | Term::Record(_) | Term::Nominal { .. })
+            && !matches!(
+                ty,
+                Term::Optional(_) | Term::Tuple(_) | Term::Record(_) | Term::Nominal { .. }
+            )
             && self.tuple_field_types(ty)?.is_none()
         {
             return Ok(None);

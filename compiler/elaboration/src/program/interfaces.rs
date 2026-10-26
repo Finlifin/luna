@@ -397,6 +397,7 @@ impl Checker<'_, '_> {
                     subject,
                     Term::Nominal { .. }
                         | Term::ErrorResult { .. }
+                        | Term::Optional(_)
                         | Term::Primitive(_)
                         | Term::Tuple(_)
                         | Term::Record(_)
@@ -495,7 +496,7 @@ impl Checker<'_, '_> {
                     "implementation overlap is not provably disjoint{}",
                     pair.map_or_else(
                         || " (coherence budget or proof replay incomplete)".into(),
-                        |(left, right, _)| format!(" between {left} and {right}")
+                        |(left, right, reason)| format!(" between {left} and {right}: {reason}")
                     )
                 ),
             ));
@@ -2826,15 +2827,25 @@ impl Checker<'_, '_> {
         budget: Budget,
         span: Span,
     ) -> Result<Term, Error> {
+        self.callable_input_view_metered(signature, &mut { budget }, span)
+    }
+
+    pub(super) fn callable_input_view_metered(
+        &self,
+        signature: &Term,
+        budget: &mut Budget,
+        span: Span,
+    ) -> Result<Term, Error> {
         // This view is also used for complete interface argument vectors.
         // A finished scalar index has no associated Type projection to solve.
         if signature.is_structural_index_value() {
-            let mut fuel = budget.steps;
-            crate::associated::charge_projection_copy(signature, &mut fuel)
+            crate::associated::charge_projection_copy(signature, &mut budget.steps)
                 .map_err(|e| error(span, e))?;
             return Ok(signature.clone());
         }
         if !self.interfaces_ready {
+            crate::associated::charge_projection_copy(signature, &mut budget.steps)
+                .map_err(|e| error(span, e))?;
             return Ok(signature.clone());
         }
         if !signature
@@ -2857,7 +2868,7 @@ impl Checker<'_, '_> {
             scoped
                 .check_scope(&[])
                 .map_err(|e| error(span, e.to_string()))?;
-            let checked = self.callable_input_view_budgeted(&scoped, budget, span)?;
+            let checked = self.callable_input_view_metered(&scoped, budget, span)?;
             let Term::Function { result, .. } = checked else {
                 unreachable!()
             };
@@ -2871,7 +2882,7 @@ impl Checker<'_, '_> {
             assumptions: &assumptions,
             context: &self.context,
         }
-        .associated_type_view(signature, budget)
+        .associated_type_view_metered(signature, budget)
         .map(|value| value.value)
         .map_err(|message| error(span, message))
     }

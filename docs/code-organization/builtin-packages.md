@@ -30,6 +30,8 @@ attribute -> ^expr
 | attrs | 语言提供的属性构造接口 |
 | verification | 程序验证所需的对象和操作，例如 Set、Map |
 
+str 归 builtin，String 归 std，内存模块使用 mem 命名。Flurry 不提供 Option/Result 库枚举；可选类型和错误结果遵循各自的语言语义。
+
 所属包不替代接口自己的阶段与效果要求。meta 的操作仍需满足相应 comptime 契约；verification 中的程序状态规格也不因此成为 PTC 的类型命题。
 
 ### Prelude
@@ -39,6 +41,12 @@ builtin、meta、build、attrs、verification 各自的 prelude 默认导入，�
 std.prelude 不默认导入。需要时在包根写 use std.prelude.*；子模块通过普通父级查找使用这些绑定。若两个 prelude 路径提供相同原始声明，按身份去重；真正不同的同名来源仍按通配歧义处理。
 
 哪些名称由某个 prelude 提供，取决于该 prelude 的成员。不能仅凭一个名字常见，就跳过导入规则。
+
+math 属于 builtin，通过 builtin.prelude 导出 math 模块入口；常用路径为
+`math.sqrt(...)`，也可以显式使用 `builtin.math.sqrt(...)`。它不是第七个
+内置包。math 同时提供 Eq、Ord、Ordering 等比较协议；这些协议经其他入口
+再导出时保留原始声明身份。math 中的数值 intrinsic 函数是 LLVM intrinsic
+的泛型包装，仍按具体操作的类型与目标契约检查，不因默认可见而改变数值语义。
 
 ### 属性名称
 
@@ -142,7 +150,7 @@ comptime {
 
 ## 与 Rust / Zig / C / C++ 的关键差异
 
-Rust 有由语言版本及 crate 设置决定的 prelude；Flurry 区分自动的 builtin.prelude 与显式的 std.prelude，导入后采用普通通配竞争规则。[Rust prelude](https://doc.rust-lang.org/reference/names/preludes.html)
+Rust 有由语言版本及 crate 设置决定的 prelude；Flurry 区分五个默认内置包 prelude 与显式的 std.prelude，导入后采用普通通配竞争规则。[Rust prelude](https://doc.rust-lang.org/reference/names/preludes.html)
 
 Zig 可导入 std 与构建相关的 builtin 信息；Flurry 把基础语言内容、编译时接口和构建信息分别放在 builtin、meta、build 的职责下。[Zig import](https://ziglang.org/documentation/master/#import)
 
@@ -156,7 +164,7 @@ C/C++ 的标准头文件和 C++ 库模块提供库声明，预处理定义可承
 
 ## 编译器实现引导
 
-建立包根时，把 builtin.prelude 的导入作为明确的来源记录，排除 builtin 自身。其绑定使用普通通配优先级与身份去重，不建立一套绕过解析器的内建短名快表。
+建立包根时，按已登记的内置包身份记录五个默认 prelude 来源，分别排除提供者自身；std 不参与默认注入。其绑定使用普通通配优先级与身份去重，不建立一套绕过解析器的内建短名快表。
 
 属性表达式直接复用普通名称解析结果；属性检查只处理阶段、Object 结果和附着目标。这样属性位置与普通位置不会选择不同的同名声明。
 

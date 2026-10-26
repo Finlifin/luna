@@ -173,10 +173,11 @@ impl Checker<'_, '_> {
                         ));
                     }
                 };
-                if !nir::normal_forms::supported_input_type_in_scope_in(
+                if !nir::normal_forms::supported_input_type_with_collections_in(
                     &domain,
                     &self.input_binders(&visible_parameters),
                     |head| Some(head) == self.protocols.tuple,
+                    |head| Some(head) == self.protocols.meta_list,
                     |id| {
                         self.structs.contains_key(&id)
                             || self.enums.contains_key(&id)
@@ -2961,7 +2962,7 @@ impl Checker<'_, '_> {
                         pending.push((result, depth + 1));
                     }
                 }
-                Term::Pointer(inner) => pending.push((inner, depth + 1)),
+                Term::Optional(inner) | Term::Pointer(inner) => pending.push((inner, depth + 1)),
                 Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_) => {}
                 Term::Closure {
                     environment,
@@ -2984,10 +2985,11 @@ impl Checker<'_, '_> {
                     };
                     pending.extend(fields.iter().map(|ty| (ty, depth + 1)));
                 }
-                _ if nir::normal_forms::supported_input_type_in_scope_in(
+                _ if nir::normal_forms::supported_input_type_with_collections_in(
                     ty,
                     &self.input_binders(parameters),
                     |head| Some(head) == self.protocols.tuple,
+                    |head| Some(head) == self.protocols.meta_list,
                     |declaration| {
                         self.structs.contains_key(&declaration)
                             || self.enums.contains_key(&declaration)

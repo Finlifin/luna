@@ -24,7 +24,7 @@ fn actual_eq_defaults_support_nominal_and_generic_operators() {
             and not (Key {{value:1}} != Key {{value:1}}) and not (Key {{value:1}} == Key {{value:2}})}}
         fn verify() {{let valid=run();assumes valid;}}",include_str!("../../../library/builtin/comparison.fl"),include_str!("../../../library/builtin/resources.fl"));
     assert!(compile(&source, None).is_err());
-    let package = compile(&source, Some("input::comparison::Eq")).unwrap();
+    let package = compile(&source, Some("input.comparison.Eq")).unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100000).unwrap(),
         comptime_interpretor::Value::Bool(true)
@@ -71,7 +71,7 @@ fn equality_preserves_operand_order_and_calls_overridden_ne() {
         }
         fn escape()->bool {var called=false;Key {value:false,called:called.ref} != do {return true}}
         fn left_escape()->bool {var called=false;do {return true} == Key {value:false,called:called.ref}}";
-    let package = compile(source, Some("input::Compare")).unwrap();
+    let package = compile(source, Some("input.Compare")).unwrap();
     for name in ["run", "escape", "left_escape"] {
         assert_eq!(
             luna::execution::interpret(&package, name, 100000).unwrap(),
@@ -87,7 +87,7 @@ fn equality_binding_does_not_override_type_identity_or_scalar_equality() {
         comptime fn identity_is_opaque()->bool {Identity<.u32'builtin> != .u32'builtin}
         comptime fn reflexive()->bool {Identity<.u32'builtin> == Identity<.u32'builtin>}
         fn run()->bool {let n:.u32'builtin=1;true==true and n==1 and \"a\"!=\"b\"}";
-    let package = compile(source, Some("input::Compare")).unwrap();
+    let package = compile(source, Some("input.Compare")).unwrap();
     let error = luna::invocation::invoke(&package, "identity_is_opaque", 100000).unwrap_err();
     assert!(error.contains("TypeContractUnresolved"), "{error}");
     assert_eq!(
@@ -106,7 +106,7 @@ fn equality_rejects_missing_implementation_and_wrong_result() {
         "trait Compare {fn eq(self,other:Self)->bool;} struct Key {} fn run()->bool {Key {}==Key {}}",
         "trait Compare {fn eq(self,other:Self)->.u8'builtin;} struct Key {} impl Compare for Key {fn eq(self,other:Self)->.u8'builtin {1}} fn run()->bool {Key {}==Key {}}",
     ] {
-        assert!(compile(source, Some("input::Compare")).is_err());
+        assert!(compile(source, Some("input.Compare")).is_err());
     }
 }
 
@@ -120,12 +120,12 @@ fn equality_cli_requires_one_binding() {
         "--emit",
         "nir",
         "--eq-protocol",
-        "input::Compare",
+        "input.Compare",
     ])
     .unwrap() else {
         panic!("expected compile")
     };
-    assert_eq!(options.eq_protocol.as_deref(), Some("input::Compare"));
+    assert_eq!(options.eq_protocol.as_deref(), Some("input.Compare"));
     assert!(parse(["input.fl", "--eq-protocol"]).is_err());
     assert!(
         parse([
@@ -133,9 +133,9 @@ fn equality_cli_requires_one_binding() {
             "--emit",
             "nir",
             "--eq-protocol",
-            "input::Compare",
+            "input.Compare",
             "--eq-protocol",
-            "input::Other"
+            "input.Other"
         ])
         .is_err()
     );

@@ -1,4 +1,4 @@
--- Bind fma=input::Ops::fma and enable Duplicate/Retire when building run.
+-- Bind fma=input.Ops.fma and enable Duplicate/Retire when building run.
 -- The operation has scalar target evidence; unsafe does not authorize writes
 -- or unchecked function calls inside the predicate.
 trait Duplicate {}

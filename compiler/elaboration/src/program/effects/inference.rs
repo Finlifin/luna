@@ -106,9 +106,9 @@ impl Checker<'_, '_> {
                     .map_err(|e| call_inference_error(span, e))?;
             }
             candidate
-                .refine_type_views(
+                .refine_type_views_metered(
                     |ty, budget| {
-                        self.callable_input_view_budgeted(ty, budget, span)
+                        self.callable_input_view_metered(ty, budget, span)
                             .map_err(|e| e.message)
                     },
                     crate::ptc::Budget::default(),

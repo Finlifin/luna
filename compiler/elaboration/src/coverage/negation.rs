@@ -256,6 +256,24 @@ impl Engine<'_> {
             }));
         }
         match (pattern, &domain) {
+            (Pattern::OptionalAbsent, Term::Optional(_)) => Ok(Some(if invert {
+                Pattern::OptionalPresent(Box::new(Pattern::Wild))
+            } else {
+                Pattern::OptionalAbsent
+            })),
+            (Pattern::OptionalPresent(inner), Term::Optional(payload)) => {
+                let Some(selected) = self.constructor_pattern(inner, payload, invert, depth + 1)?
+                else {
+                    return Ok(None);
+                };
+                let selected = Pattern::OptionalPresent(Box::new(selected));
+                if invert {
+                    self.spend(2)?;
+                    Ok(Some(Pattern::Or(vec![Pattern::OptionalAbsent, selected])))
+                } else {
+                    Ok(Some(selected))
+                }
+            }
             (Pattern::ErrorResult { label, inner }, Term::ErrorResult { errors, result }) => {
                 let payload = match label {
                     None => result.as_ref(),
@@ -518,6 +536,12 @@ impl Engine<'_> {
                 .collect()
         };
         Ok(match (a, b) {
+            (Pattern::OptionalAbsent, Pattern::OptionalAbsent) => Pattern::OptionalAbsent,
+            (Pattern::OptionalAbsent, Pattern::OptionalPresent(_))
+            | (Pattern::OptionalPresent(_), Pattern::OptionalAbsent) => Pattern::Or(vec![]),
+            (Pattern::OptionalPresent(a), Pattern::OptionalPresent(b)) => {
+                Pattern::OptionalPresent(Box::new(self.intersect(a, b, depth + 1)?))
+            }
             (
                 Pattern::ErrorResult {
                     label: a,
@@ -717,6 +741,46 @@ mod tests {
             }),
         }
     }
+    #[test]
+    fn optional_complements_agree_with_all_three_state_subsets() {
+        let ty = Term::Optional(Box::new(Term::Primitive(Primitive::Bool)));
+        let states = [
+            Pattern::OptionalAbsent,
+            Pattern::OptionalPresent(Box::new(Pattern::Literal(Literal::Bool(false)))),
+            Pattern::OptionalPresent(Box::new(Pattern::Literal(Literal::Bool(true)))),
+        ];
+        let selected = |mask: u8| {
+            Pattern::Or(
+                states
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| mask & (1 << i) != 0)
+                    .map(|(_, p)| p.clone())
+                    .collect(),
+            )
+        };
+        for excluded in 0..8u8 {
+            for included in 0..8u8 {
+                let patterns = [negate(selected(excluded), &ty), selected(included)];
+                let expected = if ((!excluded | included) & 7) == 7 {
+                    Coverage::Exhaustive
+                } else {
+                    Coverage::Missing
+                };
+                assert_eq!(
+                    check(
+                        &BTreeMap::new(),
+                        &ty,
+                        &[&patterns[0], &patterns[1]],
+                        100_000
+                    ),
+                    expected,
+                    "excluded={excluded}, included={included}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn nominal_complements_agree_with_all_boolean_pair_subsets() {
         let (enums, ty) = setup();

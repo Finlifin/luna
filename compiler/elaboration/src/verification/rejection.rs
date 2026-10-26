@@ -302,8 +302,9 @@ fn scan<'a>(
             }
             Work::Pattern(pattern, context) => match pattern {
                 Pattern::CodeEvidence { .. } => return Err("unresolved pattern-code evidence"),
-                Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => (),
-                Pattern::ErrorResult { inner: pattern, .. }
+                Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => (),
+                Pattern::OptionalPresent(pattern)
+                | Pattern::ErrorResult { inner: pattern, .. }
                 | Pattern::Observe { inner: pattern, .. }
                 | Pattern::Binding { inner: pattern, .. }
                 | Pattern::Remap { pattern, .. } => {

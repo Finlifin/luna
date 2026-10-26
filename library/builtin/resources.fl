@@ -135,3 +135,11 @@ impl Clone for *T where T {
     fn clone(*self) -> Self { self.* }
 }
 impl Copy for *T where T {}
+
+{-
+    Native optional and single-error results can enter Once-constrained APIs.
+    The marker transfers the existing payload and its cleanup responsibility;
+    it does not duplicate the payload or install an additional destructor.
+-}
+impl Once for ?T where T {}
+impl Once for !E T where E, T {}

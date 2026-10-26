@@ -1051,6 +1051,8 @@ impl<'a> Analysis<'a> {
             K::Local(_)
                 | K::Record { .. }
                 | K::Variant { .. }
+                | K::OptionalPresent(_)
+                | K::OptionalAbsent
                 | K::ErrorConvert { .. }
                 | K::Tuple(_)
                 | K::AnonymousRecord { .. }
@@ -1251,7 +1253,7 @@ impl<'a> Analysis<'a> {
                 }
                 true
             }
-            n::Pattern::ErrorResult { inner, .. } => {
+            n::Pattern::OptionalPresent(inner) | n::Pattern::ErrorResult { inner, .. } => {
                 let Some(subject) = subject else { return false };
                 let Ok(ty) = crate::verification::memory::owned_path_type(
                     Some(self.package),
@@ -1516,7 +1518,8 @@ impl<'a> Analysis<'a> {
                 n::Pattern::Then { .. } | n::Pattern::Guard { .. } | n::Pattern::Observe { .. } => {
                     false
                 }
-                n::Pattern::ErrorResult { inner, .. }
+                n::Pattern::OptionalPresent(inner)
+                | n::Pattern::ErrorResult { inner, .. }
                 | n::Pattern::Binding { inner, .. }
                 | n::Pattern::Remap { pattern: inner, .. } => structural(inner, fuel, depth + 1),
                 n::Pattern::Tuple(fields)
@@ -1543,10 +1546,12 @@ impl<'a> Analysis<'a> {
             | n::Pattern::Remap { pattern: inner, .. } => {
                 self.code_pattern_absent(subject, inner, fields, path, depth + 1)
             }
-            n::Pattern::Variant { .. } | n::Pattern::ErrorResult { .. } => {
+            n::Pattern::Variant { .. }
+            | n::Pattern::OptionalPresent(_)
+            | n::Pattern::ErrorResult { .. } => {
                 let (tag, patterns) = match pattern {
                     n::Pattern::Variant { index, fields, .. } => (*index, fields.as_slice()),
-                    n::Pattern::ErrorResult { inner, .. } => {
+                    n::Pattern::OptionalPresent(inner) | n::Pattern::ErrorResult { inner, .. } => {
                         let Some(subject) = subject else { return false };
                         let Ok(ty) = crate::verification::memory::owned_path_type(
                             Some(self.package),
@@ -2319,11 +2324,18 @@ impl<'a> Analysis<'a> {
             {
                 self.aggregate_code_fields(fields, private, returns, depth)
             }
-            K::Variant { index, fields, .. }
-                if !self.finite
-                    || self.resource_scope
-                    || fields.iter().all(|field| self.copy_type(&field.ty)) =>
-            {
+            K::Variant { .. } | K::OptionalPresent(_) | K::OptionalAbsent => {
+                let Ok((fields, Some(index))) =
+                    crate::verification::memory::owned_constructor(value, &mut self.fuel)
+                else {
+                    return false;
+                };
+                if self.finite
+                    && !self.resource_scope
+                    && !fields.iter().all(|field| self.copy_type(&field.ty))
+                {
+                    return false;
+                }
                 if !self.aggregate_code_fields(fields, private, returns, depth) {
                     return false;
                 }
@@ -2337,11 +2349,11 @@ impl<'a> Analysis<'a> {
                 };
                 let mut result = layout
                     .into_keys()
-                    .filter(|path| !path.starts_with(&[VARIANT_FIELD, *index]))
+                    .filter(|path| !path.starts_with(&[VARIANT_FIELD, index]))
                     .map(|path| (path, vec![]))
                     .collect::<BTreeMap<_, _>>();
                 for (path, codes) in selected {
-                    let mut field = vec![VARIANT_FIELD, *index];
+                    let mut field = vec![VARIANT_FIELD, index];
                     field.extend(path);
                     result.insert(field, codes);
                 }
@@ -3141,7 +3153,7 @@ impl<'a> Analysis<'a> {
                         path.pop();
                     }
                 }
-                n::Pattern::ErrorResult { inner, .. } => {
+                n::Pattern::OptionalPresent(inner) | n::Pattern::ErrorResult { inner, .. } => {
                     let ty = crate::verification::memory::owned_path_type(
                         Some(package),
                         &value.ty,
@@ -3524,7 +3536,10 @@ impl<'a> Analysis<'a> {
                 let (index, tail) = path.split_first()?;
                 Some(self.loop_code_value_at(fields.get(*index)?, tail, facts, depth + 1))
             }
-            K::Variant { index, fields, .. } => {
+            K::Variant { .. } | K::OptionalPresent(_) | K::OptionalAbsent => {
+                let (fields, index) =
+                    crate::verification::memory::owned_constructor(value, &mut self.fuel).ok()?;
+                let index = index?;
                 let [marker, variant, field, tail @ ..] = path else {
                     return None;
                 };
@@ -3541,7 +3556,7 @@ impl<'a> Analysis<'a> {
                 if !matches!(leaf, Term::Function { .. } | Term::Closure { .. }) {
                     return None;
                 }
-                if variant != index {
+                if *variant != index {
                     return Some(LoopCode::Known(vec![]));
                 }
                 Some(self.loop_code_value_at(fields.get(*field)?, tail, facts, depth + 1))

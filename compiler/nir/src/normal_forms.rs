@@ -130,6 +130,17 @@ pub fn supported_input_type_in_scope_in(
     is_nominal: impl Fn(DeclarationId) -> bool,
     target: Option<crate::target::TargetData>,
 ) -> bool {
+    supported_input_type_with_collections_in(ty, prior, is_tuple, |_| false, is_nominal, target)
+}
+
+pub fn supported_input_type_with_collections_in(
+    ty: &Term,
+    prior: &[crate::DeclarationParameter],
+    is_tuple: impl Fn(DeclarationId) -> bool,
+    is_list: impl Fn(DeclarationId) -> bool,
+    is_nominal: impl Fn(DeclarationId) -> bool,
+    target: Option<crate::target::TargetData>,
+) -> bool {
     let mut work = vec![(ty, 0usize)];
     let mut remaining = 100_000usize;
     while let Some((ty, depth)) = work.pop() {
@@ -139,6 +150,11 @@ pub fn supported_input_type_in_scope_in(
         remaining -= 1;
         match ty {
             Term::ClosureContextType => {}
+            Term::Optional(payload) => {
+                if payload.as_ref() != &Term::Primitive(Primitive::Never) {
+                    work.push((payload, depth + 1));
+                }
+            }
             Term::ErrorResult { errors, result } => {
                 if errors.is_empty() || errors.len().saturating_add(1) > remaining {
                     return false;
@@ -202,6 +218,19 @@ pub fn supported_input_type_in_scope_in(
                     }
                     work.push((ty, depth + 1));
                 }
+            }
+            Term::NormalForm {
+                head,
+                sort: Sort::Type,
+                arguments,
+            } if is_list(*head) => {
+                let [element] = arguments.as_slice() else {
+                    return false;
+                };
+                if element.sort() != Sort::Type {
+                    return false;
+                }
+                work.push((element, depth + 1));
             }
             Term::NormalForm {
                 head,
@@ -300,7 +329,7 @@ pub fn validate(package: &Package) -> Result<(), &'static str> {
                     values.push(parameter);
                 }
                 Kind::Value => {
-                    let supported = supported_input_type_in_scope_in(
+                    let supported = supported_input_type_with_collections_in(
                         &parameter.ty,
                         &prior,
                         |id| {
@@ -308,6 +337,12 @@ pub fn validate(package: &Package) -> Result<(), &'static str> {
                                 .normal_forms
                                 .iter()
                                 .any(|head| head.declaration == id && head.role == Role::Tuple)
+                        },
+                        |id| {
+                            package
+                                .normal_forms
+                                .iter()
+                                .any(|head| head.declaration == id && head.role == Role::TypeList)
                         },
                         |id| {
                             package.structs.iter().any(|s| s.declaration == id)
@@ -405,6 +440,27 @@ impl fmt::Display for ApplicationError {
     }
 }
 impl Head {
+    /// Inspect the trusted list representation without unfolding its opaque head.
+    pub fn list_element<'a>(&self, ty: &'a Term) -> Option<&'a Term> {
+        if self.role != Role::TypeList
+            || !matches!(self.parameters.as_slice(), [parameter]
+                if parameter.kind == Kind::Type && parameter.ty == Term::Primitive(Primitive::Type))
+        {
+            return None;
+        }
+        match ty {
+            Term::NormalForm {
+                head,
+                sort: Sort::Type,
+                arguments,
+            } if *head == self.declaration => match arguments.as_slice() {
+                [element] if element.sort() == Sort::Type => Some(element),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     pub fn is_type_list_instance(&self, ty: &Term) -> bool {
         self.role == Role::TypeList
             && matches!(self.parameters.as_slice(), [parameter]
@@ -561,6 +617,31 @@ impl Head {
         fuel: &mut usize,
         target: Option<crate::target::TargetData>,
     ) -> Result<(), ApplicationError> {
+        self.check_arguments_in_scope_with_collections_budgeted_in(
+            arguments,
+            is_tuple,
+            |_| false,
+            nominal_fields,
+            declared,
+            frames,
+            fuel,
+            target,
+        )
+    }
+
+    /// Collection authority is supplied by the validated declaration world,
+    /// never inferred from a frozen value's head spelling or field count.
+    pub fn check_arguments_in_scope_with_collections_budgeted_in(
+        &self,
+        arguments: &[Term],
+        is_tuple: impl Fn(DeclarationId) -> bool,
+        is_list: impl Fn(DeclarationId) -> bool,
+        nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
+        declared: impl Fn(&Term, &Term) -> bool,
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+        target: Option<crate::target::TargetData>,
+    ) -> Result<(), ApplicationError> {
         let mut remaining = *fuel;
         let result = (|| {
             if arguments.len() != self.parameters.len() {
@@ -637,128 +718,183 @@ impl Head {
                         return Err(ApplicationError::InputType { index });
                     }
                     remaining -= 1;
-                    let accepted = match (&expected, argument) {
-                        (
-                            _,
-                            Term::Rigid {
-                                sort: Sort::ComptimeValue,
-                                ..
+                    let accepted =
+                        match (&expected, argument) {
+                            (
+                                _,
+                                Term::Rigid {
+                                    sort: Sort::ComptimeValue,
+                                    ..
+                                }
+                                | Term::Bound {
+                                    sort: Sort::ComptimeValue,
+                                    ..
+                                },
+                            ) => {
+                                expected != Term::Primitive(Primitive::Type)
+                                    && declared(argument, &expected)
                             }
-                            | Term::Bound {
-                                sort: Sort::ComptimeValue,
-                                ..
-                            },
-                        ) => {
-                            expected != Term::Primitive(Primitive::Type)
-                                && declared(argument, &expected)
-                        }
-                        (Term::ErrorResult { .. }, Term::ErrorValue { value, .. }) => {
-                            let payload = crate::error_results::frozen_payload_domain(
-                                argument,
-                                &expected,
-                                &mut remaining,
-                            )
-                            .map_err(|_| ApplicationError::InputType { index })?;
-                            work.push((payload.clone(), value.as_ref(), depth + 1));
-                            true
-                        }
-                        (
-                            Term::Nominal { .. },
-                            Term::NominalValue {
-                                ty,
-                                variant,
-                                fields,
-                            },
-                        ) if ty.as_ref() == &expected => {
-                            let types = nominal_fields(&expected, *variant, &mut remaining)
-                                .ok_or(ApplicationError::InputType { index })?;
-                            if types.len() != fields.len() || fields.len() > remaining {
-                                return Err(ApplicationError::InputType { index });
+                            (Term::Optional(payload), Term::OptionalValue { ty, value })
+                                if ty.as_ref() == &expected =>
+                            {
+                                if let Some(value) = value {
+                                    work.push(((**payload).clone(), value.as_ref(), depth + 1));
+                                }
+                                true
                             }
-                            for (ty, value) in types.into_iter().zip(fields) {
-                                crate::type_computations::charge_term(&ty, &mut remaining)
-                                    .map_err(|_| ApplicationError::InputType { index })?;
-                                work.push((ty, value, depth + 1));
+                            (Term::ErrorResult { .. }, Term::ErrorValue { value, .. }) => {
+                                let payload = crate::error_results::frozen_payload_domain(
+                                    argument,
+                                    &expected,
+                                    &mut remaining,
+                                )
+                                .map_err(|_| ApplicationError::InputType { index })?;
+                                work.push((payload.clone(), value.as_ref(), depth + 1));
+                                true
                             }
-                            true
-                        }
-                        (Term::Record(fields), Term::RecordValue(values))
-                            if fields.len() == values.len() && fields.len() <= remaining =>
-                        {
-                            let mut names = BTreeSet::new();
-                            for ((name, ty), (label, value)) in fields.iter().zip(values) {
-                                remaining = remaining
-                                    .checked_sub(name.len())
-                                    .and_then(|n| n.checked_sub(label.len()))
-                                    .ok_or(ApplicationError::InputType { index })?;
-                                if name != label || !names.insert(name) {
+                            (
+                                Term::NormalForm {
+                                    head,
+                                    sort: Sort::Type,
+                                    arguments,
+                                },
+                                Term::TypeListValue(fields),
+                            ) if is_list(*head)
+                                && arguments.as_slice() == [Term::Primitive(Primitive::Type)] =>
+                            {
+                                if fields.len() > remaining {
                                     return Err(ApplicationError::InputType { index });
                                 }
-                                work.push((ty.clone(), value, depth + 1));
+                                work.extend(fields.iter().map(|value| {
+                                    (Term::Primitive(Primitive::Type), value, depth + 1)
+                                }));
+                                true
                             }
-                            true
-                        }
-                        (
-                            Term::NormalForm {
-                                head,
-                                sort: Sort::Type,
-                                arguments,
-                            },
-                            Term::TupleValue(values),
-                        ) if is_tuple(*head) => {
-                            let [Term::TypeListValue(fields)] = arguments.as_slice() else {
-                                return Err(ApplicationError::InputType { index });
-                            };
-                            if fields.len() != values.len() || fields.len() > remaining {
-                                return Err(ApplicationError::InputType { index });
-                            }
-                            work.extend(
-                                fields
-                                    .iter()
-                                    .zip(values)
-                                    .map(|(ty, value)| (ty.clone(), value, depth + 1)),
-                            );
-                            true
-                        }
-                        (Term::Tuple(fields), Term::TupleValue(values))
-                            if fields.len() == values.len() && fields.len() <= remaining =>
-                        {
-                            work.extend(
-                                fields
-                                    .iter()
-                                    .zip(values)
-                                    .map(|(ty, value)| (ty.clone(), value, depth + 1)),
-                            );
-                            true
-                        }
-                        (Term::Primitive(Primitive::Type), value) => value.sort() == Sort::Type,
-                        (Term::ClosureContextType, Term::ClosureContextValue(_)) => true,
-                        (Term::Primitive(Primitive::BitVec(width)), Term::BitVec(value)) => {
-                            *width == value.width()
-                        }
-                        (Term::Primitive(Primitive::Void), Term::Unit) => true,
-                        (Term::Primitive(Primitive::Bool), Term::Bool(_)) => true,
-                        (Term::Primitive(Primitive::F32), Term::Float32(_)) => true,
-                        (Term::Primitive(Primitive::F64), Term::Float64(_)) => true,
-                        (Term::Primitive(Primitive::Integer), Term::Integer(_)) => true,
-                        (Term::Primitive(Primitive::Float), Term::Float(_)) => true,
-                        (Term::Primitive(Primitive::Char), Term::Char(_)) => true,
-                        (Term::Primitive(Primitive::Str), Term::String(_)) => true,
-                        (Term::Primitive(Primitive::Symbol), Term::Symbol(_)) => true,
-                        (Term::Primitive(primitive), Term::Integer(value)) => target
-                            .map_or_else(
-                                || primitive.fixed_integer_layout(),
-                                |target| target.integer_layout(*primitive),
-                            )
-                            .is_some_and(|(signed, width)| {
-                                if signed {
-                                    value.to_signed(width).is_ok()
-                                } else {
-                                    value.to_unsigned(width).is_ok()
+                            (
+                                Term::NormalForm {
+                                    head,
+                                    sort: Sort::Type,
+                                    arguments,
+                                },
+                                Term::NominalValue {
+                                    ty,
+                                    variant: None,
+                                    fields,
+                                },
+                            ) if ty.as_ref() == &expected && is_list(*head) => {
+                                let [element] = arguments.as_slice() else {
+                                    return Err(ApplicationError::InputType { index });
+                                };
+                                if element.sort() != Sort::Type
+                                    || *element == Term::Primitive(Primitive::Type)
+                                    || fields.len() > remaining
+                                {
+                                    return Err(ApplicationError::InputType { index });
                                 }
-                            }),
-                        _ => false,
-                    };
+                                for value in fields {
+                                    crate::type_computations::charge_term(element, &mut remaining)
+                                        .map_err(|_| ApplicationError::InputType { index })?;
+                                    work.push((element.clone(), value, depth + 1));
+                                }
+                                true
+                            }
+                            (
+                                Term::Nominal { .. },
+                                Term::NominalValue {
+                                    ty,
+                                    variant,
+                                    fields,
+                                },
+                            ) if ty.as_ref() == &expected => {
+                                let types = nominal_fields(&expected, *variant, &mut remaining)
+                                    .ok_or(ApplicationError::InputType { index })?;
+                                if types.len() != fields.len() || fields.len() > remaining {
+                                    return Err(ApplicationError::InputType { index });
+                                }
+                                for (ty, value) in types.into_iter().zip(fields) {
+                                    crate::type_computations::charge_term(&ty, &mut remaining)
+                                        .map_err(|_| ApplicationError::InputType { index })?;
+                                    work.push((ty, value, depth + 1));
+                                }
+                                true
+                            }
+                            (Term::Record(fields), Term::RecordValue(values))
+                                if fields.len() == values.len() && fields.len() <= remaining =>
+                            {
+                                let mut names = BTreeSet::new();
+                                for ((name, ty), (label, value)) in fields.iter().zip(values) {
+                                    remaining = remaining
+                                        .checked_sub(name.len())
+                                        .and_then(|n| n.checked_sub(label.len()))
+                                        .ok_or(ApplicationError::InputType { index })?;
+                                    if name != label || !names.insert(name) {
+                                        return Err(ApplicationError::InputType { index });
+                                    }
+                                    work.push((ty.clone(), value, depth + 1));
+                                }
+                                true
+                            }
+                            (
+                                Term::NormalForm {
+                                    head,
+                                    sort: Sort::Type,
+                                    arguments,
+                                },
+                                Term::TupleValue(values),
+                            ) if is_tuple(*head) => {
+                                let [Term::TypeListValue(fields)] = arguments.as_slice() else {
+                                    return Err(ApplicationError::InputType { index });
+                                };
+                                if fields.len() != values.len() || fields.len() > remaining {
+                                    return Err(ApplicationError::InputType { index });
+                                }
+                                work.extend(
+                                    fields
+                                        .iter()
+                                        .zip(values)
+                                        .map(|(ty, value)| (ty.clone(), value, depth + 1)),
+                                );
+                                true
+                            }
+                            (Term::Tuple(fields), Term::TupleValue(values))
+                                if fields.len() == values.len() && fields.len() <= remaining =>
+                            {
+                                work.extend(
+                                    fields
+                                        .iter()
+                                        .zip(values)
+                                        .map(|(ty, value)| (ty.clone(), value, depth + 1)),
+                                );
+                                true
+                            }
+                            (Term::Primitive(Primitive::Type), value) => value.sort() == Sort::Type,
+                            (Term::ClosureContextType, Term::ClosureContextValue(_)) => true,
+                            (Term::Primitive(Primitive::BitVec(width)), Term::BitVec(value)) => {
+                                *width == value.width()
+                            }
+                            (Term::Primitive(Primitive::Void), Term::Unit) => true,
+                            (Term::Primitive(Primitive::Bool), Term::Bool(_)) => true,
+                            (Term::Primitive(Primitive::F32), Term::Float32(_)) => true,
+                            (Term::Primitive(Primitive::F64), Term::Float64(_)) => true,
+                            (Term::Primitive(Primitive::Integer), Term::Integer(_)) => true,
+                            (Term::Primitive(Primitive::Float), Term::Float(_)) => true,
+                            (Term::Primitive(Primitive::Char), Term::Char(_)) => true,
+                            (Term::Primitive(Primitive::Str), Term::String(_)) => true,
+                            (Term::Primitive(Primitive::Symbol), Term::Symbol(_)) => true,
+                            (Term::Primitive(primitive), Term::Integer(value)) => target
+                                .map_or_else(
+                                    || primitive.fixed_integer_layout(),
+                                    |target| target.integer_layout(*primitive),
+                                )
+                                .is_some_and(|(signed, width)| {
+                                    if signed {
+                                        value.to_signed(width).is_ok()
+                                    } else {
+                                        value.to_unsigned(width).is_ok()
+                                    }
+                                }),
+                            _ => false,
+                        };
                     if !accepted {
                         return Err(ApplicationError::InputType { index });
                     }
@@ -1048,6 +1184,13 @@ fn nominal_domain_scope(
             Term::Record(fields) | Term::RecordValue(fields) => {
                 pending.extend(fields.iter().map(|(_, ty)| ty))
             }
+            Term::OptionalValue { ty, value } => {
+                pending.push(ty);
+                if let Some(value) = value {
+                    pending.push(value);
+                }
+            }
+
             Term::ErrorValue { ty, label, value } => {
                 pending.push(ty);
                 if let Some(label) = label {
@@ -1059,9 +1202,10 @@ fn nominal_domain_scope(
                 pending.push(ty);
                 pending.extend(fields);
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
-                pending.push(inner)
-            }
+            Term::Optional(inner)
+            | Term::Pointer(inner)
+            | Term::ComptimeFunction(inner)
+            | Term::UnsafeFunction(inner) => pending.push(inner),
             Term::Function { parameters, result } => {
                 pending.push(result);
                 pending.extend(parameters.iter().map(|p| &p.ty));

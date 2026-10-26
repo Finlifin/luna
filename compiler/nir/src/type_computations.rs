@@ -591,6 +591,12 @@ fn visit_expanded_term(
                     push(ty)?;
                 }
             }
+            Term::OptionalValue { ty, value } => {
+                push(ty)?;
+                if let Some(value) = value {
+                    push(value)?;
+                }
+            }
             Term::ErrorValue { ty, label, value } => {
                 push(ty)?;
                 if let Some(label) = label {
@@ -609,9 +615,10 @@ fn visit_expanded_term(
                     push(ty)?;
                 }
             }
-            Term::Pointer(ty) | Term::ComptimeFunction(ty) | Term::UnsafeFunction(ty) => {
-                push(ty.as_ref())?
-            }
+            Term::Optional(ty)
+            | Term::Pointer(ty)
+            | Term::ComptimeFunction(ty)
+            | Term::UnsafeFunction(ty) => push(ty.as_ref())?,
             Term::Function { parameters, result } => {
                 push(result.as_ref())?;
                 for parameter in parameters {

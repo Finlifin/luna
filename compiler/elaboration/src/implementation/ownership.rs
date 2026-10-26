@@ -82,6 +82,13 @@ fn local_identity(
             | Term::TypeListValue(arguments)
             | Term::TypeListConcat(arguments)
             | Term::TupleValue(arguments) => arguments,
+            Term::OptionalValue { ty, value } => {
+                work.push((ty, depth + 1));
+                if let Some(value) = value {
+                    work.push((value, depth + 1));
+                }
+                continue;
+            }
             Term::ErrorValue { ty, label, value } => {
                 work.push((ty, depth + 1));
                 if let Some(label) = label {
@@ -105,7 +112,10 @@ fn local_identity(
                 work.extend(fields.iter().rev().map(|(_, ty)| (ty, depth + 1)));
                 continue;
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
+            Term::Optional(inner)
+            | Term::Pointer(inner)
+            | Term::ComptimeFunction(inner)
+            | Term::UnsafeFunction(inner) => {
                 work.push((inner, depth + 1));
                 continue;
             }

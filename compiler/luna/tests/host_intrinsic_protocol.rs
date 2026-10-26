@@ -15,166 +15,136 @@ fn bind_fma(package: nir::program::Package) -> nir::program::Package {
 fn repository_math_generic_wrapper_specializes_both_float_widths() {
     let source=format!("mod math {{
 {}
-}} fn min_single()->bool {{math.minimumnum<.f32'builtin>(3.0,-2.0)==-2.0}} fn min_double()->bool {{math.minimumnum<.f64'builtin>(3.0,-2.0)==-2.0}} fn max_single()->bool {{math.maximumnum<.f32'builtin>(3.0,-2.0)==3.0}} fn max_double()->bool {{math.maximumnum<.f64'builtin>(3.0,-2.0)==3.0}} fn abs_single()->bool {{math.abs<.f32'builtin>(-3.5)==3.5}} fn abs_double()->bool {{math.abs<.f64'builtin>(-3.5)==3.5}} fn single()->.f32'builtin {{math.fma<.f32'builtin>(3.0,4.0,5.0)}} fn double()->.f64'builtin {{math.fma<.f64'builtin>(3.0,4.0,5.0)}}",include_str!("../../../library/math/lib.fl"));
+}} fn min_single()->bool {{math.minimumnum<.f32'builtin>(3.0,-2.0)==-2.0}} fn min_double()->bool {{math.minimumnum<.f64'builtin>(3.0,-2.0)==-2.0}} fn max_single()->bool {{math.maximumnum<.f32'builtin>(3.0,-2.0)==3.0}} fn max_double()->bool {{math.maximumnum<.f64'builtin>(3.0,-2.0)==3.0}} fn abs_single()->bool {{math.abs<.f32'builtin>(-3.5)==3.5}} fn abs_double()->bool {{math.abs<.f64'builtin>(-3.5)==3.5}} fn single()->.f32'builtin {{math.fma<.f32'builtin>(3.0,4.0,5.0)}} fn double()->.f64'builtin {{math.fma<.f64'builtin>(3.0,4.0,5.0)}}",include_str!("../../../library/builtin/math_intrinsics.fl"));
     let package = support::compile_with_source_bindings(
         &source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            host_fma: Some("input::math::target::Scalar::fma"),
-            host_sqrt: Some("input::math::target::Scalar::sqrt"),
-            host_copysign: Some("input::math::target::Scalar::copysign"),
+            host_fma: Some("input.math.target.Scalar.fma"),
+            host_sqrt: Some("input.math.target.Scalar.sqrt"),
+            host_copysign: Some("input.math.target.Scalar.copysign"),
             host_intrinsics: &[
                 (
                     Operation::AbsoluteValue,
-                    "input::math::target::Scalar::fabs".into(),
+                    "input.math.target.Scalar.fabs".into(),
                 ),
-                (
-                    Operation::Floor,
-                    "input::math::target::Scalar::floor".into(),
-                ),
-                (
-                    Operation::Ceiling,
-                    "input::math::target::Scalar::ceil".into(),
-                ),
-                (
-                    Operation::Truncate,
-                    "input::math::target::Scalar::trunc".into(),
-                ),
+                (Operation::Floor, "input.math.target.Scalar.floor".into()),
+                (Operation::Ceiling, "input.math.target.Scalar.ceil".into()),
+                (Operation::Truncate, "input.math.target.Scalar.trunc".into()),
                 (
                     Operation::RoundEven,
-                    "input::math::target::Scalar::roundeven".into(),
+                    "input.math.target.Scalar.roundeven".into(),
                 ),
                 (
                     Operation::RoundAway,
-                    "input::math::target::Scalar::round".into(),
+                    "input.math.target.Scalar.round".into(),
                 ),
-                (Operation::Sine, "input::math::target::Scalar::sin".into()),
-                (Operation::Cosine, "input::math::target::Scalar::cos".into()),
+                (Operation::Sine, "input.math.target.Scalar.sin".into()),
+                (Operation::Cosine, "input.math.target.Scalar.cos".into()),
                 (
                     Operation::Exponential,
-                    "input::math::target::Scalar::exp".into(),
+                    "input.math.target.Scalar.exp".into(),
                 ),
                 (
                     Operation::Exponential2,
-                    "input::math::target::Scalar::exp2".into(),
+                    "input.math.target.Scalar.exp2".into(),
                 ),
-                (
-                    Operation::NaturalLog,
-                    "input::math::target::Scalar::log".into(),
-                ),
-                (Operation::Log2, "input::math::target::Scalar::log2".into()),
-                (
-                    Operation::Log10,
-                    "input::math::target::Scalar::log10".into(),
-                ),
-                (Operation::Power, "input::math::target::Scalar::pow".into()),
+                (Operation::NaturalLog, "input.math.target.Scalar.log".into()),
+                (Operation::Log2, "input.math.target.Scalar.log2".into()),
+                (Operation::Log10, "input.math.target.Scalar.log10".into()),
+                (Operation::Power, "input.math.target.Scalar.pow".into()),
                 (
                     Operation::ScaleByPowerOfTwo,
-                    "input::math::target::Scalar::ldexp".into(),
+                    "input.math.target.Scalar.ldexp".into(),
                 ),
                 (
                     Operation::IntegerPower,
-                    "input::math::target::Scalar::powi".into(),
+                    "input.math.target.Scalar.powi".into(),
                 ),
                 (
                     Operation::Minimum,
-                    "input::math::target::Scalar::minimum".into(),
+                    "input.math.target.Scalar.minimum".into(),
                 ),
                 (
                     Operation::Maximum,
-                    "input::math::target::Scalar::maximum".into(),
+                    "input.math.target.Scalar.maximum".into(),
                 ),
                 (
                     Operation::MinimumNumber,
-                    "input::math::target::Scalar::minimumnum".into(),
+                    "input.math.target.Scalar.minimumnum".into(),
                 ),
                 (
                     Operation::MaximumNumber,
-                    "input::math::target::Scalar::maximumnum".into(),
+                    "input.math.target.Scalar.maximumnum".into(),
                 ),
-                (
-                    Operation::IsNan,
-                    "input::math::target::Scalar::isnan".into(),
-                ),
+                (Operation::IsNan, "input.math.target.Scalar.isnan".into()),
                 (
                     Operation::IsInfinite,
-                    "input::math::target::Scalar::isinf".into(),
+                    "input.math.target.Scalar.isinf".into(),
                 ),
                 (
                     Operation::IsFinite,
-                    "input::math::target::Scalar::isfinite".into(),
+                    "input.math.target.Scalar.isfinite".into(),
                 ),
                 (
                     Operation::IsNormal,
-                    "input::math::target::Scalar::isnormal".into(),
+                    "input.math.target.Scalar.isnormal".into(),
                 ),
                 (
                     Operation::IsSubnormal,
-                    "input::math::target::Scalar::issubnormal".into(),
+                    "input.math.target.Scalar.issubnormal".into(),
                 ),
                 (
                     Operation::SignBit,
-                    "input::math::target::Scalar::signbit".into(),
+                    "input.math.target.Scalar.signbit".into(),
                 ),
                 (
                     Operation::SaturatingAdd,
-                    "input::math::target::Scalar::add_sat".into(),
+                    "input.math.target.Scalar.add_sat".into(),
                 ),
                 (
                     Operation::SaturatingSubtract,
-                    "input::math::target::Scalar::sub_sat".into(),
+                    "input.math.target.Scalar.sub_sat".into(),
                 ),
                 (
                     Operation::IntegerMinimum,
-                    "input::math::target::Scalar::min".into(),
+                    "input.math.target.Scalar.min".into(),
                 ),
                 (
                     Operation::IntegerMaximum,
-                    "input::math::target::Scalar::max".into(),
+                    "input.math.target.Scalar.max".into(),
                 ),
-                (
-                    Operation::BitAnd,
-                    "input::math::target::Scalar::bit_and".into(),
-                ),
-                (
-                    Operation::BitOr,
-                    "input::math::target::Scalar::bit_or".into(),
-                ),
-                (
-                    Operation::BitXor,
-                    "input::math::target::Scalar::bit_xor".into(),
-                ),
+                (Operation::BitAnd, "input.math.target.Scalar.bit_and".into()),
+                (Operation::BitOr, "input.math.target.Scalar.bit_or".into()),
+                (Operation::BitXor, "input.math.target.Scalar.bit_xor".into()),
                 (
                     Operation::WrappingAbsoluteValue,
-                    "input::math::target::Scalar::abs".into(),
+                    "input.math.target.Scalar.abs".into(),
                 ),
                 (
                     Operation::FunnelShiftLeft,
-                    "input::math::target::Scalar::fshl".into(),
+                    "input.math.target.Scalar.fshl".into(),
                 ),
                 (
                     Operation::FunnelShiftRight,
-                    "input::math::target::Scalar::fshr".into(),
+                    "input.math.target.Scalar.fshr".into(),
                 ),
-                (
-                    Operation::ByteSwap,
-                    "input::math::target::Scalar::bswap".into(),
-                ),
+                (Operation::ByteSwap, "input.math.target.Scalar.bswap".into()),
                 (
                     Operation::BitReverse,
-                    "input::math::target::Scalar::bitreverse".into(),
+                    "input.math.target.Scalar.bitreverse".into(),
                 ),
                 (
                     Operation::PopulationCount,
-                    "input::math::target::Scalar::ctpop".into(),
+                    "input.math.target.Scalar.ctpop".into(),
                 ),
                 (
                     Operation::LeadingZeros,
-                    "input::math::target::Scalar::ctlz".into(),
+                    "input.math.target.Scalar.ctlz".into(),
                 ),
                 (
                     Operation::TrailingZeros,
-                    "input::math::target::Scalar::cttz".into(),
+                    "input.math.target.Scalar.cttz".into(),
                 ),
             ],
             ..Default::default()
@@ -203,167 +173,137 @@ fn repository_math_generic_wrapper_specializes_both_float_widths() {
 fn math_float_domain_rejects_nonfloat_instantiation() {
     let source = format!(
         "mod math {{\n{}\n}} fn run()->bool {{math.fma<bool>(true,true,true)}}",
-        include_str!("../../../library/math/lib.fl")
+        include_str!("../../../library/builtin/math_intrinsics.fl")
     );
     let error = support::compile_with_source_bindings(
         &source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            host_fma: Some("input::math::target::Scalar::fma"),
-            host_sqrt: Some("input::math::target::Scalar::sqrt"),
-            host_copysign: Some("input::math::target::Scalar::copysign"),
+            host_fma: Some("input.math.target.Scalar.fma"),
+            host_sqrt: Some("input.math.target.Scalar.sqrt"),
+            host_copysign: Some("input.math.target.Scalar.copysign"),
             host_intrinsics: &[
                 (
                     Operation::AbsoluteValue,
-                    "input::math::target::Scalar::fabs".into(),
+                    "input.math.target.Scalar.fabs".into(),
                 ),
-                (
-                    Operation::Floor,
-                    "input::math::target::Scalar::floor".into(),
-                ),
-                (
-                    Operation::Ceiling,
-                    "input::math::target::Scalar::ceil".into(),
-                ),
-                (
-                    Operation::Truncate,
-                    "input::math::target::Scalar::trunc".into(),
-                ),
+                (Operation::Floor, "input.math.target.Scalar.floor".into()),
+                (Operation::Ceiling, "input.math.target.Scalar.ceil".into()),
+                (Operation::Truncate, "input.math.target.Scalar.trunc".into()),
                 (
                     Operation::RoundEven,
-                    "input::math::target::Scalar::roundeven".into(),
+                    "input.math.target.Scalar.roundeven".into(),
                 ),
                 (
                     Operation::RoundAway,
-                    "input::math::target::Scalar::round".into(),
+                    "input.math.target.Scalar.round".into(),
                 ),
-                (Operation::Sine, "input::math::target::Scalar::sin".into()),
-                (Operation::Cosine, "input::math::target::Scalar::cos".into()),
+                (Operation::Sine, "input.math.target.Scalar.sin".into()),
+                (Operation::Cosine, "input.math.target.Scalar.cos".into()),
                 (
                     Operation::Exponential,
-                    "input::math::target::Scalar::exp".into(),
+                    "input.math.target.Scalar.exp".into(),
                 ),
                 (
                     Operation::Exponential2,
-                    "input::math::target::Scalar::exp2".into(),
+                    "input.math.target.Scalar.exp2".into(),
                 ),
-                (
-                    Operation::NaturalLog,
-                    "input::math::target::Scalar::log".into(),
-                ),
-                (Operation::Log2, "input::math::target::Scalar::log2".into()),
-                (
-                    Operation::Log10,
-                    "input::math::target::Scalar::log10".into(),
-                ),
-                (Operation::Power, "input::math::target::Scalar::pow".into()),
+                (Operation::NaturalLog, "input.math.target.Scalar.log".into()),
+                (Operation::Log2, "input.math.target.Scalar.log2".into()),
+                (Operation::Log10, "input.math.target.Scalar.log10".into()),
+                (Operation::Power, "input.math.target.Scalar.pow".into()),
                 (
                     Operation::ScaleByPowerOfTwo,
-                    "input::math::target::Scalar::ldexp".into(),
+                    "input.math.target.Scalar.ldexp".into(),
                 ),
                 (
                     Operation::IntegerPower,
-                    "input::math::target::Scalar::powi".into(),
+                    "input.math.target.Scalar.powi".into(),
                 ),
                 (
                     Operation::Minimum,
-                    "input::math::target::Scalar::minimum".into(),
+                    "input.math.target.Scalar.minimum".into(),
                 ),
                 (
                     Operation::Maximum,
-                    "input::math::target::Scalar::maximum".into(),
+                    "input.math.target.Scalar.maximum".into(),
                 ),
                 (
                     Operation::MinimumNumber,
-                    "input::math::target::Scalar::minimumnum".into(),
+                    "input.math.target.Scalar.minimumnum".into(),
                 ),
                 (
                     Operation::MaximumNumber,
-                    "input::math::target::Scalar::maximumnum".into(),
+                    "input.math.target.Scalar.maximumnum".into(),
                 ),
-                (
-                    Operation::IsNan,
-                    "input::math::target::Scalar::isnan".into(),
-                ),
+                (Operation::IsNan, "input.math.target.Scalar.isnan".into()),
                 (
                     Operation::IsInfinite,
-                    "input::math::target::Scalar::isinf".into(),
+                    "input.math.target.Scalar.isinf".into(),
                 ),
                 (
                     Operation::IsFinite,
-                    "input::math::target::Scalar::isfinite".into(),
+                    "input.math.target.Scalar.isfinite".into(),
                 ),
                 (
                     Operation::IsNormal,
-                    "input::math::target::Scalar::isnormal".into(),
+                    "input.math.target.Scalar.isnormal".into(),
                 ),
                 (
                     Operation::IsSubnormal,
-                    "input::math::target::Scalar::issubnormal".into(),
+                    "input.math.target.Scalar.issubnormal".into(),
                 ),
                 (
                     Operation::SignBit,
-                    "input::math::target::Scalar::signbit".into(),
+                    "input.math.target.Scalar.signbit".into(),
                 ),
                 (
                     Operation::SaturatingAdd,
-                    "input::math::target::Scalar::add_sat".into(),
+                    "input.math.target.Scalar.add_sat".into(),
                 ),
                 (
                     Operation::SaturatingSubtract,
-                    "input::math::target::Scalar::sub_sat".into(),
+                    "input.math.target.Scalar.sub_sat".into(),
                 ),
                 (
                     Operation::IntegerMinimum,
-                    "input::math::target::Scalar::min".into(),
+                    "input.math.target.Scalar.min".into(),
                 ),
                 (
                     Operation::IntegerMaximum,
-                    "input::math::target::Scalar::max".into(),
+                    "input.math.target.Scalar.max".into(),
                 ),
-                (
-                    Operation::BitAnd,
-                    "input::math::target::Scalar::bit_and".into(),
-                ),
-                (
-                    Operation::BitOr,
-                    "input::math::target::Scalar::bit_or".into(),
-                ),
-                (
-                    Operation::BitXor,
-                    "input::math::target::Scalar::bit_xor".into(),
-                ),
+                (Operation::BitAnd, "input.math.target.Scalar.bit_and".into()),
+                (Operation::BitOr, "input.math.target.Scalar.bit_or".into()),
+                (Operation::BitXor, "input.math.target.Scalar.bit_xor".into()),
                 (
                     Operation::WrappingAbsoluteValue,
-                    "input::math::target::Scalar::abs".into(),
+                    "input.math.target.Scalar.abs".into(),
                 ),
                 (
                     Operation::FunnelShiftLeft,
-                    "input::math::target::Scalar::fshl".into(),
+                    "input.math.target.Scalar.fshl".into(),
                 ),
                 (
                     Operation::FunnelShiftRight,
-                    "input::math::target::Scalar::fshr".into(),
+                    "input.math.target.Scalar.fshr".into(),
                 ),
-                (
-                    Operation::ByteSwap,
-                    "input::math::target::Scalar::bswap".into(),
-                ),
+                (Operation::ByteSwap, "input.math.target.Scalar.bswap".into()),
                 (
                     Operation::BitReverse,
-                    "input::math::target::Scalar::bitreverse".into(),
+                    "input.math.target.Scalar.bitreverse".into(),
                 ),
                 (
                     Operation::PopulationCount,
-                    "input::math::target::Scalar::ctpop".into(),
+                    "input.math.target.Scalar.ctpop".into(),
                 ),
                 (
                     Operation::LeadingZeros,
-                    "input::math::target::Scalar::ctlz".into(),
+                    "input.math.target.Scalar.ctlz".into(),
                 ),
                 (
                     Operation::TrailingZeros,
-                    "input::math::target::Scalar::cttz".into(),
+                    "input.math.target.Scalar.cttz".into(),
                 ),
             ],
             ..Default::default()
@@ -957,7 +897,7 @@ fn generic_fma_specializes_pending_signature_before_host_admission() {
             source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                host_fma: Some("input::Ops::fma"),
+                host_fma: Some("input.Ops.fma"),
                 ..Default::default()
             },
         )
@@ -1197,7 +1137,7 @@ fn generic_intrinsic_rebinding_preserves_only_existing_source_admission() {
                 unsafe {{Ops.{name}'intrinsic({arguments}).as(T)}}
             }}
             fn run() {{let a=calculate<.f32'builtin>({call});let b=calculate<.f64'builtin>({call});assumes a == {value} and b == {value};}}");
-        let selector = format!("input::Ops::{name}");
+        let selector = format!("input.Ops.{name}");
         let package = support::compile_with_source_bindings(
             &source,
             &Default::default(),
@@ -1729,7 +1669,7 @@ fn integer_intrinsic_generic_domain_requires_source_proof() {
             let source = format!(
                 "^intrinsic_enum enum Ops {{bits}} pure fn bits({parameters})->T where T, {constraint} {{unsafe {{Ops.bits'intrinsic({arguments}).as(T)}}}}"
             );
-            let bindings = [(operation, "input::Ops::bits".into())];
+            let bindings = [(operation, "input.Ops.bits".into())];
             let result = support::compile_with_source_bindings(
                 &source,
                 &Default::default(),
@@ -1759,7 +1699,7 @@ fn integer_generic_rebinding_cannot_exchange_same_arity_domains_or_operations() 
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            host_intrinsics: &[(Operation::BitReverse, "input::Ops::bits".into())],
+            host_intrinsics: &[(Operation::BitReverse, "input.Ops.bits".into())],
             ..Default::default()
         },
     )
@@ -1804,7 +1744,7 @@ fn integer_zero_counts_lower_with_a_defined_zero_flag() {
                 &source,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    host_intrinsics: &[(operation, "input::Ops::bits".into())],
+                    host_intrinsics: &[(operation, "input.Ops.bits".into())],
                     ..Default::default()
                 },
             )

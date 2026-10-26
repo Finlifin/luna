@@ -33,8 +33,8 @@ fn tuple_examples_execute_with_explicit_type_constructor_bindings() {
             source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::TupleElements"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.TupleElements"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -56,8 +56,8 @@ fn compile(body: &str, bound: bool) -> Result<nir::program::Package, String> {
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: bound.then_some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: bound.then_some("input.Tuple"),
             ..Default::default()
         },
     )

@@ -45,13 +45,22 @@ pub(crate) fn compile_with_source_bindings(
     protocols: &elaboration::program::Protocols,
     selectors: luna::protocols::type_constructors::Selectors<'_>,
 ) -> Result<Package, String> {
+    compile_with_source_bindings_for_target(source, protocols, selectors, None)
+}
+
+pub(crate) fn compile_with_source_bindings_for_target(
+    source: &str,
+    protocols: &elaboration::program::Protocols,
+    selectors: luna::protocols::type_constructors::Selectors<'_>,
+    target: Option<nir::target::TargetData>,
+) -> Result<Package, String> {
     let path = std::env::temp_dir().join(format!(
         "luna-execution-{}-{}.fl",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::write(&path, source).unwrap();
-    let result = frontend::compile_in_package_with_source_protocols(
+    let result = frontend::compile_bound_for_target(
         &Options {
             input: path.clone(),
             emit: Emit::Nir,
@@ -60,7 +69,6 @@ pub(crate) fn compile_with_source_bindings(
             splice_protocol: selectors.splice.map(str::to_owned),
             meta_list_type: selectors.meta_list.map(str::to_owned),
             tuple_type: selectors.tuple.map(str::to_owned),
-            optional_type: selectors.optional.map(str::to_owned),
             index_protocol: selectors.index.map(str::to_owned),
             ord_protocol: selectors.ordering.map(str::to_owned),
             eq_protocol: selectors.equality.map(str::to_owned),
@@ -71,7 +79,9 @@ pub(crate) fn compile_with_source_bindings(
         0,
         protocols,
         selectors,
-    );
+        target,
+    )
+    .map(|(artifact, _)| artifact);
     std::fs::remove_file(path).unwrap();
     let Artifact::Nir(package) = result? else {
         panic!("wrong artifact")
@@ -116,8 +126,8 @@ pub(crate) fn compile_splice_fixture(
         protocols,
         luna::protocols::type_constructors::Selectors {
             splice,
-            meta_list: Some("input::TupleElements"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.TupleElements"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -138,8 +148,8 @@ pub(crate) fn compile_with_tuple_selectors(
     mut selectors: luna::protocols::type_constructors::Selectors<'_>,
 ) -> Result<nir::program::Package, String> {
     assert!(selectors.meta_list.is_none() && selectors.tuple.is_none());
-    selectors.meta_list = Some("input::TupleElements");
-    selectors.tuple = Some("input::Tuple");
+    selectors.meta_list = Some("input.TupleElements");
+    selectors.tuple = Some("input.Tuple");
     compile_with_source_bindings(
         &format!(
             "pure comptime fn TupleElements<T>->.Type'builtin {{T}}

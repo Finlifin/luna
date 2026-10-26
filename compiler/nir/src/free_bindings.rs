@@ -446,7 +446,7 @@ fn pattern_scan(
                 *scope = common;
             }
         }
-        P::ErrorResult { inner, .. } => {
+        P::OptionalPresent(inner) | P::ErrorResult { inner, .. } => {
             pattern_scan(inner, scope, free, fuel, depth + 1, dependencies)?
         }
         P::NominalType { fields, .. }
@@ -462,7 +462,7 @@ fn pattern_scan(
                 pattern_scan(field, scope, free, fuel, depth + 1, dependencies)?;
             }
         }
-        P::Wild | P::Unit | P::Literal(_) => {}
+        P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => {}
     }
     Ok(())
 }

@@ -28,7 +28,7 @@ fn exact_float_literals_flow_through_comptime_calls_and_suffix_protocols() {
     "#,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            literal_into: Some("input::Convert"),
+            literal_into: Some("input.Convert"),
             ..Default::default()
         },
     )
@@ -150,7 +150,7 @@ fn exact_float_suffix_can_generate_runtime_results_from_precise_comparisons() {
     "#,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            literal_into: Some("input::Convert"),
+            literal_into: Some("input.Convert"),
             splice: Some("Splice"),
             ..Default::default()
         },

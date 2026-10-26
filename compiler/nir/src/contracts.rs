@@ -188,7 +188,7 @@ pub fn remap_predicate(
             }
             // Associated identities contain declaration inputs, not local
             // bindings. Type/input substitution is handled before this remap.
-            K::AssociatedValue { .. } | K::Literal(_) | K::Unit => {}
+            K::OptionalAbsent | K::AssociatedValue { .. } | K::Literal(_) | K::Unit => {}
             K::ReadPointer(v)
             | K::AddressOf(v)
             | K::PointerField { pointer: v, .. }
@@ -197,6 +197,8 @@ pub fn remap_predicate(
             | K::IntegerNegate(v)
             | K::FloatNegate(v)
             | K::BitConvert(v)
+            | K::OptionalPresent(v)
+            | K::OptionalType(v)
             | K::ErrorConvert { value: v, .. }
             | K::NewtypeConvert(v)
             | K::Snapshot(v)
@@ -282,8 +284,10 @@ fn remap_predicate_pattern<'a>(
         *remaining -= 1;
         use crate::program::Pattern;
         match pattern {
-            Pattern::ErrorResult { inner, .. } => patterns.push(inner),
-            Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
+            Pattern::OptionalPresent(inner) | Pattern::ErrorResult { inner, .. } => {
+                patterns.push(inner)
+            }
+            Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
             Pattern::Then { first, value, next } => {
                 patterns.push(first);
                 patterns.push(next);

@@ -2207,3 +2207,194 @@ fn error_label_inference_keeps_permutation_ambiguity_and_budget_failure() {
         vec![primitive(P::Char), primitive(P::Char)]
     );
 }
+
+#[test]
+fn partial_optional_context_preserves_layers_and_recovers_after_failure() {
+    use elaboration::{calls::InputContext as C, ptc::Context};
+    let optional = |ty| Term::Optional(Box::new(ty));
+    let world = Context::default();
+    let consumer = scheme(vec![optional(optional(generic(0)))], generic(0), 1);
+    let pending = consumer
+        .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+        .unwrap();
+    let shape = pending.parameter_input_context(0).unwrap();
+    assert!(matches!(&shape, C::Optional(outer)
+        if matches!(outer.as_ref(), C::Optional(inner) if matches!(inner.as_ref(), C::Unknown))));
+    assert!(pending.finish().is_err());
+
+    let identity = scheme(vec![generic(0)], generic(0), 1);
+    let complete = optional(optional(primitive(P::Bool)));
+    let mut candidate = identity
+        .infer_partial_types_in_context(&[Some(complete.clone())], None, &world, Budget::default())
+        .unwrap();
+    assert!(
+        candidate
+            .constrain_result_context(
+                &shape,
+                Budget {
+                    steps: 1,
+                    ..Budget::default()
+                }
+            )
+            .is_err()
+    );
+    let wrong = C::Optional(Box::new(C::Optional(Box::new(C::Known(primitive(
+        P::Char,
+    ))))));
+    assert!(
+        candidate
+            .constrain_result_context(&wrong, Budget::default())
+            .is_err()
+    );
+    candidate
+        .constrain_result_context(&shape, Budget::default())
+        .unwrap();
+    assert_eq!(candidate.finish().unwrap().result, complete);
+
+    // A context is a structural constraint, not permission to inject or flatten.
+    for wrong in [
+        primitive(P::Bool),
+        optional(primitive(P::Bool)),
+        Term::error_result(vec![primitive(P::Char)], primitive(P::Bool)),
+    ] {
+        let mut candidate = identity
+            .infer_partial_types_in_context(&[Some(wrong)], None, &world, Budget::default())
+            .unwrap();
+        assert!(
+            candidate
+                .constrain_result_context(&shape, Budget::default())
+                .and_then(|_| candidate.finish())
+                .is_err()
+        );
+    }
+    let mut forwarding = identity
+        .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+        .unwrap();
+    forwarding
+        .constrain_result_context(&shape, Budget::default())
+        .unwrap();
+    assert!(
+        matches!(forwarding.parameter_input_context(0).unwrap(), C::Optional(inner)
+        if matches!(inner.as_ref(), C::Optional(_)))
+    );
+    assert!(forwarding.finish().is_err());
+}
+
+#[test]
+fn partial_optional_callback_result_survives_forwarding() {
+    use elaboration::{calls::InputContext as C, ptc::Context};
+    let optional = |ty| Term::Optional(Box::new(ty));
+    let callback = |result| Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Runtime,
+            ty: primitive(P::Bool),
+        }],
+        result: Box::new(result),
+    };
+    let world = Context::default();
+    let consumer = scheme(
+        vec![callback(optional(Term::Record(vec![
+            (
+                "value".into(),
+                Term::Bound {
+                    depth: 2,
+                    index: 0,
+                    sort: Sort::Type,
+                },
+            ),
+            ("fixed".into(), primitive(P::U8)),
+        ])))],
+        generic(0),
+        1,
+    );
+    let pending = consumer
+        .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+        .unwrap();
+    let shape = pending.parameter_input_context(0).unwrap();
+    let C::Callable(context) = &shape else {
+        panic!("callable context lost");
+    };
+    assert!(context.result.is_none());
+    assert!(
+        matches!(context.result_context.as_deref(), Some(C::Optional(inner)) if matches!(inner.as_ref(), C::Record(_)))
+    );
+    let identity = scheme(vec![generic(0)], generic(0), 1);
+    let mut forwarding = identity
+        .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+        .unwrap();
+    forwarding
+        .constrain_result_context(&shape, Budget::default())
+        .unwrap();
+    let C::Callable(context) = forwarding.parameter_input_context(0).unwrap() else {
+        panic!("forwarded callable lost");
+    };
+    assert!(matches!(
+        context.result_context.as_deref(),
+        Some(C::Optional(_))
+    ));
+    assert!(forwarding.finish().is_err());
+    for (fixed, accepted) in [(P::U8, true), (P::Char, false)] {
+        let complete = callback(optional(Term::Record(vec![
+            ("value".into(), primitive(P::Bool)),
+            ("fixed".into(), primitive(fixed)),
+        ])));
+        let mut candidate = identity
+            .infer_partial_types_in_context(
+                &[Some(complete.clone())],
+                None,
+                &world,
+                Budget::default(),
+            )
+            .unwrap();
+        let result = candidate
+            .constrain_result_context(&shape, Budget::default())
+            .and_then(|_| candidate.finish());
+        assert_eq!(result.is_ok(), accepted);
+        if let Ok(instance) = result {
+            assert_eq!(instance.result, complete);
+        }
+    }
+}
+
+#[test]
+fn incompatible_optional_record_relation_cannot_export_an_instance() {
+    use elaboration::{calls::InputContext as C, ptc::Context};
+    let world = Context::default();
+    let signature = scheme(
+        vec![],
+        Term::Optional(Box::new(Term::Record(vec![
+            ("inferred".into(), generic(0)),
+            ("fixed".into(), primitive(P::Bool)),
+        ]))),
+        1,
+    );
+    let context = |inferred, fixed| {
+        C::Optional(Box::new(C::Record(vec![
+            ("inferred".into(), C::Known(primitive(inferred))),
+            ("fixed".into(), C::Known(primitive(fixed))),
+        ])))
+    };
+    let mut candidate = signature
+        .infer_partial_types_in_context(&[], None, &world, Budget::default())
+        .unwrap();
+    // Immediate refutation and an unsettled final obligation both reject export.
+    // Do not require the solver to retain its current Unknown result forever.
+    assert!(
+        candidate
+            .constrain_result_context(&context(P::U8, P::Char), Budget::default())
+            .and_then(|_| candidate.finish())
+            .is_err()
+    );
+
+    // A separate valid candidate must still infer the payload and finish.
+    let mut candidate = signature
+        .infer_partial_types_in_context(&[], None, &world, Budget::default())
+        .unwrap();
+    candidate
+        .constrain_result_context(&context(P::Char, P::Bool), Budget::default())
+        .unwrap();
+    assert_eq!(
+        candidate.finish().unwrap().type_arguments,
+        vec![primitive(P::Char)]
+    );
+}

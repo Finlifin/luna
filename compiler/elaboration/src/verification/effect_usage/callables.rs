@@ -200,7 +200,7 @@ fn structural_bindings<'a>(
             }
         };
         match pattern {
-            Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
+            Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
             Pattern::Binding { binding, inner } => {
                 step(fuel, path.len())?;
                 pending.push(Work::Pattern(inner, value, path.clone()));

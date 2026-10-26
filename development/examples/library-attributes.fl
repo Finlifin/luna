@@ -1,0 +1,10 @@
+{-
+    Inspect with --emit attributes. ABI lowering is not yet implemented, so
+    this example is not a native execution or C interoperability claim.
+-}
+use attrs.abi;
+
+^abi(.c)
+fn identity(value: bool) -> bool {
+    value
+}

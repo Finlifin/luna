@@ -174,7 +174,6 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--splice-protocol"
                 | "--meta-list-type"
                 | "--tuple-type"
-                | "--optional-type"
                 | "--list-pattern-protocol"
                 | "--index-protocol"
                 | "--ord-protocol"
@@ -567,7 +566,6 @@ impl Request {
                 splice: options.splice_protocol.as_deref(),
                 meta_list: options.meta_list_type.as_deref(),
                 tuple: options.tuple_type.as_deref(),
-                optional: options.optional_type.as_deref(),
                 list_pattern: options.list_pattern_protocol.as_deref(),
                 index: options.index_protocol.as_deref(),
                 ordering: options.ord_protocol.as_deref(),

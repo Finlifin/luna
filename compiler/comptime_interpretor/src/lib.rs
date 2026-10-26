@@ -12,6 +12,7 @@ mod cleanup;
 mod environment;
 mod iir_execution;
 mod invocation_contracts;
+mod list_index;
 mod memory;
 mod normal_inputs;
 #[cfg(test)]
@@ -42,6 +43,7 @@ use environment::Environment;
 enum PreparedNormalInput {
     Value(Value),
     TypeTuple(Option<DeclarationId>),
+    ListType(Term),
 }
 /// Invocation-only input transport. Live graphs retain their storage identity;
 /// normal terms are reconstructed in the invocation's checked environment.
@@ -70,6 +72,11 @@ pub fn validate_snapshot_term(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
+    /// One optional layer. An absent outer value is distinct from a present absent payload.
+    Optional {
+        ty: Term,
+        value: Option<Box<Value>>,
+    },
     /// Tagged result data, with no continuation. None is the success branch.
     ErrorResult {
         ty: Term,
@@ -91,6 +98,11 @@ pub enum Value {
     /// Immutable meta.List<Type>; distinct from a tuple of Type values.
     /// Abstract elements require the same scope as individual Type descriptions.
     TypeList(Vec<Term>),
+    /// Immutable homogeneous comptime data with its original list type identity.
+    List {
+        ty: Term,
+        values: Vec<Value>,
+    },
     Integer(comptime_runtime::Integer),
     BitVec(comptime_runtime::bitvec::BitVec),
     Float(comptime_runtime::decimal::DecimalValue),
@@ -210,7 +222,8 @@ impl Value {
                         visit(child, fuel, depth + 1, closures, storage, visitor)?;
                     }
                 }
-                Value::Tuple(fields)
+                Value::List { values: fields, .. }
+                | Value::Tuple(fields)
                 | Value::Record { fields, .. }
                 | Value::Variant { fields, .. } => {
                     for child in fields {
@@ -232,6 +245,11 @@ impl Value {
                             storage,
                             visitor,
                         )?;
+                    }
+                }
+                Value::Optional { value, .. } => {
+                    if let Some(value) = value {
+                        visit(value, fuel, depth + 1, closures, storage, visitor)?;
                     }
                 }
                 Value::ErrorResult { value, .. } | Value::Newtype { value, .. } => {
@@ -274,6 +292,8 @@ impl Value {
             work = work.checked_add(1)?;
             let extra = match value {
                 Self::Type(ty)
+                | Self::List { ty, .. }
+                | Self::Optional { ty, .. }
                 | Self::ErrorResult { ty, .. }
                 | Self::Newtype { ty, .. }
                 | Self::AbstractValue { ty, .. } => scoped_type_value_work_with_evidence(
@@ -357,11 +377,13 @@ impl Value {
             };
             work = work.checked_add(extra)?;
             let children = match value {
-                Self::Record { fields, .. }
+                Self::List { values: fields, .. }
+                | Self::Record { fields, .. }
                 | Self::Variant { fields, .. }
                 | Self::Tuple(fields) => fields.len(),
                 Self::AnonymousRecord(fields) => fields.len(),
                 Self::Object(object) => object.entries().len(),
+                Self::Optional { value, .. } => usize::from(value.is_some()),
                 Self::ErrorResult { .. } | Self::Newtype { .. } => 1,
                 _ => 0,
             };
@@ -369,10 +391,16 @@ impl Value {
                 return None;
             }
             match value {
+                Self::Optional { value, .. } => {
+                    if let Some(value) = value {
+                        pending.push((value, depth + 1));
+                    }
+                }
                 Self::ErrorResult { value, .. } | Self::Newtype { value, .. } => {
                     pending.push((value, depth + 1))
                 }
-                Self::Record { fields, .. }
+                Self::List { values: fields, .. }
+                | Self::Record { fields, .. }
                 | Self::Variant { fields, .. }
                 | Self::Tuple(fields) => pending.extend(fields.iter().map(|v| (v, depth + 1))),
                 Self::AnonymousRecord(fields) => {
@@ -579,6 +607,53 @@ impl Value {
                     charge(budget, work)?;
                     ty.clone()
                 }
+                Value::List { ty, values } => {
+                    let Term::NormalForm {
+                        sort: nir::Sort::Type,
+                        arguments,
+                        ..
+                    } = ty
+                    else {
+                        return Err(ErrorKind::Type);
+                    };
+                    if !matches!(arguments.as_slice(), [element]
+                        if element.sort() == nir::Sort::Type && *element != Term::Primitive(Primitive::Type))
+                    {
+                        return Err(ErrorKind::Type);
+                    }
+                    let work = if invocation {
+                        scoped_type_value_work_with_evidence(
+                            ty,
+                            &BTreeMap::new(),
+                            parameters,
+                            value_parameters,
+                            |_, _, _| None,
+                        )
+                    } else {
+                        scoped_type_value_work(ty, &BTreeMap::new(), parameters)
+                    }
+                    .ok_or(ErrorKind::Type)?;
+                    charge(budget, work)?;
+                    charge(budget, values.len())?;
+                    ty.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
+                    Term::NominalValue {
+                        ty: Box::new(ty.clone()),
+                        variant: None,
+                        fields: values
+                            .iter()
+                            .map(|value| {
+                                visit(
+                                    value,
+                                    depth + 1,
+                                    budget,
+                                    parameters,
+                                    value_parameters,
+                                    invocation,
+                                )
+                            })
+                            .collect::<Result<_, _>>()?,
+                    }
+                }
                 Value::TypeList(types) => {
                     // Charge width before traversing or allocating a frozen list.
                     charge(budget, types.len())?;
@@ -643,6 +718,37 @@ impl Value {
                     Term::Float(value.clone())
                 }
                 Value::Integer(value) => freeze_integer(value, budget)?,
+                Value::Optional { ty, value } => {
+                    if !matches!(ty, Term::Optional(_)) {
+                        return Err(ErrorKind::Type);
+                    }
+                    let work = scoped_type_value_work_with_evidence(
+                        ty,
+                        &BTreeMap::new(),
+                        parameters,
+                        value_parameters,
+                        |_, _, _| None,
+                    )
+                    .ok_or(ErrorKind::Type)?;
+                    charge(budget, work)?;
+                    Term::OptionalValue {
+                        ty: Box::new(ty.clone()),
+                        value: value
+                            .as_ref()
+                            .map(|value| {
+                                visit(
+                                    value,
+                                    depth + 1,
+                                    budget,
+                                    parameters,
+                                    value_parameters,
+                                    invocation,
+                                )
+                                .map(Box::new)
+                            })
+                            .transpose()?,
+                    }
+                }
                 Value::ErrorResult { ty, error, value } => {
                     let Term::ErrorResult { errors, result: _ } = ty else {
                         return Err(ErrorKind::Type);
@@ -836,6 +942,10 @@ impl Value {
         while let Some(value) = pending.pop() {
             match value {
                 Value::Tuple(values) => pending.extend(values),
+                Value::List { ty, values } => {
+                    ty.drop_iteratively();
+                    pending.extend(values);
+                }
                 Value::Record {
                     fields, arguments, ..
                 }
@@ -858,6 +968,12 @@ impl Value {
                     }
                 }
                 Value::Type(ty) => ty.drop_iteratively(),
+                Value::Optional { ty, value } => {
+                    ty.drop_iteratively();
+                    if let Some(value) = value {
+                        pending.push(*value);
+                    }
+                }
                 Value::ErrorResult { ty, value, .. } | Value::Newtype { ty, value } => {
                     ty.drop_iteratively();
                     pending.push(*value);
@@ -2743,7 +2859,7 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };
         if parameters.len() != arguments.len() || types.len() != arguments.len() {
-            return Err(self.failure(ErrorKind::Arity, None));
+            return Err(self.failure(ErrorKind::Arity, Some(source)));
         }
         let mut type_inputs = vec![None; types.len()];
         let mut type_scope: Option<nir::FunctionInputBinding> = None;
@@ -2758,12 +2874,12 @@ impl<'a> Interpreter<'a> {
                 Some(scope) => scope.rebind(&parameter.ty),
                 None => parameter.ty.substitute_partial(&type_inputs),
             }
-            .map_err(|_| self.failure(ErrorKind::Type, None))?;
+            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
             expected
                 .check_scope(&[])
-                .map_err(|_| self.failure(ErrorKind::Type, None))?;
+                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
             if !self.has_type(&representation, &expected) {
-                return Err(self.failure(ErrorKind::Type, None));
+                return Err(self.failure(ErrorKind::Type, Some(source)));
             }
             if self.comptime_only {
                 self.admit_embedded_type_descriptions(&representation, 0)?;
@@ -2782,13 +2898,13 @@ impl<'a> Interpreter<'a> {
                             sort: nir::Sort::Type,
                         }
                     }
-                    _ => return Err(self.failure(ErrorKind::Type, None)),
+                    _ => return Err(self.failure(ErrorKind::Type, Some(source))),
                 };
                 type_inputs[index] = Some(ty);
                 type_scope = Some(
                     signature
                         .prepare_function_inputs(&type_inputs)
-                        .map_err(|_| self.failure(ErrorKind::Type, None))?,
+                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
                 );
             } else if parameter.sort == nir::Sort::ComptimeValue
                 && self.normal_input_is_data(&representation, source)?
@@ -2800,7 +2916,7 @@ impl<'a> Interpreter<'a> {
                 type_scope = Some(
                     signature
                         .prepare_function_inputs(&type_inputs)
-                        .map_err(|_| self.failure(ErrorKind::Type, None))?,
+                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
                 );
             }
             environment.insert(*binding, argument);
@@ -2866,6 +2982,15 @@ impl<'a> Interpreter<'a> {
 
         if depth >= 128 {
             return false;
+        }
+        if let Value::Optional { ty: actual, value } = value {
+            let Term::Optional(payload) = ty else {
+                return false;
+            };
+            return actual == ty
+                && value
+                    .as_ref()
+                    .is_none_or(|value| self.has_type_at(value, payload, depth + 1));
         }
         if let Value::ErrorResult {
             ty: actual,
@@ -3055,6 +3180,12 @@ impl<'a> Interpreter<'a> {
                     self.type_description_work(&typed.ty).is_some()
                         && self.has_type_at(&typed.value, &typed.ty, depth + 1)
                 })
+            }
+            (Value::List { ty: actual, values }, ty) => {
+                self.comptime_only && actual == ty && values.len() <= 100_000
+                    && self.list_element(ty).is_some_and(|element|
+                        element != &Term::Primitive(Primitive::Type)
+                        && values.iter().all(|value| self.has_type_at(value, element, depth + 1)))
             }
             (Value::TypeList(elements), ty) => {
                 self.is_type_list_input(ty)
@@ -3628,6 +3759,7 @@ impl<'a> Interpreter<'a> {
     // exhausting the host stack before the logical depth budget can fire.
     fn eval_inner(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
         match &expr.kind {
+            K::OptionalPresent(_) | K::OptionalAbsent => self.eval_optional(expr, environment),
             K::EffectResume(_)
             | K::EffectHandle { .. }
             | K::EffectRun { .. }
@@ -3643,7 +3775,7 @@ impl<'a> Interpreter<'a> {
             K::FunctionType { .. } | K::FunctionResultType { .. } => {
                 self.eval_function_type(expr, environment)
             }
-            K::PointerType(..) | K::ClosureType { .. } => {
+            K::OptionalType(..) | K::PointerType(..) | K::ClosureType { .. } => {
                 self.eval_environment_type(expr, environment)
             }
             K::NominalType { .. } => self.eval_nominal_type(expr, environment),
@@ -4076,7 +4208,8 @@ impl<'a> Interpreter<'a> {
                 return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
             }
             let width = match value {
-                Value::Tuple(values)
+                Value::List { values, .. }
+                | Value::Tuple(values)
                 | Value::Record { fields: values, .. }
                 | Value::Variant { fields: values, .. } => values.len(),
                 Value::Newtype { .. } => 1,
@@ -4107,7 +4240,8 @@ impl<'a> Interpreter<'a> {
             // payload sizes, labels and completed embedded types separately.
             self.integer_operation(Some(source), |budget| budget.consume(width))?;
             match value {
-                Value::Tuple(values)
+                Value::List { values, .. }
+                | Value::Tuple(values)
                 | Value::Record { fields: values, .. }
                 | Value::Variant { fields: values, .. } => {
                     pending.extend(values.iter().rev().map(|value| (value, depth + 1)))
@@ -4137,6 +4271,66 @@ impl<'a> Interpreter<'a> {
         );
         self.budget.steps -= (steps - budget.steps) as u64;
         term.map_err(|kind| self.failure(kind, Some(source)))
+    }
+
+    fn append_normal_list_item(
+        &mut self,
+        ty: &Term,
+        types: &mut Vec<Term>,
+        values: &mut Vec<Value>,
+        spread: bool,
+        value: Value,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let type_elements = self.is_type_list_input(ty);
+        if spread {
+            self.validate_immutable_input(&value, ty)?;
+            match value {
+                Value::TypeList(elements) if type_elements => {
+                    self.integer_operation(Some(source), |budget| budget.consume(elements.len()))?;
+                    if types.len().saturating_add(elements.len()) > 100_000 {
+                        return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
+                    }
+                    types.extend(elements);
+                }
+                Value::List {
+                    values: elements, ..
+                } if !type_elements => {
+                    self.integer_operation(Some(source), |budget| budget.consume(elements.len()))?;
+                    if values.len().saturating_add(elements.len()) > 100_000 {
+                        return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
+                    }
+                    values.extend(elements);
+                }
+                _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+            }
+        } else if type_elements {
+            types.push(self.type_description_term(value, source)?);
+        } else {
+            values.push(value);
+        }
+        if values.len().max(types.len()) > 100_000 {
+            return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
+        }
+        Ok(())
+    }
+
+    fn finish_normal_list(
+        &mut self,
+        ty: Term,
+        types: Vec<Term>,
+        values: Vec<Value>,
+    ) -> Result<Value, Error> {
+        let value = if self.is_type_list_input(&ty) {
+            Value::TypeList(types)
+        } else {
+            Value::List {
+                ty: ty.clone(),
+                values,
+            }
+        };
+        self.validate_immutable_input(&value, &ty)?;
+        Ok(value)
     }
 
     // The addresses are invocation-local cache identities only, never
@@ -4238,16 +4432,37 @@ impl<'a> Interpreter<'a> {
                 self.prepare_normal_argument(else_input, expected, literals, depth + 1)?;
             }
             A::TypeList { source, items } => {
-                if !self.is_type_list_input(expected) {
-                    return Err(self.failure(ErrorKind::Type, Some(*source)));
+                if items.len() > 100_000 {
+                    return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(*source)));
                 }
+                self.integer_operation(Some(*source), |budget| {
+                    let before = budget.steps;
+                    let mut fuel = before;
+                    if nir::type_computations::charge_term(expected, &mut fuel).is_err() {
+                        return budget.consume(before.saturating_add(1));
+                    }
+                    budget.consume(before - fuel)
+                })?;
+                let element = self
+                    .list_element(expected)
+                    .cloned()
+                    .or_else(|| {
+                        self.is_type_list_input(expected)
+                            .then_some(Term::Primitive(Primitive::Type))
+                    })
+                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(*source)))?;
+                self.integer_operation(Some(*source), |budget| budget.consume(items.len()))?;
+                literals.insert(
+                    input as *const A as usize,
+                    PreparedNormalInput::ListType(expected.clone()),
+                );
                 for item in items {
                     let element_type = if matches!(item, A::TypeListSpread(_)) {
-                        expected.clone()
+                        expected
                     } else {
-                        Term::Primitive(Primitive::Type)
+                        &element
                     };
-                    self.prepare_normal_argument(item, &element_type, literals, depth + 1)?;
+                    self.prepare_normal_argument(item, element_type, literals, depth + 1)?;
                 }
             }
             A::Tuple {
@@ -4330,7 +4545,7 @@ impl<'a> Interpreter<'a> {
                 .remove(&(input as *const A as usize))
                 .and_then(|prepared| match prepared {
                     PreparedNormalInput::Value(value) => Some(Flow::Value(value)),
-                    PreparedNormalInput::TypeTuple(_) => None,
+                    PreparedNormalInput::TypeTuple(_) | PreparedNormalInput::ListType(_) => None,
                 })
                 .ok_or_else(|| self.failure(ErrorKind::Type, Some(input.source()))),
             A::If {
@@ -4353,23 +4568,25 @@ impl<'a> Interpreter<'a> {
                 )
             }
             A::TypeList { items, .. } => {
+                let Some(PreparedNormalInput::ListType(ty)) =
+                    literals.remove(&(input as *const A as usize))
+                else {
+                    return Err(self.failure(ErrorKind::Type, Some(input.source())));
+                };
+                let mut values = Vec::new();
                 let mut types = Vec::new();
                 for item in items {
                     let value = value!(self.eval_normal_argument(item, literals, environment));
-                    match (item, value) {
-                        (A::TypeListSpread(_), Value::TypeList(elements)) => {
-                            self.integer_operation(Some(item.source()), |budget| {
-                                budget.consume(elements.len())
-                            })?;
-                            types.extend(elements);
-                        }
-                        (A::TypeListSpread(_), _) => {
-                            return Err(self.failure(ErrorKind::Type, Some(item.source())));
-                        }
-                        (_, value) => types.push(self.type_description_term(value, item.source())?),
-                    }
+                    self.append_normal_list_item(
+                        &ty,
+                        &mut types,
+                        &mut values,
+                        matches!(item, A::TypeListSpread(_)),
+                        value,
+                        item.source(),
+                    )?;
                 }
-                Ok(Flow::Value(Value::TypeList(types)))
+                self.finish_normal_list(ty, types, values).map(Flow::Value)
             }
             A::Tuple { items, .. } => {
                 let mut values = Vec::new();
@@ -4646,7 +4863,7 @@ impl<'a> Interpreter<'a> {
         scope: &mut Environment,
     ) -> Result<Flow, Error> {
         let (fields, signature): (&[Expr], &Expr) = match &expr.kind {
-            K::PointerType(inner) => (&[], inner),
+            K::OptionalType(inner) | K::PointerType(inner) => (&[], inner),
             K::ClosureType {
                 environment,
                 signature,
@@ -4686,7 +4903,9 @@ impl<'a> Interpreter<'a> {
         }
         let value = value!(self.eval(signature, scope));
         let body = self.type_description_term(value, signature.source)?;
-        let ty = if matches!(expr.kind, K::PointerType(_)) {
+        let ty = if matches!(expr.kind, K::OptionalType(_)) {
+            Term::Optional(Box::new(body))
+        } else if matches!(expr.kind, K::PointerType(_)) {
             Term::Pointer(Box::new(body))
         } else if environment.is_empty() {
             body
@@ -5306,13 +5525,20 @@ impl<'a> Interpreter<'a> {
         let K::TypeListIndex(values, index) = &expr.kind else {
             unreachable!()
         };
+        let element_type = self
+            .list_element(&values.ty)
+            .cloned()
+            .or_else(|| {
+                self.is_type_list_input(&values.ty)
+                    .then_some(Term::Primitive(Primitive::Type))
+            })
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
         let result_type = if index.ty == Term::Primitive(Primitive::Never) {
-            Primitive::Never
+            Term::Primitive(Primitive::Never)
         } else {
-            Primitive::Type
+            element_type
         };
-        if expr.ty != Term::Primitive(result_type)
-            || !self.is_type_list_input(&values.ty)
+        if expr.ty != result_type
             || !matches!(
                 index.ty,
                 Term::Primitive(Primitive::Integer | Primitive::Never)
@@ -5320,8 +5546,18 @@ impl<'a> Interpreter<'a> {
         {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
-        let Value::TypeList(mut elements) = value!(self.eval(values, environment)) else {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        if self.comptime_only
+            && self.cleanup_schedule.is_none()
+            && let K::Local(binding) = values.kind
+            && matches!(index.kind, K::Literal(Literal::Integer(_)) | K::Local(_))
+        {
+            return self.eval_local_list_index(expr, values, binding, index, environment);
+        }
+        let list = value!(self.eval(values, environment));
+        let length = match &list {
+            Value::TypeList(elements) => elements.len(),
+            Value::List { values, .. } => values.len(),
+            _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
         };
         let Value::Integer(position) = value!(self.eval(index, environment)) else {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
@@ -5330,8 +5566,14 @@ impl<'a> Interpreter<'a> {
             .to_u128()
             .ok()
             .and_then(|index| usize::try_from(index).ok())
-            .filter(|index| *index < elements.len())
+            .filter(|index| *index < length)
             .ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(expr.source)))?;
+        if let Value::List { mut values, .. } = list {
+            return Ok(Flow::Value(values.swap_remove(position)));
+        }
+        let Value::TypeList(mut elements) = list else {
+            unreachable!()
+        };
         let result = elements.swap_remove(position);
         let work = self
             .type_description_work(&result)
@@ -5415,13 +5657,16 @@ impl<'a> Interpreter<'a> {
         let diverging = fields
             .iter()
             .any(|field| field.ty == Term::Primitive(Primitive::Never));
+        let element_type = self.list_element(&expr.ty).cloned().or_else(|| {
+            self.is_type_list_input(&expr.ty)
+                .then_some(Term::Primitive(Primitive::Type))
+        });
         if (diverging && expr.ty != Term::Primitive(Primitive::Never))
-            || (!diverging && !self.is_type_list_input(&expr.ty))
+            || (!diverging && element_type.is_none())
             || fields.iter().any(|field| {
-                !matches!(
-                    field.ty,
-                    Term::Primitive(Primitive::Type | Primitive::Never)
-                )
+                field.ty != Term::Primitive(Primitive::Never)
+                    && !diverging
+                    && Some(&field.ty) != element_type.as_ref()
             })
         {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
@@ -5429,13 +5674,28 @@ impl<'a> Interpreter<'a> {
         self.integer_operation(Some(expr.source), |budget| {
             budget.consume(fields.len().saturating_add(1))
         })?;
+        if diverging {
+            for field in fields {
+                let _ = value!(self.eval(field, environment));
+            }
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        if element_type != Some(Term::Primitive(Primitive::Type)) {
+            let mut values = Vec::with_capacity(fields.len());
+            for field in fields {
+                values.push(value!(self.eval(field, environment)));
+            }
+            let value = Value::List {
+                ty: expr.ty.clone(),
+                values,
+            };
+            self.validate_immutable_input(&value, &expr.ty)?;
+            return Ok(Flow::Value(value));
+        }
         let mut types = Vec::with_capacity(fields.len());
         for field in fields {
             let value = value!(self.eval(field, environment));
             types.push(self.type_description_term(value, field.source)?);
-        }
-        if diverging {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
         let value = Value::TypeList(types);
         self.validate_immutable_input(&value, &expr.ty)?;
@@ -6039,6 +6299,37 @@ impl<'a> Interpreter<'a> {
                 {
                     return Err(ErrorKind::Type);
                 }
+                continue;
+            }
+            if self.list_element(&domain).is_some() {
+                nir::type_computations::charge_term(&domain, fuel)
+                    .map_err(|_| ErrorKind::StepsExhausted)?;
+                // Ordinary function clauses have the same value-domain contract
+                // as normal-form inputs; this descriptor is only a checker,
+                // never a new declaration or a type identity.
+                let contract = nir::normal_forms::Head {
+                    declaration: binder.declaration,
+                    role: nir::normal_forms::Role::Opaque,
+                    requirements: vec![],
+                    parameters: vec![nir::normal_forms::Parameter {
+                        declaration: binder.declaration,
+                        binding: LocalId {
+                            owner: binder.declaration.local,
+                            index: 0,
+                        },
+                        kind: nir::normal_forms::Kind::Value,
+                        ty: domain.clone(),
+                    }],
+                };
+                contract.check_arguments_in_scope_with_collections_budgeted_in(
+                    std::slice::from_ref(argument),
+                    |id| self.normal_forms.get(&id).is_some_and(|head| head.role == nir::normal_forms::Role::Tuple),
+                    |id| self.normal_forms.get(&id).is_some_and(|head| head.role == nir::normal_forms::Role::TypeList),
+                    |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
+                    |value, domain| matches!(value, Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
+                        if self.abstract_value_parameters.get(declaration) == Some(domain)),
+                    &[], fuel, self.target,
+                ).map_err(|_| if *fuel == 0 { ErrorKind::StepsExhausted } else { ErrorKind::Type })?;
                 continue;
             }
             nir::validate_declaration_arguments_with_evidence_in(
@@ -8061,6 +8352,13 @@ impl<'a> Interpreter<'a> {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Optional { ty, value } => {
+                write!(f, "(optional-value (type {ty}) ")?;
+                match value {
+                    Some(value) => write!(f, "(present {value}))"),
+                    None => f.write_str("(absent))"),
+                }
+            }
             Self::Object(object) => object.fmt(f),
             Self::ErrorResult { ty, error, value } => {
                 write!(f, "(error-result (type {ty}) (branch ")?;
@@ -8153,6 +8451,13 @@ impl fmt::Display for Value {
                         f.write_str(" ")?;
                     }
                     write!(f, "{ty}")?;
+                }
+                f.write_str("))")
+            }
+            Self::List { ty, values } => {
+                write!(f, "(comptime-list (type {ty}) (values")?;
+                for value in values {
+                    write!(f, " {value}")?;
                 }
                 f.write_str("))")
             }
@@ -8271,6 +8576,16 @@ impl Interpreter<'_> {
         let matched = match pattern {
             Pattern::CodeEvidence { .. } => {
                 return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
+            }
+            Pattern::OptionalAbsent => matches!(input, Value::Optional { value: None, .. }),
+            Pattern::OptionalPresent(inner) => {
+                let Value::Optional {
+                    value: Some(value), ..
+                } = input
+                else {
+                    return Ok(Flow::Value(Value::Bool(false)));
+                };
+                return self.match_pattern_field(inner, value, environment, undo, Some(0));
             }
             Pattern::ErrorResult { label, inner } => {
                 let Value::ErrorResult { ty, error, value } = input else {
@@ -8881,6 +9196,13 @@ impl Interpreter<'_> {
             })
     }
 
+    fn list_element<'a>(&self, ty: &'a Term) -> Option<&'a Term> {
+        let Term::NormalForm { head, .. } = ty else {
+            return None;
+        };
+        self.normal_forms.get(head)?.list_element(ty)
+    }
+
     fn tuple_input_elements<'a>(&self, ty: &'a Term) -> Option<&'a [Term]> {
         match ty {
             Term::Tuple(elements) => Some(elements),
@@ -8934,6 +9256,10 @@ impl Interpreter<'_> {
                 Term::String(value) | Term::Symbol(value) => value.len(),
                 Term::BitVec(value) => value.words().len(),
                 Term::TupleValue(values) | Term::TypeListValue(values) => values.len(),
+                Term::OptionalValue { ty, value } => self
+                    .type_description_work(ty)
+                    .ok_or_else(|| self.failure(ErrorKind::Type, None))?
+                    .saturating_add(usize::from(value.is_some())),
                 Term::ErrorValue { ty, label, .. } => {
                     let mut work = self
                         .type_description_work(ty)
@@ -9109,6 +9435,20 @@ impl Interpreter<'_> {
                 (Term::Float32(bits), Term::Primitive(Primitive::F32)) => Value::Float32(*bits),
                 (Term::Float64(bits), Term::Primitive(Primitive::F64)) => Value::Float64(*bits),
                 (Term::Unit, _) => Value::Unit,
+                (Term::OptionalValue { ty: actual, value }, Term::Optional(payload))
+                    if actual.as_ref() == ty =>
+                {
+                    Value::Optional {
+                        ty: ty.clone(),
+                        value: value
+                            .as_ref()
+                            .map(|value| {
+                                self.normal_pattern_value_at(value, payload, depth + 1)
+                                    .map(Box::new)
+                            })
+                            .transpose()?,
+                    }
+                }
                 (
                     Term::ErrorValue {
                         ty: actual,
@@ -9134,6 +9474,33 @@ impl Interpreter<'_> {
                         error,
                         value: Box::new(self.normal_pattern_value_at(value, payload, depth + 1)?),
                     }
+                }
+                (
+                    Term::NominalValue {
+                        ty: actual,
+                        variant: None,
+                        fields,
+                    },
+                    Term::NormalForm { .. },
+                ) if actual.as_ref() == ty => {
+                    let element = self
+                        .list_element(ty)
+                        .cloned()
+                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                    if element == Term::Primitive(Primitive::Type) {
+                        return Err(self.failure(ErrorKind::Type, None));
+                    }
+                    self.integer_operation(None, |budget| budget.consume(fields.len()))?;
+                    let values = fields
+                        .iter()
+                        .map(|value| self.normal_pattern_value_at(value, &element, depth + 1))
+                        .collect::<Result<_, _>>()?;
+                    let value = Value::List {
+                        ty: ty.clone(),
+                        values,
+                    };
+                    self.validate_immutable_input(&value, ty)?;
+                    value
                 }
                 (
                     Term::NominalValue {
@@ -9513,6 +9880,7 @@ fn scoped_term_value_work_with_evidence_in(
             return None;
         }
         let children = match ty {
+            Term::OptionalValue { value, .. } => 1 + usize::from(value.is_some()),
             Term::ErrorValue { .. } => 3,
             Term::NominalValue { fields, .. } => fields.len().saturating_add(1),
             Term::Record(fields) | Term::RecordValue(fields) => fields.len(),
@@ -9542,7 +9910,7 @@ fn scoped_term_value_work_with_evidence_in(
             }
             Term::Closure { environment, .. } => environment.len().saturating_add(1),
             Term::Function { parameters, .. } => parameters.len().saturating_add(1),
-            Term::Pointer(_) | Term::ComptimeFunction(_) => 1,
+            Term::Optional(_) | Term::Pointer(_) | Term::ComptimeFunction(_) => 1,
             _ => 0,
         };
         if work.saturating_add(pending.len()).saturating_add(children) > 100_000 {
@@ -9577,12 +9945,17 @@ fn scoped_term_value_work_with_evidence_in(
                     }
                 }
                 metadata
-                    .check_arguments_in_scope_with_evidence_budgeted_in(
+                    .check_arguments_in_scope_with_collections_budgeted_in(
                         arguments,
                         |head| {
                             heads
                                 .get(&head)
                                 .is_some_and(|head| head.role == nir::normal_forms::Role::Tuple)
+                        },
+                        |head| {
+                            heads
+                                .get(&head)
+                                .is_some_and(|head| head.role == nir::normal_forms::Role::TypeList)
                         },
                         &nominal_fields,
                         |value, domain| match value {
@@ -9609,6 +9982,12 @@ fn scoped_term_value_work_with_evidence_in(
             }
         }
         match ty {
+            Term::OptionalValue { ty, value } => {
+                pending.push((ty, depth + 1, frames.clone()));
+                if let Some(value) = value {
+                    pending.push((value, depth + 1, frames.clone()));
+                }
+            }
             Term::ErrorValue { ty, label, value } => {
                 pending.push((ty, depth + 1, frames.clone()));
                 if let Some(label) = label {
@@ -9683,9 +10062,10 @@ fn scoped_term_value_work_with_evidence_in(
                 pending.extend(environment.iter().map(|t| (t, depth + 1, frames.clone())));
                 pending.push((signature, depth + 1, frames.clone()));
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
-                pending.push((inner, depth + 1, frames.clone()))
-            }
+            Term::Optional(inner)
+            | Term::Pointer(inner)
+            | Term::ComptimeFunction(inner)
+            | Term::UnsafeFunction(inner) => pending.push((inner, depth + 1, frames.clone())),
             Term::Function { parameters, result } => {
                 work = work.checked_add(frame_slice.len().saturating_add(1))?;
                 if work > 100_000 {
@@ -10499,6 +10879,7 @@ mod pointer_copy_budget_tests {
 
 mod error_results;
 mod newtypes;
+mod optional;
 
 #[cfg(test)]
 mod live_graph_tests {

@@ -34,8 +34,8 @@ fn compile(source: &str) -> nir::program::Package {
         luna::protocols::type_constructors::Selectors {
             copy: Some("Duplicate"),
             drop: Some("Retire"),
-            equality: Some("input::comparison::Eq"),
-            ordering: Some("input::comparison::Ord"),
+            equality: Some("input.comparison.Eq"),
+            ordering: Some("input.comparison.Ord"),
             ..Default::default()
         },
     )

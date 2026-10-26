@@ -693,6 +693,13 @@ impl Normalizer<'_, '_, '_> {
             Term::TupleValue(items) => Term::TupleValue(self.many(items, depth + 1)?),
             Term::TypeListValue(items) => Term::TypeListValue(self.many(items, depth + 1)?),
             Term::TypeListConcat(items) => Term::type_list_concat(self.many(items, depth + 1)?),
+            Term::OptionalValue { ty, value } => Term::OptionalValue {
+                ty: Box::new(self.normalize(ty, depth + 1)?),
+                value: value
+                    .as_ref()
+                    .map(|value| self.normalize(value, depth + 1).map(Box::new))
+                    .transpose()?,
+            },
             Term::ErrorValue { ty, label, value } => {
                 let Term::ErrorResult { errors, result } = ty.as_ref() else {
                     return Err("invalid frozen error result domain".into());
@@ -732,6 +739,7 @@ impl Normalizer<'_, '_, '_> {
                     Term::Record(output)
                 }
             }
+            Term::Optional(inner) => Term::Optional(Box::new(self.normalize(inner, depth + 1)?)),
             Term::Pointer(inner) => Term::Pointer(Box::new(self.normalize(inner, depth + 1)?)),
             Term::ComptimeFunction(inner) => {
                 Term::ComptimeFunction(Box::new(self.normalize(inner, depth + 1)?))
@@ -867,6 +875,13 @@ pub(crate) fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<()
                 pending.extend(items);
                 0
             }
+            Term::OptionalValue { ty, value } => {
+                pending.push(ty);
+                if let Some(value) = value {
+                    pending.push(value);
+                }
+                0
+            }
             Term::ErrorValue { ty, label, value } => {
                 pending.push(ty);
                 if let Some(label) = label {
@@ -890,7 +905,10 @@ pub(crate) fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<()
                 }
                 cost
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
+            Term::Optional(inner)
+            | Term::Pointer(inner)
+            | Term::ComptimeFunction(inner)
+            | Term::UnsafeFunction(inner) => {
                 pending.push(inner);
                 0
             }
@@ -1246,7 +1264,16 @@ mod shared_cache_tests {
             )
             .unwrap();
         assert!(second.steps.is_empty());
-        assert_eq!(second.value, Term::Pointer(Box::new(result)));
+        assert_eq!(second.value, Term::Pointer(Box::new(result.clone())));
+        let (optional, _) = world
+            .normalize_associated_types_cached(
+                &Term::Optional(Box::new(projection.clone())),
+                Budget::default(),
+                &mut cache,
+            )
+            .unwrap();
+        assert!(optional.steps.is_empty());
+        assert_eq!(optional.value, Term::Optional(Box::new(result)));
         let before = cache.clone();
         assert!(
             world

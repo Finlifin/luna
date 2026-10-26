@@ -48,6 +48,7 @@ impl TypeKind {
             Term::Primitive(P::Unit) => return None, // legacy representation
             Term::Primitive(_) => return Some(false),
             Term::Tuple(_) => Self::Tuple,
+            Term::Optional(_) => return Some(false),
             Term::Pointer(_) => Self::Pointer,
             Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_) => {
                 Self::Function

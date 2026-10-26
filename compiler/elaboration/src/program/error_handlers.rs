@@ -202,6 +202,7 @@ impl Checker<'_, '_> {
                 | n::Pattern::CodeEvidence { .. } => return Ok(false),
                 n::Pattern::Binding { inner, .. }
                 | n::Pattern::Observe { inner, .. }
+                | n::Pattern::OptionalPresent(inner)
                 | n::Pattern::ErrorResult { inner, .. }
                 | n::Pattern::Remap { pattern: inner, .. } => pending.push(inner),
                 n::Pattern::Tuple(fields)
@@ -214,7 +215,10 @@ impl Checker<'_, '_> {
                 | n::Pattern::NormalForm {
                     arguments: fields, ..
                 } => pending.extend(fields),
-                n::Pattern::Wild | n::Pattern::Unit | n::Pattern::Literal(_) => {}
+                n::Pattern::OptionalAbsent
+                | n::Pattern::Wild
+                | n::Pattern::Unit
+                | n::Pattern::Literal(_) => {}
             }
         }
         Ok(true)
@@ -282,7 +286,7 @@ impl Checker<'_, '_> {
                 }
                 exports = canonical.unwrap_or_default();
             }
-            n::Pattern::ErrorResult { inner, .. } => {
+            n::Pattern::OptionalPresent(inner) | n::Pattern::ErrorResult { inner, .. } => {
                 return self.checked_pattern_exports(inner, span, depth + 1);
             }
             n::Pattern::Tuple(fields)
@@ -301,7 +305,10 @@ impl Checker<'_, '_> {
                     exports.extend(nested);
                 }
             }
-            n::Pattern::Wild | n::Pattern::Unit | n::Pattern::Literal(_) => {}
+            n::Pattern::OptionalAbsent
+            | n::Pattern::Wild
+            | n::Pattern::Unit
+            | n::Pattern::Literal(_) => {}
             _ => return Ok(None),
         }
         Ok(Some(exports))

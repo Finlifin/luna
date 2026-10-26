@@ -6,9 +6,15 @@ use std::ops::ControlFlow;
 
 pub(super) enum StagedNormalInput {
     Value(Value),
-    TypeList(Vec<(bool, Self)>),
+    TypeList {
+        key: usize,
+        items: Vec<(bool, Self)>,
+    },
     Literal(usize),
-    Tuple { key: usize, items: Vec<Self> },
+    Tuple {
+        key: usize,
+        items: Vec<Self>,
+    },
 }
 
 macro_rules! staged_value {
@@ -56,7 +62,10 @@ impl Interpreter<'_> {
                             staged_input!(self.stage_normal_argument(item, environment, depth + 1)),
                         ));
                     }
-                    StagedNormalInput::TypeList(values)
+                    StagedNormalInput::TypeList {
+                        key: input as *const A as usize,
+                        items: values,
+                    }
                 }
                 A::Tuple { items, .. } => {
                     let mut values = Vec::new();
@@ -167,23 +176,25 @@ impl Interpreter<'_> {
                 Some(PreparedNormalInput::Value(value)) => Ok(value),
                 _ => Err(self.failure(ErrorKind::Type, Some(source))),
             },
-            StagedNormalInput::TypeList(items) => {
+            StagedNormalInput::TypeList { key, items } => {
+                let Some(PreparedNormalInput::ListType(ty)) = literals.remove(&key) else {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                };
                 let mut types = Vec::new();
+                let mut values = Vec::new();
                 for (spread, item) in items {
                     let value =
                         self.finish_staged_normal_argument(item, literals, source, depth + 1)?;
-                    match (spread, value) {
-                        (true, Value::TypeList(elements)) => {
-                            self.integer_operation(Some(source), |budget| {
-                                budget.consume(elements.len())
-                            })?;
-                            types.extend(elements);
-                        }
-                        (false, Value::Type(ty)) => types.push(ty),
-                        _ => return Err(self.failure(ErrorKind::Type, Some(source))),
-                    }
+                    self.append_normal_list_item(
+                        &ty,
+                        &mut types,
+                        &mut values,
+                        spread,
+                        value,
+                        source,
+                    )?;
                 }
-                Ok(Value::TypeList(types))
+                self.finish_normal_list(ty, types, values)
             }
             StagedNormalInput::Tuple { key, items } => {
                 let values = items

@@ -21,6 +21,13 @@ class LibraryCheckTests(unittest.TestCase):
                 evidence.mkdir(parents=True)
                 count = {'native-resources': 4, 'native-comparison': 6, 'native-math': 8, 'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3}
                 text = '(bool false)' if wrong_value else '(bool true)'
+                if label in ('attributes', 'merged-attributes'):
+                    text = '(evaluated-attribute (property "abi") (symbol "c"))'
+                    if label == 'merged-attributes':
+                        text = (f'(attribute-inspection (evaluated {text}) '
+                                '(selected (merged-attributes (key "abi") (entry 0))))')
+                    if native_output is not None and label == native_stage:
+                        text = native_output
                 if label in count:
                     text = f'(count {count[label]}) (failures 0)'
                     if native_output is not None and label == native_stage:
@@ -36,7 +43,7 @@ class LibraryCheckTests(unittest.TestCase):
                     patch('sys.argv', argv), patch('builtins.print'):
                 status = library_check.main()
             summary = json.loads((root / 'summary.json').read_text())
-            self.assertEqual(len(calls), len(set(selected)) if selected else 10)
+            self.assertEqual(len(calls), len(set(selected)) if selected else len(library_check.STAGES))
             self.assertEqual(summary['scope'], 'selected' if selected else 'all')
             self.assertEqual(summary['selected_stages'], [label for label, _ in calls])
             for _, command in calls:
@@ -52,12 +59,36 @@ class LibraryCheckTests(unittest.TestCase):
                 self.assertIn(str(library_check.ROOT / f'library/builtin/{name}.fl'), command)
                 self.assertIn(str(library_check.ROOT / 'library/builtin/resources.fl'), command)
                 self.assertIn('--test-native', command)
-                self.assertIn('resources::Copy', command)
-                self.assertIn('resources::Drop', command)
+                self.assertIn('resources.Copy', command)
+                self.assertIn('resources.Drop', command)
                 if name == 'option':
-                    self.assertIn('optional::Option', command)
+                    self.assertNotIn('--optional-type', command)
+                    self.assertIn('optional', command)
             self.assertEqual(summary['passed'], status == 0)
             return status, summary
+
+    def test_inline_iteration_failure_is_reported(self):
+        status, summary = self.check_stages(release=True, failing='inline-iteration', selected=['inline-iteration'])
+        self.assertEqual(status, 1)
+        self.assertFalse(summary['stages'][0]['passed'])
+
+    def test_meta_values_requires_the_expected_comptime_result(self):
+        for wrong_value in [False, True]:
+            status, summary = self.check_stages(selected=['meta-values'], wrong_value=wrong_value)
+            self.assertEqual(status, int(wrong_value))
+            self.assertEqual(summary['stages'][0]['value_matches'], not wrong_value)
+
+    def test_attribute_stages_require_evaluation_and_merge_evidence(self):
+        raw = '(evaluated-attribute (property "abi") (symbol "c"))'
+        for label, output in [('attributes', ''), ('attributes', raw + raw),
+                              ('attributes', raw.replace('"c"', '"other"')),
+                              ('merged-attributes', raw),
+                              ('merged-attributes', '(attribute-inspection (evaluated) (selected))')]:
+            with self.subTest(label=label, output=output):
+                status, summary = self.check_stages(
+                    selected=[label], native_stage=label, native_output=output)
+                self.assertEqual(status, 1)
+                self.assertFalse(summary['stages'][0]['value_matches'])
 
     def test_profiles_apply_to_every_cargo_stage(self):
         for release in [False, True]:

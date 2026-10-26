@@ -37,7 +37,7 @@ fn real_ord_defaults_drive_nominal_and_generic_operators() {
         include_str!("../../../library/builtin/resources.fl")
     );
     assert!(compile(&source, None).is_err());
-    let package = compile(&source, Some("input::comparison::Ord")).unwrap();
+    let package = compile(&source, Some("input.comparison.Ord")).unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100000).unwrap(),
         comptime_interpretor::Value::Bool(true)
@@ -80,7 +80,7 @@ fn ordering_calls_preserve_left_right_order_and_divergence() {
         }
         fn escape()->bool {Rank {value:1} < do {return true}}
         fn left_escape()->bool {do {return true} < Rank {value:2}}";
-    let package = compile(source, Some("input::Compare")).unwrap();
+    let package = compile(source, Some("input.Compare")).unwrap();
     for entry in ["run", "escape", "left_escape"] {
         assert_eq!(
             luna::execution::interpret(&package, entry, 100000).unwrap(),
@@ -95,7 +95,7 @@ fn ordering_does_not_use_unbound_or_wrong_result_protocols() {
         "trait Compare {fn lt(self,other:Self)->.u8'builtin;} struct Rank {} impl Compare for Rank {fn lt(self,other:Self)->.u8'builtin {1}} fn run()->bool {Rank {} < Rank {}}",
         "trait Compare {fn lt(self,other:Self)->bool;} struct Rank {} fn run()->bool {Rank {} < Rank {}}",
     ] {
-        assert!(compile(source, Some("input::Compare")).is_err());
+        assert!(compile(source, Some("input.Compare")).is_err());
     }
 }
 
@@ -109,12 +109,12 @@ fn cli_accepts_qualified_ord_binding_and_rejects_duplicates() {
         "--emit",
         "nir",
         "--ord-protocol",
-        "input::Compare",
+        "input.Compare",
     ])
     .unwrap() else {
         panic!("compile expected")
     };
-    assert_eq!(options.ord_protocol.as_deref(), Some("input::Compare"));
+    assert_eq!(options.ord_protocol.as_deref(), Some("input.Compare"));
     assert!(parse(["input.fl", "--ord-protocol"]).is_err());
     assert!(
         parse([
@@ -122,9 +122,9 @@ fn cli_accepts_qualified_ord_binding_and_rejects_duplicates() {
             "--emit",
             "nir",
             "--ord-protocol",
-            "input::Compare",
+            "input.Compare",
             "--ord-protocol",
-            "input::Other"
+            "input.Other"
         ])
         .is_err()
     );

@@ -9,6 +9,7 @@ mod enums;
 mod errors;
 mod frames;
 mod named_calls;
+mod optional;
 use bits::bit_width;
 mod decimal;
 mod patterns;
@@ -22,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
     Unit,
+    Optional(std::sync::Arc<Ty>),
     ErrorResult(std::sync::Arc<Vec<(Option<Term>, Ty)>>),
     Bool,
     String,
@@ -44,6 +46,14 @@ enum Ty {
 impl Ty {
     fn llvm(&self) -> String {
         match self {
+            Self::Optional(payload) => format!(
+                "{{ i1, {} }}",
+                if **payload == Ty::Unit {
+                    "{}".into()
+                } else {
+                    payload.llvm()
+                }
+            ),
             Self::ErrorResult(fields) => format!(
                 "{{ i32, {} }}",
                 fields
@@ -143,6 +153,14 @@ fn repr_at(
         return Ok(Ty::TemplateIdentity(std::sync::Arc::new(ty.clone())));
     }
     match ty {
+        Term::Optional(payload) => {
+            let payload = if **payload == Term::Primitive(P::Never) {
+                Ty::Unit
+            } else {
+                repr_at(graph, payload, depth + 1, checked, remaining)?
+            };
+            Ok(Ty::Optional(std::sync::Arc::new(payload)))
+        }
         Term::ErrorResult { errors, result } => {
             let success = if **result == Term::Primitive(P::Never) {
                 Ty::Unit
@@ -844,6 +862,7 @@ impl Emitter<'_> {
             K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. } => {
                 self.callable(expr)?
             }
+            K::OptionalAbsent | K::OptionalPresent(_) => self.optional(expr, depth)?,
             K::Variant { index, fields, .. } => {
                 self.variant(expr.source, *index, fields, &expr.ty, depth)?
             }

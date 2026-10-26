@@ -93,7 +93,8 @@ fn subject_pattern_bindings(
                     pending.push(Work::Bind(*binding));
                     pending.push(Work::Visit(inner));
                 }
-                n::Pattern::ErrorResult { inner: pattern, .. }
+                n::Pattern::OptionalPresent(pattern)
+                | n::Pattern::ErrorResult { inner: pattern, .. }
                 | n::Pattern::Observe { inner: pattern, .. }
                 | n::Pattern::Guard { pattern, .. }
                 | n::Pattern::Then { first: pattern, .. } => pending.push(Work::Visit(pattern)),
@@ -120,9 +121,10 @@ fn subject_pattern_bindings(
                     ));
                     pending.extend(fields.iter().map(Work::Visit));
                 }
-                n::Pattern::Wild | n::Pattern::Unit | n::Pattern::Literal(_) => {
-                    values.push(BTreeSet::new())
-                }
+                n::Pattern::OptionalAbsent
+                | n::Pattern::Wild
+                | n::Pattern::Unit
+                | n::Pattern::Literal(_) => values.push(BTreeSet::new()),
             },
         }
     }
@@ -3068,23 +3070,24 @@ impl Checker<'_, '_> {
                 }
                 D::Known(p(P::Type))
             }
-            H::List(elements) if matches!(expected, Some(D::Known(ty)) if self.is_type_list_type(ty)) =>
+            H::List(elements) if matches!(expected, Some(D::Known(ty)) if self.list_element_type(ty).is_some()) =>
             {
+                let Some(D::Known(ty)) = expected else {
+                    unreachable!()
+                };
+                let element_type = self.list_element_type(ty).unwrap().clone();
                 for element in *elements {
                     self.describe_open_expression(
                         element,
                         locals,
                         returns,
-                        Some(&D::Known(p(P::Type))),
+                        Some(&D::Known(element_type.clone())),
                         depth + 1,
                     )?;
                 }
                 expected.unwrap().clone()
             }
             H::TyPtr(inner) | H::TyOptional(inner) => {
-                if matches!(expr.kind, H::TyOptional(_)) {
-                    self.bound_optional_declaration(expr.span)?;
-                }
                 self.describe_open_expression(
                     inner,
                     locals,
@@ -7300,9 +7303,9 @@ impl Checker<'_, '_> {
             // Keep that obligation pending while collecting evidence, then
             // resolve established projections before finishing the candidate.
             candidate
-                .refine_type_views(
+                .refine_type_views_metered(
                     |ty, budget| {
-                        self.callable_input_view_budgeted(ty, budget, expr.span)
+                        self.callable_input_view_metered(ty, budget, expr.span)
                             .map_err(|failure| failure.message)
                     },
                     crate::ptc::Budget::default(),

@@ -129,20 +129,19 @@ fn deferred_structural_types_preserve_nested_bitvec_computations() {
 }
 
 #[test]
-fn deferred_optional_payloads_still_require_constructor_evidence() {
-    let definitions = "enum Option where T {Some(T),None}
-        fn forward(comptime width:.Integer'builtin,value:defer ?.BitVec'builtin<width>)
+fn deferred_optional_payloads_use_native_type_and_check_width() {
+    let definitions =
+        "fn forward(comptime width:.Integer'builtin,value:defer ?.BitVec'builtin<width>)
             ->defer ?.BitVec'builtin<width> {value}";
     let source = format!(
         "{definitions} fn run()->bool {{
-        let first=forward(2,.Some(3));
-        let empty=forward(0,.None);
-        (first match {{.Some(bits)=>bits == 3,.None=>false}})
-            and (empty match {{.Some(_)=>false,.None=>true}})
+        let first=forward(2,3);
+        let empty=forward(0,null);
+        (first match {{bits?=>bits == 3,null=>false}})
+            and (empty match {{_?=>false,null=>true}})
     }}"
     );
     let selectors = luna::protocols::type_constructors::Selectors {
-        optional: Some("input::Option"),
         ..Default::default()
     };
     let package =
@@ -152,8 +151,7 @@ fn deferred_optional_payloads_still_require_constructor_evidence() {
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
-    assert!(compile_with_protocols(&source, &Default::default()).is_err());
-    let invalid = format!("{definitions} fn bad() {{forward(2,.Some(4));}}");
+    let invalid = format!("{definitions} fn bad() {{forward(2,4);}}");
     assert!(
         execution_support::compile_with_source_bindings(&invalid, &Default::default(), selectors)
             .is_err()
@@ -479,8 +477,8 @@ fn owned_fields_and_captured_bit_storage_use_resource_checked_execution() {
         pure fn snapshots()->Word {{var word:Word=0;let first=|| do {{let i:Byte=4;word'bitvec[i]=1;word}};
             let second=|| word;let changed=first();let original=second();if original == 0 {{changed}} else {{original}}}}");
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -581,8 +579,8 @@ fn field_writeback_preserves_rhs_object_replacement_and_siblings() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                copy: Some("input::Copy"),
-                drop: Some("input::Drop"),
+                copy: Some("input.Copy"),
+                drop: Some("input.Drop"),
                 ..Default::default()
             },
         )

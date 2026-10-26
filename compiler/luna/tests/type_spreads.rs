@@ -265,8 +265,8 @@ fn packet_unpacking_uses_bound_tuple_view_without_unfolding() {
         typealias Concrete=Pair<...packet(bool)>;"
     );
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package =
@@ -877,8 +877,8 @@ fn computed_mixed_packets_use_the_bound_tuple_view() {
         comptime fn Run()->Type {{Tagged<...packet()>}}"
     );
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package =
@@ -1039,8 +1039,8 @@ fn partial_context_preserves_the_bound_tuple_constructor() {
         comptime fn Run()->Type {{Tagged<...do {{(bool,true,7)}}>}}"
     );
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package =
@@ -1539,7 +1539,7 @@ fn named_type_list_supply_accepts_literal_prefix_packets_in_source_order() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
+                meta_list: Some("input.List"),
                 ..Default::default()
             },
         )
@@ -1581,7 +1581,7 @@ fn named_type_list_prefix_packets_preserve_exits_and_reject_conflicting_supply()
             ),
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
+                meta_list: Some("input.List"),
                 ..Default::default()
             },
         )
@@ -1636,8 +1636,8 @@ fn computed_prefix_packets_share_the_named_type_list_input_plan() {
                 &source,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    meta_list: Some("input::List"),
-                    tuple: bound_tuple.then_some("input::Tuple"),
+                    meta_list: Some("input.List"),
+                    tuple: bound_tuple.then_some("input.Tuple"),
                     ..Default::default()
                 },
             );
@@ -1684,8 +1684,8 @@ fn computed_prefix_packets_keep_exit_order_and_dependent_checks() {
             ),
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -1735,8 +1735,8 @@ fn named_type_list_packets_compose_with_dependent_defaults() {
         &source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -1791,8 +1791,8 @@ fn named_type_list_packets_retain_generic_type_alias_parameters() {
         &source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -1842,7 +1842,7 @@ fn defaulted_normal_heads_collect_type_items_in_source_order() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
+                meta_list: Some("input.List"),
                 ..Default::default()
             },
         )
@@ -1879,8 +1879,8 @@ fn defaulted_type_collection_preserves_early_exit_and_rejects_mixed_supply() {
             ),
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -1941,8 +1941,8 @@ fn defaulted_type_collectors_spread_lists_once_in_source_order() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -1979,7 +1979,7 @@ fn defaulted_list_spreads_preserve_exit_and_validate_element_domains() {
             ),
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
+                meta_list: Some("input.List"),
                 ..Default::default()
             },
         )
@@ -2019,8 +2019,8 @@ fn required_prefix_heads_collect_after_computed_packets() {
         &source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -2066,7 +2066,7 @@ fn prefix_literal_expansion_does_not_reinterpret_tail_tuples_as_type_lists() {
             ),
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
+                meta_list: Some("input.List"),
                 ..Default::default()
             },
         )
@@ -2101,7 +2101,7 @@ fn collected_type_list_contracts_reject_known_violations_during_elaboration() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
+                meta_list: Some("input.List"),
                 ..Default::default()
             },
         )
@@ -2124,7 +2124,7 @@ fn collected_type_list_contracts_check_deferred_inputs_and_recover() {
         &source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
+            meta_list: Some("input.List"),
             ..Default::default()
         },
     )
@@ -2283,8 +2283,8 @@ fn returning_type_list_inputs_keep_preparation_nodes_diverging() {
                 &source,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    meta_list: Some("input::List"),
-                    tuple: bound_tuple.then_some("input::Tuple"),
+                    meta_list: Some("input.List"),
+                    tuple: bound_tuple.then_some("input.Tuple"),
                     ..Default::default()
                 },
             )
@@ -2379,8 +2379,8 @@ fn generic_invocation_transports_residual_nominal_type_lists() {
         &source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )

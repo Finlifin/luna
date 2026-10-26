@@ -357,7 +357,9 @@ pub fn machine_arithmetic_functions(
                         }
                         work.push(Work::Pattern(pattern, ct));
                     }
-                    Pattern::ErrorResult { inner, .. } => work.push(Work::Pattern(inner, ct)),
+                    Pattern::OptionalPresent(inner) | Pattern::ErrorResult { inner, .. } => {
+                        work.push(Work::Pattern(inner, ct))
+                    }
                     Pattern::Record { fields, .. }
                     | Pattern::AnonymousRecord { fields, .. }
                     | Pattern::Variant { fields, .. }
@@ -375,7 +377,10 @@ pub fn machine_arithmetic_functions(
                             "unresolved pattern-code evidence",
                         ));
                     }
-                    Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
+                    Pattern::OptionalAbsent
+                    | Pattern::Wild
+                    | Pattern::Unit
+                    | Pattern::Literal(_) => {}
                 },
                 Work::Expr(expr, _callee, ct) => {
                     let written = match &expr.kind {
@@ -1140,6 +1145,8 @@ pub fn machine_arithmetic_functions(
                         | K::UnsafeScope(value)
                         | K::Discard(value)
                         | K::BitSlice { value, .. }
+                        | K::OptionalPresent(value)
+                        | K::OptionalType(value)
                         | K::PointerType(value)
                         | K::BitVecType(value)
                         | K::IntegerNegate(value)
@@ -1415,6 +1422,7 @@ pub fn machine_arithmetic_functions(
                         | K::TypeListValue(_)
                         | K::Literal(_)
                         | K::Local(_)
+                        | K::OptionalAbsent
                         | K::Unit
                         | K::Break(_)
                         | K::Continue(_) => {}

@@ -281,13 +281,13 @@ impl fmt::Display for NormalFormInputPlan {
 /// A head input may need its earlier Type inputs before literal conversion.
 #[derive(Clone, Debug, PartialEq)]
 pub enum NormalFormArgument {
-    /// Collect Type expressions into one comptime list argument in source order.
+    /// Collect expressions into one contextual comptime list in source order.
     TypeList {
         source: SourceRange,
         items: Vec<Self>,
     },
     Value(Expr),
-    /// Expand a completed Type list inside a Type-list collector.
+    /// Expand a completed list of the collector's exact contextual list type.
     TypeListSpread(Expr),
     Unit {
         source: SourceRange,
@@ -817,6 +817,12 @@ impl fmt::Display for EffectHandler {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExprKind {
+    /// Preserve the entire operand as the payload of one new optional layer.
+    OptionalPresent(Box<Expr>),
+    /// Absence in the optional domain carried by Expr.ty.
+    OptionalAbsent,
+    /// Comptime construction of an optional Type from a Type-valued expression.
+    OptionalType(Box<Expr>),
     /// Explicit result construction/transport, independent of effect continuations.
     ErrorConvert {
         conversion: crate::error_results::Conversion,
@@ -858,9 +864,10 @@ pub enum ExprKind {
     ComptimeValue(Term),
     /// Completed immutable meta.List<Type> data, distinct from Type and tuple data.
     TypeListValue(Vec<Term>),
-    /// Ordered comptime construction of immutable meta.List<Type> data.
+    /// Ordered comptime construction of immutable meta.List<T> data.
+    /// The expression type carries the trusted head and homogeneous element domain.
     TypeList(Vec<Expr>),
-    /// Checked comptime indexing of the compiler-bound meta.List<Type> value.
+    /// Checked comptime indexing of a compiler-bound meta.List<T> value.
     TypeListIndex(Box<Expr>, Box<Expr>),
     /// A value selected by an interface member. Its declaration identity remains
     /// abstract until implementation evidence fixes the value; defaults are not facts.
@@ -1186,6 +1193,10 @@ pub struct Capture {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pattern {
+    /// Match one existing optional layer and expose its whole payload.
+    OptionalPresent(Box<Pattern>),
+    /// Match absence at exactly this layer.
+    OptionalAbsent,
     /// None selects success; Some selects a full error type identity.
     ErrorResult {
         label: Option<Term>,
@@ -1257,6 +1268,8 @@ pub struct MatchArm {
 impl fmt::Display for Pattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::OptionalPresent(inner) => write!(f, "(optional-present-pattern {inner})"),
+            Self::OptionalAbsent => f.write_str("(optional-absent-pattern)"),
             Self::CodeEvidence { outputs } => {
                 f.write_str("(pattern-code-evidence (outputs")?;
                 for (id, ty) in outputs {
@@ -2329,37 +2342,6 @@ impl Enum {
         }
         Ok(())
     }
-    /// A trusted optional representation preserves its single payload intact.
-    pub fn is_optional_representation(&self) -> bool {
-        if self.encoding.is_some() || self.symbol_encoding.is_some() || !self.groups.is_empty() {
-            return false;
-        }
-        let [parameter] = self.type_parameters.as_slice() else {
-            return false;
-        };
-        self.variants.len() == 2
-            && self
-                .variants
-                .iter()
-                .filter(|variant| variant.shape == VariantShape::Unit && variant.fields.is_empty())
-                .count()
-                == 1
-            && self
-                .variants
-                .iter()
-                .filter(|variant| {
-                    variant.shape == VariantShape::Tuple
-                        && variant.fields
-                            == [Term::Rigid {
-                                declaration: *parameter,
-                                sort: crate::Sort::Type,
-                            }]
-                })
-                .count()
-                == 1
-            && self.requirements.is_empty()
-            && self.capabilities.is_empty()
-    }
     pub fn instantiate_variants(
         &self,
         arguments: &[Term],
@@ -2599,6 +2581,9 @@ impl fmt::Display for Expr {
 impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::OptionalPresent(inner) => write!(f, "(optional-present {inner})"),
+            Self::OptionalAbsent => f.write_str("(optional-absent)"),
+            Self::OptionalType(inner) => write!(f, "(optional-type-value {inner})"),
             Self::EffectResume(value) => write!(f, "(effect-resume {value})"),
             Self::EffectHandle {
                 computation,
@@ -3379,6 +3364,8 @@ impl Expr {
                     | ExprKind::ReadPointer(_)
                     | ExprKind::PointerAnonymousField { .. }
                     | ExprKind::PointerField { .. }
+                    | ExprKind::OptionalPresent(_)
+                    | ExprKind::OptionalType(_)
                     | ExprKind::PointerType(_)
                     | ExprKind::BitVecType(_)
                     | ExprKind::IntegerNegate(_)
@@ -3453,6 +3440,8 @@ impl Expr {
                 | ExprKind::ReadPointer(value)
                 | ExprKind::PointerAnonymousField { pointer: value, .. }
                 | ExprKind::PointerField { pointer: value, .. }
+                | ExprKind::OptionalPresent(value)
+                | ExprKind::OptionalType(value)
                 | ExprKind::PointerType(value)
                 | ExprKind::BitVecType(value)
                 | ExprKind::IntegerNegate(value)
@@ -3826,6 +3815,8 @@ impl Expr {
             | ExprKind::ReadPointer(value)
             | ExprKind::PointerAnonymousField { pointer: value, .. }
             | ExprKind::PointerField { pointer: value, .. }
+            | ExprKind::OptionalPresent(value)
+            | ExprKind::OptionalType(value)
             | ExprKind::PointerType(value)
             | ExprKind::BitVecType(value)
             | ExprKind::IntegerNegate(value)
@@ -3967,6 +3958,7 @@ impl Expr {
             ExprKind::Literal(_)
             | ExprKind::Local(_)
             | ExprKind::Function(_)
+            | ExprKind::OptionalAbsent
             | ExprKind::Unit
             | ExprKind::Break(_)
             | ExprKind::Continue(_) => {}
@@ -4007,6 +3999,13 @@ impl Term {
                 | Term::TypeListValue(arguments)
                 | Term::TypeListConcat(arguments)
                 | Term::TupleValue(arguments) => terms.extend(arguments),
+                Term::OptionalValue { ty, value } => {
+                    terms.push(ty);
+                    if let Some(value) = value {
+                        terms.push(value);
+                    }
+                }
+
                 Term::ErrorValue { ty, label, value } => {
                     terms.push(ty);
                     if let Some(label) = label {
@@ -4021,9 +4020,10 @@ impl Term {
                 Term::Record(fields) | Term::RecordValue(fields) => {
                     terms.extend(fields.iter().map(|(_, ty)| ty))
                 }
-                Term::Pointer(t) | Term::ComptimeFunction(t) | Term::UnsafeFunction(t) => {
-                    terms.push(t)
-                }
+                Term::Optional(t)
+                | Term::Pointer(t)
+                | Term::ComptimeFunction(t)
+                | Term::UnsafeFunction(t) => terms.push(t),
                 Term::Function { parameters, result } => {
                     terms.extend(parameters.iter().map(|p| &p.ty));
                     terms.push(result);
@@ -4314,6 +4314,13 @@ impl Pattern {
             _ => None,
         };
         match self {
+            Self::OptionalPresent(inner) => {
+                let payload = match domain {
+                    Some(Term::Optional(payload)) => Some(payload.as_ref()),
+                    _ => None,
+                };
+                inner.rewrite_with_domain(rewriter, payload)?;
+            }
             Self::ErrorResult { label, inner } => {
                 let inner_domain = label.clone().or_else(|| match domain {
                     Some(Term::ErrorResult { result, .. }) => Some((**result).clone()),
@@ -4439,7 +4446,10 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
             ExprKind::BitWindow { value, start, end } => {
                 pending.extend([value.as_ref(), start.as_ref(), end.as_ref()])
             }
-            ExprKind::Literal(_) | ExprKind::Local(_) | ExprKind::Unit => {}
+            ExprKind::Literal(_)
+            | ExprKind::Local(_)
+            | ExprKind::OptionalAbsent
+            | ExprKind::Unit => {}
             ExprKind::Intrinsic {
                 tag,
                 inputs,
@@ -4484,6 +4494,7 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
             | ExprKind::IntegerNegate(value)
             | ExprKind::FloatNegate(value)
             | ExprKind::BitConvert(value)
+            | ExprKind::OptionalPresent(value)
             | ExprKind::ErrorConvert { value: value, .. }
             | ExprKind::NewtypeConvert(value)
             | ExprKind::Snapshot(value)
@@ -4574,7 +4585,7 @@ fn predicate_pattern<'a>(
         }
         *remaining -= 1;
         match pattern {
-            Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
+            Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
             Pattern::Then { first, value, next } => {
                 patterns.extend([first.as_ref(), next.as_ref()]);
                 pending.push(value);
@@ -4590,7 +4601,9 @@ fn predicate_pattern<'a>(
                 patterns.push(pattern);
                 pending.push(condition);
             }
-            Pattern::Observe { inner, .. } | Pattern::Binding { inner, .. } => patterns.push(inner),
+            Pattern::OptionalPresent(inner)
+            | Pattern::Observe { inner, .. }
+            | Pattern::Binding { inner, .. } => patterns.push(inner),
             Pattern::Tuple(fields)
             | Pattern::Record { fields, .. }
             | Pattern::AnonymousRecord { fields, .. }

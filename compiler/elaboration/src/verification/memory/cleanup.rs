@@ -88,9 +88,9 @@ fn collect_pattern_storage(
                 pending.push(first);
                 pending.push(next);
             }
-            Pattern::Guard { pattern, .. } | Pattern::ErrorResult { inner: pattern, .. } => {
-                pending.push(pattern)
-            }
+            Pattern::Guard { pattern, .. }
+            | Pattern::OptionalPresent(pattern)
+            | Pattern::ErrorResult { inner: pattern, .. } => pending.push(pattern),
             Pattern::Tuple(fields)
             | Pattern::TypeTuple(fields)
             | Pattern::Or(fields)
@@ -107,7 +107,7 @@ fn collect_pattern_storage(
                 pending.extend(fields);
             }
             Pattern::CodeEvidence { .. } => return Err("unresolved private pattern storage".into()),
-            Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
+            Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
         }
     }
     let mut successors = BTreeMap::<LocalId, Vec<LocalId>>::new();

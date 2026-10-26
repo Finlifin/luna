@@ -1,5 +1,9 @@
 # LLVM host pipeline（首个可执行子集）
 
+当前 math 源码位于 `library/builtin/math_intrinsics.fl`，由 builtin.prelude 导出模块入口；
+sysroot 绑定为 `builtin.math_intrinsics.target.Scalar`，不再加载独立 math 包。
+下文历史检查记录中的旧路径与命令保留原貌；当前使用方法见 library/README.md。
+
 ## 普通 comptime 宽度与默认供应工厂（2026-10-25）
 
 staged-bitvec 新增 `ordinary_factory(width)` 和带 comptime 可选默认值的 `defaulted_factory()`，返回相应宽度的普通回调；覆盖零宽、65 位、1024 位及闭包捕获。在 `/home/fin/luna` 执行 `python3 -B development/host_examples.py staged-bitvec --release-driver --compare-optimization --timeout 900` 退出 0，O0/O3 均为 `(bool true)`，`/tmp/luna-host-examples-s1i3_h5i/summary.json`。相关 486 项 Rust 回归通过，`/tmp/luna-tools-ago0xws2/result.json`，包括失败默认供应与错误阶段输入的拒绝。
@@ -26,7 +30,7 @@ staged-bitvec 现覆盖 `fn ones()->defer .BitVec'builtin<N> where N:Integer {no
 
 ## 捕获声明值的 staging 示例恢复运行（2026-10-25）
 
-list-clauses 中的函数工厂现在可以转交 bool／u8 声明值，生成函数保留捕获域和符号引用，具体实例完成替换。示例新增不同整数捕获实例的状态检查，并在目录入口绑定真实 resources::Copy／Drop，保证指针访问经过资源验证。
+list-clauses 中的函数工厂现在可以转交 bool／u8 声明值，生成函数保留捕获域和符号引用，具体实例完成替换。示例新增不同整数捕获实例的状态检查，并在目录入口绑定真实 resources.Copy／Drop，保证指针访问经过资源验证。
 
 在 `/home/fin/luna` 执行 `python3 -B development/host_examples.py list-clauses --release-driver --compare-optimization --timeout 900`，退出 0，O0/O3 均输出 `(bool true)`，报告 `/tmp/luna-host-examples-uee6m44i/summary.json`。相关 452 项 Rust 回归通过，`/tmp/luna-tools-c_6uhz32/result.json`；运行器 9 项通过，`/tmp/luna-tools-0jm5q2jp/result.json`。下节记录的 list-clauses 前端失败已修复，完整 sysroot 和调用协议缺口仍保留。
 
@@ -153,7 +157,7 @@ library_check.py 新增 native-tuple，复用 host 示例的真实 tuple/meta/re
 
 ## Sysroot 发现 math 包并绑定 LLVM scalar 默认项（2026-10-25）
 
-单文件 --sysroot 加载器现在发现可选 math/lib.fl，追加在原包列表之后，保留已有包的身份分配。language-items.conf v1 新增 host-intrinsic.<operation> = package::Enum::variant；仓库清单列出所有当前标量操作及真实 math::target::Scalar 声明。默认项按 operation 合并，显式通用 CLI 选项、fma/sqrt/copysign 专用选项以及驱动已绑定身份优先；显式重复／冲突仍进入原有检查，不被合并消掉。非法操作名、重复项、缺少 enum/variant 的 selector 在加载时拒绝；解析后仍验证 intrinsic enum 身份和签名。AST/HIR 路径及显式 package-set 客户端不会隐式应用这些默认项。
+单文件 --sysroot 加载器现在发现可选 math/lib.fl，追加在原包列表之后，保留已有包的身份分配。language-items.conf v1 新增 host-intrinsic.<operation> = package.Enum.variant；仓库清单列出所有当前标量操作及真实 math.target.Scalar 声明。默认项按 operation 合并，显式通用 CLI 选项、fma/sqrt/copysign 专用选项以及驱动已绑定身份优先；显式重复／冲突仍进入原有检查，不被合并消掉。非法操作名、重复项、缺少 enum/variant 的 selector 在加载时拒绝；解析后仍验证 intrinsic enum 身份和签名。AST/HIR 路径及显式 package-set 客户端不会隐式应用这些默认项。
 
 新增真实 math/resources 模块的隔离 sysroot 回归，在 LLVM O0/O3 下执行 fma、sqrt 和 wrapping_abs；覆盖两种 CLI 覆盖写法、错误默认项保留旧可执行文件，以及绑定驱动身份优先。该夹具未加载尚不完整的 String/I/O 等模块，不代表完整 sysroot 已可用。更新使用真实仓库清单的旧 Tuple 测试，使其同时加载清单声明的实际 math 包。
 
@@ -247,7 +251,7 @@ result.fl 保留真实普通枚举及 is_ok／is_err／map／map_err／and_then�
 
 将 Option 的 panic-dependent unwrap 原样移到 builtin/option_unwrap.fl，完整 builtin 仍发现该模块并保留同一公开方法；option.fl 本身保留真实定义、查询、unwrap_or、map、and_then，查询结果使用独立可用的 bool 拼写。没有提供 panic 占位实现或改变 unwrap 失败语义。该分离让现有值操作能作为真实模块独立验收，不代表完整 sysroot 已完成。
 
-新增 examples/host-library-option.fl 和默认目录项 library-option，直接加载 option.fl、resources.fl 并绑定 optional::Option。受检解释输出 true（`/tmp/luna-tools-_066imyg/result.json`）；公开入口 `python3 -B development/host_examples.py library-option --release-driver --compare-optimization` 两档通过（`/tmp/luna-host-examples-46xo1i3d/summary.json`）。示例使用显式 Option<bool> 构造器，未把当前构造器推断限制改成语义承诺。
+新增 examples/host-library-option.fl 和默认目录项 library-option，直接加载 option.fl、resources.fl 并绑定 optional.Option。受检解释输出 true（`/tmp/luna-tools-_066imyg/result.json`）；公开入口 `python3 -B development/host_examples.py library-option --release-driver --compare-optimization` 两档通过（`/tmp/luna-host-examples-46xo1i3d/summary.json`）。示例使用显式 Option<bool> 构造器，未把当前构造器推断限制改成语义承诺。
 
 库回归使用真实 Option／资源声明，核对非 Copy Watch 的 fallback 退休、map 消费、and_then 返回所有权及查询消费清理；析构检查未提前或重复发生。解释与 LLVM O0/O3 均通过。工作目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 900 -- test --release -p luna --test library_protocols --no-fail-fast` 最终退出 0，12 项通过（`/tmp/luna-tools-ch7s3xnr/result.json`），含全部实际库文件的词法／解析检查。首次运行在链接时触发磁盘配额，报告落盘也失败（保留日志目录 `/tmp/luna-tools-0ujumh2y`）；通过已授权 cargo.py clean --release -p luna 清理 362.2 MiB 可重建产物后重跑成功，没有清理源码或日志。目录运行器 8 项 Python 测试通过（`/tmp/luna-tools-uo2x8dsg/result.json`），格式检查通过（`/tmp/luna-tools-oq619ygr/result.json`），git diff --check 通过。
 
@@ -263,7 +267,7 @@ CLI 的 inline-functions／discard-result 不再在读取 sysroot 之前强制�
 
 ## Sysroot 默认资源绑定进入执行（2026-10-25）
 
-实际 library/language-items.conf 现在绑定 builtin::resources::Copy／Drop。行为验收发现此前即使清单已提供资源身份，Action 与单文件 host 入口仍仅按命令行 protocols 是否存在选择受检执行，导致默认绑定下跳过析构，Watch 用例错误返回 false（`/tmp/luna-tools-o8y9kfsj/result.json`）。现以最终解析的身份加显式配置决定是否进入资源路径，解释执行、comptime invocation、host 输出与构建、解释式／原生源测试同步调整；缺少配对身份仍由受检入口报错，不回退成无检查执行。显式协议覆盖及只分析所有权的 action 范围保持原契约。
+实际 library/language-items.conf 现在绑定 builtin.resources.Copy／Drop。行为验收发现此前即使清单已提供资源身份，Action 与单文件 host 入口仍仅按命令行 protocols 是否存在选择受检执行，导致默认绑定下跳过析构，Watch 用例错误返回 false（`/tmp/luna-tools-o8y9kfsj/result.json`）。现以最终解析的身份加显式配置决定是否进入资源路径，解释执行、comptime invocation、host 输出与构建、解释式／原生源测试同步调整；缺少配对身份仍由受检入口报错，不回退成无检查执行。显式协议覆盖及只分析所有权的 action 范围保持原契约。
 
 新增隔离测试加载真实 resources.fl 和真实清单中的资源条目，包根按可见性规则重导出 Drop。它检查作用域退出修改指针目标、两档原生结果、两种源测试入口、双重消费拒绝及旧产物保留。该夹具不加载尚未完成的 String／panic 模块，不冒充完整 sysroot。原真实清单类型构造器测试同步加载真实 resources 模块，清单单测核对资源身份。
 
@@ -1028,7 +1032,7 @@ type-packets 示例新增直接 Type 块的嵌套成员注解。`python3 -B deve
 
 host 测试的 Work::execute 现与生产启动入口一致，仅对 exec 前的 ETXTBSY 重试、最多一秒；已经启动的程序和其他错误不重试。真实 ELF 写句柄回归覆盖先确认 ETXTBSY、释放后成功、持续占用有界失败及再次释放后恢复。随后 `python3 -B development/check.py --timeout 900 -- test -p luna --test host --no-fail-fast` 553 项全部通过（`/tmp/luna-tools-7xxphcg9/result.json`）。合并上述未改动语义代码的四组证据，本轮共 1,731 项不同测试通过。最终全 workspace 格式化通过（`/tmp/luna-tools-2f19r4mu/result.json`）。
 
-`python3 -B development/command.py --timeout 600 -- python3 -B development/host_examples.py type-packets --compare-optimization`：更新例子的 O0/O3 构建及执行通过（`/tmp/luna-tools-ndtivqxl/result.json`）。私有驱动 `/tmp/luna-host-examples-set3icmx/luna` 经 reproduce.py 执行原复现的 `--interpret run --meta-list-type input::Elements --tuple-type input::Tuple` 返回 bool true（`/tmp/luna-tools-1uhqi8dw/result.json`）。任意工厂调用结果、未知存储读取及自定义 pattern view 的完整字段分析仍未完成。未重复完整示例目录，dev 改动未提交。
+`python3 -B development/command.py --timeout 600 -- python3 -B development/host_examples.py type-packets --compare-optimization`：更新例子的 O0/O3 构建及执行通过（`/tmp/luna-tools-ndtivqxl/result.json`）。私有驱动 `/tmp/luna-host-examples-set3icmx/luna` 经 reproduce.py 执行原复现的 `--interpret run --meta-list-type input.Elements --tuple-type input.Tuple` 返回 bool true（`/tmp/luna-tools-1uhqi8dw/result.json`）。任意工厂调用结果、未知存储读取及自定义 pattern view 的完整字段分析仍未完成。未重复完整示例目录，dev 改动未提交。
 
 ## 部分聚合的 const 别名与作用域（2026-10-24）
 
@@ -1040,7 +1044,7 @@ host 测试的 Work::execute 现与生产启动入口一致，仅对 exec 前的
 
 工作目录 `/home/fin/luna`。最终 `python3 -B development/check.py --timeout 900 -- test -p luna --test host --test comptime_memory --test open_functions --test cmtt --test inline_control --no-fail-fast`：550／17／389／523／249 项，共 1,728 项通过，退出 0（`/tmp/luna-tools-j06qsnbw/result.json`）。`python3 -B development/check.py --timeout 600 -- test -p elaboration --lib partial_snapshot_dump_and_budget_preserve_unknown_fields`：1 项通过（`/tmp/luna-tools-g7x38j95/result.json`）。全 workspace 格式化通过（`/tmp/luna-tools-qzho1acd/result.json`）。
 
-`python3 -B development/command.py --timeout 600 -- python3 -B development/host_examples.py type-packets --compare-optimization`：更新例子的 O0/O3 构建与执行通过（`/tmp/luna-tools-6oj_xb2r/result.json`）。使用私有驱动 `/tmp/luna-host-examples-2z86tttk/luna` 经 reproduce.py 对原 alias 复现执行 `--interpret run --meta-list-type input::Elements --tuple-type input::Tuple` 返回 bool true（`/tmp/luna-tools-o7n25emc/result.json`）。
+`python3 -B development/command.py --timeout 600 -- python3 -B development/host_examples.py type-packets --compare-optimization`：更新例子的 O0/O3 构建与执行通过（`/tmp/luna-tools-6oj_xb2r/result.json`）。使用私有驱动 `/tmp/luna-host-examples-2z86tttk/luna` 经 reproduce.py 对原 alias 复现执行 `--interpret run --meta-list-type input.Elements --tuple-type input.Tuple` 返回 bool true（`/tmp/luna-tools-o7n25emc/result.json`）。
 
 新增剩余问题 `repros/comptime-type-packet-enumeration.fl`：合法 tuple_enumerate 的元素模式仍只取得 Type 域而缺少字段身份，后续 Selected 注解失败（当前驱动复验 `/tmp/luna-tools-izi8n_53/result.json`）。未通过把普通循环元素绑定当成 const 来绕开其存储语义。范围循环回归已经通过，但不据此宣称上述路径已完成。任意工厂返回值、一般控制流及自定义 pattern view 的部分字段分析仍待补齐。未重复完整示例目录；改动保留 dev，未提交。
 
@@ -1078,7 +1082,7 @@ host 测试的 Work::execute 现与生产启动入口一致，仅对 exec 前的
 
 工作目录 `/home/fin/luna`。最终 `python3 -B development/check.py --timeout 600 -- test -p luna --test host --test open_functions --test cmtt --no-fail-fast`：host 542、open_functions 389、cmtt 523，共 1,454 项通过，退出 0（`/tmp/luna-tools-ja3vg1sw/result.json`）。全 workspace 格式化通过（`/tmp/luna-tools-shbpjh94/result.json`）。`python3 -B development/command.py --timeout 600 -- python3 -B development/host_examples.py type-packets --compare-optimization` O0/O3 通过（`/tmp/luna-tools-n13c_jlh/result.json`）。完整目录基线仍是上节前一轮的 33 项集成验收，本轮没有重复全目录测试。
 
-使用私有驱动 `/tmp/luna-host-examples-cp3nfls9/luna`，经 reproduce.py 的 `--binary`、`--interpret run --meta-list-type input::Elements --tuple-type input::Tuple` 复核：guarded-tuple-alias 返回 bool true（`/tmp/luna-tools-pih5lfa_/result.json`）；guarded-return 退出 1 并保留上述诊断（`/tmp/luna-tools-kkps4fkn/result.json`）。`git diff --check` 通过，dev 未提交。
+使用私有驱动 `/tmp/luna-host-examples-cp3nfls9/luna`，经 reproduce.py 的 `--binary`、`--interpret run --meta-list-type input.Elements --tuple-type input.Tuple` 复核：guarded-tuple-alias 返回 bool true（`/tmp/luna-tools-pih5lfa_/result.json`）；guarded-return 退出 1 并保留上述诊断（`/tmp/luna-tools-kkps4fkn/result.json`）。`git diff --check` 通过，dev 未提交。
 
 ## required comptime 返回边界的诊断（2026-10-24）
 
@@ -1100,7 +1104,7 @@ required initializer 的准备过程主动隔离外层 return／loop 上下文�
 
 验证目录 `/home/fin/luna`。最终代码使用 `python3 -B development/check.py --timeout 600 -- test -p luna --test comptime_memory --test open_functions --test host --no-fail-fast`，17／389／540 项通过（`/tmp/luna-tools-twlj40nh/result.json`）；再检查 `--test cmtt --test inline_control --test newtypes --no-fail-fast`，523／249／211 项通过（`/tmp/luna-tools-6mvgslhr/result.json`），共 1,929 项，均退出 0。运行器单元测试 `python3 -B development/command.py --timeout 120 -- python3 -B -m unittest discover -s development -p test_host_examples.py` 6 项通过（`/tmp/luna-tools-pssxzfre/result.json`）。全 workspace 格式化通过（`/tmp/luna-tools-fvv6ftdb/result.json`）。
 
-`python3 -B development/command.py --timeout 600 -- python3 -B development/host_examples.py type-packets --compare-optimization` O0/O3 通过，报告 `/tmp/luna-tools-k6tl52pb/result.json`。以本轮私有驱动 `/tmp/luna-host-examples-aw9t073o/luna`，通过 reproduce.py 的 `--binary` 执行两个复现（加 `--meta-list-type input::Elements --tuple-type input::Tuple --interpret run`）均返回 bool true：分支版本 `/tmp/luna-tools-l02hshf1/result.json`，直接版本 `/tmp/luna-tools-3vxulw8s/result.json`。`git diff --check` 通过；dev 未提交。
+`python3 -B development/command.py --timeout 600 -- python3 -B development/host_examples.py type-packets --compare-optimization` O0/O3 通过，报告 `/tmp/luna-tools-k6tl52pb/result.json`。以本轮私有驱动 `/tmp/luna-host-examples-aw9t073o/luna`，通过 reproduce.py 的 `--binary` 执行两个复现（加 `--meta-list-type input.Elements --tuple-type input.Tuple --interpret run`）均返回 bool true：分支版本 `/tmp/luna-tools-l02hshf1/result.json`，直接版本 `/tmp/luna-tools-3vxulw8s/result.json`。`git diff --check` 通过；dev 未提交。
 
 ## 条件成员别名与分支局部绑定（2026-10-24）
 
@@ -1542,7 +1546,7 @@ computed pattern 的成功／拒绝分支及显式 inline 展开也纳入测试�
 
 ## 字节序反转 intrinsic
 
-新增 `math.byte_swap<T>(value)` 与显式目标绑定 `--host-intrinsic bswap=math::target::Scalar::bswap`。输入输出同为 u16/u32/u64/u128；反转字节顺序而不反转字节内部位序。域依据 [LLVM 21 bswap 合同](https://releases.llvm.org/21.1.0/docs/LangRef.html#llvm-bswap-intrinsics) 的正 16 倍数位宽要求，不接纳 u8、signed、target-sized、float 或 BitVec。Operation 的名称、类型域、元数、泛型证明、实例化重验和 CLI 帮助同步；已有通用 LLVM intrinsic 降码生成匹配位宽的 llvm.bswap，无需另设语言关键字。
+新增 `math.byte_swap<T>(value)` 与显式目标绑定 `--host-intrinsic bswap=math.target.Scalar.bswap`。输入输出同为 u16/u32/u64/u128；反转字节顺序而不反转字节内部位序。域依据 [LLVM 21 bswap 合同](https://releases.llvm.org/21.1.0/docs/LangRef.html#llvm-bswap-intrinsics) 的正 16 倍数位宽要求，不接纳 u8、signed、target-sized、float 或 BitVec。Operation 的名称、类型域、元数、泛型证明、实例化重验和 CLI 帮助同步；已有通用 LLVM intrinsic 降码生成匹配位宽的 llvm.bswap，无需另设语言关键字。
 
 本节加入 bswap 时，math 的 Scalar 家族和默认 math 示例绑定共 24 项操作；`host-math-fma.fl` 同时检查 `0x01020304 → 0x04030201` 的字节反转。测试使用独立字节数组折叠算法作为数值 oracle，覆盖零、全 1、最高位和混合模式，交换两次恢复、输入只求值一次；LLVM O0/O3 实际运行，IR 断言四种合法位宽且无 i8 bswap。当前参考解释器仍不执行目标 intrinsic，不把本测试称为解释器支持；非法类型、缺少泛型域证明、篡改输入和重绑操作的拒绝检查继续生效。
 
@@ -1898,7 +1902,7 @@ checked 源码测试覆盖两层转发、递归、实参使用 caller 的不同�
 
 ## 整数位操作的泛型 host 接线
 
-新增 `bitreverse`／`ctpop` target operation，library/math 导出 `bit_reverse<T>`／`count_ones<T>`，输入输出均为同一个 u8/u16/u32/u64/u128 类型。语义分别沿用 [LLVM bitreverse](https://releases.llvm.org/21.1.0/docs/LangRef.html#llvm-bitreverse-intrinsic) 与 [LLVM ctpop](https://releases.llvm.org/21.1.0/docs/LangRef.html#llvm-ctpop-intrinsic)：反转整个整数的位序，或返回其中 1 的数量；零输入合法。CLI 使用 `--host-intrinsic bitreverse=math::target::Scalar::bitreverse` 和 `ctpop=math::target::Scalar::ctpop`。README、math 源码验收和绑定脚本同步为二十一项操作。
+新增 `bitreverse`／`ctpop` target operation，library/math 导出 `bit_reverse<T>`／`count_ones<T>`，输入输出均为同一个 u8/u16/u32/u64/u128 类型。语义分别沿用 [LLVM bitreverse](https://releases.llvm.org/21.1.0/docs/LangRef.html#llvm-bitreverse-intrinsic) 与 [LLVM ctpop](https://releases.llvm.org/21.1.0/docs/LangRef.html#llvm-ctpop-intrinsic)：反转整个整数的位序，或返回其中 1 的数量；零输入合法。CLI 使用 `--host-intrinsic bitreverse=math.target.Scalar.bitreverse` 和 `ctpop=math.target.Scalar.ctpop`。README、math 源码验收和绑定脚本同步为二十一项操作。
 
 NIR 具体签名现在保存 Primitive 身份，而不只保存宽度；同宽度 u32／f32 不可互换。操作声明自己的源类型域，泛型体在 elaboration 中证明该类型命题，特化时重新检查；驱动重绑定仍要求原有同操作的 source admission。LLVM 使用 iN 或 fN 后缀，输入、输出和具体绑定必须一致。整数 dump 输出 scalar-type，既有浮点 dump 保留 float-width。没有把 BitVec、signed 或 target-sized 类型隐式纳入本次接口，也没有给解释器伪造目标 intrinsic 执行。
 
@@ -2069,7 +2073,7 @@ Host 的表示查询现在接收已验证 IIR 图。遇到 normal-form Type 时�
 
 Tuple 构造和 pattern 解构复用聚合值降码，支持函数参数/结果、嵌套字段、空 tuple、单元素 tuple、or 候选绑定和普通函数值字段。空 tuple 用零大小调用表示，嵌入聚合字段时保留空 struct 位置。变参收集、runtime tuple spread 和扩展调用中 tuple 与匿名记录组合已实际生成原生代码。原入口打印器仍不打印整个聚合结果，示例通过解构计算 bool 返回。
 
-新增 `development/examples/host-tuple.fl`，构建时添加 `--meta-list-type input::TupleElements --tuple-type input::Tuple --build run --output <path>`，输出 `(bool true)`。示例 Type 函数的正文不是布局依据。
+新增 `development/examples/host-tuple.fl`，构建时添加 `--meta-list-type input.TupleElements --tuple-type input.Tuple --build run --output <path>`，输出 `(bool true)`。示例 Type 函数的正文不是布局依据。
 
 本轮 `/home/fin/luna` 下 `python3 -B development/check.py --timeout 300 -- test -p luna --test host` 76 项通过（`/tmp/luna-tools-bizf5fyl/result.json`）。新增测试后 `--test host tuple` 中 7 项通过，扩展调用初稿因对无结构约束 T 投影字段被前端拒绝；改用现有 schema 定义的明确 Options 类型后，定向测试通过（`/tmp/luna-tools-kcfhjq4w/result.json`）。仓库示例单独通过（`/tmp/luna-tools-7qr7iiyg/result.json`）。IIR dump 检查确认在 codegen 前仍有 normal-form head 和 TypeList 输入；原生正例验证求值次数、返回值和分支绑定。没有修改前端语义或运行全 workspace 测试，改动未提交。
 
@@ -2833,7 +2837,7 @@ host 现支持返回 `.noreturn'builtin` 的普通函数、函数值和 lambda�
 可运行例子：
 
 ```sh
-python3 -B development/check.py --timeout 300 -- run -p luna -- development/examples/host-product-result.fl --build run --meta-list-type input::Elements --tuple-type input::Tuple --output /tmp/flurry-product-result
+python3 -B development/check.py --timeout 300 -- run -p luna -- development/examples/host-product-result.fl --build run --meta-list-type input.Elements --tuple-type input.Tuple --output /tmp/flurry-product-result
 python3 -B development/command.py --timeout 10 -- /tmp/flurry-product-result
 ```
 
@@ -2986,14 +2990,14 @@ python3 -B development/command.py --timeout 10 -- /tmp/flurry-unsafe-call
 
 ## 命令行目标绑定及 pure 包装
 
-新增 `--host-fma package::module::Enum::variant`（module 可省略），当前用于 `--build` / `--emit-llvm`，一次命令只接纳一个 FMA 绑定。单文件输入的包名是 input；显式包编译使用 `--package` 指定的包名。选择器沿现有 HIR 模块路径解析，转换为驱动提供的语义包身份与声明身份，具体变体在 NIR 中定位，不借同名变体推断操作。
+新增 `--host-fma package.module.Enum.variant`（module 可省略），当前用于 `--build` / `--emit-llvm`，一次命令只接纳一个 FMA 绑定。单文件输入的包名是 input；显式包编译使用 `--package` 指定的包名。选择器沿现有 HIR 模块路径解析，转换为驱动提供的语义包身份与声明身份，具体变体在 NIR 中定位，不借同名变体推断操作。
 
 绑定在 elaboration 前传入 Protocols，并在 intrinsic 节点形成时生成签名证据，因此具体 f32/f64 的 pure 包装现在可以完成纯度检查；这个变化取代前节中“source pure 尚未提前绑定”的限制。绑定仍不授权越阶段执行、unsafe 边界外调用或 pure 函数读取外部指针。无效包、模块、enum、非 intrinsic_enum、非 unit 变体和与驱动身份冲突的选择均拒绝。包请求的 Action 保存选择器，原有完整请求缓存键也包含它；sysroot 默认配置保留显式选择，不创建隐式标签绑定。
 
 示例 `development/examples/host-intrinsic-fma.fl` 可直接运行：
 
 ```sh
-python3 -B development/check.py --timeout 300 -- run -p luna -- development/examples/host-intrinsic-fma.fl --host-fma input::machine::Scalar::fused --build run --output /tmp/flurry-fma
+python3 -B development/check.py --timeout 300 -- run -p luna -- development/examples/host-intrinsic-fma.fl --host-fma input.machine.Scalar.fused --build run --output /tmp/flurry-fma
 python3 -B development/command.py --timeout 10 -- /tmp/flurry-fma
 ```
 
@@ -3017,7 +3021,7 @@ python3 -B development/command.py --timeout 10 -- /tmp/flurry-fma
 
 ## Native source tests 的 host intrinsic 接线
 
-`--test-native --host-fma package::module::Enum::variant` 现已贯通单文件和 `--packages-v1`，在 elaboration 前绑定身份，使 pure math 包装和后续 IIR/LLVM 使用同一份验证证据。支持 O0/O3、筛选和 paired Copy/Drop；无效 variant 拒绝，测试失败仍以非零退出码返回。`--test`、`--list-tests` 与普通 NIR dump 不接受这个目标执行选项，解释器能力没有因此扩大。新增可直接执行的 `development/examples/host-math-tests.fl`，命令见 library/README.md。
+`--test-native --host-fma package.module.Enum.variant` 现已贯通单文件和 `--packages-v1`，在 elaboration 前绑定身份，使 pure math 包装和后续 IIR/LLVM 使用同一份验证证据。支持 O0/O3、筛选和 paired Copy/Drop；无效 variant 拒绝，测试失败仍以非零退出码返回。`--test`、`--list-tests` 与普通 NIR dump 不接受这个目标执行选项，解释器能力没有因此扩大。新增可直接执行的 `development/examples/host-math-tests.fl`，命令见 library/README.md。
 
 工作目录 `/home/fin/luna`，`python3 -B development/check.py --timeout 300 -- test -p luna --test frontend_cli --lib` 退出 0，26 + 191 共 217 项通过，报告 `/tmp/luna-tools-i_hvg3td/result.json`。文档中的实际 math native-test 命令退出 0，两项测试通过，报告 `/tmp/luna-tools-fdlozke3/result.json`。格式化退出 0，报告 `/tmp/luna-tools-4vu_36on/result.json`；`git diff --check` 通过。未运行全 workspace 测试，dev 未提交。
 
@@ -3047,7 +3051,7 @@ Once/Clone/Copy/Drop 从 builtin/traits.fl 拆到独立的 builtin/resources.fl�
 
 上一节 Clone 返回结构体后丢失指针来源的问题已修复。根因并非 Clone 修改 pointee，而是 moves 的聚合返回分析显式排除了 TraitMethod 调用，退回普通 expr 路径后只检查调用效果，没有交付返回字段映射。现在对静态方法先做完整 method selection，再通过已有 named aggregate 路径传递返回 origins、guards 和返回值元数据。不克隆/重放 receiver 或实参，也不使用 behavior-only 选择绕过接口义务。
 
-examples/host-library-resources.fl 已恢复对 cloned.counter 的读取断言。真实 resources 包在 O0/O3 下验证整个 self.* 返回及重新构造 Self 字段两种 Clone；额外 native 测试验证嵌套泛型结构体中的指针来源、局部逃逸拒绝、移动 owner 后访问拒绝、失败保留旧产物。保存的 repro 也通过实际多包 CLI 运行：`python3 -B development/check.py --timeout 300 -- run -p luna -- --packages-v1 --package 1 101 app development/repros/host-clone-result-pointer-provenance.fl --package 2 202 resources library/builtin/resources.fl --dependency 1 resources 2 --primary 1 --copy-protocol resources::Copy --drop-protocol resources::Drop --test-native --opt-level 3` 退出 0，4 项通过（`/tmp/luna-tools-2ph7ns10/result.json`）。其后只将首行注释从 Known rejection 更新为 Regression。
+examples/host-library-resources.fl 已恢复对 cloned.counter 的读取断言。真实 resources 包在 O0/O3 下验证整个 self.* 返回及重新构造 Self 字段两种 Clone；额外 native 测试验证嵌套泛型结构体中的指针来源、局部逃逸拒绝、移动 owner 后访问拒绝、失败保留旧产物。保存的 repro 也通过实际多包 CLI 运行：`python3 -B development/check.py --timeout 300 -- run -p luna -- --packages-v1 --package 1 101 app development/repros/host-clone-result-pointer-provenance.fl --package 2 202 resources library/builtin/resources.fl --dependency 1 resources 2 --primary 1 --copy-protocol resources.Copy --drop-protocol resources.Drop --test-native --opt-level 3` 退出 0，4 项通过（`/tmp/luna-tools-2ph7ns10/result.json`）。其后只将首行注释从 Known rejection 更新为 Regression。
 
 完整 selection 仍拒绝带 program pre/postconditions、尚未组合内存契约的接口。补充验收确认：不满足前置条件时报 program precondition；满足前置条件后仍明确报 interface predicates require a composed memory contract，不悄悄丢弃接口。该独立限制尚未解决。
 
@@ -3471,14 +3475,14 @@ Operation 新增 SquareRoot，参数数目由操作协议决定；Registry 的�
 
 ### sqrt 源码、库与命令行接线
 
-新增 `--host-sqrt package::module::Enum::variant`，传入普通文件、package-set、原生测试与泛型 elaboration。选择器按声明身份绑定；同一 tag 同时指定 FMA/sqrt 时拒绝，既有输出文件保持不变。两种操作共用 family 验证及浮点域证明；不根据源码名字猜测操作，不允许 comptime 调用。
+新增 `--host-sqrt package.module.Enum.variant`，传入普通文件、package-set、原生测试与泛型 elaboration。选择器按声明身份绑定；同一 tag 同时指定 FMA/sqrt 时拒绝，既有输出文件保持不变。两种操作共用 family 验证及浮点域证明；不根据源码名字猜测操作，不允许 comptime 调用。
 
 `library/math/lib.fl` 新增泛型 pure sqrt，支持 f32/f64。加载 math 时需同时指定 FMA 和 sqrt 两个绑定，以检查所有泛型函数正文。现有数学示例、library README 和 library_check.py 已同步；host-math-fma.fl 现在联合验证两种运算及两种精度。完整数学库、一般 intrinsic 签名及自动目标注册仍待实现。
 
 工作目录 `/home/fin/luna`，经 `python3 -B development/check.py --timeout 300 --`：
 - `test -p luna --test frontend_cli --test host_intrinsic_protocol --test packages`：193 + 17 + 46 项通过（`/tmp/luna-tools-p12ei886/result.json`）。新增 CLI 用例验证任意 tag 名称、泛型源码、O0/O3、原生测试、重复/冲突选择器、错误参数数目/类型和 comptime 拒绝；package 用例通过真实 math 库编译运行。
 - `test -p luna --lib protocols::type_constructors`：4 项通过（`/tmp/luna-tools-um_4j3q1/result.json`）。
-- `run -p luna -- --packages-v1 --package 1 101 app development/examples/host-math-tests.fl --package 2 202 math library/math/lib.fl --dependency 1 math 2 --primary 1 --host-fma math::target::Scalar::fma --host-sqrt math::target::Scalar::sqrt --test-native --opt-level 3`：原生两项测试通过（`/tmp/luna-tools-r2eq1o57/result.json`），每项同时检查 FMA 与 sqrt。
+- `run -p luna -- --packages-v1 --package 1 101 app development/examples/host-math-tests.fl --package 2 202 math library/math/lib.fl --dependency 1 math 2 --primary 1 --host-fma math.target.Scalar.fma --host-sqrt math.target.Scalar.sqrt --test-native --opt-level 3`：原生两项测试通过（`/tmp/luna-tools-r2eq1o57/result.json`），每项同时检查 FMA 与 sqrt。
 
 没有运行全 workspace 测试；dev 工作区未提交。
 
@@ -3622,7 +3626,7 @@ python3 -B development/command.py --timeout 10 -- /tmp/flurry-void-flow
 
 ### 可重复的通用 host intrinsic 绑定
 
-新增 `--host-intrinsic operation=package::module::Enum::variant`，当前 operation 为 fma/sqrt/copysign。单文件与 packages-v1 的 build、emit-llvm、test-native 均接通；旧 --host-fma/--host-sqrt/--host-copysign 保持有效。Selectors 和 Protocols 保留通用声明/操作集合，统一 host_bindings 供 elaboration 与绑定校验消费；后续增加操作不再要求逐项增加所有 action/frontend 字段。
+新增 `--host-intrinsic operation=package.module.Enum.variant`，当前 operation 为 fma/sqrt/copysign。单文件与 packages-v1 的 build、emit-llvm、test-native 均接通；旧 --host-fma/--host-sqrt/--host-copysign 保持有效。Selectors 和 Protocols 保留通用声明/操作集合，统一 host_bindings 供 elaboration 与绑定校验消费；后续增加操作不再要求逐项增加所有 action/frontend 字段。
 
 同一操作可以绑定多个包中的不同 tag；同一已解析声明的相同操作重复绑定幂等，旧/新写法混合亦然。相同声明绑定冲突操作明确拒绝，不能由参数次序覆盖。仍以完整 package/declaration/variant 身份取得行为，不从源成员拼写推断。语法 dump/参考测试仍不接收 host-only CLI 选项；不新增 comptime 目标执行权限。
 
@@ -3777,7 +3781,7 @@ python3 -B development/command.py --timeout 10 -- /tmp/flurry-arithmetic
 
 ## 浮点绝对值 intrinsic 与 math.abs
 
-Operation::AbsoluteValue 通过 --host-intrinsic fabs=package::Enum::variant 绑定，保留身份检查、同宽 f32/f64 单操作数与同类型结果、pending generic admission、预算及重绑定规则。Display 为 fabs；LLVM 发出 llvm.fabs.f32/f64。library/math 的 abs<T> 是此 intrinsic 的 pure 泛型包装，限制 T 为精确 f32 或 f64；math 包现在需提供十六项绑定，库检查脚本、CLI 回归和 README 命令已同步。
+Operation::AbsoluteValue 通过 --host-intrinsic fabs=package.Enum.variant 绑定，保留身份检查、同宽 f32/f64 单操作数与同类型结果、pending generic admission、预算及重绑定规则。Display 为 fabs；LLVM 发出 llvm.fabs.f32/f64。library/math 的 abs<T> 是此 intrinsic 的 pure 泛型包装，限制 T 为精确 f32 或 f64；math 包现在需提供十六项绑定，库检查脚本、CLI 回归和 README 命令已同步。
 
 契约遵循 [LLVM 21.1 fabs](https://releases.llvm.org/21.1.0/docs/LangRef.html#llvm-fabs-intrinsic)：只清除符号位，NaN 的 quiet/signaling 位及 payload 不变。不通过普通算术取负或比较来实现，不添加 fast-math。原生回归覆盖两种宽度、O0/O3、正负零、负数、最小非正规数、负无穷和两类 NaN；另覆盖一次求值、泛型特化、错误输入、低预算及重绑定恢复。真实库包装的调用与 CLI 包绑定均已执行。
 
@@ -3965,7 +3969,7 @@ math.byte_swap 与 bswap target operation 接受 usize，保留原先 u16/u32/u6
 
 非原生类型的 `< <= > >=` 现在通过显式 Ord 绑定分别调用 lt/le/gt/ge。复用普通方法选择与调用 elaboration，支持泛型前提、实现与默认方法；普通实参保持源码顺序各求值一次，返回类型要求 bool。左侧 Never 保留既有提前退出路径，右侧 Never 仍先执行左侧。原生标量比较不改写为协议调用，保持 IEEE 无序行为并避免库中的原生比较实现递归回调自身。Eq 的运算符接线仍未完成。
 
-新增 `--ord-protocol package::module::trait`，贯通普通 CLI、多包入口、语法阶段拒绝检查、sysroot manifest 默认值及显式覆盖；按声明身份绑定，不识别 trait 的源码拼写。真实清单加入 builtin::comparison::Ord。新的 host-custom-order.fl 由 comparison/resources 两个真实包提供协议，Version 的 cmp 实现字典序，泛型 precedes 使用 `<`，其余运算符使用库默认方法；原生路径执行完整 Copy/Drop 资源检查。
+新增 `--ord-protocol package.module.trait`，贯通普通 CLI、多包入口、语法阶段拒绝检查、sysroot manifest 默认值及显式覆盖；按声明身份绑定，不识别 trait 的源码拼写。真实清单加入 builtin.comparison.Ord。新的 host-custom-order.fl 由 comparison/resources 两个真实包提供协议，Version 的 cmp 实现字典序，泛型 precedes 使用 `<`，其余运算符使用库默认方法；原生路径执行完整 Copy/Drop 资源检查。
 
 2026-10-24，工作目录 `/home/fin/luna`：首次构建在 elaboration 归档时遇配额错误，管理入口清理 Cargo target 后重试成功。随后修正新测试的 OsString 参数类型；第一次原生测试使用未检查名义存储的入口，被既有资源 gate 正确拒绝，现改用真实 resources 包和受检原生入口，没有放宽 gate。CLI 回归中隔离 sysroot 夹具漏带新 manifest 指向的 comparison 模块，已补真实文件并经公开重导出访问，保留模块可见性检查。
 
@@ -3977,7 +3981,7 @@ math.byte_swap 与 bswap target operation 接受 usize，保留原先 u16/u32/u6
 
 新增显式 Eq 身份绑定：非原生类型的 ==／!= 分别通过普通方法选择与 finish_call 调用 eq／ne，支持泛型 Eq 前提及真实库的默认 ne。覆盖的 ne 直接执行，不能替换成编译器对 eq 的取反。返回值必须是 bool，左右操作数各求值一次，保持既有 Never 与提前返回边界。Type、BitVec、原生标量及已证明原生域的泛型仍走原有相等节点；模式常量观察与编译期查询键协议不在本轮范围。
 
-`--eq-protocol` 已接普通 CLI、多包入口、语法阶段拒绝和 manifest 默认／显式覆盖。真实清单加入 builtin::comparison::Eq。custom-order 示例的 Version 新增 ==／!=，现在由实际 comparison/resources 包验证全部六个比较运算符。
+`--eq-protocol` 已接普通 CLI、多包入口、语法阶段拒绝和 manifest 默认／显式覆盖。真实清单加入 builtin.comparison.Eq。custom-order 示例的 Version 新增 ==／!=，现在由实际 comparison/resources 包验证全部六个比较运算符。
 
 2026-10-24，工作目录 `/home/fin/luna`，经 development/check.py 执行 `test --release -p luna --test equality_protocol --test ordering_protocol --test frontend_cli --test packages --lib --no-fail-fast`：68 项单元、201 项 CLI、48 项多包及 4 项 Ord 均通过（`/tmp/luna-tools-2ad3o8tm/result.json`）；新 Eq 测试先有词法空格与类型身份预期错误。核对 docs/type/type-identity.md 与解释器既有契约后，保留 Identity<T> 与 T 的关系 Unknown，不能由“不展开”推出不等；测试通过正式 comptime invocation 检查未决关系，同时验证同一范式应用自相等。未更改类型相等实现。
 

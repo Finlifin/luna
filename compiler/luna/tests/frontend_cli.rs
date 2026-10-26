@@ -220,9 +220,9 @@ fn tuple_types_remain_explicit_through_both_cli_drivers() {
     ] {
         base.extend([
             "--meta-list-type",
-            "input::List",
+            "input.List",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
         ]);
         for invalid in [
             "fn entry(value:(bool,bool)) {}",
@@ -268,9 +268,9 @@ fn tuple_types_remain_explicit_through_both_cli_drivers() {
             "--interpret",
             "entry",
             "--copy-protocol",
-            "input::Duplicate",
+            "input.Duplicate",
             "--drop-protocol",
-            "input::Retire",
+            "input.Retire",
         ]);
         let output = sandbox.run(&args);
         assert_eq!(success(&output).trim(), "(bool true)");
@@ -296,28 +296,28 @@ fn tuple_selectors_work_in_single_file_and_sysroot_commands() {
         "--interpret",
         "run",
         "--meta-list-type",
-        "input::List",
+        "input.List",
         "--tuple-type",
-        "input::Tuple",
+        "input.Tuple",
     ]);
     assert_eq!(success(&output).trim(), "(bool true)");
     for args in [
-        vec!["input.fl", "--tuple-type", "input::Tuple"],
+        vec!["input.fl", "--tuple-type", "input.Tuple"],
         vec![
             "input.fl",
             "--emit",
             "ast",
             "--meta-list-type",
-            "input::List",
+            "input.List",
         ],
         vec![
             "input.fl",
             "--interpret",
             "run",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
         ],
         vec!["input.fl", "--interpret", "run", "--meta-list-type"],
     ] {
@@ -328,7 +328,7 @@ fn tuple_selectors_work_in_single_file_and_sysroot_commands() {
         "--interpret",
         "run",
         "--tuple-type",
-        "input::Tuple",
+        "input.Tuple",
     ]);
     failure(&missing, 1);
     assert!(String::from_utf8_lossy(&missing.stderr).contains("meta.List binding"));
@@ -344,7 +344,7 @@ fn tuple_selectors_work_in_single_file_and_sysroot_commands() {
     sandbox.write("library/std/lib.fl", "");
     sandbox.write(
         "library/meta/lib.fl",
-        "typealias Type=.Type'builtin; pub pure comptime fn List<T> -> Type {T}",
+        "typealias Type=.Type'builtin; pub pure comptime fn List<T> -> Type {T} pub mod prelude {}",
     );
     sandbox.write(
         "input.fl",
@@ -357,9 +357,9 @@ fn tuple_selectors_work_in_single_file_and_sysroot_commands() {
         "--interpret",
         "run",
         "--meta-list-type",
-        "meta::List",
+        "meta.List",
         "--tuple-type",
-        "builtin::Tuple",
+        "builtin.Tuple",
     ]);
     assert_eq!(
         success(&output).trim(),
@@ -374,9 +374,9 @@ fn splice_selector_runs_automatic_conversion_and_rejects_invalid_bindings() {
         let mut args = args.to_vec();
         args.extend([
             "--meta-list-type",
-            "input::TupleElements",
+            "input.TupleElements",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
         ]);
         sandbox.run(&args)
     };
@@ -384,7 +384,7 @@ fn splice_selector_runs_automatic_conversion_and_rejects_invalid_bindings() {
         "input.fl",
         include_str!("../../../development/examples/automatic-splice.fl"),
     );
-    for selector in ["Splice", "input::Splice"] {
+    for selector in ["Splice", "input.Splice"] {
         let output = run(&[
             "input.fl",
             "--interpret",
@@ -400,10 +400,10 @@ fn splice_selector_runs_automatic_conversion_and_rejects_invalid_bindings() {
     failure(&run(&["input.fl", "--interpret", "run"]), 1);
     for selector in [
         "Missing",
-        "missing::Splice",
-        "input::",
-        "::Splice",
-        "input::Splice::extra",
+        "missing.Splice",
+        "input.",
+        ".Splice",
+        "input.Splice.extra",
     ] {
         sandbox.write("result", OLD_OUTPUT);
         failure(
@@ -469,7 +469,7 @@ fn splice_selector_disambiguates_sysroot_protocols() {
         "--interpret",
         "run",
         "--splice-protocol",
-        "std::Conversion",
+        "std.Conversion",
     ]);
     assert_eq!(success(&output).trim(), "(bool true)");
     let ambiguous = sandbox.run(&[
@@ -509,7 +509,6 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,
-        optional_type: None,
     };
     let foreign = elaboration::program::Protocols {
         splice: Some(nir::DeclarationId {
@@ -1168,6 +1167,81 @@ fn explicit_sysroot_loads_builtin_prelude_and_keeps_std_import_explicit() {
 }
 
 #[test]
+fn sysroot_imports_five_preludes_with_deduplication_shadowing_and_ambiguity() {
+    let sandbox = Sandbox::new();
+    for name in ["builtin", "meta", "build", "attrs", "verification", "std"] {
+        fs::create_dir_all(sandbox.path(format!("library/{name}"))).unwrap();
+    }
+    sandbox.write(
+        "library/builtin/lib.fl",
+        "pub mod prelude {pub fn ready()->bool {true}}",
+    );
+    sandbox.write(
+        "library/meta/lib.fl",
+        "pub mod prelude {pub use builtin.prelude.ready;pub fn metadata()->bool {ready()}}",
+    );
+    sandbox.write(
+        "library/build/lib.fl",
+        "pub mod prelude {pub fn configured()->bool {metadata()}}",
+    );
+    sandbox.write(
+        "library/attrs/lib.fl",
+        "pub mod prelude {pub fn attributed()->bool {configured()}}",
+    );
+    sandbox.write(
+        "library/verification/lib.fl",
+        "pub mod prelude {pub fn specified()->bool {attributed()}}",
+    );
+    sandbox.write(
+        "library/std/lib.fl",
+        "pub mod prelude {pub fn standard()->bool {specified()}}",
+    );
+    sandbox.write(
+        "input.fl",
+        "fn run()->bool {ready() and metadata() and configured() and attributed() and specified()}",
+    );
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        "(bool true)"
+    );
+    sandbox.write(
+        "input.fl",
+        "fn ready()->bool {false} fn run()->bool {ready()}",
+    );
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        "(bool false)"
+    );
+    sandbox.write("input.fl", "fn run()->bool {standard()}");
+    failure(
+        &sandbox.run(&["input.fl", "--sysroot", "library", "--emit", "nir"]),
+        1,
+    );
+    sandbox.write("input.fl", "use std.prelude.*;fn run()->bool {standard()}");
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        "(bool true)"
+    );
+    sandbox.write(
+        "library/meta/lib.fl",
+        "pub mod prelude {pub fn ready()->bool {false} pub fn metadata()->bool {true}}",
+    );
+    sandbox.write("input.fl", "fn run()->bool {ready()}");
+    failure(
+        &sandbox.run(&["input.fl", "--sysroot", "library", "--emit", "nir"]),
+        1,
+    );
+    sandbox.write(
+        "input.fl",
+        "use builtin.prelude.ready;fn run()->bool {ready()}",
+    );
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        "(bool true)"
+    );
+}
+
+#[test]
 fn explicit_sysroot_protects_dependency_sources_and_reports_invalid_packages() {
     let sandbox = Sandbox::new();
     fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
@@ -1615,9 +1689,9 @@ fn comptime_invocation_specializes_type_dispatch_and_preserves_failed_output() {
         let mut args = args.to_vec();
         args.extend([
             "--meta-list-type",
-            "input::TupleElements",
+            "input.TupleElements",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
         ]);
         sandbox.run(&args)
     };
@@ -2593,9 +2667,9 @@ fn owned_default_cli_constructs_and_delivers_aggregate_results() {
         let result = sandbox.run(&[
             "input.fl",
             "--meta-list-type",
-            "input::List",
+            "input.List",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
             "--interpret",
             "entry",
             "--copy-protocol",
@@ -3117,10 +3191,10 @@ fn shipped_operator_protocols_execute_with_default_and_named_types() {
 }
 
 #[test]
-fn shipped_option_and_result_modules_resolve_contextual_variants() {
+fn shipped_optional_module_resolves_without_enum_substitute() {
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in ["primitives", "option", "result"] {
+    for name in ["primitives", "option"] {
         fs::copy(
             repository.join(format!("library/builtin/{name}.fl")),
             sandbox.path(format!("{name}.fl")),
@@ -3129,9 +3203,8 @@ fn shipped_option_and_result_modules_resolve_contextual_variants() {
     }
     sandbox.write(
         "lib.fl",
-        "pub use primitives.*;pub use option.Option;pub use result.Result;
-        fn panic(message:str)->noreturn {panic(message)}
-        fn run()->bool {let value:Option<bool> = .Some(true);value.unwrap_or(false)}",
+        "pub use primitives.*;pub use option.OptionalOps;
+        fn run()->bool {let value:?bool=true;value.as(OptionalOps<bool>).unwrap_or(false)}",
     );
     let output = sandbox.run(&["lib.fl", "--emit", "hir"]);
     hir_dump(&output);
@@ -3150,22 +3223,24 @@ fn shipped_result_methods_execute_both_variants_and_generic_callbacks() {
     }
     sandbox.write(
         "lib.fl",
-        "pub use primitives.*;pub use result.Result;
+        "pub use primitives.*;pub use result.ErrorResultOps;pub use result_unwrap.ErrorResultUnwrap;
         fn panic(message:str)->noreturn {panic(message)}
-        fn good()->Result<bool,u8> {.Ok(true)}
-        fn bad()->Result<bool,u8> {.Err(7)}
+        fn good()->!u8 bool {true}
+        fn bad()->!u8 bool {error 7}
         fn forbidden_bool(value:bool)->bool {forbidden_bool(value)}
         fn forbidden_byte(value:u8)->u8 {forbidden_byte(value)}
-        fn forbidden_result(value:bool)->Result<bool,u8> {forbidden_result(value)}
+        fn forbidden_result(value:bool)->!u8 bool {forbidden_result(value)}
+        fn invert(value:bool)->!u8 bool {not value}
         fn run()->bool {
-            good().is_ok() and bad().is_err() and good().unwrap() and
-            bad().unwrap_err()==7 and not good().map(|value| not value).unwrap() and
-            bad().map_err(|value| value==7).unwrap_err() and
-            good().and_then(|value| .Ok(not value)).is_ok() and
-            good().and_then(|value| {return .Ok(not value);}).is_ok() and
-            bad().and_then(forbidden_result).is_err() and
-            bad().map(forbidden_bool).unwrap_err()==7 and
-            good().map_err(forbidden_byte).unwrap()
+            good().as(ErrorResultOps<bool,u8>).is_ok() and bad().as(ErrorResultOps<bool,u8>).is_err() and
+            good().as(ErrorResultUnwrap<bool,u8>).unwrap() and bad().as(ErrorResultUnwrap<bool,u8>).unwrap_err()==7 and
+            not good().as(ErrorResultOps<bool,u8>).map(|value| not value).as(ErrorResultUnwrap<bool,u8>).unwrap() and
+            bad().as(ErrorResultOps<bool,u8>).map_err(|value| value==7).as(ErrorResultUnwrap<bool,bool>).unwrap_err() and
+            good().as(ErrorResultOps<bool,u8>).and_then(invert).as(ErrorResultOps<bool,u8>).is_ok() and
+            good().as(ErrorResultOps<bool,u8>).and_then(|value| {let result:!u8 bool=not value;return result;}).as(ErrorResultOps<bool,u8>).is_ok() and
+            bad().as(ErrorResultOps<bool,u8>).and_then(forbidden_result).as(ErrorResultOps<bool,u8>).is_err() and
+            bad().as(ErrorResultOps<bool,u8>).map(forbidden_bool).as(ErrorResultUnwrap<bool,u8>).unwrap_err()==7 and
+            good().as(ErrorResultOps<bool,u8>).map_err(forbidden_byte).as(ErrorResultUnwrap<bool,u8>).unwrap()
         }",
     );
     let output = sandbox.run(&["lib.fl", "--interpret", "run"]);
@@ -3197,25 +3272,25 @@ fn shipped_result_methods_execute_from_an_importing_package() {
         "library/builtin/lib.fl",
         "pub use primitives.*;pub mod prelude {pub use primitives.*;}",
     );
-    // A test-only diverging panic implementation makes the real Result module
+    // A test-only diverging panic implementation makes the native error-result module
     // checkable. No assertion below invokes panic or claims its API is shipped.
     sandbox.write(
         "library/std/lib.fl",
-        "pub use result.Result;fn panic(message:str)->noreturn {panic(message)}",
+        "pub use result.ErrorResultOps;pub use result_unwrap.ErrorResultUnwrap;fn panic(message:str)->noreturn {panic(message)}",
     );
     sandbox.write(
         "input.fl",
-        "use std.Result;
-        fn good()->Result<bool,u8> {.Ok(true)}
-        fn bad()->Result<bool,u8> {.Err(7)}
-        fn run()->bool {good().map(|value| not value).is_ok() and bad().unwrap_err()==7}",
+        "use std.{ErrorResultOps,ErrorResultUnwrap};
+        fn good()->!u8 bool {true}
+        fn bad()->!u8 bool {error 7}
+        fn run()->bool {good().as(ErrorResultOps<bool,u8>).map(|value| not value).as(ErrorResultOps<bool,u8>).is_ok() and bad().as(ErrorResultUnwrap<bool,u8>).unwrap_err()==7}",
     );
     let output = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
 }
 
 #[test]
-fn shipped_option_methods_execute_with_explicit_optional_binding() {
+fn shipped_optional_methods_execute_without_declaration_binding() {
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for name in ["primitives", "option", "option_unwrap"] {
@@ -3228,70 +3303,66 @@ fn shipped_option_methods_execute_with_explicit_optional_binding() {
     // Test-only diverging panic; exercised success branches do not invoke it.
     sandbox.write(
         "lib.fl",
-        "pub use primitives.*;pub use option.Option;
+        "pub use primitives.*;pub use option.OptionalOps;pub use option_unwrap.OptionalUnwrap;
         fn panic(message:str)->noreturn {panic(message)}
-        fn some()->?bool {.Some(true)}
-        fn none()->?bool {.None}
-        fn nested()->??bool {.Some(.None)}
+        fn some()->?bool {true}
+        fn none()->?bool {null}
+        fn nested()->??bool {none()}
         fn forbidden(value:bool)->bool {forbidden(value)}
-        fn forbidden_option(value:bool)->?bool {forbidden_option(value)}
-        fn run()->bool {some().is_some() and none().is_none() and some().unwrap() and
-            some().unwrap_or(false) and none().unwrap_or(true) and
-            not some().map(|value| not value).unwrap() and none().map(forbidden).is_none() and
-            some().and_then(|value| .Some(not value)).is_some() and
-            none().and_then(forbidden_option).is_none() and nested().unwrap().is_none()}",
+        fn forbidden_optional(value:bool)->?bool {forbidden_optional(value)}
+        fn invert(value:bool)->?bool {not value}
+        fn run()->bool {
+            some().as(OptionalOps<bool>).is_some() and none().as(OptionalOps<bool>).is_none() and
+            some().as(OptionalUnwrap<bool>).unwrap() and
+            some().as(OptionalOps<bool>).unwrap_or(false) and none().as(OptionalOps<bool>).unwrap_or(true) and
+            not some().as(OptionalOps<bool>).map(|value| not value).as(OptionalUnwrap<bool>).unwrap() and
+            none().as(OptionalOps<bool>).map(forbidden).as(OptionalOps<bool>).is_none() and
+            some().as(OptionalOps<bool>).and_then(invert).as(OptionalOps<bool>).is_some() and
+            none().as(OptionalOps<bool>).and_then(forbidden_optional).as(OptionalOps<bool>).is_none() and
+            nested().as(OptionalUnwrap<?bool>).unwrap().as(OptionalOps<bool>).is_none()}",
     );
-    let output = sandbox.run(&[
-        "lib.fl",
-        "--optional-type",
-        "input::option::Option",
-        "--interpret",
-        "run",
-    ]);
+    let output = sandbox.run(&["lib.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
-    let missing = sandbox.run(&["lib.fl", "--interpret", "run"]);
-    assert!(!missing.status.success());
-    assert!(details(&missing).contains("optional type requires a bound optional declaration"));
 }
 
 #[test]
-fn optional_binding_checks_representation_and_does_not_use_spelling() {
+fn optional_type_does_not_use_enum_names_or_shapes() {
     let sandbox = Sandbox::new();
     for definition in [
         "enum Maybe where T {Absent,Present(T)}",
         "enum Maybe where T {Present(T),Absent}",
-    ] {
-        sandbox.write("input.fl",&format!("{definition} enum Option where T {{Wrong(T)}} fn run()->bool {{let value:?bool=.Present(true);value match {{.Present(flag)=>flag,.Absent=>false}}}}"));
-        let output = sandbox.run(&[
-            "input.fl",
-            "--optional-type",
-            "input::Maybe",
-            "--interpret",
-            "run",
-        ]);
-        assert_eq!(success(&output).trim(), "(bool true)");
-    }
-    for definition in [
         "enum Maybe where T {Absent,Present(bool)}",
         "enum Maybe where T {Absent,Present(T),Other}",
         "enum Maybe where T,E {Absent,Present(T)}",
-        "enum Maybe where T, requires T == bool {Absent,Present(T)}",
         "struct Maybe where T {value:T}",
     ] {
-        sandbox.write("input.fl", &format!("{definition} fn run()->bool {{true}}"));
-        let output = sandbox.run(&[
+        sandbox.write("input.fl", &format!("{definition} enum Option where T {{Wrong(T)}} fn run()->bool {{let value:?bool=true;value match {{flag?=>flag,null=>false}}}}"));
+        let output = sandbox.run(&["input.fl", "--interpret", "run"]);
+        assert_eq!(success(&output).trim(), "(bool true)");
+    }
+}
+
+#[test]
+fn removed_optional_type_selector_is_rejected_in_both_cli_modes() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "fn run()->bool {true}");
+    for mut args in [
+        vec!["input.fl"],
+        vec![
+            "--packages-v1",
+            "--package",
+            "1",
+            "701",
+            "input",
             "input.fl",
-            "--optional-type",
-            "input::Maybe",
-            "--interpret",
-            "run",
-        ]);
-        assert!(!output.status.success(), "{definition}");
-        assert!(
-            details(&output).contains("optional binding requires"),
-            "{}",
-            details(&output)
-        );
+            "--primary",
+            "1",
+        ],
+    ] {
+        args.extend(["--optional-type", "input.Maybe", "--interpret", "run"]);
+        let output = sandbox.run(&args);
+        assert_eq!(output.status.code(), Some(2), "{}", details(&output));
+        assert!(details(&output).contains("--optional-type"));
     }
 }
 
@@ -3308,20 +3379,14 @@ fn optional_null_and_patterns_preserve_each_nested_layer() {
                 "{definition}
             fn classify(value:??bool)->.u8'builtin {{value match {{
                 inner? => inner match {{flag? => if flag {{2}} else {{3}},null=>1}},null=>0}}}}
-            fn make(flag:bool)->?bool {{if flag {{.Present(true)}} else {{null}}}}
-            fn run()->bool {{classify(null)==0 and classify(.Present(null))==1 and
-                classify(.Present(.Present(true)))==2 and classify(.Present(.Present(false)))==3 and
+            fn make(flag:bool)->?bool {{if flag {{true}} else {{null}}}}
+            fn run()->bool {{classify(null)==0 and classify(do {{let inner:?bool=null;inner}})==1 and
+                classify(do {{let inner:?bool=true;inner}})==2 and classify(do {{let inner:?bool=false;inner}})==3 and
                 (make(true) match {{value?=>value,null=>false}}) and
                 (make(false) match {{_?=>false,null=>true}})}}"
             ),
         );
-        let output = sandbox.run(&[
-            "input.fl",
-            "--optional-type",
-            "input::Maybe",
-            "--interpret",
-            "run",
-        ]);
+        let output = sandbox.run(&["input.fl", "--interpret", "run"]);
         assert_eq!(success(&output).trim(), "(bool true)");
     }
     for body in [
@@ -3333,13 +3398,7 @@ fn optional_null_and_patterns_preserve_each_nested_layer() {
             "input.fl",
             &format!("enum Maybe where T {{Absent,Present(T)}} {body}"),
         );
-        let output = sandbox.run(&[
-            "input.fl",
-            "--optional-type",
-            "input::Maybe",
-            "--interpret",
-            "run",
-        ]);
+        let output = sandbox.run(&["input.fl", "--interpret", "run"]);
         assert!(!output.status.success(), "{body}");
     }
 }
@@ -3347,30 +3406,21 @@ fn optional_null_and_patterns_preserve_each_nested_layer() {
 #[test]
 fn optional_patterns_export_bindings_and_keep_failure_scopes_separate() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl","enum Maybe where T {Missing,Value(T)}
+    sandbox.write(
+        "input.fl",
+        "enum Maybe where T {Missing,Value(T)}
         fn take(value:?bool)->bool {let inner?=value else {return false;};inner}
         fn choose(value:?bool)->bool {value match {flag? or flag?=>flag,null=>false}}
-        fn run()->bool {take(.Value(true)) and not take(null) and choose(.Value(true)) and not choose(null)}");
-    let output = sandbox.run(&[
-        "input.fl",
-        "--optional-type",
-        "input::Maybe",
-        "--interpret",
-        "run",
-    ]);
+        fn run()->bool {take(true) and not take(null) and choose(true) and not choose(null)}",
+    );
+    let output = sandbox.run(&["input.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
     sandbox.write(
         "input.fl",
         "enum Maybe where T {Missing,Value(T)}
         fn run()->bool {let value:?bool=null;value match {flag?=>flag,null=>flag}}",
     );
-    let output = sandbox.run(&[
-        "input.fl",
-        "--optional-type",
-        "input::Maybe",
-        "--interpret",
-        "run",
-    ]);
+    let output = sandbox.run(&["input.fl", "--interpret", "run"]);
     assert!(!output.status.success());
     assert!(
         details(&output).contains("Unresolved identifier"),
@@ -3394,13 +3444,7 @@ fn optional_success_injection_preserves_existing_layers() {
             (choose(false) match {_?=>false,null=>true}) and
             (number() match {value?=>value==9,null=>false}) and
             (missing match {_?=>false,null=>true})}");
-    let output = sandbox.run(&[
-        "input.fl",
-        "--optional-type",
-        "input::Maybe",
-        "--interpret",
-        "run",
-    ]);
+    let output = sandbox.run(&["input.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
 }
 
@@ -3423,23 +3467,11 @@ fn generic_optional_parameters_infer_payloads_without_extra_layers() {
             (d match {inner?=>inner match {_?=>false,null=>true},null=>false}) and
             (e match {flag?=>flag,null=>false})}",
     );
-    let output = sandbox.run(&[
-        "input.fl",
-        "--optional-type",
-        "input::Maybe",
-        "--interpret",
-        "run",
-    ]);
+    let output = sandbox.run(&["input.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
     for expression in ["pair(true,'x')", "keep(null)"] {
         sandbox.write("input.fl",&format!("enum Maybe where T {{Absent,Present(T)}} fn keep(value:?T)->?T where T {{value}} fn pair(value:?T,other:T)->?T where T {{value}} fn run()->bool {{let result={expression};true}}"));
-        let output = sandbox.run(&[
-            "input.fl",
-            "--optional-type",
-            "input::Maybe",
-            "--interpret",
-            "run",
-        ]);
+        let output = sandbox.run(&["input.fl", "--interpret", "run"]);
         assert!(!output.status.success(), "{expression}");
     }
 }
@@ -3460,21 +3492,9 @@ fn optional_propagation_has_a_structured_hir_dump_and_converts_missing_result_ty
     );
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     assert!(hir_dump(&output).contains("(option-propagate (value "));
-    let output = sandbox.run(&[
-        "input.fl",
-        "--optional-type",
-        "input::Maybe",
-        "--interpret",
-        "run",
-    ]);
+    let output = sandbox.run(&["input.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
-    let output = sandbox.run(&[
-        "input.fl",
-        "--optional-type",
-        "input::Maybe",
-        "--invoke-comptime",
-        "check",
-    ]);
+    let output = sandbox.run(&["input.fl", "--invoke-comptime", "check"]);
     assert_eq!(success(&output).trim(), "(bool true)");
 }
 
@@ -3494,13 +3514,7 @@ fn inferred_optional_callbacks_complete_missing_returns_from_success_paths() {
             (nested match {value?=>not value,null=>false}) and (number match {value?=>value==9,null=>false}) and
             (yes match {value?=>not value,null=>false}) and (no match {_?=>false,null=>true}) and
             (byte match {value?=>value==9,null=>false}) and (missing_byte match {_?=>false,null=>true})}");
-    let output = sandbox.run(&[
-        "input.fl",
-        "--optional-type",
-        "input::Maybe",
-        "--interpret",
-        "run",
-    ]);
+    let output = sandbox.run(&["input.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
     sandbox.write(
         "input.fl",
@@ -3509,13 +3523,7 @@ fn inferred_optional_callbacks_complete_missing_returns_from_success_paths() {
         fn apply(action:fn(bool)->?T)->?T where T {action(true)}
         fn run()->bool {let value=apply(|flag| {lookup(flag)?;null});true}",
     );
-    let output = sandbox.run(&[
-        "input.fl",
-        "--optional-type",
-        "input::Maybe",
-        "--interpret",
-        "run",
-    ]);
+    let output = sandbox.run(&["input.fl", "--interpret", "run"]);
     assert!(!output.status.success());
 }
 
@@ -3542,13 +3550,7 @@ fn inferred_optional_callbacks_defer_explicit_missing_returns() {
                 (no match {{_?=>false,null=>true}})}}"
             ),
         );
-        let output = sandbox.run(&[
-            "input.fl",
-            "--optional-type",
-            "input::Maybe",
-            "--interpret",
-            "run",
-        ]);
+        let output = sandbox.run(&["input.fl", "--interpret", "run"]);
         assert_eq!(success(&output).trim(), "(bool true)", "{body}");
     }
     for body in [
@@ -3564,13 +3566,7 @@ fn inferred_optional_callbacks_defer_explicit_missing_returns() {
             fn run()->bool {{let value=apply(|flag| {{{body}}},true);true}}"
             ),
         );
-        let output = sandbox.run(&[
-            "input.fl",
-            "--optional-type",
-            "input::Maybe",
-            "--interpret",
-            "run",
-        ]);
+        let output = sandbox.run(&["input.fl", "--interpret", "run"]);
         assert!(!output.status.success(), "accepted {body}");
     }
 }
@@ -3608,13 +3604,7 @@ fn partial_optional_branches_infer_from_later_success_values() {
                     let result={input};result match {{value?=>not flag and value==9,null=>flag}}}}"
                     ),
                 );
-                let output = sandbox.run(&[
-                    "input.fl",
-                    "--optional-type",
-                    "input::Maybe",
-                    "--interpret",
-                    "run",
-                ]);
+                let output = sandbox.run(&["input.fl", "--interpret", "run"]);
                 assert_eq!(success(&output).trim(), "(bool true)", "{input}, {flag}");
             }
         }
@@ -3632,7 +3622,7 @@ fn optional_propagation_supplies_context_to_generic_producers() {
         fn consume(value:bool)->Byte {9}
         fn local()->?Byte {let value:bool=empty()?;9}
         fn argument()->?Byte {consume(empty()?)}
-        fn symbol()->?Byte {let value:bool=.Absent?;9}
+        fn symbol()->?Byte {let value:bool=null?;9}
         fn nested()->??Byte {let value:?Byte=empty()?;value}
         fn run()->bool {
             (local() match {_?=>false,null=>true}) and
@@ -3640,13 +3630,7 @@ fn optional_propagation_supplies_context_to_generic_producers() {
             (symbol() match {_?=>false,null=>true}) and
             (nested() match {_?=>false,null=>true})}",
     );
-    let output = sandbox.run(&[
-        "input.fl",
-        "--optional-type",
-        "input::Maybe",
-        "--interpret",
-        "run",
-    ]);
+    let output = sandbox.run(&["input.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
 }
 
@@ -3673,13 +3657,7 @@ fn optional_branch_probes_reach_later_evidence_through_nested_nulls() {
                     value match {{value?=>not flag and value==9,null=>flag}}}}"
                 ),
             );
-            let output = sandbox.run(&[
-                "input.fl",
-                "--optional-type",
-                "input::Maybe",
-                "--interpret",
-                "run",
-            ]);
+            let output = sandbox.run(&["input.fl", "--interpret", "run"]);
             assert_eq!(success(&output).trim(), "(bool true)", "{shape}, {flag}");
         }
     }
@@ -3691,13 +3669,7 @@ fn optional_branch_probes_reach_later_evidence_through_nested_nulls() {
             |flag| {if flag {return true;} else {return false;}}
         });value match {value?=>value,null=>false}}",
     );
-    let output = sandbox.run(&[
-        "input.fl",
-        "--optional-type",
-        "input::Maybe",
-        "--interpret",
-        "run",
-    ]);
+    let output = sandbox.run(&["input.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
     for missing in [
         "true match {true=>null}",
@@ -3711,13 +3683,7 @@ fn optional_branch_probes_reach_later_evidence_through_nested_nulls() {
             fn run()->bool {{let value=keep(if false {{{missing}}} else {{true}});true}}"
             ),
         );
-        let output = sandbox.run(&[
-            "input.fl",
-            "--optional-type",
-            "input::Maybe",
-            "--interpret",
-            "run",
-        ]);
+        let output = sandbox.run(&["input.fl", "--interpret", "run"]);
         assert!(!output.status.success(), "accepted {missing}");
     }
 }
@@ -3745,13 +3711,7 @@ fn optional_callback_tails_use_explicit_return_payload_evidence() {
                 result match {{value?=>{flag} and value==9,null=>not {flag}}}}}"
                 ),
             );
-            let output = sandbox.run(&[
-                "input.fl",
-                "--optional-type",
-                "input::Maybe",
-                "--interpret",
-                "run",
-            ]);
+            let output = sandbox.run(&["input.fl", "--interpret", "run"]);
             assert_eq!(success(&output).trim(), "(bool true)", "{body}, {flag}");
         }
     }
@@ -3883,17 +3843,10 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     for name in ["builtin", "std", "meta"] {
         fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();
     }
-    sandbox.write("library/builtin/lib.fl","pub typealias Type=.Type'builtin;pub use tuple.Tuple;pub use ops.*;pub use comparison.*;pub mod prelude {pub use tuple.Tuple;}");
+    sandbox.write("library/builtin/lib.fl","pub typealias Type=.Type'builtin;pub use tuple.Tuple;pub use ops.*;pub use comparison.*;pub mod math {pub use math_intrinsics.*;} pub mod prelude {pub use tuple.Tuple;}");
     sandbox.write(
         "library/builtin/resources.fl",
         include_str!("../../../library/builtin/resources.fl"),
-    );
-    // This isolated binding fixture supplies the optional constructor named
-    // by the real manifest. Actual Option methods have separate library tests;
-    // the full library smoke check uses the real file without replacements.
-    sandbox.write(
-        "library/builtin/option.fl",
-        "pub enum Option where T {Some(T),None}",
     );
     sandbox.write(
         "library/builtin/tuple.fl",
@@ -3916,12 +3869,11 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
         "library/language-items.conf",
         include_str!("../../../library/language-items.conf"),
     );
-    fs::create_dir_all(sandbox.path("library/math")).unwrap();
     sandbox.write(
-        "library/math/lib.fl",
-        include_str!("../../../library/math/lib.fl"),
+        "library/builtin/math_intrinsics.fl",
+        include_str!("../../../library/builtin/math_intrinsics.fl"),
     );
-    sandbox.write("input.fl","fn pair()->Tuple<bool,.u8'builtin> {(true,9)} fn present()->?bool {.Some(true)} fn run()->bool {let (flag,byte)=pair();flag and byte==9 and (present() match {.Some(value)=>value,.None=>false})}");
+    sandbox.write("input.fl","fn pair()->Tuple<bool,.u8'builtin> {(true,9)} fn present()->?bool {true} fn run()->bool {let (flag,byte)=pair();flag and byte==9 and (present() match {value?=>value,null=>false})}");
     assert_eq!(
         success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
         "(bool true)"
@@ -3964,7 +3916,14 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     // Defaults do not override explicit driver choices.
     sandbox.write(
         "library/language-items.conf",
-        format!("version = 1\nmeta-list-type = meta::List\ntuple-type = missing::Tuple\noptional-type = builtin::option::Option\n{}", include_str!("../../../library/language-items.conf").lines().filter(|line| line.starts_with("host-intrinsic.")).collect::<Vec<_>>().join("\n")),
+        format!(
+            "version = 1\nmeta-list-type = meta.List\ntuple-type = missing.Tuple\n{}",
+            include_str!("../../../library/language-items.conf")
+                .lines()
+                .filter(|line| line.starts_with("host-intrinsic."))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
     );
     failure(
         &sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]),
@@ -3978,7 +3937,7 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
             "--interpret",
             "run",
             "--tuple-type",
-            "builtin::tuple::Tuple"
+            "builtin.tuple.Tuple"
         ]))
         .trim(),
         "(bool true)"
@@ -3987,10 +3946,9 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
         "library/language-items.conf",
         include_str!("../../../library/language-items.conf"),
     );
-    fs::create_dir_all(sandbox.path("library/math")).unwrap();
     sandbox.write(
-        "library/math/lib.fl",
-        include_str!("../../../library/math/lib.fl"),
+        "library/builtin/math_intrinsics.fl",
+        include_str!("../../../library/builtin/math_intrinsics.fl"),
     );
     sandbox.write("input.fl","typealias Type=.Type'builtin;pure comptime fn Tuple<...Es:meta.List<Type>>->Type {Tuple<...Es>} fn run()->Tuple<bool> {(true,)}");
     let shadow = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]);
@@ -4011,11 +3969,11 @@ fn sysroot_language_item_configuration_is_validated_without_clobbering_output() 
         "",
         "version = 2",
         "version = 1\nversion = 1",
-        "version = 1\nunknown = x::T",
+        "version = 1\nunknown = x.T",
         "version = 1\ntuple-type = Tuple",
-        "version = 1\ntuple-type = x::::T",
-        "version = 1\ntuple-type = x::T\ntuple-type = x::T",
-        "version = 1\ntuple-type x::T",
+        "version = 1\ntuple-type = x..T",
+        "version = 1\ntuple-type = x.T\ntuple-type = x.T",
+        "version = 1\ntuple-type x.T",
     ] {
         sandbox.write("library/language-items.conf", config);
         sandbox.write("dump.lisp", OLD_OUTPUT);
@@ -4103,7 +4061,7 @@ fn arithmetic_protocol_cli_checks_binding_shape_and_source_identity() {
         success(&sandbox.run(&[
             "input.fl",
             "--add-protocol",
-            "input::Operation",
+            "input.Operation",
             "--interpret",
             "run"
         ]))
@@ -4115,7 +4073,7 @@ fn arithmetic_protocol_cli_checks_binding_shape_and_source_identity() {
         &sandbox.run(&[
             "input.fl",
             "--add-protocol",
-            "input::Flag",
+            "input.Flag",
             "--interpret",
             "run",
         ]),
@@ -4125,7 +4083,7 @@ fn arithmetic_protocol_cli_checks_binding_shape_and_source_identity() {
         &sandbox.run(&[
             "input.fl",
             "--add-protocol",
-            "missing::Operation",
+            "missing.Operation",
             "--interpret",
             "run",
         ]),
@@ -4135,9 +4093,9 @@ fn arithmetic_protocol_cli_checks_binding_shape_and_source_identity() {
         &sandbox.run(&[
             "input.fl",
             "--add-protocol",
-            "input::Operation",
+            "input.Operation",
             "--add-protocol",
-            "input::Operation",
+            "input.Operation",
         ]),
         2,
     );
@@ -4156,7 +4114,7 @@ fn arithmetic_protocol_cli_checks_binding_shape_and_source_identity() {
         let output = sandbox.run(&[
             "input.fl",
             "--add-protocol",
-            "input::Operation",
+            "input.Operation",
             "--interpret",
             "run",
         ]);
@@ -4193,37 +4151,31 @@ fn unary_protocol_cli_validates_identity_shape_and_native_fallback() {
             ("native_not", "(bool true)"),
         ] {
             let output =
-                sandbox.run(&["input.fl", option, "input::Operation", "--interpret", entry]);
+                sandbox.run(&["input.fl", option, "input.Operation", "--interpret", entry]);
             let result = success(&output);
             assert_eq!(result.trim(), expected, "{option} {entry}");
         }
-        let bits = sandbox.run(&[
-            "input.fl",
-            option,
-            "input::Operation",
-            "--interpret",
-            "bits",
-        ]);
+        let bits = sandbox.run(&["input.fl", option, "input.Operation", "--interpret", "bits"]);
         assert_eq!(
             success(&bits).trim(),
             "(bitvec (width 8) (hex \"000000f0\"))"
         );
         failure(&sandbox.run(&["input.fl", "--interpret", "run"]), 1);
         failure(
-            &sandbox.run(&["input.fl", option, "input::Flag", "--emit", "nir"]),
+            &sandbox.run(&["input.fl", option, "input.Flag", "--emit", "nir"]),
             1,
         );
         failure(
-            &sandbox.run(&["input.fl", option, "missing::Operation", "--emit", "nir"]),
+            &sandbox.run(&["input.fl", option, "missing.Operation", "--emit", "nir"]),
             1,
         );
         failure(
             &sandbox.run(&[
                 "input.fl",
                 option,
-                "input::Operation",
+                "input.Operation",
                 option,
-                "input::Operation",
+                "input.Operation",
             ]),
             2,
         );
@@ -4240,7 +4192,7 @@ fn unary_protocol_cli_validates_identity_shape_and_native_fallback() {
                 format!("typealias Type=.Type'builtin;{declaration} fn run()->bool {{true}}"),
             );
             let output =
-                sandbox.run(&["input.fl", option, "input::Operation", "--interpret", "run"]);
+                sandbox.run(&["input.fl", option, "input.Operation", "--interpret", "run"]);
             failure(&output, 1);
             assert!(String::from_utf8_lossy(&output.stderr).contains("protocol"));
         }
@@ -4259,7 +4211,7 @@ fn index_protocol_cli_checks_binding_and_declaration_shape() {
         success(&sandbox.run(&[
             "input.fl",
             "--index-protocol",
-            "input::Access",
+            "input.Access",
             "--interpret",
             "run"
         ]))
@@ -4268,11 +4220,11 @@ fn index_protocol_cli_checks_binding_and_declaration_shape() {
     );
     failure(&sandbox.run(&["input.fl", "--interpret", "run"]), 1);
     for selector in [
-        "input::Flag",
-        "missing::Access",
+        "input.Flag",
+        "missing.Access",
         "Access",
-        "input::",
-        "input::missing::Access",
+        "input.",
+        "input.missing.Access",
     ] {
         failure(
             &sandbox.run(&[
@@ -4287,13 +4239,13 @@ fn index_protocol_cli_checks_binding_and_declaration_shape() {
     }
     for args in [
         vec!["input.fl", "--index-protocol"],
-        vec!["input.fl", "--index-protocol", "input::Access"],
+        vec!["input.fl", "--index-protocol", "input.Access"],
         vec![
             "input.fl",
             "--index-protocol",
-            "input::Access",
+            "input.Access",
             "--index-protocol",
-            "input::Access",
+            "input.Access",
             "--interpret",
             "run",
         ],
@@ -4310,7 +4262,7 @@ fn index_protocol_cli_checks_binding_and_declaration_shape() {
         let output = sandbox.run(&[
             "input.fl",
             "--index-protocol",
-            "input::Access",
+            "input.Access",
             "--interpret",
             "run",
         ]);
@@ -4336,7 +4288,7 @@ fn index_protocol_sysroot_defaults_preserve_explicit_pointer_access() {
     sandbox.write("library/std/lib.fl", "pub mod prelude {}");
     sandbox.write(
         "library/language-items.conf",
-        "version = 1\nindex-protocol = builtin::ops::Index\n",
+        "version = 1\nindex-protocol = builtin.ops.Index\n",
     );
     sandbox.write(
         "input.fl",
@@ -4356,7 +4308,7 @@ fn index_protocol_sysroot_defaults_preserve_explicit_pointer_access() {
         "--interpret",
         "run",
         "--index-protocol",
-        "input::Missing",
+        "input.Missing",
     ]);
     failure(&output, 1);
 }
@@ -4368,9 +4320,9 @@ fn checked_interpret_supplies_resource_identities_before_pure_validation() {
     let result = sandbox.run(&[
         "input.fl",
         "--meta-list-type",
-        "input::List",
+        "input.List",
         "--tuple-type",
-        "input::Tuple",
+        "input.Tuple",
         "--interpret",
         "run",
         "--copy-protocol",
@@ -4482,7 +4434,7 @@ fn literal_into_cli_runs_suffix_conversion_and_checks_usage() {
         success(&sandbox.run(&[
             "input.fl",
             "--literal-into-protocol",
-            "input::Convert",
+            "input.Convert",
             "--interpret",
             "run"
         ]))
@@ -4490,12 +4442,7 @@ fn literal_into_cli_runs_suffix_conversion_and_checks_usage() {
         "(bool true)"
     );
     failure(&sandbox.run(&["input.fl", "--interpret", "run"]), 1);
-    for selector in [
-        "Convert",
-        "input::Missing",
-        "missing::Convert",
-        "input::run",
-    ] {
+    for selector in ["Convert", "input.Missing", "missing.Convert", "input.run"] {
         failure(
             &sandbox.run(&[
                 "input.fl",
@@ -4509,13 +4456,13 @@ fn literal_into_cli_runs_suffix_conversion_and_checks_usage() {
     }
     for args in [
         vec!["input.fl", "--literal-into-protocol"],
-        vec!["input.fl", "--literal-into-protocol", "input::Convert"],
+        vec!["input.fl", "--literal-into-protocol", "input.Convert"],
         vec![
             "input.fl",
             "--literal-into-protocol",
-            "input::Convert",
+            "input.Convert",
             "--literal-into-protocol",
-            "input::Convert",
+            "input.Convert",
             "--emit",
             "nir",
         ],
@@ -4535,7 +4482,7 @@ fn literal_into_cli_overrides_sysroot_defaults() {
     sandbox.write("library/std/lib.fl", "pub mod prelude {}");
     sandbox.write(
         "library/language-items.conf",
-        "version = 1\nliteral-into-protocol = builtin::Convert\n",
+        "version = 1\nliteral-into-protocol = builtin.Convert\n",
     );
     sandbox.write(
         "input.fl",
@@ -4556,7 +4503,7 @@ fn literal_into_cli_overrides_sysroot_defaults() {
             "--interpret",
             "run",
             "--literal-into-protocol",
-            "input::Custom"
+            "input.Custom"
         ]))
         .trim(),
         "(bool true)"
@@ -4573,7 +4520,7 @@ fn literal_suffix_result_inference_requires_a_unique_complete_candidate() {
     let args = [
         "input.fl",
         "--literal-into-protocol",
-        "input::Convert",
+        "input.Convert",
         "--interpret",
         "run",
     ];
@@ -4640,7 +4587,7 @@ fn literal_result_inference_uses_implementation_equalities_without_assuming_them
     let args = [
         "input.fl",
         "--literal-into-protocol",
-        "input::Convert",
+        "input.Convert",
         "--interpret",
         "run",
     ];
@@ -5435,7 +5382,7 @@ fn interface_constants_remain_checked_lexical_definitions() {
             "--interpret",
             "run",
             "--splice-protocol",
-            "input::Splice",
+            "input.Splice",
         ]);
         assert_eq!(success(&output).trim(), "(bool true)");
         sandbox.write(
@@ -5450,7 +5397,7 @@ fn interface_constants_remain_checked_lexical_definitions() {
             "--emit",
             "nir",
             "--splice-protocol",
-            "input::Splice",
+            "input.Splice",
         ]);
         assert!(!invalid.status.success());
         assert!(
@@ -5593,9 +5540,9 @@ fn tuple_enumeration_view_retains_operand_and_loop_structure_in_hir() {
             "--emit",
             "nir",
             "--meta-list-type",
-            "input::List",
+            "input.List",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
         ]);
         if runtime_view {
             failure(&output, 1);
@@ -5776,9 +5723,9 @@ fn explicit_package_cli_resolves_source_protocols_by_provider_name() {
     ];
     failure(&sandbox.run(&args), 1);
     let mut selected = args.to_vec();
-    selected.extend(["--add-protocol", "provider::Merge"]);
+    selected.extend(["--add-protocol", "provider.Merge"]);
     success(&sandbox.run(&selected));
-    *selected.last_mut().unwrap() = "dependency::Merge";
+    *selected.last_mut().unwrap() = "dependency.Merge";
     failure(&sandbox.run(&selected), 1);
 }
 
@@ -5878,27 +5825,27 @@ fn explicit_package_cli_runs_actions_in_primary_semantic_identity() {
             "--interpret",
             "run",
             "--copy-protocol",
-            "provider::Duplicate",
+            "provider.Duplicate",
             "--drop-protocol",
-            "provider::Retire",
+            "provider.Retire",
         ],
         vec![
             "--interpret",
             "run",
             "--inline-functions",
             "--copy-protocol",
-            "provider::Duplicate",
+            "provider.Duplicate",
             "--drop-protocol",
-            "provider::Retire",
+            "provider.Retire",
         ],
         vec!["--instantiate", "run"],
         vec![
             "--analyze-resources",
             "run",
             "--copy-protocol",
-            "provider::Duplicate",
+            "provider.Duplicate",
             "--drop-protocol",
-            "provider::Retire",
+            "provider.Retire",
         ],
     ] {
         let mut args = base.to_vec();
@@ -5939,9 +5886,9 @@ fn explicit_package_cli_runs_actions_in_primary_semantic_identity() {
     // Duplicate leaf names are legal: the selected source identity survives
     // elaboration, including nested-module qualification.
     sandbox.write("provider.fl", "pub mod memory {pub trait Duplicate {} pub trait Retire {fn drop(*self);}} pub fn answer()->bool {true}");
-    for selector in ["provider::memory", "dep::memory"] {
-        let copy = format!("{selector}::Duplicate");
-        let drop = format!("{selector}::Retire");
+    for selector in ["provider.memory", "dep.memory"] {
+        let copy = format!("{selector}.Duplicate");
+        let drop = format!("{selector}.Retire");
         let mut args = base.to_vec();
         args.extend([
             "--interpret",
@@ -5952,7 +5899,7 @@ fn explicit_package_cli_runs_actions_in_primary_semantic_identity() {
             &drop,
         ]);
         let output = sandbox.run(&args);
-        if selector == "provider::memory" {
+        if selector == "provider.memory" {
             assert_eq!(success(&output).trim(), "(bool true)");
         } else {
             failure(&output, 1);
@@ -6001,9 +5948,9 @@ fn single_input_resource_actions_keep_qualified_source_identities() {
             action,
             "run",
             "--copy-protocol",
-            "input::selected::Duplicate",
+            "input.selected.Duplicate",
             "--drop-protocol",
-            "input::selected::Retire",
+            "input.selected.Retire",
         ];
         let output = sandbox.run(&args);
         let dump = success(&output);
@@ -6030,12 +5977,12 @@ fn sysroot_resource_actions_preserve_explicit_selection_and_action_scope() {
     );
     sandbox.write(
         "library/language-items.conf",
-        "version = 1\ncopy-protocol = builtin::Duplicate\ndrop-protocol = builtin::Retire\n",
+        "version = 1\ncopy-protocol = builtin.Duplicate\ndrop-protocol = builtin.Retire\n",
     );
     sandbox.write("input.fl", "fn run()->bool {true}");
     for provider in ["builtin", "std"] {
-        let copy = format!("{provider}::Duplicate");
-        let drop = format!("{provider}::Retire");
+        let copy = format!("{provider}.Duplicate");
+        let drop = format!("{provider}.Retire");
         let mut args = vec![
             "input.fl",
             "--sysroot",
@@ -6058,7 +6005,7 @@ fn sysroot_resource_actions_preserve_explicit_selection_and_action_scope() {
         "--analyze-resources",
         "run",
         "--copy-protocol",
-        "std::Duplicate",
+        "std.Duplicate",
     ]);
     let dump = success(&output);
     assert!(dump.contains("(stage ownership-obligations)"), "{dump}");
@@ -6085,7 +6032,6 @@ fn all_source_bindings_require_elaboration_in_both_cli_modes() {
         "--splice-protocol",
         "--meta-list-type",
         "--tuple-type",
-        "--optional-type",
     ] {
         for base in [
             vec!["input.fl"],
@@ -6105,7 +6051,7 @@ fn all_source_bindings_require_elaboration_in_both_cli_modes() {
                 if let Some(stage) = stage {
                     args.extend(["--emit", stage]);
                 }
-                args.extend([flag, "input::Missing", "--output", "result.lisp"]);
+                args.extend([flag, "input.Missing", "--output", "result.lisp"]);
                 sandbox.write("result.lisp", "previous");
                 failure(&sandbox.run(&args), 2);
                 assert_eq!(
@@ -6114,7 +6060,7 @@ fn all_source_bindings_require_elaboration_in_both_cli_modes() {
                 );
             }
             let mut args = base;
-            args.extend(["--emit", "nir", flag, "input::Missing"]);
+            args.extend(["--emit", "nir", flag, "input.Missing"]);
             // It must now attempt semantic binding, rather than reject the action.
             failure(&sandbox.run(&args), 1);
         }
@@ -6133,7 +6079,7 @@ fn list_pattern_cli_binds_single_package_and_dependency_protocols() {
             mode,
             entry,
             "--list-pattern-protocol",
-            "input::ListView",
+            "input.ListView",
         ]);
         let dump = success(&output);
         if mode == "--interpret" {
@@ -6163,9 +6109,9 @@ fn list_pattern_cli_binds_single_package_and_dependency_protocols() {
         "run",
     ];
     let mut args = base.to_vec();
-    args.extend(["--list-pattern-protocol", "provider::ListView"]);
+    args.extend(["--list-pattern-protocol", "provider.ListView"]);
     assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
-    for selector in ["dep::ListView", "provider::Missing", "provider::Repeated"] {
+    for selector in ["dep.ListView", "provider.Missing", "provider.Repeated"] {
         let mut args = base.to_vec();
         args.extend(["--list-pattern-protocol", selector]);
         failure(&sandbox.run(&args), 1);
@@ -6175,9 +6121,9 @@ fn list_pattern_cli_binds_single_package_and_dependency_protocols() {
         vec!["--list-pattern-protocol"],
         vec![
             "--list-pattern-protocol",
-            "input::ListView",
+            "input.ListView",
             "--list-pattern-protocol",
-            "input::ListView",
+            "input.ListView",
         ],
     ] {
         let mut args = vec!["input.fl", "--emit", "nir"];
@@ -6195,7 +6141,7 @@ fn list_pattern_cli_overrides_sysroot_manifest_default() {
     sandbox.write("library/std/lib.fl", "");
     sandbox.write(
         "library/language-items.conf",
-        "version = 1\nlist-pattern-protocol = builtin::Missing\n",
+        "version = 1\nlist-pattern-protocol = builtin.Missing\n",
     );
     sandbox.write(
         "input.fl",
@@ -6210,7 +6156,7 @@ fn list_pattern_cli_overrides_sysroot_manifest_default() {
     ];
     failure(&sandbox.run(&args), 1);
     let mut selected = args.to_vec();
-    selected.extend(["--list-pattern-protocol", "input::ListView"]);
+    selected.extend(["--list-pattern-protocol", "input.ListView"]);
     assert_eq!(success(&sandbox.run(&selected)).trim(), "(bool true)");
 }
 
@@ -6237,11 +6183,11 @@ fn list_pattern_cli_checks_extractor_observation_with_cleanup_and_inlining() {
                 "--interpret",
                 "evaluate",
                 "--list-pattern-protocol",
-                "input::ListView",
+                "input.ListView",
                 "--copy-protocol",
-                "input::Duplicate",
+                "input.Duplicate",
                 "--drop-protocol",
-                "input::Retire",
+                "input.Retire",
                 "--output",
                 "result.lisp",
             ];
@@ -6353,9 +6299,9 @@ fn source_tests_use_checked_cleanup_and_bounded_execution() {
         "input.fl",
         "--test",
         "--copy-protocol",
-        "input::Duplicate",
+        "input.Duplicate",
         "--drop-protocol",
-        "input::Retire",
+        "input.Retire",
     ];
     assert!(success(&sandbox.run(&base)).contains("(count 1)"));
     let mut inline = base.to_vec();
@@ -6426,9 +6372,9 @@ fn repository_language_suite_runs_as_checked_source_tests() {
         "main.fl",
         "--test",
         "--copy-protocol",
-        "input::Duplicate",
+        "input.Duplicate",
         "--drop-protocol",
-        "input::Retire",
+        "input.Retire",
     ];
     let output = sandbox.run(&args);
     let report = success(&output);
@@ -7025,9 +6971,9 @@ fn native_inline_tests_preserve_package_identity_and_resource_bindings() {
         "--test-native",
         "--inline-functions",
         "--copy-protocol",
-        "support::Duplicate",
+        "support.Duplicate",
         "--drop-protocol",
-        "support::Retire",
+        "support.Retire",
     ];
     for level in ["0", "3"] {
         let mut app = base.to_vec();
@@ -7081,9 +7027,9 @@ fn package_llvm_dump_selects_primary_identity_and_preserves_inputs() {
                 primary,
                 "--inline-functions",
                 "--copy-protocol",
-                "support::Duplicate",
+                "support.Duplicate",
                 "--drop-protocol",
-                "support::Retire",
+                "support.Retire",
                 "--opt-level",
                 level,
             ]);
@@ -7142,9 +7088,9 @@ fn package_native_build_preserves_identity_resources_and_previous_artifacts() {
         "run",
         "--inline-functions",
         "--copy-protocol",
-        "support::Duplicate",
+        "support.Duplicate",
         "--drop-protocol",
-        "support::Retire",
+        "support.Retire",
     ];
     for level in ["0", "3"] {
         for (primary, expected) in [
@@ -7248,9 +7194,9 @@ fn package_discard_result_uses_selected_identity_and_checked_drop() {
         "--discard-result",
         "--inline-functions",
         "--copy-protocol",
-        "support::Duplicate",
+        "support.Duplicate",
         "--drop-protocol",
-        "support::Retire",
+        "support.Retire",
     ];
     for level in ["0", "3"] {
         for primary in ["1", "2"] {
@@ -7538,7 +7484,7 @@ fn host_fma_cli_binds_qualified_source_before_purity_and_runs_example() {
         success(&sandbox.run(&[
             "input.fl",
             "--host-fma",
-            "input::machine::Scalar::fused",
+            "input.machine.Scalar.fused",
             "--build",
             "run",
             "--opt-level",
@@ -7552,7 +7498,7 @@ fn host_fma_cli_binds_qualified_source_before_purity_and_runs_example() {
     let output = sandbox.run(&[
         "input.fl",
         "--host-fma",
-        "input::machine::Scalar::fused",
+        "input.machine.Scalar.fused",
         "--emit-llvm",
         "run",
     ]);
@@ -7570,12 +7516,12 @@ fn host_fma_cli_rejects_invalid_selectors_and_preserves_output() {
     );
     sandbox.write("native", "previous");
     for selector in [
-        "Ops::op",
-        "missing::Ops::op",
-        "input::Missing::op",
-        "input::Ordinary::op",
-        "input::Ops::missing",
-        "input::::op",
+        "Ops.op",
+        "missing.Ops.op",
+        "input.Missing.op",
+        "input.Ordinary.op",
+        "input.Ops.missing",
+        "input..op",
     ] {
         let output = sandbox.run(&[
             "input.fl",
@@ -7590,15 +7536,15 @@ fn host_fma_cli_rejects_invalid_selectors_and_preserves_output() {
         assert_eq!(fs::read(sandbox.path("native")).unwrap(), b"previous");
     }
     for args in [
-        vec!["input.fl", "--emit", "nir", "--host-fma", "input::Ops::op"],
+        vec!["input.fl", "--emit", "nir", "--host-fma", "input.Ops.op"],
         vec![
             "input.fl",
             "--emit-llvm",
             "run",
             "--host-fma",
-            "input::Ops::op",
+            "input.Ops.op",
             "--host-fma",
-            "input::Ops::op",
+            "input.Ops.op",
         ],
         vec!["input.fl", "--emit-llvm", "run", "--host-fma"],
     ] {
@@ -7613,7 +7559,7 @@ fn host_fma_cli_rejects_invalid_selectors_and_preserves_output() {
         "--build",
         "run",
         "--host-fma",
-        "input::Ops::op",
+        "input.Ops.op",
         "--output",
         "native",
     ]);
@@ -7650,7 +7596,7 @@ fn host_fma_package_cli_uses_declared_package_identity() {
     let mut args = base.to_vec();
     args.extend([
         "--host-fma",
-        "one::machine::Scalar::fused",
+        "one.machine.Scalar.fused",
         "--emit-llvm",
         "run",
     ]);
@@ -7666,7 +7612,7 @@ fn host_fma_package_cli_uses_declared_package_identity() {
     let mut args = base.to_vec();
     args.extend([
         "--host-fma",
-        "one::machine::Scalar::fused",
+        "one.machine.Scalar.fused",
         "--build",
         "run",
         "--output",
@@ -7693,7 +7639,7 @@ fn host_fma_binding_preserves_resources_purity_and_unsafe_responsibility() {
     success(&sandbox.run(&[
         "input.fl",
         "--host-fma",
-        "input::machine::Scalar::fused",
+        "input.machine.Scalar.fused",
         "--copy-protocol",
         "Duplicate",
         "--drop-protocol",
@@ -7729,7 +7675,7 @@ fn host_fma_binding_preserves_resources_purity_and_unsafe_responsibility() {
         let output = sandbox.run(&[
             "input.fl",
             "--host-fma",
-            "input::Ops::op",
+            "input.Ops.op",
             "--build",
             "run",
             "--output",
@@ -7749,7 +7695,8 @@ fn host_fma_binding_preserves_resources_purity_and_unsafe_responsibility() {
 #[test]
 fn repository_math_package_runs_generic_fma_and_rejects_nonfloat_inputs() {
     let sandbox = Sandbox::new();
-    let math = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/math/lib.fl");
+    let math =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/builtin/math_intrinsics.fl");
     let math = math.to_str().unwrap();
     sandbox.write(
         "app.fl",
@@ -7774,93 +7721,93 @@ fn repository_math_package_runs_generic_fma_and_rejects_nonfloat_inputs() {
         "--primary",
         "1",
         "--host-fma",
-        "math::target::Scalar::fma",
+        "math.target.Scalar.fma",
         "--host-sqrt",
-        "math::target::Scalar::sqrt",
+        "math.target.Scalar.sqrt",
         "--host-copysign",
-        "math::target::Scalar::copysign",
+        "math.target.Scalar.copysign",
         "--host-intrinsic",
-        "floor=math::target::Scalar::floor",
+        "floor=math.target.Scalar.floor",
         "--host-intrinsic",
-        "ceil=math::target::Scalar::ceil",
+        "ceil=math.target.Scalar.ceil",
         "--host-intrinsic",
-        "trunc=math::target::Scalar::trunc",
+        "trunc=math.target.Scalar.trunc",
         "--host-intrinsic",
-        "roundeven=math::target::Scalar::roundeven",
+        "roundeven=math.target.Scalar.roundeven",
         "--host-intrinsic",
-        "round=math::target::Scalar::round",
+        "round=math.target.Scalar.round",
         "--host-intrinsic",
-        "fabs=math::target::Scalar::fabs",
+        "fabs=math.target.Scalar.fabs",
         "--host-intrinsic",
-        "sin=math::target::Scalar::sin",
+        "sin=math.target.Scalar.sin",
         "--host-intrinsic",
-        "cos=math::target::Scalar::cos",
+        "cos=math.target.Scalar.cos",
         "--host-intrinsic",
-        "exp=math::target::Scalar::exp",
+        "exp=math.target.Scalar.exp",
         "--host-intrinsic",
-        "exp2=math::target::Scalar::exp2",
+        "exp2=math.target.Scalar.exp2",
         "--host-intrinsic",
-        "log=math::target::Scalar::log",
+        "log=math.target.Scalar.log",
         "--host-intrinsic",
-        "log2=math::target::Scalar::log2",
+        "log2=math.target.Scalar.log2",
         "--host-intrinsic",
-        "log10=math::target::Scalar::log10",
+        "log10=math.target.Scalar.log10",
         "--host-intrinsic",
-        "minimum=math::target::Scalar::minimum",
+        "minimum=math.target.Scalar.minimum",
         "--host-intrinsic",
-        "maximum=math::target::Scalar::maximum",
+        "maximum=math.target.Scalar.maximum",
         "--host-intrinsic",
-        "bswap=math::target::Scalar::bswap",
+        "bswap=math.target.Scalar.bswap",
         "--host-intrinsic",
-        "fshl=math::target::Scalar::fshl",
+        "fshl=math.target.Scalar.fshl",
         "--host-intrinsic",
-        "fshr=math::target::Scalar::fshr",
+        "fshr=math.target.Scalar.fshr",
         "--host-intrinsic",
-        "minimumnum=math::target::Scalar::minimumnum",
+        "minimumnum=math.target.Scalar.minimumnum",
         "--host-intrinsic",
-        "maximumnum=math::target::Scalar::maximumnum",
+        "maximumnum=math.target.Scalar.maximumnum",
         "--host-intrinsic",
-        "isnan=math::target::Scalar::isnan",
+        "isnan=math.target.Scalar.isnan",
         "--host-intrinsic",
-        "isinf=math::target::Scalar::isinf",
+        "isinf=math.target.Scalar.isinf",
         "--host-intrinsic",
-        "isfinite=math::target::Scalar::isfinite",
+        "isfinite=math.target.Scalar.isfinite",
         "--host-intrinsic",
-        "isnormal=math::target::Scalar::isnormal",
+        "isnormal=math.target.Scalar.isnormal",
         "--host-intrinsic",
-        "issubnormal=math::target::Scalar::issubnormal",
+        "issubnormal=math.target.Scalar.issubnormal",
         "--host-intrinsic",
-        "signbit=math::target::Scalar::signbit",
+        "signbit=math.target.Scalar.signbit",
         "--host-intrinsic",
-        "add_sat=math::target::Scalar::add_sat",
+        "add_sat=math.target.Scalar.add_sat",
         "--host-intrinsic",
-        "sub_sat=math::target::Scalar::sub_sat",
+        "sub_sat=math.target.Scalar.sub_sat",
         "--host-intrinsic",
-        "min=math::target::Scalar::min",
+        "min=math.target.Scalar.min",
         "--host-intrinsic",
-        "max=math::target::Scalar::max",
+        "max=math.target.Scalar.max",
         "--host-intrinsic",
-        "abs=math::target::Scalar::abs",
+        "abs=math.target.Scalar.abs",
         "--host-intrinsic",
-        "bit_and=math::target::Scalar::bit_and",
+        "bit_and=math.target.Scalar.bit_and",
         "--host-intrinsic",
-        "bit_or=math::target::Scalar::bit_or",
+        "bit_or=math.target.Scalar.bit_or",
         "--host-intrinsic",
-        "bit_xor=math::target::Scalar::bit_xor",
+        "bit_xor=math.target.Scalar.bit_xor",
         "--host-intrinsic",
-        "bitreverse=math::target::Scalar::bitreverse",
+        "bitreverse=math.target.Scalar.bitreverse",
         "--host-intrinsic",
-        "ctpop=math::target::Scalar::ctpop",
+        "ctpop=math.target.Scalar.ctpop",
         "--host-intrinsic",
-        "ctlz=math::target::Scalar::ctlz",
+        "ctlz=math.target.Scalar.ctlz",
         "--host-intrinsic",
-        "cttz=math::target::Scalar::cttz",
+        "cttz=math.target.Scalar.cttz",
         "--host-intrinsic",
-        "pow=math::target::Scalar::pow",
+        "pow=math.target.Scalar.pow",
         "--host-intrinsic",
-        "powi=math::target::Scalar::powi",
+        "powi=math.target.Scalar.powi",
         "--host-intrinsic",
-        "ldexp=math::target::Scalar::ldexp",
+        "ldexp=math.target.Scalar.ldexp",
     ];
     for level in ["0", "3"] {
         let mut args = base.to_vec();
@@ -7887,9 +7834,9 @@ fn repository_math_package_runs_generic_fma_and_rejects_nonfloat_inputs() {
         "--output",
         "native",
         "--copy-protocol",
-        "app::Duplicate",
+        "app.Duplicate",
         "--drop-protocol",
-        "app::Retire",
+        "app.Retire",
         "--opt-level",
         "3",
     ]);
@@ -7931,7 +7878,7 @@ fn native_tests_bind_host_fma_for_single_source_and_real_math_package() {
             "single.fl",
             "--test-native",
             "--host-fma",
-            "input::machine::Scalar::fused",
+            "input.machine.Scalar.fused",
             "--opt-level",
             level,
         ]);
@@ -7942,7 +7889,7 @@ fn native_tests_bind_host_fma_for_single_source_and_real_math_package() {
         if action == "--emit" {
             args.push("nir");
         }
-        args.extend(["--host-fma", "input::machine::Scalar::fused"]);
+        args.extend(["--host-fma", "input.machine.Scalar.fused"]);
         let output = sandbox.run(&args);
         failure(&output, 2);
         assert!(details(&output).contains("--host-fma requires"));
@@ -7951,10 +7898,11 @@ fn native_tests_bind_host_fma_for_single_source_and_real_math_package() {
         "single.fl",
         "--test-native",
         "--host-fma",
-        "input::machine::Scalar::missing",
+        "input.machine.Scalar.missing",
     ]);
     failure(&output, 1);
-    let math = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/math/lib.fl");
+    let math =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/builtin/math_intrinsics.fl");
     sandbox.write(
         "app.fl",
         &format!(
@@ -7981,93 +7929,93 @@ fn native_tests_bind_host_fma_for_single_source_and_real_math_package() {
         "--primary",
         "1",
         "--host-fma",
-        "math::target::Scalar::fma",
+        "math.target.Scalar.fma",
         "--host-sqrt",
-        "math::target::Scalar::sqrt",
+        "math.target.Scalar.sqrt",
         "--host-copysign",
-        "math::target::Scalar::copysign",
+        "math.target.Scalar.copysign",
         "--host-intrinsic",
-        "floor=math::target::Scalar::floor",
+        "floor=math.target.Scalar.floor",
         "--host-intrinsic",
-        "ceil=math::target::Scalar::ceil",
+        "ceil=math.target.Scalar.ceil",
         "--host-intrinsic",
-        "trunc=math::target::Scalar::trunc",
+        "trunc=math.target.Scalar.trunc",
         "--host-intrinsic",
-        "roundeven=math::target::Scalar::roundeven",
+        "roundeven=math.target.Scalar.roundeven",
         "--host-intrinsic",
-        "round=math::target::Scalar::round",
+        "round=math.target.Scalar.round",
         "--host-intrinsic",
-        "fabs=math::target::Scalar::fabs",
+        "fabs=math.target.Scalar.fabs",
         "--host-intrinsic",
-        "sin=math::target::Scalar::sin",
+        "sin=math.target.Scalar.sin",
         "--host-intrinsic",
-        "cos=math::target::Scalar::cos",
+        "cos=math.target.Scalar.cos",
         "--host-intrinsic",
-        "exp=math::target::Scalar::exp",
+        "exp=math.target.Scalar.exp",
         "--host-intrinsic",
-        "exp2=math::target::Scalar::exp2",
+        "exp2=math.target.Scalar.exp2",
         "--host-intrinsic",
-        "log=math::target::Scalar::log",
+        "log=math.target.Scalar.log",
         "--host-intrinsic",
-        "log2=math::target::Scalar::log2",
+        "log2=math.target.Scalar.log2",
         "--host-intrinsic",
-        "log10=math::target::Scalar::log10",
+        "log10=math.target.Scalar.log10",
         "--host-intrinsic",
-        "minimum=math::target::Scalar::minimum",
+        "minimum=math.target.Scalar.minimum",
         "--host-intrinsic",
-        "maximum=math::target::Scalar::maximum",
+        "maximum=math.target.Scalar.maximum",
         "--host-intrinsic",
-        "bswap=math::target::Scalar::bswap",
+        "bswap=math.target.Scalar.bswap",
         "--host-intrinsic",
-        "fshl=math::target::Scalar::fshl",
+        "fshl=math.target.Scalar.fshl",
         "--host-intrinsic",
-        "fshr=math::target::Scalar::fshr",
+        "fshr=math.target.Scalar.fshr",
         "--host-intrinsic",
-        "minimumnum=math::target::Scalar::minimumnum",
+        "minimumnum=math.target.Scalar.minimumnum",
         "--host-intrinsic",
-        "maximumnum=math::target::Scalar::maximumnum",
+        "maximumnum=math.target.Scalar.maximumnum",
         "--host-intrinsic",
-        "isnan=math::target::Scalar::isnan",
+        "isnan=math.target.Scalar.isnan",
         "--host-intrinsic",
-        "isinf=math::target::Scalar::isinf",
+        "isinf=math.target.Scalar.isinf",
         "--host-intrinsic",
-        "isfinite=math::target::Scalar::isfinite",
+        "isfinite=math.target.Scalar.isfinite",
         "--host-intrinsic",
-        "isnormal=math::target::Scalar::isnormal",
+        "isnormal=math.target.Scalar.isnormal",
         "--host-intrinsic",
-        "issubnormal=math::target::Scalar::issubnormal",
+        "issubnormal=math.target.Scalar.issubnormal",
         "--host-intrinsic",
-        "signbit=math::target::Scalar::signbit",
+        "signbit=math.target.Scalar.signbit",
         "--host-intrinsic",
-        "add_sat=math::target::Scalar::add_sat",
+        "add_sat=math.target.Scalar.add_sat",
         "--host-intrinsic",
-        "sub_sat=math::target::Scalar::sub_sat",
+        "sub_sat=math.target.Scalar.sub_sat",
         "--host-intrinsic",
-        "min=math::target::Scalar::min",
+        "min=math.target.Scalar.min",
         "--host-intrinsic",
-        "max=math::target::Scalar::max",
+        "max=math.target.Scalar.max",
         "--host-intrinsic",
-        "abs=math::target::Scalar::abs",
+        "abs=math.target.Scalar.abs",
         "--host-intrinsic",
-        "bit_and=math::target::Scalar::bit_and",
+        "bit_and=math.target.Scalar.bit_and",
         "--host-intrinsic",
-        "bit_or=math::target::Scalar::bit_or",
+        "bit_or=math.target.Scalar.bit_or",
         "--host-intrinsic",
-        "bit_xor=math::target::Scalar::bit_xor",
+        "bit_xor=math.target.Scalar.bit_xor",
         "--host-intrinsic",
-        "bitreverse=math::target::Scalar::bitreverse",
+        "bitreverse=math.target.Scalar.bitreverse",
         "--host-intrinsic",
-        "ctpop=math::target::Scalar::ctpop",
+        "ctpop=math.target.Scalar.ctpop",
         "--host-intrinsic",
-        "ctlz=math::target::Scalar::ctlz",
+        "ctlz=math.target.Scalar.ctlz",
         "--host-intrinsic",
-        "cttz=math::target::Scalar::cttz",
+        "cttz=math.target.Scalar.cttz",
         "--host-intrinsic",
-        "pow=math::target::Scalar::pow",
+        "pow=math.target.Scalar.pow",
         "--host-intrinsic",
-        "powi=math::target::Scalar::powi",
+        "powi=math.target.Scalar.powi",
         "--host-intrinsic",
-        "ldexp=math::target::Scalar::ldexp",
+        "ldexp=math.target.Scalar.ldexp",
         "--test-native",
     ];
     for level in ["0", "3"] {
@@ -8081,9 +8029,9 @@ fn native_tests_bind_host_fma_for_single_source_and_real_math_package() {
     let mut checked = base.to_vec();
     checked.extend([
         "--copy-protocol",
-        "app::Duplicate",
+        "app.Duplicate",
         "--drop-protocol",
-        "app::Retire",
+        "app.Retire",
         "--test-filter",
         "fused",
         "--opt-level",
@@ -8133,9 +8081,9 @@ fn repository_resource_package_executes_native_clone_and_cleanup() {
                 "--primary",
                 "1",
                 "--copy-protocol",
-                "resources::Copy",
+                "resources.Copy",
                 "--drop-protocol",
-                "resources::Drop",
+                "resources.Drop",
                 "--test-native",
                 "--opt-level",
                 level,
@@ -8157,7 +8105,7 @@ fn host_sqrt_selector_runs_generic_code_and_rejects_conflicts() {
         fn run()->.f64'builtin {root<.f64'builtin>(81.0)}
         test {let value=root<.f32'builtin>(16.0); assumes value == 4.0;}",
     );
-    let selector = "input::machine::Scalar::radical";
+    let selector = "input.machine.Scalar.radical";
     for level in ["0", "3"] {
         success(&sandbox.run(&[
             "input.fl",
@@ -8241,7 +8189,7 @@ fn host_sqrt_selector_runs_generic_code_and_rejects_conflicts() {
         let output = sandbox.run(&[
             "input.fl",
             "--host-sqrt",
-            "input::Ops::sqrt",
+            "input.Ops.sqrt",
             "--build",
             "run",
             "--output",
@@ -8265,7 +8213,7 @@ fn host_copysign_selector_runs_generic_code_and_rejects_conflicts() {
         fn run()->.f64'builtin {root<.f64'builtin>(3.5,-0.0)}
         test {let value=root<.f32'builtin>(3.5,-0.0); assumes value == -3.5;}",
     );
-    let selector = "input::machine::Scalar::radical";
+    let selector = "input.machine.Scalar.radical";
     for level in ["0", "3"] {
         success(&sandbox.run(&[
             "input.fl",
@@ -8349,7 +8297,7 @@ fn host_copysign_selector_runs_generic_code_and_rejects_conflicts() {
         let output = sandbox.run(&[
             "input.fl",
             "--host-copysign",
-            "input::Ops::sqrt",
+            "input.Ops.sqrt",
             "--build",
             "run",
             "--output",
@@ -8400,9 +8348,9 @@ fn repeated_host_intrinsic_bindings_keep_package_identities_separate() {
         "--primary",
         "1",
         "--host-intrinsic",
-        "sqrt=left::Ops::root",
+        "sqrt=left.Ops.root",
         "--host-intrinsic",
-        "sqrt=right::Ops::root",
+        "sqrt=right.Ops.root",
     ];
     for level in ["0", "3"] {
         let mut args = base.to_vec();
@@ -8423,16 +8371,16 @@ fn repeated_host_intrinsic_bindings_keep_package_identities_separate() {
     // Identical repeated bindings and the legacy spelling are idempotent.
     args.extend([
         "--host-intrinsic",
-        "sqrt=left::Ops::root",
+        "sqrt=left.Ops.root",
         "--host-sqrt",
-        "left::Ops::root",
+        "left.Ops.root",
     ]);
     assert_eq!(success(&sandbox.run(&args)), baseline);
     let old = fs::read(sandbox.path("native")).unwrap();
     let mut conflict = base.to_vec();
     conflict.extend([
         "--host-intrinsic",
-        "copysign=left::Ops::root",
+        "copysign=left.Ops.root",
         "--build",
         "run",
         "--output",
@@ -8465,21 +8413,21 @@ fn generic_host_intrinsic_cli_rejects_invalid_bindings_without_replacing_output(
         "--host-intrinsic",
     ];
     let mut args = base.to_vec();
-    args.push("sqrt=input::Ops::tag");
+    args.push("sqrt=input.Ops.tag");
     success(&sandbox.run(&args));
     let old = fs::read(sandbox.path("native")).unwrap();
     for (binding, status, reason) in [
         ("sqrt", 2, "requires operation="),
         ("sqrt=", 2, "must not be empty"),
         (
-            "mystery=input::Ops::tag",
+            "mystery=input.Ops.tag",
             2,
             "unknown host intrinsic operation",
         ),
-        ("sqrt=absent::Ops::tag", 1, "package is missing"),
-        ("sqrt=input::Ops::missing", 1, "declared unit variant"),
-        ("sqrt=input::Ops", 1, "selector requires"),
-        ("copysign=input::Ops::tag", 1, "requires 2 operands"),
+        ("sqrt=absent.Ops.tag", 1, "package is missing"),
+        ("sqrt=input.Ops.missing", 1, "declared unit variant"),
+        ("sqrt=input.Ops", 1, "selector requires"),
+        ("copysign=input.Ops.tag", 1, "requires 2 operands"),
     ] {
         let mut args = base.to_vec();
         args.push(binding);
@@ -8492,7 +8440,7 @@ fn generic_host_intrinsic_cli_rejects_invalid_bindings_without_replacing_output(
         vec![
             "input.fl",
             "--host-intrinsic",
-            "sqrt=input::Ops::tag",
+            "sqrt=input.Ops.tag",
             "--emit",
             "nir",
         ],
@@ -8500,7 +8448,7 @@ fn generic_host_intrinsic_cli_rejects_invalid_bindings_without_replacing_output(
             "input.fl",
             "--test",
             "--host-intrinsic",
-            "sqrt=input::Ops::tag",
+            "sqrt=input.Ops.tag",
         ],
         vec![
             "input.fl",
@@ -8514,7 +8462,7 @@ fn generic_host_intrinsic_cli_rejects_invalid_bindings_without_replacing_output(
         failure(&sandbox.run(&args), 2);
     }
     let mut args = base.to_vec();
-    args.extend(["sqrt=input::Ops::tag", "--host-fma", "input::Ops::tag"]);
+    args.extend(["sqrt=input.Ops.tag", "--host-fma", "input.Ops.tag"]);
     let output = sandbox.run(&args);
     failure(&output, 1);
     assert!(details(&output).contains("cannot bind both"));
@@ -8641,8 +8589,8 @@ fn sysroot_incomplete_resource_defaults_never_fall_back_to_unchecked_execution()
         "fn run()->bool {true} test simple {let value=run();assumes value;}",
     );
     for binding in [
-        "copy-protocol = builtin::Copy",
-        "drop-protocol = builtin::Drop",
+        "copy-protocol = builtin.Copy",
+        "drop-protocol = builtin.Drop",
         "",
     ] {
         sandbox.write(
@@ -8696,19 +8644,29 @@ fn sysroot_incomplete_resource_defaults_never_fall_back_to_unchecked_execution()
 #[test]
 fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override() {
     let sandbox = Sandbox::new();
-    for name in ["builtin", "std", "math"] {
+    for name in ["builtin", "std"] {
         fs::create_dir_all(sandbox.path(format!("library/{name}"))).unwrap();
     }
-    sandbox.write("library/builtin/lib.fl", "pub mod prelude {}");
+    sandbox.write(
+        "library/builtin/lib.fl",
+        "pub mod math {pub use comparison.{Eq,Ord,Ordering};pub use math_intrinsics.*;} pub mod prelude {pub use math;pub use primitives.*;pub use math.{Eq,Ord,Ordering};}",
+    );
     sandbox.write(
         "library/builtin/resources.fl",
         include_str!("../../../library/builtin/resources.fl"),
     );
-    sandbox.write("library/std/lib.fl", "pub mod prelude {}");
-    fs::create_dir_all(sandbox.path("library/math")).unwrap();
     sandbox.write(
-        "library/math/lib.fl",
-        include_str!("../../../library/math/lib.fl"),
+        "library/builtin/primitives.fl",
+        include_str!("../../../library/builtin/primitives.fl"),
+    );
+    sandbox.write(
+        "library/builtin/comparison.fl",
+        include_str!("../../../library/builtin/comparison.fl"),
+    );
+    sandbox.write("library/std/lib.fl", "pub mod prelude {}");
+    sandbox.write(
+        "library/builtin/math_intrinsics.fl",
+        include_str!("../../../library/builtin/math_intrinsics.fl"),
     );
     let config = include_str!("../../../library/language-items.conf")
         .lines()
@@ -8717,6 +8675,8 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
                 || line.starts_with("host-intrinsic.")
                 || line.starts_with("copy-protocol")
                 || line.starts_with("drop-protocol")
+                || line.starts_with("eq-protocol")
+                || line.starts_with("ord-protocol")
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -8724,9 +8684,9 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
     sandbox.write(
         "input.fl",
         "fn run()->bool {
-        math.fma<.f64'builtin>(3.0,4.0,5.0) == 17.0
-        and math.sqrt<.f64'builtin>(4.0) == 2.0
-        and math.wrapping_abs<.i8'builtin>(-5) == 5
+        math.fma<f64>(3.0,4.0,5.0) == 17.0
+        and math.sqrt<f64>(4.0) == 2.0
+        and math.wrapping_abs<i8>(-5) == 5
     }",
     );
     for level in ["0", "3"] {
@@ -8747,8 +8707,8 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
         assert_eq!(success(&output).trim(), "(bool true)");
     }
     let bad = config.replace(
-        "host-intrinsic.sqrt = math::target::Scalar::sqrt",
-        "host-intrinsic.sqrt = missing::Ops::sqrt",
+        "host-intrinsic.sqrt = builtin.math_intrinsics.target.Scalar.sqrt",
+        "host-intrinsic.sqrt = missing.Ops.sqrt",
     );
     sandbox.write("library/language-items.conf", &bad);
     let previous = fs::read(sandbox.path("native")).unwrap();
@@ -8770,8 +8730,11 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
     );
     assert_eq!(fs::read(sandbox.path("native")).unwrap(), previous);
     for override_args in [
-        ["--host-sqrt", "math::target::Scalar::sqrt"],
-        ["--host-intrinsic", "sqrt=math::target::Scalar::sqrt"],
+        ["--host-sqrt", "builtin.math_intrinsics.target.Scalar.sqrt"],
+        [
+            "--host-intrinsic",
+            "sqrt=builtin.math_intrinsics.target.Scalar.sqrt",
+        ],
     ] {
         let mut args = vec![
             "input.fl",
@@ -8791,6 +8754,55 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
             "(bool true)"
         );
     }
+    sandbox.write("library/language-items.conf", &config);
+    for source in [
+        "use builtin.math as explicit_math; use math.sqrt as square_root; fn run()->bool { explicit_math.sqrt<f64>(4.0) == square_root<f64>(4.0) }",
+        "mod math { fn marker()->bool {true} } use builtin.math as explicit_math; fn run()->bool { math.marker() and explicit_math.sqrt<f64>(4.0) == 2.0 }",
+    ] {
+        sandbox.write("input.fl", source);
+        success(&sandbox.run(&[
+            "input.fl",
+            "--fuel",
+            "1000000",
+            "--sysroot",
+            "library",
+            "--build",
+            "run",
+            "--output",
+            "native",
+        ]));
+        assert_eq!(
+            success(&Command::new(sandbox.path("native")).output().unwrap()).trim(),
+            "(bool true)"
+        );
+    }
+    // All three public paths must retain the identity bound by the manifest.
+    // The implementation uses math, the call uses a prelude trait, and a second
+    // alias imports that same trait explicitly: no duplicate candidate is valid.
+    sandbox.write(
+        "input.fl",
+        "use builtin.math.Eq as Same;
+        struct Flag {value:bool}
+        impl math.Eq for Flag {fn eq(self,other:Self)->bool {self.value==other.value}}
+        impl math.Ord for Flag {fn cmp(self,other:Self)->math.Ordering {
+            if self.value==other.value {.Equal} else if self.value {.Greater} else {.Less}
+        }}
+        fn run()->bool {
+            Flag {value:false}.as(Eq).eq(Flag {value:false})
+            and Flag {value:true}.as(Same).eq(Flag {value:true})
+            and Flag {value:false} < Flag {value:true}
+        }",
+    );
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        "(bool true)"
+    );
+    // Exporting the module does not introduce all mathematical function names.
+    sandbox.write("input.fl", "fn run()->f64 {sqrt<f64>(4.0)}");
+    failure(
+        &sandbox.run(&["input.fl", "--sysroot", "library", "--emit", "nir"]),
+        1,
+    );
 }
 
 #[test]
@@ -9120,4 +9132,28 @@ fn source_attribute_merge_selects_outer_prefix_and_retains_origin() {
         selected.value.ty,
         nir::Term::Primitive(nir::Primitive::Bool)
     );
+}
+
+#[test]
+fn hir_retains_source_identity_frontier_including_clause_parameters() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "struct Many where A, B, C, D { first: A }");
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    let frontier: usize = dump
+        .split("(next-definition ")
+        .nth(1)
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let owners = dump.matches("(owner (id ").count();
+    assert!(
+        frontier >= owners + 4,
+        "source clause IDs must remain reserved: {dump}"
+    );
+    let again = sandbox.run(&["input.fl", "--emit", "hir"]);
+    assert_eq!(dump, hir_dump(&again));
 }

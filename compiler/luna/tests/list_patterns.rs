@@ -81,7 +81,7 @@ fn list_rest_must_be_last_and_named_rest_requires_a_protocol() {
     ] {
         let error = compile_with_source_bindings(&format!("{PROTOCOL} fn inspect(value:Repeated)->bool {{value match {{{pattern}=>true,_=>false}}}}"),
             &Default::default(), luna::protocols::type_constructors::Selectors {
-                list_pattern:Some("input::ListView"),..Default::default()
+                list_pattern:Some("input.ListView"),..Default::default()
             }).unwrap_err();
         assert!(error.contains(message), "{pattern}: {error}");
     }
@@ -152,7 +152,7 @@ fn comptime_list_wildcard_rest_uses_the_same_prefix_rule() {
         &source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            list_pattern: Some("input::ListView"),
+            list_pattern: Some("input.ListView"),
             ..Default::default()
         },
     )
@@ -206,7 +206,7 @@ fn negated_list_views_invert_prefix_matches_with_copy_evidence() {
             and not inspect(Repeated {length:2,value:true})
         }";
     let selectors = luna::protocols::type_constructors::Selectors {
-        list_pattern: Some("input::ListView"),
+        list_pattern: Some("input.ListView"),
         copy: Some("Duplicate"),
         drop: Some("Retire"),
         ..Default::default()
@@ -233,7 +233,7 @@ fn compile(body: &str) -> nir::program::Package {
         &format!("{PROTOCOL} {body}"),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            list_pattern: Some("input::ListView"),
+            list_pattern: Some("input.ListView"),
             ..Default::default()
         },
     )
@@ -257,7 +257,7 @@ fn pure_list_patterns_cannot_hide_extractor_writes() {
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            list_pattern: Some("input::ListView"),
+            list_pattern: Some("input.ListView"),
             copy: Some("Duplicate"),
             drop: Some("Retire"),
             ..Default::default()
@@ -276,7 +276,7 @@ fn pure_list_patterns_accept_independently_pure_extractors() {
         trait Duplicate {{}} trait Retire {{fn drop(*self);}}
         pure fn inspect(value:Repeated)->bool {{value match {{[false,_]=>false,[a,b]=>a and b,_=>false}}}}
         fn entry()->bool {{inspect(Repeated {{length:2,value:true}})}}"),
-        &Default::default(),luna::protocols::type_constructors::Selectors {list_pattern:Some("input::ListView"),copy:Some("Duplicate"),drop:Some("Retire"),..Default::default()}).unwrap();
+        &Default::default(),luna::protocols::type_constructors::Selectors {list_pattern:Some("input.ListView"),copy:Some("Duplicate"),drop:Some("Retire"),..Default::default()}).unwrap();
     let graph = luna::instantiation::instantiate(&package, "entry", 200_000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
     assert_eq!(
@@ -421,7 +421,7 @@ fn list_view_indices_are_staged_and_resource_checked() {
     let package=compile_with_source_bindings(&format!("{source}
         trait Duplicate {{}} trait Retire {{fn drop(*self);}}
         fn entry()->Tuple<Size,Size> {{Repeated {{length:2,value:true}} match {{[a,b]=>(a,b),_=>(9,9)}}}}"),
-        &Default::default(),luna::protocols::type_constructors::Selectors {list_pattern:Some("input::ListView"),..Default::default()}).unwrap();
+        &Default::default(),luna::protocols::type_constructors::Selectors {list_pattern:Some("input.ListView"),..Default::default()}).unwrap();
     assert_eq!(
         luna::execution::interpret_with_protocols(
             &package,
@@ -457,7 +457,7 @@ fn list_view_candidates_do_not_retire_subject_on_failure() {
                 {{let subject=Repeated {{length:2,value:true,retired:retired.ref,duplicate:duplicate.ref}};
                   subject match {{{arms},_=>()}};}}
                 retired and not duplicate
-            }}"),&Default::default(),luna::protocols::type_constructors::Selectors {list_pattern:Some("input::ListView"),..Default::default()}).unwrap();
+            }}"),&Default::default(),luna::protocols::type_constructors::Selectors {list_pattern:Some("input.ListView"),..Default::default()}).unwrap();
         assert_eq!(
             luna::execution::interpret_with_protocols(
                 &package,
@@ -490,7 +490,7 @@ fn list_view_rejects_missing_or_malformed_protocols() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                list_pattern: Some("input::ListView"),
+                list_pattern: Some("input.ListView"),
                 ..Default::default()
             },
         )
@@ -538,7 +538,7 @@ fn list_view_observation_rejects_mutation_and_rejection() {
             ),
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                list_pattern: Some("input::ListView"),
+                list_pattern: Some("input.ListView"),
                 ..Default::default()
             },
         )
@@ -579,7 +579,7 @@ fn list_view_scope_and_phase_failures_remain_explicit() {
             &format!("{PROTOCOL} {body}"),
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                list_pattern: Some("input::ListView"),
+                list_pattern: Some("input.ListView"),
                 ..Default::default()
             },
         )
@@ -734,7 +734,7 @@ fn quote_list_extractors_preserve_candidate_order_and_staged_indices() {
         );
     let package=compile_with_source_bindings(&format!("{source}
         fn entry()->bool {{Repeated {{length:2,value:true}} match {{[false,_]=>false,[a,b]=>a and b,_=>false}}}}"),
-        &Default::default(),luna::protocols::type_constructors::Selectors {list_pattern:Some("input::ListView"),..Default::default()}).unwrap();
+        &Default::default(),luna::protocols::type_constructors::Selectors {list_pattern:Some("input.ListView"),..Default::default()}).unwrap();
     let graph = luna::instantiation::instantiate(&package, "entry", 200_000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
     assert_eq!(
@@ -751,7 +751,7 @@ fn quote_list_extractors_preserve_candidate_order_and_staged_indices() {
         vec!["length", "element", "length", "element", "element"]
     );
     assert!(
-        observed.iter().any(|name| name.ends_with("::callable")),
+        observed.iter().any(|name| name.ends_with(".callable")),
         "{observed:?}"
     );
 }
@@ -775,7 +775,7 @@ fn quote_list_extractors_remain_resource_checked() {
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            list_pattern: Some("input::ListView"),
+            list_pattern: Some("input.ListView"),
             ..Default::default()
         },
     )
@@ -800,7 +800,7 @@ fn quote_list_extractors_remain_resource_checked() {
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            list_pattern: Some("input::ListView"),
+            list_pattern: Some("input.ListView"),
             ..Default::default()
         },
     )
@@ -830,7 +830,7 @@ fn list_pattern_arity_respects_the_bound_size_representation() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                list_pattern: Some("input::ListView"),
+                list_pattern: Some("input.ListView"),
                 ..Default::default()
             },
         );
@@ -865,7 +865,7 @@ fn list_pattern_protocol_validation_precedes_any_pattern_use() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                list_pattern: Some("input::ListView"),
+                list_pattern: Some("input.ListView"),
                 ..Default::default()
             },
         )
@@ -1042,7 +1042,7 @@ fn comptime_list_views_execute_and_select_runtime_types() {
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            list_pattern: Some("input::ListView"),
+            list_pattern: Some("input.ListView"),
             ..Default::default()
         },
     )
@@ -1074,7 +1074,7 @@ fn comptime_list_views_reject_runtime_use_and_mixed_method_phases() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                list_pattern: Some("input::ListView"),
+                list_pattern: Some("input.ListView"),
                 ..Default::default()
             },
         )
@@ -1110,7 +1110,7 @@ fn comptime_list_views_short_circuit_before_failing_extractors() {
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            list_pattern: Some("input::ListView"),
+            list_pattern: Some("input.ListView"),
             ..Default::default()
         },
     )
@@ -1154,7 +1154,7 @@ fn comptime_list_views_can_extract_types_without_runtime_splicing() {
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            list_pattern: Some("input::ListView"),
+            list_pattern: Some("input.ListView"),
             ..Default::default()
         },
     )
@@ -1189,7 +1189,7 @@ fn comptime_list_views_read_stored_type_elements_with_copy_evidence() {
             source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                list_pattern: Some("input::ListView"),
+                list_pattern: Some("input.ListView"),
                 copy: Some("Duplicate"),
                 drop: Some("Retire"),
                 ..Default::default()
@@ -1236,7 +1236,7 @@ fn quoted_list_patterns_reject_comptime_only_extractors() {
     let error=compile_with_source_bindings(
         &format!("{protocol}comptime fn pair_code()-><Repeated -| left:bool,right:bool> {{'<[left,right]>}}"),
         &Default::default(),luna::protocols::type_constructors::Selectors {
-            list_pattern:Some("input::ListView"),..Default::default()
+            list_pattern:Some("input.ListView"),..Default::default()
         }).unwrap_err();
     assert!(error.contains("runtime ListPatternView phase"), "{error}");
 }
@@ -1268,7 +1268,7 @@ fn list_views_extract_normal_form_tuples_with_ordered_nested_bindings() {
         }}"
     );
     let selectors = luna::protocols::type_constructors::Selectors {
-        list_pattern: Some("input::ListView"),
+        list_pattern: Some("input.ListView"),
         copy: Some("Duplicate"),
         drop: Some("Retire"),
         ..Default::default()
@@ -1328,7 +1328,7 @@ fn list_views_extract_copy_records_and_retry_failed_candidates() {
         }}"
     );
     let selectors = luna::protocols::type_constructors::Selectors {
-        list_pattern: Some("input::ListView"),
+        list_pattern: Some("input.ListView"),
         copy: Some("Duplicate"),
         drop: Some("Retire"),
         ..Default::default()
@@ -1384,7 +1384,7 @@ fn list_view_nominal_copy_checks_nested_resources() {
         fn entry()->bool {{inspect(Repeated {{length:1,value:true}})}}"
     );
     let selectors = luna::protocols::type_constructors::Selectors {
-        list_pattern: Some("input::ListView"),
+        list_pattern: Some("input.ListView"),
         copy: Some("Duplicate"),
         drop: Some("Retire"),
         ..Default::default()
@@ -1438,7 +1438,7 @@ fn list_view_copy_record_does_not_hide_pointer_provenance() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                list_pattern: Some("input::ListView"),
+                list_pattern: Some("input.ListView"),
                 copy: Some("Duplicate"),
                 drop: Some("Retire"),
                 ..Default::default()
@@ -1481,7 +1481,7 @@ fn list_view_enum_copy_checks_inactive_variants() {
         fn entry()->bool {{inspect(Repeated {{length:1,value:true}})}}"
     );
     let selectors = luna::protocols::type_constructors::Selectors {
-        list_pattern: Some("input::ListView"),
+        list_pattern: Some("input.ListView"),
         copy: Some("Duplicate"),
         drop: Some("Retire"),
         ..Default::default()
@@ -1540,7 +1540,7 @@ fn list_view_normal_form_tuple_composes_with_nominal_elements() {
         }}"
     );
     let selectors = luna::protocols::type_constructors::Selectors {
-        list_pattern: Some("input::ListView"),
+        list_pattern: Some("input.ListView"),
         copy: Some("Duplicate"),
         drop: Some("Retire"),
         ..Default::default()

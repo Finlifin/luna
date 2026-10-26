@@ -799,7 +799,7 @@ fn platform_bitwise_intrinsics_keep_unspecified_layout_until_consumed() {
         fn combine(a:.usize'builtin,b:.usize'builtin)->.usize'builtin {
             unsafe {Ops.bits'intrinsic(a,b).as(.usize'builtin)}
         }";
-    let package = compile_with_intrinsics(source, None, &["bit_and=input::Ops::bits"]).unwrap();
+    let package = compile_with_intrinsics(source, None, &["bit_and=input.Ops.bits"]).unwrap();
     assert_eq!(package.target, None);
     let mut found = false;
     for function in &package.functions {
@@ -820,9 +820,9 @@ fn platform_bitwise_intrinsics_keep_unspecified_layout_until_consumed() {
 #[test]
 fn platform_bitwise_intrinsics_use_package_target_for_proofs_and_native_layout() {
     let bindings = [
-        "bit_and=input::Ops::band",
-        "bit_or=input::Ops::bor",
-        "bit_xor=input::Ops::bxor",
+        "bit_and=input.Ops.band",
+        "bit_or=input.Ops.bor",
+        "bit_xor=input.Ops.bxor",
     ];
     for (width, maximum, minimum, signed_max) in [
         (32, "4294967295", "-2147483648", "2147483647"),
@@ -907,7 +907,7 @@ fn platform_bit_counts_reversal_and_funnels_use_target_layout() {
         .iter()
         .map(|operation| {
             format!(
-                "{}=input::math::target::Scalar::{}",
+                "{}=input.math.target.Scalar.{}",
                 operation.name(),
                 operation.name()
             )
@@ -944,7 +944,7 @@ fn platform_bit_counts_reversal_and_funnels_use_target_layout() {
                 let l=math.funnel_shift_left<Word>(1,{high},{width} + 1)==3;assumes l;
                 let m=math.funnel_shift_right<Word>(1,2,{width} + 1)=={high} + 1;assumes m;
             }}",
-            include_str!("../../../library/math/lib.fl")
+            include_str!("../../../library/builtin/math_intrinsics.fl")
         );
         assert!(compile_with_intrinsics(&source, None, &bindings).is_err());
         let package = compile_with_intrinsics(&source, Some(width), &bindings).unwrap();
@@ -975,8 +975,8 @@ fn platform_bit_counts_reversal_and_funnels_use_target_layout() {
         }
         let invalid = format!("^intrinsic_enum enum Ops {{count}} typealias Word=.usize'builtin;
             fn wrong(a:Word)->r:Word where ensures r < {width} {{unsafe {{Ops.count'intrinsic(a).as(Word)}}}}");
-        let error = compile_with_intrinsics(&invalid, Some(width), &["ctpop=input::Ops::count"])
-            .unwrap_err();
+        let error =
+            compile_with_intrinsics(&invalid, Some(width), &["ctpop=input.Ops.count"]).unwrap_err();
         assert!(error.contains("postcondition is not proven"), "{error}");
     }
 }
@@ -985,7 +985,7 @@ fn platform_bit_counts_reversal_and_funnels_use_target_layout() {
 fn platform_saturation_extrema_and_absolute_value_follow_selected_bounds() {
     let bindings: Vec<String> = nir::intrinsics::Operation::ALL
         .iter()
-        .map(|op| format!("{}=input::math::target::Scalar::{}", op.name(), op.name()))
+        .map(|op| format!("{}=input.math.target.Scalar.{}", op.name(), op.name()))
         .collect();
     let bindings: Vec<&str> = bindings.iter().map(String::as_str).collect();
     for width in [32, 64] {
@@ -1020,7 +1020,7 @@ fn platform_saturation_extrema_and_absolute_value_follow_selected_bounds() {
                 let m=cap({maximum},1)==1;assumes m;
                 let n=floor({low},{high})=={high};assumes n;
             }}",
-            include_str!("../../../library/math/lib.fl")
+            include_str!("../../../library/builtin/math_intrinsics.fl")
         );
         assert!(compile_with_intrinsics(&source, None, &bindings).is_err());
         let package = compile_with_intrinsics(&source, Some(width), &bindings).unwrap();
@@ -1077,7 +1077,7 @@ fn platform_byte_swap_checks_layout_at_admission_and_after_specialization() {
     let declaration = "^intrinsic_enum enum Ops {swap}
         typealias Word=.usize'builtin;
         fn swap(a:Word)->Word {unsafe {Ops.swap'intrinsic(a).as(Word)}}";
-    let bindings = ["bswap=input::Ops::swap"];
+    let bindings = ["bswap=input.Ops.swap"];
     let deferred = compile_with_intrinsics(declaration, None, &bindings).unwrap();
     assert_eq!(deferred.target, None);
     for width in (8..=128).step_by(8) {

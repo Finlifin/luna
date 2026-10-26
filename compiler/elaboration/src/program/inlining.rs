@@ -158,7 +158,7 @@ pub fn expand(package: &mut n::Package, fuel: &mut usize) -> Result<Report, Stri
     let mut pass = Pass {
         selection: selection.as_ref(),
         methods: std::collections::HashMap::new(),
-        active: BTreeSet::new(),
+        active: Vec::new(),
         templates: &templates,
         next: &mut package.quote_identity_cursor,
         sources: &mut package.expansion_sources,
@@ -203,7 +203,7 @@ struct MethodKey {
 }
 
 struct Pass<'a> {
-    active: BTreeSet<DeclarationId>,
+    active: Vec<(DeclarationId, Vec<Term>)>,
     methods: std::collections::HashMap<MethodKey, n::MethodInstance>,
     selection: Option<&'a n::Package>,
     templates: &'a BTreeMap<DeclarationId, n::Function>,
@@ -304,9 +304,31 @@ impl n::Rewriter for Pass<'_> {
         let Some(template) = self.templates.get(&id) else {
             return Ok(true);
         };
-        if self.active.contains(&id) || self.active.len() >= 64 {
+        if self.active.len() >= 64 {
             self.report.retained += 1;
             return Ok(false);
+        }
+        // Nested adapters instantiate the same method with different inputs.
+        // Only a repeated complete instance is a recursive expansion cycle;
+        // growing instances remain bounded by depth and the shared work budget.
+        for (active, arguments) in &self.active {
+            if *self.fuel == 0 {
+                self.report.retained += 1;
+                return Ok(false);
+            }
+            *self.fuel -= 1;
+            if *active == id {
+                for ty in types {
+                    if nir::type_computations::charge_term(ty, self.fuel).is_err() {
+                        self.report.retained += 1;
+                        return Ok(false);
+                    }
+                }
+                if arguments == types {
+                    self.report.retained += 1;
+                    return Ok(false);
+                }
+            }
         }
         if !matches!(template.signature.callable_signature(),Term::Function {parameters,..}
             if parameters.iter().all(|parameter|parameter.sort==Sort::Runtime))
@@ -324,13 +346,18 @@ impl n::Rewriter for Pass<'_> {
             return Ok(false);
         }
         for ty in types {
-            if nir::type_computations::charge_term(ty, self.fuel).is_err() {
+            // One owned copy enters the template, another records the active instance.
+            if nir::type_computations::charge_term(ty, self.fuel)
+                .and_then(|_| nir::type_computations::charge_term(ty, self.fuel))
+                .is_err()
+            {
                 self.report.retained += 1;
                 return Ok(false);
             }
         }
         let mut candidate = expression.clone();
         let types = types.to_vec();
+        let active_instance = (id, types.clone());
         let source_end = self.sources.len();
         let enum_end = self.enums.len();
         let old_next = *self.next;
@@ -360,9 +387,9 @@ impl n::Rewriter for Pass<'_> {
             })
             .is_ok()
             {
-                self.active.insert(id);
+                self.active.push(active_instance);
                 let nested = expression.rewrite_with(self);
-                self.active.remove(&id);
+                self.active.pop();
                 nested?;
             }
         } else {

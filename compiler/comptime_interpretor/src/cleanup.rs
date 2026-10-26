@@ -131,6 +131,9 @@ impl Interpreter<'_> {
             return Ok(false);
         }
         match ty {
+            Term::Optional(inner) => {
+                return self.cleanup_value_context(inner, depth + 1, pointers_only);
+            }
             Term::ErrorResult { errors, result } => {
                 for ty in std::iter::once(result.as_ref()).chain(errors) {
                     if self.cleanup_value_context(ty, depth + 1, pointers_only)? {
@@ -652,6 +655,19 @@ impl<'a> Interpreter<'a> {
                         .collect::<Result<_, Error>>()?,
                 )
             }
+            Value::Optional { ty, value } => {
+                self.copy_invocation_type_work(ty, source, preserve_identity)?;
+                Value::Optional {
+                    ty: ty.clone(),
+                    value: value
+                        .as_ref()
+                        .map(|value| {
+                            self.clone_representation(value, source, depth + 1, preserve_identity)
+                                .map(Box::new)
+                        })
+                        .transpose()?,
+                }
+            }
             Value::ErrorResult { ty, error, value } => {
                 self.copy_invocation_type_work(ty, source, preserve_identity)?;
                 Value::ErrorResult {
@@ -735,6 +751,20 @@ impl<'a> Interpreter<'a> {
                     self.copy_invocation_type_work(ty, source, preserve_identity)?;
                 }
                 Value::TypeList(types.clone())
+            }
+            Value::List { ty, values } => {
+                self.copy_invocation_type_work(ty, source, preserve_identity)?;
+                self.copy_work(values.len(), source)?;
+                let values = values
+                    .iter()
+                    .map(|value| {
+                        self.clone_representation(value, source, depth + 1, preserve_identity)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Value::List {
+                    ty: ty.clone(),
+                    values,
+                }
             }
             Value::RuntimeFunction {
                 declaration,
@@ -2145,6 +2175,7 @@ mod variant_selection_tests {
 fn cleanup_variant(value: &Value) -> Option<usize> {
     match value {
         Value::Variant { index, .. } => Some(*index),
+        Value::Optional { value, .. } => Some(usize::from(value.is_some())),
         Value::ErrorResult { error: None, .. } => Some(0),
         Value::ErrorResult {
             error: Some(index), ..

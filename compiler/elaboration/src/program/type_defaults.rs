@@ -932,9 +932,9 @@ impl<'h> Checker<'_, 'h> {
         span: Span,
     ) -> Result<(), Error> {
         candidate
-            .refine_type_views(
+            .refine_type_views_metered(
                 |ty, budget| {
-                    self.callable_input_view_budgeted(ty, budget, span)
+                    self.callable_input_view_metered(ty, budget, span)
                         .map_err(|error| error.message)
                 },
                 crate::ptc::Budget::default(),

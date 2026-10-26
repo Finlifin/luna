@@ -166,15 +166,14 @@ impl Project {
             output: None,
             sysroot: None,
             splice_protocol: None,
-            meta_list_type: self.1.then(|| "input::TupleElements".into()),
+            meta_list_type: self.1.then(|| "input.TupleElements".into()),
             index_protocol: None,
             ord_protocol: None,
             eq_protocol: None,
             list_pattern_protocol: None,
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
-            tuple_type: self.1.then(|| "input::Tuple".into()),
-            optional_type: None,
+            tuple_type: self.1.then(|| "input.Tuple".into()),
         })? {
             Artifact::Nir(package) => Ok(package),
             _ => panic!("expected NIR"),
@@ -396,7 +395,6 @@ fn output_cannot_overwrite_an_automatically_discovered_source() {
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,
-        optional_type: None,
     });
     assert!(result.err().unwrap().contains("discovered source"));
     assert_eq!(
@@ -680,7 +678,6 @@ fn grouped_imports_preserve_shared_prefixes_nested_paths_and_aliases() {
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,
-        optional_type: None,
     })
     .unwrap()
     .to_string();

@@ -241,9 +241,10 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
             charge(signature, fuel, depth - 1)?;
             terms(environment, fuel, depth - 1)
         }
-        Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
-            charge(inner, fuel, depth - 1)
-        }
+        Term::Optional(inner)
+        | Term::Pointer(inner)
+        | Term::ComptimeFunction(inner)
+        | Term::UnsafeFunction(inner) => charge(inner, fuel, depth - 1),
         Term::Function { parameters, result } => {
             if parameters.len() > *fuel {
                 return Err(Error::BudgetExhausted);
@@ -252,6 +253,13 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
                 charge(&parameter.ty, fuel, depth - 1)?;
             }
             charge(result, fuel, depth - 1)
+        }
+        Term::OptionalValue { ty, value } => {
+            charge(ty, fuel, depth - 1)?;
+            if let Some(value) = value {
+                charge(value, fuel, depth - 1)?;
+            }
+            Ok(())
         }
         Term::ErrorValue { ty, label, value } => {
             charge(ty, fuel, depth - 1)?;

@@ -105,7 +105,6 @@ fn nested_expression_child() {
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,
-        optional_type: None,
     });
     eprintln!("frontend returned");
     std::fs::remove_file(path).unwrap();

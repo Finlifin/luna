@@ -106,6 +106,7 @@ enum Head<'a> {
     Bool(bool),
     Unit,
     Variant(DeclarationId, usize),
+    Optional(bool),
     ErrorResult(Option<&'a Term>),
     // The residual domain of an open scalar or unsupported type. A literal
     // cannot cover this domain; only the default (wildcard) rows contribute.
@@ -151,6 +152,7 @@ impl Engine<'_> {
         if matches!(
             ty,
             Term::Primitive(_)
+                | Term::Optional(_)
                 | Term::ErrorResult { .. }
                 | Term::Nominal { .. }
                 | Term::Tuple(_)
@@ -422,6 +424,11 @@ impl Engine<'_> {
         };
         let mut branches = Vec::new();
         match types[0] {
+            Term::Optional(payload) => {
+                self.spend(2)?;
+                branches.push((Head::Optional(false), vec![]));
+                branches.push((Head::Optional(true), vec![payload.as_ref()]));
+            }
             Term::ErrorResult { errors, result } => {
                 self.spend(errors.len().saturating_add(1))?;
                 branches.push((Head::ErrorResult(None), vec![result.as_ref()]));
@@ -742,6 +749,10 @@ impl Engine<'_> {
                     },
                     Head::Record(actual),
                 ) if *declaration == actual && fields.len() == arity => fields.iter().collect(),
+                (Pattern::OptionalAbsent, Head::Optional(false)) => vec![],
+                (Pattern::OptionalPresent(inner), Head::Optional(true)) if arity == 1 => {
+                    vec![inner.as_ref()]
+                }
                 (Pattern::ErrorResult { label, inner }, Head::ErrorResult(actual)) => {
                     for ty in label.iter().chain(actual) {
                         crate::associated::charge_projection_copy(ty, &mut self.steps)
@@ -1707,4 +1718,41 @@ fn metered_error_coverage_charges_failed_work_and_can_be_retried() {
     let (outcome, used) = check_metered(&structs, &enums, &ty, &refs, 100_000, &context, None);
     assert_eq!(outcome, Coverage::Exhaustive);
     assert!(used > 1 && used < 100_000);
+}
+
+#[cfg(test)]
+mod optional_tests {
+    use super::*;
+
+    #[test]
+    fn optional_coverage_requires_each_observable_layer() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let nested = Term::Optional(Box::new(Term::Optional(Box::new(boolean))));
+        let missing = Pattern::OptionalAbsent;
+        let clear = Pattern::OptionalPresent(Box::new(Pattern::OptionalAbsent));
+        let set =
+            Pattern::OptionalPresent(Box::new(Pattern::OptionalPresent(Box::new(Pattern::Wild))));
+        let enums = BTreeMap::new();
+        assert_eq!(
+            check(&enums, &nested, &[&missing, &clear], 10000),
+            Coverage::Missing
+        );
+        assert_eq!(
+            check(&enums, &nested, &[&missing, &set], 10000),
+            Coverage::Missing
+        );
+        assert_eq!(
+            check(&enums, &nested, &[&missing, &clear, &set], 10000),
+            Coverage::Exhaustive
+        );
+        assert_eq!(
+            check(&enums, &nested, &[&missing, &clear, &set], 0),
+            Coverage::Unknown
+        );
+        let empty = Term::Optional(Box::new(Term::Primitive(Primitive::Never)));
+        assert_eq!(
+            check(&enums, &empty, &[&missing], 10000),
+            Coverage::Exhaustive
+        );
+    }
 }

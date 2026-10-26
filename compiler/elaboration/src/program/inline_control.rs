@@ -101,7 +101,8 @@ impl Checker<'_, '_> {
                     pending.push(pattern);
                     Some(condition)
                 }
-                n::Pattern::ErrorResult { inner, .. }
+                n::Pattern::OptionalPresent(inner)
+                | n::Pattern::ErrorResult { inner, .. }
                 | n::Pattern::Observe { inner, .. }
                 | n::Pattern::Binding { inner, .. }
                 | n::Pattern::Remap { pattern: inner, .. } => {
@@ -121,7 +122,10 @@ impl Checker<'_, '_> {
                     pending.extend(fields);
                     None
                 }
-                n::Pattern::Wild | n::Pattern::Unit | n::Pattern::Literal(_) => None,
+                n::Pattern::OptionalAbsent
+                | n::Pattern::Wild
+                | n::Pattern::Unit
+                | n::Pattern::Literal(_) => None,
             };
             if let Some(value) = computation {
                 let binding = n::LocalId {

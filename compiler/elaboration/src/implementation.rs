@@ -21,6 +21,7 @@ pub enum Head {
     Nominal(DeclarationId),
     Tuple,
     Record(Vec<String>),
+    Optional,
     Pointer,
     ComptimeFunction,
     UnsafeFunction,
@@ -87,6 +88,7 @@ impl Key {
                     }
                     (Head::Tuple, items.iter().collect())
                 }
+                Term::Optional(inner) => (Head::Optional, vec![inner]),
                 Term::Pointer(inner) => (Head::Pointer, vec![inner]),
                 Term::Record(fields) => {
                     let work = fields
@@ -111,7 +113,8 @@ impl Key {
                         .chain(std::iter::once(result.as_ref()))
                         .collect(),
                 ),
-                Term::ErrorValue { .. }
+                Term::OptionalValue { .. }
+                | Term::ErrorValue { .. }
                 | Term::NominalValue { .. }
                 | Term::NormalForm { .. }
                 | Term::ClosureContextValue(_)
@@ -155,6 +158,12 @@ impl Key {
                                 }
                                 work.extend(arguments.iter().map(|t| (t, d + 1)))
                             }
+                            Term::OptionalValue { ty, value } => {
+                                work.push((ty, d + 1));
+                                if let Some(value) = value {
+                                    work.push((value, d + 1));
+                                }
+                            }
                             Term::ErrorValue { ty, label, value } => {
                                 work.push((ty, d + 1));
                                 if let Some(label) = label {
@@ -187,7 +196,8 @@ impl Key {
                                 work.push((result, d + 1));
                                 work.extend(errors.iter().map(|ty| (ty, d + 1)));
                             }
-                            Term::Pointer(t)
+                            Term::Optional(t)
+                            | Term::Pointer(t)
                             | Term::ComptimeFunction(t)
                             | Term::UnsafeFunction(t) => work.push((t, d + 1)),
                             // Dependent function/closure structure is not an
@@ -702,6 +712,7 @@ impl fmt::Display for Key {
                         }
                         f.write_str(")")?;
                     }
+                    Head::Optional => f.write_str("optional")?,
                     Head::Pointer => f.write_str("pointer")?,
                     Head::ComptimeFunction => f.write_str("comptime-function")?,
                     Head::UnsafeFunction => f.write_str("unsafe-function")?,

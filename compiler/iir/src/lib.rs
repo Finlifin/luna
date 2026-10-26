@@ -543,6 +543,16 @@ impl Package {
             _ => (),
         }
         match &expr.kind {
+            K::OptionalAbsent | K::OptionalPresent(_) => {
+                let Term::Optional(payload) = &expr.ty else {
+                    return Err("IIR optional construction requires an optional type".into());
+                };
+                if let K::OptionalPresent(value) = &expr.kind {
+                    if value.ty != **payload {
+                        return Err("IIR optional payload type mismatch".into());
+                    }
+                }
+            }
             K::ErrorConvert { conversion, value } => {
                 nir::error_results::validate_conversion_with_tuple(
                     *conversion,
@@ -676,6 +686,12 @@ impl Package {
                 | Term::TypeListValue(fields)
                 | Term::TypeListConcat(fields)
                 | Term::TupleValue(fields) => pending.extend(fields),
+                Term::OptionalValue { ty, value } => {
+                    pending.push(ty);
+                    if let Some(value) = value {
+                        pending.push(value);
+                    }
+                }
                 Term::ErrorValue { ty, label, value } => {
                     pending.push(ty);
                     if let Some(label) = label {
@@ -690,7 +706,8 @@ impl Package {
                 Term::Record(fields) | Term::RecordValue(fields) => {
                     pending.extend(fields.iter().map(|(_, ty)| ty))
                 }
-                Term::Pointer(inner)
+                Term::Optional(inner)
+                | Term::Pointer(inner)
                 | Term::ComptimeFunction(inner)
                 | Term::UnsafeFunction(inner) => pending.push(inner),
                 Term::Function { parameters, result } => {
@@ -829,6 +846,12 @@ pub fn completed_dependencies(
             | Term::Tuple(arguments)
             | Term::TypeListValue(arguments)
             | Term::TupleValue(arguments) => pending.extend(arguments),
+            Term::OptionalValue { ty, value } => {
+                pending.push(ty);
+                if let Some(value) = value {
+                    pending.push(value);
+                }
+            }
             Term::ErrorValue { ty, label, value } => {
                 pending.push(ty);
                 if let Some(label) = label {
@@ -843,9 +866,10 @@ pub fn completed_dependencies(
             Term::Record(fields) | Term::RecordValue(fields) => {
                 pending.extend(fields.iter().map(|(_, ty)| ty))
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
-                pending.push(inner)
-            }
+            Term::Optional(inner)
+            | Term::Pointer(inner)
+            | Term::ComptimeFunction(inner)
+            | Term::UnsafeFunction(inner) => pending.push(inner),
             Term::Function { parameters, result } => {
                 pending.extend(parameters.iter().map(|p| &p.ty));
                 pending.push(result);
@@ -891,5 +915,91 @@ impl Package {
             }
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod optional_construction_tests {
+    use super::*;
+    use nir::program::{Expr, ExprKind as K, Literal, SourceRange};
+
+    #[test]
+    fn optional_types_and_frozen_payloads_cannot_hide_dangling_declarations() {
+        let graph = Package::default();
+        let missing = Term::Nominal {
+            declaration: DeclarationId {
+                package: 99,
+                local: 1,
+            },
+            arguments: vec![],
+        };
+        let optional = |ty| Term::Optional(Box::new(ty));
+        let source = SourceRange { start: 1, end: 2 };
+        let expression = Expr {
+            source,
+            ty: Term::Primitive(nir::Primitive::Type),
+            kind: K::TypeValue(optional(missing.clone())),
+        };
+        assert!(
+            graph
+                .validate_expression_types(&expression, &mut 100)
+                .unwrap_err()
+                .contains("dangling")
+        );
+        let frozen = Term::OptionalValue {
+            ty: Box::new(optional(Term::Primitive(nir::Primitive::Type))),
+            value: Some(Box::new(missing)),
+        };
+        assert!(
+            graph
+                .type_links(&frozen, &mut 100)
+                .unwrap_err()
+                .contains("dangling")
+        );
+        let valid = Expr {
+            kind: K::TypeValue(optional(Term::Primitive(nir::Primitive::Bool))),
+            ..expression
+        };
+        graph.validate_expression_types(&valid, &mut 100).unwrap();
+    }
+
+    #[test]
+    fn optional_construction_requires_exact_payload_domain() {
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let optional = Term::Optional(Box::new(boolean.clone()));
+        let source = SourceRange { start: 1, end: 2 };
+        let absent = Expr {
+            source,
+            ty: optional.clone(),
+            kind: K::OptionalAbsent,
+        };
+        let graph = Package::default();
+        graph.validate_expression_types(&absent, &mut 100).unwrap();
+        let present = Expr {
+            source,
+            ty: optional.clone(),
+            kind: K::OptionalPresent(Box::new(Expr {
+                source,
+                ty: boolean.clone(),
+                kind: K::Literal(Literal::Bool(true)),
+            })),
+        };
+        graph.validate_expression_types(&present, &mut 100).unwrap();
+        for malformed in [
+            Expr {
+                ty: boolean,
+                ..absent
+            },
+            Expr {
+                ty: Term::Optional(Box::new(optional)),
+                ..present
+            },
+        ] {
+            assert!(
+                graph
+                    .validate_expression_types(&malformed, &mut 100)
+                    .is_err()
+            );
+        }
     }
 }

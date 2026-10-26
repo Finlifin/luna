@@ -429,7 +429,6 @@ pub(crate) fn source_protocols(
         splice: options.splice_protocol.as_deref(),
         meta_list: options.meta_list_type.as_deref(),
         tuple: options.tuple_type.as_deref(),
-        optional: options.optional_type.as_deref(),
     }
 }
 

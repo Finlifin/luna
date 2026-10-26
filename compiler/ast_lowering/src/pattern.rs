@@ -628,8 +628,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 }
             }
 
-            // Unit / null / undefined
-            NodeKind::Unit | NodeKind::Null | NodeKind::Undefined => {
+            NodeKind::Null => Pattern {
+                hir_id: self.next_hir_id(),
+                kind: PatternKind::OptionNull,
+                span,
+            },
+
+            // Unit / undefined constants.
+            NodeKind::Unit | NodeKind::Undefined => {
                 let expr = self.lower_expr(ExprContext::PatternConstant, node);
                 let expr_ref = self.arena.alloc_expr(expr);
                 Pattern {

@@ -31,7 +31,7 @@ fn bit_compound_assignment_infers_rhs_from_operator_protocol() {
                 .replace("add(", &format!("{}(", operator.method()))
                 .replace("+=", symbol);
             let mut selectors = luna::protocols::type_constructors::Selectors::default();
-            selectors.arithmetic[operator as usize] = Some("input::Operation");
+            selectors.arithmetic[operator as usize] = Some("input.Operation");
             for source in [source.clone(), source.replace("fn ", "comptime fn ")] {
                 let package =
                     compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
@@ -76,7 +76,7 @@ fn bit_compound_assignment_prepares_location_and_preserves_rhs_updates() {
         fn empty()->bool {var word:Word=0;
             word'bitvec[4..4] += do {word=0xB0;true};word == 0xB0}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
-    selectors.arithmetic[Operator::Add as usize] = Some("input::Operation");
+    selectors.arithmetic[Operator::Add as usize] = Some("input.Operation");
     for source in [source.to_owned(), source.replace("fn ", "comptime fn ")] {
         let package =
             compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
@@ -165,7 +165,7 @@ fn inferred_left_operand_dispatches_bound_rounding_protocol() {
             fn right()->Int {{3}}
             fn run()->bool {{({receiver}) {symbol} right()}}");
             let mut selectors = luna::protocols::type_constructors::Selectors::default();
-            selectors.arithmetic[operator as usize] = Some("input::Operation");
+            selectors.arithmetic[operator as usize] = Some("input.Operation");
             let package =
                 compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
             let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
@@ -201,7 +201,7 @@ fn inferred_protocol_operands_keep_source_order_and_early_exit() {
         fn run()->bool {(do {mark();7}) / right()}
         fn early()->bool {(do {mark();if true {return true;}7}) / right()}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
-    selectors.arithmetic[Operator::Divide as usize] = Some("input::Operation");
+    selectors.arithmetic[Operator::Divide as usize] = Some("input.Operation");
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
     for (entry, trace) in [
         ("run", vec!["run", "mark", "right", "div"]),
@@ -229,7 +229,7 @@ fn inferred_float_remainder_uses_protocol_instead_of_float_division() {
             fn run()->bool {{7.0 % right()}}"
         );
         let mut selectors = luna::protocols::type_constructors::Selectors::default();
-        selectors.arithmetic[Operator::Remainder as usize] = Some("input::Operation");
+        selectors.arithmetic[Operator::Remainder as usize] = Some("input.Operation");
         let package =
             compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
         assert_eq!(
@@ -249,7 +249,7 @@ fn inferred_native_unsigned_operations_keep_builtin_semantics() {
                 fn {method}(self,rhs:Byte)->Byte {{99}}}}
             fn run()->Byte {{7 {symbol} 3}}");
         let mut selectors = luna::protocols::type_constructors::Selectors::default();
-        selectors.arithmetic[operator as usize] = Some("input::Operation");
+        selectors.arithmetic[operator as usize] = Some("input.Operation");
         let package =
             compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
         assert_eq!(
@@ -268,7 +268,7 @@ fn inferred_protocol_preserves_input_output_and_contract_checks() {
             fn div(self,rhs:Int)->bool where requires rhs == 3 {self == 7}}
         fn run()->bool {7 / (do {let divisor:Int=3;divisor})}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
-    selectors.arithmetic[Operator::Divide as usize] = Some("input::Operation");
+    selectors.arithmetic[Operator::Divide as usize] = Some("input.Operation");
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -298,7 +298,7 @@ fn untyped_comptime_integers_dispatch_after_defaulting() {
             comptime fn div(self,rhs:Int)->bool {self == 7 and rhs == 3}}
         comptime fn run()->bool {7 / 3}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
-    selectors.arithmetic[Operator::Divide as usize] = Some("input::Operation");
+    selectors.arithmetic[Operator::Divide as usize] = Some("input.Operation");
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
@@ -314,7 +314,7 @@ fn compound_assignment_uses_selected_operator_and_checks_writeback_type() {
             fn add(self,rhs:bool)->Number {Number {ready:self.ready and rhs}}}
         fn run()->bool {var number=Number {ready:true};number += false;not number.ready}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
-    selectors.arithmetic[Operator::Add as usize] = Some("input::Operation");
+    selectors.arithmetic[Operator::Add as usize] = Some("input.Operation");
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -340,7 +340,7 @@ fn compound_remainder_assignment_uses_explicit_signed_rounding_protocol() {
             fn rem(self,rhs:Int)->Int {if self == 19 and rhs == 7 {5} else {0}}}
         fn run()->bool {var value:Int=19;value %= 7;value == 5}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
-    selectors.arithmetic[Operator::Remainder as usize] = Some("input::Operation");
+    selectors.arithmetic[Operator::Remainder as usize] = Some("input.Operation");
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();

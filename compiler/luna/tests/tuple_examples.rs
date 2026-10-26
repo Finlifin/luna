@@ -72,9 +72,9 @@ fn migrated_tuple_examples_compile_with_their_source_protocols() {
             .arg(root.join(name))
             .args([
                 "--meta-list-type",
-                "input::TupleElements",
+                "input.TupleElements",
                 "--tuple-type",
-                "input::Tuple",
+                "input.Tuple",
             ])
             .stdin(Stdio::null());
         match name {

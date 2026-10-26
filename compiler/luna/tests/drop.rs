@@ -3380,13 +3380,6 @@ fn compile(source: &str) -> nir::program::Package {
     compile_in(source, 0)
 }
 fn compile_in(source: &str, identity: u64) -> nir::program::Package {
-    compile_with_optional(source, identity, None)
-}
-fn compile_with_optional(
-    source: &str,
-    identity: u64,
-    optional: Option<&str>,
-) -> nir::program::Package {
     let path = std::env::temp_dir().join(format!(
         "luna-drop-{}-{}.fl",
         std::process::id(),
@@ -3408,7 +3401,6 @@ fn compile_with_optional(
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             tuple_type: None,
-            optional_type: optional.map(str::to_owned),
         },
         identity,
     );
@@ -3813,7 +3805,6 @@ fn trait_implementation_receiver_modes_must_match() {
                 literal_into_protocol: None,
                 arithmetic_protocols: Default::default(),
                 tuple_type: None,
-                optional_type: None,
             },
             0,
         );
@@ -15745,11 +15736,7 @@ fn optional_propagation_cleans_locals_and_prepared_arguments_once() {
             vec!["entry", "available", "drop Item"],
         ),
     ] {
-        let package = compile_with_optional(
-            &format!("{prefix} fn entry()->?bool {{{body}}}"),
-            0,
-            Some("input::Maybe"),
-        );
+        let package = compile_in(&format!("{prefix} fn entry()->?bool {{{body}}}"), 0);
         let executable = source_executable(&package, "entry").unwrap();
         let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
             .unwrap()
@@ -15772,7 +15759,7 @@ fn inferred_optional_propagation_completes_before_callback_cleanup() {
         let source = format!(
             "{prefix} fn entry()->bool {{let result=apply(|flag| {{let item=Item {{}};let value=lookup(flag)?;value}},{flag});result match {{value?=>value,null=>true}}}}"
         );
-        let package = compile_with_optional(&source, 0, Some("input::Maybe"));
+        let package = compile_in(&source, 0);
         let executable = source_executable(&package, "entry").unwrap();
         let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
             .unwrap()
@@ -15802,7 +15789,7 @@ fn inferred_optional_explicit_missing_return_cleans_local_once() {
             let result=apply(|flag| {{let item=Item {{}};if not flag {{return null;}} 9}},{flag});
             result match {{value?=>value==9,null=>true}}}}"
         );
-        let package = compile_with_optional(&source, 0, Some("input::Maybe"));
+        let package = compile_in(&source, 0);
         let executable = source_executable(&package, "entry").unwrap();
         let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
             .unwrap()
@@ -15836,7 +15823,7 @@ fn partial_optional_branches_cleanup_selected_branch_once() {
                 "{prefix} fn entry()->bool {{let flag={flag};let result=keep({body});
                 result match {{value?=>not flag and value==9,null=>flag}}}}"
             );
-            let package = compile_with_optional(&source, 0, Some("input::Maybe"));
+            let package = compile_in(&source, 0);
             let executable = source_executable(&package, "entry").unwrap();
             let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
                 .unwrap()
@@ -15867,11 +15854,7 @@ fn contextual_optional_propagation_cleans_loop_and_argument_owners() {
         "consume(Item {},empty()?,later())",
         "while true {let item=Item {};let flag:bool=empty()?;} true",
     ] {
-        let package = compile_with_optional(
-            &format!("{prefix} fn entry()->?bool {{{body}}}"),
-            0,
-            Some("input::Maybe"),
-        );
+        let package = compile_in(&format!("{prefix} fn entry()->?bool {{{body}}}"), 0);
         let executable = source_executable(&package, "entry").unwrap();
         let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
             .unwrap()
@@ -15901,7 +15884,7 @@ fn inferred_optional_return_tail_retry_preserves_single_cleanup() {
                 let item=Item {{}};touch();{propagation}if flag {{return 9;}} null
             }},{flag});result match {{value?=>{flag} and value==9,null=>not {flag}}}}}"
             );
-            let package = compile_with_optional(&source, 0, Some("input::Maybe"));
+            let package = compile_in(&source, 0);
             let executable = source_executable(&package, "entry").unwrap();
             let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
                 .unwrap()
@@ -19701,8 +19684,7 @@ fn bit_compound_assignment_transfers_affine_rhs_and_cleans_early_exit() {
         fn run()->bool {let word:Word=0xA1;apply(word.ref);word == 0xA3}
         fn cancelled()->bool {let word:Word=0xA1;early(word.ref);word == 0xA1}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
-    selectors.arithmetic[elaboration::arithmetic::Operator::Add as usize] =
-        Some("input::Operation");
+    selectors.arithmetic[elaboration::arithmetic::Operator::Add as usize] = Some("input.Operation");
     let package = finite_default_support::compile_with_source_bindings(
         source,
         &Default::default(),
@@ -20217,8 +20199,8 @@ fn finite_factory_postcondition_failure_retires_result_before_caller() {
     use comptime_interpretor::{ErrorKind, Event, Interpreter, Value};
     use nir::program::{ExprKind as K, Literal};
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Duplicate"),
-        drop: Some("input::Retire"),
+        copy: Some("input.Duplicate"),
+        drop: Some("input.Retire"),
         ..Default::default()
     };
     for (params, result, contract, args, checks) in [
@@ -20308,8 +20290,8 @@ fn finite_factory_postcondition_failure_retires_result_before_caller() {
 fn finite_default_factory_cleanup_runs_once_in_each_scope() {
     use comptime_interpretor::{Interpreter, Value};
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Duplicate"),
-        drop: Some("input::Retire"),
+        copy: Some("input.Duplicate"),
+        drop: Some("input.Retire"),
         ..Default::default()
     };
     for (body, expected) in [
@@ -23402,12 +23384,13 @@ fn scheduled_handler_local_pointer_can_be_captured_by_nested_handler() {
 }
 
 #[test]
-fn scheduled_handler_local_pointer_rejects_slot_changes_anywhere_in_enclosing_body() {
-    for (before, arm, after) in [
-        ("pointer=other;", "pointer.*", ""),
-        ("", "pointer=other;pointer.*", ""),
-        ("", "pointer.*", "pointer=other;"),
-        ("", "pointer.*", "let exposed=pointer.ref;"),
+fn scheduled_handler_local_pointer_stability_tracks_the_installation_lifetime() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (before, arm, after, expected) in [
+        ("pointer=other;", "pointer.*", "", Some(true)),
+        ("", "pointer=other;pointer.*", "", None),
+        ("", "pointer.*", "pointer=other;", Some(false)),
+        ("", "pointer.*", "let exposed=pointer.ref;", None),
     ] {
         let package = compile(&format!(
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
@@ -23419,13 +23402,26 @@ fn scheduled_handler_local_pointer_rejects_slot_changes_anywhere_in_enclosing_bo
                 {after} result
             }},}}}}"
         ));
-        let error = source_executable(&package, "entry")
-            .err()
-            .expect("whole-body slot stability is required");
-        assert!(
-            error.contains("slot rebinding or address exposure"),
-            "{error}"
-        );
+        let executable = source_executable(&package, "entry");
+        if let Some(expected) = expected {
+            let executable = executable.unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(expected)
+            );
+        } else {
+            let error = executable
+                .err()
+                .expect("active rebinding or slot alias must fail");
+            assert!(
+                error.contains("slot rebinding or address exposure"),
+                "{error}"
+            );
+        }
     }
 }
 
@@ -25549,7 +25545,7 @@ fn owned_default_argument_preparation_preserves_cleanup_order() {
     use comptime_interpretor::{Interpreter, Value};
     let source = "trait Duplicate {}trait Retire {fn drop(*self);}struct First {}struct Second {}impl Retire for First {fn drop(*self) {}}impl Retire for Second {fn drop(*self) {}}fn consume(first:First,second:Second,flag:bool)->bool {flag}fn take(flag:bool,.value:bool=consume(First {},Second {},flag))->bool {value}fn run()->bool {take(true)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        drop: Some("input::Retire"),
+        drop: Some("input.Retire"),
         ..Default::default()
     };
     let package = finite_default_support::compile_with_source_bindings(
@@ -25589,7 +25585,7 @@ fn owned_default_factories_preserve_preparation_and_delivery_boundaries() {
     use comptime_interpretor::{Interpreter, Value};
     let source = "trait Duplicate {}trait Retire {fn drop(*self);}struct First {}struct Second {}impl Retire for First {fn drop(*self) {}}impl Retire for Second {fn drop(*self) {}}fn first()->First {First {}}fn second()->Second {Second {}}fn consume(a:First,b:Second)->bool {true}fn take(.value:bool=consume(first(),second()))->bool {value}fn run()->bool {take()}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        drop: Some("input::Retire"),
+        drop: Some("input.Retire"),
         ..Default::default()
     };
     let package = finite_default_support::compile_with_source_bindings(
@@ -25622,7 +25618,7 @@ fn owned_default_factories_preserve_preparation_and_delivery_boundaries() {
 
     let source = "trait Duplicate {}trait Retire {fn drop(*self);}struct Owned {flag:bool}impl Retire for Owned {fn drop(*self) {}}fn produce()->Owned {Owned {flag:true}}fn take(.item:Owned=produce())->bool {item.flag}fn run()->bool {take()}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        drop: Some("input::Retire"),
+        drop: Some("input.Retire"),
         ..Default::default()
     };
     let package = finite_default_support::compile_with_source_bindings(
@@ -25913,7 +25909,7 @@ fn staged_mixed_packets_preserve_unused_field_cleanup_order() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                drop: Some("input::Retire"),
+                drop: Some("input.Retire"),
                 ..Default::default()
             },
         )
@@ -25957,7 +25953,7 @@ fn staged_mixed_packets_retire_wildcard_fields_before_continuation() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -25993,7 +25989,7 @@ fn staged_mixed_packets_preserve_runtime_parent_cleanup() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26028,7 +26024,7 @@ fn staged_mixed_packets_discard_enum_runtime_payloads() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26068,7 +26064,7 @@ fn staged_mixed_runtime_alternatives_preserve_selected_cleanup_order() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26117,7 +26113,7 @@ fn staged_mixed_let_else_preserves_failure_exit_cleanup() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26166,7 +26162,7 @@ fn staged_mixed_guards_preserve_evaluation_and_cleanup_order() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26241,7 +26237,7 @@ fn staged_mixed_pattern_computations_preserve_alternative_order() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                drop: Some("input::Retire"),
+                drop: Some("input.Retire"),
                 ..Default::default()
             },
         )
@@ -26296,7 +26292,7 @@ fn staged_nested_packet_destructuring_preserves_owned_siblings() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                drop: Some("input::Retire"),
+                drop: Some("input.Retire"),
                 ..Default::default()
             },
         )
@@ -26344,7 +26340,7 @@ fn staged_nested_guarded_packets_preserve_short_circuit_and_cleanup() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26425,7 +26421,7 @@ fn staged_alternative_bindings_preserve_runtime_selection_and_cleanup() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26477,7 +26473,7 @@ fn staged_alternative_discriminants_preserve_runtime_guards_and_cleanup() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26548,7 +26544,7 @@ fn staged_enum_payloads_preserve_selected_resource_cleanup() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26672,7 +26668,7 @@ fn tuple_enumeration_preserves_iteration_and_unvisited_resource_cleanup() {
                     &source,
                     &Default::default(),
                     luna::protocols::type_constructors::Selectors {
-                        drop: Some("input::Retire"),
+                        drop: Some("input.Retire"),
                         ..Default::default()
                     },
                 )
@@ -26717,7 +26713,7 @@ fn tuple_enumeration_nested_label_exits_preserve_remaining_owners() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26770,7 +26766,7 @@ fn tuple_field_dependencies_follow_or_candidate_binding_and_cleanup_order() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26817,7 +26813,7 @@ fn generic_tuple_iteration_specializes_transferred_and_remaining_cleanup() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26864,7 +26860,7 @@ fn open_loop_aggregate_return_cleans_only_prepared_fields() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26900,7 +26896,7 @@ fn open_call_input_return_cleans_prepared_generic_argument() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26935,7 +26931,7 @@ fn open_call_tuple_spread_transfers_each_resource_once() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -26978,7 +26974,7 @@ fn open_inline_packet_selection_transfers_only_the_selected_resources() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -27022,7 +27018,7 @@ fn open_literal_packet_forwarding_delivers_runtime_resources_once() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -27067,7 +27063,7 @@ fn computed_packet_to_open_instance_is_prepared_and_cleaned_once() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -27110,7 +27106,7 @@ fn pure_nested_closure_factories_retire_owned_captures_once() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -27151,7 +27147,7 @@ fn nested_owned_closures_keep_distinct_invocation_and_abandonment_order() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -27184,7 +27180,7 @@ fn nested_owned_closures_keep_distinct_invocation_and_abandonment_order() {
         &invalid,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -27224,7 +27220,7 @@ fn open_peer_spread_inference_preserves_owned_input_cleanup() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                drop: Some("input::Retire"),
+                drop: Some("input.Retire"),
                 ..Default::default()
             },
         )
@@ -27264,7 +27260,7 @@ fn open_peer_spreads_do_not_duplicate_or_revive_moved_values() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                drop: Some("input::Retire"),
+                drop: Some("input.Retire"),
                 ..Default::default()
             },
         )
@@ -27281,7 +27277,7 @@ fn open_peer_spreads_do_not_duplicate_or_revive_moved_values() {
         &source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -27340,7 +27336,7 @@ fn inferred_collection_fields_preserve_owned_cleanup() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                drop: Some("input::Retire"),
+                drop: Some("input.Retire"),
                 ..Default::default()
             },
         )
@@ -27378,7 +27374,7 @@ fn inferred_collection_fields_reject_duplicate_ownership() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                drop: Some("input::Retire"),
+                drop: Some("input.Retire"),
                 ..Default::default()
             },
         )
@@ -27410,7 +27406,7 @@ fn inferred_property_fields_preserve_owned_cleanup() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                drop: Some("input::Retire"),
+                drop: Some("input.Retire"),
                 ..Default::default()
             },
         )
@@ -27448,7 +27444,7 @@ fn staged_factory_callees_transfer_owned_capture_and_retire_once() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -27507,7 +27503,7 @@ fn open_effect_handler_exit_cleans_staged_factory_inputs() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                drop: Some("input::Retire"),
+                drop: Some("input.Retire"),
                 ..Default::default()
             },
         )
@@ -27555,7 +27551,7 @@ fn staged_closure_instances_do_not_acquire_copy_from_captures() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                copy: Some("input::Duplicate"),
+                copy: Some("input.Duplicate"),
                 ..Default::default()
             },
         )
@@ -27577,7 +27573,7 @@ fn staged_closure_instances_do_not_acquire_copy_from_captures() {
                     &source,
                     &Default::default(),
                     luna::protocols::type_constructors::Selectors {
-                        copy: Some("input::Duplicate"),
+                        copy: Some("input.Duplicate"),
                         ..Default::default()
                     },
                 )
@@ -30400,7 +30396,7 @@ fn tuple_runtime_element_filter_preserves_failure_cleanup_order() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Retire"),
+            drop: Some("input.Retire"),
             ..Default::default()
         },
     )
@@ -33048,8 +33044,8 @@ fn computed_registered_tuple_export_preserves_head_and_copy_obligation() {
             source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -33118,8 +33114,8 @@ fn computed_nested_tuple_export_uses_one_constrained_copy_implementation() {
             source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -33286,8 +33282,8 @@ fn computed_generic_nested_tuple_exports_keep_instantiated_copy_checks() {
             source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -33739,8 +33735,8 @@ fn generic_error_drop_does_not_block_registered_tuple_payload_cleanup() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -33816,8 +33812,8 @@ fn generic_error_drop_preserves_nested_tuple_error_cleanup() {
                 &source,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    meta_list: Some("input::List"),
-                    tuple: Some("input::Tuple"),
+                    meta_list: Some("input.List"),
+                    tuple: Some("input.Tuple"),
                     ..Default::default()
                 },
             )
@@ -35784,8 +35780,8 @@ fn borrowed_callable_trivial_cleanup_survives_higher_order_calls_and_defaults() 
                 &format!("{prefix}fn entry()->bool {{let action:Action=read;let p={flag};{call}}}"),
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    copy: Some("input::Duplicate"),
-                    drop: Some("input::Retire"),
+                    copy: Some("input.Duplicate"),
+                    drop: Some("input.Retire"),
                     ..Default::default()
                 },
             )
@@ -37201,8 +37197,8 @@ fn guard_defaults_preserve_enum_payload_pointer_premises() {
                 &source,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    copy: Some("input::Copy"),
-                    drop: Some("input::Drop"),
+                    copy: Some("input.Copy"),
+                    drop: Some("input.Drop"),
                     ..Default::default()
                 },
             )
@@ -37220,8 +37216,8 @@ fn guard_defaults_preserve_enum_payload_pointer_premises() {
                     &bad,
                     &Default::default(),
                     luna::protocols::type_constructors::Selectors {
-                        copy: Some("input::Copy"),
-                        drop: Some("input::Drop"),
+                        copy: Some("input.Copy"),
+                        drop: Some("input.Drop"),
                         ..Default::default()
                     },
                 )
@@ -37243,8 +37239,8 @@ fn guard_defaults_preserve_enum_payload_pointer_premises() {
                     &bad,
                     &Default::default(),
                     luna::protocols::type_constructors::Selectors {
-                        copy: Some("input::Copy"),
-                        drop: Some("input::Drop"),
+                        copy: Some("input.Copy"),
+                        drop: Some("input.Drop"),
                         ..Default::default()
                     },
                 )
@@ -37301,8 +37297,8 @@ fn guard_default_aggregate_results_feed_later_defaults() {
                 &source,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    copy: Some("input::Copy"),
-                    drop: Some("input::Drop"),
+                    copy: Some("input.Copy"),
+                    drop: Some("input.Drop"),
                     ..Default::default()
                 },
             )

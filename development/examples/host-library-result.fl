@@ -1,9 +1,9 @@
--- Library Result is an ordinary enum, separate from the language error ABI.
-use fallible.Result;
+-- Native error results retain their error identity through library operations.
+use fallible.ErrorResultOps;
 
 fn invert(value: bool) -> bool {not value}
-fn choose(value: bool) -> Result<bool, bool> {
-    if value {.Ok(true)} else {.Err(true)}
+fn choose(value: bool) -> !bool bool {
+    if value {true} else {error true}
 }
 
 struct Recovery {called: *bool, retired: *bool}
@@ -18,16 +18,16 @@ fn recover_trial(ok: bool, succeed: bool) -> bool {
     var called = false;
     var retired = false;
     let state = Recovery {called: called.ref, retired: retired.ref};
-    let recover = |reason: bool| -> Result<bool, .u32'builtin> {
+    let recover = |reason: bool| -> !.u32'builtin bool {
         assumes not state.called.*;
         state.called.* = true;
-        if reason {.Ok(true)} else {.Err(42)}
+        if reason {true} else {error 42}
     };
-    let input: Result<bool, bool> = if ok {.Ok(true)} else {.Err(succeed)};
-    let result = input.or_else<.u32'builtin>(recover);
+    let input: !bool bool = if ok {true} else {error succeed};
+    let result = input.as(ErrorResultOps<bool, bool>).or_else<.u32'builtin>(recover);
     let valid = result match {
-        .Ok(value) => value and (ok or succeed),
-        .Err(reason) => reason == 42 and not ok and not succeed,
+        value! => value and (ok or succeed),
+        error reason => reason == 42 and not ok and not succeed,
     };
     valid and called == not ok and retired
 }
@@ -41,19 +41,24 @@ fn fallback_trial(ok: bool) -> bool {
         state.called.* = true;
         reason
     };
-    let input: Result<bool, bool> = if ok {.Ok(true)} else {.Err(true)};
-    let value = input.unwrap_or_else(fallback);
+    let input: !bool bool = if ok {true} else {error true};
+    let value = input.as(ErrorResultOps<bool, bool>).unwrap_or_else(fallback);
     value and called == not ok and retired
 }
+fn good(value: bool) -> !bool bool {value}
+fn failed(value: bool) -> !bool bool {error value}
+
 fn run() -> bool {
-    let mapped = Result<bool, bool>.Ok(false).map<bool>(invert);
-    let mapped_err = Result<bool, bool>.Err(false).map_err<bool>(invert);
-    let chained = Result<bool, bool>.Ok(true).and_then<bool>(choose);
-    let rejected = Result<bool, bool>.Ok(false).and_then<bool>(choose);
-    let preserved = Result<bool, bool>.Err(true).and_then<bool>(choose);
-    (mapped match {.Ok(value) => value, .Err(_) => false})
-        and (mapped_err match {.Ok(_) => false, .Err(value) => value})
-        and chained.is_ok() and rejected.is_err() and preserved.is_err()
+    let mapped = good(false).as(ErrorResultOps<bool, bool>).map<bool>(invert);
+    let mapped_err = failed(false).as(ErrorResultOps<bool, bool>).map_err<bool>(invert);
+    let chained = good(true).as(ErrorResultOps<bool, bool>).and_then<bool>(choose);
+    let rejected = good(false).as(ErrorResultOps<bool, bool>).and_then<bool>(choose);
+    let preserved = failed(true).as(ErrorResultOps<bool, bool>).and_then<bool>(choose);
+    (mapped match {value! => value, error _ => false})
+        and (mapped_err match {_! => false, error value => value})
+        and chained.as(ErrorResultOps<bool, bool>).is_ok()
+        and rejected.as(ErrorResultOps<bool, bool>).is_err()
+        and preserved.as(ErrorResultOps<bool, bool>).is_err()
         and recover_trial(true, false) and recover_trial(false, true)
         and recover_trial(false, false) and fallback_trial(true) and fallback_trial(false)
 }

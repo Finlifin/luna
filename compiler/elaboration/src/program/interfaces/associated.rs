@@ -886,6 +886,12 @@ impl Checker<'_, '_> {
                 | Term::TupleValue(arguments) => {
                     pending.extend(arguments.into_iter().map(|t| Work::Visit(t, depth + 1)))
                 }
+                Term::OptionalValue { ty, value } => {
+                    pending.push(Work::Visit(*ty, depth + 1));
+                    if let Some(value) = value {
+                        pending.push(Work::Visit(*value, depth + 1));
+                    }
+                }
                 Term::ErrorValue { ty, label, value } => {
                     pending.push(Work::Visit(*ty, depth + 1));
                     if let Some(label) = label {

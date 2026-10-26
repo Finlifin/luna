@@ -1,4 +1,4 @@
--- Bind --meta-list-type input::TupleElements --tuple-type input::Tuple.
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
 typealias Type = .Type'builtin;
 pure comptime fn TupleElements<T> -> Type { T }
 pure comptime fn Tuple<...Es: TupleElements<Type>> -> Type { bool }

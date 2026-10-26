@@ -92,6 +92,11 @@ impl Checker<'_, '_> {
                         })?;
                     pending.extend(fields.iter().map(|(_, field)| (field, depth + 1)));
                 }
+                Value::Optional { value, .. } => {
+                    if let Some(value) = value {
+                        pending.push((value, depth + 1));
+                    }
+                }
                 Value::Newtype { value, .. } | Value::ErrorResult { value, .. } => {
                     pending.push((value, depth + 1))
                 }

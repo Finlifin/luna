@@ -79,7 +79,8 @@ pub(super) fn pattern_observes(pattern: &Pattern, depth: usize) -> bool {
     match pattern {
         Pattern::CodeEvidence { .. } => true,
         Pattern::Observe { .. } | Pattern::Then { .. } | Pattern::Guard { .. } => true,
-        Pattern::ErrorResult { inner, .. }
+        Pattern::OptionalPresent(inner)
+        | Pattern::ErrorResult { inner, .. }
         | Pattern::Binding { inner, .. }
         | Pattern::Remap { pattern: inner, .. } => pattern_observes(inner, depth + 1),
         Pattern::Tuple(fields)
@@ -94,7 +95,7 @@ pub(super) fn pattern_observes(pattern: &Pattern, depth: usize) -> bool {
         } => fields
             .iter()
             .any(|field| pattern_observes(field, depth + 1)),
-        Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => false,
+        Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => false,
     }
 }
 
@@ -123,6 +124,12 @@ pub(super) fn known_pattern(pattern: &Pattern, value: &Expr, depth: usize) -> Op
         if unknown { None } else { Some(true) }
     }
     match (pattern, &value.kind) {
+        (Pattern::OptionalAbsent, K::OptionalAbsent) => Some(true),
+        (Pattern::OptionalAbsent, K::OptionalPresent(_))
+        | (Pattern::OptionalPresent(_), K::OptionalAbsent) => Some(false),
+        (Pattern::OptionalPresent(inner), K::OptionalPresent(payload)) => {
+            known_pattern(inner, payload, depth + 1)
+        }
         (Pattern::Wild, _) => Some(true),
         (Pattern::Remap { pattern, .. }, _) => known_pattern(pattern, value, depth + 1),
         (Pattern::Or(alternatives), _) => {
@@ -248,5 +255,20 @@ pub(super) fn irrefutable_shape(pattern: &Pattern, depth: usize) -> bool {
             fields.iter().all(|p| irrefutable_shape(p, depth + 1))
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod optional_tests {
+    use super::*;
+
+    #[test]
+    fn optional_tests_are_refutable_even_when_their_payload_is_wild() {
+        assert!(!irrefutable_shape(&Pattern::OptionalAbsent, 0));
+        assert!(!irrefutable_shape(
+            &Pattern::OptionalPresent(Box::new(Pattern::Wild)),
+            0
+        ));
+        assert!(irrefutable_shape(&Pattern::Wild, 0));
     }
 }

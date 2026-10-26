@@ -952,9 +952,9 @@ fn native_tuple(source: &str, expected: &str) {
         .command()
         .args([
             "--meta-list-type",
-            "input::TupleElements",
+            "input.TupleElements",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
             "--build",
             "run",
             "--output",
@@ -1026,9 +1026,9 @@ fn tuple_head_is_retained_in_iir_before_codegen() {
         .command()
         .args([
             "--meta-list-type",
-            "input::TupleElements",
+            "input.TupleElements",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
             "--instantiate",
             "run",
         ])
@@ -1047,9 +1047,9 @@ fn shipped_tuple_example_executes_natively() {
         .command()
         .args([
             "--meta-list-type",
-            "input::TupleElements",
+            "input.TupleElements",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
             "--build",
             "run",
             "--output",
@@ -2420,9 +2420,9 @@ fn native_error_product_transport_preserves_tuple_head_and_fields() {
             "--build",
             "run",
             "--meta-list-type",
-            "input::TupleElements",
+            "input.TupleElements",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
             "--copy-protocol",
             "Duplicate",
             "--drop-protocol",
@@ -7164,9 +7164,9 @@ fn native_entry_prints_structural_products_without_erasing_tuple_identity() {
                     "--build",
                     "run",
                     "--tuple-type",
-                    "input::Tuple",
+                    "input.Tuple",
                     "--meta-list-type",
-                    "input::Elements",
+                    "input.Elements",
                     "--opt-level",
                     level,
                     "--output",
@@ -7232,9 +7232,9 @@ fn native_product_entry_checks_failure_before_display() {
                         "--build",
                         "run",
                         "--tuple-type",
-                        "input::Tuple",
+                        "input.Tuple",
                         "--meta-list-type",
-                        "input::Elements",
+                        "input.Elements",
                         "--copy-protocol",
                         "Duplicate",
                         "--drop-protocol",
@@ -7443,9 +7443,9 @@ fn native_product_string_results_share_escaping_and_evaluate_fields_once() {
                 "--interpret",
                 "run",
                 "--tuple-type",
-                "input::Tuple",
+                "input.Tuple",
                 "--meta-list-type",
-                "input::Elements",
+                "input.Elements",
             ])
             .output()
             .unwrap();
@@ -7456,9 +7456,9 @@ fn native_product_string_results_share_escaping_and_evaluate_fields_once() {
                     "--build",
                     "run",
                     "--tuple-type",
-                    "input::Tuple",
+                    "input.Tuple",
                     "--meta-list-type",
-                    "input::Elements",
+                    "input.Elements",
                     "--opt-level",
                     level,
                     "--output",
@@ -7535,9 +7535,9 @@ fn native_wide_bitvec_product_prints_zero_and_partial_limbs() {
                     "--build",
                     "run",
                     "--tuple-type",
-                    "input::Tuple",
+                    "input.Tuple",
                     "--meta-list-type",
-                    "input::Elements",
+                    "input.Elements",
                     "--opt-level",
                     level,
                     "--output",
@@ -9501,7 +9501,7 @@ fn native_copysign_preserves_magnitude_bits_and_uses_the_sign_bit() {
                 &w.command()
                     .args([
                         "--host-copysign",
-                        "input::Ops::sign",
+                        "input.Ops.sign",
                         "--copy-protocol",
                         "Duplicate",
                         "--drop-protocol",
@@ -9771,7 +9771,7 @@ fn native_rounding_intrinsics_keep_ieee_boundaries() {
                 fn apply(input:F)->F {{unsafe {{Ops.round'intrinsic(input).as(F)}}}}
                 fn run()->bool {{{checks} true}}"
             ));
-            let binding = format!("{operation}=input::Ops::round");
+            let binding = format!("{operation}=input.Ops.round");
             for level in ["0", "3"] {
                 success(
                     &w.command()
@@ -10220,7 +10220,7 @@ fn emit_object_preserves_intrinsic_bindings_and_checked_closure_cleanup() {
     for (source, flags, expected) in [
         (
             include_str!("../../../development/examples/host-intrinsic-fma.fl"),
-            vec!["--host-intrinsic", "fma=input::machine::Scalar::fused"],
+            vec!["--host-intrinsic", "fma=input.machine.Scalar.fused"],
             b"(float32 (bits 41880000))\n".as_slice(),
         ),
         (
@@ -10292,9 +10292,9 @@ fn emit_object_packages_preserve_discarded_result_cleanup_and_failure() {
                     "--discard-result",
                     "--inline-functions",
                     "--copy-protocol",
-                    "app::Duplicate",
+                    "app.Duplicate",
                     "--drop-protocol",
-                    "app::Retire",
+                    "app.Retire",
                     "--opt-level",
                     level,
                     "--output",
@@ -10373,7 +10373,7 @@ fn native_minimum_maximum_preserve_nan_and_signed_zero() {
             let w = Work::new(&format!(
                 "{RESOURCE_HEADER}typealias F=.f{width}'builtin;impl Duplicate for F {{}}impl Duplicate for .BitVec'builtin<{width}> {{}}^intrinsic_enum enum Ops {{bound}}fn apply(a:F,b:F)->F {{unsafe {{Ops.bound'intrinsic(a,b).as(F)}}}}fn run()->bool {{{checks}true}}"
             ));
-            let binding = format!("{operation}=input::Ops::bound");
+            let binding = format!("{operation}=input.Ops.bound");
             for level in ["0", "3"] {
                 let out = w
                     .command()
@@ -10456,7 +10456,7 @@ fn native_integer_math_wrappers_cover_widths_bits_and_once_only_inputs() {
         impl Duplicate for .u32'builtin {{}} impl Duplicate for .u64'builtin {{}}
         impl Duplicate for .u128'builtin {{}}
         fn run()->bool {{{body} true}}",
-        include_str!("../../../library/math/lib.fl")
+        include_str!("../../../library/builtin/math_intrinsics.fl")
     );
     let w = Work::new(&source);
     let mut dump = w.command();
@@ -10474,7 +10474,7 @@ fn native_integer_math_wrappers_cover_widths_bits_and_once_only_inputs() {
         let name = operation.name();
         dump.args([
             "--host-intrinsic",
-            &format!("{name}=input::math::target::Scalar::{name}"),
+            &format!("{name}=input.math.target.Scalar.{name}"),
         ]);
     }
     let dumped = dump.output().unwrap();
@@ -10504,7 +10504,7 @@ fn native_integer_math_wrappers_cover_widths_bits_and_once_only_inputs() {
             let name = operation.name();
             command.args([
                 "--host-intrinsic",
-                &format!("{name}=input::math::target::Scalar::{name}"),
+                &format!("{name}=input.math.target.Scalar.{name}"),
             ]);
         }
         success(&command.output().unwrap());
@@ -11028,9 +11028,30 @@ fn native_direct_passing_owned_closure_cleans_invoked_and_uninvoked_captures() {
     );
     assert_eq!(fs::read(w.0.join("native program")).unwrap(), b"previous");
 
-    // Changing the operation ABI must not bypass request-time handler checks.
+    // Both ABIs allow the closed invocation, with the same payload cleanup.
+    // Neither permits invoking the consumed affine environment a second time.
     let ordinary = source.replace("^attrs.effects.direct_passing effect ready", "effect ready");
-    fs::write(w.0.join("source.fl"), ordinary).unwrap();
+    fs::write(w.0.join("source.fl"), &ordinary).unwrap();
+    let accepted = w
+        .command()
+        .args([
+            "--interpret",
+            "run",
+            "--copy-protocol",
+            "Duplicate",
+            "--drop-protocol",
+            "Retire",
+        ])
+        .output()
+        .unwrap();
+    success(&accepted);
+    assert_eq!(accepted.stdout, reference.stdout);
+    let twice = ordinary.replace(
+        "fn invoke(action:Action)->#ready bool {action()}",
+        "fn invoke(action:Action)->#ready bool {let first:bool=action();action()}",
+    );
+    assert_ne!(ordinary, twice);
+    fs::write(w.0.join("source.fl"), twice).unwrap();
     let rejected = w
         .command()
         .args([
@@ -11045,10 +11066,7 @@ fn native_direct_passing_owned_closure_cleans_invoked_and_uninvoked_captures() {
         .unwrap();
     assert!(!rejected.status.success());
     let error = String::from_utf8_lossy(&rejected.stderr);
-    assert!(
-        error.contains("handler pointer requires a live local Copy scalar target"),
-        "{error}"
-    );
+    assert!(error.contains("unavailable"), "{error}");
 }
 
 #[test]
@@ -14082,9 +14100,9 @@ fn native_empty_tuple_and_error_product_display_keep_logical_types() {
         ));
         let bindings = [
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
             "--meta-list-type",
-            "input::TupleElements",
+            "input.TupleElements",
         ];
         let reference = w
             .command()
@@ -14174,7 +14192,7 @@ fn native_funnel_shifts_and_rotations_cover_modulo_width_and_argument_order() {
         impl Duplicate for .u32'builtin {{}} impl Duplicate for .u64'builtin {{}}
         impl Duplicate for .u128'builtin {{}}
         fn run()->bool {{{body} true}}",
-        include_str!("../../../library/math/lib.fl")
+        include_str!("../../../library/builtin/math_intrinsics.fl")
     );
     let w = Work::new(&source);
     let mut dump = w.command();
@@ -14192,7 +14210,7 @@ fn native_funnel_shifts_and_rotations_cover_modulo_width_and_argument_order() {
         let name = operation.name();
         dump.args([
             "--host-intrinsic",
-            &format!("{name}=input::math::target::Scalar::{name}"),
+            &format!("{name}=input.math.target.Scalar.{name}"),
         ]);
     }
     let dumped = dump.output().unwrap();
@@ -14223,7 +14241,7 @@ fn native_funnel_shifts_and_rotations_cover_modulo_width_and_argument_order() {
             let name = operation.name();
             command.args([
                 "--host-intrinsic",
-                &format!("{name}=input::math::target::Scalar::{name}"),
+                &format!("{name}=input.math.target.Scalar.{name}"),
             ]);
         }
         success(&command.output().unwrap());
@@ -14787,7 +14805,7 @@ fn native_intrinsic_predicates_preserve_runtime_failure() {
                         "--build",
                         "run",
                         "--host-intrinsic",
-                        "fma=input::Ops::fma",
+                        "fma=input.Ops.fma",
                         "--copy-protocol",
                         "Duplicate",
                         "--drop-protocol",
@@ -14835,7 +14853,7 @@ fn intrinsic_predicates_do_not_authorize_operand_writes() {
             "--build",
             "run",
             "--host-intrinsic",
-            "fma=input::Ops::fma",
+            "fma=input.Ops.fma",
             "--output",
             "native program",
         ])
@@ -14938,7 +14956,7 @@ fn native_integer_intrinsic_contract_ranges_and_exact_results() {
                 "fshl",
                 "fshr",
             ] {
-                command.args(["--host-intrinsic", &format!("{op}=input::Ops::{op}")]);
+                command.args(["--host-intrinsic", &format!("{op}=input.Ops.{op}")]);
             }
             let output = command.output().unwrap();
             success(&output);
@@ -14971,7 +14989,7 @@ fn integer_intrinsic_contracts_reject_false_and_stale_bounds() {
                 "--build",
                 "run",
                 "--host-intrinsic",
-                &format!("{op}=input::Ops::{op}"),
+                &format!("{op}=input.Ops.{op}"),
                 "--output",
                 "native program",
             ])
@@ -15017,7 +15035,7 @@ fn native_mixed_intrinsic_contract_chain_reuses_current_relations() {
             "fshl",
             "fshr",
         ] {
-            command.args(["--host-intrinsic", &format!("{op}=input::Ops::{op}")]);
+            command.args(["--host-intrinsic", &format!("{op}=input.Ops.{op}")]);
         }
         success(&command.output().unwrap());
         let output = w.execute();
@@ -15301,7 +15319,7 @@ fn native_float_classification_generic_library_preserves_ieee_classes() {
 {}
 }} typealias F=.f{width}'builtin;impl Duplicate for F {{}}impl Duplicate for .BitVec'builtin<{width}> {{}}
             fn verify(value:F,n:bool,i:bool,f:bool,normal:bool,subnormal:bool,sign:bool)->bool {{math.isnan(value)==n and math.isinf(value)==i and math.isfinite(value)==f and math.isnormal(value)==normal and math.issubnormal(value)==subnormal and math.signbit(value)==sign}}
-            fn run()->bool {{{checks}true}}", include_str!("../../../library/math/lib.fl"));
+            fn run()->bool {{{checks}true}}", include_str!("../../../library/builtin/math_intrinsics.fl"));
         let w = Work::new(&source);
         for level in ["0", "3"] {
             let mut command = w.command();
@@ -15322,7 +15340,7 @@ fn native_float_classification_generic_library_preserves_ieee_classes() {
             for operation in nir::intrinsics::Operation::ALL {
                 command.args([
                     "--host-intrinsic",
-                    &format!("{0}=input::math::target::Scalar::{0}", operation.name()),
+                    &format!("{0}=input.math.target.Scalar.{0}", operation.name()),
                 ]);
             }
             success(&command.output().unwrap());
@@ -15351,7 +15369,7 @@ fn float_classification_rejects_unproved_domains_and_wrong_results() {
                 "--emit-llvm",
                 "run",
                 "--host-intrinsic",
-                "isnan=input::Ops::classify",
+                "isnan=input.Ops.classify",
                 "--output",
                 "previous.ll",
             ])
@@ -15412,7 +15430,7 @@ fn native_float_classification_predicates_check_runtime_values_and_evaluate_once
                                 "--drop-protocol",
                                 "Retire",
                                 "--host-intrinsic",
-                                &format!("{operation}=input::Ops::classify"),
+                                &format!("{operation}=input.Ops.classify"),
                                 "--opt-level",
                                 level,
                                 "--output",
@@ -15748,7 +15766,7 @@ fn native_saturating_integer_math_covers_all_widths_and_signs() {
             let source = format!("{RESOURCE_HEADER}mod math {{\n{}\n}}
                 typealias Number=.{prefix}{width}'builtin;impl Duplicate for Number {{}}
                 fn verify(a:Number,b:Number,added:Number,subtracted:Number)->bool {{math.saturating_add(a,b)==added and math.saturating_sub(a,b)==subtracted}}
-                fn run()->bool {{{}}}",include_str!("../../../library/math/lib.fl"),cases.join(" and "));
+                fn run()->bool {{{}}}",include_str!("../../../library/builtin/math_intrinsics.fl"),cases.join(" and "));
             let w = Work::new(&source);
             for level in ["0", "3"] {
                 let mut command = w.command();
@@ -15769,7 +15787,7 @@ fn native_saturating_integer_math_covers_all_widths_and_signs() {
                 for operation in nir::intrinsics::Operation::ALL {
                     command.args([
                         "--host-intrinsic",
-                        &format!("{0}=input::math::target::Scalar::{0}", operation.name()),
+                        &format!("{0}=input.math.target.Scalar.{0}", operation.name()),
                     ]);
                 }
                 success(&command.output().unwrap());
@@ -15833,9 +15851,9 @@ fn native_saturating_contracts_prove_clamped_and_unsaturated_ranges() {
                             "--drop-protocol",
                             "Retire",
                             "--host-intrinsic",
-                            "add_sat=input::Ops::add",
+                            "add_sat=input.Ops.add",
                             "--host-intrinsic",
-                            "sub_sat=input::Ops::sub",
+                            "sub_sat=input.Ops.sub",
                             "--opt-level",
                             level,
                             "--output",
@@ -15867,9 +15885,9 @@ fn saturating_contracts_preserve_argument_snapshots_and_reject_false_bounds() {
         "--drop-protocol",
         "Retire",
         "--host-intrinsic",
-        "add_sat=input::Ops::add",
+        "add_sat=input.Ops.add",
         "--host-intrinsic",
-        "sub_sat=input::Ops::sub",
+        "sub_sat=input.Ops.sub",
         "--output",
         "native program",
     ];
@@ -15950,7 +15968,7 @@ fn native_integer_minmax_math_covers_all_widths_and_signs() {
             let source = format!("{RESOURCE_HEADER}mod math {{\n{}\n}}
                 typealias Number=.{prefix}{width}'builtin;impl Duplicate for Number {{}}
                 fn verify(a:Number,b:Number,smaller:Number,larger:Number)->bool {{math.min(a,b)==smaller and math.max(a,b)==larger}}
-                fn run()->bool {{{}}}",include_str!("../../../library/math/lib.fl"),cases.join(" and "));
+                fn run()->bool {{{}}}",include_str!("../../../library/builtin/math_intrinsics.fl"),cases.join(" and "));
             let w = Work::new(&source);
             for level in ["0", "3"] {
                 let mut command = w.command();
@@ -15971,7 +15989,7 @@ fn native_integer_minmax_math_covers_all_widths_and_signs() {
                 for operation in nir::intrinsics::Operation::ALL {
                     command.args([
                         "--host-intrinsic",
-                        &format!("{0}=input::math::target::Scalar::{0}", operation.name()),
+                        &format!("{0}=input.math.target.Scalar.{0}", operation.name()),
                     ]);
                 }
                 success(&command.output().unwrap());
@@ -16016,9 +16034,9 @@ fn native_integer_minmax_contracts_and_argument_snapshots() {
                             "--drop-protocol",
                             "Retire",
                             "--host-intrinsic",
-                            "min=input::Ops::min",
+                            "min=input.Ops.min",
                             "--host-intrinsic",
-                            "max=input::Ops::max",
+                            "max=input.Ops.max",
                             "--opt-level",
                             level,
                             "--output",
@@ -16054,7 +16072,7 @@ fn native_integer_minmax_contracts_and_argument_snapshots() {
                 "--drop-protocol",
                 "Retire",
                 "--host-intrinsic",
-                &format!("{operation}=input::Ops::op"),
+                &format!("{operation}=input.Ops.op"),
                 "--output",
                 "native program",
             ])
@@ -16100,9 +16118,9 @@ fn native_integer_minmax_relations_survive_calls_and_source_writes() {
             "--drop-protocol",
             "Retire",
             "--host-intrinsic",
-            "min=input::Ops::min",
+            "min=input.Ops.min",
             "--host-intrinsic",
-            "max=input::Ops::max",
+            "max=input.Ops.max",
             "--output",
             "native program",
         ];
@@ -16199,7 +16217,7 @@ fn native_integer_minmax_selects_an_input_across_calls() {
                 success(
                     &w.command()
                         .args(args)
-                        .arg(format!("{operation}=input::Ops::select"))
+                        .arg(format!("{operation}=input.Ops.select"))
                         .args(["--opt-level", level, "--output", "native program"])
                         .output()
                         .unwrap(),
@@ -16247,7 +16265,7 @@ fn integer_minmax_choice_rejects_false_contracts_and_stale_inputs() {
                         "--drop-protocol",
                         "Retire",
                         "--host-intrinsic",
-                        &format!("{operation}=input::Ops::select"),
+                        &format!("{operation}=input.Ops.select"),
                         "--opt-level",
                         level,
                         "--output",
@@ -17006,9 +17024,9 @@ fn conditional_constants_keep_tuple_and_type_evidence() {
                 .command()
                 .args([
                     "--meta-list-type",
-                    "input::TupleElements",
+                    "input.TupleElements",
                     "--tuple-type",
-                    "input::Tuple",
+                    "input.Tuple",
                     "--build",
                     "run",
                     "--output",
@@ -17075,9 +17093,9 @@ fn conditional_constants_destructure_normal_form_inputs() {
                 .command()
                 .args([
                     "--meta-list-type",
-                    "input::TupleElements",
+                    "input.TupleElements",
                     "--tuple-type",
-                    "input::Tuple",
+                    "input.Tuple",
                     "--build",
                     "run",
                     "--output",
@@ -17663,9 +17681,9 @@ fn staged_type_members_compose_in_local_type_constructors() {
             let output = command
                 .args([
                     "--meta-list-type",
-                    "input::TupleElements",
+                    "input.TupleElements",
                     "--tuple-type",
-                    "input::Tuple",
+                    "input.Tuple",
                     "--build",
                     "run",
                     "--output",
@@ -18058,9 +18076,9 @@ fn staged_tuple_aliases_keep_member_sources_across_branch_scopes() {
         let work = Work::new(&source);
         let arguments = [
             "--meta-list-type",
-            "input::Elements",
+            "input.Elements",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
         ];
         let output = work
             .command()
@@ -18123,9 +18141,9 @@ fn staged_tuple_aliases_preserve_shape_domains_and_constructor_admission() {
             .command()
             .args([
                 "--meta-list-type",
-                "input::Elements",
+                "input.Elements",
                 "--tuple-type",
-                "input::Tuple",
+                "input.Tuple",
                 "--build",
                 "run",
                 "--output",
@@ -18153,7 +18171,7 @@ fn guarded_tuple_member_aliases_keep_successful_sources() {
 
     ] {
         let work = Work::new(&source);
-        let protocols = ["--meta-list-type", "input::Elements", "--tuple-type", "input::Tuple"];
+        let protocols = ["--meta-list-type", "input.Elements", "--tuple-type", "input.Tuple"];
         let output = work.command().args(protocols).args(["--interpret", "run"]).output().unwrap();
         assert!(output.status.success(), "{source}: {}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(output.stdout, b"(bool true)\n");
@@ -18188,9 +18206,9 @@ fn guarded_tuple_member_aliases_keep_guard_and_failure_checks() {
             .command()
             .args([
                 "--meta-list-type",
-                "input::Elements",
+                "input.Elements",
                 "--tuple-type",
-                "input::Tuple",
+                "input.Tuple",
                 "--build",
                 "run",
                 "--output",
@@ -18227,9 +18245,9 @@ fn required_comptime_return_boundaries_are_reported_without_publishing_output() 
         if source == nested {
             command.args([
                 "--meta-list-type",
-                "input::Elements",
+                "input.Elements",
                 "--tuple-type",
-                "input::Tuple",
+                "input.Tuple",
             ]);
         }
         let output = command
@@ -18307,7 +18325,7 @@ fn partial_comptime_tuple_evidence_preserves_known_fields_and_invocation_values(
         base.replace("const (Selected, value) = (Outer, flag);", "const action=do {var ready=false;|| {ready=not ready;ready}};const (Selected, value) = (Outer, action());").replace("    checked\n", "    checked and not action() and flag\n"),
     ] {
         let work = Work::new(&source);
-        let protocols = ["--meta-list-type", "input::Elements", "--tuple-type", "input::Tuple"];
+        let protocols = ["--meta-list-type", "input.Elements", "--tuple-type", "input.Tuple"];
         let output = work.command().args(protocols).args(["--interpret", "run"]).output().unwrap();
         assert!(output.status.success(), "{source}: {}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(output.stdout, b"(bool true)\n", "{source}");
@@ -18349,9 +18367,9 @@ fn partial_comptime_tuple_evidence_does_not_invent_types_or_skip_checks() {
             .command()
             .args([
                 "--meta-list-type",
-                "input::Elements",
+                "input.Elements",
                 "--tuple-type",
-                "input::Tuple",
+                "input.Tuple",
                 "--build",
                 "run",
                 "--output",
@@ -18464,7 +18482,7 @@ fn partial_comptime_packet_aliases_preserve_binding_snapshots() {
             .replace("    checked\n", "    checked and not action() and flag\n"),
     ] {
         let work = Work::new(&source);
-        let protocols = if source.contains("fn Tuple") {vec!["--meta-list-type", "input::Elements", "--tuple-type", "input::Tuple"]} else {vec![]};
+        let protocols = if source.contains("fn Tuple") {vec!["--meta-list-type", "input.Elements", "--tuple-type", "input.Tuple"]} else {vec![]};
         let output = work.command().args(&protocols).args(["--interpret", "run"]).output().unwrap();
         assert!(output.status.success(), "{source}: {}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(output.stdout, b"(bool true)\n", "{source}");
@@ -18501,9 +18519,9 @@ fn partial_packet_aliases_keep_nominal_identity_and_scope_checks() {
             .command()
             .args([
                 "--meta-list-type",
-                "input::Elements",
+                "input.Elements",
                 "--tuple-type",
-                "input::Tuple",
+                "input.Tuple",
                 "--build",
                 "run",
                 "--output",
@@ -18540,7 +18558,7 @@ fn tuple_enumeration_preserves_observed_type_fields() {
             .replace("    checked\n", "    checked and not action()\n"),
     ] {
         let work = Work::new(&source);
-        let options = ["--meta-list-type", "input::Elements", "--tuple-type", "input::Tuple"];
+        let options = ["--meta-list-type", "input.Elements", "--tuple-type", "input.Tuple"];
         let output = work.command().args(options).args(["--interpret", "run"]).output().unwrap();
         assert!(output.status.success(), "{source}: {}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(output.stdout, b"(bool true)\n");
@@ -18566,9 +18584,9 @@ fn tuple_type_observations_preserve_storage_and_expire_on_escape() {
         .replace("    checked\n", "    checked and intact\n"));
     let options = [
         "--meta-list-type",
-        "input::Elements",
+        "input.Elements",
         "--tuple-type",
-        "input::Tuple",
+        "input.Tuple",
         "--copy-protocol",
         "Duplicate",
         "--drop-protocol",
@@ -19629,7 +19647,7 @@ fn native_wrapping_absolute_value_all_widths_and_argument_once() {
                 seen and actual==expected
             }}
             fn run()->bool {{{cases}true}}",
-            include_str!("../../../library/math/lib.fl")
+            include_str!("../../../library/builtin/math_intrinsics.fl")
         ));
         for level in ["0", "3"] {
             let mut command = work.command();
@@ -19650,7 +19668,7 @@ fn native_wrapping_absolute_value_all_widths_and_argument_once() {
             for operation in nir::intrinsics::Operation::ALL {
                 command.args([
                     "--host-intrinsic",
-                    &format!("{0}=input::math::target::Scalar::{0}", operation.name()),
+                    &format!("{0}=input.math.target.Scalar.{0}", operation.name()),
                 ]);
             }
             success(&command.output().unwrap());
@@ -19672,7 +19690,7 @@ fn wrapping_absolute_llvm_disables_minimum_poison() {
             "--emit-llvm",
             "run",
             "--host-intrinsic",
-            "abs=input::Ops::absolute",
+            "abs=input.Ops.absolute",
         ])
         .output()
         .unwrap();
@@ -19718,7 +19736,7 @@ fn wrapping_absolute_contracts_use_input_intervals_and_keep_minimum_exception() 
                     "--opt-level",
                     level,
                     "--host-intrinsic",
-                    "abs=input::Ops::absolute",
+                    "abs=input.Ops.absolute",
                 ])
                 .output()
                 .unwrap();
@@ -19740,7 +19758,7 @@ fn wrapping_absolute_contracts_use_input_intervals_and_keep_minimum_exception() 
                     "--output",
                     "native program",
                     "--host-intrinsic",
-                    "abs=input::Ops::absolute",
+                    "abs=input.Ops.absolute",
                 ])
                 .output()
                 .unwrap();
@@ -19779,7 +19797,7 @@ fn wrapping_absolute_relations_survive_contracts_and_input_writes() {
                     "--opt-level",
                     level,
                     "--host-intrinsic",
-                    "abs=input::Ops::absolute",
+                    "abs=input.Ops.absolute",
                 ])
                 .output()
                 .unwrap();
@@ -19806,7 +19824,7 @@ fn wrapping_absolute_relations_do_not_authorize_wrong_or_stale_results() {
                 "--output",
                 "native program",
                 "--host-intrinsic",
-                "abs=input::Ops::absolute",
+                "abs=input.Ops.absolute",
             ])
             .output()
             .unwrap();
@@ -19831,7 +19849,7 @@ fn wrapping_absolute_relations_do_not_authorize_wrong_or_stale_results() {
                 "--opt-level",
                 level,
                 "--host-intrinsic",
-                "abs=input::Ops::absolute",
+                "abs=input.Ops.absolute",
             ])
             .output()
             .unwrap();
@@ -19914,7 +19932,7 @@ fn generic_integer_contracts_check_every_allowed_width() {
                     "--opt-level",
                     level,
                     "--host-intrinsic",
-                    "abs=input::Ops::absolute",
+                    "abs=input.Ops.absolute",
                 ])
                 .output()
                 .unwrap(),
@@ -19940,7 +19958,7 @@ fn generic_integer_contracts_check_every_allowed_width() {
                 "--output",
                 "native program",
                 "--host-intrinsic",
-                "abs=input::Ops::absolute",
+                "abs=input.Ops.absolute",
             ])
             .output()
             .unwrap();
@@ -20201,13 +20219,13 @@ fn generic_native_negation_survives_protocol_binding() {
         ));
         let bindings = [
             "--neg-protocol",
-            "input::Neg",
+            "input.Neg",
             "--not-protocol",
-            "input::Not",
+            "input.Not",
             "--copy-protocol",
-            "input::Duplicate",
+            "input.Duplicate",
             "--drop-protocol",
-            "input::Retire",
+            "input.Retire",
             "--fuel",
             "1000000",
         ];
@@ -20253,7 +20271,7 @@ fn bound_negation_keeps_generic_range_obligations() {
         .command()
         .args([
             "--neg-protocol",
-            "input::Neg",
+            "input.Neg",
             "--build",
             "run",
             "--output",
@@ -20291,15 +20309,15 @@ fn generic_float_operators_preserve_ieee_values_and_evaluation() {
     );
     let bindings = [
         "--add-protocol",
-        "input::Add",
+        "input.Add",
         "--sub-protocol",
-        "input::Sub",
+        "input.Sub",
         "--mul-protocol",
-        "input::Mul",
+        "input.Mul",
         "--div-protocol",
-        "input::Div",
+        "input.Div",
         "--neg-protocol",
-        "input::Neg",
+        "input.Neg",
     ];
     for primitive in ["f32", "f64"] {
         let rounding = if primitive == "f32" {
@@ -20395,12 +20413,7 @@ fn unary_nonreturning_operands_preserve_control_and_effects() {
                 and pure_exit<.f64'builtin>(-2.5) == -2.5
                 and pure_bool(true)
         }";
-    let bindings = [
-        "--neg-protocol",
-        "input::Neg",
-        "--not-protocol",
-        "input::Not",
-    ];
+    let bindings = ["--neg-protocol", "input.Neg", "--not-protocol", "input.Not"];
     for options in [&[][..], &bindings[..]] {
         let work = Work::new(header);
         let reference = work
@@ -20951,7 +20964,7 @@ fn comparison_nonreturning_right_keeps_left_evaluation() {
 
 #[test]
 fn native_bitwise_library_operations_preserve_width_sign_and_operand_order() {
-    let library = include_str!("../../../library/math/lib.fl");
+    let library = include_str!("../../../library/builtin/math_intrinsics.fl");
     for width in [8, 16, 32, 64, 128] {
         for signed in [false, true] {
             let primitive = format!("{}{}", if signed { 'i' } else { 'u' }, width);
@@ -21008,7 +21021,7 @@ fn native_bitwise_library_operations_preserve_width_sign_and_operand_order() {
                     command.args([
                         "--host-intrinsic",
                         &format!(
-                            "{}=input::math::target::Scalar::{}",
+                            "{}=input.math.target.Scalar.{}",
                             operation.name(),
                             operation.name()
                         ),
@@ -21044,7 +21057,7 @@ fn native_bitwise_intrinsics_reject_invalid_domains_interfaces_and_contracts() {
                     "--output",
                     "native program",
                     "--host-intrinsic",
-                    &format!("{operation}=input::Ops::bits"),
+                    &format!("{operation}=input.Ops.bits"),
                 ])
                 .output()
                 .unwrap();
@@ -21104,11 +21117,11 @@ fn native_bitwise_contracts_preserve_signed_bounds_and_evaluated_values() {
                             "--output",
                             "native program",
                             "--host-intrinsic",
-                            "bit_and=input::Ops::band",
+                            "bit_and=input.Ops.band",
                             "--host-intrinsic",
-                            "bit_or=input::Ops::bor",
+                            "bit_or=input.Ops.bor",
                             "--host-intrinsic",
-                            "bit_xor=input::Ops::bxor",
+                            "bit_xor=input.Ops.bxor",
                         ])
                         .output()
                         .unwrap(),
@@ -21167,7 +21180,7 @@ fn native_bitwise_contracts_reject_sign_confusion_and_stale_operands() {
                 "--output",
                 "native program",
                 "--host-intrinsic",
-                &format!("{operation}=input::Ops::bits"),
+                &format!("{operation}=input.Ops.bits"),
             ])
             .output()
             .unwrap();
@@ -23490,13 +23503,13 @@ fn quoted_tuple_contract_requires_explicit_copy_and_preserves_caller() {
                     "--primary",
                     "1",
                     "--tuple-type",
-                    "tuples::Tuple",
+                    "tuples.Tuple",
                     "--meta-list-type",
-                    "meta::List",
+                    "meta.List",
                     "--copy-protocol",
                     "Duplicate",
                     "--drop-protocol",
-                    "resources::Drop",
+                    "resources.Drop",
                     "--fuel",
                     "1000000",
                     "--build",

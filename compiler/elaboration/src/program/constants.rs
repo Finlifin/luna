@@ -137,8 +137,13 @@ fn staged_pattern_inputs<'a>(
             n::Pattern::CodeEvidence { .. } => {
                 return Err(error(span, "unresolved pattern-code evidence"));
             }
-            n::Pattern::ErrorResult { inner, .. } => pending.push(inner),
-            n::Pattern::Wild | n::Pattern::Unit | n::Pattern::Literal(_) => {}
+            n::Pattern::OptionalPresent(inner) | n::Pattern::ErrorResult { inner, .. } => {
+                pending.push(inner)
+            }
+            n::Pattern::OptionalAbsent
+            | n::Pattern::Wild
+            | n::Pattern::Unit
+            | n::Pattern::Literal(_) => {}
             n::Pattern::Tuple(fields)
             | n::Pattern::TypeTuple(fields)
             | n::Pattern::Or(fields)
@@ -575,6 +580,7 @@ impl Checker<'_, '_> {
             Value::Record { .. }
                 | Value::Variant { .. }
                 | Value::Newtype { .. }
+                | Value::Optional { .. }
                 | Value::ErrorResult { .. }
         ) {
             let mut snapshot = Materialization {
@@ -907,6 +913,28 @@ impl Checker<'_, '_> {
                 for field in fields {
                     self.validate_closure_snapshot(
                         field,
+                        span,
+                        depth + 1,
+                        active,
+                        completed,
+                        type_scope,
+                    )?;
+                }
+                Ok(())
+            }
+            Value::Optional { ty, value } => {
+                let ty = self.copy_alias_type(ty, span)?;
+                self.validate_closure_snapshot(
+                    &Value::Type(ty),
+                    span,
+                    depth + 1,
+                    active,
+                    completed,
+                    type_scope,
+                )?;
+                if let Some(value) = value {
+                    self.validate_closure_snapshot(
+                        value,
                         span,
                         depth + 1,
                         active,
@@ -3010,6 +3038,51 @@ impl Checker<'_, '_> {
         }
         self.required_steps -= 1;
         let kind = match value {
+            Value::List { ty: actual, values } => {
+                if actual != ty {
+                    return Err(error(span, "constant list identity mismatch"));
+                }
+                let element = self
+                    .list_element_type(&ty)
+                    .cloned()
+                    .ok_or_else(|| error(span, "constant list requires bound meta.List"))?;
+                self.required_steps = self
+                    .required_steps
+                    .checked_sub(values.len() as u64)
+                    .ok_or_else(|| error(span, "constant list budget exhausted"))?;
+                K::TypeList(
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            self.constant_nominal_field(
+                                value,
+                                element.clone(),
+                                span,
+                                depth + 1,
+                                snapshot,
+                            )
+                        })
+                        .collect::<Result<_, _>>()?,
+                )
+            }
+            Value::Optional { ty: actual, value } => {
+                if actual != ty {
+                    return Err(error(span, "constant optional identity mismatch"));
+                }
+                let Term::Optional(payload) = &ty else {
+                    return Err(error(span, "constant optional type missing"));
+                };
+                match value {
+                    None => K::OptionalAbsent,
+                    Some(value) => K::OptionalPresent(Box::new(self.constant_nominal_field(
+                        *value,
+                        (**payload).clone(),
+                        span,
+                        depth + 1,
+                        snapshot,
+                    )?)),
+                }
+            }
             Value::AbstractValue { .. } => {
                 return Err(error(
                     span,

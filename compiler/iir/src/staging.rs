@@ -3,7 +3,7 @@
 //! user code or prove contracts; all program predicates remain executable.
 //!
 //! Layout-aware entrypoints receive normal-form descriptors from the caller's
-//! validated package. Only a descriptor with the Tuple role exposes fields;
+//! validated package. Tuple and list roles expose their respective layouts;
 //! neither spelling nor the shape of application arguments grants that role.
 //! Folding preserves the original expression types. Frozen tuple values enter
 //! instance keys as TupleValue, independently of their retained Type identity.
@@ -26,6 +26,16 @@ pub struct Layouts<'a> {
         Option<&'a std::collections::BTreeMap<nir::DeclarationId, nir::newtypes::Newtype>>,
 }
 impl<'a> Layouts<'a> {
+    fn list_element(self, ty: &Term, fuel: &mut usize) -> Result<Option<Term>, String> {
+        for head in self.heads {
+            charge(fuel, 1)?;
+            if let Some(element) = head.list_element(ty) {
+                nir::type_computations::charge_term(element, fuel).map_err(|e| e.to_string())?;
+                return Ok(Some(element.clone()));
+            }
+        }
+        Ok(None)
+    }
     pub fn new(
         heads: &'a [nir::normal_forms::Head],
         newtypes: &'a [nir::newtypes::Newtype],
@@ -489,7 +499,8 @@ fn collect_forwarded_locals<'layout>(
                         charge(fuel, 1)?;
                         match pattern {
                             nir::program::Pattern::Wild => {}
-                            nir::program::Pattern::ErrorResult { inner, .. }
+                            nir::program::Pattern::OptionalPresent(inner)
+                            | nir::program::Pattern::ErrorResult { inner, .. }
                             | nir::program::Pattern::Observe { inner, .. }
                             | nir::program::Pattern::Binding { inner, .. } => patterns.push(inner),
                             nir::program::Pattern::Tuple(fields)
@@ -2032,6 +2043,24 @@ fn fold_type_list<'layout>(
             return Err("staged type-list depth exceeded".into());
         }
         charge(fuel, fields.len().saturating_add(1))?;
+        if let Some(element) = heads.list_element(&expr.ty, fuel)? {
+            if element != Term::Primitive(Primitive::Type) {
+                let mut folded = Vec::with_capacity(fields.len());
+                for field in fields {
+                    if field.ty != element {
+                        return Err("staged list element type mismatch".into());
+                    }
+                    folded.push(fold_input(heads, field, fuel, depth + 1)?);
+                }
+                let result = Expr {
+                    source: expr.source,
+                    ty: expr.ty.clone(),
+                    kind: K::TypeList(folded),
+                };
+                constant(heads, &result, fuel, depth + 1)?;
+                return Ok(result);
+            }
+        }
         let mut types = Vec::with_capacity(fields.len());
         for field in fields {
             if field.ty != Term::Primitive(Primitive::Type) {
@@ -2066,6 +2095,30 @@ fn fold_type_list_index<'layout>(
     let K::TypeListIndex(values, index) = &expr.kind else {
         unreachable!()
     };
+    if let Some(element) = heads.list_element(&values.ty, fuel)? {
+        if element != Term::Primitive(Primitive::Type) {
+            if expr.ty != element || index.ty != Term::Primitive(Primitive::Integer) {
+                return Err("invalid staged list index types".into());
+            }
+            let values = fold_input(heads, values, fuel, depth + 1)?;
+            let K::TypeList(mut fields) = values.kind else {
+                return Err("staged list index requires completed list data".into());
+            };
+            let index = fold_input(heads, index, fuel, depth + 1)?;
+            let Term::Integer(index) = constant(heads, &index, fuel, depth + 1)? else {
+                return Err("staged list index requires an Integer".into());
+            };
+            let position = index
+                .to_u128()
+                .ok()
+                .and_then(|n| usize::try_from(n).ok())
+                .filter(|n| *n < fields.len())
+                .ok_or("staged list index is out of bounds")?;
+            let mut selected = fields.swap_remove(position);
+            selected.source = expr.source;
+            return Ok(selected);
+        }
+    }
     if expr.ty != Term::Primitive(Primitive::Type)
         || index.ty != Term::Primitive(Primitive::Integer)
     {
@@ -2231,6 +2284,19 @@ fn fold_input<'layout>(
             return fold_scalar_comparison(heads, expr, left, right, fuel, depth);
         }
         _ => {}
+    }
+    if let K::OptionalPresent(value) = &expr.kind {
+        if depth >= 128 {
+            return Err("staged expression depth exceeded".into());
+        }
+        charge(fuel, 1)?;
+        let folded = Expr {
+            source: expr.source,
+            ty: expr.ty.clone(),
+            kind: K::OptionalPresent(Box::new(fold_input(heads, value, fuel, depth + 1)?)),
+        };
+        constant(heads, &folded, fuel, depth)?;
+        return Ok(folded);
     }
     if matches!(expr.kind, K::ErrorConvert { .. }) {
         return error_values::fold(heads, expr, fuel, depth);
@@ -2832,6 +2898,42 @@ fn constant<'layout>(
     }
     charge(fuel, 1)?;
     Ok(match (&expr.kind, &expr.ty) {
+        (K::TypeList(fields), ty) => {
+            let element = heads
+                .list_element(ty, fuel)?
+                .ok_or("staged list requires a bound list head")?;
+            if element == Term::Primitive(Primitive::Type) {
+                return Err("staged Type list is not canonical".into());
+            }
+            charge(fuel, fields.len())?;
+            nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
+            let mut values = Vec::with_capacity(fields.len());
+            for field in fields {
+                if field.ty != element {
+                    return Err("staged list element type mismatch".into());
+                }
+                values.push(constant(heads, field, fuel, depth + 1)?);
+            }
+            Term::NominalValue {
+                ty: Box::new(ty.clone()),
+                variant: None,
+                fields: values,
+            }
+        }
+        (K::OptionalAbsent, Term::Optional(_)) => {
+            nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())?;
+            Term::OptionalValue {
+                ty: Box::new(expr.ty.clone()),
+                value: None,
+            }
+        }
+        (K::OptionalPresent(value), Term::Optional(payload)) if value.ty == **payload => {
+            nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())?;
+            Term::OptionalValue {
+                ty: Box::new(expr.ty.clone()),
+                value: Some(Box::new(constant(heads, value, fuel, depth + 1)?)),
+            }
+        }
         (K::Function(declaration), ty)
             if matches!(
                 ty,

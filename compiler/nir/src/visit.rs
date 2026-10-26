@@ -59,7 +59,8 @@ pub fn into_pattern_observations(pattern: P, fuel: &mut usize) -> Result<Vec<Exp
                 roots.push(*condition);
                 pending.push(*pattern);
             }
-            P::ErrorResult { inner: pattern, .. }
+            P::OptionalPresent(pattern)
+            | P::ErrorResult { inner: pattern, .. }
             | P::Observe { inner: pattern, .. }
             | P::Remap { pattern, .. }
             | P::Binding { inner: pattern, .. } => pending.push(*pattern),
@@ -79,7 +80,7 @@ pub fn into_pattern_observations(pattern: P, fuel: &mut usize) -> Result<Vec<Exp
                 pending.extend(fields.into_iter().rev());
             }
             P::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
-            P::Wild | P::Unit | P::Literal(_) => (),
+            P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => (),
         }
     }
     Ok(roots)
@@ -114,7 +115,8 @@ pub fn pattern_observations<'a>(pattern: &'a P, fuel: &mut usize) -> Result<Vec<
                 pending.push(Node::Expr(condition));
                 pending.push(Node::Pattern(pattern));
             }
-            P::ErrorResult { inner: pattern, .. }
+            P::OptionalPresent(pattern)
+            | P::ErrorResult { inner: pattern, .. }
             | P::Observe { inner: pattern, .. }
             | P::Remap { pattern, .. }
             | P::Binding { inner: pattern, .. } => pending.push(Node::Pattern(pattern)),
@@ -134,7 +136,7 @@ pub fn pattern_observations<'a>(pattern: &'a P, fuel: &mut usize) -> Result<Vec<
                 pending.extend(fields.iter().rev().map(Node::Pattern));
             }
             P::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
-            P::Wild | P::Unit | P::Literal(_) => (),
+            P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => (),
         }
     }
     Ok(roots)
@@ -245,7 +247,8 @@ fn walk_roots<'a>(
                     work.push(Node::Pattern(pattern));
                     work.push(Node::Expr(condition));
                 }
-                P::ErrorResult { inner: pattern, .. }
+                P::OptionalPresent(pattern)
+                | P::ErrorResult { inner: pattern, .. }
                 | P::Observe { inner: pattern, .. }
                 | P::Remap { pattern, .. }
                 | P::Binding { inner: pattern, .. } => work.push(Node::Pattern(pattern)),
@@ -263,7 +266,7 @@ fn walk_roots<'a>(
                 | P::TypeTuple(fields)
                 | P::Or(fields) => work.extend(fields.iter().map(Node::Pattern)),
                 P::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
-                P::Wild | P::Unit | P::Literal(_) => {}
+                P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => {}
             },
             Node::Expr(expr) => {
                 if !visit(expr, fuel)? {
@@ -403,6 +406,8 @@ fn walk_roots<'a>(
                     | K::ReadPointer(value)
                     | K::PointerAnonymousField { pointer: value, .. }
                     | K::PointerField { pointer: value, .. }
+                    | K::OptionalPresent(value)
+                    | K::OptionalType(value)
                     | K::PointerType(value)
                     | K::BitVecType(value)
                     | K::IntegerNegate(value)
@@ -532,6 +537,7 @@ fn walk_roots<'a>(
                     | K::TypeListValue(_)
                     | K::Literal(_)
                     | K::Local(_)
+                    | K::OptionalAbsent
                     | K::Unit
                     | K::Break(_)
                     | K::Continue(_)
@@ -667,7 +673,8 @@ fn walk_mut(
                     work.push(Node::Pattern(pattern));
                     work.push(Node::Expr(condition));
                 }
-                P::ErrorResult { inner: pattern, .. }
+                P::OptionalPresent(pattern)
+                | P::ErrorResult { inner: pattern, .. }
                 | P::Observe { inner: pattern, .. }
                 | P::Remap { pattern, .. }
                 | P::Binding { inner: pattern, .. } => work.push(Node::Pattern(pattern)),
@@ -685,7 +692,7 @@ fn walk_mut(
                 | P::TypeTuple(fields)
                 | P::Or(fields) => work.extend(fields.iter_mut().map(Node::Pattern)),
                 P::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
-                P::Wild | P::Unit | P::Literal(_) => {}
+                P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => {}
             },
             Node::Expr(expr) => {
                 if !visit(expr, fuel)? {
@@ -798,6 +805,8 @@ fn walk_mut(
                     | K::ReadPointer(value)
                     | K::PointerAnonymousField { pointer: value, .. }
                     | K::PointerField { pointer: value, .. }
+                    | K::OptionalPresent(value)
+                    | K::OptionalType(value)
                     | K::PointerType(value)
                     | K::BitVecType(value)
                     | K::IntegerNegate(value)
@@ -922,6 +931,7 @@ fn walk_mut(
                     | K::TypeListValue(_)
                     | K::Literal(_)
                     | K::Local(_)
+                    | K::OptionalAbsent
                     | K::Unit
                     | K::Break(_)
                     | K::Continue(_)
@@ -979,7 +989,8 @@ pub fn pattern_types(
                     visit(ty, fuel)?;
                 }
             }
-            P::Observe { inner, .. }
+            P::OptionalPresent(inner)
+            | P::Observe { inner, .. }
             | P::Binding { inner, .. }
             | P::Remap { pattern: inner, .. }
             | P::Guard { pattern: inner, .. } => pending.push(inner),
@@ -1002,7 +1013,7 @@ pub fn pattern_types(
                     .ok_or("pattern type field budget exhausted")?;
                 pending.extend(fields);
             }
-            P::Wild | P::Unit | P::Literal(_) => (),
+            P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => (),
         }
     }
     Ok(())

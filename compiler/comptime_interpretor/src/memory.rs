@@ -196,6 +196,13 @@ impl Storage {
                 return Ok(pointer);
             }
             match target {
+                Value::Optional {
+                    ty,
+                    value: Some(value),
+                } if *index == 0 => {
+                    fields.push(Projection::Optional(ty.clone()));
+                    target = value;
+                }
                 Value::ErrorResult { ty, error, value } if *index == 0 => {
                     fields.push(Projection::ErrorResult(ty.clone(), *error));
                     target = value;
@@ -267,6 +274,7 @@ pub(crate) enum Projection {
     /// Cleanup-only descent; ordinary source field projection cannot create it.
     Newtype(Term),
     /// Cleanup-only payload projection, guarded by result type and active branch.
+    Optional(Term),
     ErrorResult(Term, Option<usize>),
     Record(DeclarationId, usize),
     Variant(DeclarationId, usize, usize),
@@ -292,7 +300,10 @@ impl PointerValue {
             if let Projection::AnonymousRecord(name, _) = field {
                 work = work.checked_add(name.len())?;
             }
-            if let Projection::Newtype(ty) | Projection::ErrorResult(ty, _) = field {
+            if let Projection::Optional(ty)
+            | Projection::Newtype(ty)
+            | Projection::ErrorResult(ty, _) = field
+            {
                 let mut fuel = 100_000;
                 nir::type_computations::charge_term(ty, &mut fuel).ok()?;
                 work = work.checked_add(100_000 - fuel)?;
@@ -333,6 +344,7 @@ impl fmt::Display for PointerValue {
                     write!(f, " (variant-field {declaration} {tag} {index})")?
                 }
                 Projection::Tuple(index) => write!(f, " (tuple-field {index})")?,
+                Projection::Optional(ty) => write!(f, " (optional-payload (type {ty}))")?,
                 Projection::ErrorResult(ty, branch) => {
                     write!(f, " (error-payload (type {ty}) (branch ")?;
                     match branch {
@@ -380,11 +392,13 @@ impl PointerValue {
                 | Value::Tuple(fields) => fields.len(),
                 Value::AnonymousRecord(fields) => fields.len(),
                 Value::Closure(closure) => closure.capture_order.len(),
-                Value::ErrorResult { .. } | Value::Newtype { .. } => 1,
+                Value::Optional { value: Some(_), .. }
+                | Value::ErrorResult { .. }
+                | Value::Newtype { .. } => 1,
                 _ => return Err(ErrorKind::InvalidPointer),
             });
             path.push(match field {
-                Projection::ErrorResult(..) | Projection::Newtype(_) => 0,
+                Projection::Optional(_) | Projection::ErrorResult(..) | Projection::Newtype(_) => 0,
                 Projection::Record(_, index)
                 | Projection::Variant(_, _, index)
                 | Projection::AnonymousRecord(_, index)
@@ -401,6 +415,19 @@ impl PointerValue {
                 }
             });
             target = match field {
+                Projection::Optional(expected) => {
+                    let Value::Optional {
+                        ty,
+                        value: Some(value),
+                    } = target
+                    else {
+                        return Err(ErrorKind::InvalidPointer);
+                    };
+                    if ty != expected {
+                        return Err(ErrorKind::InvalidPointer);
+                    }
+                    value.as_mut()
+                }
                 Projection::ErrorResult(expected, branch) => {
                     let Value::ErrorResult { ty, error, value } = target else {
                         return Err(ErrorKind::InvalidPointer);
@@ -1320,5 +1347,66 @@ mod error_result_projection_tests {
         );
         root.write(packet(wider, Some(0)), |_| true).unwrap();
         assert_eq!(failure.read().unwrap_err(), ErrorKind::InvalidPointer);
+    }
+}
+
+#[cfg(test)]
+mod optional_projection_tests {
+    use super::*;
+
+    #[test]
+    fn optional_payload_projection_checks_presence_and_full_type_identity() {
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let ty = Term::Optional(Box::new(boolean.clone()));
+        let present = Value::Optional {
+            ty: ty.clone(),
+            value: Some(Box::new(Value::Bool(true))),
+        };
+        let storage = Storage::new(present);
+        let root = storage.owned_pointer(ty.clone(), &[]).unwrap();
+        let payload = storage.owned_pointer(boolean.clone(), &[0]).unwrap();
+        assert_eq!(payload.read().unwrap(), Value::Bool(true));
+        assert!(payload.to_string().contains("(optional-payload"));
+        assert!(storage.owned_pointer(boolean.clone(), &[1]).is_err());
+        root.write(
+            Value::Optional {
+                ty: ty.clone(),
+                value: None,
+            },
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(payload.read().unwrap_err(), ErrorKind::InvalidPointer);
+        assert!(storage.owned_pointer(boolean.clone(), &[0]).is_err());
+        root.write(
+            Value::Optional {
+                ty: Term::Optional(Box::new(Term::Primitive(nir::Primitive::Char))),
+                value: Some(Box::new(Value::Char('x'))),
+            },
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(payload.read().unwrap_err(), ErrorKind::InvalidPointer);
+    }
+
+    #[test]
+    fn checkpoints_follow_optional_ownership_edges_without_copying_storage_identity() {
+        let package = nir::program::Package::default();
+        let mut vm = crate::Interpreter::new(&package, crate::Budget::default()).unwrap();
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let cell = Storage::new(Value::Bool(false));
+        let root = Value::Optional {
+            ty: Term::Optional(Box::new(boolean.clone())),
+            value: Some(Box::new(Value::Storage(cell.clone()))),
+        };
+        let checkpoint = vm.checkpoint_owned_graph(&[root.clone()]).unwrap();
+        let pointer = cell.owned_pointer(boolean, &[]).unwrap();
+        pointer.write(Value::Bool(true), |_| true).unwrap();
+        assert_eq!(cell.read().unwrap(), Value::Bool(true));
+        checkpoint.restore().unwrap();
+        assert_eq!(cell.read().unwrap(), Value::Bool(false));
+        let copy = vm.read_owned_value(&Storage::new(root.clone())).unwrap();
+        assert_eq!(copy, root);
+        assert!(root.immutable_copy_work().is_none());
     }
 }

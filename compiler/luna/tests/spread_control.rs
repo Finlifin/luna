@@ -136,8 +136,8 @@ fn diverging_enum_packet_keeps_bound_tuple_layout_and_checks_dead_source() {
         fn accept(value:Packet<T,Byte>)->bool where T {false}
         fn run()->bool {accept(.pair(first(),...do {return true; (false,9)}))}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package =

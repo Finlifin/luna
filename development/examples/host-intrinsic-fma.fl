@@ -1,4 +1,4 @@
--- --host-fma input::machine::Scalar::fused --build run --output /tmp/flurry-fma
+-- --host-fma input.machine.Scalar.fused --build run --output /tmp/flurry-fma
 mod machine {
     ^intrinsic_enum
     enum Scalar { fused }

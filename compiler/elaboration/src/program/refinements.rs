@@ -240,7 +240,7 @@ impl Checker<'_, '_> {
             (known, None) | (None, known) => known,
         };
         Ok(match pattern {
-            P::ErrorResult { .. } | P::CodeEvidence { .. } => None,
+            P::OptionalPresent(_) | P::ErrorResult { .. } | P::CodeEvidence { .. } => None,
             P::Observe { .. } => None,
             P::Guard { pattern, condition } => {
                 // The canonical constant Type pattern binds its input and
@@ -322,7 +322,7 @@ impl Checker<'_, '_> {
                     Some(F::And(facts))
                 }
             }
-            P::Wild | P::Unit | P::Literal(_) => None,
+            P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => None,
         })
     }
 

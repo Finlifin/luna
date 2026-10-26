@@ -536,8 +536,8 @@ fn partial_variadic_packets_keep_normal_tuple_identity() {
         fn run()->bool {let result=apply(collect(...wrap(|value| value==9),9));result}",
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )

@@ -418,7 +418,7 @@ fn pattern_from_enum_domains(
     *fuel = fuel
         .checked_sub(path.len().saturating_add(1))
         .ok_or_else(|| error(source, "enum pattern budget exhausted"))?;
-    let (fields, tag_known) = match pattern {
+    let (fields, tag_known): (&[Pattern], bool) = match pattern {
         Pattern::Wild | Pattern::Unit => return Ok(Some(true)),
         Pattern::Binding { inner, .. } | Pattern::Remap { pattern: inner, .. } => {
             return pattern_from_enum_domains(inner, path, domains, fuel, source, depth + 1);
@@ -452,6 +452,21 @@ fn pattern_from_enum_domains(
             }
             return Ok(if unknown { None } else { Some(false) });
         }
+        Pattern::OptionalAbsent | Pattern::OptionalPresent(_) => {
+            let tag = usize::from(matches!(pattern, Pattern::OptionalPresent(_)));
+            let known = domains
+                .get(path)
+                .is_some_and(|tags| tags.len() == 1 && tags.contains(&tag));
+            if domains.get(path).is_some_and(|tags| !tags.contains(&tag)) {
+                return Ok(Some(false));
+            }
+            let fields = match pattern {
+                Pattern::OptionalPresent(inner) => std::slice::from_ref(inner.as_ref()),
+                _ => &[],
+            };
+            path.extend([VARIANT_PATH, tag]);
+            (fields, known)
+        }
         Pattern::Variant { index, fields, .. } => {
             let known = domains
                 .get(path)
@@ -483,7 +498,10 @@ fn pattern_from_enum_domains(
             unknown_before |= super::pattern_facts::pattern_observes(field, depth + 1);
         }
     }
-    if matches!(pattern, Pattern::Variant { .. }) {
+    if matches!(
+        pattern,
+        Pattern::OptionalAbsent | Pattern::OptionalPresent(_) | Pattern::Variant { .. }
+    ) {
         path.truncate(path.len() - 2);
     }
     Ok(result)
@@ -5469,6 +5487,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     | Term::NormalForm { .. }
                     | Term::Closure { .. }
                     | Term::ErrorResult { .. }
+                    | Term::Optional(_)
             )
             && self.storage_inputs_are_closed(result, source)?
             && super::memory::pointer_representation(self.package, result, &mut self.fuel)
@@ -7000,6 +7019,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             return Ok(true);
         }
+        if let Term::Optional(payload) = ty {
+            return self.scalar_packet_shape(payload, source, depth + 1);
+        }
         if let Term::ErrorResult { errors, result } = ty {
             for field in std::iter::once(result.as_ref()).chain(errors) {
                 if !self.scalar_packet_shape(field, source, depth + 1)? {
@@ -7092,7 +7114,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         if matches!(
             ty,
-            Term::Nominal { .. } | Term::Record(_) | Term::ErrorResult { .. }
+            Term::Nominal { .. } | Term::Record(_) | Term::ErrorResult { .. } | Term::Optional(_)
         ) || nir::normal_forms::tuple_fields(self.package, ty).is_some()
         {
             // Copy permits candidate-local delivery; the recursive shape
@@ -7515,7 +7537,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 if owned_observation || matches!(node.kind, K::Closure { .. }) {
                     return Ok(false);
                 }
-                owned_observation = matches!(node.kind, K::Tuple(_) | K::AnonymousRecord { .. } | K::Record { .. } | K::Variant { .. })
+                owned_observation = matches!(node.kind, K::Tuple(_) | K::AnonymousRecord { .. } | K::Record { .. } | K::OptionalPresent(_)
+                | K::OptionalAbsent
+                | K::Variant { .. })
                     || matches!(&node.kind, K::Call { arguments, .. }
                     if arguments.iter().any(|argument| matches!(argument.value.ty,
                         Term::Nominal { .. } | Term::Record(_) | Term::Tuple(_) | Term::NormalForm { .. })))
@@ -7929,6 +7953,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     | Term::Tuple(_)
                     | Term::NormalForm { .. }
                     | Term::ErrorResult { .. }
+                    | Term::Optional(_)
             ) {
                 return Err(error(
                     expr.source,
@@ -8001,6 +8026,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         | Term::Tuple(_)
                         | Term::NormalForm { .. }
                         | Term::ErrorResult { .. }
+                        | Term::Optional(_)
                 )
             {
                 return Err(error(
@@ -8632,7 +8658,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     allow_copy_bindings,
                 );
             }
-            Pattern::ErrorResult { .. } => {
+            Pattern::OptionalAbsent | Pattern::OptionalPresent(_) | Pattern::ErrorResult { .. } => {
                 let (_, patterns, types) =
                     super::memory::owned_variant_pattern(self.package, pattern, ty, &mut self.fuel)
                         .map_err(|reason| error(source, reason))?;
@@ -9376,7 +9402,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     depth,
                 );
             }
-            Pattern::Variant { .. } | Pattern::ErrorResult { .. } => {
+            Pattern::OptionalAbsent
+            | Pattern::OptionalPresent(_)
+            | Pattern::Variant { .. }
+            | Pattern::ErrorResult { .. } => {
                 let (tag, fields, types) =
                     super::memory::owned_variant_pattern(self.package, pattern, ty, &mut self.fuel)
                         .map_err(|reason| error(source, reason))?;
@@ -12528,6 +12557,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             K::Tuple(_)
                 | K::AnonymousRecord { .. }
                 | K::Record { .. }
+                | K::OptionalPresent(_)
+                | K::OptionalAbsent
                 | K::Variant { .. }
                 | K::ErrorConvert { .. }
                 | K::Field { .. }
@@ -13151,6 +13182,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         | Term::NormalForm { .. }
                         | Term::Closure { .. }
                         | Term::ErrorResult { .. }
+                        | Term::Optional(_)
                 )
                 && self.storage_inputs_are_closed(completion_type(&expr.ty), expr.source)?
                 && !super::memory::pointer_input_layout(
@@ -13189,6 +13221,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             K::Tuple(_)
             | K::AnonymousRecord { .. }
             | K::Record { .. }
+            | K::OptionalPresent(_)
+            | K::OptionalAbsent
             | K::Variant { .. }
             | K::ErrorConvert { .. } => self.pending_frame(expr.source, |this| {
                 let (fields, variant) = super::memory::owned_constructor(expr, &mut this.fuel)
@@ -13846,6 +13880,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 | K::Closure { .. }
                 | K::Record { .. }
                 | K::AnonymousRecord { .. }
+                | K::OptionalPresent(_)
+                | K::OptionalAbsent
                 | K::Variant { .. }
                 | K::ErrorConvert { .. }
                 | K::EffectRequest { .. }
@@ -15374,6 +15410,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             K::Tuple(_)
             | K::AnonymousRecord { .. }
             | K::Record { .. }
+            | K::OptionalPresent(_)
+            | K::OptionalAbsent
             | K::Variant { .. }
             | K::ErrorConvert { .. } => {
                 self.evaluate_value_origins(expr, flow, depth + 1)?;
@@ -17095,13 +17133,36 @@ fn import_callable_evidence(
     }
     *fuel -= 1;
     let mut result: Option<Callable> = None;
+    let mut expected_view = None;
     for definition in std::iter::once(definition).chain(alternatives) {
         super::memory::bound_type(&definition.ty, fuel).map_err(|e| error(source, e))?;
         if expected != &definition.ty {
-            return Err(error(
-                source,
-                "callable definition type disagrees with parameter",
-            ));
+            // Nominal field declarations retain associated projections while
+            // residual callback bodies carry completed types. Resolve only the
+            // expected Type view; retain exact equality and callable validation.
+            if expected_view.is_none() {
+                if let Some(package) = package {
+                    // Nested adapters can require more than a fixed small
+                    // query allowance. Share the caller's remaining budget,
+                    // reserving half for subsequent ownership validation.
+                    let allowance = *fuel / 2;
+                    *fuel -= allowance;
+                    let mut remaining = allowance;
+                    let view = crate::materialization::normalize_concrete_type(
+                        package,
+                        expected,
+                        &mut remaining,
+                    );
+                    *fuel += remaining;
+                    expected_view = Some(view.map_err(|reason| error(source, reason))?);
+                }
+            }
+            if expected_view.as_ref() != Some(&definition.ty) {
+                return Err(error(
+                    source,
+                    "callable definition type disagrees with parameter",
+                ));
+            }
         }
         if !alternatives.is_empty()
             && !matches!(definition.kind, K::Function(_) | K::FunctionInstance { .. })
@@ -17433,7 +17494,7 @@ fn callable_value_paths(
             super::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
             fields.iter().map(|(_, ty)| ty.clone()).collect()
         }
-        Term::ErrorResult { .. } => {
+        Term::ErrorResult { .. } | Term::Optional(_) => {
             let mut result = vec![];
             for (variant, layout) in super::memory::owned_variants(package, ty, fuel)
                 .map_err(|reason| error(source, reason))?
@@ -17560,6 +17621,7 @@ fn recoverable_return_capture_layout(
         fields.to_vec()
     } else {
         match ty {
+            Term::Optional(payload) => vec![(**payload).clone()],
             Term::ErrorResult { errors, result } => std::iter::once(result.as_ref())
                 .chain(errors.iter())
                 .cloned()
@@ -17710,6 +17772,21 @@ fn contains_return_evidence_kind(
         return Ok(false);
     }
     match ty {
+        Term::Optional(payload) => {
+            super::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
+            if include_tags {
+                return Ok(true);
+            }
+            return contains_return_evidence_kind(
+                package,
+                payload,
+                fuel,
+                source,
+                depth + 1,
+                false,
+                pointers_only,
+            );
+        }
         Term::ErrorResult { errors, result } => {
             super::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
             if include_tags {
@@ -18062,7 +18139,7 @@ fn owned_field_type(
                 environment: fields,
                 ..
             } => fields.clone(),
-            Term::ErrorResult { .. } => {
+            Term::ErrorResult { .. } | Term::Optional(_) => {
                 if *index != VARIANT_PATH {
                     return Err(error(
                         source,
@@ -18696,5 +18773,38 @@ mod record_shape_tests {
             })
             .unwrap();
         assert!(state.remaining().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod optional_domain_tests {
+    use super::*;
+
+    #[test]
+    fn optional_presence_requires_known_branch_evidence() {
+        let source = SourceRange { start: 1, end: 2 };
+        let absent = Pattern::OptionalAbsent;
+        let present = Pattern::OptionalPresent(Box::new(Pattern::Wild));
+        for (tags, expected_absent, expected_present) in [
+            (vec![0], Some(true), Some(false)),
+            (vec![1], Some(false), Some(true)),
+            (vec![0, 1], None, None),
+        ] {
+            let domains = BTreeMap::from([(vec![], tags.into_iter().collect())]);
+            for (pattern, expected) in [(&absent, expected_absent), (&present, expected_present)] {
+                let mut path = vec![];
+                assert_eq!(
+                    pattern_from_enum_domains(pattern, &mut path, &domains, &mut 1000, source, 0)
+                        .unwrap(),
+                    expected
+                );
+                assert!(path.is_empty());
+            }
+        }
+        assert_eq!(
+            pattern_from_enum_domains(&absent, &mut vec![], &BTreeMap::new(), &mut 1000, source, 0)
+                .unwrap(),
+            None
+        );
     }
 }

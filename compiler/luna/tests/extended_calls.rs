@@ -215,7 +215,7 @@ fn mixed_calls_preserve_the_bound_tuple_normal_form() {
     let package = execution_support::compile_with_source_bindings(
         "typealias Type=.Type'builtin;pure comptime fn List<T>->Type {T} pure comptime fn Tuple<...Es:List<Type>>->Type {bool} fn packet()->Tuple<bool,bool> {(true,false)} fn take(...items:Tuple<bool,bool>,...properties:T)->Tuple<Tuple<bool,bool>,T> where T {(items,properties)} fn run()->bool {let ((a,b),p)=take {...packet(),flag:true};a and not b and p.flag}",
         &Default::default(), luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"), tuple: Some("input::Tuple"), ..Default::default()
+            meta_list: Some("input.List"), tuple: Some("input.Tuple"), ..Default::default()
         },
     ).unwrap();
     let tuple = id(&package, "Tuple");

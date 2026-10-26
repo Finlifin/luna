@@ -107,6 +107,31 @@ pub(super) fn pointer_possible(
             qualified.pop();
             result
         }
+        Term::Optional(payload) => {
+            crate::verification::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
+            let Some((&0, rest)) = fields.split_first() else {
+                return Ok(false);
+            };
+            if domains
+                .get(qualified)
+                .is_some_and(|tags| !tags.contains(&1))
+            {
+                return Ok(false);
+            }
+            qualified.extend([VARIANT_PATH, 1, 0]);
+            let possible = pointer_possible(
+                package,
+                payload,
+                rest,
+                domains,
+                qualified,
+                fuel,
+                source,
+                depth + 1,
+            );
+            qualified.truncate(qualified.len() - 3);
+            possible
+        }
         Term::ErrorResult { errors, result } => {
             crate::verification::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
             let Some((&0, rest)) = fields.split_first() else {
@@ -617,5 +642,30 @@ mod observation_tests {
             .unwrap()
             .insert(right, vec![(vec![], 1)]);
         assert!(!check(&altered));
+    }
+}
+
+#[cfg(test)]
+mod optional_tests {
+    use super::*;
+
+    #[test]
+    fn absent_optional_excludes_pointer_but_unknown_presence_does_not() {
+        let ty = Term::Optional(Box::new(Term::Pointer(Box::new(Term::Primitive(
+            nir::Primitive::Bool,
+        )))));
+        let source = SourceRange { start: 0, end: 1 };
+        for (tags, expected) in [(Some(vec![0]), false), (Some(vec![1]), true), (None, true)] {
+            let domains = tags
+                .map(|tags| EnumDomains::from([(vec![], tags.into_iter().collect())]))
+                .unwrap_or_default();
+            let mut path = vec![];
+            assert_eq!(
+                pointer_possible(None, &ty, &[0], &domains, &mut path, &mut 1000, source, 0)
+                    .unwrap(),
+                expected
+            );
+            assert!(path.is_empty());
+        }
     }
 }

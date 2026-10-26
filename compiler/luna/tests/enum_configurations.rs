@@ -20,7 +20,6 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         splice_protocol: None,
         meta_list_type: None,
         tuple_type: None,
-        optional_type: None,
         index_protocol: None,
         ord_protocol: None,
         eq_protocol: None,

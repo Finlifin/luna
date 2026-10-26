@@ -1,6 +1,6 @@
 -- Reduced constant-only call-chain budget probe: currently passes.
 -- The mixed constant/range-contract chain still exhausts analysis budgets.
--- Bind ctpop=input::Ops::ctpop; no change to the proof obligation is intended.
+-- Bind ctpop=input.Ops.ctpop; no change to the proof obligation is intended.
 typealias U = .u16'builtin;
 ^intrinsic_enum enum Ops { ctpop }
 

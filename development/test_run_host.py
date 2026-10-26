@@ -58,10 +58,10 @@ class RunHostTests(unittest.TestCase):
             return code, calls, json.loads((root / 'summary.json').read_text()), stdout.buffer.getvalue(), stderr.buffer.getvalue()
 
     def test_private_build_then_execute_with_exact_forwarded_arguments(self):
-        code, calls, summary, output, diagnostic = self.exercise(extra=['--copy-protocol', 'A::Copy'])
+        code, calls, summary, output, diagnostic = self.exercise(extra=['--copy-protocol', 'A.Copy'])
         self.assertEqual(code, 0)
         self.assertEqual([c[3] for c in calls], ['driver-build', 'build', 'execute'])
-        self.assertEqual(calls[1][0][-2:], ['--copy-protocol', 'A::Copy'])
+        self.assertEqual(calls[1][0][-2:], ['--copy-protocol', 'A.Copy'])
         self.assertEqual(calls[1][0][2:4], ['--build', 'start'])
         self.assertEqual(calls[2][2], 0.25)
         self.assertEqual(output, b'program\x00\xff\n')
@@ -83,13 +83,13 @@ class RunHostTests(unittest.TestCase):
                 self.assertEqual(output, b'program\x00\xff\n')
 
     def test_package_inputs_preserve_identities_aliases_and_paths(self):
-        code, calls, summary, output, _ = self.exercise(packages=True, extra=['--copy-protocol', 'alias::Copy'])
+        code, calls, summary, output, _ = self.exercise(packages=True, extra=['--copy-protocol', 'alias.Copy'])
         self.assertEqual(code, 0)
         self.assertIsNone(summary['source'])
         self.assertEqual(calls[1][0][1:1 + len(summary['inputs'])], summary['inputs'])
         self.assertEqual(summary['inputs'][:5], ['--packages-v1', '--package', '7', '107', 'app'])
         self.assertIn('dependency with spaces.fl', summary['inputs'])
-        self.assertEqual(summary['inputs'][-8:], ['--dependency', '7', 'alias', '9', '--primary', '7', '--copy-protocol', 'alias::Copy'])
+        self.assertEqual(summary['inputs'][-8:], ['--dependency', '7', 'alias', '9', '--primary', '7', '--copy-protocol', 'alias.Copy'])
         self.assertEqual(output, b'program\x00\xff\n')
 
     def test_missing_input_and_mixed_modes_do_not_start_a_driver(self):

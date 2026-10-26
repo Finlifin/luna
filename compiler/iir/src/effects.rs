@@ -166,9 +166,10 @@ fn data_type(package: &Package, ty: &Term, fuel: &mut usize, depth: usize) -> Re
             }
             data_type(package, row_result(result).1, fuel, depth + 1)?;
         }
-        Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) | Term::Pointer(inner) => {
-            data_type(package, inner, fuel, depth + 1)?
-        }
+        Term::Optional(inner)
+        | Term::ComptimeFunction(inner)
+        | Term::UnsafeFunction(inner)
+        | Term::Pointer(inner) => data_type(package, inner, fuel, depth + 1)?,
         Term::Tuple(_) | Term::Record(_) => {
             if let Term::Tuple(items) = ty {
                 for item in items {
@@ -297,7 +298,8 @@ fn pattern(
                 depth + 1,
             )?;
         }
-        Pattern::ErrorResult { inner, .. }
+        Pattern::OptionalPresent(inner)
+        | Pattern::ErrorResult { inner, .. }
         | Pattern::Observe { inner, .. }
         | Pattern::Binding { inner, .. }
         | Pattern::Remap { pattern: inner, .. } => {

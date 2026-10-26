@@ -71,6 +71,20 @@ fn index_overlap(
             continue;
         }
         if let (
+            Term::OptionalValue { ty: a, value: av },
+            Term::OptionalValue { ty: b, value: bv },
+        ) = (left, right)
+        {
+            if av.is_some() != bv.is_some() {
+                return Ok(vec![Formula::False]);
+            }
+            pending.push((a, b, depth + 1));
+            if let (Some(a), Some(b)) = (av, bv) {
+                pending.push((a, b, depth + 1));
+            }
+            continue;
+        }
+        if let (
             Term::ErrorValue {
                 ty: a,
                 label: al,
@@ -123,7 +137,8 @@ fn index_overlap(
                 || term.scalar_index_domain().is_some()
                 || matches!(
                     term,
-                    Term::ErrorValue { .. }
+                    Term::OptionalValue { .. }
+                        | Term::ErrorValue { .. }
                         | Term::RecordValue(_)
                         | Term::TupleValue(_)
                         | Term::NominalValue { .. }
@@ -211,6 +226,12 @@ fn separation_goal(
                 | Term::TypeListValue(arguments)
                 | Term::TypeListConcat(arguments)
                 | Term::TupleValue(arguments) => terms.extend(arguments),
+                Term::OptionalValue { ty, value } => {
+                    terms.push(ty);
+                    if let Some(value) = value {
+                        terms.push(value);
+                    }
+                }
                 Term::ErrorValue { ty, label, value } => {
                     terms.push(ty);
                     if let Some(label) = label {

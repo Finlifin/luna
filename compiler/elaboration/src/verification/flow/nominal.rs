@@ -212,7 +212,23 @@ impl Walker<'_> {
             return Ok(());
         };
         let types = match kind {
-            AggregateKind::EnumTag(_) => return Err(Reason::InvalidSignature),
+            AggregateKind::EnumTag(_) | AggregateKind::OptionalTag => {
+                return Err(Reason::InvalidSignature);
+            }
+            AggregateKind::Optional(present) => {
+                let Term::Optional(payload) = base
+                    .nominal_type
+                    .as_deref()
+                    .ok_or(Reason::InvalidSignature)?
+                else {
+                    return Err(Reason::InvalidSignature);
+                };
+                Some(if *present {
+                    vec![(**payload).clone()]
+                } else {
+                    vec![]
+                })
+            }
             AggregateKind::AnonymousRecord | AggregateKind::Tuple => {
                 let ty = base.nominal_type.as_ref().ok_or(Reason::Unsupported)?;
                 Some(self.place_fields(ty, nir::program::FieldOwner::Anonymous)?)

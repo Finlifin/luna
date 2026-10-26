@@ -1875,8 +1875,8 @@ fn open_deferred_variadics_use_computed_tuple_identity_and_source_order() {
         fn spread()->Tuple<bool,.u8'builtin> {collect(true,...packet(),.marker=mark())}
         fn literal()->Tuple<bool,.u8'builtin> {collect(...(true,true,9))}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -1960,8 +1960,8 @@ fn open_deferred_variadics_combine_default_format_inputs_with_computed_packets()
         fn pair()->Tuple<bool,.u8'builtin> {pack(true,7)}
         fn empty()->Tuple<> {pack(.format=\"none\")}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -3523,7 +3523,6 @@ fn deferred_nested_structural_types_participate_in_inference() {
                 callback:defer fn({shape})->T)->bool where T {{false}}
             fn run()->bool {{choose(true,bool,number)}}");
         let selectors = luna::protocols::type_constructors::Selectors {
-            optional: Some("input::Maybe"),
             ..Default::default()
         };
         let package = execution_support::compile_with_source_bindings(
@@ -3547,10 +3546,7 @@ fn deferred_nested_structural_types_participate_in_inference() {
             .is_err(),
             "{shape}"
         );
-        if shape.contains('?') {
-            let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
-            assert!(error.contains("bound optional declaration"), "{error}");
-        }
+        compile_with_protocols(&source, &Default::default()).unwrap();
         let invalid = source.replace("choose(true,bool,number)", "choose(false,true,number)");
         assert!(
             execution_support::compile_with_source_bindings(
@@ -4429,8 +4425,8 @@ fn partial_open_packet_contexts_support_bound_tuple_protocols() {
         fn choose(comptime flag:bool,comptime T:Type,tag:Byte,value:defer Select(flag,T))->defer Select(flag,T) {value}
         fn run()->bool {choose(...do {(true,bool,7,true)})}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -4467,7 +4463,7 @@ fn comptime_open_instances_participate_in_required_invocation() {
         comptime fn Select(flag:bool)->Type {bool}
         comptime fn identity(comptime flag:bool,value:defer Select(flag))->defer Select(flag) {value}
         const RESULT=identity(true,true);
-        fn run()->bool {RESULT}", &Default::default(), luna::protocols::type_constructors::Selectors {splice:Some("input::Splice"),..Default::default()}).unwrap();
+        fn run()->bool {RESULT}", &Default::default(), luna::protocols::type_constructors::Selectors {splice:Some("input.Splice"),..Default::default()}).unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -4491,7 +4487,7 @@ fn comptime_open_calls_preserve_phase_and_splice_delivery() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            splice: Some("input::Splice"),
+            splice: Some("input.Splice"),
             ..Default::default()
         },
     )
@@ -4538,7 +4534,7 @@ fn comptime_open_calls_preserve_phase_and_splice_delivery() {
         &format!("{source} fn bad(flag:bool)->bool {{choose<bool>(flag,true)}}"),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            splice: Some("input::Splice"),
+            splice: Some("input.Splice"),
             ..Default::default()
         },
     )
@@ -4900,8 +4896,8 @@ fn ordinary_comptime_collections_preserve_bound_tuple_layouts() {
         typealias Pair=PAIR'type;typealias Empty=EMPTY'type;
         fn pair_result()->Pair {true} fn empty_result()->Empty {true}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -5123,8 +5119,8 @@ fn ordinary_comptime_type_inputs_form_bound_tuple_domains() {
         const PAIR=pair(bool,true,false);typealias Pair=PAIR'type;
         fn run()->Pair {(true,false)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -5270,8 +5266,8 @@ fn ordinary_comptime_mixed_function_collections_survive_default_chains() {
         fn invoke(callback:Callback)->bool {callback(true)}
         fn run()->bool {invoke(identity)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -5345,8 +5341,8 @@ fn staged_packets_preserve_nested_function_delivery() {
     for bound in [false, true] {
         let selectors = if bound {
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             }
         } else {
@@ -5781,7 +5777,7 @@ fn suspended_type_list_applications_collect_type_inputs() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
+                meta_list: Some("input.List"),
                 ..Default::default()
             },
         )
@@ -5801,7 +5797,7 @@ fn suspended_type_collections_reject_tuple_tails_and_different_elements() {
         "comptime fn keep(T:Type,callback:defer fn(Pack<T,T>)->Pack<T,T>)->defer fn(Pack<T,T>)->Pack<T,T> {callback}
          fn wrong(value:Pack<bool,Byte>)->Pack<bool,Byte> {value} const BAD=keep(bool,wrong);",
     ] {
-        let failure=compile_with_source_bindings(&format!("{prefix}{suffix}"),&Default::default(),luna::protocols::type_constructors::Selectors {meta_list:Some("input::List"),..Default::default()}).unwrap_err();
+        let failure=compile_with_source_bindings(&format!("{prefix}{suffix}"),&Default::default(),luna::protocols::type_constructors::Selectors {meta_list:Some("input.List"),..Default::default()}).unwrap_err();
         assert!(failure.contains("elaboration failed"),"{failure}");
     }
 }
@@ -5828,7 +5824,7 @@ fn suspended_normal_applications_accept_whole_and_spread_type_lists() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
+                meta_list: Some("input.List"),
                 ..Default::default()
             },
         )
@@ -5863,7 +5859,7 @@ fn suspended_whole_type_lists_reject_mixed_supplies_and_wrong_domains() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
+                meta_list: Some("input.List"),
                 ..Default::default()
             },
         )
@@ -5891,7 +5887,7 @@ fn suspended_type_applications_invoke_list_producers() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
+                meta_list: Some("input.List"),
                 ..Default::default()
             },
         )
@@ -5908,7 +5904,7 @@ fn suspended_list_producers_preserve_phase_and_invocation_failures() {
     let consumer =
         "comptime fn keep(T:Type,callback:defer fn(Pack<T,...types(T)>)->Pack<T>)->bool {true}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
+        meta_list: Some("input.List"),
         ..Default::default()
     };
     let dormant = format!(
@@ -5996,7 +5992,7 @@ fn suspended_type_collections_accept_fixed_value_prefixes() {
             const CALLBACK=keep(true,bool,[bool],identity);typealias Callback=CALLBACK'type;
             fn run(callback:Callback,value:Pack<true,bool>)->Pack<true,bool> {{callback(value)}}");
         let selectors = luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
+            meta_list: Some("input.List"),
             ..Default::default()
         };
         let package =
@@ -7134,8 +7130,8 @@ fn live_empty_collection_domains_run_once_in_declaration_order() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )

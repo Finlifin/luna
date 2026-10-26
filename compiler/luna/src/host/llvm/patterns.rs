@@ -62,6 +62,26 @@ impl Emitter<'_> {
                     )?;
                 }
             }
+            Pattern::OptionalAbsent | Pattern::OptionalPresent(_) => {
+                let tag = self.optional_tag(value)?;
+                let condition = if matches!(pattern, Pattern::OptionalAbsent) {
+                    self.instruction(Ty::Bool, format!("xor i1 {}, true", tag.text))
+                } else {
+                    tag
+                };
+                self.accept(condition, failure)?;
+                if let Pattern::OptionalPresent(inner) = pattern {
+                    let payload = self.optional_payload(value)?;
+                    self.pattern(
+                        inner,
+                        &payload,
+                        failure,
+                        depth,
+                        child_path(&path, 0),
+                        receipt,
+                    )?;
+                }
+            }
             Pattern::ErrorResult { label, inner } => {
                 let index = self.error_index(&value.ty, label.as_ref())?;
                 let tag = self.error_tag(value)?;

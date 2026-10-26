@@ -11,7 +11,7 @@ fn compile(body: &str) -> Result<nir::program::Package, String> {
         &format!("{PREFIX}{body}"),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
+            meta_list: Some("input.List"),
             ..Default::default()
         },
     )
@@ -403,7 +403,7 @@ fn type_list_literal_requires_type_elements_and_bound_domain() {
     for source in [
         "comptime fn bad()->List<Type> {[true]}",
         "comptime fn bad()->List<Type> {[7]}",
-        "comptime fn bad()->List<bool> {[true]}",
+        "comptime fn bad()->List<bool> {[bool]}",
         "fn bad()->List<Type> {[bool]}",
         "fn runtime()->Type {bool} comptime fn bad()->List<Type> {[runtime()]}",
     ] {
@@ -419,14 +419,42 @@ fn type_list_literal_requires_type_elements_and_bound_domain() {
 }
 
 #[test]
+fn value_list_literals_preserve_order_and_early_exit() {
+    let package = compile(
+        "comptime fn first()->bool {true}
+         comptime fn second()->bool {false}
+         comptime fn make()->List<bool> {[first(),second(),first()]}
+         comptime fn early()->List<bool> {[first(),do {return [];},second()]}",
+    )
+    .unwrap();
+    for (entry, expected, calls) in [
+        (
+            "make",
+            vec![Value::Bool(true), Value::Bool(false), Value::Bool(true)],
+            vec!["make", "first", "second", "first"],
+        ),
+        ("early", vec![], vec!["early", "first"]),
+    ] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let Value::List { ty, values } = vm.invoke(support::id(&package, entry), vec![]).unwrap()
+        else {
+            panic!("expected immutable list")
+        };
+        assert!(matches!(ty, Term::NormalForm { .. }));
+        assert_eq!(values, expected);
+        assert_eq!(support::calls(&package, &vm), calls);
+    }
+}
+
+#[test]
 fn type_lists_and_tuple_packets_keep_distinct_domains() {
     let compile_packet = |body: &str| {
         support::compile_with_source_bindings(
             &format!("{PREFIX} pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}} {body}"),
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -731,8 +759,8 @@ fn tuple_storage_phase_uses_only_bound_structural_views() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         );
@@ -744,4 +772,26 @@ fn tuple_storage_phase_uses_only_bound_structural_views() {
     }
     // A spelling or a body returning a comptime-only type is not a layout contract.
     compile("pure comptime fn Identity<T>->Type {T} fn consume(value:Identity<Type>) {}").unwrap();
+}
+
+#[test]
+fn comptime_list_loop_reads_local_indices_without_quadratic_copy_cost() {
+    let elements = vec!["true"; 512].join(",");
+    let package = compile(&format!(
+        "comptime fn count()->.Integer'builtin {{
+            let values:List<bool> = [{elements}];
+            var index:.Integer'builtin = 0;
+            var count:.Integer'builtin = 0;
+            while index < 64 {{
+                if values[index] {{count = count + 1;}}
+                index = index + 1;
+            }}
+            count
+        }}"
+    ))
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "count", 20_000).unwrap(),
+        Value::Integer(comptime_runtime::Integer::from_u128(64))
+    );
 }

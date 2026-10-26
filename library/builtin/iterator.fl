@@ -1,70 +1,152 @@
--- ==========================================================================
--- builtin/iterator – the Iterator protocol
--- ==========================================================================
+{-
+    Inline iteration delivers owned items to the consumer's handler. Producing
+    an item does not allocate a resumable iterator state. Implementations and
+    adapters expose their bodies for joint expansion with the consumer.
+-}
 
--- #[lang = "iterator"]
+typealias IterationUnit = .void'builtin;
+
+pub inline effect emit_item(value: T) where T;
+
 pub trait Iterator {
-    assoc Item: Type;
+    assoc Item: (.Type'builtin);
 
-    fn next(*self) -> ?Item;
+    inline fn iterate(self) -> #emit_item<Item> IterationUnit;
 
-    fn map(self, f: fn(Item) -> U) -> MapIterator<Self, U> where U {
-        MapIterator { iter: self, f: f }
-    }
-
-    fn filter(self, pred: fn(*Item) -> Bool) -> FilterIterator<Self> {
-        FilterIterator { iter: self, pred: pred }
-    }
-
-    fn foreach(self, f: fn(Item)) {
-        while true {
-            self.next() match {
-                .Some(item) => f(item),
-                .None       => break,
-            }
+    inline fn foreach(self, f: %c fn(Item)) where c: (.Type'builtin).vars.Closure {
+        self.iterate()# {
+            emit_item<Item>(value) => f(value),
         }
     }
 
-    fn collect(self) -> C where C :- FromIterator<Item> {
+    inline fn map(self, f: %c fn(Item) -> U) -> MapIterator<Self, U, c>
+        where U, c: (.Type'builtin).vars.Closure {
+        MapIterator<Self, U, c> {iter: self, f: f}
+    }
+
+    inline fn filter(self, pred: %c fn(*Item) -> bool) -> FilterIterator<Self, c>
+        where c: (.Type'builtin).vars.Closure {
+        FilterIterator<Self, c> {iter: self, pred: pred}
+    }
+
+    inline fn filter_map(self, f: %c fn(Item) -> ?U) -> FilterMapIterator<Self, U, c>
+        where U, c: (.Type'builtin).vars.Closure {
+        FilterMapIterator<Self, U, c> {iter: self, f: f}
+    }
+
+    inline fn inspect(self, f: %c fn(*Item)) -> InspectIterator<Self, c>
+        where c: (.Type'builtin).vars.Closure {
+        InspectIterator<Self, c> {iter: self, f: f}
+    }
+
+    inline fn take_while(self, pred: %c fn(*Item) -> bool) -> TakeWhileIterator<Self, c>
+        where c: (.Type'builtin).vars.Closure {
+        TakeWhileIterator<Self, c> {iter: self, pred: pred}
+    }
+
+    inline fn skip_while(self, pred: %c fn(*Item) -> bool) -> SkipWhileIterator<Self, c>
+        where c: (.Type'builtin).vars.Closure {
+        SkipWhileIterator<Self, c> {iter: self, pred: pred}
+    }
+
+    inline fn take(self, count: .usize'builtin) -> TakeIterator<Self> {
+        TakeIterator<Self> {iter: self, count: count}
+    }
+
+    inline fn skip(self, count: .usize'builtin) -> SkipIterator<Self> {
+        SkipIterator<Self> {iter: self, count: count}
+    }
+
+    inline fn flat_map(self, f: %c fn(Item) -> J) -> FlatMapIterator<Self, J, c>
+        where J :- Iterator, c: (.Type'builtin).vars.Closure {
+        FlatMapIterator<Self, J, c> {iter: self, f: f}
+    }
+
+    inline fn chain(self, next: J) -> ChainIterator<Self, J>
+        where J :- Iterator, requires J.as(Iterator).Item == Item {
+        ChainIterator<Self, J> {first: self, second: next}
+    }
+
+    inline fn any(self, pred: %c fn(*Item) -> bool) -> bool
+        where c: (.Type'builtin).vars.Closure {
+        self.iterate()# {
+            emit_item<Item>(value) => if pred(value.ref) {return true;},
+        }
+        false
+    }
+
+    inline fn all(self, pred: %c fn(*Item) -> bool) -> bool
+        where c: (.Type'builtin).vars.Closure {
+        self.iterate()# {
+            emit_item<Item>(value) => if not pred(value.ref) {return false;},
+        }
+        true
+    }
+
+    inline fn find(self, pred: %c fn(*Item) -> bool) -> ?Item
+        where c: (.Type'builtin).vars.Closure {
+        self.iterate()# {
+            emit_item<Item>(value) => if pred(value.ref) {return value;},
+        }
+        null
+    }
+
+    inline fn find_map(self, f: %c fn(Item) -> ?U) -> ?U
+        where U, c: (.Type'builtin).vars.Closure {
+        self.iterate()# {
+            emit_item<Item>(value) => f(value) match {
+                mapped? => {return mapped;},
+                null => {},
+            },
+        }
+        null
+    }
+
+    inline fn collect(self) -> C where C :- FromIterator<Item> {
         C.from_iter(self)
     }
 
-    fn count(self) -> Int {
-        var n = 0;
-        self.foreach(|item| { n = n + 1; });
-        n
-    }
-
-    fn enumerate(self) -> EnumerateIterator<Self> {
-        EnumerateIterator { iter: self, index: 0 }
-    }
-
-    fn zip(self, other: I) -> ZipIterator<Self, I> where I :- Iterator {
-        ZipIterator { a: self, b: other }
-    }
-
-    fn fold(self, init: A, f: fn(A, Item) -> A) -> A where A {
-        var acc = init;
-        self.foreach(|item| { acc = f(acc, item); });
-        acc
-    }
-
-    fn any(self, pred: fn(*Item) -> Bool) -> Bool {
-        while true {
-            self.next() match {
-                .Some(item) => if pred(item.ref) { return true },
-                .None       => return false,
-            }
+    inline fn fold(self, initial: A, f: %c fn(A, Item) -> A) -> A
+        where A, c: (.Type'builtin).vars.Closure {
+        var accumulator = initial;
+        self.iterate()# {
+            emit_item<Item>(value) => {
+                accumulator = f(accumulator, value);
+            },
         }
+        accumulator
     }
+}
 
-    fn all(self, pred: fn(*Item) -> Bool) -> Bool {
-        while true {
-            self.next() match {
-                .Some(item) => if not pred(item.ref) { return false },
-                .None       => return true,
-            }
-        }
+{-
+    An optional contributes its payload exactly once when present. Only this
+    optional layer is consumed: a present null payload in ??T is still an item.
+-}
+impl Iterator for ?T where T {
+    assoc Item: (.Type'builtin) = T;
+
+    inline fn iterate(self) -> #emit_item<T> IterationUnit {
+        self match {
+            value? => emit_item<T>(value)#,
+            null => {},
+        };
+    }
+}
+
+pub struct ChainIterator where I :- Iterator, J :- Iterator,
+    requires I.as(Iterator).Item == J.as(Iterator).Item {
+    first: I,
+    second: J,
+}
+
+impl Iterator for ChainIterator<I, J>
+    where I :- Iterator, J :- Iterator,
+    requires I.as(Iterator).Item == J.as(Iterator).Item {
+    assoc Item: (.Type'builtin) = I.as(Iterator).Item;
+
+    inline fn iterate(self) -> #emit_item<Item> IterationUnit {
+        self.first.as(Iterator).iterate();
+        self.second.as(Iterator).iterate();
     }
 }
 
@@ -72,65 +154,206 @@ pub trait FromIterator where T {
     fn from_iter(iter: I) -> Self where I :- Iterator, requires I.as(Iterator).Item == T;
 }
 
--- ── Adapter iterators ──────────────────────────────────────────────────────
-
-struct MapIterator where I :- Iterator, U {
+{-
+    The first rejected item ends this adapter's iteration. The lexical return
+    belongs to this iterate method, so an enclosing chain can still continue
+    with its next source. Neither rejection nor downstream exit leaks items.
+-}
+pub struct TakeWhileIterator where I :- Iterator, c: (.Type'builtin).vars.Closure {
     iter: I,
-    f: fn(I.Item) -> U,
+    pred: %c fn(*I.as(Iterator).Item) -> bool,
 }
 
-impl Iterator for MapIterator<I, U> where I :- Iterator, U {
-    assoc Item: Type = U;
-    fn next(*self) -> ?U = self.iter.next().map(self.f);
-}
+impl Iterator for TakeWhileIterator<I, c>
+    where I :- Iterator, c: (.Type'builtin).vars.Closure {
+    assoc Item: (.Type'builtin) = I.as(Iterator).Item;
 
-struct FilterIterator where I :- Iterator {
-    iter: I,
-    pred: fn(*I.Item) -> Bool,
-}
-
-impl Iterator for FilterIterator<I> where I :- Iterator {
-    assoc Item: Type = I.Item;
-    fn next(*self) -> ?Item {
-        while true {
-            self.iter.next() match {
-                .Some(item) => if self.pred(item.ref) { return .Some(item) },
-                .None       => return .None,
-            }
+    inline fn iterate(self) -> #emit_item<Item> IterationUnit {
+        let pred = self.pred;
+        self.iter.as(Iterator).iterate()# {
+            emit_item<Item>(value) => {
+                if not pred(value.ref) {return;}
+                emit_item<Item>(value)#;
+            },
         }
     }
 }
 
-struct EnumerateIterator where I :- Iterator {
+{-
+    Finish each mapped source before requesting the next outer item. The inner
+    iterate call propagates its effect to the enclosing consumer; it does not
+    request the outer source's emit operation again.
+-}
+pub struct FlatMapIterator where I :- Iterator, J :- Iterator, c: (.Type'builtin).vars.Closure {
     iter: I,
-    index: Int,
+    f: %c fn(I.as(Iterator).Item) -> J,
 }
 
-impl Iterator for EnumerateIterator<I> where I :- Iterator {
-    assoc Item: Type = Tuple<Int, I.Item>;
-    fn next(*self) -> ?Item {
-        self.iter.next().map(|item| {
-            let i = self.index;
-            self.index = self.index + 1;
-            (i, item)
-        })
+impl Iterator for FlatMapIterator<I, J, c>
+    where I :- Iterator, J :- Iterator, c: (.Type'builtin).vars.Closure {
+    assoc Item: (.Type'builtin) = J.as(Iterator).Item;
+
+    inline fn iterate(self) -> #emit_item<Item> IterationUnit {
+        let f = self.f;
+        self.iter.as(Iterator).iterate()# {
+            emit_item<I.as(Iterator).Item>(value) => f(value).as(Iterator).iterate(),
+        }
     }
 }
 
-struct ZipIterator where A :- Iterator, B :- Iterator {
-    a: A,
-    b: B,
+pub struct MapIterator where I :- Iterator, U, c: (.Type'builtin).vars.Closure {
+    iter: I,
+    f: %c fn(I.as(Iterator).Item) -> U,
 }
 
-impl Iterator for ZipIterator<A, B> where A :- Iterator, B :- Iterator {
-    assoc Item: Type = Tuple<A.Item, B.Item>;
-    fn next(*self) -> ?Item {
-        let a = self.a.next();
-        let b = self.b.next();
-        if a.is_some() and b.is_some() {
-            .Some((a.unwrap(), b.unwrap()))
-        } else {
-            .None
+impl Iterator for MapIterator<I, U, c>
+    where I :- Iterator, U, c: (.Type'builtin).vars.Closure {
+    assoc Item: (.Type'builtin) = U;
+
+    inline fn iterate(self) -> #emit_item<U> IterationUnit {
+        let f = self.f;
+        self.iter.as(Iterator).iterate()# {
+            emit_item<I.as(Iterator).Item>(value) => emit_item<U>(f(value))#,
+        }
+    }
+}
+
+pub struct FilterIterator where I :- Iterator, c: (.Type'builtin).vars.Closure {
+    iter: I,
+    pred: %c fn(*I.as(Iterator).Item) -> bool,
+}
+
+{-
+    Each input is consumed by the mapper once. An absent result emits nothing;
+    a present result transfers its payload, preserving any inner optional layer.
+-}
+pub struct FilterMapIterator where I :- Iterator, U, c: (.Type'builtin).vars.Closure {
+    iter: I,
+    f: %c fn(I.as(Iterator).Item) -> ?U,
+}
+
+impl Iterator for FilterMapIterator<I, U, c>
+    where I :- Iterator, U, c: (.Type'builtin).vars.Closure {
+    assoc Item: (.Type'builtin) = U;
+
+    inline fn iterate(self) -> #emit_item<U> IterationUnit {
+        let f = self.f;
+        self.iter.as(Iterator).iterate()# {
+            emit_item<I.as(Iterator).Item>(value) => f(value) match {
+                mapped? => emit_item<U>(mapped)#,
+                null => {},
+            },
+        }
+    }
+}
+
+{-
+    Observe an item before forwarding ownership to the next handler. The
+    callback borrows the item; inspection neither clones nor consumes it.
+-}
+pub struct InspectIterator where I :- Iterator, c: (.Type'builtin).vars.Closure {
+    iter: I,
+    f: %c fn(*I.as(Iterator).Item),
+}
+
+impl Iterator for InspectIterator<I, c>
+    where I :- Iterator, c: (.Type'builtin).vars.Closure {
+    assoc Item: (.Type'builtin) = I.as(Iterator).Item;
+
+    inline fn iterate(self) -> #emit_item<Item> IterationUnit {
+        let f = self.f;
+        self.iter.as(Iterator).iterate()# {
+            emit_item<Item>(value) => {
+                f(value.ref);
+                emit_item<Item>(value)#;
+            },
+        }
+    }
+}
+
+impl Iterator for FilterIterator<I, c>
+    where I :- Iterator, c: (.Type'builtin).vars.Closure {
+    assoc Item: (.Type'builtin) = I.as(Iterator).Item;
+
+    inline fn iterate(self) -> #emit_item<Item> IterationUnit {
+        let pred = self.pred;
+        self.iter.as(Iterator).iterate()# {
+            emit_item<Item>(value) => if pred(value.ref) {emit_item<Item>(value)#;},
+        }
+    }
+}
+
+{-
+    Test only the initial prefix. The first rejected item is forwarded and
+    disables the predicate for all later items. Skipped items keep their normal
+    cleanup; downstream exit retires the remaining source and environment.
+-}
+pub struct SkipWhileIterator where I :- Iterator, c: (.Type'builtin).vars.Closure {
+    iter: I,
+    pred: %c fn(*I.as(Iterator).Item) -> bool,
+}
+
+impl Iterator for SkipWhileIterator<I, c>
+    where I :- Iterator, c: (.Type'builtin).vars.Closure {
+    assoc Item: (.Type'builtin) = I.as(Iterator).Item;
+
+    inline fn iterate(self) -> #emit_item<Item> IterationUnit {
+        let pred = self.pred;
+        var skipping = true;
+        self.iter.as(Iterator).iterate()# {
+            emit_item<Item>(value) => {
+                if skipping {skipping = pred(value.ref);}
+                if not skipping {emit_item<Item>(value)#;}
+            },
+        }
+    }
+}
+
+{-
+    A zero limit does not start the source. After the last permitted emission,
+    return before the source can produce another item. Pending source resources
+    are still retired by the ordinary early-exit cleanup.
+-}
+pub struct TakeIterator where I :- Iterator {
+    iter: I,
+    count: .usize'builtin,
+}
+
+impl Iterator for TakeIterator<I> where I :- Iterator {
+    assoc Item: (.Type'builtin) = I.as(Iterator).Item;
+
+    inline fn iterate(self) -> #emit_item<Item> IterationUnit {
+        var remaining = self.count;
+        if remaining == 0 {return;}
+        self.iter.as(Iterator).iterate()# {
+            emit_item<Item>(value) => {
+                assumes remaining > 0;
+                remaining = remaining - 1;
+                emit_item<Item>(value)#;
+                if remaining == 0 {return;}
+            },
+        }
+    }
+}
+
+pub struct SkipIterator where I :- Iterator {
+    iter: I,
+    count: .usize'builtin,
+}
+
+impl Iterator for SkipIterator<I> where I :- Iterator {
+    assoc Item: (.Type'builtin) = I.as(Iterator).Item;
+
+    inline fn iterate(self) -> #emit_item<Item> IterationUnit {
+        var remaining = self.count;
+        self.iter.as(Iterator).iterate()# {
+            emit_item<Item>(value) => {
+                if remaining > 0 {
+                    remaining = remaining - 1;
+                } else {
+                    emit_item<Item>(value)#;
+                }
+            },
         }
     }
 }

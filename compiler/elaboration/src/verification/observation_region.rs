@@ -155,9 +155,9 @@ fn pattern_locals(
                 pending.push(next);
                 pending.push(first);
             }
-            Pattern::ErrorResult { inner: pattern, .. } | Pattern::Guard { pattern, .. } => {
-                pending.push(pattern)
-            }
+            Pattern::OptionalPresent(pattern)
+            | Pattern::ErrorResult { inner: pattern, .. }
+            | Pattern::Guard { pattern, .. } => pending.push(pattern),
             Pattern::Tuple(fields)
             | Pattern::TypeTuple(fields)
             | Pattern::Or(fields)
@@ -173,7 +173,7 @@ fn pattern_locals(
                     .ok_or("observation pattern field budget exhausted")?;
                 pending.extend(fields);
             }
-            Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
+            Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
         }
     }
     Ok(())

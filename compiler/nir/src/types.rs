@@ -225,12 +225,19 @@ pub enum Term {
     TypeListConcat(Vec<Term>),
     /// Completed structural value; field labels and order are part of identity.
     RecordValue(Vec<(String, Term)>),
-    /// Closed nominal value. Full nominal identity and declaration-order fields
-    /// survive staging; Some(index) distinguishes enum variants from structs.
+    /// Closed value of an identity-bearing aggregate. Nominal fields follow
+    /// declaration order; trusted normal-form collections retain element order.
+    /// Some(index) distinguishes nominal enum variants. A normal-form head
+    /// carries no layout authority here: admission must check its contract.
     NominalValue {
         ty: Box<Term>,
         variant: Option<u32>,
         fields: Vec<Term>,
+    },
+    /// Frozen optional data. None marks absence at exactly this outer layer.
+    OptionalValue {
+        ty: Box<Term>,
+        value: Option<Box<Term>>,
     },
     /// Frozen error result. Branch identity is its full label, never a layout tag.
     ErrorValue {
@@ -238,6 +245,9 @@ pub enum Term {
         label: Option<Box<Term>>,
         value: Box<Term>,
     },
+    /// Language optional qualification. Every layer is observable; it is neither
+    /// a nominal enum application nor a flattenable error/effect row.
+    Optional(Box<Term>),
     Pointer(Box<Term>),
     /// A comptime callable. Its inner signature must be an ordinary Function.
     ComptimeFunction(Box<Term>),
@@ -495,6 +505,10 @@ impl Term {
                 Self::Record(fields) | Self::RecordValue(fields) => {
                     pending.extend(fields.into_iter().map(|(_, field)| field))
                 }
+                Self::OptionalValue { ty, value } => {
+                    pending.push(*ty);
+                    pending.extend(value.map(|value| *value));
+                }
                 Self::ErrorValue { ty, label, value } => {
                     pending.push(*ty);
                     pending.extend(label.map(|label| *label));
@@ -511,7 +525,8 @@ impl Term {
                     pending.push(*signature);
                     pending.extend(environment);
                 }
-                Self::Pointer(inner)
+                Self::Optional(inner)
+                | Self::Pointer(inner)
                 | Self::ComptimeFunction(inner)
                 | Self::UnsafeFunction(inner) => pending.push(*inner),
                 Self::Function { parameters, result } => {
@@ -772,7 +787,8 @@ impl Term {
             | Self::Rigid { sort, .. }
             | Self::NormalForm { sort, .. } => *sort,
             Self::Runtime(_) => Sort::Runtime,
-            Self::ErrorValue { .. }
+            Self::OptionalValue { .. }
+            | Self::ErrorValue { .. }
             | Self::NominalValue { .. }
             | Self::TupleValue(_)
             | Self::ClosureContextValue(_)
@@ -1216,6 +1232,13 @@ impl Term {
                     .map(|(name, ty)| Ok((name.clone(), ty.rewrite(nesting, leaf)?)))
                     .collect::<Result<_, TypeError>>()?,
             ),
+            Self::OptionalValue { ty, value } => Self::OptionalValue {
+                ty: Box::new(ty.rewrite(nesting, leaf)?),
+                value: value
+                    .as_ref()
+                    .map(|value| value.rewrite(nesting, leaf).map(Box::new))
+                    .transpose()?,
+            },
             Self::ErrorValue { ty, label, value } => {
                 let Self::ErrorResult { errors, result } = ty.as_ref() else {
                     return Err(TypeError::InvalidErrorValue);
@@ -1260,6 +1283,7 @@ impl Term {
             Self::UnsafeFunction(inner) => {
                 Self::UnsafeFunction(Box::new(inner.rewrite(nesting, leaf)?))
             }
+            Self::Optional(inner) => Self::Optional(Box::new(inner.rewrite(nesting, leaf)?)),
             Self::Pointer(inner) => Self::Pointer(Box::new(inner.rewrite(nesting, leaf)?)),
             Self::Function { parameters, result } => {
                 let inner = nesting
@@ -1327,6 +1351,7 @@ pub enum TypeError {
     InvalidClosureContext,
     DuplicateRecordField(String),
     InvalidNominalValueType,
+    InvalidOptionalValue,
     InvalidErrorValue,
     InvalidComptimeFunctionSignature,
     InvalidUnsafeFunctionSignature,
@@ -1364,9 +1389,10 @@ impl fmt::Display for TypeError {
                 "runtime identity {id} is unavailable in this environment"
             ),
             Self::DuplicateRecordField(name) => write!(f, "duplicate record field {name:?}"),
+            Self::InvalidOptionalValue => f.write_str("invalid frozen optional value"),
             Self::InvalidErrorValue => f.write_str("invalid frozen error result"),
             Self::InvalidNominalValueType => {
-                f.write_str("nominal value requires an explicit nominal type")
+                f.write_str("frozen aggregate requires a nominal type, or an untagged normal-form type")
             }
             Self::BinderDepthOverflow => f.write_str("binder depth overflow"),
             Self::InvalidFunctionSignature => f.write_str("expected a function signature"),
@@ -1637,6 +1663,12 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
                 collect_runtime_dependencies(argument, result);
             }
         }
+        Term::OptionalValue { ty, value } => {
+            collect_runtime_dependencies(ty, result);
+            if let Some(value) = value {
+                collect_runtime_dependencies(value, result);
+            }
+        }
         Term::ErrorValue { ty, label, value } => {
             collect_runtime_dependencies(ty, result);
             if let Some(label) = label {
@@ -1668,9 +1700,10 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
             }
             collect_runtime_dependencies(signature, result);
         }
-        Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
-            collect_runtime_dependencies(inner, result)
-        }
+        Term::Optional(inner)
+        | Term::Pointer(inner)
+        | Term::ComptimeFunction(inner)
+        | Term::UnsafeFunction(inner) => collect_runtime_dependencies(inner, result),
         Term::Function {
             parameters,
             result: output,
@@ -1882,9 +1915,21 @@ fn validate(
                 validate(item, holes, frames, allow_free, core)?;
             }
         }
-        Term::Pointer(inner) => {
+        Term::Optional(inner) | Term::Pointer(inner) => {
             require_sort(inner, Sort::Type)?;
             validate(inner, holes, frames, allow_free, core)?;
+        }
+        Term::OptionalValue { ty, value } => {
+            if !matches!(ty.as_ref(), Term::Optional(_)) {
+                return Err(TypeError::InvalidOptionalValue);
+            }
+            validate(ty, holes, frames, allow_free, core)?;
+            if let Some(value) = value {
+                if value.sort() == Sort::Runtime {
+                    return Err(TypeError::InvalidOptionalValue);
+                }
+                validate(value, holes, frames, allow_free, core)?;
+            }
         }
         Term::ErrorValue { ty, label, value } => {
             require_sort(ty, Sort::Type)?;
@@ -1904,9 +1949,22 @@ fn validate(
             }
             validate(value, holes, frames, allow_free, core)?;
         }
-        Term::NominalValue { ty, fields, .. } => {
+        Term::NominalValue {
+            ty,
+            variant,
+            fields,
+        } => {
             require_sort(ty, Sort::Type)?;
-            if !matches!(ty.as_ref(), Term::Nominal { .. }) {
+            if !matches!(ty.as_ref(), Term::Nominal { .. })
+                && !(variant.is_none()
+                    && matches!(
+                        ty.as_ref(),
+                        Term::NormalForm {
+                            sort: Sort::Type,
+                            ..
+                        }
+                    ))
+            {
                 return Err(TypeError::InvalidNominalValueType);
             }
             validate(ty, holes, frames, allow_free, core)?;
@@ -2124,6 +2182,13 @@ impl fmt::Display for Term {
                 }
                 f.write_str("))")
             }
+            Self::OptionalValue { ty, value } => {
+                write!(f, "(optional-value (type {ty}) ")?;
+                match value {
+                    Some(value) => write!(f, "(present {value}))"),
+                    None => f.write_str("(absent))"),
+                }
+            }
             Self::ErrorValue { ty, label, value } => {
                 write!(f, "(error-value (type {ty}) (branch ")?;
                 match label {
@@ -2178,6 +2243,7 @@ impl fmt::Display for Term {
             }
             Self::ComptimeFunction(inner) => write!(f, "(comptime-function {inner})"),
             Self::UnsafeFunction(inner) => write!(f, "(unsafe-function {inner})"),
+            Self::Optional(inner) => write!(f, "(optional {inner})"),
             Self::Pointer(inner) => write!(f, "(pointer {inner})"),
             Self::Function { parameters, result } => {
                 f.write_str("(function (parameters ")?;

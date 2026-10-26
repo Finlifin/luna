@@ -95,6 +95,127 @@ fn package() -> Package {
 }
 
 #[test]
+fn homogeneous_value_lists_require_the_bound_head_and_validate_every_element() {
+    let mut package = package();
+    package.normal_forms.truncate(1);
+    package.normal_forms[0].role = nir::normal_forms::Role::TypeList;
+    let list = Term::NormalForm {
+        head: id(1),
+        sort: Sort::Type,
+        arguments: vec![ty(P::Bool)],
+    };
+    let function = &mut package.functions[0];
+    function.signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::ComptimeValue,
+            ty: list.clone(),
+        }],
+        result: Box::new(list.clone()),
+    };
+    function.body.ty = list.clone();
+    function.body.kind = K::Local(function.parameters[0]);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let good = Value::List {
+        ty: list.clone(),
+        values: vec![Value::Bool(true), Value::Bool(false)],
+    };
+    for bad in [
+        Value::List {
+            ty: list.clone(),
+            values: vec![Value::Bool(true), Value::Type(ty(P::Bool))],
+        },
+        Value::List {
+            ty: list_type(),
+            values: vec![Value::Bool(true)],
+        },
+        Value::Tuple(vec![Value::Bool(true)]),
+        Value::TypeList(vec![ty(P::Bool)]),
+    ] {
+        assert!(vm.invoke(id(3), vec![bad]).is_err());
+        assert_eq!(vm.invoke(id(3), vec![good.clone()]).unwrap(), good);
+    }
+    let mut unbound = package.clone();
+    unbound.normal_forms[0].role = nir::normal_forms::Role::Opaque;
+    let mut vm = Interpreter::for_comptime(&unbound, Budget::default()).unwrap();
+    assert!(vm.invoke(id(3), vec![good.clone()]).is_err());
+    let wide = Value::List {
+        ty: list.clone(),
+        values: vec![Value::Bool(true); 100_001],
+    };
+    assert!(wide.immutable_copy_work().is_none());
+    assert!(good.immutable_copy_work().is_some());
+    let frozen = good
+        .clone()
+        .into_normal_term(&mut Default::default())
+        .unwrap();
+    assert_eq!(
+        frozen,
+        Term::NominalValue {
+            ty: Box::new(list.clone()),
+            variant: None,
+            fields: vec![Term::Bool(true), Term::Bool(false)],
+        }
+    );
+    assert!(frozen.check_scope(&[]).is_ok());
+    assert!(
+        vm.invoke_with_normal_arguments(id(3), vec![(list.clone(), frozen.clone())])
+            .is_err(),
+        "the unbound head must not acquire list representation authority by serialization"
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for malformed in [
+        Term::NominalValue {
+            ty: Box::new(list_type()),
+            variant: None,
+            fields: vec![Term::Bool(true)],
+        },
+        Term::NominalValue {
+            ty: Box::new(list.clone()),
+            variant: Some(0),
+            fields: vec![Term::Bool(true)],
+        },
+        Term::NominalValue {
+            ty: Box::new(list.clone()),
+            variant: None,
+            fields: vec![Term::Primitive(P::Bool)],
+        },
+        Term::TupleValue(vec![Term::Bool(true)]),
+        Term::TypeListValue(vec![Term::Primitive(P::Bool)]),
+    ] {
+        assert!(
+            vm.invoke_with_normal_arguments(id(3), vec![(list.clone(), malformed)])
+                .is_err()
+        );
+        assert_eq!(
+            vm.invoke_with_normal_arguments(id(3), vec![(list.clone(), frozen.clone())])
+                .unwrap(),
+            good
+        );
+    }
+    assert!(
+        good.clone()
+            .into_normal_term(&mut comptime_runtime::Budget {
+                steps: 1,
+                ..Default::default()
+            })
+            .is_err()
+    );
+    let empty = Value::List {
+        ty: list.clone(),
+        values: vec![],
+    };
+    let empty_term = empty
+        .clone()
+        .into_normal_term(&mut Default::default())
+        .unwrap();
+    assert_eq!(
+        vm.invoke_with_normal_arguments(id(3), vec![(list, empty_term)])
+            .unwrap(),
+        empty
+    );
+}
+
+#[test]
 fn collected_type_list_crosses_invocation_and_preserves_tuple_head() {
     let package = package();
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
@@ -440,4 +561,178 @@ fn planned_input_type_rewrite_charges_unused_closure_body() {
         enough.invoke(id(3), vec![]).unwrap(),
         Value::Type(tuple_type(vec![]))
     );
+}
+
+#[test]
+fn repeated_fixed_list_indices_charge_selected_elements_not_whole_lists() {
+    check_list_read_cost(false);
+}
+
+#[test]
+fn repeated_local_list_indices_charge_selected_elements_not_whole_lists() {
+    check_list_read_cost(true);
+}
+
+fn check_list_read_cost(local_index: bool) {
+    for element in [P::Bool, P::Type] {
+        let run = |reads: usize| {
+            let (mut package, list) = fixed_list_read_package(element, reads, "511");
+            if local_index {
+                use_local_list_index(&mut package);
+            }
+            let argument = if element == P::Type {
+                Value::TypeList(vec![ty(P::Bool); 512])
+            } else {
+                Value::List {
+                    ty: list,
+                    values: vec![Value::Bool(true); 512],
+                }
+            };
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let before = vm.remaining_steps();
+            let mut arguments = vec![argument];
+            if local_index {
+                arguments.push(Value::Integer(comptime_runtime::Integer::from_u128(511)));
+            }
+            let result = vm.invoke(id(3), arguments).unwrap();
+            assert_eq!(
+                result,
+                if element == P::Type {
+                    Value::Type(ty(P::Bool))
+                } else {
+                    Value::Bool(true)
+                }
+            );
+            before - vm.remaining_steps()
+        };
+        let single = run(1);
+        let repeated = run(64);
+        assert!(repeated > single);
+        assert!(
+            repeated - single < 2_000,
+            "{element:?}: {single} -> {repeated}"
+        );
+    }
+}
+
+fn fixed_list_read_package(element: P, reads: usize, spelling: &str) -> (Package, Term) {
+    use nir::program::Literal;
+    let mut package = package();
+    package.normal_forms.truncate(1);
+    package.normal_forms[0].role = nir::normal_forms::Role::TypeList;
+    let list = Term::NormalForm {
+        head: id(1),
+        sort: Sort::Type,
+        arguments: vec![ty(element)],
+    };
+    let function = &mut package.functions[0];
+    let source = function.body.source;
+    function.signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::ComptimeValue,
+            ty: list.clone(),
+        }],
+        result: Box::new(ty(element)),
+    };
+    let read = Expr {
+        source,
+        ty: ty(element),
+        kind: K::TypeListIndex(
+            Box::new(Expr {
+                source,
+                ty: list.clone(),
+                kind: K::Local(function.parameters[0]),
+            }),
+            Box::new(Expr {
+                source,
+                ty: ty(P::Integer),
+                kind: K::Literal(Literal::Integer(spelling.into())),
+            }),
+        ),
+    };
+    function.body = Expr {
+        source,
+        ty: ty(element),
+        kind: K::Block {
+            statements: vec![read.clone(); reads - 1],
+            result: Some(Box::new(read)),
+        },
+    };
+    (package, list)
+}
+
+#[test]
+fn fixed_list_index_rejects_bounds_and_recovers_without_mutating_the_list() {
+    use comptime_interpretor::ErrorKind;
+    for element in [P::Bool, P::Type] {
+        for local_index in [false, true] {
+            for spelling in ["-1", "1", "999999999999999999999999999999999999"] {
+                let (mut package, list) = fixed_list_read_package(element, 1, spelling);
+                if local_index {
+                    use_local_list_index(&mut package);
+                }
+                let (good, _) = fixed_list_read_package(element, 1, "0");
+                let mut recovery = good.functions[0].clone();
+                recovery.declaration = id(4);
+                package.functions.push(recovery);
+                let argument = if element == P::Type {
+                    Value::TypeList(vec![ty(P::Bool)])
+                } else {
+                    Value::List {
+                        ty: list,
+                        values: vec![Value::Bool(true)],
+                    }
+                };
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let mut arguments = vec![argument.clone()];
+                if local_index {
+                    let mut position = comptime_runtime::Integer::parse_literal(
+                        spelling.trim_start_matches('-'),
+                        &mut Default::default(),
+                    )
+                    .unwrap();
+                    if spelling.starts_with('-') {
+                        position = position.negated();
+                    }
+                    arguments.push(Value::Integer(position));
+                }
+                assert_eq!(
+                    vm.invoke(id(3), arguments).unwrap_err().kind,
+                    ErrorKind::IndexOutOfBounds,
+                    "{element:?} [{spelling}]"
+                );
+                let expected = if element == P::Type {
+                    Value::Type(ty(P::Bool))
+                } else {
+                    Value::Bool(true)
+                };
+                assert_eq!(vm.invoke(id(4), vec![argument]).unwrap(), expected);
+            }
+        }
+    }
+}
+
+fn use_local_list_index(package: &mut Package) {
+    let function = &mut package.functions[0];
+    let index = LocalId { owner: 3, index: 1 };
+    function.parameters.push(index);
+    let Term::Function { parameters, .. } = &mut function.signature else {
+        unreachable!()
+    };
+    parameters.push(Parameter {
+        sort: Sort::ComptimeValue,
+        ty: ty(P::Integer),
+    });
+    let K::Block { statements, result } = &mut function.body.kind else {
+        unreachable!()
+    };
+    for read in statements
+        .iter_mut()
+        .chain(result.iter_mut().map(Box::as_mut))
+    {
+        let K::TypeListIndex(_, operand) = &mut read.kind else {
+            unreachable!()
+        };
+        operand.kind = K::Local(index);
+    }
 }

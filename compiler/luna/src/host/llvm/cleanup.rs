@@ -523,6 +523,9 @@ pub(super) fn admitted_direct_program(
                             if let K::Tuple(fields) | K::AnonymousRecord {fields} | K::Record {fields, ..} | K::Variant {fields, ..} = &expr.kind {
                                 found |= fields.get(*slot).is_some_and(|field| field.source == *value_source);
                             }
+                            if let K::OptionalPresent(payload) = &expr.kind {
+                                found |= *slot == 0 && payload.source == *value_source;
+                            }
                             if let K::Closure {captures, ..} = &expr.kind {
                                 found |= captures.get(*slot).is_some_and(|capture| capture.value.as_ref().map_or(expr.source, |value| value.source) == *value_source);
                             }
@@ -1098,6 +1101,13 @@ impl Emitter<'_> {
         if matches!(value.ty, Ty::Enum(_)) {
             return self.variant_condition(&value, tag);
         }
+        if matches!(value.ty, Ty::Optional(_)) {
+            if tag > 1 {
+                return Err("host optional cleanup tag out of range".into());
+            }
+            let actual = self.optional_tag(&value)?;
+            return Ok(self.instruction(Ty::Bool, format!("icmp eq i1 {}, {tag}", actual.text)));
+        }
         if matches!(value.ty, Ty::ErrorResult(_)) {
             let actual = self.instruction(
                 Ty::Int(32, false),
@@ -1105,7 +1115,7 @@ impl Emitter<'_> {
             );
             return Ok(self.instruction(Ty::Bool, format!("icmp eq i32 {}, {tag}", actual.text)));
         }
-        Err("host cleanup tag requires enum or error result".into())
+        Err("host cleanup tag requires enum, optional or error result".into())
     }
     fn cleanup_steps(
         &mut self,
@@ -1373,6 +1383,7 @@ pub(super) fn has_invoke(steps: &[Step]) -> bool {
 }
 fn variant_count(ty: &Ty) -> Option<usize> {
     match ty {
+        Ty::Optional(_) => Some(2),
         Ty::Enum(layout) => Some(layout.fields.len()),
         Ty::ErrorResult(variants) => Some(variants.len()),
         _ => None,
@@ -1388,6 +1399,9 @@ fn field_layout(ty: &Ty, field: usize, tag: Option<usize>) -> Option<(Ty, Vec<us
                 layout.fields.get(tag)?.get(field)?.1.clone(),
                 vec![tag + 1, field],
             ))
+        }
+        Ty::Optional(payload) if field == 0 && tag == Some(1) => {
+            Some(((**payload).clone(), vec![1]))
         }
         Ty::ErrorResult(variants) if field == 0 => {
             let tag = tag?;
@@ -1445,6 +1459,7 @@ fn cleanup_field_layout(
                 .clone(),
         ),
         Some(Term::Closure { environment, .. }) => Some(environment.get(field)?.clone()),
+        Some(Term::Optional(payload)) if field == 0 && tag == Some(1) => Some((**payload).clone()),
         Some(Term::ErrorResult { errors, result }) if field == 0 => Some(if tag? == 0 {
             (**result).clone()
         } else {

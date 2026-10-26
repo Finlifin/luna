@@ -239,10 +239,11 @@ impl Checker<'_, '_> {
                         ));
                     }
                 };
-                if !nir::normal_forms::supported_input_type_in_scope_in(
+                if !nir::normal_forms::supported_input_type_with_collections_in(
                     &domain,
                     &this.input_binders(&visible_parameters),
                     |head| Some(head) == this.protocols.tuple,
+                    |head| Some(head) == this.protocols.meta_list,
                     |id| {
                         this.structs.contains_key(&id)
                             || this.enums.contains_key(&id)

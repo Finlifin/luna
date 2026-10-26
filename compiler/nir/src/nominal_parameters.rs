@@ -260,6 +260,20 @@ fn validate_value(
             Err("nominal value index lacks matching completed domain evidence".into())
         };
     }
+    if let Term::OptionalValue { ty, value } = argument {
+        let Term::Optional(payload) = domain else {
+            return Err("optional value index requires an optional domain".into());
+        };
+        if ty.as_ref() != domain {
+            return Err("optional value index domain mismatch".into());
+        }
+        return match value {
+            Some(value) => {
+                validate_value(value, payload, fuel, layout, declared, depth + 1, target)
+            }
+            None => Ok(()),
+        };
+    }
     if let Term::ErrorValue { value, .. } = argument {
         let payload = crate::error_results::frozen_payload_domain(argument, domain, fuel).map_err(
             |error| {

@@ -1,4 +1,4 @@
--- Bind --meta-list-type input::Elements --tuple-type input::Tuple.
+-- Bind --meta-list-type input.Elements --tuple-type input.Tuple.
 pure comptime fn Elements<T> -> .Type'builtin { T }
 pure comptime fn Tuple<...Es: Elements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Text = .str'builtin;

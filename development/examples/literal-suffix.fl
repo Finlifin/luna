@@ -1,4 +1,4 @@
-{- luna literal-suffix.fl --literal-into-protocol input::Convert --interpret run
+{- luna literal-suffix.fl --literal-into-protocol input.Convert --interpret run
 The result context selects Convert<.flag, bool> for Char. -}
 typealias Symbol = .Symbol'builtin;
 typealias Char = .char'builtin;

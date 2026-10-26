@@ -33,9 +33,9 @@ impl Checker<'_, '_> {
                 .map_err(|cause| call_inference_error(span, cause))?;
         }
         candidate
-            .refine_type_views(
+            .refine_type_views_metered(
                 |ty, budget| {
-                    self.callable_input_view_budgeted(ty, budget, span)
+                    self.callable_input_view_metered(ty, budget, span)
                         .map_err(|e| e.message)
                 },
                 crate::ptc::Budget::default(),
@@ -417,9 +417,9 @@ impl Checker<'_, '_> {
             // before passing domains to callback and literal checking.
             if routes.iter().any(|route| route.is_collected()) {
                 candidate
-                    .refine_type_views(
+                    .refine_type_views_metered(
                         |ty, budget| {
-                            self.callable_input_view_budgeted(ty, budget, span)
+                            self.callable_input_view_metered(ty, budget, span)
                                 .map_err(|e| e.message)
                         },
                         crate::ptc::Budget::default(),

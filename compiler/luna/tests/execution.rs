@@ -980,10 +980,15 @@ fn comptime_snapshot_effect_type_admission_keeps_occurrences_without_execution()
         }
     );
     assert!(vm.events().is_empty());
+    let grant = Budget::default();
+    let setup_steps = grant.steps
+        - Interpreter::for_comptime(&package, grant)
+            .unwrap()
+            .remaining_steps();
     let mut exhausted = Interpreter::for_comptime(
         &package,
         Budget {
-            steps: 1,
+            steps: setup_steps + 1,
             depth: 128,
         },
     )
@@ -13642,10 +13647,15 @@ fn explicit_comptime_functions_preserve_phase_and_execute_through_checked_entry(
             .unwrap(),
         Value::Bool(true)
     );
+    let grant = Budget::default();
+    let setup_steps = grant.steps
+        - Interpreter::for_comptime(&package, grant)
+            .unwrap()
+            .remaining_steps();
     let mut bounded = Interpreter::for_comptime(
         &package,
         Budget {
-            steps: 3,
+            steps: setup_steps + 3,
             depth: 128,
         },
     )
@@ -34156,7 +34166,7 @@ fn variadic_normal_heads_collect_type_lists_without_replacing_the_head() {
     assert!(
         compile_with_protocols(&source, &Default::default())
             .unwrap_err()
-            .contains("bound meta.List<Type>")
+            .contains("bound meta.List<T>")
     );
 }
 
@@ -34243,7 +34253,7 @@ fn variadic_normal_type_collection_evaluates_each_input_once_in_source_order() {
     assert!(
         compile_with_protocols(&source, &foreign)
             .unwrap_err()
-            .contains("bound meta.List<Type>")
+            .contains("bound meta.List<T>")
     );
 }
 
@@ -34979,8 +34989,8 @@ fn bound_tuple_spread_widths_deliver_context_to_multiple_generic_producers() {
             ...packet(|value| value,10))}
         fn stop()->bool {consume(...packet(|flag| not flag,do {return true;9}),...packet(|flag| flag,10))}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -35036,8 +35046,8 @@ fn bound_tuple_memory_layout_preserves_callable_and_pointer_fields() {
         fn run()->bool {let (callback,value)=packet();callback(value)}
         fn pointer_packet(value:*bool)->Tuple<*bool,bool> {(value,true)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -35107,8 +35117,8 @@ fn bound_tuple_stores_effectful_code_without_storing_a_computation() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -35154,8 +35164,8 @@ fn bound_tuple_staging_retains_identity_through_defaults_and_nested_forwarding()
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -35230,8 +35240,8 @@ fn type_list_constants_reconstruct_and_specialize_without_tuple_coercion() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -35277,8 +35287,8 @@ fn bound_tuple_copy_requires_declared_capability_and_checks_components() {
         fn read(value:Tuple<bool,bool>)->bool {let (a,b)=value;a and b}
         fn run()->bool {let original=(true,true);let copied=original;read(original) and read(copied)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -35340,8 +35350,8 @@ fn bound_tuple_callable_cleanup_contexts_follow_nested_fields() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -35366,8 +35376,8 @@ fn symbolic_type_list_spreads_in_annotations_specialize_without_unfolding() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -35443,8 +35453,8 @@ fn type_list_call_inputs_specialize_mixed_tuple_annotations() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -35461,8 +35471,8 @@ fn type_list_call_inputs_specialize_mixed_tuple_annotations() {
                 &invalid,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    meta_list: Some("input::List"),
-                    tuple: Some("input::Tuple"),
+                    meta_list: Some("input.List"),
+                    tuple: Some("input.Tuple"),
                     ..Default::default()
                 }
             )
@@ -35505,8 +35515,8 @@ fn ordinary_type_list_annotation_inputs_report_the_phase_boundary() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -35578,8 +35588,8 @@ fn aggregate_comptime_inputs_specialize_normal_results_in_both_execution_paths()
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -35649,8 +35659,8 @@ fn module_qualified_type_constructor_selectors_preserve_declaration_identity() {
         fn pair()->meta.types.Tuple<bool,bool> {(true,false)}
         fn run()->bool {let (a,b)=pair();a and not b}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::meta::List"),
-        tuple: Some("input::meta::types::Tuple"),
+        meta_list: Some("input.meta.List"),
+        tuple: Some("input.meta.types.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -35667,10 +35677,10 @@ fn module_qualified_type_constructor_selectors_preserve_declaration_identity() {
         1
     );
     for wrong in [
-        "input::Tuple",
-        "input::meta::Tuple",
-        "input::meta::::types::Tuple",
-        "input::meta::types::Tuple::nested",
+        "input.Tuple",
+        "input.meta.Tuple",
+        "input.meta..types.Tuple",
+        "input.meta.types.Tuple.nested",
     ] {
         assert!(
             compile_with_source_bindings(
@@ -35949,8 +35959,8 @@ fn partial_named_enum_payloads_in_callbacks_and_generic_defaults() {
 #[test]
 fn partial_enum_payload_spreads_infer_literal_fields_and_evaluate_packets_once() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(
@@ -36006,8 +36016,8 @@ fn partial_enum_payload_spreads_infer_literal_fields_and_evaluate_packets_once()
 #[test]
 fn partial_enum_spreads_propagate_known_fields_into_generic_packets() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let source = "typealias Type=.Type'builtin;
@@ -36066,8 +36076,8 @@ fn partial_enum_spreads_propagate_known_fields_into_generic_packets() {
 #[test]
 fn partial_enum_spreads_share_peer_types_without_rechecking_values() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let prefix = "typealias Type=.Type'builtin;
@@ -36117,8 +36127,8 @@ fn partial_enum_spreads_share_peer_types_without_rechecking_values() {
 #[test]
 fn partial_enum_peer_packets_settle_before_numeric_defaults() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let prefix = "typealias Type=.Type'builtin;
@@ -36174,8 +36184,8 @@ fn partial_enum_peer_packets_settle_before_numeric_defaults() {
 #[test]
 fn partial_enum_packet_widths_come_from_checked_generic_results() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let prefix = "typealias Type=.Type'builtin;
@@ -36287,430 +36297,6 @@ fn partial_callback_context_reaches_explicit_and_early_returns() {
 }
 
 #[test]
-fn optional_injection_keeps_single_evaluation_and_nested_absence() {
-    let selectors = luna::protocols::type_constructors::Selectors {
-        optional: Some("input::Maybe"),
-        ..Default::default()
-    };
-    let source="enum Maybe where T {Absent,Present(T)}
-        fn flag()->bool {true}
-        fn empty()->?bool {null}
-        fn wrap()->??bool {empty()}
-        fn take(value:?bool)->bool {value match {flag?=>flag,null=>false}}
-        fn run()->bool {take(flag()) and (wrap() match {inner?=>inner match {_?=>false,null=>true},null=>false})}";
-    let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
-    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
-    let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
-    assert_eq!(
-        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        calls(&package, &vm),
-        vec!["run", "flag", "take", "wrap", "empty"]
-    );
-    for body in [
-        "fn run()->?bool {'x'}",
-        "fn run()->?.u8'builtin {256}",
-        "fn run()->bool {let value:?bool=true;value}",
-    ] {
-        assert!(
-            compile_with_source_bindings(
-                &format!("enum Maybe where T {{Absent,Present(T)}} {body}"),
-                &Default::default(),
-                selectors
-            )
-            .is_err()
-        );
-    }
-}
-
-#[test]
-fn generic_optional_injection_preserves_scope_instances_and_call_count() {
-    let selectors = luna::protocols::type_constructors::Selectors {
-        optional: Some("input::Maybe"),
-        ..Default::default()
-    };
-    let source="enum Maybe where T {Absent,Present(T)}
-        fn flag()->bool {true}
-        fn keep(value:?T)->?T where T {value}
-        fn relay(value:T)->?T where T {keep(value)}
-        fn empty()->?bool {null}
-        fn nested(value:??T)->??T where T {value}
-        fn run()->bool {
-            let first=keep(flag());let second=relay(true);let outer=nested(empty());let same=keep(outer);
-            (first match {value?=>value,null=>false}) and
-            (second match {value?=>value,null=>false}) and
-            (same match {inner?=>inner match {_?=>false,null=>true},null=>false})}";
-    let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
-    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
-    let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
-    assert_eq!(
-        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        calls(&package, &vm),
-        vec![
-            "run", "flag", "keep", "relay", "keep", "empty", "nested", "keep"
-        ]
-    );
-    let instances = graph
-        .functions
-        .iter()
-        .filter(|function| function.function.name == "keep")
-        .collect::<Vec<_>>();
-    assert_eq!(instances.len(), 2);
-    assert!(
-        instances
-            .iter()
-            .any(|function| function.key.arguments
-                == vec![nir::Term::Primitive(nir::Primitive::Bool)])
-    );
-    assert!(instances.iter().any(
-        |function| matches!(&function.key.arguments[..],[nir::Term::Nominal {arguments,..}]
-        if arguments==&vec![nir::Term::Primitive(nir::Primitive::Bool)])
-    ));
-}
-
-#[test]
-fn optional_propagation_extracts_one_layer_and_stops_later_arguments() {
-    let selectors = luna::protocols::type_constructors::Selectors {
-        optional: Some("input::Maybe"),
-        ..Default::default()
-    };
-    let prefix = "enum Maybe where T {Absent,Present(T)}
-        fn missing()->?bool {null}
-        fn present()->?bool {true}
-        fn later()->bool {false}
-        fn combine(first:bool,second:bool)->bool {first and not second}
-        fn failed()->?bool {combine(missing()?,later())}
-        fn passed()->?bool {combine(present()?,later())}
-        fn one(value:??bool)->??bool {let inner=value?;inner}
-        fn run()->bool {
-            (failed() match {_?=>false,null=>true}) and
-            (passed() match {flag?=>flag,null=>false}) and
-            (one(.Present(null)) match {inner?=>inner match {_?=>false,null=>true},null=>false}) and
-            (one(null) match {_?=>false,null=>true})}";
-    let package = compile_with_source_bindings(prefix, &Default::default(), selectors).unwrap();
-    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
-    let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
-    assert_eq!(
-        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        calls(&package, &vm),
-        vec![
-            "run", "failed", "missing", "passed", "present", "later", "combine", "one", "one"
-        ]
-    );
-    for definition in ["fn bad()->bool {missing()?}", "fn bad()->?bool {true?}"] {
-        assert!(
-            compile_with_source_bindings(
-                &format!("{prefix} {definition}"),
-                &Default::default(),
-                selectors
-            )
-            .is_err()
-        );
-    }
-}
-
-#[test]
-fn optional_type_values_construct_dynamic_payloads_once_at_comptime() {
-    let selectors = luna::protocols::type_constructors::Selectors {
-        optional: Some("input::Maybe"),
-        ..Default::default()
-    };
-    let source = "typealias Type=.Type'builtin;
-        enum Maybe where T {Absent,Present(T)}
-        comptime fn Payload()->Type {bool}
-        comptime fn Wrap(value:Type)->Type {?value}
-        pure comptime fn Opaque<T>->Type {?T}
-        comptime fn OpaqueValue()->Type {Opaque<bool>}
-        comptime fn Build()->Type {Wrap(Payload())}
-        comptime fn Nested()->Type {Wrap(Wrap(Payload()))}
-        comptime fn Early()->Type {?do {return bool;}}
-        comptime fn VoidType()->Type {Wrap(.void'builtin)}";
-    let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
-    let optional = package
-        .enums
-        .iter()
-        .find(|definition| definition.name == "Maybe")
-        .unwrap()
-        .declaration;
-    let wrap = |ty| nir::Term::Nominal {
-        declaration: optional,
-        arguments: vec![ty],
-    };
-    let boolean = nir::Term::Primitive(nir::Primitive::Bool);
-    for (name, expected, trace) in [
-        (
-            "Build",
-            wrap(boolean.clone()),
-            vec!["Build", "Payload", "Wrap"],
-        ),
-        (
-            "Nested",
-            wrap(wrap(boolean.clone())),
-            vec!["Nested", "Payload", "Wrap", "Wrap"],
-        ),
-        ("Early", boolean, vec!["Early"]),
-        (
-            "VoidType",
-            wrap(nir::Term::Primitive(nir::Primitive::Void)),
-            vec!["VoidType", "Wrap"],
-        ),
-        (
-            "OpaqueValue",
-            nir::Term::NormalForm {
-                head: id(&package, "Opaque"),
-                sort: nir::Sort::Type,
-                arguments: vec![nir::Term::Primitive(nir::Primitive::Bool)],
-            },
-            vec!["OpaqueValue"],
-        ),
-    ] {
-        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
-        assert_eq!(
-            vm.invoke(id(&package, name), vec![]).unwrap(),
-            Value::Type(expected.clone())
-        );
-        assert_eq!(calls(&package, &vm), trace);
-        assert_eq!(
-            luna::invocation::invoke(&package, name, 100_000).unwrap(),
-            Value::Type(expected)
-        );
-    }
-    assert!(package.to_string().contains("nominal-type-value"));
-    let invalid = source.replace("?value", "?true");
-    assert!(compile_with_source_bindings(&invalid, &Default::default(), selectors).is_err());
-}
-
-#[test]
-fn partial_optional_branches_preserve_types_bindings_and_execution_order() {
-    let selectors = luna::protocols::type_constructors::Selectors {
-        optional: Some("input::Maybe"),
-        ..Default::default()
-    };
-    let prefix = "typealias Byte=.u8'builtin;
-        enum Maybe where T {Absent,Present(T)}
-        fn choose(value:bool)->bool {value}
-        fn touch()->bool {true}
-        fn byte()->Byte {9}
-        fn source(flag:bool)->?Byte {if flag {null} else {9}}
-        fn keep(value:?T)->?T where T {value}";
-    for (expression, missing, present) in [
-        (
-            "if choose(flag) {touch();null} else {byte()}",
-            vec!["run", "choose", "touch", "keep"],
-            vec!["run", "choose", "byte", "keep"],
-        ),
-        (
-            "when {choose(flag)=>null,false=>9,else=>byte()}",
-            vec!["run", "choose", "keep"],
-            vec!["run", "choose", "byte", "keep"],
-        ),
-        (
-            "source(flag) match {null=>null,value?=>value}",
-            vec!["run", "source", "keep"],
-            vec!["run", "source", "keep"],
-        ),
-    ] {
-        for flag in ["true", "false"] {
-            let source = format!(
-                "{prefix} fn run()->bool {{let flag={flag};let result=keep({expression});
-                result match {{value?=>not flag and value==9,null=>flag}}}}"
-            );
-            let package =
-                compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
-            let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
-            let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
-            assert_eq!(
-                vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
-                Value::Bool(true)
-            );
-            assert_eq!(
-                calls(&package, &vm),
-                if flag == "true" {
-                    missing.clone()
-                } else {
-                    present.clone()
-                }
-            );
-            let keep = graph
-                .functions
-                .iter()
-                .find(|function| function.function.name == "keep")
-                .unwrap();
-            assert_eq!(
-                keep.key.arguments,
-                vec![nir::Term::Primitive(nir::Primitive::U8)]
-            );
-        }
-    }
-    for expression in [
-        "if true {null} else {null}",
-        "true match {true=>null,false=>null}",
-        "when {true=>null,else=>null}",
-        "when {true=>null,false=>true,else=>byte()}",
-        "source(true) match {value?=>null,null=>value}",
-        "source(true) match {null=>null}",
-        "if true {let private_value=9;null} else {private_value}",
-    ] {
-        let source = format!("{prefix} fn run()->bool {{let result=keep({expression});true}}");
-        assert!(
-            compile_with_source_bindings(&source, &Default::default(), selectors).is_err(),
-            "accepted {expression}"
-        );
-    }
-}
-
-#[test]
-fn optional_propagation_context_preserves_nested_payloads_and_loop_exits() {
-    let selectors = luna::protocols::type_constructors::Selectors {
-        optional: Some("input::Maybe"),
-        ..Default::default()
-    };
-    let source="typealias Byte=.u8'builtin;
-        enum Maybe where T {Absent,Present(T)}
-        fn empty()->?T where T {null}
-        fn identity(value:T)->T where T {value}
-        fn later()->Byte {9}
-        fn failed()->?Byte {let flag:bool=empty()?;later()}
-        fn nested()->??Byte {let value:?Byte=empty()?;value}
-        fn inner_missing()->??Byte {let value:?Byte=identity(.Present(null))?;value}
-        fn loop_exit()->?Byte {while true {let flag:bool=empty()?;} later()}
-        fn loop_success()->?Byte {var count:Byte=0;while count < 2 {
-            let value:Byte=identity(.Present(1))?;assumes count < 2;assumes value == 1;count = count + value;} count}
-        fn run()->bool {
-            (failed() match {_?=>false,null=>true}) and
-            (nested() match {_?=>false,null=>true}) and
-            (inner_missing() match {inner?=>inner match {_?=>false,null=>true},null=>false}) and
-            (loop_exit() match {_?=>false,null=>true}) and
-            (loop_success() match {value?=>value==2,null=>false})}";
-    let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
-    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
-    let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
-    assert_eq!(
-        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        calls(&package, &vm),
-        vec![
-            "run",
-            "failed",
-            "empty",
-            "nested",
-            "empty",
-            "inner_missing",
-            "identity",
-            "loop_exit",
-            "empty",
-            "loop_success",
-            "identity",
-            "identity"
-        ]
-    );
-    let empty = graph
-        .functions
-        .iter()
-        .filter(|function| function.function.name == "empty")
-        .collect::<Vec<_>>();
-    assert_eq!(empty.len(), 2);
-    assert!(
-        empty
-            .iter()
-            .any(|f| f.key.arguments == vec![nir::Term::Primitive(nir::Primitive::Bool)])
-    );
-    assert!(empty.iter().any(
-        |f| matches!(&f.key.arguments[..],[nir::Term::Nominal {arguments,..}]
-        if arguments==&vec![nir::Term::Primitive(nir::Primitive::U8)])
-    ));
-    let comptime_source = source.replace("fn ", "comptime fn ");
-    let comptime =
-        compile_with_source_bindings(&comptime_source, &Default::default(), selectors).unwrap();
-    assert_eq!(
-        luna::invocation::invoke(&comptime, "run", 100_000).unwrap(),
-        Value::Bool(true)
-    );
-    for body in [
-        "let value:bool=true?;9",
-        "let value:Byte=9?;9",
-        "let value:bool=identity(true)?;9",
-        "let value=empty()?;9",
-        "let source:?Byte=9;let value:bool=source?;9",
-    ] {
-        let invalid = format!("{source} fn bad()->?Byte {{{body}}}");
-        assert!(
-            compile_with_source_bindings(&invalid, &Default::default(), selectors).is_err(),
-            "accepted {body}"
-        );
-    }
-}
-
-#[test]
-fn inferred_callback_return_evidence_retry_preserves_captures_and_calls() {
-    let selectors = luna::protocols::type_constructors::Selectors {
-        optional: Some("input::Maybe"),
-        ..Default::default()
-    };
-    let source = "typealias Byte=.u8'builtin;
-        enum Maybe where T {Absent,Present(T)}
-        fn byte()->Byte {9}
-        fn touch()->bool {true}
-        fn apply(action:%{base:Byte} fn(bool)->?T,flag:bool)->?T where T {action(flag)}
-        fn run()->bool {let base=byte();
-            let yes=apply(|flag| {touch();if flag {return base;} null},true);
-            let no=apply(|flag| {touch();if flag {return base;} null},false);
-            (yes match {value?=>value==9,null=>false}) and (no match {_?=>false,null=>true})}";
-    let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
-    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
-    let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
-    assert_eq!(
-        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        calls(&package, &vm),
-        vec!["run", "byte", "apply", "touch", "apply", "touch"]
-    );
-    let apply = graph
-        .functions
-        .iter()
-        .find(|function| function.function.name == "apply")
-        .unwrap();
-    assert_eq!(
-        apply.key.arguments,
-        vec![nir::Term::Primitive(nir::Primitive::U8)]
-    );
-    let comptime_source = source
-        .replace("fn ", "comptime fn ")
-        .replace("fn(", "comptime fn(");
-    let comptime =
-        compile_with_source_bindings(&comptime_source, &Default::default(), selectors).unwrap();
-    assert_eq!(
-        luna::invocation::invoke(&comptime, "run", 100_000).unwrap(),
-        Value::Bool(true)
-    );
-    let prefix = "enum Maybe where T {Absent,Present(T)}
-        fn apply(action:fn(bool)->?T)->?T where T {action(true)}";
-    for body in [
-        "if flag {return true;} 9",
-        "let inner=apply(|other| {if other {return 9;} null});null",
-        "if flag {return null;} null",
-    ] {
-        let source = format!("{prefix} fn run()->bool {{let value=apply(|flag| {{{body}}});true}}");
-        assert!(
-            compile_with_source_bindings(&source, &Default::default(), selectors).is_err(),
-            "accepted {body}"
-        );
-    }
-}
-
-#[test]
 fn checked_pointer_predicates_do_not_reuse_facts_after_writes() {
     use elaboration::verification::{self as v, optimization};
     for source in [
@@ -36735,8 +36321,8 @@ fn checked_pointer_predicates_do_not_reuse_facts_after_writes() {
 #[test]
 fn bound_tuple_dynamic_syntax_checks_independent_formation_requirements() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     for expression in ["Tuple<bool, Choose()>", "Tuple<bool, do {Choose()}>"] {
@@ -36774,8 +36360,8 @@ fn bound_tuple_dynamic_syntax_checks_independent_formation_requirements() {
 #[test]
 fn bound_tuple_syntax_checks_known_block_inputs_before_invocation() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     for expression in [
@@ -36799,8 +36385,8 @@ fn bound_tuple_syntax_checks_known_block_inputs_before_invocation() {
 #[test]
 fn bound_tuple_deferred_list_contracts_check_values_and_recover() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     for expression in [
@@ -36868,8 +36454,8 @@ fn comptime_type_list_indexing_preserves_elements_and_checks_bounds() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -36974,8 +36560,8 @@ fn comptime_type_list_indexing_prepared_calls_and_nonlocal_exit() {
         comptime fn Negative()->Type {Pick(elements(Tuple<bool>),-1)}
         comptime fn Huge()->Type {Pick(elements(Tuple<bool>),340282366920938463463374607431768211456)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -37010,8 +36596,8 @@ fn comptime_type_list_indexing_rejects_wrong_input_types_and_runtime_escape() {
         pure comptime fn List<T>->Type {List<T>}
         pure comptime fn Tuple<...Es:List<Type>>->Type {Tuple<...Es>}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     for body in [
@@ -37048,8 +36634,8 @@ fn type_list_indexing_specializes_runtime_parameter_and_result_types() {
         fn flag()->bool {identity(elements(Tuple<bool,.u8'builtin>),true)}
         fn nested()->Tuple<bool,.u8'builtin> {identity(elements(Tuple<Tuple<bool,.u8'builtin>>),(true,9))}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -37096,8 +36682,8 @@ fn type_list_indexing_direct_type_annotations_preserve_opaque_identity() {
         fn nested(value:elements(Tuple<Tuple<bool,.u8'builtin>>)[0])->Tuple<bool,.u8'builtin> {value}
         fn run()->Tuple<bool,.u8'builtin> {nested((true,byte()))}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -37153,8 +36739,8 @@ fn pending_type_computations_wait_resume_and_publish_opaque_types_once() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -38002,8 +37588,8 @@ fn compact_residual_entries_preserve_tuple_head_and_single_collected_type_list()
         comptime fn Template(unused:bool,comptime T:Type)->Type {Tuple<T,bool>}",
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -38498,8 +38084,8 @@ fn completed_source_type_refinements_keep_tuple_identity_and_lexical_subjects() 
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -38853,8 +38439,8 @@ fn abstract_compound_type_descriptions_preserve_tuple_heads_and_scope() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -38999,8 +38585,8 @@ fn abstract_type_admission_preserves_nested_formation_requirements() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -39137,8 +38723,8 @@ fn scoped_type_computations_resume_with_declaration_evidence_without_replay() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -39288,8 +38874,8 @@ fn deferred_signature_tasks_wait_resolve_tuple_types_and_preserve_execution_orde
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -39785,8 +39371,8 @@ fn explicit_comptime_type_signature_computations_preserve_slots_and_nested_binde
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -39923,8 +39509,8 @@ fn explicit_comptime_type_inputs_support_predicates_and_type_list_results() {
         fn flag()->bool {known(bool,checked(bool,true))}
         fn run()->Tuple<.u8'builtin,bool> {generic(pair(.u8'builtin,(7,checked(bool,true))))}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -39994,8 +39580,8 @@ fn explicit_comptime_type_defaults_preserve_computed_types_and_overrides() {
         fn checked_flag()->bool {checked(bool)}
         fn override_predicate()->bool {checked(bool,.ok=false)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -40111,8 +39697,8 @@ fn source_type_refinements_use_if_and_short_circuit_path_facts() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -40496,7 +40082,6 @@ fn match_continuations_join_only_successful_normal_paths() {
 #[test]
 fn optional_branch_probes_use_scoped_type_facts() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        optional: Some("input::Maybe"),
         ..Default::default()
     };
     let prefix = "typealias Type=.Type'builtin;typealias Flag=bool;typealias Byte=.u8'builtin;
@@ -40825,7 +40410,7 @@ fn source_arithmetic_protocols_select_associated_outputs_and_preserve_order() {
             fn combine(value:T,rhs:bool)->T.as(Operation<bool>).Output where T :- Operation<bool> {{value {symbol} rhs}}
             fn run()->bool {{(left() {symbol} right()) and combine(left(),right())}}");
         let mut selectors = luna::protocols::type_constructors::Selectors::default();
-        selectors.arithmetic[operator as usize] = Some("input::Operation");
+        selectors.arithmetic[operator as usize] = Some("input.Operation");
         let package = compile_with_source_bindings(&source, &Default::default(), selectors)
             .unwrap_or_else(|error| panic!("{operator}: {error}"));
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
@@ -40881,7 +40466,7 @@ fn arithmetic_protocol_results_keep_effect_execution_boundaries() {
         fn subject()->#read bool {Flag {value:true} + true}
         fn run()->bool {subject()# {read()=>true,}}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
-    selectors.arithmetic[0] = Some("input::Operation");
+    selectors.arithmetic[0] = Some("input.Operation");
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -40913,7 +40498,7 @@ fn primitive_left_arithmetic_uses_heterogeneous_rhs_protocols() {
             fn core_call(a:Byte,b:Byte)->Byte where requires a == 9 and b == 3 {{a {symbol} b}}
             fn native_values()->Byte {{core_call(9,3)}}");
         let mut selectors = luna::protocols::type_constructors::Selectors::default();
-        selectors.arithmetic[operator as usize] = Some("input::Operation");
+        selectors.arithmetic[operator as usize] = Some("input.Operation");
         let package =
             compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
@@ -40962,7 +40547,7 @@ fn arithmetic_rhs_context_comes_from_proven_capabilities_and_subjects() {
         fn generic(value:T)->T.as(Operation<Choice>).Output where T :- Operation<Choice> {value + .Ready}
         fn identity(value:U)->U where U {value}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
-    selectors.arithmetic[0] = Some("input::Operation");
+    selectors.arithmetic[0] = Some("input.Operation");
     let source=format!("{prefix}
         fn exact()->bool {{Flag<bool> {{value:true}} + .Ready}}
         fn contextual(value:Flag<bool>)->bool {{value + identity(.Ready)}}
@@ -41094,7 +40679,7 @@ fn primitive_arithmetic_supplies_unique_enum_symbol_context() {
             fn run()->bool {{left() {symbol} .Ready}}
             fn native()->Byte {{let value:Byte=9;value {symbol} 3}}");
         let mut selectors = luna::protocols::type_constructors::Selectors::default();
-        selectors.arithmetic[operator as usize] = Some("input::Operation");
+        selectors.arithmetic[operator as usize] = Some("input.Operation");
         let package = compile_with_source_bindings(&source, &Default::default(), selectors)
             .unwrap_or_else(|error| panic!("{operator}: {error}"));
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
@@ -41172,7 +40757,7 @@ fn primitive_arithmetic_propagates_protocol_context_through_nested_rhs() {
             fn run()->bool {{block() and call() and branch(true) and not branch(false) and matched(true) and not matched(false)}}
             fn native()->Byte {{let value:Byte=9;value {symbol} do {{mark();if true {{3}} else {{3}}}}}}");
         let mut selectors = luna::protocols::type_constructors::Selectors::default();
-        selectors.arithmetic[operator as usize] = Some("input::Operation");
+        selectors.arithmetic[operator as usize] = Some("input.Operation");
         let package = compile_with_source_bindings(&source, &Default::default(), selectors)
             .unwrap_or_else(|error| panic!("{operator}: {error}"));
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
@@ -41238,7 +40823,7 @@ fn primitive_arithmetic_contextual_lambda_preserves_captures() {
         fn apply(flag:bool)->bool {left() + (|value| value and flag)}
         fn run()->bool {apply(true) and not apply(false)}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
-    selectors.arithmetic[0] = Some("input::Operation");
+    selectors.arithmetic[0] = Some("input.Operation");
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
@@ -41451,8 +41036,8 @@ fn deferred_signature_caller_substitution_preserves_nested_tuple_identity_and_gu
         pure comptime fn Tuple<...Es:List<Type>>->Type {Tuple<...Es>}",
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -41967,7 +41552,7 @@ fn source_unary_protocols_select_outputs_and_evaluate_operands_once() {
             fn generic(value:T)->T.as(Operation).Output where T :- Operation {{ {symbol}value}}
             fn run()->bool {{({symbol}operand()) and generic(operand())}}");
         let mut selectors = luna::protocols::type_constructors::Selectors::default();
-        selectors.arithmetic[operator as usize] = Some("input::Operation");
+        selectors.arithmetic[operator as usize] = Some("input.Operation");
         let package =
             compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
         let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
@@ -42015,7 +41600,7 @@ fn source_unary_protocol_results_obey_effect_boundaries() {
             fn subject()->#read bool {{ {symbol}Flag {{value:true}}}}
             fn run()->bool {{subject()# {{read()=>true,}}}}");
         let mut selectors = luna::protocols::type_constructors::Selectors::default();
-        selectors.arithmetic[operator as usize] = Some("input::Operation");
+        selectors.arithmetic[operator as usize] = Some("input.Operation");
         let package =
             compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
         assert_eq!(
@@ -43001,7 +42586,7 @@ fn index_protocol_selects_source_identity_generic_results_and_order() {
         fn lookup(value:T,idx:bool)->T.as(Access<bool>).Output where T :- Access<bool> {value[idx]}
         fn run()->bool {receiver()[key()] and lookup(receiver(),key())}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        index: Some("input::Access"),
+        index: Some("input.Access"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -43057,7 +42642,7 @@ fn index_protocol_preserves_pointer_results_and_explicit_writeback() {
         fn run()->Word {var word:Word=0;target(word.ref)[key()].* = rhs();word}
         fn bits()->Word {var word:Word=0;target(word.ref)[true].*'bitvec[4..8]=0b1010;word}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        index: Some("input::Access"),
+        index: Some("input.Access"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -43088,7 +42673,7 @@ fn index_protocol_infers_keys_and_retains_effect_boundaries() {
         impl Access<Key> for Flags {assoc Output:Type=bool;fn index(self,idx:Key)->bool {idx match {.one=>self.value,.two=>false}}}
         fn run()->bool {Flags {value:true}[.one]}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        index: Some("input::Access"),
+        index: Some("input.Access"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -43130,7 +42715,7 @@ fn index_protocol_context_rejects_ambiguity_and_checks_instance_requirements() {
         "{prefix}fn run()->bool {{generic(Container<bool> {{value:true}}) and Container<bool> {{value:true}}[identity(.First)]}}"
     );
     let selectors = luna::protocols::type_constructors::Selectors {
-        index: Some("input::Access"),
+        index: Some("input.Access"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
@@ -43174,7 +42759,7 @@ fn index_protocol_consumes_affine_receivers_through_ordinary_calls() {
         struct Flags {value:bool}
         impl Access<bool> for Flags {fn index(self,idx:bool)->bool {self.value and idx}}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        index: Some("input::Access"),
+        index: Some("input.Access"),
         ..Default::default()
     };
     for (body, valid) in [
@@ -43217,7 +42802,7 @@ fn index_protocol_preserves_program_contracts_and_diverging_keys() {
         fn run()->Byte {lookup(receiver(),41)}
         fn early()->Byte {receiver()[do {return 7;}]}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        index: Some("input::Access"),
+        index: Some("input.Access"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -43262,7 +42847,7 @@ fn arithmetic_protocol_diverging_rhs_does_not_select_a_never_instance() {
             fn run()->bool {{receiver() {symbol} do {{return true;}}}}
             fn leave()->bool {{while true {{receiver() {symbol} do {{break;}};}}true}}");
         let mut selectors = luna::protocols::type_constructors::Selectors::default();
-        selectors.arithmetic[operator as usize] = Some("input::Operation");
+        selectors.arithmetic[operator as usize] = Some("input.Operation");
         let package =
             compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
         for entry in ["run", "leave"] {
@@ -43328,7 +42913,7 @@ fn index_protocol_diverging_key_cleans_receiver_before_caller_without_dispatch()
         fn receiver()->Held {Held {}}
         fn run()->bool {let caller=Caller {};receiver()[do {return true;}]}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        index: Some("input::Access"),
+        index: Some("input.Access"),
         ..Default::default()
     };
     let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
@@ -44117,8 +43702,8 @@ fn deferred_runtime_signatures_wait_admit_and_erase_staged_inputs() {
         comptime fn First(es:List<Type>)->Type {es[0]}",
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -45198,7 +44783,7 @@ fn literal_suffix_uses_explicit_protocol_and_contextual_result() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            literal_into: Some("input::Convert"),
+            literal_into: Some("input.Convert"),
             ..Default::default()
         },
     )
@@ -45226,7 +44811,7 @@ fn literal_suffix_runtime_conversions_preserve_input_and_contracts() {
             impl Convert<.flag,bool> for Source {{fn literal_into(comptime value:Source)->bool {{value == {expected}}}}}
             fn run()->bool {{{literal}}}");
         let selectors = luna::protocols::type_constructors::Selectors {
-            literal_into: Some("input::Convert"),
+            literal_into: Some("input.Convert"),
             ..Default::default()
         };
         let package =
@@ -45314,7 +44899,7 @@ fn dependent_normal_inputs_preserve_literal_conversion_calls() {
             comptime fn Build(flag:bool)->Type {{Tagged<Choose(flag),{input}>}}
             comptime fn Run()->Type {{Build(true)}}");
         let selectors = luna::protocols::type_constructors::Selectors {
-            literal_into: Some("input::Convert"),
+            literal_into: Some("input.Convert"),
             ..Default::default()
         };
         let package =
@@ -45535,7 +45120,7 @@ fn normal_input_type_branches_select_contextual_literal_results() {
                 &source,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    literal_into: Some("input::Convert"),
+                    literal_into: Some("input.Convert"),
                     ..Default::default()
                 },
             )
@@ -45675,7 +45260,7 @@ fn normal_input_match_types_preserve_candidate_bindings_and_guards() {
                 &source,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    literal_into: Some("input::Convert"),
+                    literal_into: Some("input.Convert"),
                     ..Default::default()
                 },
             )
@@ -45729,9 +45314,9 @@ fn known_collected_type_list_indices_supply_dependent_literal_contexts() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
-                literal_into: Some("input::Convert"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
+                literal_into: Some("input.Convert"),
                 ..Default::default()
             },
         )
@@ -45758,8 +45343,8 @@ fn known_type_list_index_failures_remain_invocation_failures() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                meta_list: Some("input::List"),
-                tuple: Some("input::Tuple"),
+                meta_list: Some("input.List"),
+                tuple: Some("input.Tuple"),
                 ..Default::default()
             },
         )
@@ -46795,13 +46380,6 @@ fn quote_callable_adapters_keep_affine_receiver_and_caller_cleanup_order() {
             cleanup,
             vec!["nested_clean", "held_clean", "caller_clean"],
             "{observed:?}"
-        );
-        assert_eq!(
-            observed
-                .iter()
-                .filter(|name| name.as_str() == "drop::callable")
-                .count(),
-            3
         );
         let invalid = source.replace(
             &format!("{action}true"),

@@ -2574,12 +2574,18 @@ impl Builder<'_> {
                         .find(|h| h.declaration == *head)
                         .ok_or("IIR normal-form type has no head declaration")?;
                     descriptor
-                        .check_closed_arguments_budgeted_in(
+                        .check_arguments_in_scope_with_collections_budgeted_in(
                             arguments,
                             |head| {
                                 self.package.normal_forms.iter().any(|metadata| {
                                     metadata.declaration == head
                                         && metadata.role == nir::normal_forms::Role::Tuple
+                                })
+                            },
+                            |head| {
+                                self.package.normal_forms.iter().any(|metadata| {
+                                    metadata.declaration == head
+                                        && metadata.role == nir::normal_forms::Role::TypeList
                                 })
                             },
                             |ty, variant, fuel| {
@@ -2590,6 +2596,8 @@ impl Builder<'_> {
                                     fuel,
                                 )
                             },
+                            |_, _| false,
+                            &[],
                             &mut self.fuel,
                             self.package.target,
                         )
@@ -2709,6 +2717,12 @@ impl Builder<'_> {
             | Term::TypeListValue(items)
             | Term::TypeListConcat(items)
             | Term::TupleValue(items) => children.extend(items.iter().cloned()),
+            Term::OptionalValue { ty, value } => {
+                children.push((**ty).clone());
+                if let Some(value) = value {
+                    children.push((**value).clone());
+                }
+            }
             Term::ErrorValue { ty, label, value } => {
                 children.push((**ty).clone());
                 if let Some(label) = label {
@@ -2723,9 +2737,10 @@ impl Builder<'_> {
             Term::Record(fields) | Term::RecordValue(fields) => {
                 children.extend(fields.iter().map(|(_, ty)| ty.clone()))
             }
-            Term::Pointer(t) | Term::ComptimeFunction(t) | Term::UnsafeFunction(t) => {
-                children.push((**t).clone())
-            }
+            Term::Optional(t)
+            | Term::Pointer(t)
+            | Term::ComptimeFunction(t)
+            | Term::UnsafeFunction(t) => children.push((**t).clone()),
             Term::Function { parameters, result } => {
                 children.extend(parameters.iter().map(|p| p.ty.clone()));
                 children.push((**result).clone());
@@ -2761,7 +2776,8 @@ impl Builder<'_> {
                 self.pattern(pattern, depth + 1)?;
                 self.expr(condition, depth + 1)?;
             }
-            P::Observe { inner: pattern, .. }
+            P::OptionalPresent(pattern)
+            | P::Observe { inner: pattern, .. }
             | P::Remap { pattern, .. }
             | P::Binding { inner: pattern, .. } => self.pattern(pattern, depth + 1)?,
             P::NominalType { fields, .. }
@@ -2778,7 +2794,7 @@ impl Builder<'_> {
                     self.pattern(p, depth + 1)?;
                 }
             }
-            P::Wild | P::Unit | P::Literal(_) => {}
+            P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => {}
         }
         Ok(())
     }
@@ -2810,6 +2826,8 @@ impl Builder<'_> {
                 | K::ReadPointer(value)
                 | K::PointerAnonymousField { pointer: value, .. }
                 | K::PointerField { pointer: value, .. }
+                | K::OptionalPresent(value)
+                | K::OptionalType(value)
                 | K::PointerType(value)
                 | K::BitVecType(value)
                 | K::IntegerNegate(value)
@@ -3175,6 +3193,8 @@ impl Builder<'_> {
             | K::ReadPointer(value)
             | K::PointerAnonymousField { pointer: value, .. }
             | K::PointerField { pointer: value, .. }
+            | K::OptionalPresent(value)
+            | K::OptionalType(value)
             | K::PointerType(value)
             | K::BitVecType(value)
             | K::IntegerNegate(value)
@@ -3310,7 +3330,12 @@ impl Builder<'_> {
                     self.queue.push_back(Task::Type(ty.clone()));
                 }
             }
-            K::Literal(_) | K::Local(_) | K::Unit | K::Break(_) | K::Continue(_) => {}
+            K::Literal(_)
+            | K::Local(_)
+            | K::OptionalAbsent
+            | K::Unit
+            | K::Break(_)
+            | K::Continue(_) => {}
         }
         Ok(())
     }

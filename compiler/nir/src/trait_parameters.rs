@@ -52,6 +52,12 @@ impl Term {
                     }
                     pending.extend(fields.iter().map(|(_, value)| (value, depth + 1)));
                 }
+                Self::OptionalValue { ty, value } => {
+                    pending.push((ty, depth + 1));
+                    if let Some(value) = value {
+                        pending.push((value, depth + 1));
+                    }
+                }
                 Self::ErrorValue { ty, label, value } => {
                     pending.push((ty, depth + 1));
                     if let Some(label) = label {
@@ -109,6 +115,18 @@ impl Term {
                 }
                 pending.push((a, b, depth + 1));
                 pending.extend(af.iter().zip(bf).rev().map(|(a, b)| (a, b, depth + 1)));
+            } else if let (
+                Self::OptionalValue { ty: a, value: av },
+                Self::OptionalValue { ty: b, value: bv },
+            ) = (left, right)
+            {
+                if av.is_some() != bv.is_some() {
+                    return None;
+                }
+                pending.push((a, b, depth + 1));
+                if let (Some(a), Some(b)) = (av, bv) {
+                    pending.push((a, b, depth + 1));
+                }
             } else if let (
                 Self::ErrorValue {
                     ty: a,
@@ -203,6 +221,19 @@ impl Term {
                         return false;
                     }
                     pending.extend(a.iter().zip(b));
+                }
+                (
+                    Self::OptionalValue { ty: a, value: av },
+                    Self::OptionalValue { ty: b, value: bv },
+                ) => {
+                    if av.is_some() != bv.is_some() {
+                        return true;
+                    }
+                    if a == b {
+                        if let (Some(a), Some(b)) = (av, bv) {
+                            pending.push((a, b));
+                        }
+                    }
                 }
                 (
                     Self::ErrorValue {
@@ -516,7 +547,10 @@ impl Trait {
             };
             if matches!(
                 argument,
-                Term::ErrorValue { .. } | Term::NominalValue { .. } | Term::TupleValue(_)
+                Term::OptionalValue { .. }
+                    | Term::ErrorValue { .. }
+                    | Term::NominalValue { .. }
+                    | Term::TupleValue(_)
             ) {
                 crate::nominal_parameters::validate_symbolic_value_in(
                     argument,
@@ -754,6 +788,18 @@ pub fn validate_record_index_with_admission_in(
                     return Err("trait record index field mismatch".into());
                 }
                 pending.push((value, ty));
+            }
+            continue;
+        }
+        if let Term::OptionalValue { ty, value } = value {
+            let Term::Optional(payload) = domain else {
+                return Err("trait optional index requires an optional domain".into());
+            };
+            if ty.as_ref() != domain {
+                return Err("trait optional index domain mismatch".into());
+            }
+            if let Some(value) = value {
+                pending.push((value, payload));
             }
             continue;
         }

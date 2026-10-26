@@ -1,21 +1,33 @@
--- builtin package root. Sibling .fl files are discovered as modules.
--- Public root re-exports also supply names to builtin's own child modules.
--- Only builtin.prelude is imported by default into other packages.
+{-
+  builtin package root. Sibling .fl files are discovered as modules.
+  Public root re-exports also supply names to builtin's own child modules.
+  The prelude supplies default imports to other packages.
+-}
 
 pub use primitives.*;
 pub use tuple.Tuple;
 pub use traits.*;
-pub use option.Option;
-pub use result.Result;
-pub use iterator.{Iterator, FromIterator};
+pub use option.OptionalOps;
+pub use option_unwrap.OptionalUnwrap;
+pub use result.ErrorResultOps;
+pub use result_unwrap.ErrorResultUnwrap;
+pub use iterator.{Iterator, FromIterator, emit_item, MapIterator, FilterIterator, FilterMapIterator, FlatMapIterator, TakeWhileIterator, SkipWhileIterator, TakeIterator, SkipIterator, ChainIterator, InspectIterator};
 pub use ops.*;
 
+pub mod math {
+    pub use comparison.{Eq, Ord, Ordering};
+    pub use math_intrinsics.*;
+}
+
 pub mod prelude {
+    pub use .math;
     pub use primitives.*;
     pub use tuple.Tuple;
     pub use traits.*;
-    pub use option.Option;
-    pub use result.Result;
+    pub use option.OptionalOps;
+    pub use option_unwrap.OptionalUnwrap;
+    pub use result.ErrorResultOps;
+    pub use result_unwrap.ErrorResultUnwrap;
     pub use iterator.{Iterator, FromIterator};
     pub use ops.*;
 }

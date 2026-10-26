@@ -60,14 +60,6 @@ impl Index<Int> for Vec<T> where T {
     }
 }
 
-impl Iterator for Vec<T> where T {
-    assoc Item: Type = T;
-    fn next(*self) -> ?T {
-        -- Vec iteration is handled by VecIter adapter in practice
-        todo()
-    }
-}
-
 impl FromIterator<T> for Vec<T> where T {
     fn from_iter(iter: I) -> Self where I :- Iterator, requires I.as(Iterator).Item == T {
         var v = Vec.new();

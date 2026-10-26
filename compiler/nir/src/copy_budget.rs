@@ -431,7 +431,12 @@ fn charge_node(
                         0
                     }
                     K::Literal(value) => literal_size(value),
-                    K::Unit | K::Local(_) | K::Function(_) | K::Break(_) | K::Continue(_) => 0,
+                    K::OptionalAbsent
+                    | K::Unit
+                    | K::Local(_)
+                    | K::Function(_)
+                    | K::Break(_)
+                    | K::Continue(_) => 0,
                     K::If {
                         condition,
                         then_branch,
@@ -473,6 +478,8 @@ fn charge_node(
                         0
                     }
                     K::EffectResume(value)
+                    | K::OptionalPresent(value)
+                    | K::OptionalType(value)
                     | K::PointerType(value)
                     | K::AddressOf(value)
                     | K::ReadPointer(value)
@@ -717,7 +724,9 @@ fn charge_node(
                         work.push((Node::Pattern(inner), depth + 1));
                         0
                     }
-                    P::Observe { inner, .. } | P::Binding { inner, .. } => {
+                    P::OptionalPresent(inner)
+                    | P::Observe { inner, .. }
+                    | P::Binding { inner, .. } => {
                         work.push((Node::Pattern(inner), depth + 1));
                         0
                     }
@@ -762,7 +771,7 @@ fn charge_node(
                         work.extend(outputs.iter().map(|(_, ty)| (Node::Type(ty), depth + 1)));
                         0
                     }
-                    P::Wild | P::Unit => 0,
+                    P::OptionalAbsent | P::Wild | P::Unit => 0,
                 }
             }
             Node::Type(_) => unreachable!(),

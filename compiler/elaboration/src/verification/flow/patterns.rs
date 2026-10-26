@@ -151,7 +151,12 @@ impl Walker<'_> {
         if depth >= 128 {
             return Err(Reason::DepthLimit);
         }
-        let (patterns, types, kind, mut selected) = match pattern {
+        let (patterns, types, kind, mut selected): (
+            &[Pattern],
+            Vec<Term>,
+            AggregateKind,
+            Condition,
+        ) = match pattern {
             Pattern::Wild | Pattern::Unit => return Ok(Some(Condition::Bool(true))),
             Pattern::Binding { inner, .. } => {
                 return self.pattern_selection_condition(inner, value, ty, state, depth + 1);
@@ -207,6 +212,27 @@ impl Walker<'_> {
                     Condition::Bool(true),
                 )
             }
+            Pattern::OptionalAbsent | Pattern::OptionalPresent(_) => {
+                let Term::Optional(payload) = ty else {
+                    return Err(Reason::InvalidSignature);
+                };
+                let present = matches!(pattern, Pattern::OptionalPresent(_));
+                let Some(selected) = self.optional_condition(value, present, state)? else {
+                    return Ok(None);
+                };
+                if selected == Condition::Bool(false) || !present {
+                    return Ok(Some(selected));
+                }
+                let Pattern::OptionalPresent(inner) = pattern else {
+                    unreachable!()
+                };
+                (
+                    std::slice::from_ref(inner.as_ref()),
+                    vec![(**payload).clone()],
+                    AggregateKind::Optional(true),
+                    selected,
+                )
+            }
             Pattern::Variant {
                 declaration,
                 index,
@@ -251,6 +277,41 @@ impl Walker<'_> {
             selected = conjunction(selected, condition);
         }
         Ok(Some(selected))
+    }
+    fn optional_condition(
+        &mut self,
+        input: &Value,
+        present: bool,
+        state: &mut State,
+    ) -> Result<Option<Condition>, Reason> {
+        match input.aggregate_kind {
+            Some(AggregateKind::Optional(actual)) => Ok(Some(Condition::Bool(actual == present))),
+            None => {
+                let mut tag = Value {
+                    range: Some(Interval::new(
+                        Integer::from_u128(0),
+                        Integer::from_u128(1),
+                        self.limits,
+                    )?),
+                    ..Value::default()
+                };
+                self.project_component(
+                    state,
+                    &mut tag,
+                    input.projection.clone(),
+                    (AggregateKind::OptionalTag, 0),
+                )?;
+                Ok(match tag.scalar {
+                    Some(Scalar::Local(value)) => Some(Condition::Compare {
+                        value,
+                        relation: crate::verification::Comparison::Equal,
+                        constant: Integer::from_u128(u128::from(present)),
+                    }),
+                    _ => None,
+                })
+            }
+            _ => Err(Reason::InvalidSignature),
+        }
     }
     fn variant_condition(
         &mut self,
@@ -310,6 +371,25 @@ impl Walker<'_> {
         self.limits.step(ancestors.len().saturating_add(1))?;
         if depth >= 128 {
             return Err(Reason::DepthLimit);
+        }
+        if let Some(ty) = value.nominal_type.clone() {
+            if let Term::Optional(payload) = ty.as_ref() {
+                self.optional_condition(value, true, state)?;
+                if value.aggregate_kind != Some(AggregateKind::Optional(false)) {
+                    let mut field = match value.fields.as_ref().and_then(|fields| fields.first()) {
+                        Some(field) => field.snapshot(self.limits, 0)?,
+                        None => self.unknown_value(payload)?,
+                    };
+                    self.project_component(
+                        state,
+                        &mut field,
+                        value.projection.clone(),
+                        (AggregateKind::Optional(true), 0),
+                    )?;
+                    self.prime_payload_observations(&mut field, state, ancestors, depth + 1)?;
+                }
+                return Ok(());
+            }
         }
         self.limits
             .step(self.package.map_or(0, |package| package.enums.len()))?;
@@ -576,6 +656,29 @@ impl Walker<'_> {
                     state,
                     depth,
                 )
+            }
+            Pattern::OptionalAbsent | Pattern::OptionalPresent(_) => {
+                let Term::Optional(payload) = ty else {
+                    return Err(Reason::InvalidSignature);
+                };
+                let present = matches!(pattern, Pattern::OptionalPresent(_));
+                let condition = self.optional_condition(input, present, &mut state)?;
+                let (yes, no) = self.split_condition(state, condition.as_ref())?;
+                if !yes.facts.is_reachable() || !present {
+                    return Ok((yes, no));
+                }
+                let Pattern::OptionalPresent(inner) = pattern else {
+                    unreachable!()
+                };
+                let (yes, failed) = self.fields_pattern(
+                    std::slice::from_ref(inner.as_ref()),
+                    std::slice::from_ref(payload.as_ref()),
+                    input,
+                    AggregateKind::Optional(true),
+                    yes,
+                    depth,
+                )?;
+                Ok((yes, no.merge(failed, self.limits)?))
             }
             Pattern::Variant {
                 declaration,

@@ -264,6 +264,12 @@ pub(super) fn validate(
                 pending.push((Work::Term(subject), depth + 1));
                 pending.extend(arguments.iter().map(|t| (Work::Term(t), depth + 1)));
             }
+            Work::Term(Term::OptionalValue { ty, value }) => {
+                pending.push((Work::Term(ty), depth + 1));
+                if let Some(value) = value {
+                    pending.push((Work::Term(value), depth + 1));
+                }
+            }
             Work::Term(Term::ErrorValue { ty, label, value }) => {
                 pending.push((Work::Term(ty), depth + 1));
                 if let Some(label) = label {
@@ -307,9 +313,12 @@ pub(super) fn validate(
                 }
                 pending.extend(items.iter().map(|t| (Work::Term(t), depth + 1)));
             }
-            Work::Term(Term::Pointer(t) | Term::ComptimeFunction(t) | Term::UnsafeFunction(t)) => {
-                pending.push((Work::Term(t), depth + 1))
-            }
+            Work::Term(
+                Term::Optional(t)
+                | Term::Pointer(t)
+                | Term::ComptimeFunction(t)
+                | Term::UnsafeFunction(t),
+            ) => pending.push((Work::Term(t), depth + 1)),
             Work::Term(Term::Symbol(name) | Term::String(name)) => {
                 fuel = fuel
                     .checked_sub(name.len())
@@ -559,6 +568,7 @@ impl ImplementationHead {
                     Term::Primitive(_)
                         | Term::Tuple(_)
                         | Term::Record(_)
+                        | Term::Optional(_)
                         | Term::Pointer(_)
                         | Term::Function { .. }
                         | Term::ComptimeFunction(_)
@@ -608,6 +618,7 @@ impl ImplementationHead {
                 | Term::Nominal { .. }
                 | Term::Tuple(_)
                 | Term::Record(_)
+                | Term::Optional(_)
                 | Term::Pointer(_)
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)
@@ -805,6 +816,19 @@ impl ImplementationHead {
                         ));
                     }
                     if let (
+                        Term::OptionalValue { ty: a, value: av },
+                        Term::OptionalValue { ty: b, value: bv },
+                    ) = (template, actual)
+                    {
+                        if av.is_some() == bv.is_some() {
+                            pending.push((a, b));
+                            if let (Some(a), Some(b)) = (av, bv) {
+                                pending.push((a, b));
+                            }
+                            continue;
+                        }
+                    }
+                    if let (
                         Term::ErrorValue {
                             ty: a,
                             label: al,
@@ -860,7 +884,8 @@ impl ImplementationHead {
                         && template.scalar_index_domain().is_none()
                         && !matches!(
                             template,
-                            Term::ErrorValue { .. }
+                            Term::OptionalValue { .. }
+                                | Term::ErrorValue { .. }
                                 | Term::RecordValue(_)
                                 | Term::TupleValue(_)
                                 | Term::NominalValue { .. }
@@ -1453,6 +1478,7 @@ impl ImplementationHead {
                 | Term::Nominal { .. }
                 | Term::Tuple(_)
                 | Term::Record(_)
+                | Term::Optional(_)
                 | Term::Pointer(_)
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)

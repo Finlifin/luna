@@ -1470,7 +1470,6 @@ fn compile_in_with_resources(
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             tuple_type: None,
-            optional_type: None,
         },
         identity,
         &Default::default(),

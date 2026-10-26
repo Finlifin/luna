@@ -226,9 +226,9 @@ fn accepted_with_tuple(source: &str, tuple: bool) -> String {
     if tuple {
         args.extend([
             "--meta-list-type",
-            "input::TupleElements",
+            "input.TupleElements",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
         ]);
     }
     let output = Sandbox::new(&source).run(&args);
@@ -255,9 +255,9 @@ fn rejected_with_tuple(source: &str, message: &str, tuple: bool) {
     if tuple {
         args.extend([
             "--meta-list-type",
-            "input::TupleElements",
+            "input.TupleElements",
             "--tuple-type",
-            "input::Tuple",
+            "input.Tuple",
         ]);
     }
     let output = sandbox.run(&args);

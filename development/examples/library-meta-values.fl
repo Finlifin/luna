@@ -1,0 +1,69 @@
+{-
+    Compiled with the real meta package and builtin primitive declarations.
+    Lists retain their type identity and remain in comptime execution.
+-}
+use builtin.Integer;
+
+comptime fn flags() -> meta.List<bool> { [true, false] }
+
+comptime fn choose(values: meta.List<bool>, index: Integer) -> bool {
+    values[index]
+}
+
+comptime fn nested() -> meta.List<meta.List<bool>> {
+    [flags(), [false, true]]
+}
+
+comptime fn selected() -> bool where values: meta.List<bool> {
+    values[0]
+}
+
+comptime fn first() -> T where T, values: meta.List<T> {
+    values[0]
+}
+
+comptime fn defaulted() -> bool where .values: meta.List<bool> = [true, false] {
+    values[0]
+}
+
+const saved = flags();
+
+comptime fn run() -> bool {
+    let groups = nested();
+    choose(saved, 0) and not choose(saved, 1) and groups[1][1]
+        and selected<saved>() and not selected<[false, true]>()
+        and first<bool, saved>() and not first<bool, [false, true]>()
+        and defaulted<>() and not defaulted<.values = [false]>()
+}
+
+{-
+    A factory retains its normal-form head and the ordered collected values.
+    The two entries produce the same type through different argument routes.
+-}
+pure comptime fn FlagPacket<...values: meta.List<bool>> -> builtin.Type {
+    bool
+}
+
+comptime fn SpreadPacket() -> builtin.Type {
+    FlagPacket<true, ...flags()>
+}
+
+comptime fn WholePacket() -> builtin.Type {
+    FlagPacket<.values = [true, true, false]>
+}
+
+pure comptime fn TypedPacket<T, .tag: bool = true, ...values: meta.List<T>> -> builtin.Type {
+    T
+}
+
+comptime fn ByteType() -> builtin.Type {
+    builtin.u8
+}
+
+comptime fn DirectTypedPacket() -> builtin.Type {
+    TypedPacket<builtin.u8, 1, 255>
+}
+
+comptime fn LateTypedPacket() -> builtin.Type {
+    TypedPacket<.values = [1, 255], ByteType()>
+}

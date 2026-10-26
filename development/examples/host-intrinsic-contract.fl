@@ -1,4 +1,4 @@
--- Bind ctlz=input::Ops::leading_zeros; enable Duplicate/Retire.
+-- Bind ctlz=input.Ops.leading_zeros; enable Duplicate/Retire.
 trait Duplicate {}
 trait Retire { fn drop(*self); }
 impl Duplicate for bool {}

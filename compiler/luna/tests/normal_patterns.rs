@@ -283,8 +283,8 @@ fn tuple_type_patterns_preserve_observed_dependent_domains() {
         &format!("{source} pure comptime fn List<T>->Type {{T}} pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}"),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     ).unwrap();
@@ -1316,9 +1316,9 @@ fn deep_type_guard_reports_resource_failure_without_stack_overflow() {
     };
     for (optional, unary) in [
         (None, false),
-        (Some("input::Maybe"), false),
+        (Some("input.Maybe"), false),
         (None, true),
-        (Some("input::Maybe"), true),
+        (Some("input.Maybe"), true),
     ] {
         let compile = |depth| {
             execution_support::compile_with_tuple_selectors(

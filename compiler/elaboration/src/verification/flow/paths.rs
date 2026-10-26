@@ -180,7 +180,10 @@ impl Walker<'_> {
                     Err(Unknown::MissingBound(_)) => None,
                     Err(e) => return Err(e.into()),
                 };
-                if matches!(path.fields.last(), Some((AggregateKind::EnumTag(_), _))) {
+                if matches!(
+                    path.fields.last(),
+                    Some((AggregateKind::EnumTag(_) | AggregateKind::OptionalTag, _))
+                ) {
                     continue;
                 }
                 // Alternative payload observations are meaningful only under
@@ -189,8 +192,10 @@ impl Walker<'_> {
                 let mut cursor = Some(&result);
                 let mut compatible = true;
                 for (kind, slot) in &path.fields {
-                    if matches!(kind, AggregateKind::Variant(..))
-                        && cursor.and_then(|value| value.aggregate_kind) != Some(*kind)
+                    if matches!(
+                        kind,
+                        AggregateKind::Variant(..) | AggregateKind::Optional(_)
+                    ) && cursor.and_then(|value| value.aggregate_kind) != Some(*kind)
                     {
                         compatible = false;
                         break;

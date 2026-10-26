@@ -29,8 +29,8 @@ fn finite_known_callback_chains_can_supply_defaults() {
 #[test]
 fn pure_code_captures_preserve_nested_and_branch_candidates() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for source in [
@@ -63,8 +63,8 @@ fn pure_code_captures_preserve_nested_and_branch_candidates() {
 #[test]
 fn pure_computed_pattern_loop_results_close_over_their_own_sources() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for update in [
@@ -107,8 +107,8 @@ fn pure_computed_pattern_loop_results_close_over_their_own_sources() {
 #[test]
 fn computed_pattern_loop_proofs_do_not_relabel_unknown_sources_or_skip_effects() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for update in [
@@ -144,8 +144,8 @@ fn computed_pattern_loop_proofs_do_not_relabel_unknown_sources_or_skip_effects()
 #[test]
 fn pure_computed_patterns_transfer_the_computed_callback_identity() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -189,8 +189,8 @@ fn pure_computed_patterns_transfer_the_computed_callback_identity() {
 #[test]
 fn pure_computed_patterns_check_observations_and_failed_alternatives() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -221,8 +221,8 @@ fn pure_computed_patterns_check_observations_and_failed_alternatives() {
 #[test]
 fn pure_enum_loop_transitions_keep_variant_qualified_callback_candidates() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for (initial, update) in [
@@ -270,8 +270,8 @@ fn pure_enum_loop_transitions_keep_variant_qualified_callback_candidates() {
 #[test]
 fn pure_enum_loop_transitions_cannot_keep_initial_absence_or_callback_identity() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for (initial, update) in [
@@ -318,8 +318,8 @@ fn pure_enum_loop_transitions_cannot_keep_initial_absence_or_callback_identity()
 #[test]
 fn pure_enum_callback_fields_preserve_variant_provenance() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -363,8 +363,8 @@ fn pure_enum_callback_fields_preserve_variant_provenance() {
 #[test]
 fn pure_enum_callbacks_do_not_confuse_unknown_and_absent_variants() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -396,8 +396,8 @@ fn pure_enum_callbacks_do_not_confuse_unknown_and_absent_variants() {
 #[test]
 fn pure_aggregate_loop_equations_preserve_all_owned_callback_leaves() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for update in [
@@ -435,8 +435,8 @@ fn pure_aggregate_loop_equations_preserve_all_owned_callback_leaves() {
 #[test]
 fn pure_aggregate_loop_equations_cover_nested_fields_and_tuple_aliases() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -470,8 +470,8 @@ fn pure_aggregate_loop_equations_cover_nested_fields_and_tuple_aliases() {
 #[test]
 fn pure_aggregate_loop_equations_reject_factory_and_alias_impurity() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for update in [
@@ -506,8 +506,8 @@ fn pure_aggregate_loop_equations_reject_factory_and_alias_impurity() {
 #[test]
 fn pure_aggregate_callbacks_survive_projection_capture_and_factories() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -551,8 +551,8 @@ fn pure_aggregate_callbacks_survive_projection_capture_and_factories() {
 #[test]
 fn pure_aggregate_callbacks_reject_stale_fields_and_mixed_candidates() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -589,8 +589,8 @@ fn pure_aggregate_callbacks_reject_stale_fields_and_mixed_candidates() {
 #[test]
 fn repeated_closure_invocation_cannot_reuse_initial_callback_fields() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -618,10 +618,10 @@ fn repeated_closure_invocation_cannot_reuse_initial_callback_fields() {
 #[test]
 fn pure_registered_tuple_callback_factory_retains_normal_head_and_capture_fields() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
-        meta_list: Some("input::List"),
-        tuple: Some("input::Tuple"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
+        meta_list: Some("input.List"),
+        tuple: Some("input.Tuple"),
         ..Default::default()
     };
     let source = "trait Copy {} trait Drop {fn drop(*self);}
@@ -656,8 +656,8 @@ fn pure_registered_tuple_callback_factory_retains_normal_head_and_capture_fields
 #[test]
 fn pure_factories_keep_captured_callback_behavior_across_return_boundaries() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for callback in ["invert", "|value:bool|not value"] {
@@ -685,8 +685,8 @@ fn pure_factories_keep_captured_callback_behavior_across_return_boundaries() {
 #[test]
 fn pure_factories_forward_nested_callback_environments() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let source = "trait Copy {} trait Drop {fn drop(*self);}
@@ -710,8 +710,8 @@ fn pure_factories_forward_nested_callback_environments() {
 #[test]
 fn pure_factory_capture_remains_safe_after_original_callback_changes() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let source = "trait Copy {} trait Drop {fn drop(*self);}
@@ -735,8 +735,8 @@ fn pure_factory_capture_remains_safe_after_original_callback_changes() {
 #[test]
 fn pure_factories_do_not_erase_impure_or_unknown_capture_candidates() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for body in [
@@ -856,8 +856,8 @@ fn anonymous_higher_order_body_receives_the_same_code_premises() {
 fn anonymous_callback_cleanup_is_checked_after_invocation() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Owned {} impl Drop for Owned {fn drop(*self) {}} fn apply(callback:fn()->bool)->bool {callback()} pure fn run()->bool {apply(|| do {let owned=Owned {};true})}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -884,8 +884,8 @@ fn anonymous_callback_cleanup_is_checked_after_invocation() {
 fn readonly_value_captures_keep_their_environment_through_higher_order_calls() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} fn apply(callback:%{flag:bool} fn(bool)->bool,value:bool)->bool {callback(value)} pure fn run()->bool {let flag=true;let action=|value:bool| flag and value;apply(action,true)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -904,8 +904,8 @@ fn readonly_value_captures_keep_their_environment_through_higher_order_calls() {
 fn owned_capture_updates_remain_private_through_by_value_parameters() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} fn apply(callback:%{flag:bool} fn()->bool)->bool {let first=callback();let second=callback();first and not second} pure fn run()->bool {var flag=false;let action=|| do {flag=not flag;flag};apply(action) and not flag}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -924,8 +924,8 @@ fn owned_capture_updates_remain_private_through_by_value_parameters() {
 fn readonly_capture_is_a_snapshot_and_can_be_invoked_repeatedly() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} fn twice(callback:%{flag:bool} fn()->bool)->bool {callback() and callback()} pure fn run()->bool {var flag=true;let action=|| flag;flag=false;twice(action) and not flag}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -944,8 +944,8 @@ fn readonly_capture_is_a_snapshot_and_can_be_invoked_repeatedly() {
 fn captured_pointer_representation_does_not_authorize_reading_its_target() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} fn apply(callback:%{p:*bool} fn()->bool)->bool {callback()} pure fn read(p:*bool)->bool {apply(|| p.*)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let error =
@@ -1025,8 +1025,8 @@ fn generic_factory_returns_specialized_code() {
 fn factory_returns_a_readonly_capture_snapshot() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} fn factory(flag:bool)->%{flag:bool} fn()->bool {|| flag} pure fn run()->bool {let action=factory(true);action()}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -1120,8 +1120,8 @@ fn match_results_merge_code_identities() {
 fn multiple_readonly_environments_remain_separate_resource_candidates() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} fn choose(flag:bool)->%{flag:bool} fn()->bool {if flag {|| flag} else {|| not flag}} fn apply(callback:%{flag:bool} fn()->bool)->bool {callback()} pure fn run()->bool {apply(choose(true)) and apply(choose(false))}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -1299,8 +1299,8 @@ fn loop_factory_itself_can_arrive_as_a_known_higher_order_parameter() {
 fn affine_capture_can_transfer_through_one_higher_order_invocation() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Token {flag:bool} fn invoke(action:%{token:Token} fn()->Token)->Token {action()} pure fn run()->bool {let token=Token {flag:true};let action=|| token;let result=invoke(action);result.flag}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -1321,10 +1321,10 @@ fn repeated_owned_capture_consumption_cannot_be_declared_pure() {
         pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>>->.Type'builtin {bool}
         trait Copy {} trait Drop {fn drop(*self);} struct Token {flag:bool} fn invoke(action:%{token:Token} fn()->Token)->Tuple<Token,Token> {(action(),action())} pure fn run()->Tuple<Token,Token> {let token=Token {flag:true};invoke(|| token)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        meta_list: Some("input::TupleElements"),
-        tuple: Some("input::Tuple"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        meta_list: Some("input.TupleElements"),
+        tuple: Some("input.Tuple"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let error =
@@ -1337,8 +1337,8 @@ fn repeated_owned_capture_consumption_cannot_be_declared_pure() {
 fn owned_capture_cleanup_cannot_hide_an_effectful_destructor() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Token {flag:bool} impl Drop for Token {fn drop(*self) {self.flag.* = false;}} fn invoke(action:%{token:Token} fn()->bool)->bool {action()} pure fn run()->bool {let token=Token {flag:true};invoke(|| token.flag)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let error =
@@ -1351,8 +1351,8 @@ fn owned_capture_cleanup_cannot_hide_an_effectful_destructor() {
 fn owned_capture_factory_preserves_delivery_into_the_returned_environment() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Token {flag:bool} fn make(token:Token)->%{token:Token} fn()->Token {|| token} fn invoke(action:%{token:Token} fn()->Token)->Token {action()} pure fn run()->bool {let action=make(Token {flag:true});invoke(action).flag}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -1371,8 +1371,8 @@ fn owned_capture_factory_preserves_delivery_into_the_returned_environment() {
 fn partial_owned_capture_transfer_checks_remaining_environment_cleanup() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Token {flag:bool} impl Drop for Token {fn drop(*self) {}} struct Pair {first:Token,second:Token} fn invoke(action:%{pair:Pair} fn()->Token)->Token {action()} pure fn run()->bool {let pair=Pair {first:Token {flag:true},second:Token {flag:false}};invoke(|| pair.first).flag}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -1391,8 +1391,8 @@ fn partial_owned_capture_transfer_checks_remaining_environment_cleanup() {
 fn local_mutable_closure_has_independent_value_storage() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} pure fn run()->bool {var flag=false;let left=|| do {flag=not flag;flag};let right=|| do {flag=not flag;flag};let first=left();let other=right();let second=left();first and other and not second and not flag}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -1411,8 +1411,8 @@ fn local_mutable_closure_has_independent_value_storage() {
 fn private_capture_storage_does_not_include_pointer_targets() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} fn apply(callback:%{p:*bool} fn()->bool)->bool {callback()} pure fn run(p:*bool)->bool {apply(|| do {p.* = true;true})}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let error =
@@ -1425,8 +1425,8 @@ fn private_capture_storage_does_not_include_pointer_targets() {
 fn owned_struct_capture_can_update_private_scalar_fields() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct State {flag:bool} fn apply(callback:%{state:State} fn()->bool)->bool {let first=callback();let second=callback();first and not second} pure fn run()->bool {let state=State {flag:false};apply(|| do {state.flag=not state.flag;state.flag})}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -1445,8 +1445,8 @@ fn owned_struct_capture_can_update_private_scalar_fields() {
 fn factory_created_mutable_environments_do_not_share_state() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} fn make(flag:bool)->%{flag:bool} fn()->bool {|| do {flag=not flag;flag}} pure fn run()->bool {let left=make(false);let right=make(true);let a=left();let b=right();let c=left();a and not b and not c}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -1465,8 +1465,8 @@ fn factory_created_mutable_environments_do_not_share_state() {
 fn owned_capture_field_replacement_validates_retired_and_new_values() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Token {flag:bool} impl Drop for Token {fn drop(*self) {}} struct State {item:Token} fn apply(callback:%{state:State} fn()->bool)->bool {callback() and callback()} pure fn run()->bool {let state=State {item:Token {flag:false}};apply(|| do {state.item=Token {flag:true};state.item.flag})}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -1490,8 +1490,8 @@ fn owned_capture_field_replacement_validates_retired_and_new_values() {
 fn early_return_from_replacement_rhs_keeps_the_original_cleanup() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Token {} impl Drop for Token {fn drop(*self) {}} pure fn replace(value:Token)->bool {value=do {return true;};false} fn run()->bool {replace(Token {})}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -1548,8 +1548,8 @@ fn early_return_from_replacement_rhs_keeps_the_original_cleanup() {
 fn affine_self_replacement_does_not_retire_the_value_being_transferred() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Token {flag:bool} impl Drop for Token {fn drop(*self) {}} pure fn move_back(value:Token)->Token {value=value;value} fn run()->bool {move_back(Token {flag:true}).flag}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -1603,8 +1603,8 @@ fn loop_closure_factories_preserve_all_returned_candidates() {
             "trait Copy {{}} trait Drop {{fn drop(*self);}} typealias Action=fn(bool)->bool;impl Copy for Action {{}} {source}"
         );
         let selectors = luna::protocols::type_constructors::Selectors {
-            copy: Some("input::Copy"),
-            drop: Some("input::Drop"),
+            copy: Some("input.Copy"),
+            drop: Some("input.Drop"),
             ..Default::default()
         };
         let package = execution_support::compile_with_source_bindings(
@@ -1635,8 +1635,8 @@ fn loop_closure_factory_identity_does_not_certify_behavior() {
             "trait Copy {{}} trait Drop {{fn drop(*self);}} typealias Action=fn(bool)->bool;impl Copy for Action {{}} {source}"
         );
         let selectors = luna::protocols::type_constructors::Selectors {
-            copy: Some("input::Copy"),
-            drop: Some("input::Drop"),
+            copy: Some("input.Copy"),
+            drop: Some("input.Drop"),
             ..Default::default()
         };
         let error = execution_support::compile_with_source_bindings(

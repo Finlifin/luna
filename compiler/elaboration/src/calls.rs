@@ -37,6 +37,7 @@ pub struct CallableContext {
 /// to the candidate and are never published as NIR types.
 #[derive(Clone, Debug)]
 pub enum InputContext {
+    Optional(Box<InputContext>),
     ErrorResult {
         errors: Vec<Term>,
         result: Box<InputContext>,
@@ -593,6 +594,14 @@ impl CallCandidate {
             }
             *fuel -= 1;
             match context {
+                InputContext::Optional(payload) => Ok(Term::Optional(Box::new(build(
+                    payload,
+                    engine,
+                    components,
+                    nesting,
+                    depth + 1,
+                    fuel,
+                )?))),
                 InputContext::ErrorResult { errors, result } => {
                     for label in errors {
                         crate::associated::charge_projection_copy(label, fuel)
@@ -778,6 +787,11 @@ impl CallCandidate {
                 ..budget
             },
         );
+        if engine.has_refuted_obligation() {
+            return Err(Error::TypeView(
+                "input context constraint was refuted".into(),
+            ));
+        }
         self.engine = engine;
         Ok(())
     }
@@ -1077,6 +1091,9 @@ impl CallCandidate {
             )
         };
         match template {
+            Term::Optional(payload) => {
+                Ok(InputContext::Optional(Box::new(field_context(*payload)?)))
+            }
             Term::ErrorResult { errors, result } => {
                 let mut completed = Vec::new();
                 for label in errors {

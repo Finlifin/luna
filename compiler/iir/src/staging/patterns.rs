@@ -16,7 +16,7 @@ pub(super) fn bindings(
             return Err("staged pattern depth exceeded".into());
         }
         match pattern {
-            Pattern::Wild | Pattern::Unit => {}
+            Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit => {}
             Pattern::Literal(
                 Literal::Bool(_)
                 | Literal::Char(_)
@@ -28,7 +28,9 @@ pub(super) fn bindings(
                 output.insert(*binding);
                 pending.push((inner, depth + 1));
             }
-            Pattern::ErrorResult { inner, .. } => pending.push((inner, depth + 1)),
+            Pattern::OptionalPresent(inner) | Pattern::ErrorResult { inner, .. } => {
+                pending.push((inner, depth + 1))
+            }
             Pattern::Guard { pattern, .. } => pending.push((pattern, depth + 1)),
             Pattern::Then { first, next, .. } => {
                 pending.push((first, depth + 1));
@@ -82,6 +84,13 @@ fn matches<'layout>(
     }
     let pairs = match pattern {
         Pattern::Wild => return Ok(true),
+        Pattern::OptionalAbsent => return Ok(matches!(value.kind, K::OptionalAbsent)),
+        Pattern::OptionalPresent(inner) => {
+            let K::OptionalPresent(payload) = &value.kind else {
+                return Ok(false);
+            };
+            return matches(heads, inner, payload, locals, fuel, depth + 1);
+        }
         Pattern::ErrorResult { label, inner } => {
             return match error_values::payload(value, label.as_ref(), fuel)? {
                 Some(payload) => matches(heads, inner, payload, locals, fuel, depth + 1),

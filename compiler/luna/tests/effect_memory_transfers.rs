@@ -5,6 +5,53 @@ mod support;
 use comptime_interpretor::Value;
 
 #[test]
+fn optional_effect_transfers_preserve_presence_and_pointer_lifetimes() {
+    let prefix = "trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        typealias Maybe=?*bool;
+        effect relay(value:Maybe)->Maybe;
+        fn forward(value:Maybe)->#relay Maybe {relay(value)#}";
+    let package = support::compile(&format!(
+        "{prefix}
+        fn run()->bool {{
+            var flag=false;
+            let present:Maybe=flag.ref;
+            let delivered=forward(present)# {{relay(value)=>value,}};
+            delivered match {{pointer?=>{{pointer.* = true;}},null=>{{}},}};
+            let absent:Maybe=null;
+            let empty=forward(absent)# {{relay(value)=>value,}};
+            flag and (empty match {{_?=>false,null=>true}})
+        }}"
+    ));
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    let dangling = support::compile(&format!(
+        "{prefix}
+        fn run()->Maybe {{var local=false;
+            forward(local.ref)# {{relay(value)=>value,}}
+        }}"
+    ));
+    let error = luna::execution::interpret_with_protocols(
+        &dangling,
+        "run",
+        "Duplicate",
+        "Retire",
+        1_000_000,
+    )
+    .unwrap_err();
+    assert!(error.contains("move-error"), "{error}");
+}
+
+#[test]
 fn conditional_memory_joins_same_operation_contracts_without_order_dependence() {
     use elaboration::verification::memory;
     use std::collections::BTreeSet;

@@ -1,6 +1,9 @@
--- Supply library/math/lib.fl as the math package with a direct dependency.
--- Bind all Scalar operations listed in library/README.md, including unused generic bodies.
--- Legacy spellings for the original operations: --host-fma math::target::Scalar::fma and --host-sqrt math::target::Scalar::sqrt --host-copysign math::target::Scalar::copysign.
+{-
+  Load library/builtin/math_intrinsics.fl as an isolated math test package
+  with a direct dependency. Bind all Scalar operations listed in
+  library/README.md, including those in unused generic bodies.
+-}
+
 typealias F32 = .f32'builtin;
 typealias F64 = .f64'builtin;
 

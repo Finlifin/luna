@@ -40,10 +40,14 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             Term::ContextualClosure { .. } => 2,
             Term::Closure { environment, .. } => environment.len().saturating_add(1),
             Term::Function { parameters, .. } => parameters.len().saturating_add(1),
+            Term::OptionalValue { value, .. } => 1 + usize::from(value.is_some()),
             Term::ErrorValue { .. } => 3,
             Term::NominalValue { fields, .. } => fields.len().saturating_add(1),
             Term::Record(fields) | Term::RecordValue(fields) => fields.len(),
-            Term::Pointer(_) | Term::ComptimeFunction(_) | Term::UnsafeFunction(_) => 1,
+            Term::Optional(_)
+            | Term::Pointer(_)
+            | Term::ComptimeFunction(_)
+            | Term::UnsafeFunction(_) => 1,
             _ => 0,
         };
         charge(fuel, width)?;
@@ -85,13 +89,21 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
                 children.extend(environment);
                 children.push(signature);
             }
-            Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
-                children.push(inner)
-            }
+            Term::Optional(inner)
+            | Term::Pointer(inner)
+            | Term::ComptimeFunction(inner)
+            | Term::UnsafeFunction(inner) => children.push(inner),
             Term::Function { parameters, result } => {
                 children.extend(parameters.iter().map(|p| &p.ty));
                 children.push(result);
             }
+            Term::OptionalValue { ty, value } => {
+                children.push(ty);
+                if let Some(value) = value {
+                    children.push(value);
+                }
+            }
+
             Term::ErrorValue { ty, label, value } => {
                 children.push(ty);
                 if let Some(label) = label {
@@ -282,6 +294,25 @@ fn value_in<'a, 'd>(
         }
     }
     match &value.kind {
+        K::OptionalAbsent if matches!(value.ty, Term::Optional(_)) => Ok(()),
+        K::OptionalPresent(payload) => {
+            let Term::Optional(inner) = &value.ty else {
+                return Err("optional value requires optional type");
+            };
+            if payload.ty != **inner {
+                return Err("optional payload type mismatch");
+            }
+            value_in(
+                payload,
+                fuel,
+                scope,
+                depth + 1,
+                definitions,
+                is_tuple,
+                lookup,
+                target,
+            )
+        }
         K::Literal(Literal::Symbol(s) | Literal::String(s)) => charge(fuel, s.len()),
         K::Literal(
             literal @ (Literal::Integer(_) | Literal::Float(_) | Literal::BitVec { .. }),

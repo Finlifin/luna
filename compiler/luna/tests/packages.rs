@@ -59,8 +59,8 @@ fn compile_provider_tuple(
         None,
         protocols,
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("library::List"),
-            tuple: Some("library::Tuple"),
+            meta_list: Some("library.List"),
+            tuple: Some("library.Tuple"),
             splice,
             ..Default::default()
         },
@@ -377,7 +377,7 @@ fn projected_constants_use_splice_without_bypassing_member_access() {
             &[dependency(1, "support", 2)],
             1,
             None,
-            "provider::Conversion",
+            "provider.Conversion",
         );
         if visibility.is_empty() {
             assert!(
@@ -410,7 +410,7 @@ fn generic_member_constants_splice_the_selected_container_value() {
         &[dependency(1, "support", 2)],
         1,
         None,
-        "provider::Conversion",
+        "provider.Conversion",
     )
     .unwrap() else {
         panic!("NIR")
@@ -449,7 +449,7 @@ fn nested_member_constants_splice_all_parent_inputs_without_cross_instance_reuse
         &[dependency(1, "support", 2)],
         1,
         None,
-        "provider::Conversion",
+        "provider.Conversion",
     )
     .unwrap() else {
         panic!("NIR")
@@ -469,7 +469,7 @@ fn nested_member_constants_splice_all_parent_inputs_without_cross_instance_reuse
             &[dependency(1, "support", 2)],
             1,
             None,
-            "provider::Conversion"
+            "provider.Conversion"
         )
         .is_err()
     );
@@ -509,7 +509,7 @@ fn automatic_splice_uses_provider_identity_across_package_boundaries() {
         &dependencies,
         7,
         &Default::default(),
-        Some("library::Conversion"),
+        Some("library.Conversion"),
     )
     .unwrap() else {
         panic!("NIR")
@@ -1232,8 +1232,8 @@ fn source_tuple_selectors_bind_provider_identities_before_elaboration() {
     let packages = [app, builtin, meta];
     let dependencies = [dependency(7, "core", 9), dependency(9, "sequence", 11)];
     let selectors = Selectors {
-        meta_list: Some("sequence::List"),
-        tuple: Some("core::Tuple"),
+        meta_list: Some("sequence.List"),
+        tuple: Some("core.Tuple"),
         ..Default::default()
     };
     let Artifact::Nir(program) = packages::compile_with_source_protocols(
@@ -1287,9 +1287,9 @@ fn source_tuple_selectors_bind_provider_identities_before_elaboration() {
     );
     for selector in [
         "Tuple",
-        "missing::Tuple",
-        "core::Missing",
-        "core::Tuple::nested",
+        "missing.Tuple",
+        "core.Missing",
+        "core.Tuple.nested",
     ] {
         assert!(
             packages::compile_with_source_protocols(
@@ -1331,7 +1331,7 @@ fn source_tuple_selectors_bind_provider_identities_before_elaboration() {
         None,
         &Default::default(),
         Selectors {
-            meta_list: Some("wrong::List"),
+            meta_list: Some("wrong.List"),
             ..Default::default()
         },
     )
@@ -1361,8 +1361,8 @@ fn source_tuple_selectors_follow_provider_module_paths() {
     let inputs = [app, library];
     let dependencies = [dependency(7, "support", 9)];
     let selectors = Selectors {
-        meta_list: Some("library::meta::List"),
-        tuple: Some("library::types::Tuple"),
+        meta_list: Some("library.meta.List"),
+        tuple: Some("library.types.Tuple"),
         ..Default::default()
     };
     let Artifact::Nir(program) = packages::compile_with_source_protocols(
@@ -1386,11 +1386,7 @@ fn source_tuple_selectors_follow_provider_module_paths() {
         luna::execution::interpret(&program, "check", 100_000).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
-    for wrong in [
-        "support::types::Tuple",
-        "app::types::Tuple",
-        "library::Tuple",
-    ] {
+    for wrong in ["support.types.Tuple", "app.types.Tuple", "library.Tuple"] {
         assert!(
             packages::compile_with_source_protocols(
                 &inputs,
@@ -1440,8 +1436,8 @@ fn source_tuple_selectors_walk_directory_only_modules() {
         None,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("library::meta::List"),
-            tuple: Some("library::types::tuples::Tuple"),
+            meta_list: Some("library.meta.List"),
+            tuple: Some("library.types.tuples.Tuple"),
             ..Default::default()
         },
     )
@@ -1476,7 +1472,7 @@ fn module_qualified_splice_binding_selects_the_declared_provider_trait() {
         &dependencies,
         7,
         &Default::default(),
-        Some("library::conversion::Splice"),
+        Some("library.conversion.Splice"),
     )
     .unwrap() else {
         panic!("NIR")
@@ -1490,11 +1486,11 @@ fn module_qualified_splice_binding_selects_the_declared_provider_trait() {
     );
     for wrong in [
         "Splice",
-        "library::conversion",
-        "library::Splice",
-        "support::conversion::Splice",
-        "library::conversion::::Splice",
-        "library::conversion::Splice::nested",
+        "library.conversion",
+        "library.Splice",
+        "support.conversion.Splice",
+        "library.conversion..Splice",
+        "library.conversion.Splice.nested",
     ] {
         assert!(
             compile_provider_tuple(&inputs, &dependencies, 7, &Default::default(), Some(wrong))
@@ -1570,8 +1566,8 @@ fn source_type_constructors_preserve_their_own_opaque_heads() {
     let packages = [app, core, meta];
     let dependencies = [dependency(7, "core", 9), dependency(9, "sequence", 11)];
     let selectors = Selectors {
-        meta_list: Some("sequence::List"),
-        tuple: Some("core::Tuple"),
+        meta_list: Some("sequence.List"),
+        tuple: Some("core.Tuple"),
         ..Default::default()
     };
     let Artifact::Nir(program) = packages::compile_with_source_protocols(

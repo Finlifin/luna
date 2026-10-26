@@ -21,11 +21,14 @@ pub(crate) fn resolve_source(
     let Some(selector) = selector else {
         return Ok(identities.clone());
     };
-    let (selected_owner, name) = match selector.split_once("::") {
+    let (selected_owner, name) = match selector.split_once(".") {
         Some((package, path)) => {
-            let path = path.split("::").collect::<Vec<_>>();
+            let path = path.split(".").collect::<Vec<_>>();
             if package.is_empty() || path.iter().any(|part| part.is_empty()) {
-                return Err("Splice protocol selector must be trait, package::trait or package::module::trait".into());
+                return Err(
+                    "Splice protocol selector must be trait, package.trait or package.module.trait"
+                        .into(),
+                );
             }
             let providers = packages
                 .iter()

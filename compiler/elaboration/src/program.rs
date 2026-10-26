@@ -211,7 +211,6 @@ pub struct Protocols {
     pub splice: Option<DeclarationId>,
     pub meta_list: Option<DeclarationId>,
     pub tuple: Option<DeclarationId>,
-    pub optional: Option<DeclarationId>,
 }
 impl Protocols {
     pub fn host_bindings(
@@ -1734,10 +1733,10 @@ impl Checker<'_, '_> {
                 self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
                 if let hir::clause::ClauseParamKind::Varadic(_, declared) = parameter.kind {
                     let ty = self.type_expr(declared)?;
-                    if !sig.modifiers.is_normal_form_head || !self.is_type_list_type(&ty) {
+                    if !sig.modifiers.is_normal_form_head || self.list_element_type(&ty).is_none() {
                         return Err(error(
                             parameter.span,
-                            "variadic normal-form input requires a bound meta.List<Type>",
+                            "variadic normal-form input requires a bound meta.List<T>",
                         ));
                     }
                     if !std::ptr::eq(parameter, sig.clause_params.last().unwrap()) {
@@ -1762,7 +1761,7 @@ impl Checker<'_, '_> {
                 if let hir::clause::ClauseParamKind::Positional(_, ty) = parameter.kind {
                     let ty = self.type_expr(ty)?;
                     if !self.is_type_list_type(&ty)
-                        && !nir::normal_forms::supported_input_type_in_scope_in(
+                        && !nir::normal_forms::supported_input_type_with_collections_in(
                             &ty,
                             &type_parameters
                                 .iter()
@@ -1781,6 +1780,7 @@ impl Checker<'_, '_> {
                                 )
                                 .collect::<Vec<_>>(),
                             |head| Some(head) == self.protocols.tuple,
+                            |head| Some(head) == self.protocols.meta_list,
                             |id| {
                                 self.structs.contains_key(&id)
                                     || self.enums.contains_key(&id)
@@ -1819,7 +1819,7 @@ impl Checker<'_, '_> {
                     let ty = self.type_expr(ty)?;
                     if ty != p(P::Type) {
                         if !self.is_type_list_type(&ty)
-                            && !nir::normal_forms::supported_input_type_in_scope_in(
+                            && !nir::normal_forms::supported_input_type_with_collections_in(
                                 &ty,
                                 &type_parameters
                                     .iter()
@@ -1838,6 +1838,7 @@ impl Checker<'_, '_> {
                                     )
                                     .collect::<Vec<_>>(),
                                 |head| Some(head) == self.protocols.tuple,
+                                |head| Some(head) == self.protocols.meta_list,
                                 |id| {
                                     self.structs.contains_key(&id)
                                         || self.enums.contains_key(&id)
@@ -2196,72 +2197,11 @@ impl Checker<'_, '_> {
         checked
     }
 
-    fn bound_optional_declaration(
-        &mut self,
-        span: Span,
-    ) -> Result<(OwnerId, DeclarationId), Error> {
-        let id = self
-            .protocols
-            .optional
-            .ok_or_else(|| error(span, "optional type requires a bound optional declaration"))?;
-        let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                (matches_declaration(self.package, &self.package_identities, owner, id))
-                    .then_some(owner)
-            })
-            .ok_or_else(|| error(span, "optional declaration is unavailable"))?;
-        self.ensure_nominal(owner, span)?;
-        let definition = self
-            .enums
-            .get(&id)
-            .ok_or_else(|| error(span, "optional binding requires an enum"))?;
-        if !definition.is_optional_representation() {
-            return Err(error(
-                span,
-                "optional binding requires one Type parameter, one unit variant and one single-value variant",
-            ));
+    fn optional_payload(&self, ty: &Term, span: Span) -> Result<Term, Error> {
+        match self.type_identity_view(ty, span)? {
+            Term::Optional(payload) => Ok(*payload),
+            _ => Err(error(span, "optional operation requires an optional type")),
         }
-        Ok((owner, id))
-    }
-
-    fn optional_layout(
-        &self,
-        ty: &Term,
-        span: Span,
-    ) -> Result<(DeclarationId, usize, usize, Term), Error> {
-        let shape = self.type_identity_view(ty, span)?;
-        let Term::Nominal {
-            declaration,
-            arguments,
-        } = shape
-        else {
-            return Err(error(
-                span,
-                "optional operation requires a bound optional type",
-            ));
-        };
-        if self.protocols.optional != Some(declaration) {
-            return Err(error(
-                span,
-                "optional operation requires the bound optional declaration",
-            ));
-        }
-        let definition = self
-            .enums
-            .get(&declaration)
-            .filter(|definition| definition.is_optional_representation())
-            .ok_or_else(|| error(span, "invalid optional representation"))?;
-        let [payload] = arguments.as_slice() else {
-            return Err(error(span, "optional type argument count mismatch"));
-        };
-        let none = definition
-            .variants
-            .iter()
-            .position(|variant| variant.shape == n::VariantShape::Unit)
-            .unwrap();
-        Ok((declaration, none, 1 - none, payload.clone()))
     }
     fn instantiated_variants(&self, ty: &Term, span: Span) -> Result<Vec<n::Variant>, Error> {
         let Term::Nominal {
@@ -2596,9 +2536,9 @@ impl Checker<'_, '_> {
                 .constrain_result_context(context, crate::ptc::Budget::default())
                 .map_err(|e| call_inference_error(expr.span, e))?;
             candidate
-                .refine_type_views(
+                .refine_type_views_metered(
                     |ty, budget| {
-                        self.callable_input_view_budgeted(ty, budget, expr.span)
+                        self.callable_input_view_metered(ty, budget, expr.span)
                             .map_err(|e| e.message)
                     },
                     crate::ptc::Budget::default(),
@@ -4221,15 +4161,7 @@ impl Checker<'_, '_> {
             H::TyVoid => Ok(p(P::Void)),
             H::TyType => Ok(p(P::Type)),
             H::TyNoReturn => Ok(p(P::Never)),
-            H::TyOptional(inner) => {
-                let (owner, id) = self.bound_optional_declaration(expr.span)?;
-                let arguments = vec![self.type_expr(inner)?];
-                self.check_type_application(owner, &arguments, expr.span)?;
-                Ok(Term::Nominal {
-                    declaration: id,
-                    arguments,
-                })
-            }
+            H::TyOptional(inner) => Ok(Term::Optional(Box::new(self.type_expr(inner)?))),
             H::TyPtr(inner) => Ok(Term::Pointer(Box::new(self.type_expr(inner)?))),
             H::Tuple(_) => Err(error(
                 expr.span,
@@ -4566,6 +4498,13 @@ impl Checker<'_, '_> {
     }
     fn binder_assumptions(&self, owner: OwnerId) -> Vec<n::TraitRequirement> {
         let mut assumptions = self.capabilities.get(&owner).cloned().unwrap_or_default();
+        if let Some(parent) = self.self_containers.get(&owner) {
+            for requirement in self.capabilities.get(parent).into_iter().flatten() {
+                if !assumptions.contains(requirement) {
+                    assumptions.push(requirement.clone());
+                }
+            }
+        }
         if let Some(interface) = self.checked_traits.iter().find(|interface| {
             self.self_containers.get(&owner).is_some_and(|parent| {
                 matches_declaration(
@@ -5454,9 +5393,9 @@ impl Checker<'_, '_> {
             )
             .map_err(|e| call_inference_error(expr.span, e))?;
         candidate
-            .refine_type_views(
+            .refine_type_views_metered(
                 |ty, budget| {
-                    self.callable_input_view_budgeted(ty, budget, expr.span)
+                    self.callable_input_view_metered(ty, budget, expr.span)
                         .map_err(|e| e.message)
                 },
                 crate::ptc::Budget::default(),
@@ -5531,26 +5470,12 @@ impl Checker<'_, '_> {
     ) -> Result<Option<n::Expr>, Error> {
         self.argument_attempt_with_input(input, expected, partial, allow_defaults, None)
     }
-    fn wrap_inferred_optional(
-        &self,
-        value: n::Expr,
-        declaration: DeclarationId,
-        span: Span,
-    ) -> Result<n::Expr, Error> {
-        let ty = Term::Nominal {
-            declaration,
-            arguments: vec![value.ty.clone()],
-        };
-        let (_, _, index, _) = self.optional_layout(&ty, span)?;
-        Ok(n::Expr {
+    fn wrap_inferred_optional(&self, value: n::Expr, span: Span) -> n::Expr {
+        n::Expr {
             source: source(span),
-            ty,
-            kind: K::Variant {
-                declaration,
-                index,
-                fields: vec![value],
-            },
-        })
+            ty: Term::Optional(Box::new(value.ty.clone())),
+            kind: K::OptionalPresent(Box::new(value)),
+        }
     }
 
     fn input_context_expression(
@@ -5559,11 +5484,7 @@ impl Checker<'_, '_> {
         context: &crate::calls::InputContext,
     ) -> Result<n::Expr, Error> {
         use crate::calls::InputContext as C;
-        if let C::Nominal {
-            declaration,
-            arguments,
-        } = context
-        {
+        if let C::Optional(payload_context) = context {
             let directed = matches!(
                 &input.kind,
                 H::Null
@@ -5578,13 +5499,7 @@ impl Checker<'_, '_> {
             ) || enum_groups::symbol_path(input).is_some()
                 || matches!(&input.kind, H::Application(head,_) | H::ExtendedApplication(head,_)
                     if enum_groups::symbol_path(head).is_some());
-            if self.protocols.optional == Some(*declaration) && !directed {
-                let [payload_context] = arguments.as_slice() else {
-                    return Err(error(
-                        input.span,
-                        "optional context argument count mismatch",
-                    ));
-                };
+            if !directed {
                 if let Some(mut value) = self.argument_attempt(input, None, None)? {
                     if is_never(&value.ty) {
                         return Ok(value);
@@ -5593,17 +5508,7 @@ impl Checker<'_, '_> {
                     // by the context; the enclosing candidate checks leaf constraints.
                     let mut depth = 0;
                     let mut cursor = context;
-                    while let C::Nominal {
-                        declaration: head,
-                        arguments,
-                    } = cursor
-                    {
-                        if *head != *declaration {
-                            break;
-                        }
-                        let [inner] = arguments.as_slice() else {
-                            break;
-                        };
+                    while let C::Optional(inner) = cursor {
                         depth += 1;
                         if depth > 128 {
                             return Err(error(input.span, "optional context depth exhausted"));
@@ -5613,14 +5518,14 @@ impl Checker<'_, '_> {
                     let mut ty = value.ty.clone();
                     let mut present = 0;
                     while present < depth {
-                        let Ok((_, _, _, inner)) = self.optional_layout(&ty, input.span) else {
+                        let Ok(inner) = self.optional_payload(&ty, input.span) else {
                             break;
                         };
                         present += 1;
                         ty = inner;
                     }
                     for _ in present..depth {
-                        value = self.wrap_inferred_optional(value, *declaration, input.span)?;
+                        value = self.wrap_inferred_optional(value, input.span);
                     }
                     return Ok(value);
                 }
@@ -5628,7 +5533,7 @@ impl Checker<'_, '_> {
                 if is_never(&value.ty) {
                     return Ok(value);
                 }
-                return self.wrap_inferred_optional(value, *declaration, input.span);
+                return Ok(self.wrap_inferred_optional(value, input.span));
             }
         }
         let checked = match (context, &input.kind) {
@@ -5640,7 +5545,11 @@ impl Checker<'_, '_> {
                 self.infer_contextual_variant(input, *declaration, name.as_str(), args, context)
             }
             (
-                C::Tuple(_) | C::NormalTuple { .. } | C::Record(_) | C::Nominal { .. },
+                C::Optional(_)
+                | C::Tuple(_)
+                | C::NormalTuple { .. }
+                | C::Record(_)
+                | C::Nominal { .. },
                 H::Application(..) | H::ExtendedApplication(..) | H::EffectRequest(_),
             )
             | (
@@ -5657,7 +5566,8 @@ impl Checker<'_, '_> {
             (C::Known(ty), _) => self.expr(input, Some(ty)),
             (C::Callable(callable), _) => self.expr_context(input, None, Some(callable)),
             (
-                C::Tuple(_)
+                C::Optional(_)
+                | C::Tuple(_)
                 | C::NormalTuple { .. }
                 | C::Record(_)
                 | C::Nominal { .. }
@@ -5665,7 +5575,8 @@ impl Checker<'_, '_> {
                 H::Match(value, arms),
             ) => self.match_expr_with_input(input, value, arms, None, None, Some(context)),
             (
-                C::Tuple(_)
+                C::Optional(_)
+                | C::Tuple(_)
                 | C::NormalTuple { .. }
                 | C::Record(_)
                 | C::Nominal { .. }
@@ -5673,7 +5584,8 @@ impl Checker<'_, '_> {
                 H::When(arms),
             ) => self.when_expr_with_input(input, arms, None, None, Some(context)),
             (
-                C::Tuple(_)
+                C::Optional(_)
+                | C::Tuple(_)
                 | C::NormalTuple { .. }
                 | C::Record(_)
                 | C::Nominal { .. }
@@ -5689,7 +5601,8 @@ impl Checker<'_, '_> {
                 result
             }
             (
-                C::Tuple(_)
+                C::Optional(_)
+                | C::Tuple(_)
                 | C::NormalTuple { .. }
                 | C::Record(_)
                 | C::Nominal { .. }
@@ -5803,7 +5716,8 @@ impl Checker<'_, '_> {
                 && matches!(
                     input_context,
                     Some(
-                        crate::calls::InputContext::Tuple(_)
+                        crate::calls::InputContext::Optional(_)
+                            | crate::calls::InputContext::Tuple(_)
                             | crate::calls::InputContext::NormalTuple { .. }
                             | crate::calls::InputContext::Record(_)
                             | crate::calls::InputContext::Nominal { .. }
@@ -5902,8 +5816,7 @@ impl Checker<'_, '_> {
         count: usize,
         mut check: impl FnMut(&mut Self, usize) -> Result<n::Expr, Error>,
     ) -> Result<Option<Term>, Error> {
-        if !matches!(context, crate::calls::InputContext::Nominal { declaration, .. }
-            if Some(*declaration) == self.protocols.optional)
+        if !matches!(context, crate::calls::InputContext::Optional(_))
             && !matches!(context, crate::calls::InputContext::ErrorResult { .. })
         {
             return Ok(None);
@@ -6145,9 +6058,9 @@ impl Checker<'_, '_> {
                 .map_err(|e| call_inference_error(expr.span, e))?;
         }
         initial
-            .refine_type_views(
+            .refine_type_views_metered(
                 |ty, budget| {
-                    self.callable_input_view_budgeted(ty, budget, expr.span)
+                    self.callable_input_view_metered(ty, budget, expr.span)
                         .map_err(|e| e.message)
                 },
                 crate::ptc::Budget::default(),
@@ -6285,9 +6198,9 @@ impl Checker<'_, '_> {
                     .map_err(|e| call_inference_error(expr.span, e))?;
             }
             candidate
-                .refine_type_views(
+                .refine_type_views_metered(
                     |ty, budget| {
-                        self.callable_input_view_budgeted(ty, budget, expr.span)
+                        self.callable_input_view_metered(ty, budget, expr.span)
                             .map_err(|e| e.message)
                     },
                     crate::ptc::Budget::default(),
@@ -6356,7 +6269,8 @@ impl Checker<'_, '_> {
                     || partial.is_some()
                     || matches!(
                         input_context,
-                        crate::calls::InputContext::Tuple(_)
+                        crate::calls::InputContext::Optional(_)
+                            | crate::calls::InputContext::Tuple(_)
                             | crate::calls::InputContext::NormalTuple { .. }
                             | crate::calls::InputContext::Record(_)
                             | crate::calls::InputContext::Nominal { .. }
@@ -7017,7 +6931,9 @@ impl Checker<'_, '_> {
                     .map(|(parameters, _)| parameters[index].ty.substitute_partial(&[]))
                     .transpose()
                     .map_err(|e| error(parameter.span, e.to_string()))?
-                    .or_else(|| partial.and_then(|context| context.parameters[index].clone()));
+                    .or_else(|| partial.and_then(|context| context.parameters[index].clone()))
+                    .map(|ty| self.callable_input_view(&ty, parameter.span))
+                    .transpose()?;
                 let ty = if let Some(annotation) = parameter.ty {
                     let ty = self.type_expr(annotation)?;
                     if let Some(context_type) = context_type.as_ref() {
@@ -7044,7 +6960,9 @@ impl Checker<'_, '_> {
                 .map(|(_, result)| result.substitute_partial(&[]))
                 .transpose()
                 .map_err(|e| error(expr.span, e.to_string()))?
-                .or_else(|| partial.and_then(|context| context.result.clone()));
+                .or_else(|| partial.and_then(|context| context.result.clone()))
+                .map(|ty| self.callable_input_view(&ty, expr.span))
+                .transpose()?;
             let result_type = if let Some(annotation) = annotation {
                 let ty = self.type_expr(annotation)?;
                 if let Some(expected) = contextual_result.as_ref() {
@@ -7124,7 +7042,7 @@ impl Checker<'_, '_> {
                 } else {
                     &result
                 };
-                let (declaration, index, _, _) = self.optional_layout(value_result, expr.span)?;
+                self.optional_payload(value_result, expr.span)?;
                 let mut remaining = self
                     .pending_optional_returns
                     .keys()
@@ -7140,11 +7058,7 @@ impl Checker<'_, '_> {
                             node.kind = K::Return(Some(Box::new(n::Expr {
                                 source: *empty_source,
                                 ty: value_result.clone(),
-                                kind: K::Variant {
-                                    declaration,
-                                    index,
-                                    fields: Vec::new(),
-                                },
+                                kind: K::OptionalAbsent,
                             })));
                         }
                     }
@@ -7532,20 +7446,14 @@ impl Checker<'_, '_> {
                 })
             }
             HP::OptionSome(inner) => {
-                let (declaration, _, index, payload) = self.optional_layout(ty, pattern.span)?;
-                Ok(n::Pattern::Variant {
-                    declaration,
-                    index,
-                    fields: vec![self.pattern(inner, &payload)?],
-                })
+                let payload = self.optional_payload(ty, pattern.span)?;
+                Ok(n::Pattern::OptionalPresent(Box::new(
+                    self.pattern(inner, &payload)?,
+                )))
             }
             HP::OptionNull => {
-                let (declaration, index, _, _) = self.optional_layout(ty, pattern.span)?;
-                Ok(n::Pattern::Variant {
-                    declaration,
-                    index,
-                    fields: Vec::new(),
-                })
+                self.optional_payload(ty, pattern.span)?;
+                Ok(n::Pattern::OptionalAbsent)
             }
 
             HP::Not(inner) => {
@@ -8328,6 +8236,7 @@ impl Checker<'_, '_> {
                 match value.kind {
                     K::Literal(literal) => Ok(n::Pattern::Literal(literal)),
                     K::Unit => Ok(n::Pattern::Unit),
+                    K::OptionalAbsent => Ok(n::Pattern::OptionalAbsent),
                     // `()` is parsed as a constant pattern, but with a bound
                     // Tuple<> context its checked value is an empty tuple.
                     // Match its layout directly, just like a nonempty tuple
@@ -9212,11 +9121,9 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         // Ordinary scalar recursion must not retain the larger adaptation
         // frame used by error-result and optional destinations.
-        // Primitive identities cannot denote the nominal optional declaration;
-        // binding that protocol must not enlarge every bool/numeric stack frame.
+        // Primitive identities cannot denote optional types.
         if matches!(expected, Some(Term::ErrorResult { .. }))
-            || (self.protocols.optional.is_some()
-                && expected.is_some_and(|ty| !matches!(ty, Term::Primitive(_))))
+            || expected.is_some_and(|ty| !matches!(ty, Term::Primitive(_)))
         {
             self.expr_context_adapted(expr, expected, partial)
         } else {
@@ -9261,11 +9168,9 @@ impl Checker<'_, '_> {
                 return self.convert_error_value(value, target, conversion, expr.span);
             }
         }
-        if self.protocols.optional.is_some() && self.optional_target_probe != Some(expr.hir_id) {
+        if self.optional_target_probe != Some(expr.hir_id) {
             if let Some(target) = expected {
-                if let Ok((declaration, _, index, payload)) =
-                    self.optional_layout(target, expr.span)
-                {
+                if let Ok(payload) = self.optional_payload(target, expr.span) {
                     // Branches and null receive the whole destination, not a payload hint.
                     let directed = matches!(
                         &expr.kind,
@@ -9310,11 +9215,7 @@ impl Checker<'_, '_> {
                         return Ok(n::Expr {
                             source: source(expr.span),
                             ty: target.clone(),
-                            kind: K::Variant {
-                                declaration,
-                                index,
-                                fields: vec![value],
-                            },
+                            kind: K::OptionalPresent(Box::new(value)),
                         });
                     }
                 }
@@ -9379,21 +9280,17 @@ impl Checker<'_, '_> {
         let mut inner = target.clone();
         for _ in 0..128 {
             if self.require(&value.ty, &inner, span).is_ok() {
-                for (ty, declaration, index) in layers.into_iter().rev() {
+                for ty in layers.into_iter().rev() {
                     value = n::Expr {
                         source: source(span),
                         ty,
-                        kind: K::Variant {
-                            declaration,
-                            index,
-                            fields: vec![value],
-                        },
+                        kind: K::OptionalPresent(Box::new(value)),
                     };
                 }
                 return Ok(value);
             }
-            let (declaration, _, index, payload) = self.optional_layout(&inner, span)?;
-            layers.push((inner, declaration, index));
+            let payload = self.optional_payload(&inner, span)?;
+            layers.push(inner);
             inner = payload;
         }
         Err(error(span, "optional injection depth exhausted"))
@@ -10034,39 +9931,14 @@ impl Checker<'_, '_> {
                 });
             }
             H::TyOptional(inner) => {
-                let (owner, declaration) = self.bound_optional_declaration(expr.span)?;
                 let inner = self.expr(inner, Some(&p(P::Type)))?;
                 let ty = inner.ty.clone();
                 if let Some(expected) = expected {
                     self.require_expression(&ty, expected, expr.span)?;
                 }
-                let kind = if let K::TypeValue(payload) = &inner.kind {
-                    self.check_type_application(owner, std::slice::from_ref(payload), expr.span)?;
-                    K::TypeValue(Term::Nominal {
-                        declaration,
-                        arguments: vec![payload.clone()],
-                    })
-                } else {
-                    let parameter = self.enums[&declaration].type_parameters[0];
-                    self.check_formation_application(
-                        owner,
-                        FormationInputs {
-                            terms: vec![Term::Rigid {
-                                declaration: parameter,
-                                sort: Sort::Type,
-                            }],
-                            deferred: BTreeSet::from([parameter]),
-                            environment: BTreeMap::new(),
-                        },
-                        expr.span,
-                    )?;
-                    K::NominalType {
-                        preparations: vec![],
-                        bindings: None,
-                        order: None,
-                        declaration,
-                        arguments: vec![n::NormalFormArgument::Value(inner)],
-                    }
+                let kind = match inner.kind {
+                    K::TypeValue(value) => K::TypeValue(Term::Optional(Box::new(value))),
+                    _ => K::OptionalType(Box::new(inner)),
                 };
                 return Ok(n::Expr {
                     source: source(expr.span),
@@ -10300,14 +10172,14 @@ impl Checker<'_, '_> {
             _ => {}
         }
         if let (H::List(items), Some(expected)) = (&expr.kind, expected) {
-            if self.is_type_list_type(expected) {
+            if let Some(element) = self.list_element_type(expected).cloned() {
                 self.required_steps = self
                     .required_steps
                     .checked_sub(items.len() as u64)
                     .ok_or_else(|| error(expr.span, "type-list construction budget exhausted"))?;
                 let fields = items
                     .iter()
-                    .map(|item| self.expr(item, Some(&p(P::Type))))
+                    .map(|item| self.expr(item, Some(&element)))
                     .collect::<Result<Vec<_>, _>>()?;
                 let ty = if fields.iter().any(|field| is_never(&field.ty)) {
                     p(P::Never)
@@ -10443,17 +10315,16 @@ impl Checker<'_, '_> {
             H::OptionPropagate(input) => {
                 let result = self.result.clone();
                 let deferred = self.return_observations.is_some() && matches!(&self.partial_return_context,
-                    Some(crate::calls::InputContext::Nominal { declaration, .. }) if Some(*declaration) == self.protocols.optional);
+                    Some(crate::calls::InputContext::Optional(_)));
                 if result.is_none() && !deferred {
                     return Err(context_error(expr.span, "optional propagation requires an optional function result context"));
                 }
-                let result_layout = result.as_ref().map(|result| self.optional_layout(result, expr.span)).transpose()?;
+                let result_layout = result.as_ref().map(|result| self.optional_payload(result, expr.span)).transpose()?;
                 let input = if let Some(payload) = expected {
                     if let Some(value) = self.argument_attempt(input, None, None)? {
                         value
                     } else {
-                        let (_, declaration) = self.bound_optional_declaration(expr.span)?;
-                        let target = Term::Nominal { declaration, arguments: vec![payload.clone()] };
+                        let target = Term::Optional(Box::new(payload.clone()));
                         // Supply the missing operand context without implicitly
                         // injecting an already nonoptional operand at this root.
                         self.expr_context_unadapted(input, Some(&target), None)?
@@ -10462,17 +10333,17 @@ impl Checker<'_, '_> {
                     self.expr(input, None)?
                 };
                 if is_never(&input.ty) { return Ok(input); }
-                let (declaration, absent, present, payload) = self.optional_layout(&input.ty, expr.span)?;
+                let payload = self.optional_payload(&input.ty, expr.span)?;
                 let binding = self.spread_binding(expr.span)?;
                 // Match, successful projection, empty value and Return need distinct
                 // source anchors: cleanup uses them to identify runtime boundaries.
                 let return_source = n::SourceRange { start: expr.span.lo().0, end: expr.span.lo().0 };
                 let empty_source = n::SourceRange { start: expr.span.lo().0, end: expr.span.lo().0 + 1 };
-                let empty = if let Some((result_declaration, missing, _, _)) = result_layout {
+                let empty = if result_layout.is_some() {
                     let result = result.unwrap();
                     if let Some(observations) = &mut self.return_observations { observations.push(result.clone()); }
                     Some(Box::new(n::Expr { source: empty_source, ty: result,
-                        kind: K::Variant { declaration: result_declaration, index: missing, fields: Vec::new() } }))
+                        kind: K::OptionalAbsent }))
                 } else {
                     // This private control-exit site is completed before the closure is exported.
                     self.pending_optional_returns.insert((return_source.start, return_source.end), empty_source);
@@ -10481,19 +10352,18 @@ impl Checker<'_, '_> {
                 if let Some(expected) = expected { self.require(&payload, expected, expr.span)?; }
                 let match_source = n::SourceRange { start: input.source.start, end: expr.span.hi().0 };
                 return Ok(n::Expr { source: match_source, ty: payload.clone(), kind: K::Match { value: Box::new(input), arms: vec![
-                    n::MatchArm { pattern: n::Pattern::Variant { declaration, index: present,
-                        fields: vec![n::Pattern::Binding { binding, inner: Box::new(n::Pattern::Wild) }] },
+                    n::MatchArm { pattern: n::Pattern::OptionalPresent(Box::new(n::Pattern::Binding { binding, inner: Box::new(n::Pattern::Wild) })),
                         guard: None, body: n::Expr {
                             source: n::SourceRange { start: expr.span.hi().0, end: expr.span.hi().0 },
                             ty: payload, kind: K::Local(binding) } },
-                    n::MatchArm { pattern: n::Pattern::Variant { declaration, index: absent, fields: Vec::new() },
+                    n::MatchArm { pattern: n::Pattern::OptionalAbsent,
                         guard: None, body: n::Expr { source: return_source, ty: p(P::Never), kind: K::Return(empty) } },
                 ] } });
             }
             H::Null => {
                 let ty = expected.ok_or_else(|| context_error(expr.span, "null requires an optional target type"))?;
-                let (declaration, index, _, _) = self.optional_layout(ty, expr.span)?;
-                (ty.clone(), K::Variant { declaration, index, fields: Vec::new() })
+                self.optional_payload(ty, expr.span)?;
+                (ty.clone(), K::OptionalAbsent)
             }
             H::Unit => {
                 let empty_tuple = expected
@@ -11280,8 +11150,7 @@ impl Checker<'_, '_> {
                 // private until the callback's successful paths determine ?T,
                 // just as for the missing branch of optional propagation.
                 if expected_return.is_none()
-                    && matches!(&partial, Some(crate::calls::InputContext::Nominal { declaration, .. })
-                        if Some(*declaration) == self.protocols.optional)
+                    && matches!(&partial, Some(crate::calls::InputContext::Optional(_)))
                     && value.is_some_and(|value| matches!(value.kind, H::Null))
                 {
                     let return_source = source(expr.span);
@@ -11321,9 +11190,9 @@ impl Checker<'_, '_> {
             }
             H::Index(value, index) => {
                 let value = self.expr(value, None)?;
-                if self.is_type_list_type(&value.ty) {
+                if let Some(element) = self.list_element_type(&value.ty).cloned() {
                     let index=self.expr(index,Some(&p(P::Integer)))?;
-                    let ty=if index.ty==p(P::Never) {p(P::Never)} else {p(P::Type)};
+                    let ty=if index.ty==p(P::Never) {p(P::Never)} else {element};
                     let result=n::Expr {source:source(expr.span),ty,kind:K::TypeListIndex(Box::new(value),Box::new(index))};
                     if let Some(expected)=expected {self.require_expression(&result.ty,expected,expr.span)?;}
                     return Ok(result);
@@ -11969,6 +11838,8 @@ fn stable_observation(expr: &n::Expr) -> bool {
 // general totality prover supplies evidence, use this finite infallible subset.
 fn total_default_field(expr: &n::Expr) -> bool {
     match &expr.kind {
+        K::OptionalAbsent => true,
+        K::OptionalPresent(value) => total_default_field(value),
         K::Function(_) | K::FunctionInstance { .. } => true,
         K::Closure { captures, .. } => captures.iter().all(|capture| {
             capture
@@ -12017,6 +11888,17 @@ fn total_default_field(expr: &n::Expr) -> bool {
     }
 }
 fn stable_default(expr: &n::Expr) -> bool {
+    match &expr.kind {
+        K::OptionalAbsent => return true,
+        K::OptionalPresent(value) => {
+            return if copy_scalar(&value.ty) {
+                stable_default(value)
+            } else {
+                total_default_field(value)
+            };
+        }
+        _ => {}
+    }
     // Direct constructors deliver all their fields to the result. They do not
     // invoke allocation, user code or Drop. A nominal result need not be Copy.
     // Local owned temporaries and projections are excluded below: their cleanup
@@ -12153,6 +12035,7 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::PointerField { .. }
         | K::WritePointer { .. }
         | K::BitWritePointer { .. }
+        | K::OptionalType(_)
         | K::PointerType(_)
         | K::ClosureType { .. }
         | K::FunctionType { .. }
@@ -12164,7 +12047,9 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::Block { .. }
         | K::CallPreparation { .. }
         | K::If { .. }
-        | K::Match { .. } => unreachable!(),
+        | K::Match { .. }
+        | K::OptionalPresent(_)
+        | K::OptionalAbsent => unreachable!(),
     }
 }
 

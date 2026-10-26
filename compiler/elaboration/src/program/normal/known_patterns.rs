@@ -52,6 +52,17 @@ where
         }
         use n::Pattern as Pat;
         match pattern {
+            Pat::OptionalAbsent => match value {
+                Term::OptionalValue { value, .. } => Some(value.is_none()),
+                _ => None,
+            },
+            Pat::OptionalPresent(inner) => match value {
+                Term::OptionalValue {
+                    value: Some(value), ..
+                } => self.inspect(inner, value, depth + 1, budget, bindings),
+                Term::OptionalValue { value: None, .. } => Some(false),
+                _ => None,
+            },
             Pat::CodeEvidence { .. } => None,
             Pat::ErrorResult { label, inner } => {
                 if value.has_pending_error_branch() {

@@ -1,8 +1,11 @@
--- Host scalar math. Supply all operation bindings in the driver:
--- --host-fma math::target::Scalar::fma --host-sqrt math::target::Scalar::sqrt
--- --host-copysign math::target::Scalar::copysign
--- Bind every remaining operation with --host-intrinsic name=math::target::Scalar::name.
--- fma performs one fused rounding; it is not a multiply followed by an add.
+{-
+  builtin.math provides generic wrappers for host scalar intrinsics.
+  The sysroot manifest binds every Scalar operation, including operations in
+  unused generic bodies. Explicit driver bindings may override those defaults.
+
+  fma performs one fused rounding; it is not a multiply followed by an add.
+-}
+
 pub mod target {
     ^intrinsic_enum
     pub enum Scalar { fma, sqrt, copysign, floor, ceil, trunc, roundeven, round, fabs, sin, cos, exp, exp2, log, log2, log10, pow, powi, ldexp, minimum, maximum, bitreverse, ctpop, ctlz, cttz, bswap, fshl, fshr, minimumnum, maximumnum, isnan, isinf, isfinite, isnormal, issubnormal, signbit, add_sat, sub_sat, min, max, abs, bit_and, bit_or, bit_xor }

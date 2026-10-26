@@ -62,8 +62,8 @@ fn signature_templates_preserve_closure_environment_types_and_dependencies() {
 #[test]
 fn signature_template_local_destructuring_uses_cleanup_evidence() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for default in [
@@ -562,7 +562,7 @@ fn compile_with_meta_list(
         source,
         modules,
         emit,
-        meta_list.then_some("input::List"),
+        meta_list.then_some("input.List"),
         None,
     )
 }
@@ -577,8 +577,8 @@ fn compile_with_tuple(source: &str, emit: Emit) -> Result<Artifact, String> {
         &source,
         &[],
         emit,
-        Some("input::TupleTypes"),
-        Some("input::Tuple"),
+        Some("input.TupleTypes"),
+        Some("input.Tuple"),
     )
 }
 
@@ -608,7 +608,6 @@ fn compile_with_constructors(
         splice_protocol: None,
         meta_list_type: meta_list.map(str::to_owned),
         tuple_type: tuple.map(str::to_owned),
-        optional_type: None,
         index_protocol: None,
         ord_protocol: None,
         eq_protocol: None,
@@ -1947,8 +1946,8 @@ fn template_mixed_collection_domains_keep_protocols_and_empty_inputs_distinct() 
         source,
         &[],
         Emit::Nir,
-        Some("input::List"),
-        Some("input::Tuple"),
+        Some("input.List"),
+        Some("input.Tuple"),
     )
     .unwrap() else {
         unreachable!()
@@ -1960,8 +1959,8 @@ fn template_mixed_collection_domains_keep_protocols_and_empty_inputs_distinct() 
         &format!("{source} test ambiguous use fixture<true,bool> {{}}"),
         &[],
         Emit::Nir,
-        Some("input::List"),
-        Some("input::Tuple"),
+        Some("input.List"),
+        Some("input.Tuple"),
     )
     .err()
     .expect("input types must not guess an ambiguous target");

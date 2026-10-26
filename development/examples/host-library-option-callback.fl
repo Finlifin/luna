@@ -1,4 +1,4 @@
-use optional.Option;
+use optional.OptionalOps;
 use resources.Drop;
 
 struct State {called: *bool, retired: *bool}
@@ -17,9 +17,9 @@ fn trial(present: bool) -> bool {
         state.called.* = true;
         value
     };
-    let input: ?bool = if present {.Some(true)} else {.None};
-    let mapped = input.map<bool>(callback);
-    called == present and retired and mapped.unwrap_or(true)
+    let input: ?bool = if present {true} else {null};
+    let mapped = input.as(OptionalOps<bool>).map<bool>(callback);
+    called == present and retired and mapped.as(OptionalOps<bool>).unwrap_or(true)
 }
 fn fallback_trial(present: bool) -> bool {
     var called = false;
@@ -30,8 +30,8 @@ fn fallback_trial(present: bool) -> bool {
         state.called.* = true;
         true
     };
-    let input: ?bool = if present {.Some(true)} else {.None};
-    let value = input.unwrap_or_else(fallback);
+    let input: ?bool = if present {true} else {null};
+    let value = input.as(OptionalOps<bool>).unwrap_or_else(fallback);
     value and called == not present and retired
 }
 fn run() -> bool {

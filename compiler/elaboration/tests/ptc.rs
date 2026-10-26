@@ -2033,3 +2033,80 @@ fn unsafe_callable_constructor_keeps_identity_and_congruence() {
     injectivity.assume(eq(unsafe_type(variable(702)), unsafe_type(ty(P::Bool))));
     proved(&injectivity, eq(variable(702), ty(P::Bool)));
 }
+
+#[test]
+fn optional_identity_is_injective_layered_and_not_a_nominal_enum() {
+    let optional = |t| Term::Optional(Box::new(t));
+    let mut context = Context::default();
+    context.assume(eq(variable(1), ty(P::Bool)));
+    proved(&context, eq(optional(variable(1)), optional(ty(P::Bool))));
+    let mut inverse = Context::default();
+    inverse.assume(eq(optional(variable(1)), optional(variable(2))));
+    proved(&inverse, eq(variable(1), variable(2)));
+    for other in [
+        ty(P::Bool),
+        optional(optional(ty(P::Bool))),
+        Term::Pointer(Box::new(ty(P::Bool))),
+        Term::Nominal {
+            declaration: DeclarationId {
+                package: 29,
+                local: 1,
+            },
+            arguments: vec![ty(P::Bool)],
+        },
+    ] {
+        proved(
+            &Context::default(),
+            F::Not(Box::new(eq(optional(ty(P::Bool)), other))),
+        );
+    }
+    let opaque = head(10, vec![ty(P::Bool)]);
+    assert!(!matches!(
+        Context::default().prove(
+            eq(optional(opaque), optional(ty(P::Bool))),
+            Budget::default()
+        ),
+        Outcome::Entailed(_)
+    ));
+}
+
+#[test]
+fn frozen_optional_congruence_keeps_presence_and_type_only_proof_boundary() {
+    let wrap = |value| {
+        head(
+            7,
+            vec![Term::OptionalValue {
+                ty: Box::new(Term::Optional(Box::new(ty(P::Type)))),
+                value,
+            }],
+        )
+    };
+    let mut context = Context::default();
+    context.admit_congruence(DeclarationId {
+        package: 1,
+        local: 7,
+    });
+    context.assume(eq(variable(1), variable(2)));
+    proved(
+        &context,
+        eq(
+            wrap(Some(Box::new(variable(1)))),
+            wrap(Some(Box::new(variable(2)))),
+        ),
+    );
+    assert!(!matches!(
+        context.prove(
+            eq(wrap(None), wrap(Some(Box::new(variable(1))))),
+            Budget::default()
+        ),
+        Outcome::Entailed(_)
+    ));
+    let data = Term::OptionalValue {
+        ty: Box::new(Term::Optional(Box::new(ty(P::Bool)))),
+        value: None,
+    };
+    assert!(matches!(
+        context.prove(eq(data.clone(), data), Budget::default()),
+        Outcome::IllFormed(_)
+    ));
+}

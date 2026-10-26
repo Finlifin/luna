@@ -18,6 +18,7 @@ pub(super) fn binding_orders(
     charge(fuel, source)?;
     let orders = match pattern {
         Pattern::Observe { inner: pattern, .. }
+        | Pattern::OptionalPresent(pattern)
         | Pattern::ErrorResult { inner: pattern, .. }
         | Pattern::Guard { pattern, .. } => binding_orders(pattern, fuel, source, depth + 1)?,
         Pattern::Then { first, next, .. } => {
@@ -99,7 +100,9 @@ pub(super) fn binding_orders(
             }
             rows
         }
-        Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => vec![vec![]],
+        Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {
+            vec![vec![]]
+        }
         _ => {
             return Err(error(
                 source,
@@ -126,7 +129,8 @@ pub(super) fn has_alternatives(
         // An as-binding owns the whole position. Its inner alternatives may
         // only copy, and already use the compact Copy candidate analysis.
         Pattern::Binding { .. } => Ok(false),
-        Pattern::ErrorResult { inner, .. }
+        Pattern::OptionalPresent(inner)
+        | Pattern::ErrorResult { inner, .. }
         | Pattern::Observe { inner, .. }
         | Pattern::Remap { pattern: inner, .. }
         | Pattern::Guard { pattern: inner, .. } => has_alternatives(inner, fuel, source, depth + 1),
@@ -174,6 +178,10 @@ pub(super) fn alternatives(
                 binding: *binding,
                 inner: Box::new(inner),
             })
+            .collect(),
+        Pattern::OptionalPresent(inner) => alternatives(inner, fuel, source, depth + 1)?
+            .into_iter()
+            .map(|inner| Pattern::OptionalPresent(Box::new(inner)))
             .collect(),
         Pattern::ErrorResult { label, inner } => {
             if let Some(label) = label {
@@ -279,6 +287,18 @@ pub(super) fn common_plan(
     let pair = match pattern {
         Pattern::Wild | Pattern::Literal(_) => (Pattern::Wild, Pattern::Wild),
         Pattern::Unit => (Pattern::Unit, Pattern::Wild),
+        Pattern::OptionalAbsent => (Pattern::OptionalAbsent, Pattern::Wild),
+        Pattern::OptionalPresent(inner) => {
+            let (observation, transfer) = common_plan(inner, fuel, source, depth + 1)?;
+            (
+                Pattern::OptionalPresent(Box::new(observation)),
+                if matches!(transfer, Pattern::Wild) {
+                    Pattern::Wild
+                } else {
+                    Pattern::OptionalPresent(Box::new(transfer))
+                },
+            )
+        }
         Pattern::ErrorResult { label, inner } => {
             if let Some(label) = label {
                 super::super::memory::bound_type(label, fuel).map_err(|e| error(source, e))?;
@@ -436,6 +456,7 @@ fn exports(
     let mut names = BTreeSet::new();
     match pattern {
         Pattern::Observe { inner: pattern, .. }
+        | Pattern::OptionalPresent(pattern)
         | Pattern::ErrorResult { inner: pattern, .. }
         | Pattern::Guard { pattern, .. } => {
             return exports(pattern, fuel, source, depth + 1);
@@ -493,7 +514,7 @@ fn exports(
                 }
             }
         }
-        Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => (),
+        Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => (),
         _ => {
             return Err(error(
                 source,
@@ -535,12 +556,14 @@ fn remap(
                 }
                 pending.push(inner);
             }
-            Pattern::ErrorResult { inner, .. } => pending.push(inner),
+            Pattern::OptionalPresent(inner) | Pattern::ErrorResult { inner, .. } => {
+                pending.push(inner)
+            }
             Pattern::Tuple(fields)
             | Pattern::Record { fields, .. }
             | Pattern::AnonymousRecord { fields, .. }
             | Pattern::Variant { fields, .. } => pending.extend(fields),
-            Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => (),
+            Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => (),
             _ => return Err(error(source, "noncanonical or-pattern transfer plan")),
         }
     }

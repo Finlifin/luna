@@ -18,7 +18,6 @@ pub struct Selectors<'a> {
     pub splice: Option<&'a str>,
     pub meta_list: Option<&'a str>,
     pub tuple: Option<&'a str>,
-    pub optional: Option<&'a str>,
 }
 
 impl Selectors<'_> {
@@ -47,7 +46,6 @@ impl Selectors<'_> {
                 self.splice,
                 self.meta_list,
                 self.tuple,
-                self.optional,
             ]
             .into_iter()
             .chain(self.arithmetic)
@@ -66,10 +64,10 @@ fn resolve_host_tag(
     label: &str,
     selector: &str,
 ) -> Result<(nir::DeclarationId, String), String> {
-    let parts: Vec<_> = selector.split("::").collect();
+    let parts: Vec<_> = selector.split(".").collect();
     if parts.len() < 3 || parts.iter().any(|part| part.is_empty()) {
         return Err(format!(
-            "host {label} selector requires package::module::Enum::variant (module optional)"
+            "host {label} selector requires package.module.Enum.variant (module optional)"
         ));
     }
     let providers: Vec<_> = packages
@@ -197,7 +195,7 @@ pub(crate) fn resolve_source(
         let Some(selector) = selector else {
             continue;
         };
-        let parts = selector.split("::").collect::<Vec<_>>();
+        let parts = selector.split(".").collect::<Vec<_>>();
         if parts.len() == 1 && matches!(operator.as_str(), "Copy" | "Drop") {
             // Preserve the resource CLI's unique-leaf-name contract, including
             // sysroot packages and nested modules. Qualified selectors below
@@ -237,7 +235,7 @@ pub(crate) fn resolve_source(
         }
         if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
             return Err(format!(
-                "{operator} selector requires package::trait or package::module::trait"
+                "{operator} selector requires package.trait or package.module.trait"
             ));
         }
         let providers = packages
@@ -275,15 +273,14 @@ pub(crate) fn resolve_source(
     for (label, selector, target) in [
         ("meta.List", selectors.meta_list, &mut result.meta_list),
         ("Tuple", selectors.tuple, &mut result.tuple),
-        ("optional", selectors.optional, &mut result.optional),
     ] {
         let Some(selector) = selector else {
             continue;
         };
-        let components = selector.split("::").collect::<Vec<_>>();
+        let components = selector.split(".").collect::<Vec<_>>();
         if components.len() < 2 || components.iter().any(|part| part.is_empty()) {
             return Err(format!(
-                "{label} selector must be package::definition or package::module::definition"
+                "{label} selector must be package.definition or package.module.definition"
             ));
         }
         let package_name = components[0];
@@ -371,17 +368,6 @@ pub(crate) fn validate(
             .ok_or("host intrinsic variant missing")?;
         nir::intrinsics::Registry::for_family(family, index, operation).map_err(str::to_owned)?;
     }
-    if let Some(id) = protocols.optional {
-        let definitions = package
-            .enums
-            .iter()
-            .filter(|definition| definition.declaration == id)
-            .collect::<Vec<_>>();
-        if !matches!(definitions.as_slice(), [definition] if definition.is_optional_representation())
-        {
-            return Err("optional binding requires one Type parameter, one unit variant and one single-value variant without additional requirements".into());
-        }
-    }
     for (label, id) in [
         ("meta.List", protocols.meta_list),
         ("Tuple", protocols.tuple),
@@ -432,7 +418,6 @@ pub(crate) struct SysrootBindings {
     splice: Option<String>,
     meta_list: Option<String>,
     tuple: Option<String>,
-    optional: Option<String>,
 }
 impl SysrootBindings {
     pub(crate) fn load(root: &std::path::Path) -> Result<Self, String> {
@@ -491,15 +476,15 @@ impl SysrootBindings {
                 {
                     return Err(fail("duplicate host intrinsic operation"));
                 }
-                if value.split("::").count() < 3
-                    || value.split("::").any(|part| {
+                if value.split(".").count() < 3
+                    || value.split(".").any(|part| {
                         part.is_empty()
                             || part
                                 .chars()
                                 .any(|ch| ch.is_whitespace() || matches!(ch, '=' | '\"' | '\''))
                     })
                 {
-                    return Err(fail("expected an unquoted package::Enum::variant selector"));
+                    return Err(fail("expected an unquoted package.Enum.variant selector"));
                 }
                 result.host_intrinsics.push((operation, value.to_owned()));
                 continue;
@@ -522,13 +507,12 @@ impl SysrootBindings {
                 "splice-protocol" => &mut result.splice,
                 "meta-list-type" => &mut result.meta_list,
                 "tuple-type" => &mut result.tuple,
-                "optional-type" => &mut result.optional,
                 _ => return Err(fail("unknown language-item key")),
             };
             if target.is_some() {
                 return Err(fail("duplicate language-item key"));
             }
-            let parts = value.split("::").collect::<Vec<_>>();
+            let parts = value.split(".").collect::<Vec<_>>();
             if parts.len() < 2
                 || parts.iter().any(|part| {
                     part.is_empty()
@@ -538,7 +522,7 @@ impl SysrootBindings {
                 })
             {
                 return Err(fail(
-                    "expected an unquoted package::definition or package::module::definition selector",
+                    "expected an unquoted package.definition or package.module.definition selector",
                 ));
             }
             *target = Some(value.to_owned());
@@ -664,13 +648,6 @@ impl SysrootBindings {
                     .then_some(self.tuple.as_deref())
                     .flatten()
             }),
-            optional: explicit.optional.or_else(|| {
-                identities
-                    .optional
-                    .is_none()
-                    .then_some(self.optional.as_deref())
-                    .flatten()
-            }),
         }
     }
 }
@@ -681,16 +658,16 @@ mod literal_binding_tests {
     #[test]
     fn list_pattern_binding_configuration_preserves_driver_authority() {
         let config =
-            SysrootBindings::parse("version = 1\nlist-pattern-protocol = builtin::ListView\n")
+            SysrootBindings::parse("version = 1\nlist-pattern-protocol = builtin.ListView\n")
                 .unwrap();
         assert_eq!(
             config
                 .apply(Selectors::default(), &Protocols::default())
                 .list_pattern,
-            Some("builtin::ListView")
+            Some("builtin.ListView")
         );
         let explicit = Selectors {
-            list_pattern: Some("input::View"),
+            list_pattern: Some("input.View"),
             ..Default::default()
         };
         assert_eq!(
@@ -708,21 +685,21 @@ mod literal_binding_tests {
             config.apply(Selectors::default(), &bound).list_pattern,
             None
         );
-        assert!(SysrootBindings::parse("version = 1\nlist-pattern-protocol = input::One\nlist-pattern-protocol = input::Two\n").is_err());
+        assert!(SysrootBindings::parse("version = 1\nlist-pattern-protocol = input.One\nlist-pattern-protocol = input.Two\n").is_err());
     }
     #[test]
     fn literal_binding_configuration_preserves_explicit_authority() {
         let config =
-            SysrootBindings::parse("version = 1\nliteral-into-protocol = builtin::Convert\n")
+            SysrootBindings::parse("version = 1\nliteral-into-protocol = builtin.Convert\n")
                 .unwrap();
         assert_eq!(
             config
                 .apply(Selectors::default(), &Protocols::default())
                 .literal_into,
-            Some("builtin::Convert")
+            Some("builtin.Convert")
         );
         let explicit = Selectors {
-            literal_into: Some("input::Custom"),
+            literal_into: Some("input.Custom"),
             ..Default::default()
         };
         assert_eq!(
@@ -740,7 +717,7 @@ mod literal_binding_tests {
             config.apply(Selectors::default(), &bound).literal_into,
             None
         );
-        assert!(SysrootBindings::parse("version = 1\nliteral-into-protocol = input::One\nliteral-into-protocol = input::Two\n").is_err());
+        assert!(SysrootBindings::parse("version = 1\nliteral-into-protocol = input.One\nliteral-into-protocol = input.Two\n").is_err());
     }
 }
 
@@ -751,16 +728,19 @@ mod repository_bindings_tests {
     #[test]
     fn sysroot_host_intrinsics_preserve_explicit_and_driver_authority() {
         use nir::intrinsics::Operation as O;
-        let config = SysrootBindings::parse("version = 1\nhost-intrinsic.sqrt = math::Ops::sqrt\nhost-intrinsic.abs = math::Ops::abs\n").unwrap();
+        let config = SysrootBindings::parse(
+            "version = 1\nhost-intrinsic.sqrt = math.Ops.sqrt\nhost-intrinsic.abs = math.Ops.abs\n",
+        )
+        .unwrap();
         assert_eq!(
             config
                 .merged_host_intrinsics(Selectors::default(), &Protocols::default())
                 .len(),
             2
         );
-        let explicit = [(O::WrappingAbsoluteValue, "input::Ops::abs".into())];
+        let explicit = [(O::WrappingAbsoluteValue, "input.Ops.abs".into())];
         let selectors = Selectors {
-            host_sqrt: Some("input::Ops::root"),
+            host_sqrt: Some("input.Ops.root"),
             host_intrinsics: &explicit,
             ..Default::default()
         };
@@ -794,11 +774,11 @@ mod repository_bindings_tests {
                 .is_empty()
         );
         for line in [
-            "host-intrinsic.unknown = math::Ops::x",
-            "host-intrinsic.sqrt = math::sqrt",
-            "host-intrinsic.sqrt = math::Ops::",
-            "host-intrinsic.sqrt = math:: Ops::sqrt",
-            "host-intrinsic.sqrt = math::Ops::sqrt\nhost-intrinsic.sqrt = other::Ops::sqrt",
+            "host-intrinsic.unknown = math.Ops.x",
+            "host-intrinsic.sqrt = math.sqrt",
+            "host-intrinsic.sqrt = math.Ops.",
+            "host-intrinsic.sqrt = math. Ops.sqrt",
+            "host-intrinsic.sqrt = math.Ops.sqrt\nhost-intrinsic.sqrt = other.Ops.sqrt",
         ] {
             assert!(
                 SysrootBindings::parse(&format!("version = 1\n{line}\n")).is_err(),
@@ -808,33 +788,26 @@ mod repository_bindings_tests {
     }
 
     #[test]
-    fn repository_sysroot_binds_its_optional_and_operator_declarations() {
+    fn repository_sysroot_binds_operators_without_optional_declaration() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
         let bindings = SysrootBindings::load(&root).unwrap();
         for &operation in nir::intrinsics::Operation::ALL {
             assert!(bindings.host_intrinsics.contains(&(
                 operation,
-                format!("math::target::Scalar::{}", operation.name())
+                format!("builtin.math_intrinsics.target.Scalar.{}", operation.name())
             )));
         }
 
-        assert_eq!(bindings.copy.as_deref(), Some("builtin::resources::Copy"));
-        assert_eq!(bindings.drop.as_deref(), Some("builtin::resources::Drop"));
-        assert_eq!(
-            bindings.optional.as_deref(),
-            Some("builtin::option::Option")
+        assert_eq!(bindings.copy.as_deref(), Some("builtin.resources.Copy"));
+        assert_eq!(bindings.drop.as_deref(), Some("builtin.resources.Drop"));
+        assert!(
+            SysrootBindings::parse("version = 1\noptional-type = builtin.option.Option\n").is_err()
         );
-        assert_eq!(bindings.meta_list.as_deref(), Some("meta::List"));
-        assert_eq!(bindings.tuple.as_deref(), Some("builtin::tuple::Tuple"));
-        assert_eq!(bindings.index.as_deref(), Some("builtin::ops::Index"));
-        assert_eq!(
-            bindings.ordering.as_deref(),
-            Some("builtin::comparison::Ord")
-        );
-        assert_eq!(
-            bindings.equality.as_deref(),
-            Some("builtin::comparison::Eq")
-        );
+        assert_eq!(bindings.meta_list.as_deref(), Some("meta.List"));
+        assert_eq!(bindings.tuple.as_deref(), Some("builtin.tuple.Tuple"));
+        assert_eq!(bindings.index.as_deref(), Some("builtin.ops.Index"));
+        assert_eq!(bindings.ordering.as_deref(), Some("builtin.comparison.Ord"));
+        assert_eq!(bindings.equality.as_deref(), Some("builtin.comparison.Eq"));
         for (operator, declaration) in [
             (elaboration::arithmetic::Operator::Add, "Add"),
             (elaboration::arithmetic::Operator::Subtract, "Sub"),
@@ -844,7 +817,7 @@ mod repository_bindings_tests {
         ] {
             assert_eq!(
                 bindings.arithmetic[operator as usize].as_deref(),
-                Some(format!("builtin::ops::{declaration}").as_str())
+                Some(format!("builtin.ops.{declaration}").as_str())
             );
         }
     }
@@ -859,7 +832,7 @@ mod stage_tests {
     fn explicit_api_selectors_cannot_be_silently_ignored_by_syntax_exports() {
         let selectors = [
             Selectors {
-                host_fma: Some("input::Ops::fma"),
+                host_fma: Some("input.Ops.fma"),
                 ..Default::default()
             },
             Selectors {
@@ -871,11 +844,11 @@ mod stage_tests {
                 ..Default::default()
             },
             Selectors {
-                list_pattern: Some("input::ListPatternView"),
+                list_pattern: Some("input.ListPatternView"),
                 ..Default::default()
             },
             Selectors {
-                arithmetic: [Some("input::Operator"); 7],
+                arithmetic: [Some("input.Operator"); 7],
                 ..Default::default()
             },
         ];
@@ -893,7 +866,6 @@ mod stage_tests {
             splice_protocol: None,
             meta_list_type: None,
             tuple_type: None,
-            optional_type: None,
         };
         for selector in selectors {
             // Validate before filesystem access, including selectors supplied

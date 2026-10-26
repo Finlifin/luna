@@ -12,8 +12,8 @@ fn finite_scalar_type_domains_check_every_resource_behavior_case() {
         impl Read for .f64'builtin {fn read(self,p:*bool)->bool {true}}
         pure fn choose(value:T,p:*bool)->bool where T :- Read, requires T == .f32'builtin or T == .f64'builtin {value.as(Read).read(p)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     execution_support::compile_with_source_bindings(prefix, &Default::default(), selectors)
@@ -275,8 +275,8 @@ fn pure_enum_forwarding_and_normal_tuple_construction_keep_transfer_paths() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )
@@ -307,8 +307,8 @@ fn extracting_payloads_still_requires_evidence_for_wrapper_cleanup() {
 fn pure_nominal_copy_requires_bound_protocol_and_representation_evidence() {
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Flag {value:bool} impl Copy for Flag {} pure fn duplicate(value:Flag)->Tuple<Flag,Flag> {(value,value)} fn run()->bool {let (first,second)=duplicate(Flag {value:true});first.value and second.value}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -331,8 +331,8 @@ fn pure_nominal_copy_requires_bound_protocol_and_representation_evidence() {
 #[test]
 fn pure_copy_checks_all_nested_fields_and_enum_variants() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for definition in [
@@ -355,7 +355,7 @@ fn pure_copy_checks_all_nested_fields_and_enum_variants() {
 #[test]
 fn affine_aggregate_retirement_needs_drop_evidence_but_not_copy() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        drop: Some("input::Drop"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Owned {value:bool} struct Pair {first:Owned,second:Owned} pure fn read(value:Pair)->bool {value.first.value} pure fn unwrap(value:Choice)->Owned {value match {.some(inner)=>inner}} enum Choice {some(Owned)} fn run()->bool {read(Pair {first:Owned {value:true},second:Owned {value:false}}) and unwrap(Choice.some(Owned {value:true})).value}";
@@ -380,7 +380,7 @@ fn affine_aggregate_retirement_needs_drop_evidence_but_not_copy() {
 #[test]
 fn trivial_retirement_checks_nested_destructors_and_all_variants() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        drop: Some("input::Drop"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for wrapper in [
@@ -408,7 +408,7 @@ fn trivial_retirement_checks_nested_destructors_and_all_variants() {
 #[test]
 fn pure_retirement_checks_selected_drop_bodies_and_helper_calls() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        drop: Some("input::Drop"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Owned {} impl Drop for Owned {fn drop(*self) {finish()}} fn finish() {var flag=false;flag=true;} struct Wrapper {owned:Owned} pure fn retire(value:Wrapper)->bool {true} fn run()->bool {retire(Wrapper {owned:Owned {}})}";
@@ -427,7 +427,7 @@ fn pure_retirement_checks_selected_drop_bodies_and_helper_calls() {
 #[test]
 fn generic_drop_instances_are_specialized_before_purity_analysis() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        drop: Some("input::Drop"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Token where T {} impl Drop for Token<T> where T {fn drop(*self) {finish<T>()}} fn finish() where T {} pure fn retire(value:Token<bool>)->bool {true} fn run()->bool {retire(Token<bool> {})}";
@@ -446,7 +446,7 @@ fn generic_drop_instances_are_specialized_before_purity_analysis() {
 #[test]
 fn destructor_purity_follows_only_selected_bodies_and_rejects_indirect_writes() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        drop: Some("input::Drop"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let prefix = "trait Drop {fn drop(*self);} struct Owned {} impl Drop for Owned {fn drop(*self) {}} struct Other {flag:bool} impl Drop for Other {fn drop(*self) {write(self.flag)}} fn write(p:*bool) {p.* = true;}";
@@ -468,7 +468,7 @@ fn destructor_purity_follows_only_selected_bodies_and_rejects_indirect_writes() 
 #[test]
 fn pure_conditional_variant_patterns_check_every_residual_cleanup() {
     let selectors = luna::protocols::type_constructors::Selectors {
-        drop: Some("input::Drop"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let source = "trait Copy {} trait Drop {fn drop(*self);} struct Held {flag:bool}
@@ -506,7 +506,7 @@ fn pure_let_else_retirement_still_requires_selected_drop_evidence() {
         let unbound = compile_with_protocols(&source, &Default::default()).unwrap_err();
         assert!(unbound.contains("P4 evidence"), "{unbound}");
         let selectors = luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Drop"),
+            drop: Some("input.Drop"),
             ..Default::default()
         };
         let package = execution_support::compile_with_source_bindings(
@@ -586,7 +586,7 @@ fn finite_let_else_default_suppliers_check_cleanup_completion() {
             "trait Copy {{}}trait Drop {{fn drop(*self);}}struct Owned {{}}impl Drop for Owned {{fn drop(*self) {{}}}}pure fn choose(flag:bool)->bool {{let value=Owned {{}};let true=flag else {{return true;}};true}}fn take(.flag:bool=choose({flag}))->bool {{flag}}fn run()->bool {{take()}}"
         );
         let selectors = luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Drop"),
+            drop: Some("input.Drop"),
             ..Default::default()
         };
         let package = execution_support::compile_with_source_bindings(
@@ -605,7 +605,7 @@ fn finite_let_else_default_suppliers_check_cleanup_completion() {
     }
     let source = "trait Copy {}trait Drop {fn drop(*self);}struct Owned {}impl Drop for Owned {fn drop(*self) {while true {}}}pure fn choose(flag:bool)->bool {let value=Owned {};let true=flag else {return true;};true}fn take(.flag:bool=choose(false))->bool {flag}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        drop: Some("input::Drop"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let error =
@@ -624,7 +624,7 @@ fn owned_default_arguments_have_checked_preparation_cleanup() {
             "trait Copy {{}}trait Drop {{fn drop(*self);}}struct Owned {{}}impl Drop for Owned {{fn drop(*self) {{}}}}fn choose(value:Owned,flag:bool)->bool {{let true=flag else {{return true;}};true}}fn take(.flag:bool=choose(Owned {{}},{flag}))->bool {{flag}}fn run()->bool {{take()}}"
         );
         let selectors = luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Drop"),
+            drop: Some("input.Drop"),
             ..Default::default()
         };
         let package = execution_support::compile_with_source_bindings(
@@ -647,7 +647,7 @@ fn owned_default_arguments_have_checked_preparation_cleanup() {
         "trait Copy {}trait Drop {fn drop(*self);}fn take(flag:bool,.value:bool=do {flag=false;true})->bool {value}",
     ] {
         let selectors = luna::protocols::type_constructors::Selectors {
-            drop: Some("input::Drop"),
+            drop: Some("input.Drop"),
             ..Default::default()
         };
         let error =
@@ -687,8 +687,8 @@ fn owned_defaults_copy_external_nominal_inputs_with_protocol_evidence() {
                 &source,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    copy: selected.then_some("input::Copy"),
-                    drop: Some("input::Drop"),
+                    copy: selected.then_some("input.Copy"),
+                    drop: Some("input.Drop"),
                     ..Default::default()
                 },
             );
@@ -722,8 +722,8 @@ fn default_copy_evidence_checks_nested_representation() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                copy: Some("input::Copy"),
-                drop: Some("input::Drop"),
+                copy: Some("input.Copy"),
+                drop: Some("input.Drop"),
                 ..Default::default()
             },
         );
@@ -753,8 +753,8 @@ fn default_nominal_pointer_copies_preserve_external_storage() {
         "{prefix}fn read(value:Owned,p:Ref)->bool {{p.as(*bool).*}}fn take(p:Ref,.result:bool=read(Owned {{}},p))->bool {{result}}fn run()->bool {{var flag=true;let p=flag.ref.as(Ref);let first=take(p);flag=false;let second=take(p);first and not second}}"
     );
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package =
@@ -786,8 +786,8 @@ fn default_pointer_purity_does_not_authorize_moved_targets() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            copy: Some("input::Copy"),
-            drop: Some("input::Drop"),
+            copy: Some("input.Copy"),
+            drop: Some("input.Drop"),
             ..Default::default()
         },
     )
@@ -831,8 +831,8 @@ fn default_pointer_reads_require_complete_copy_evidence() {
                 &source,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    copy: Some("input::Copy"),
-                    drop: Some("input::Drop"),
+                    copy: Some("input.Copy"),
+                    drop: Some("input.Drop"),
                     ..Default::default()
                 },
             );
@@ -880,8 +880,8 @@ fn nominal_default_loads_deliver_each_calls_current_value() {
                 &source,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    copy: Some("input::Copy"),
-                    drop: Some("input::Drop"),
+                    copy: Some("input.Copy"),
+                    drop: Some("input.Drop"),
                     ..Default::default()
                 },
             )
@@ -912,8 +912,8 @@ fn pure_private_pointer_newtypes_keep_their_targets() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                copy: Some("input::Copy"),
-                drop: Some("input::Drop"),
+                copy: Some("input.Copy"),
+                drop: Some("input.Drop"),
                 ..Default::default()
             },
         )
@@ -937,8 +937,8 @@ fn pure_private_pointer_newtypes_keep_their_targets() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                copy: Some("input::Copy"),
-                drop: Some("input::Drop"),
+                copy: Some("input.Copy"),
+                drop: Some("input.Drop"),
                 ..Default::default()
             },
         )
@@ -961,8 +961,8 @@ fn pure_private_pointer_slot_loads_preserve_all_target_origins() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                copy: Some("input::Copy"),
-                drop: Some("input::Drop"),
+                copy: Some("input.Copy"),
+                drop: Some("input.Drop"),
                 ..Default::default()
             },
         )
@@ -986,8 +986,8 @@ fn pure_private_pointer_slot_loads_preserve_all_target_origins() {
             &source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                copy: Some("input::Copy"),
-                drop: Some("input::Drop"),
+                copy: Some("input.Copy"),
+                drop: Some("input.Drop"),
                 ..Default::default()
             },
         )
@@ -1027,8 +1027,8 @@ fn pure_private_data_writes_check_copy_and_cleanup() {
                 &source,
                 &Default::default(),
                 luna::protocols::type_constructors::Selectors {
-                    copy: Some("input::Copy"),
-                    drop: Some("input::Drop"),
+                    copy: Some("input.Copy"),
+                    drop: Some("input.Drop"),
                     ..Default::default()
                 },
             );
@@ -1059,8 +1059,8 @@ fn pure_data_write_rule_does_not_overwrite_pointer_or_code_evidence() {
             source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                copy: Some("input::Copy"),
-                drop: Some("input::Drop"),
+                copy: Some("input.Copy"),
+                drop: Some("input.Drop"),
                 ..Default::default()
             },
         )
@@ -1076,8 +1076,8 @@ fn pure_nested_data_replacement_preserves_copied_enum_values() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            copy: Some("input::Copy"),
-            drop: Some("input::Drop"),
+            copy: Some("input.Copy"),
+            drop: Some("input.Drop"),
             ..Default::default()
         },
     )
@@ -1094,8 +1094,8 @@ fn pure_nested_data_replacement_preserves_copied_enum_values() {
         &missing_copy,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            copy: Some("input::Copy"),
-            drop: Some("input::Drop"),
+            copy: Some("input.Copy"),
+            drop: Some("input.Drop"),
             ..Default::default()
         },
     )
@@ -1255,8 +1255,8 @@ fn recursive_callbacks_keep_factory_capture_identities_distinct() {
         fn visit(callback:Wrapped,p:*bool,done:bool)->bool {if done {callback(p)} else {visit(wrap(next),p,true)}}
         pure fn caller(p:*bool)->bool {visit(wrap(clean),p,false)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package=execution_support::compile_with_source_bindings(&format!("{common} fn next(p:*bool)->bool {{true}} fn run()->bool {{var flag=false;caller(flag.ref)}}"),&Default::default(),selectors).unwrap();
@@ -1301,8 +1301,8 @@ fn recursive_nested_closure_factories_preserve_each_capture_layer() {
         fn visit(callback:Nested,p:*bool,done:bool)->bool {if done {callback(p)} else {visit(nest(wrap(next)),p,true)}}
         pure fn caller(p:*bool)->bool {visit(nest(wrap(clean)),p,false)}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     let package=execution_support::compile_with_source_bindings(&format!("{common} fn next(p:*bool)->bool {{true}} fn run()->bool {{var flag=false;caller(flag.ref)}}"),&Default::default(),selectors).unwrap();
@@ -1335,8 +1335,8 @@ fn closure_capture_code_evidence_preserves_absent_enum_payloads() {
         fn wrap(choice:Choice)->Wrapped {|p| choice match {.none=>true,.some(callback)=>callback(p)}}
         fn clean(p:*bool)->bool {true} fn dirty(p:*bool)->bool {p.* = true;true}";
     let selectors = luna::protocols::type_constructors::Selectors {
-        copy: Some("input::Copy"),
-        drop: Some("input::Drop"),
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
         ..Default::default()
     };
     for choice in [
@@ -1411,8 +1411,8 @@ fn compile_error_purity(source: &str) -> Result<nir::program::Package, String> {
         &format!("trait Copy {{}} trait Drop {{fn drop(*self);}} {source}"),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            copy: Some("input::Copy"),
-            drop: Some("input::Drop"),
+            copy: Some("input.Copy"),
+            drop: Some("input.Drop"),
             ..Default::default()
         },
     )
@@ -1575,8 +1575,8 @@ fn owned_defaults_preserve_symbolic_copy_parameter_domains() {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            copy: Some("input::Copy"),
-            drop: Some("input::Drop"),
+            copy: Some("input.Copy"),
+            drop: Some("input.Drop"),
             ..Default::default()
         },
     )
@@ -1592,8 +1592,8 @@ fn owned_defaults_preserve_symbolic_copy_parameter_domains() {
             &rejected,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
-                copy: Some("input::Copy"),
-                drop: Some("input::Drop"),
+                copy: Some("input.Copy"),
+                drop: Some("input.Drop"),
                 ..Default::default()
             },
         )

@@ -208,6 +208,13 @@ fn normalize(
                     .collect::<Result<_, ErrorKind>>()?,
             )
         }
+        Term::OptionalValue { ty, value } => Term::OptionalValue {
+            ty: Box::new(normalize(ty, values, fuel, depth + 1)?),
+            value: value
+                .as_ref()
+                .map(|value| normalize(value, values, fuel, depth + 1).map(Box::new))
+                .transpose()?,
+        },
         Term::ErrorValue { ty, label, value } => {
             let Term::ErrorResult { errors, result } = ty.as_ref() else {
                 return Err(ErrorKind::Type);
@@ -247,6 +254,9 @@ fn normalize(
                     })
                     .collect::<Result<_, ErrorKind>>()?,
             )
+        }
+        Term::Optional(inner) => {
+            Term::Optional(Box::new(normalize(inner, values, fuel, depth + 1)?))
         }
         Term::Pointer(inner) => Term::Pointer(Box::new(normalize(inner, values, fuel, depth + 1)?)),
         Term::ComptimeFunction(inner) => {

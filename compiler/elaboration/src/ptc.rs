@@ -668,9 +668,16 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                         pending.push((Input::Term(argument), depth + 1));
                     }
                 }
-                Term::Pointer(inner)
+                Term::Optional(inner)
+                | Term::Pointer(inner)
                 | Term::ComptimeFunction(inner)
                 | Term::UnsafeFunction(inner) => pending.push((Input::Term(inner), depth + 1)),
+                Term::OptionalValue { ty, value } => {
+                    pending.push((Input::Term(ty), depth + 1));
+                    if let Some(value) = value {
+                        pending.push((Input::Term(value), depth + 1));
+                    }
+                }
                 Term::ErrorValue { ty, label, value } => {
                     pending.push((Input::Term(ty), depth + 1));
                     if let Some(label) = label {
@@ -790,6 +797,9 @@ fn subterms(term: &Term) -> Vec<&Term> {
             .iter()
             .chain(std::iter::once(subject.as_ref()))
             .collect(),
+        Term::OptionalValue { ty, value } => std::iter::once(ty.as_ref())
+            .chain(value.as_deref())
+            .collect(),
         Term::ErrorValue { ty, label, value } => std::iter::once(ty.as_ref())
             .chain(label.as_deref())
             .chain(std::iter::once(value.as_ref()))
@@ -811,7 +821,10 @@ fn subterms(term: &Term) -> Vec<&Term> {
         | Term::NormalForm {
             arguments: items, ..
         } => items.iter().collect(),
-        Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
+        Term::Optional(inner)
+        | Term::Pointer(inner)
+        | Term::ComptimeFunction(inner)
+        | Term::UnsafeFunction(inner) => {
             vec![inner]
         }
         Term::Function { parameters, result } if !has_bound(term) => parameters
@@ -844,6 +857,9 @@ fn has_bound(term: &Term) -> bool {
         Term::AssociatedType {
             arguments, subject, ..
         } => arguments.iter().any(has_bound) || has_bound(subject),
+        Term::OptionalValue { ty, value } => {
+            has_bound(ty) || value.as_ref().is_some_and(|value| has_bound(value))
+        }
         Term::ErrorValue { ty, label, value } => {
             has_bound(ty)
                 || label.as_ref().is_some_and(|label| has_bound(label))
@@ -875,9 +891,10 @@ fn has_bound(term: &Term) -> bool {
         | Term::NormalForm {
             arguments: items, ..
         } => items.iter().any(has_bound),
-        Term::Pointer(inner) | Term::ComptimeFunction(inner) | Term::UnsafeFunction(inner) => {
-            has_bound(inner)
-        }
+        Term::Optional(inner)
+        | Term::Pointer(inner)
+        | Term::ComptimeFunction(inner)
+        | Term::UnsafeFunction(inner) => has_bound(inner),
         _ => false,
     }
 }
@@ -1030,6 +1047,7 @@ impl Classes {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Head {
     Primitive(Primitive),
+    Optional,
     Pointer,
     ComptimeFunction,
     UnsafeFunction,
@@ -1041,6 +1059,7 @@ enum Head {
 fn constructor(term: &Term) -> Option<Head> {
     match term {
         Term::Primitive(p) if *p != Primitive::Unit => Some(Head::Primitive(*p)),
+        Term::Optional(_) => Some(Head::Optional),
         Term::Pointer(_) => Some(Head::Pointer),
         Term::ComptimeFunction(_) => Some(Head::ComptimeFunction),
         Term::UnsafeFunction(_) => Some(Head::UnsafeFunction),
@@ -1077,6 +1096,9 @@ impl Context {
 }
 
 fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
+    if let (Term::OptionalValue { value: a, .. }, Term::OptionalValue { value: b, .. }) = (a, b) {
+        return a.is_some() == b.is_some();
+    }
     if let (Term::ErrorValue { label: a, .. }, Term::ErrorValue { label: b, .. }) = (a, b) {
         return a.is_some() == b.is_some();
     }
@@ -1718,6 +1740,7 @@ fn rebuild(
 ) -> Option<Term> {
     match term {
         Term::Primitive(p) => Some(Term::Primitive(*p)),
+        Term::Optional(t) => Some(Term::Optional(Box::new(child(t)?))),
         Term::Pointer(t) => Some(Term::Pointer(Box::new(child(t)?))),
         Term::ComptimeFunction(t) => Some(Term::ComptimeFunction(Box::new(child(t)?))),
         Term::UnsafeFunction(t) => Some(Term::UnsafeFunction(Box::new(child(t)?))),

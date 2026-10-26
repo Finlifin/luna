@@ -32,6 +32,142 @@ fn value(name: &str, value: Term) -> Term {
 }
 
 #[test]
+fn frozen_collection_inputs_require_identity_authority_and_element_domains() {
+    let list = |element| Term::NormalForm {
+        head: id(90),
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
+    let frozen = |ty, fields| Term::NominalValue {
+        ty: Box::new(ty),
+        variant: None,
+        fields,
+    };
+    let bools = list(primitive(P::Bool));
+    let nested = list(bools.clone());
+    let descriptor = head(nested.clone());
+    let good = frozen(
+        nested.clone(),
+        vec![
+            frozen(bools.clone(), vec![Term::Bool(true), Term::Bool(false)]),
+            frozen(bools.clone(), vec![]),
+        ],
+    );
+    let check = |argument: &Term, trusted: bool, fuel: &mut usize| {
+        descriptor.check_arguments_in_scope_with_collections_budgeted_in(
+            std::slice::from_ref(argument),
+            |_| false,
+            |declaration| trusted && declaration == id(90),
+            |_, _, _| None,
+            |_, _| false,
+            &[],
+            fuel,
+            None,
+        )
+    };
+    assert!(good.check_scope(&[]).is_ok());
+    assert!(
+        descriptor
+            .check_closed_arguments(std::slice::from_ref(&good))
+            .is_err()
+    );
+    assert!(check(&good, false, &mut 100_000).is_err());
+    assert!(check(&good, true, &mut 100_000).is_ok());
+    for bad in [
+        frozen(
+            nested.clone(),
+            vec![frozen(bools.clone(), vec![Term::Char('x')])],
+        ),
+        frozen(
+            nested.clone(),
+            vec![frozen(list(primitive(P::Char)), vec![Term::Char('x')])],
+        ),
+        frozen(nested.clone(), vec![Term::TupleValue(vec![])]),
+        Term::NominalValue {
+            ty: Box::new(nested.clone()),
+            variant: Some(0),
+            fields: vec![],
+        },
+    ] {
+        assert!(check(&bad, true, &mut 100_000).is_err());
+        assert!(check(&good, true, &mut 100_000).is_ok());
+    }
+    let mut low = 1;
+    assert!(check(&good, true, &mut low).is_err());
+    let empty = frozen(nested, vec![]);
+    assert!(check(&empty, true, &mut 100_000).is_ok());
+}
+
+#[test]
+fn dependent_collection_domains_keep_type_list_encoding_canonical() {
+    let list = |element| Term::NormalForm {
+        head: id(90),
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
+    let mut descriptor = head(primitive(P::Bool));
+    descriptor.parameters = vec![
+        parameter(1, Kind::Type, primitive(P::Type)),
+        parameter(
+            2,
+            Kind::Value,
+            list(Term::Rigid {
+                declaration: id(1),
+                sort: Sort::Type,
+            }),
+        ),
+    ];
+    let check = |element, value| {
+        descriptor.check_arguments_in_scope_with_collections_budgeted_in(
+            &[element, value],
+            |_| false,
+            |declaration| declaration == id(90),
+            |_, _, _| None,
+            |_, _| false,
+            &[],
+            &mut 100_000,
+            None,
+        )
+    };
+    assert!(
+        check(
+            primitive(P::Type),
+            Term::TypeListValue(vec![primitive(P::Bool)])
+        )
+        .is_ok()
+    );
+    assert!(
+        check(
+            primitive(P::Bool),
+            Term::NominalValue {
+                ty: Box::new(list(primitive(P::Bool))),
+                variant: None,
+                fields: vec![Term::Bool(true)],
+            }
+        )
+        .is_ok()
+    );
+    assert!(
+        check(
+            primitive(P::Bool),
+            Term::TypeListValue(vec![primitive(P::Bool)])
+        )
+        .is_err()
+    );
+    assert!(
+        check(
+            primitive(P::Type),
+            Term::NominalValue {
+                ty: Box::new(list(primitive(P::Type))),
+                variant: None,
+                fields: vec![primitive(P::Bool)],
+            }
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn symbol_normal_inputs_do_not_accept_strings_or_types() {
     let descriptor = head(primitive(P::Symbol));
     assert!(supported_input_type(&primitive(P::Symbol), &[]));
@@ -710,4 +846,44 @@ fn platform_normal_inputs_validate_target_ranges_recursively() {
             assert!(descriptor.check_closed_arguments(&arguments).is_err());
         }
     }
+}
+
+#[test]
+fn optional_normal_inputs_preserve_layer_and_validate_payload_domain() {
+    let boolean = primitive(P::Bool);
+    let domain = Term::Optional(Box::new(boolean.clone()));
+    let descriptor = head(domain.clone());
+    assert!(supported_input_type(&domain, &[]));
+    for payload in [None, Some(Box::new(Term::Bool(true)))] {
+        descriptor
+            .check_closed_arguments(&[Term::OptionalValue {
+                ty: Box::new(domain.clone()),
+                value: payload,
+            }])
+            .unwrap();
+    }
+    for value in [
+        Term::OptionalValue {
+            ty: Box::new(domain.clone()),
+            value: Some(Box::new(Term::Char('x'))),
+        },
+        Term::OptionalValue {
+            ty: Box::new(Term::Optional(Box::new(domain))),
+            value: None,
+        },
+    ] {
+        assert!(descriptor.check_closed_arguments(&[value]).is_err());
+    }
+    assert!(!supported_input_type(
+        &Term::Optional(Box::new(Term::Pointer(Box::new(boolean)))),
+        &[]
+    ));
+    let empty = Term::Optional(Box::new(primitive(P::Never)));
+    assert!(supported_input_type(&empty, &[]));
+    head(empty.clone())
+        .check_closed_arguments(&[Term::OptionalValue {
+            ty: Box::new(empty),
+            value: None,
+        }])
+        .unwrap();
 }

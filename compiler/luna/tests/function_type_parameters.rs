@@ -816,7 +816,7 @@ fn recursive_template_factory_executes_with_finite_helper_graph() {
     let helpers: Vec<_> = recursive
         .functions
         .iter()
-        .filter(|instance| instance.function.name.ends_with("::template-target"))
+        .filter(|instance| instance.function.name.ends_with(".template-target"))
         .collect();
     assert_eq!(helpers.len(), 1);
     let mut vm = Interpreter::from_iir(&recursive, Budget::default()).unwrap();
@@ -1008,7 +1008,7 @@ fn recursive_factory_can_store_and_use_recursive_results_before_returning() {
     let helper = graph
         .functions
         .iter()
-        .find(|instance| instance.function.name.ends_with("::template-target"))
+        .find(|instance| instance.function.name.ends_with(".template-target"))
         .unwrap()
         .function
         .declaration;
@@ -1278,7 +1278,7 @@ fn finite_factory_graphs_are_limited_by_work_budget_not_a_fixed_node_count() {
         graph
             .functions
             .iter()
-            .filter(|instance| instance.function.name.ends_with("::template-target"))
+            .filter(|instance| instance.function.name.ends_with(".template-target"))
             .count(),
         COUNT
     );
@@ -1317,7 +1317,7 @@ fn shared_factory_dependencies_do_not_create_false_recursion_cycles() {
         !graph
             .functions
             .iter()
-            .any(|instance| instance.function.name.ends_with("::template-target"))
+            .any(|instance| instance.function.name.ends_with(".template-target"))
     );
     for choice in [false, true] {
         assert_eq!(

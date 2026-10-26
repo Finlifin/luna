@@ -2014,7 +2014,9 @@ impl Checker<'_, '_> {
                         }
                         let mut types: Vec<&Term> = match value {
                             Value::Type(ty)
+                            | Value::List { ty, .. }
                             | Value::Newtype { ty, .. }
+                            | Value::Optional { ty, .. }
                             | Value::ErrorResult { ty, .. } => vec![ty],
                             Value::TypeList(types) => types.iter().collect(),
                             Value::Closure(closure) => {
@@ -2238,6 +2240,12 @@ pub(super) fn frozen_references<'a>(
                 }
                 Term::TupleValue(fields) => pending.extend(fields),
                 Term::RecordValue(fields) => pending.extend(fields.iter().map(|(_, value)| value)),
+                Term::OptionalValue { ty, value } => {
+                    pending.push(ty);
+                    if let Some(value) = value {
+                        pending.push(value);
+                    }
+                }
                 Term::ErrorValue { ty, label, value } => {
                     pending.push(ty);
                     if let Some(label) = label {
@@ -2348,7 +2356,8 @@ pub(super) fn references(
                     pending.push(Node::Pattern(pattern));
                     pending.push(Node::Expr(condition));
                 }
-                n::Pattern::ErrorResult { inner: pattern, .. }
+                n::Pattern::OptionalPresent(pattern)
+                | n::Pattern::ErrorResult { inner: pattern, .. }
                 | n::Pattern::Observe { inner: pattern, .. }
                 | n::Pattern::Remap { pattern, .. }
                 | n::Pattern::Binding { inner: pattern, .. } => {
@@ -2364,7 +2373,10 @@ pub(super) fn references(
                 | n::Pattern::TypeTuple(fields)
                 | n::Pattern::Tuple(fields)
                 | n::Pattern::Or(fields) => pending.extend(fields.iter().map(Node::Pattern)),
-                n::Pattern::Wild | n::Pattern::Unit | n::Pattern::Literal(_) => {}
+                n::Pattern::OptionalAbsent
+                | n::Pattern::Wild
+                | n::Pattern::Unit
+                | n::Pattern::Literal(_) => {}
             },
             Node::Expr(e) => match &e.kind {
                 K::EffectHandle {
@@ -2518,6 +2530,8 @@ pub(super) fn references(
                 | K::ReadPointer(value)
                 | K::PointerAnonymousField { pointer: value, .. }
                 | K::PointerField { pointer: value, .. }
+                | K::OptionalPresent(value)
+                | K::OptionalType(value)
                 | K::PointerType(value)
                 | K::BitVecType(value)
                 | K::Loop { body: value, .. } => pending.push(Node::Expr(value)),
@@ -2639,6 +2653,7 @@ pub(super) fn references(
                 | K::TypeListValue(_)
                 | K::Literal(_)
                 | K::Local(_)
+                | K::OptionalAbsent
                 | K::Unit
                 | K::Break(_)
                 | K::Continue(_) => {}

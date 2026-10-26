@@ -241,8 +241,8 @@ fn operation_packets_preserve_bound_tuple_identity() {
         fn run()->bool {combine(...packet())# {combine(a,b)=>a and not b,}}",
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list: Some("input::List"),
-            tuple: Some("input::Tuple"),
+            meta_list: Some("input.List"),
+            tuple: Some("input.Tuple"),
             ..Default::default()
         },
     )

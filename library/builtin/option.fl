@@ -1,41 +1,76 @@
--- ==========================================================================
--- builtin/option – the Option (?T) type
--- ==========================================================================
+{-
+    Operations on the language's optional type. Each ?T layer preserves the
+    complete T value; no library enum or declaration binding defines this type.
+    Panic-dependent unwrap is kept in option_unwrap.fl.
+-}
 
--- Panic-dependent unwrap lives in option_unwrap.fl; this module contains
--- the dependency-free value operations.
--- #[lang = "optional"]
-pub enum Option where T {
-    Some(T),
-    None,
+pub trait OptionalOps where T {
+    fn is_some(self) -> bool;
+    fn is_none(self) -> bool;
+    fn unwrap_or(self, fallback: T) -> T;
+    fn unwrap_or_else(self, fallback: %c fn() -> T) -> T where c: (.Type'builtin).vars.Closure;
+    fn map(self, f: %c fn(T) -> U) -> ?U where U, c: (.Type'builtin).vars.Closure;
+    fn and_then(self, f: %c fn(T) -> ?U) -> ?U where U, c: (.Type'builtin).vars.Closure;
+    fn filter(self, pred: %c fn(*T) -> bool) -> ?T where c: (.Type'builtin).vars.Closure;
+    fn inspect(self, observer: %c fn(*T)) -> ?T where c: (.Type'builtin).vars.Closure;
+    fn or_else(self, fallback: %c fn() -> ?T) -> ?T where c: (.Type'builtin).vars.Closure;
+    fn zip_with(self, other: ?U, combine: %c fn(T, U) -> V) -> ?V where U, V, c: (.Type'builtin).vars.Closure;
 }
 
-impl Option<T> where T {
-    pub fn is_some(self) -> bool = self match {
-        .Some(_) => true,
-        .None    => false,
+impl OptionalOps<T> for ?T where T {
+    fn is_some(self) -> bool = self match {
+        _? => true,
+        null => false,
     };
 
-    pub fn is_none(self) -> bool = not self.is_some();
+    fn is_none(self) -> bool = not self.as(OptionalOps<T>).is_some();
 
-    pub fn unwrap_or(self, fallback: T) -> T = self match {
-        .Some(v) => v,
-        .None    => fallback,
+    fn unwrap_or(self, fallback: T) -> T = self match {
+        value? => value,
+        null => fallback,
     };
 
-    -- Construct a fallback only when no value is present.
-    pub fn unwrap_or_else(self, fallback: %c fn() -> T) -> T where c: (.Type'builtin).vars.Closure = self match {
-        .Some(v) => v,
-        .None => fallback(),
+    -- Construct a fallback only when this layer is absent.
+    fn unwrap_or_else(self, fallback: %c fn() -> T) -> T where c: (.Type'builtin).vars.Closure = self match {
+        value? => value,
+        null => fallback(),
     };
 
-    pub fn map(self, f: %c fn(T) -> U) -> ?U where U, c: (.Type'builtin).vars.Closure = self match {
-        .Some(v) => .Some(f(v)),
-        .None    => .None,
+    fn map(self, f: %c fn(T) -> U) -> ?U where U, c: (.Type'builtin).vars.Closure = self match {
+        value? => f(value),
+        null => null,
     };
 
-    pub fn and_then(self, f: %c fn(T) -> ?U) -> ?U where U, c: (.Type'builtin).vars.Closure = self match {
-        .Some(v) => f(v),
-        .None    => .None,
+    fn and_then(self, f: %c fn(T) -> ?U) -> ?U where U, c: (.Type'builtin).vars.Closure = self match {
+        value? => f(value),
+        null => null,
+    };
+
+    {- Observe the owned payload in place before deciding whether to retain it.
+       A rejected payload is cleaned up by the ordinary resource rules. -}
+    fn filter(self, pred: %c fn(*T) -> bool) -> ?T where c: (.Type'builtin).vars.Closure = self match {
+        value? => if pred(value.ref) {value} else {null},
+        null => null,
+    };
+
+    fn inspect(self, observer: %c fn(*T)) -> ?T where c: (.Type'builtin).vars.Closure = self match {
+        value? => do {observer(value.ref); value},
+        null => null,
+    };
+
+    -- Invoke the alternative only when this outer optional layer is absent.
+    fn or_else(self, fallback: %c fn() -> ?T) -> ?T where c: (.Type'builtin).vars.Closure = self match {
+        value? => value,
+        null => fallback(),
+    };
+
+    {- Both inputs are ordinary, eagerly evaluated arguments. Only combination
+       is conditional; an unmatched payload still has its normal cleanup. -}
+    fn zip_with(self, other: ?U, combine: %c fn(T, U) -> V) -> ?V where U, V, c: (.Type'builtin).vars.Closure = self match {
+        left? => other match {
+            right? => combine(left, right),
+            null => null,
+        },
+        null => null,
     };
 }

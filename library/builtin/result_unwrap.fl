@@ -1,13 +1,17 @@
--- The builtin root re-exports Result to its child modules.
--- Panic-dependent methods retain their original failure contract.
-impl Result<T, E> where T, E {
-    pub fn unwrap(self) -> T = self match {
-        .Ok(v)  => v,
-        .Err(_) => panic("called Result.unwrap() on an Err value"),
+-- Panic-dependent elimination of a native result with one error type.
+pub trait ErrorResultUnwrap where T, E {
+    fn unwrap(self) -> T;
+    fn unwrap_err(self) -> E;
+}
+
+impl ErrorResultUnwrap<T, E> for !E T where T, E {
+    fn unwrap(self) -> T = self match {
+        value! => value,
+        error _ => panic("called unwrap on an error result"),
     };
 
-    pub fn unwrap_err(self) -> E = self match {
-        .Ok(_)  => panic("called Result.unwrap_err() on an Ok value"),
-        .Err(e) => e,
+    fn unwrap_err(self) -> E = self match {
+        _! => panic("called unwrap_err on a successful result"),
+        error failure => failure,
     };
 }

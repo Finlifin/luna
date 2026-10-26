@@ -10,7 +10,7 @@ import tempfile
 from process_tools import ROOT, run, save_summary
 from host_examples import EXAMPLES, MATH_OPTIONS
 
-STAGES = ('declarations', 'manifest', 'native-resources', 'native-comparison',
+STAGES = ('declarations', 'attributes', 'merged-attributes', 'meta-values', 'inline-iteration', 'manifest', 'native-resources', 'native-comparison',
           'native-math', 'native-option', 'native-result', 'native-tuple', 'native-conversion', 'sysroot')
 
 
@@ -29,6 +29,20 @@ def main():
     cargo = [sys.executable, '-B', str(ROOT / 'development/cargo.py')]
     stages = [
         ('declarations', ['test', '-p', 'luna', '--test', 'library_protocols']),
+        ('attributes', ['run', '-p', 'luna', '--', '--packages-v1',
+                        '--package', '1', '101', 'app',
+                        str(ROOT / 'development/examples/library-attributes.fl'),
+                        '--package', '2', '202', 'attrs', str(ROOT / 'library/attrs/lib.fl'),
+                        '--dependency', '1', 'attrs', '2', '--primary', '1',
+                        '--emit', 'attributes']),
+        ('meta-values', ['run', '-p', 'luna', '--', '--packages-v1',
+                         '--package', '1', '101', 'app',
+                         str(ROOT / 'development/examples/library-meta-values.fl'),
+                         '--package', '2', '202', 'meta', str(ROOT / 'library/meta/lib.fl'),
+                         '--package', '3', '303', 'builtin', str(ROOT / 'library/builtin/primitives.fl'),
+                         '--dependency', '1', 'meta', '2', '--dependency', '1', 'builtin', '3',
+                         '--primary', '1', '--meta-list-type', 'meta.List', '--invoke-comptime', 'run']),
+        ('inline-iteration', ['test', '-p', 'luna', '--test', 'library_iteration']),
         ('manifest', ['test', '-p', 'luna', '--lib', 'repository_sysroot']),
         ('native-resources', ['run', '-p', 'luna', '--', '--packages-v1',
                               '--package', '1', '101', 'app',
@@ -36,8 +50,8 @@ def main():
                               '--package', '2', '202', 'resources',
                               str(ROOT / 'library/builtin/resources.fl'),
                               '--dependency', '1', 'resources', '2', '--primary', '1',
-                              '--copy-protocol', 'resources::Copy',
-                              '--drop-protocol', 'resources::Drop', '--test-native']),
+                              '--copy-protocol', 'resources.Copy',
+                              '--drop-protocol', 'resources.Drop', '--test-native']),
         ('native-comparison', ['run', '-p', 'luna', '--', '--packages-v1',
                                '--package', '1', '101', 'app',
                                str(ROOT / 'development/examples/host-library-comparison.fl'),
@@ -45,25 +59,27 @@ def main():
                                '--package', '3', '303', 'resources', str(ROOT / 'library/builtin/resources.fl'),
                                '--dependency', '1', 'comparison', '2',
                                '--dependency', '1', 'resources', '3', '--primary', '1',
-                               '--copy-protocol', 'resources::Copy',
-                               '--drop-protocol', 'resources::Drop', '--test-native']),
+                               '--copy-protocol', 'resources.Copy',
+                               '--drop-protocol', 'resources.Drop', '--test-native']),
         ('native-math', ['run', '-p', 'luna', '--', '--packages-v1',
                         '--package', '1', '101', 'app',
                         str(ROOT / 'development/examples/host-math-tests.fl'),
-                        '--package', '2', '202', 'math', str(ROOT / 'library/math/lib.fl'),
+                        '--package', '2', '202', 'math', str(ROOT / 'library/builtin/math_intrinsics.fl'),
                         '--package', '3', '303', 'resources', str(ROOT / 'library/builtin/resources.fl'),
                         '--dependency', '1', 'math', '2',
                         '--dependency', '1', 'resources', '3', '--primary', '1',
-                        '--copy-protocol', 'resources::Copy',
-                        '--drop-protocol', 'resources::Drop',
+                        '--copy-protocol', 'resources.Copy',
+                        '--drop-protocol', 'resources.Drop',
                         *MATH_OPTIONS,
                         '--test-native']),
         ('sysroot', ['run', '-p', 'luna', '--',
                      str(ROOT / 'development/examples/library-smoke.fl'),
                      '--sysroot', str(ROOT / 'library'), '--interpret', 'run']),
     ]
+    attribute_command = next(command for label, command in stages if label == 'attributes')
+    stages.insert(2, ('merged-attributes', [*attribute_command[:-1], 'merged-attributes']))
     for name, alias, bindings in [
-        ('option', 'optional', ['--optional-type', 'optional::Option']),
+        ('option', 'optional', []),
         ('result', 'fallible', []),
     ]:
         stages.insert(-1, (f'native-{name}', [
@@ -74,7 +90,7 @@ def main():
             '--package', '3', '303', 'resources', str(ROOT / 'library/builtin/resources.fl'),
             '--dependency', '1', alias, '2', '--dependency', '1', 'resources', '3',
             '--primary', '1', *bindings,
-            '--copy-protocol', 'resources::Copy', '--drop-protocol', 'resources::Drop',
+            '--copy-protocol', 'resources.Copy', '--drop-protocol', 'resources.Drop',
             '--test-native',
         ]))
     for name in ['tuple', 'conversion']:
@@ -98,8 +114,16 @@ def main():
         matches = None
         if code == 0:
             output = (evidence / 'stdout.log').read_text().strip()
-            if label == 'sysroot':
+            if label in ('sysroot', 'meta-values'):
                 matches = output == '(bool true)'
+            elif label in ('attributes', 'merged-attributes'):
+                matches = (output.count('(evaluated-attribute ') == 1
+                           and '(property "abi")' in output
+                           and '(symbol "c")' in output)
+                if label == 'merged-attributes':
+                    matches = (matches and output.startswith('(attribute-inspection (evaluated ')
+                               and output.count('(merged-attributes ') == 1
+                               and '(key "abi") (entry 0)' in output)
             elif label in native_counts:
                 count = native_counts[label]
                 matches = f'(count {count}) (failures 0)' in output

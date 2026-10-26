@@ -38,6 +38,15 @@ fn forward(value: T) -> T where T :- resources.Once { value }
 
 `Es` 是一个完整类型列表输入，不是若干独立类型参数。实现位于资源 trait 的定义包，构造器单独作为另一个包加载时不会自动取得这份实现。该标记不赋予 Clone／Copy，也不替代元素的清理；包含非 Copy 字段的元组仍只能按移动规则交付。通用逐元素 Clone／Copy 尚未接通。
 
+原生可选类型及单一错误类型的结果也由 builtin 提供 Once 实现：
+
+~~~flurry
+impl Once for ?T where T {}
+impl Once for !E T where E, T {}
+~~~
+
+因此 `forward` 可以直接交付 `?Token`、`??Token` 或 `!Error Token`，无需库包装枚举。空值没有载荷清理；present、成功或错误分支只转移实际存在的责任，离开清理范围时执行一次清理。该实现不要求载荷先具有显式 Once 标记，也不替载荷提供 Clone／Copy。任意异构错误行的通用 Once 实现、借用载荷的通用 Clone 与条件 Copy 仍待接通。
+
 ### Clone
 
 Clone 显式产生另一个合法值，同时保留合法源值。两值之间的共享关系、分配、效果和结果依赖由具体实现契约规定。
