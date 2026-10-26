@@ -340,6 +340,9 @@ fn elaborate_with_attributes(
         ));
     }
     let mut checker = Checker {
+        next_definition_identity: package
+            .next_definition_index()
+            .max(u32::try_from(package.num_defs()).unwrap_or(u32::MAX)),
         delivered_types: BTreeMap::new(),
         target,
         protocols: protocols.clone(),
@@ -1291,6 +1294,16 @@ fn elaborate_candidate<'a, 'h>(
         &mut checker.required_steps,
     )?;
     output.quote_identity_cursor = checker.next_temporary_binding;
+    output.definition_identity_cursor = checker.next_definition_identity;
+    for (id, definition) in &checker.structs {
+        if !output
+            .structs
+            .iter()
+            .any(|existing| existing.declaration == *id)
+        {
+            output.structs.push(definition.clone());
+        }
+    }
     if output
         .implementations
         .iter()
@@ -1381,6 +1394,7 @@ impl ReturnObservations {
 }
 
 struct Checker<'a, 'h> {
+    next_definition_identity: u32,
     delivered_types: BTreeMap<n::LocalId, (std::sync::Arc<Term>, Span)>,
     target: Option<nir::target::TargetData>,
     protocols: Protocols,
@@ -3056,14 +3070,10 @@ impl Checker<'_, '_> {
         let instantiated_fields = def
             .instantiate_fields_in_scope(arguments, &self.call_input_frames())
             .map_err(|e| error(expr.span, e.to_string()))?;
-        let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                (matches_declaration(self.package, &self.package_identities, owner, *id))
-                    .then_some(owner)
-            })
-            .unwrap();
+        let owner = self.package.owners().find_map(|(owner, _)| {
+            (matches_declaration(self.package, &self.package_identities, owner, *id))
+                .then_some(owner)
+        });
         let mut supplied = BTreeMap::new();
         for arg in args {
             let Arg::Named(name, value) = arg else {
@@ -3084,14 +3094,23 @@ impl Checker<'_, '_> {
                 let field_type = self.callable_input_view(field_type, value.span)?;
                 self.expr(value, Some(&field_type))?
             } else {
-                self.field_default(owner, None, index)?
-                    .instantiate_parameters_in_scope(
-                        &def.parameter_binders()
-                            .map_err(|e| error(expr.span, e.to_string()))?,
-                        arguments,
-                        &self.call_input_frames(),
-                    )
-                    .map_err(|e| error(expr.span, e.to_string()))?
+                self.field_default(
+                    owner.ok_or_else(|| {
+                        error(
+                            expr.span,
+                            format!("missing struct field {}", def.fields[index].0),
+                        )
+                    })?,
+                    None,
+                    index,
+                )?
+                .instantiate_parameters_in_scope(
+                    &def.parameter_binders()
+                        .map_err(|e| error(expr.span, e.to_string()))?,
+                    arguments,
+                    &self.call_input_frames(),
+                )
+                .map_err(|e| error(expr.span, e.to_string()))?
             });
         }
         let actual = if fields.iter().any(|f| is_never(&f.ty)) {

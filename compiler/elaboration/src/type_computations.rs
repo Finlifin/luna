@@ -303,9 +303,20 @@ impl<'a> Session<'a> {
             comptime_interpretor::Error,
         >,
     ) -> Result<Self, Error> {
-        let mut session = Self::new(package, context, budget)?;
-        session.interpreter = session.interpreter.with_struct_builder(builder);
-        Ok(session)
+        Ok(Self::new(package, context, budget)?.with_struct_builder(builder))
+    }
+    pub(crate) fn with_struct_builder(
+        mut self,
+        builder: &'a dyn Fn(
+            &comptime_interpretor::StructBuildRequest,
+            &mut u64,
+        ) -> Result<
+            comptime_interpretor::PreparedStructBuild<'a>,
+            comptime_interpretor::Error,
+        >,
+    ) -> Self {
+        self.interpreter = self.interpreter.with_struct_builder(builder);
+        self
     }
     /// Capture one declaration's Type inputs and proof environment before any
     /// work is queued. The environment cannot change while waiters are active.

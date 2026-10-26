@@ -1121,7 +1121,61 @@ impl Checker<'_, '_> {
         inputs: Vec<(n::LocalId, Term, Term)>,
     ) -> Result<(Value, Term), Error> {
         let prepared = self.prepare_required_expression(expr, expected, checked, inputs, false)?;
-        prepared.invoke(&mut self.required_steps, expr.span)
+        self.invoke_required_publishing(prepared, Vec::new(), expr.hir_id.owner, expr.span)
+    }
+
+    fn invoke_required_publishing(
+        &mut self,
+        prepared: PreparedRequired,
+        values: Vec<(n::LocalId, Value)>,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<(Value, Term), Error> {
+        let identity = declaration(self.package, &self.package_identities, owner).package;
+        let (result, definitions) = prepared.invoke_publishing(
+            values,
+            &mut self.required_steps,
+            span,
+            identity,
+            &mut self.next_definition_identity,
+        )?;
+        if definitions.is_empty() {
+            return Ok(result);
+        }
+        for batch in definitions {
+            for definition in batch.iter() {
+                let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let copied = (|| {
+                    fuel = fuel
+                        .checked_sub(
+                            definition
+                                .name
+                                .len()
+                                .saturating_add(definition.fields.len()),
+                        )
+                        .ok_or(())?;
+                    for (name, ty) in &definition.fields {
+                        fuel = fuel.checked_sub(name.len()).ok_or(())?;
+                        nir::type_computations::charge_term(ty, &mut fuel).map_err(|_| ())?;
+                    }
+                    Ok::<_, ()>(())
+                })();
+                self.required_steps -= (before - fuel) as u64;
+                copied
+                    .map_err(|_| error(span, "generated struct registration budget exhausted"))?;
+                self.context
+                    .admit_nominal_constructor(definition.declaration);
+                self.structs
+                    .insert(definition.declaration, definition.clone());
+            }
+        }
+        self.implementation_index.sync_nominal_layouts(
+            self.structs.values(),
+            self.enums.values(),
+            self.newtypes.values(),
+        );
+        Ok(result)
     }
 
     pub(super) fn prepare_required_expression(
@@ -1164,12 +1218,13 @@ impl Checker<'_, '_> {
             .iter()
             .map(|(binding, _, _)| *binding)
             .collect();
-        prepared.invoke_with_live_inputs(
+        self.invoke_required_publishing(
+            prepared,
             live.into_iter()
                 .filter(|(binding, _, _)| selected.contains(binding))
                 .map(|(binding, _, value)| (binding, value))
                 .collect(),
-            &mut self.required_steps,
+            source.hir_id.owner,
             source.span,
         )
     }
@@ -1193,12 +1248,13 @@ impl Checker<'_, '_> {
             .iter()
             .map(|(binding, _, _)| *binding)
             .collect();
-        prepared.invoke_with_live_inputs(
+        self.invoke_required_publishing(
+            prepared,
             live.into_iter()
                 .filter(|(binding, _, _)| selected.contains(binding))
                 .map(|(binding, _, value)| (binding, value))
                 .collect(),
-            &mut self.required_steps,
+            source.hir_id.owner,
             source.span,
         )
     }

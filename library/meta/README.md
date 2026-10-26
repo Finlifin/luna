@@ -41,15 +41,25 @@ comptime fn Mirror() -> Type {
     }
     builder.Build()
 }
+
+typealias Mirrored = Mirror();
+
+fn example() -> bool {
+    let value = Mirrored { first: true, second: false };
+    value.first
+}
 ```
 
-`Build` 经过普通定义检查后才发布类型，重名字段会被拒绝；字段 Type
+`Build` 检查字段 Type 的形成与有限存储表示后才发布类型，重名字段会被拒绝；字段 Type
 保留 normal-form 头。空草稿可以发布空结构体，名称相同不代表类型身份相同。
 草稿及其中的 List 数据不能成为 runtime 接口。
 
 可以通过现有 `--invoke-comptime` 执行构造入口，单文件、显式包集合和 sysroot
 路径都会安装发布服务；显式加载 meta 时仍需绑定 `--meta-list-type meta.List`。
 驱动的 `compile_and_invoke_with_struct_builders` API 还会同时返回调用值和含生成
-定义的检查后 NIR。初始 elaboration 中的 typealias 计算尚未安装发布服务。
+定义的检查后 NIR。直接的 typealias 初始化、常量计算和即时必需 comptime
+调用也已接入；生成类型可以进入后续调用、构造表达式和运行时字段访问。
+生成声明的编号边界随 NIR 保存，后续显式生成不会覆盖初始计算产生的类型。
+尚未接通保存后延迟执行的 open-function 输入计算中的 builder 发布。
 字段默认代码、属性、泛型子句、方法和 impl
 的构造尚未接入；这里还不是完整 SoA 示例所需的全部 builder 能力。

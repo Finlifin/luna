@@ -1719,6 +1719,9 @@ pub struct Package {
     pub quote_templates: Vec<Function>,
     /// Next identity in the shared hygienic-expansion namespace.
     pub quote_identity_cursor: u32,
+    /// Next resolver identity after source scanning and committed generation.
+    /// This includes declarations omitted from an invocation snapshot.
+    pub definition_identity_cursor: u32,
     /// Compiler-owned result envelopes have no user-defined destructor. This
     /// provenance permits structural cleanup reasoning, never implicit Copy.
     pub internal_return_packets: std::collections::BTreeSet<DeclarationId>,
@@ -3181,6 +3184,13 @@ impl fmt::Display for Function {
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(nir-package")?;
+        if self.definition_identity_cursor != 0 {
+            write!(
+                f,
+                " (definition-identity-cursor {})",
+                self.definition_identity_cursor
+            )?;
+        }
         if let Some(target) = self.target {
             write!(f, "\n {target}")?;
         }

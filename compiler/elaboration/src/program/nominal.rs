@@ -653,6 +653,12 @@ impl Checker<'_, '_> {
         else {
             return Ok(());
         };
+        if self.structs.contains_key(id)
+            || self.enums.contains_key(id)
+            || self.newtypes.contains_key(id)
+        {
+            return Ok(());
+        }
         let owner = self
             .package
             .owners()

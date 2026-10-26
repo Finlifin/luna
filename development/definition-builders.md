@@ -3,6 +3,54 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Immediate required source invocation
+
+Immediate required calls now install a checked publisher for both Type results
+and other comptime values. Generated descriptions return to the current source
+checker, enter its nominal/layout tables and appear in subsequent invocation
+snapshots and the completed NIR. `typealias` initializers and constants can use
+`meta.StructBuilder`; runtime construction, projection and field writes use the
+same checked descriptors. Missing fields produce diagnostics even though these
+concrete, body-free declarations have no HIR field-default owner.
+
+The checker allocates from the complete HIR source identity frontier and records
+`definition_identity_cursor` in NIR, with an S-expression dump field. The explicit
+invocation driver uses this frontier and checked snapshot publication as well,
+so it neither reexecutes typealias initializers nor reuses their identities.
+Inactive builder paths consume no structural budget. Required source calls use
+the existing required-invocation allowance; explicit calls additionally retain
+their caller-supplied structural allowance. Failed reservations are not reused
+within the publisher. Ordinary source defaults continue to use their HIR owners.
+
+Saved/deferred open-function input computations still use their prior invocation
+path; builder publication in those computations remains unsupported. Concrete
+fields must be closed Types. Generic declaration generation, field defaults,
+attributes, methods and implementation evidence remain separate work. The
+remaining sections retain earlier validation evidence; this section supersedes
+older statements that all initial required invocations lack a publisher.
+
+Validation in `/home/fin/luna`, through `python3 -B development/check.py
+--timeout 900 --`:
+
+- `check --release -p luna`: exit 0 (`/tmp/luna-tools-rgum6j19/result.json`).
+- `test --release -p luna --test builder_invocations --test elaboration --test
+  source_reflection --test packages --test frontend_cli --no-fail-fast`: 748
+  passed, exit 0 (`/tmp/luna-tools-mg44tjfj/result.json`).
+- `test --release -p elaboration --lib program::required::prepared`: 10 passed,
+  exit 0 (`/tmp/luna-tools-arvfu6ly/result.json`).
+- `test --release -p elaboration --test checked_struct_publisher --test
+  struct_publisher --test delivered_types --test representations --no-fail-fast`:
+  27 passed, exit 0 (`/tmp/luna-tools-664lf8_w/result.json`).
+
+The source tests cover a generated typealias used at runtime, constants and
+chained aliases with distinct identities, nested field assignment, subsequent
+explicit generation without identity collisions, missing/invalid field
+rejection and the public meta builder's reflection loop during initialization.
+The first builder run caught a missing structural-budget diagnostic in the new
+adapter; the corrected diagnostic passes the final run. The new allocator
+unit test's temporary borrow scope was corrected before its final passing run.
+Targeted rustfmt and `git diff --check` pass.
+
 ## Publication from a checked snapshot
 
 `definitions::CheckedStructPublisher` publishes concrete, body-free struct
@@ -17,8 +65,8 @@ its complete source world, including declarations absent from the invocation
 snapshot. The publisher does not guess a package identity or allocate from the
 maximum visible NIR declaration. It returns only committed immutable batches;
 merging them into source-checker tables and preserving the source allocation
-frontier remain caller responsibilities. Automatic `typealias` integration is
-still pending.
+frontier remain caller responsibilities. The immediate source-call adapter and
+explicit driver now perform these responsibilities.
 
 Preparation retains no candidate on failure or drop. A commit against a changed
 publication revision is rejected, allowing the invoking VM to roll back its
@@ -88,10 +136,10 @@ replay publication. A rejected commit rolls back VM admission, and an independen
 later computation can publish successfully in the same session.
 
 The host still owns declaration identity allocation and semantic publication.
-This API does not attach generated owners to an active source checker and does
-not yet enable `typealias` initializers. That integration must cover nominal
-lookup, construction/default lookup and subsequent required-call snapshots;
-rechecking the entire source package would reenter the initializer.
+The generic session API does not attach generated HIR owners. Immediate source
+calls use the adapter described above to register concrete descriptors for
+nominal lookup, construction and subsequent snapshots, without reentering an
+initializer by rechecking the complete source package.
 
 Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
 test --release -p luna --test builder_invocations`, exit 0, 13 tests passed
@@ -101,22 +149,18 @@ commit rejection, failed-dependency propagation and independent recovery.
 
 ## Default CLI invocation
 
-`--invoke-comptime` now keeps HIR available through the explicit invocation in
-single-file, package-set and sysroot modes. Compilation and invocation share a
-single hook; package actions return its completed value instead of invoking the
-entry again. Source-selected Copy/Drop identities, proof callbacks and proven
-check elimination follow the existing action path. Package `--with-inputs`
-continues to report the source bytes and discovery inputs from that compilation.
-Output files are published only after success, with source protection retained.
+`--invoke-comptime` uses checked snapshot publication in single-file, package-set
+and sysroot modes. Compilation and invocation share one hook; source-selected
+Copy/Drop identities, proof callbacks and proven-check elimination follow the
+existing invocation path. Observed inputs and output source protection remain.
 
-The CLI provides a separate structural allowance of 1,000,000 for package
-forking and builder assembly; invocation fuel still bounds executed comptime
-work. The publication world is initialized only by an executed builder request;
-ordinary invocations and skipped builder branches do not fork HIR or consume
-this structural allowance. Initial required invocations and IIR-only staged builder publication remain
-unsupported. Calling `Action::run` on frozen NIR alone cannot recover the HIR
-publisher. Full repository sysroot acceptance remains blocked by independent
-library gaps; the sysroot routing test uses minimal builtin/std and real meta.
+The explicit driver supplies a separate structural allowance of 1,000,000 for
+generated descriptor preparation and output registration. VM validation uses
+the invocation allowance. Unexecuted builder branches consume no structural
+allowance. IIR-only staged publication remains unsupported. Calling
+`Action::run` on frozen NIR alone does not install a publisher. Full repository
+sysroot acceptance still has independent library gaps; the routing test uses
+minimal builtin/std and real meta.
 
 Validation in `/home/fin/luna`:
 
@@ -147,7 +191,7 @@ Ordinary consumers need no direct builtin access. The builder is not added to
 the default prelude; use its qualified name or an explicit import.
 
 This API covers concrete fields without defaults. Explicit comptime invocation uses the builder-enabled driver or CLI path;
-required-invocation integration, defaults/attributes/clauses and other definition
+deferred-invocation integration, defaults/attributes/clauses and other definition
 kinds remain open.
 Appending inherits the current List validation cost and is not a constant-time
 draft operation. Runtime signatures cannot carry this comptime-only draft.

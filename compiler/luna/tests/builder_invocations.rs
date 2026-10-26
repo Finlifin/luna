@@ -787,3 +787,142 @@ fn checked_snapshot_publisher_generates_from_source_types_without_reelaboration(
     );
     assert_eq!(package.structs.len(), 1);
 }
+
+#[test]
+fn required_builder_type_alias_can_be_constructed_and_extended_by_explicit_invocation() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn Make() -> Type {{.build_struct'builtin(.Built, [.flag], [bool])}}
+        typealias Built = Make();
+        fn run() -> bool {{let value = Built {{flag:true}}; value.flag}}
+        comptime fn More() -> Type {{.build_struct'builtin(.Outer, [.nested], [Built])}}"
+    ));
+    let (Artifact::Nir(package), Value::Type(outer), _) =
+        fixture.invoke("More", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected generated Type and NIR")
+    };
+    assert_eq!(package.structs.len(), 3);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let built = package
+        .structs
+        .iter()
+        .find(|def| def.name == "Built")
+        .unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+    assert_eq!(
+        vm.reflect_struct(&outer).unwrap().fields[0].ty,
+        nir::Term::Nominal {
+            declaration: built.declaration,
+            arguments: vec![]
+        }
+    );
+    let ids: std::collections::BTreeSet<_> =
+        package.structs.iter().map(|def| def.declaration).collect();
+    assert_eq!(ids.len(), 3);
+    assert!(
+        ids.iter()
+            .all(|id| id.local < package.definition_identity_cursor)
+    );
+    assert!(package.to_string().contains("(definition-identity-cursor "));
+}
+
+#[test]
+fn required_builder_constants_and_chained_aliases_keep_distinct_identities() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn Make() -> Type {{.build_struct'builtin(.Built, [.flag], [bool])}}
+        const FIRST = Make();
+        typealias First = FIRST;
+        typealias Second = Make();
+        comptime fn Wrap(ty:Type) -> Type {{.build_struct'builtin(.Wrapped, [.item], [ty])}}
+        typealias Wrapped = Wrap(First);
+        comptime fn ready() -> bool {{true}}
+        fn run() -> bool {{
+            var value = Wrapped {{item: First {{flag:false}}}};
+            value.item.flag = true;
+            value.item.flag
+        }}"
+    ));
+    let (Artifact::Nir(package), _, _) = fixture.invoke("ready", &mut 100_000, 100_000).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(package.structs.len(), 4);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let definitions: Vec<_> = package
+        .structs
+        .iter()
+        .filter(|def| def.name == "Built")
+        .collect();
+    assert_eq!(definitions.len(), 2);
+    assert_ne!(definitions[0].declaration, definitions[1].declaration);
+}
+
+#[test]
+fn required_builder_field_errors_are_diagnostics_not_missing_owner_panics() {
+    for body in ["Built {}", "Built {flag:'x'}", "Built {unknown:true}"] {
+        let fixture = Fixture::new(&format!(
+            "{PREFIX}
+            comptime fn Make() -> Type {{.build_struct'builtin(.Built, [.flag], [bool])}}
+            typealias Built = Make();
+            fn bad() {{{body}}}
+            comptime fn ready() -> bool {{true}}"
+        ));
+        let error = fixture
+            .invoke("ready", &mut 100_000, 100_000)
+            .err()
+            .unwrap();
+        assert!(
+            error.contains("field") || error.contains("type mismatch"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn public_builder_can_define_a_type_alias_from_reflected_fields() {
+    let fixture = Fixture::new(
+        "typealias Type=.Type'builtin;
+        struct Source {first:bool, second:bool}
+        comptime fn Columns() -> Type {
+            let names = meta.struct_field_names(Source);
+            let types = meta.struct_field_types(Source);
+            let count = meta.length(names);
+            var index = count - count;
+            var builder = meta.StructBuilder.new(.name = .Columns);
+            while index < count {
+                builder.add_field(names[index], types[index]);
+                index = index + 1;
+            }
+            builder.Build()
+        }
+        typealias Generated = Columns();
+        comptime fn inspect() -> bool {
+            let names=meta.struct_field_names(Generated);
+            meta.length(names)==2 and names[0]==.first and names[1]==.second
+        }
+        fn run() -> bool {let value=Generated {first:true,second:false};value.first}",
+    );
+    let (Artifact::Nir(package), observed, _) = fixture.invoke_meta("inspect").unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(observed, Value::Bool(true));
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let generated: Vec<_> = package
+        .structs
+        .iter()
+        .filter(|def| def.name == "Columns")
+        .collect();
+    assert_eq!(generated.len(), 1);
+    assert_eq!(generated[0].declaration.package, 900);
+}

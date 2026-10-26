@@ -12,6 +12,7 @@ pub(super) fn charge_world_tables(package: &Package, budget: &mut Budget) -> Res
         runtime_instances,
         quote_templates,
         quote_identity_cursor: _,
+        definition_identity_cursor: _,
         internal_return_packets,
         internal_return_empty_replacements,
         expansion_sources,

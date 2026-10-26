@@ -98,6 +98,51 @@ impl PreparedRequired {
         steps: &mut u64,
         span: Span,
     ) -> Result<(Value, Term), Error> {
+        let mut prepared = self;
+        let package = std::mem::take(&mut prepared.package);
+        prepared.invoke_in_package(&package, values, steps, span, None)
+    }
+
+    pub(in crate::program) fn invoke_publishing(
+        mut self,
+        values: Vec<(n::LocalId, Value)>,
+        steps: &mut u64,
+        span: Span,
+        package_identity: u64,
+        next_identity: &mut u32,
+    ) -> Result<((Value, Term), Vec<std::sync::Arc<[n::Struct]>>), Error> {
+        let package = std::mem::take(&mut self.package);
+        use crate::definitions::StructBuildService;
+        let publisher = crate::definitions::AllocatedStructPublisher::new(
+            &package,
+            package_identity,
+            *next_identity,
+            usize::MAX,
+        );
+        let result = self.invoke_in_package(&package, values, steps, span, Some(&publisher));
+        let diagnostic = publisher.last_diagnostic();
+        let (definitions, next) = publisher.finish();
+        *next_identity = next;
+        let result = result.map_err(|failure| match diagnostic {
+            Some(message) => error(span, format!("{failure}; {message}")),
+            None => failure,
+        })?;
+        Ok((result, definitions))
+    }
+
+    fn invoke_in_package(
+        self,
+        package: &n::Package,
+        values: Vec<(n::LocalId, Value)>,
+        steps: &mut u64,
+        span: Span,
+        builder: Option<&dyn crate::definitions::StructBuildService>,
+    ) -> Result<(Value, Term), Error> {
+        let build = |request: &comptime_interpretor::StructBuildRequest, fuel: &mut u64| {
+            builder
+                .expect("configured builder service")
+                .prepare(request, fuel)
+        };
         let mut live = BTreeMap::new();
         for (binding, value) in values {
             match self.inputs.iter().find(|(id, _, _)| *id == binding) {
@@ -110,7 +155,7 @@ impl PreparedRequired {
             }
         }
         let PreparedRequired {
-            package,
+            package: _,
             implementation_index,
             entry,
             inputs,
@@ -250,6 +295,9 @@ impl PreparedRequired {
                     format!("required comptime preparation failed: {failure}"),
                 )
             })?;
+            if builder.is_some() {
+                session = session.with_struct_builder(&build);
+            }
             let output = session
                 .enqueue_prepared(
                     &mut context,
@@ -305,6 +353,9 @@ impl PreparedRequired {
         *steps = preparation_budget.steps;
         let mut interpreter = prepared
             .map_err(|e| error(span, format!("required comptime preparation failed: {e}")))?;
+        if builder.is_some() {
+            interpreter = interpreter.with_struct_builder(&build);
+        }
         interpreter = interpreter.with_budgeted_type_solver(&type_solver);
         interpreter = interpreter.with_budgeted_pointer_copy_permission(&pointer_copy);
         let scope = interpreter

@@ -536,23 +536,14 @@ pub(crate) struct BuilderInvocation<'a> {
 impl BuilderInvocation<'_> {
     pub(crate) fn execute(
         &mut self,
-        arena: &hir::HirArena,
+        _arena: &hir::HirArena,
         package: &hir::Package<'_>,
         mut nir: nir::program::Package,
         primary: u32,
         identities: &BTreeMap<u32, u64>,
         protocols: &elaboration::program::Protocols,
-        target: Option<nir::target::TargetData>,
+        _target: Option<nir::target::TargetData>,
     ) -> Result<nir::program::Package, String> {
-        let publisher = elaboration::definitions::DeferredStructPublisher::new(
-            arena,
-            package,
-            primary,
-            identities,
-            protocols,
-            target,
-            *self.structural_fuel,
-        );
         elaboration::verification::optimization::elide_proven_checks(
             &mut nir,
             &mut elaboration::verification::Limits::default(),
@@ -569,6 +560,13 @@ impl BuilderInvocation<'_> {
         } else {
             None
         };
+        let publisher = elaboration::definitions::AllocatedStructPublisher::new(
+            &nir,
+            identities[&primary],
+            nir.definition_identity_cursor
+                .max(package.next_definition_index()),
+            *self.structural_fuel,
+        );
         *self.structural_fuel = 0;
         let value = crate::invocation::invoke_selected_with_publisher(
             &nir,
@@ -580,7 +578,12 @@ impl BuilderInvocation<'_> {
         );
         *self.structural_fuel = publisher.remaining_structural_fuel();
         self.value = Some(value?);
-        let completed = publisher.finish().unwrap_or(nir);
+        let (definitions, next_identity) = publisher.finish();
+        nir.definition_identity_cursor = next_identity;
+        for batch in definitions {
+            nir.structs.extend(batch.iter().cloned());
+        }
+        let completed = nir;
         crate::protocols::type_constructors::validate(&completed, protocols)?;
         Ok(completed)
     }

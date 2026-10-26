@@ -209,3 +209,46 @@ fn exhaustion_during_copy_or_validation_never_commits() {
     .unwrap();
     assert_eq!(publisher.published_definition_count(), 1);
 }
+
+#[test]
+fn allocated_publisher_preserves_reserved_frontier_across_discarded_candidates() {
+    use elaboration::definitions::{AllocatedStructPublisher, StructBuildService};
+    let baseline = baseline();
+    let publisher = AllocatedStructPublisher::new(&baseline, 73, 100, 1000);
+    let mut steps = 100_000;
+    let discarded = publisher.prepare(&request(boolean()), &mut steps).unwrap();
+    assert_eq!(discarded.result, id(100));
+    drop(discarded);
+    {
+        let next = publisher.prepare(&request(boolean()), &mut steps).unwrap();
+        assert_eq!(next.result, id(101));
+        (next.commit)().unwrap();
+    }
+    assert!(publisher.remaining_structural_fuel() < 1000);
+    assert!(publisher.to_string().contains("(next 102)"));
+    let (definitions, frontier) = publisher.finish();
+    assert_eq!(frontier, 102);
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(definitions[0][0].declaration, id(101));
+}
+
+#[test]
+fn allocated_publisher_reports_budget_and_identity_exhaustion_without_publication() {
+    use elaboration::definitions::{AllocatedStructPublisher, StructBuildService};
+    let baseline = baseline();
+    for (frontier, fuel, expected) in [
+        (100, 0, "preparation structural budget exhausted"),
+        (u32::MAX, 1000, "identity space exhausted"),
+    ] {
+        let publisher = AllocatedStructPublisher::new(&baseline, 73, frontier, fuel);
+        assert!(
+            publisher
+                .prepare(&request(boolean()), &mut 100_000)
+                .is_err()
+        );
+        assert!(publisher.last_diagnostic().unwrap().contains(expected));
+        let (definitions, next) = publisher.finish();
+        assert!(definitions.is_empty());
+        assert_eq!(next, frontier);
+    }
+}

@@ -6,9 +6,11 @@
 use crate::program::{self, Protocols};
 use hir::definitions::{DefinitionBatch, PreparedPublication, PublicationError};
 use std::collections::BTreeMap;
+mod allocated_struct_publisher;
 mod checked_struct_publisher;
 mod deferred_struct_publisher;
 mod struct_publisher;
+pub use allocated_struct_publisher::AllocatedStructPublisher;
 pub use checked_struct_publisher::CheckedStructPublisher;
 pub use deferred_struct_publisher::{DeferredStructPublisher, StructBuildService};
 pub use struct_publisher::StructPublisher;
