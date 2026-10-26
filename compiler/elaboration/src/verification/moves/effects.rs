@@ -373,8 +373,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 })
             })
             .and_then(|input| input.forwarded_parameters.as_ref());
-        super::super::effect_transfer::with_handler_fallback(handler, outer, &mut self.fuel)
-            .map_err(|reason| error(source, reason))
+        super::super::effect_transfer::with_handler_fallback_in(
+            handler,
+            outer,
+            &self.effect_memory_inputs,
+            &mut self.fuel,
+        )
+        .map_err(|reason| error(source, reason))
     }
 
     pub(super) fn check_handler_return_layout(
@@ -958,6 +963,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let mut installation_returns = Vec::new();
         let mut installation_loop_targets = BTreeSet::new();
         let installation = expression.source;
+        let K::EffectHandle {
+            outer: effect_row, ..
+        } = &expression.kind
+        else {
+            return Err(error(
+                installation,
+                "handler resource analysis requires an installation",
+            ));
+        };
         let mut addressed_roots = None;
         for (handler_index, handler) in handlers.iter().enumerate() {
             let mut completions = vec![];
@@ -1472,6 +1486,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     &captures,
                     &capture_memory_named,
                     &capture_memory_code,
+                    &self.effect_memory_inputs,
+                    effect_row,
                     &mut self.fuel,
                 )
                 .map_err(|reason| error(installation, reason))?;
@@ -1823,15 +1839,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     signature: handler.signature.clone(),
                     values: completions,
                     forwarded_parameters: {
-                        let local = super::super::effect_transfer::forwarded_parameters(
+                        let local = super::super::effect_transfer::forwarded_parameters_in(
                             handler,
+                            &self.effect_memory_inputs,
                             &mut self.fuel,
                         )
                         .map_err(|reason| error(installation, reason))?;
                         if handler.fallback.is_some() {
-                            super::super::effect_transfer::with_handler_fallback(
+                            super::super::effect_transfer::with_handler_fallback_in(
                                 handler,
                                 fallback_parameter.as_ref(),
+                                &self.effect_memory_inputs,
                                 &mut self.fuel,
                             )
                             .map_err(|reason| error(installation, reason))?
@@ -2023,9 +2041,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let Term::Function { parameters, result } = &handler.signature else {
                 return Ok(vec![]);
             };
-            let mut forwarded =
-                super::super::effect_transfer::forwarded_parameters(handler, &mut self.fuel)
-                    .map_err(|reason| error(source, reason))?;
+            let mut forwarded = super::super::effect_transfer::forwarded_parameters_in(
+                handler,
+                &self.effect_memory_inputs,
+                &mut self.fuel,
+            )
+            .map_err(|reason| error(source, reason))?;
             if let Some(slot) = handler.fallback {
                 self.fuel = self
                     .fuel
@@ -2036,9 +2057,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         && input.abi == handler.abi
                         && input.signature == handler.signature
                 });
-                forwarded = super::super::effect_transfer::with_handler_fallback(
+                forwarded = super::super::effect_transfer::with_handler_fallback_in(
                     handler,
                     previous.and_then(|input| input.forwarded_parameters.as_ref()),
+                    &self.effect_memory_inputs,
                     &mut self.fuel,
                 )
                 .map_err(|reason| error(source, reason))?;

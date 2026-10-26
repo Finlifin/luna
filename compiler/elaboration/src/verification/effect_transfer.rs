@@ -8,15 +8,24 @@ pub(crate) fn forwarded_parameters(
     handler: &nir::program::EffectHandler,
     fuel: &mut usize,
 ) -> Result<Option<BTreeSet<usize>>, String> {
-    let result = local_forwarded_parameters(handler, fuel)?;
+    forwarded_parameters_in(handler, &[], fuel)
+}
+
+pub(crate) fn forwarded_parameters_in(
+    handler: &nir::program::EffectHandler,
+    effects: &[super::memory::EffectInput],
+    fuel: &mut usize,
+) -> Result<Option<BTreeSet<usize>>, String> {
+    let result = local_forwarded_parameters(effects, handler, fuel)?;
     Ok(result.filter(|origins| !origins.is_empty()))
 }
 
 fn local_forwarded_parameters(
+    effects: &[super::memory::EffectInput],
     handler: &nir::program::EffectHandler,
     fuel: &mut usize,
 ) -> Result<Option<BTreeSet<usize>>, String> {
-    let result = forwarded_parameters_inner(handler, fuel);
+    let result = forwarded_parameters_inner(effects, handler, fuel);
     if result.is_none() && *fuel == 0 {
         return Err("effect transfer proof budget exhausted".into());
     }
@@ -27,13 +36,14 @@ fn local_forwarded_parameters(
 // preserves a moved operand's provenance; equal input/output types alone never
 // establish a transfer. Other handler bodies retain their completion summaries.
 fn forwarded_parameters_inner(
+    effects: &[super::memory::EffectInput],
     handler: &nir::program::EffectHandler,
     fuel: &mut usize,
 ) -> Option<BTreeSet<usize>> {
     let mut common = BTreeSet::new();
     for arm in &handler.arms {
         *fuel = fuel.checked_sub(1)?;
-        let parameter = arm_forwarded_parameters(arm, fuel)?;
+        let parameter = arm_forwarded_parameters(effects, arm, fuel)?;
         common = join_origins(common, parameter, fuel)?;
     }
     Some(common)
@@ -46,14 +56,24 @@ pub(crate) fn with_handler_fallback(
     outer: Option<&BTreeSet<usize>>,
     fuel: &mut usize,
 ) -> Result<Option<BTreeSet<usize>>, String> {
+    with_handler_fallback_in(handler, outer, &[], fuel)
+}
+
+pub(crate) fn with_handler_fallback_in(
+    handler: &nir::program::EffectHandler,
+    outer: Option<&BTreeSet<usize>>,
+    effects: &[super::memory::EffectInput],
+    fuel: &mut usize,
+) -> Result<Option<BTreeSet<usize>>, String> {
     if handler.fallback.is_none() {
-        return forwarded_parameters(handler, fuel);
+        return forwarded_parameters_in(handler, effects, fuel);
     }
-    let local = local_forwarded_parameters(handler, fuel)?;
+    let local = local_forwarded_parameters(effects, handler, fuel)?;
     Ok(with_fallback(local, outer, fuel)?.filter(|origins| !origins.is_empty()))
 }
 
 fn arm_forwarded_parameters(
+    effects: &[super::memory::EffectInput],
     arm: &nir::program::MatchArm,
     fuel: &mut usize,
 ) -> Option<BTreeSet<usize>> {
@@ -77,7 +97,7 @@ fn arm_forwarded_parameters(
         *fuel = fuel.checked_sub(1)?;
         observe_pattern(field, Some(&BTreeSet::from([index])), &mut inputs, fuel, 0)?;
     }
-    forwarded_value(&arm.body, &mut inputs, fuel, 0)
+    forwarded_value(effects, &arm.body, &mut inputs, fuel, 0)
 }
 
 #[cfg(test)]
@@ -561,14 +581,16 @@ impl TransferFlow {
     }
 }
 fn forwarded_value(
+    effects: &[super::memory::EffectInput],
     value: &Expr,
     inputs: &mut BTreeMap<LocalId, BTreeSet<usize>>,
     fuel: &mut usize,
     depth: usize,
 ) -> Option<BTreeSet<usize>> {
-    transfer_flow(value, inputs, fuel, depth)?.delivered(fuel)
+    transfer_flow(effects, value, inputs, fuel, depth)?.delivered(fuel)
 }
 fn transfer_flow(
+    effects: &[super::memory::EffectInput],
     value: &Expr,
     inputs: &mut BTreeMap<LocalId, BTreeSet<usize>>,
     fuel: &mut usize,
@@ -579,6 +601,78 @@ fn transfer_flow(
     }
     spend(fuel, 1)?;
     match &value.kind {
+        K::EffectRequest {
+            operation,
+            abi,
+            signature,
+            arguments,
+            ..
+        } => {
+            // Only outer, checked identity premises may justify this result.
+            // No candidate-local handler fact is introduced into this walk.
+            let nir::Term::Function { parameters, result } = signature.as_ref() else {
+                return None;
+            };
+            if *abi != nir::effects::Abi::Direct
+                || parameters.len() != arguments.len()
+                || value.ty != **result
+            {
+                return None;
+            }
+            spend(fuel, effects.len())?;
+            let mut selected = None;
+            for input in effects {
+                super::memory::bound_type(&input.signature, fuel).ok()?;
+                for argument in &input.operation.arguments {
+                    super::memory::bound_type(argument, fuel).ok()?;
+                }
+                if input.operation == *operation
+                    && input.abi == *abi
+                    && input.signature == **signature
+                {
+                    let origins = input.forwarded_parameters.as_ref()?;
+                    spend(fuel, origins.len())?;
+                    if origins.is_empty()
+                        || origins.iter().any(|slot| {
+                            parameters
+                                .get(*slot)
+                                .is_none_or(|parameter| parameter.ty != **result)
+                        })
+                    {
+                        return None;
+                    }
+                    if selected.is_some_and(|previous| previous != origins) {
+                        return None;
+                    }
+                    selected = Some(origins);
+                }
+            }
+            let selected = selected?;
+            let mut resumed = BTreeSet::new();
+            let mut delivered = BTreeSet::new();
+            for (slot, argument) in arguments.iter().enumerate() {
+                if argument.ty != parameters[slot].ty {
+                    return None;
+                }
+                let flow = transfer_flow(effects, argument, inputs, fuel, depth + 1)?;
+                resumed = join_origins(resumed, flow.resumed, fuel)?;
+                if !flow.continues {
+                    return Some(TransferFlow {
+                        resumed,
+                        normal: None,
+                        continues: false,
+                    });
+                }
+                if selected.contains(&slot) {
+                    delivered = join_origins(delivered, flow.normal?, fuel)?;
+                }
+            }
+            Some(TransferFlow {
+                resumed,
+                normal: Some(delivered),
+                continues: true,
+            })
+        }
         K::Local(binding) => {
             let origins = if let Some(origins) = inputs.get(binding) {
                 spend(fuel, origins.len())?;
@@ -588,9 +682,9 @@ fn transfer_flow(
             };
             Some(TransferFlow::normal(origins))
         }
-        K::UnsafeScope(value) => transfer_flow(value, inputs, fuel, depth + 1),
+        K::UnsafeScope(value) => transfer_flow(effects, value, inputs, fuel, depth + 1),
         K::Discard(value) => {
-            let mut flow = transfer_flow(value, inputs, fuel, depth + 1)?;
+            let mut flow = transfer_flow(effects, value, inputs, fuel, depth + 1)?;
             flow.normal = None;
             Some(flow)
         }
@@ -607,7 +701,7 @@ fn transfer_flow(
                 })
                 .ok()?;
                 if resumes {
-                    transfer_flow(value, inputs, fuel, depth + 1)?
+                    transfer_flow(effects, value, inputs, fuel, depth + 1)?
                 } else {
                     // Arbitrary checked construction/calls on a lexical-exit
                     // path cannot contribute a normal completion operand.
@@ -632,7 +726,7 @@ fn transfer_flow(
             })
         }
         K::EffectResume(value) => {
-            let flow = transfer_flow(value, inputs, fuel, depth + 1)?;
+            let flow = transfer_flow(effects, value, inputs, fuel, depth + 1)?;
             Some(TransferFlow {
                 resumed: flow.delivered(fuel)?,
                 normal: None,
@@ -646,13 +740,20 @@ fn transfer_flow(
         } => {
             observe_scalar(condition, fuel, depth + 1)?;
             let left = transfer_flow(
+                effects,
                 then_branch,
                 &mut copy_inputs(inputs, fuel)?,
                 fuel,
                 depth + 1,
             )?;
             let right = if let Some(branch) = else_branch {
-                transfer_flow(branch, &mut copy_inputs(inputs, fuel)?, fuel, depth + 1)?
+                transfer_flow(
+                    effects,
+                    branch,
+                    &mut copy_inputs(inputs, fuel)?,
+                    fuel,
+                    depth + 1,
+                )?
             } else {
                 TransferFlow::normal(None)
             };
@@ -662,8 +763,13 @@ fn transfer_flow(
             value: scrutinee,
             arms,
         } => {
-            let subject =
-                transfer_flow(scrutinee, &mut copy_inputs(inputs, fuel)?, fuel, depth + 1)?;
+            let subject = transfer_flow(
+                effects,
+                scrutinee,
+                &mut copy_inputs(inputs, fuel)?,
+                fuel,
+                depth + 1,
+            )?;
             if !subject.continues {
                 return Some(subject);
             }
@@ -675,7 +781,7 @@ fn transfer_flow(
                 if let Some(guard) = &arm.guard {
                     observe_scalar(guard, fuel, depth + 1)?;
                 }
-                let flow = transfer_flow(&arm.body, &mut branch, fuel, depth + 1)?;
+                let flow = transfer_flow(effects, &arm.body, &mut branch, fuel, depth + 1)?;
                 combined = Some(match combined {
                     Some(previous) => previous.join(flow, fuel)?,
                     None => flow,
@@ -697,7 +803,7 @@ fn transfer_flow(
             // own state-transform evidence and are not admitted by this walk.
             let mut resumed = BTreeSet::new();
             for field in fields {
-                let flow = transfer_flow(field, inputs, fuel, depth + 1)?;
+                let flow = transfer_flow(effects, field, inputs, fuel, depth + 1)?;
                 resumed = join_origins(resumed, flow.resumed, fuel)?;
                 if !flow.continues {
                     return Some(TransferFlow {
@@ -729,7 +835,7 @@ fn transfer_flow(
                     _ => (None, statement),
                 };
                 spend(fuel, 1)?;
-                let flow = transfer_flow(initializer, &mut locals, fuel, depth + 1)?;
+                let flow = transfer_flow(effects, initializer, &mut locals, fuel, depth + 1)?;
                 resumed = join_origins(resumed, flow.resumed, fuel)?;
                 if !flow.continues {
                     return Some(TransferFlow {
@@ -760,6 +866,7 @@ fn transfer_flow(
                         // Failure cannot see successful pattern bindings and
                         // must leave this path, as required by let-else typing.
                         let failed = transfer_flow(
+                            effects,
                             otherwise,
                             &mut copy_inputs(&locals, fuel)?,
                             fuel,
@@ -774,7 +881,7 @@ fn transfer_flow(
                 }
             }
             let tail = if let Some(result) = result {
-                transfer_flow(result, &mut locals, fuel, depth + 1)?
+                transfer_flow(effects, result, &mut locals, fuel, depth + 1)?
             } else {
                 TransferFlow::normal(None)
             };
@@ -1028,4 +1135,86 @@ pub(crate) fn with_fallback(
     spend(fuel, outer.len()).ok_or("effect transfer fallback budget exhausted")?;
     local.extend(outer.iter().copied());
     Ok(Some(local))
+}
+
+#[cfg(test)]
+mod outer_request_tests {
+    use super::*;
+    use nir::{
+        DeclarationId, Parameter, Primitive, Sort, Term,
+        effects::{Abi, Operation},
+        program::SourceRange,
+    };
+
+    #[test]
+    fn outer_request_identity_requires_matching_evidence_and_recovers_after_exhaustion() {
+        let pointer = Term::Pointer(Box::new(Term::Primitive(Primitive::Bool)));
+        let signature = Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Runtime,
+                ty: pointer.clone(),
+            }],
+            result: Box::new(pointer.clone()),
+        };
+        let operation = Operation {
+            declaration: DeclarationId {
+                package: 1,
+                local: 2,
+            },
+            arguments: vec![],
+        };
+        let binding = LocalId { owner: 1, index: 0 };
+        let source = SourceRange { start: 0, end: 1 };
+        let request = Expr {
+            ty: pointer.clone(),
+            source,
+            kind: K::EffectRequest {
+                operation: operation.clone(),
+                abi: Abi::Direct,
+                signature: Box::new(signature.clone()),
+                allowed_index: 0,
+                arguments: vec![Expr {
+                    ty: pointer,
+                    source,
+                    kind: K::Local(binding),
+                }],
+            },
+        };
+        let evidence = super::super::memory::EffectInput {
+            operation,
+            abi: Abi::Direct,
+            signature,
+            forwarded_parameters: Some(BTreeSet::from([0])),
+            copy_parameters: BTreeSet::new(),
+            owned_inputs: false,
+            parameter_accesses: BTreeSet::new(),
+        };
+        let run = |effects: &[super::super::memory::EffectInput], fuel| {
+            forwarded_value(
+                effects,
+                &request,
+                &mut BTreeMap::from([(binding, BTreeSet::from([7]))]),
+                &mut { fuel },
+                0,
+            )
+        };
+        assert_eq!(
+            run(std::slice::from_ref(&evidence), 1000),
+            Some(BTreeSet::from([7]))
+        );
+        assert_eq!(run(&[], 1000), None);
+        assert_eq!(run(std::slice::from_ref(&evidence), 0), None);
+        for case in 0..5 {
+            let mut invalid = evidence.clone();
+            match case {
+                0 => invalid.operation.declaration.local += 1,
+                1 => invalid.abi = Abi::DirectPassing,
+                2 => invalid.forwarded_parameters = None,
+                3 => invalid.forwarded_parameters = Some(BTreeSet::from([1])),
+                _ => invalid.signature = Term::Primitive(Primitive::Bool),
+            }
+            assert_eq!(run(&[invalid], 1000), None, "case {case}");
+        }
+        assert_eq!(run(&[evidence], 1000), Some(BTreeSet::from([7])));
+    }
 }

@@ -712,8 +712,11 @@ impl<'a> Infer<'a, '_> {
             };
             // Memory analysis computes footprints under ordinary resource
             // validation. Copy obligations must be discharged by the installer.
-            let forwarded_parameters =
-                super::super::effect_transfer::forwarded_parameters(handler, self.fuel)?;
+            let forwarded_parameters = super::super::effect_transfer::forwarded_parameters_in(
+                handler,
+                &self.round.effects,
+                self.fuel,
+            )?;
             let mut copy_parameters = BTreeSet::new();
             for (index, parameter) in parameters.iter().enumerate() {
                 if !forwarded_parameters
@@ -742,11 +745,13 @@ impl<'a> Infer<'a, '_> {
                     return Err("handler memory fallback premise mismatch".into());
                 }
                 let origins = previous.forwarded_parameters.clone();
-                input.forwarded_parameters = super::super::effect_transfer::with_handler_fallback(
-                    handler,
-                    origins.as_ref(),
-                    self.fuel,
-                )?;
+                input.forwarded_parameters =
+                    super::super::effect_transfer::with_handler_fallback_in(
+                        handler,
+                        origins.as_ref(),
+                        &self.round.effects,
+                        self.fuel,
+                    )?;
             }
             validate_inputs(
                 self.package.ok_or("handler memory requires a package")?,
@@ -835,6 +840,8 @@ impl<'a> Infer<'a, '_> {
                     &captures,
                     &captured_code,
                     &prepared_code,
+                    &self.round.effects,
+                    &outer_row,
                     self.fuel,
                 )? {
                     self.may_reject |= summary.memory.may_reject;
@@ -1116,7 +1123,10 @@ impl<'a> Infer<'a, '_> {
                                 .remove(&access.input_fields)
                                 .flatten()
                         }
-                        .ok_or("effect parameter access requires known pointer provenance")?;
+                        .ok_or_else(|| format!(
+                            "effect parameter access requires known pointer provenance: operation {operation}, argument {index}, fields {:?}, source {}",
+                            access.input_fields, argument.source,
+                        ))?;
                         self.target_work(&targets)?;
                         pending_accesses.push((targets, access.write, access.read_value, pointee));
                     }
@@ -1300,6 +1310,8 @@ pub fn infer_handler_arm_memory(
         &[],
         &BTreeMap::new(),
         &BTreeMap::new(),
+        &[],
+        &[],
         fuel,
     )
 }
@@ -1311,6 +1323,8 @@ fn infer_handler_arm_memory_with_captures(
     captures: &[(LocalId, Term)],
     captured_code: &BTreeMap<CallablePlace, CallableResult>,
     prepared_code: &PreparedCaptures,
+    effects: &[EffectInput],
+    effect_row: &[nir::effects::Operation],
     fuel: &mut usize,
 ) -> Result<HandlerParameterSummary, String> {
     if handler.abi != nir::effects::Abi::Direct {
@@ -1549,10 +1563,32 @@ fn infer_handler_arm_memory_with_captures(
         }
         Ok(())
     })?;
+    // Requests in the arm address the installer's outer row. Carry that row
+    // into the private analysis closure as well as its memory premises.
+    let mut signature = handler.signature.clone();
+    if !effect_row.is_empty() {
+        *fuel = fuel
+            .checked_sub(effect_row.len())
+            .ok_or("handler outer effect row budget exhausted")?;
+        for operation in effect_row {
+            for argument in &operation.arguments {
+                bound_type(argument, fuel)?;
+            }
+        }
+        let Term::Function { result, .. } = &mut signature else {
+            unreachable!()
+        };
+        bound_type(result, fuel)?;
+        *result = Box::new(Term::Computation {
+            effects: effect_row.to_vec(),
+            result: result.clone(),
+        });
+        bound_type(&signature, fuel)?;
+    }
     let definition = Expr {
         ty: Term::Closure {
             environment: captures.iter().map(|(_, ty)| ty.clone()).collect(),
-            signature: Box::new(handler.signature.clone()),
+            signature: Box::new(signature),
         },
         source: arm.body.source,
         kind: K::Closure {
@@ -1568,13 +1604,14 @@ fn infer_handler_arm_memory_with_captures(
             body: std::sync::Arc::new(body),
         },
     };
-    let memory = infer_closure_with_borrowed_captures(
+    let memory = infer_closure_with_borrowed_effect_context(
         package,
         &definition,
         captured_code,
         prepared_code,
         &BTreeMap::new(),
         &BTreeMap::new(),
+        effects,
         fuel,
     )?;
     let mut pointer_captures = Vec::new();
@@ -1650,6 +1687,8 @@ pub(crate) fn direct_handler_accesses(
         captures,
         &BTreeMap::new(),
         &BTreeMap::new(),
+        &[],
+        &[],
         fuel,
     )
 }
@@ -1661,6 +1700,8 @@ pub(crate) fn direct_handler_accesses_with_code(
     captures: &[(LocalId, Term)],
     captured_code: &BTreeMap<CallablePlace, CallableResult>,
     prepared_code: &PreparedCaptures,
+    effects: &[EffectInput],
+    effect_row: &[nir::effects::Operation],
     fuel: &mut usize,
 ) -> Result<Option<HandlerParameterSummary>, String> {
     let Some(package) = package else {
@@ -1699,6 +1740,8 @@ pub(crate) fn direct_handler_accesses_with_code(
         captures,
         captured_code,
         prepared_code,
+        effects,
+        effect_row,
         fuel,
     ) {
         Ok(summary) => summary,

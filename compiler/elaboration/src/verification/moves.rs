@@ -13424,6 +13424,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         .is_some()
         {
             match &expr.kind {
+                K::EffectHandle { .. }
+                | K::EffectRun { .. }
+                | K::EffectComputation { .. }
+                | K::EffectRequest { .. } => {
+                    // Pointer-valued block tails enter this path directly.
+                    // Preserve the effect completion's provenance instead of
+                    // evaluating it as a discarded expression before retirement.
+                    let mut origins = self.evaluate_value_origins(expr, flow, depth + 1)?;
+                    return Ok(origins.remove(&vec![]));
+                }
                 K::NewtypeConvert(_) => {
                     let mut origins = self.evaluate_value_origins(expr, flow, depth + 1)?;
                     return Ok(origins.remove(&vec![]));
