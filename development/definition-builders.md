@@ -8,6 +8,38 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Shared request assembly and identity allocation
+
+`EnumBuildRequest` retains the enum name, ordered groups and ordered variants with
+unit/tuple/named shapes and payload Types. Its S-expression dump escapes names and
+preserves these distinctions. `PreparedEnumBuild` carries the admitted immutable
+batch, reserved result identity and host commit callback, matching the existing
+struct publication boundary.
+
+`CheckedDefinitionPublisher` now assembles both request kinds after charging their
+names, fields and nested Type trees. `AllocatedDefinitionPublisher` reserves their
+identities from one source frontier and returns both descriptor catalogs together.
+Structural assembly exhaustion allocates no identity; after reservation, failed
+invocation checking, dropped candidates and stale commits never reuse that ID.
+Both assembly and invocation work retain their consumed budgets on rejection.
+
+Existing checked/allocated struct publishers are adapters over this common path.
+The struct-only adapter cannot request enums, so its legacy result remains a list
+of struct batches. The mixed service returns `PublishedDefinitions` plus the final
+frontier. This is host API integration; source enum builtin dispatch and the public
+meta.EnumBuilder still need to be connected.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p elaboration -p luna --test allocated_definition_publisher
+--test checked_definition_publisher --test checked_struct_publisher
+--test builder_invocations --test source_reflection`, exit 0, 66 tests
+(`/tmp/luna-tools-maccaq78/result.json`). Four new tests cover mixed allocation
+and live-VM installation, shape/payload retention, abandoned/rejected/stale ID
+reservations, structural versus invocation exhaustion, identity overflow and
+escaped request dumps. The first run found test-only borrow scopes extending
+past publisher consumption; those scopes were corrected before this passing run.
+Targeted Rust formatting and `git diff --check` pass.
+
 ## Checked concrete struct and enum publication
 
 `CheckedDefinitionPublisher` now combines the shared declaration admission session
@@ -26,8 +58,9 @@ storage reject the entire batch. Pointer recursion stays legal. Descriptor kinds
 and declaration identities are preserved when extracting committed additions.
 
 This completes the checked concrete enum publication service. Source EnumBuilder
-syntax/library construction, source dispatch and identity allocation still need
-connection; generic/encoded enum generation needs additional contracts.
+syntax/library construction and source dispatch still need connection; shared
+identity allocation is now available above. Generic/encoded enum generation needs
+additional contracts.
 
 Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
 test --release -p elaboration --test checked_definition_publisher

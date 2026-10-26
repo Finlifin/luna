@@ -27,6 +27,8 @@ pub use generated_structs::{
     DefinitionAdmissionSession, PreparedEnumAdmission, PreparedStructAdmission,
     StructAdmissionSession, StructPublicationError,
 };
+mod enum_build;
+pub use enum_build::{EnumBuildRequest, PreparedEnumBuild};
 mod struct_build;
 pub use struct_build::{PreparedStructBuild, StructBuildRequest};
 mod reflection;

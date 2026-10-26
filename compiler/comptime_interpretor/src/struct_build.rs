@@ -7,6 +7,26 @@ pub struct StructBuildRequest {
     pub fields: Vec<ReflectedField>,
     pub source: SourceRange,
 }
+impl StructBuildRequest {
+    /// Charge descriptor assembly before copying names or field type trees.
+    pub fn charge_assembly(&self, fuel: &mut usize) -> Result<(), ()> {
+        *fuel = fuel
+            .checked_sub(
+                self.name
+                    .len()
+                    .saturating_add(self.fields.len())
+                    .saturating_add(1),
+            )
+            .ok_or(())?;
+        for field in &self.fields {
+            *fuel = fuel
+                .checked_sub(field.name.len().saturating_add(1))
+                .ok_or(())?;
+            nir::type_computations::charge_term(&field.ty, fuel).map_err(|_| ())?;
+        }
+        Ok(())
+    }
+}
 impl fmt::Display for StructBuildRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

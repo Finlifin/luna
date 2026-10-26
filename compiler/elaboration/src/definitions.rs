@@ -6,11 +6,14 @@
 use crate::program::{self, Protocols};
 use hir::definitions::{DefinitionBatch, PreparedPublication, PublicationError};
 use std::collections::BTreeMap;
+mod allocated_definition_publisher;
 mod allocated_struct_publisher;
 mod checked_definition_publisher;
 mod checked_struct_publisher;
+mod concrete_requests;
 mod deferred_struct_publisher;
 mod struct_publisher;
+pub use allocated_definition_publisher::AllocatedDefinitionPublisher;
 pub use allocated_struct_publisher::AllocatedStructPublisher;
 pub use checked_definition_publisher::{
     CheckedDefinitionPublisher, PreparedDefinitions, PublishedDefinitions,
