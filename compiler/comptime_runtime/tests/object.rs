@@ -207,3 +207,28 @@ fn ordered_entry_stream_preserves_nonclone_payloads_and_aborts_on_error() {
     );
     assert!(merge_named_entries([Ok(("key", &first))], 1, &mut Budget::default()).is_ok());
 }
+
+#[test]
+fn streaming_insert_moves_payloads_and_rejects_without_changing_selection() {
+    use comptime_runtime::object::insert_named_entry;
+    use std::collections::BTreeMap;
+    struct Payload(u32);
+    let mut selected = BTreeMap::new();
+    let mut budget = Budget::default();
+    for value in 0..1000 {
+        insert_named_entry(&mut selected, "same", Payload(value), 1, &mut budget).unwrap();
+    }
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected["same"].0, 999);
+    assert_eq!(
+        insert_named_entry(&mut selected, "other", Payload(0), 1, &mut budget),
+        Err(MergeError::EntryLimit)
+    );
+    budget.steps = 0;
+    assert_eq!(
+        insert_named_entry(&mut selected, "same", Payload(0), 1, &mut budget),
+        Err(MergeError::BudgetExhausted)
+    );
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected["same"].0, 999);
+}

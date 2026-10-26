@@ -172,3 +172,27 @@ fn every_insufficient_budget_is_atomic_and_reports_a_real_origin() {
         .unwrap();
     }
 }
+
+#[test]
+fn repeated_overrides_keep_only_final_origin_and_limit_failure_names_its_input() {
+    let mut attributes = (0..1000)
+        .map(|offset| attribute(target(1), None, &[("key", offset % 2 == 0)], offset))
+        .collect::<Vec<_>>();
+    let selected = merge(&attributes, 1, &mut Budget::default()).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].iter().count(), 1);
+    assert!(std::ptr::eq(
+        selected[0].get("key").unwrap().origin,
+        &attributes[999]
+    ));
+    attributes.push(attribute(target(1), None, &[("new", true)], 2000));
+    let failure = merge(&attributes, 1, &mut Budget::default()).unwrap_err();
+    assert_eq!(failure.source, attributes[1000].source);
+    assert!(failure.message.contains("entry-limit"));
+    assert_eq!(
+        merge(&attributes, 2, &mut Budget::default()).unwrap()[0]
+            .iter()
+            .count(),
+        2
+    );
+}

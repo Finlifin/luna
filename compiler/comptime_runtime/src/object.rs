@@ -114,10 +114,15 @@ impl<V: fmt::Display> fmt::Display for Attributes<'_, V> {
     }
 }
 
-fn insert<'a, V>(
-    values: &mut BTreeMap<&'a str, &'a V>,
+/// Insert one application-order entry after charging comparison work.
+/// On error the map is unchanged, while spent budget is retained. Callers
+/// publishing a complete merge must discard their private map on failure.
+/// Values are moved into place; neither payload cloning nor a staging list
+/// is required. The limit counts unique keys, so overrides remain permitted.
+pub fn insert_named_entry<'a, V>(
+    values: &mut BTreeMap<&'a str, V>,
     key: &'a str,
-    value: &'a V,
+    value: V,
     limit: usize,
     budget: &mut Budget,
 ) -> Result<(), MergeError> {
@@ -156,14 +161,14 @@ pub fn merge_named_attributes<'a, V>(
     budget.consume(1).map_err(|_| MergeError::BudgetExhausted)?;
     let mut values = BTreeMap::new();
     for (key, value) in configuration {
-        insert(&mut values, key, value, max_entries, budget)?;
+        insert_named_entry(&mut values, key, value, max_entries, budget)?;
     }
     for (object_index, object) in prefixes_outer_first.iter().enumerate().rev() {
         budget.consume(1).map_err(|_| MergeError::BudgetExhausted)?;
         for (entry_index, entry) in object.entries().iter().enumerate() {
             match entry {
                 Entry::Property { key, value } => {
-                    insert(&mut values, key, value, max_entries, budget)?
+                    insert_named_entry(&mut values, key, value, max_entries, budget)?
                 }
                 Entry::Value(_) => {
                     return Err(MergeError::PositionalEntry {
@@ -189,7 +194,7 @@ pub fn merge_named_entries<'a, V: 'a>(
     let mut values = BTreeMap::new();
     for entry in entries {
         let (key, value) = entry?;
-        insert(&mut values, key, value, max_entries, budget)?;
+        insert_named_entry(&mut values, key, value, max_entries, budget)?;
     }
     Ok(Attributes { values })
 }

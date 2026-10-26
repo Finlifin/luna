@@ -1,7 +1,7 @@
 //! Borrowed metadata selection. Selected expressions remain in their origin's
 //! materialization scope; merging must not clone or detach closure environments.
 use super::*;
-use comptime_runtime::object::{MergeError, merge_named_entries};
+use comptime_runtime::object::insert_named_entry;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SelectedValue<'a> {
@@ -75,20 +75,16 @@ fn failure(attribute: &EvaluatedAttribute, message: impl ToString) -> MergeFailu
 /// Positional entries have no named-property meaning and are rejected here,
 /// while the original inspection data remains intact. Failure exposes no partial
 /// result. Work and map comparisons consume the supplied shared budget.
+/// Merge directly into the private target maps: repeated overrides retain only
+/// their final selection, so scratch storage scales with unique target/key pairs
+/// rather than the total number of entries. Original expressions remain borrowed.
 pub fn merge<'a>(
     attributes: &'a [EvaluatedAttribute],
     max_keys_per_target: usize,
     budget: &mut comptime_runtime::Budget,
 ) -> Result<Vec<MergedTarget<'a>>, MergeFailure> {
     type Key = (OwnerId, Option<hir::ItemLocalId>);
-    let mut groups: BTreeMap<
-        Key,
-        (
-            hir::AttributeTarget,
-            &EvaluatedAttribute,
-            Vec<(&str, SelectedValue<'a>)>,
-        ),
-    > = BTreeMap::new();
+    let mut groups: BTreeMap<Key, MergedTarget<'a>> = BTreeMap::new();
     for configuration in [true, false] {
         for attribute in attributes {
             // Account for both scans, including entries skipped in this pass.
@@ -104,11 +100,16 @@ pub fn merge<'a>(
             budget
                 .consume(levels.saturating_mul(16))
                 .map_err(|e| failure(attribute, e))?;
-            let (_, _, entries) = groups
-                .entry(key)
-                .or_insert_with(|| (attribute.target, attribute, Vec::new()));
+            if !groups.contains_key(&key) {
+                budget.consume(1).map_err(|e| failure(attribute, e))?;
+            }
+            let group = groups.entry(key).or_insert_with(|| MergedTarget {
+                target: attribute.target,
+                values: BTreeMap::new(),
+            });
             if let Some(name) = &attribute.configuration_key {
-                entries.push((
+                insert_named_entry(
+                    &mut group.values,
                     name,
                     SelectedValue {
                         key: name,
@@ -116,7 +117,10 @@ pub fn merge<'a>(
                         entry: None,
                         value: &attribute.value,
                     },
-                ));
+                    max_keys_per_target,
+                    budget,
+                )
+                .map_err(|error| failure(attribute, error))?;
                 continue;
             }
             let mut root = &attribute.value;
@@ -144,7 +148,8 @@ pub fn merge<'a>(
                         format!("positional Object entry {index} is not a named attribute"),
                     ));
                 };
-                entries.push((
+                insert_named_entry(
+                    &mut group.values,
                     name,
                     SelectedValue {
                         key: name,
@@ -152,36 +157,12 @@ pub fn merge<'a>(
                         entry: Some(index),
                         value,
                     },
-                ));
+                    max_keys_per_target,
+                    budget,
+                )
+                .map_err(|error| failure(attribute, error))?;
             }
         }
     }
-    let mut result = Vec::new();
-    for (_, (target, first, entries)) in groups {
-        // Capture the failing insertion's provenance without cloning payloads.
-        let mut current = None;
-        let merged = merge_named_entries(
-            entries.iter().map(|(key, selected)| {
-                current = Some(selected.origin);
-                Ok::<_, MergeError>((*key, selected))
-            }),
-            max_keys_per_target,
-            budget,
-        )
-        .map_err(|error| {
-            if let Some(origin) = current {
-                failure(origin, error)
-            } else {
-                failure(first, error)
-            }
-        })?;
-        result.push(MergedTarget {
-            target,
-            values: merged
-                .iter()
-                .map(|(_, value)| (value.key, *value))
-                .collect(),
-        });
-    }
-    Ok(result)
+    Ok(groups.into_values().collect())
 }
