@@ -2299,3 +2299,31 @@ expanded execution and existing native checks remain successful. General handler
 writeback across suspension and pointer-bearing lexical search results remain
 separate work. Existing uncommitted formatting in moves/effects.rs is preserved
 outside this change's commit.
+
+### Compose stationary proofs across a complete installation
+
+Resource overlap checking now collects write-site evidence from every arm before
+checking the installation's pointer slots. Previously, checking one arm scanned
+the other arms' writes before their independent proofs were available, rejecting
+a safe multi-arm handler. The allowed set remains exact expression identities:
+an unproved write, installer mutation, address exposure, guard or suspending arm
+cannot inherit another arm's permission. No runtime ownership rule was relaxed.
+
+The new regression failed on the prior implementation with the pointer-slot
+writeback diagnostic (`/tmp/luna-tools-8mfe9a_w/result.json`). It now executes both
+a two-pattern operation and two separate operations sharing captured state; a
+local-pointer replacement in one arm still rejects the complete installation.
+Moving validation later exposes the existing observation-region diagnostic first
+for a state-mutating guard, so that test now checks this specific rejection;
+the suspending mutation still checks the writeback diagnostic.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test effect_memory_transfers --test library_iteration --test captured_memory --no-fail-fast
+```
+
+Exit 0, 226 tests (99 + 33 + 94) passed; `/tmp/luna-tools-npl0bhnp/result.json`.
+Rustfmt and `git diff --check` pass. Existing unrelated formatting in the shared
+moves/effects.rs file remains outside the commit. Affine fold's all-exit capture
+completeness restriction and general cross-suspension writeback remain unchanged.

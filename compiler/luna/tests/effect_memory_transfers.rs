@@ -4903,7 +4903,22 @@ fn handler_capture_restoration_does_not_hide_guard_or_suspension_mutations() {
             "{prefix} fn run()->bool {{var first=false;var second=true;var state=State{{target:first.ref}};let saved=state;let other=second.ref;{expression}}}"
         );
         let package = support::compile(&source);
-        assert_capture_writeback_rejected(&package);
+        if expression.contains(" if ") {
+            let error = luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                1_000_000,
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("observation region changes external state"),
+                "{error}"
+            );
+        } else {
+            assert_capture_writeback_rejected(&package);
+        }
     }
 }
 
@@ -4915,4 +4930,61 @@ fn assert_capture_writeback_rejected(package: &nir::program::Package) {
         error.contains("writeback contract") || error.contains("pointer slot rebinding"),
         "{error}"
     );
+}
+
+#[test]
+fn stationary_capture_writes_compose_across_handler_arms() {
+    let source="
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        struct State {target:*bool,next:bool} impl Duplicate for State {}
+        effect touch(which:bool)->bool;
+        fn twice()->#touch bool {let first=touch(false)#;let second=touch(true)#;not first and second}
+        fn run()->bool {
+            var flag=false;var state=State{target:flag.ref,next:false};
+            let result=twice()# {
+                touch(false)=>do {
+                    state.target.* = state.next;
+                    state=State{target:state.target,next:true};
+                    state.target.*
+                },
+                touch(true)=>do {
+                    state.target.* = state.next;
+                    state=State{target:state.target,next:false};
+                    state.target.*
+                },
+            };
+            result and flag and not state.next
+        }
+    ";
+    let separate_operations = source
+        .replace(
+            "effect touch(which:bool)->bool;",
+            "effect touch(which:bool)->bool; effect start()->bool; effect finish()->bool;",
+        )
+        .replace(
+            "let result=twice()#",
+            "let result=do {let first=start()#;let second=finish()#;not first and second}#",
+        )
+        .replace("touch(false)=>", "start()=>")
+        .replace("touch(true)=>", "finish()=>");
+    for source in [source, separate_operations.as_str()] {
+        let package = support::compile(source);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap(),
+            Value::Bool(true),
+        );
+        let changed = source.replace(
+            "state=State{target:state.target,next:false};",
+            "var local=false;state=State{target:local.ref,next:false};",
+        );
+        assert_capture_writeback_rejected(&support::compile(&changed));
+    }
 }

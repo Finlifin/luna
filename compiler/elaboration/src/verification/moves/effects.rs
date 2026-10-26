@@ -981,6 +981,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             ));
         };
         let mut addressed_roots = None;
+        let mut pointer_slot_checks = Vec::new();
+        let mut installation_stable_writes = BTreeSet::new();
         for (handler_index, handler) in handlers.iter().enumerate() {
             let mut completions = vec![];
             if handler.abi != nir::effects::Abi::Direct
@@ -1035,7 +1037,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 let mut captures = Vec::new();
                 let mut pointer_captures = BTreeMap::new();
                 let mut capture_domains = BTreeMap::new();
-                let mut pointer_slot_checks = Vec::new();
                 let mut capture_callables = BTreeMap::new();
                 let mut borrowed_code_roots = BTreeSet::new();
                 let mut borrowed_owner_roots = BTreeSet::new();
@@ -1541,23 +1542,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     .map_err(|reason| error(installation, reason))?,
                     None => BTreeSet::new(),
                 };
-                for (captured, layout) in &pointer_slot_checks {
-                    nir::visit::expression_in_closure_environment(
-                        expression,
-                        &mut self.fuel,
-                        |node, fuel| {
-                            if !stable_writes.contains(&(node as *const Expr as usize)) {
-                                if let Some(mutation) = mutated_pointer_slot(node, fuel)? {
-                                    check_capture_slot_mutation(
-                                        &mutation, *captured, layout, fuel,
-                                    )?;
-                                }
-                            }
-                            Ok(())
-                        },
-                    )
-                    .map_err(|reason| error(installation, reason))?;
-                }
+                installation_stable_writes.extend(stable_writes);
                 let outer_report = std::mem::take(&mut self.report);
                 let outer_pending = std::mem::take(&mut self.pending);
                 let outer_loops = std::mem::take(&mut self.loops);
@@ -1926,6 +1911,24 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     },
                 });
             }
+        }
+        // Validate the installation only after every arm has supplied its own
+        // proof. An arm cannot authorize an unproved write in another arm or in
+        // the computation. Addresses retain the ordinary whole-scope checks.
+        for (captured, layout) in &pointer_slot_checks {
+            nir::visit::expression_in_closure_environment(
+                expression,
+                &mut self.fuel,
+                |node, fuel| {
+                    if !installation_stable_writes.contains(&(node as *const Expr as usize)) {
+                        if let Some(mutation) = mutated_pointer_slot(node, fuel)? {
+                            check_capture_slot_mutation(&mutation, *captured, layout, fuel)?;
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|reason| error(installation, reason))?;
         }
         Ok((
             installation_may_reject,
