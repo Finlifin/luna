@@ -381,18 +381,38 @@ impl Request {
             return Err("native build returns bytes; use Request::build".into());
         }
         let mut inputs = crate::packages::CompilationInputs::default();
-        let (artifact, bindings) = self.compile_observed(if self.with_inputs {
-            Some(&mut inputs)
-        } else {
-            None
-        })?;
+        let mut structural_fuel = 1_000_000;
+        let mut invocation = match &self.action {
+            Action::Invoke { entry, fuel, .. } => Some(crate::packages::BuilderInvocation {
+                entry,
+                structural_fuel: &mut structural_fuel,
+                invocation_fuel: *fuel,
+                value: None,
+            }),
+            _ => None,
+        };
+        let (artifact, bindings) = self.compile_observed_with_invocation(
+            if self.with_inputs {
+                Some(&mut inputs)
+            } else {
+                None
+            },
+            invocation.as_mut(),
+        )?;
         let identity = self
             .packages
             .iter()
             .find(|p| p.resolution_id == self.primary)
             .ok_or("primary source package is absent")?
             .identity;
-        let result = self.action.run(artifact, &bindings, identity)?;
+        let result = if let Some(invocation) = invocation {
+            invocation
+                .value
+                .ok_or("comptime invocation requires NIR")?
+                .to_string()
+        } else {
+            self.action.run(artifact, &bindings, identity)?
+        };
         let result = if self.with_inputs && matches!(self.action, Action::EmitHost { .. }) {
             let kind = if matches!(self.action, Action::EmitHost { assembly: true, .. }) {
                 "host-assembly"
@@ -487,6 +507,14 @@ impl Request {
         &self,
         inputs: Option<&mut crate::packages::CompilationInputs>,
     ) -> Result<(Artifact, elaboration::program::Protocols), String> {
+        self.compile_observed_with_invocation(inputs, None)
+    }
+
+    fn compile_observed_with_invocation(
+        &self,
+        inputs: Option<&mut crate::packages::CompilationInputs>,
+        invocation: Option<&mut crate::packages::BuilderInvocation<'_>>,
+    ) -> Result<(Artifact, elaboration::program::Protocols), String> {
         let dependencies = self
             .dependencies
             .iter()
@@ -522,7 +550,7 @@ impl Request {
             _ => (None, None),
         };
         let target = self.semantic_target()?;
-        crate::packages::compile_observed_for_target(
+        crate::packages::compile_observed_for_target_with_invocation(
             &self.packages,
             &dependencies,
             self.primary,
@@ -576,6 +604,7 @@ impl Request {
             },
             inputs,
             target,
+            invocation,
         )
     }
 }

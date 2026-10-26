@@ -157,19 +157,14 @@ fn main() -> ExitCode {
             entry,
             fuel,
             protocols,
-        } => frontend::compile_bound_with_resource_protocols(
+        } => frontend::invoke_comptime(
             &options,
+            &entry,
+            fuel,
             protocols.as_ref().map(|(copy, _)| copy.as_str()),
             protocols.as_ref().map(|(_, drop)| drop.as_str()),
         )
-        .and_then(|(artifact, bindings)| {
-            luna::package_cli::Action::Invoke {
-                entry,
-                fuel,
-                protocols,
-            }
-            .run(artifact, &bindings, 0)
-        })
+        .map(|value| value.to_string())
         .and_then(|value| {
             if let Some(path) = &options.output {
                 output::write_file(&options.input, path, &value)

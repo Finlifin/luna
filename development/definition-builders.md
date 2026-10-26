@@ -3,6 +3,40 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Default CLI invocation
+
+`--invoke-comptime` now keeps HIR available through the explicit invocation in
+single-file, package-set and sysroot modes. Compilation and invocation share a
+single hook; package actions return its completed value instead of invoking the
+entry again. Source-selected Copy/Drop identities, proof callbacks and proven
+check elimination follow the existing action path. Package `--with-inputs`
+continues to report the source bytes and discovery inputs from that compilation.
+Output files are published only after success, with source protection retained.
+
+The CLI provides a separate structural allowance of 1,000,000 for package
+forking and builder assembly; invocation fuel still bounds executed comptime
+work. Initial required invocations and IIR-only staged builder publication remain
+unsupported. Calling `Action::run` on frozen NIR alone cannot recover the HIR
+publisher. Full repository sysroot acceptance remains blocked by independent
+library gaps; the sysroot routing test uses minimal builtin/std and real meta.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations --test source_reflection --no-fail-fast
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations --test packages --test sysroot_preludes --no-fail-fast
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli comptime_invocation --no-fail-fast
+```
+
+Final applicable results: 59 tests at `/tmp/luna-tools-d3j33s1i/result.json`,
+7 invocation regressions at `/tmp/luna-tools-967cfn8g/result.json`, and 12 source
+reflection tests at `/tmp/luna-tools-nppbu0fe/result.json` (78 distinct tests).
+The latter run failed its new CLI assertions before correction: standalone
+selectors require `input.meta.List`, and observed paths use encoded bytes.
+Final tests cover all three CLI paths, observed source inputs, source output
+protection, defaults, closure execution, type dispatch, resource bindings,
+budget exhaustion and output preservation. Targeted rustfmt and diff checks pass.
+
 ## Public field-only struct builder
 
 `meta.StructBuilder.new(.name = .Columns)` creates an ordinary comptime draft;
@@ -14,9 +48,9 @@ reuse nominal identity. The library wrapper uses no alternate type registry.
 Ordinary consumers need no direct builtin access. The builder is not added to
 the default prelude; use its qualified name or an explicit import.
 
-This API covers concrete fields without defaults. The explicit builder-enabled
-driver invocation remains necessary; default CLI and required-invocation
-integration, defaults/attributes/clauses and other definition kinds remain open.
+This API covers concrete fields without defaults. Explicit comptime invocation uses the builder-enabled driver or CLI path;
+required-invocation integration, defaults/attributes/clauses and other definition
+kinds remain open.
 Appending inherits the current List validation cost and is not a constant-time
 draft operation. Runtime signatures cannot carry this comptime-only draft.
 
@@ -58,8 +92,8 @@ an invocation requiring the IIR staging path cannot publish structs through it.
 
 This is a driver API for an explicit invocation after initial elaboration. It
 does not enable builders in typealias initializers or other required invocations
-during that initial elaboration, change the default CLI invocation path, or
-provide the complete public StructBuilder library API. Candidate publication
+during that initial elaboration or provide the complete public StructBuilder
+library API. The default CLI now uses this retained-HIR invocation boundary. Candidate publication
 still checks the full package. Active-checker integration and incremental
 semantic updates remain separate work.
 
@@ -99,8 +133,8 @@ checked NIR without another elaboration. Until the first successful commit the
 checked output is absent. Only the new concrete descriptor is copied into shared
 VM storage; its name and field-Type copying consume structural fuel. Candidate
 package checking still re-elaborates the full candidate. This service is not an
-incremental active-checker transaction, and ordinary driver invocation does not
-install it automatically yet. Hosts must supply the relevant source world and
+incremental active-checker transaction. Explicit CLI invocation installs the
+service; required invocations during initial checking still do not. Hosts must supply the relevant source world and
 matching package identities; an empty world only supports self-contained fields
 and earlier generated declarations.
 

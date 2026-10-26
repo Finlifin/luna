@@ -62,7 +62,7 @@ pub(crate) fn invoke_selected(
     invoke_selected_with_publisher(package, entry, identity, protocols, fuel, None)
 }
 
-fn invoke_selected_with_publisher(
+pub(crate) fn invoke_selected_with_publisher(
     package: &Package,
     entry: &str,
     identity: Option<u64>,

@@ -73,6 +73,37 @@ pub fn compile_bound_with_resource_protocols(
     compile_bound_with_host_protocols(options, copy, drop, None, None, None, &[])
 }
 
+/// Keep HIR alive while an explicit comptime invocation publishes definitions.
+pub fn invoke_comptime(
+    options: &Options,
+    entry: &str,
+    fuel: u64,
+    copy: Option<&str>,
+    drop: Option<&str>,
+) -> Result<comptime_interpretor::Value, String> {
+    let mut selectors = source_protocols(options);
+    selectors.copy = copy;
+    selectors.drop = drop;
+    let mut structural_fuel = 1_000_000;
+    let mut invocation = crate::packages::BuilderInvocation {
+        entry,
+        structural_fuel: &mut structural_fuel,
+        invocation_fuel: fuel,
+        value: None,
+    };
+    compile_bound_for_target_with_invocation(
+        options,
+        0,
+        &Default::default(),
+        selectors,
+        None,
+        Some(&mut invocation),
+    )?;
+    invocation
+        .value
+        .ok_or_else(|| "comptime invocation requires NIR".into())
+}
+
 pub fn compile_bound_with_host_protocols(
     options: &Options,
     copy: Option<&str>,
@@ -213,6 +244,24 @@ pub fn compile_bound_for_target(
     selectors: crate::protocols::type_constructors::Selectors<'_>,
     target: Option<nir::target::TargetData>,
 ) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    compile_bound_for_target_with_invocation(
+        options,
+        package_identity,
+        protocols,
+        selectors,
+        target,
+        None,
+    )
+}
+
+fn compile_bound_for_target_with_invocation(
+    options: &Options,
+    package_identity: u64,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    target: Option<nir::target::TargetData>,
+    invocation: Option<&mut crate::packages::BuilderInvocation<'_>>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
     source_protocols(options).validate_stage(options.emit)?;
     selectors.validate_stage(options.emit)?;
     let cwd = std::env::current_dir()
@@ -235,6 +284,7 @@ pub fn compile_bound_for_target(
                 protocols,
                 selectors,
                 target,
+                invocation,
             );
         }
     }
@@ -402,6 +452,19 @@ pub fn compile_bound_for_target(
         )
         .map_err(|error| format!("elaboration failed: {error}"))?;
         crate::protocols::type_constructors::validate(&program, &protocols)?;
+        let program = if let Some(invocation) = invocation {
+            invocation.execute(
+                package.arena(),
+                package.package(),
+                program,
+                0,
+                &std::collections::BTreeMap::from([(0, package_identity)]),
+                &protocols,
+                target,
+            )?
+        } else {
+            program
+        };
         return Ok((Artifact::Nir(program), protocols));
     }
     Ok((
@@ -439,6 +502,7 @@ fn compile_sysroot(
     protocols: &elaboration::program::Protocols,
     selectors: crate::protocols::type_constructors::Selectors<'_>,
     target: Option<nir::target::TargetData>,
+    invocation: Option<&mut crate::packages::BuilderInvocation<'_>>,
 ) -> Result<(Artifact, elaboration::program::Protocols), String> {
     use crate::packages::SourcePackage;
     let mut packages = vec![SourcePackage {
@@ -523,6 +587,7 @@ fn compile_sysroot(
         None,
         target,
         &preludes,
+        invocation,
     )
 }
 

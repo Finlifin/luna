@@ -47,7 +47,9 @@ comptime fn Mirror() -> Type {
 保留 normal-form 头。空草稿可以发布空结构体，名称相同不代表类型身份相同。
 草稿及其中的 List 数据不能成为 runtime 接口。
 
-目前需通过驱动的 `compile_and_invoke_with_struct_builders` API 执行构造入口，
-它同时返回调用值和含生成定义的检查后 NIR。默认 CLI 与初始 elaboration 中的
-typealias 计算尚未安装发布服务。字段默认代码、属性、泛型子句、方法和 impl
+可以通过现有 `--invoke-comptime` 执行构造入口，单文件、显式包集合和 sysroot
+路径都会安装发布服务；显式加载 meta 时仍需绑定 `--meta-list-type meta.List`。
+驱动的 `compile_and_invoke_with_struct_builders` API 还会同时返回调用值和含生成
+定义的检查后 NIR。初始 elaboration 中的 typealias 计算尚未安装发布服务。
+字段默认代码、属性、泛型子句、方法和 impl
 的构造尚未接入；这里还不是完整 SoA 示例所需的全部 builder 能力。

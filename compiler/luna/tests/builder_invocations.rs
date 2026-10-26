@@ -320,3 +320,151 @@ fn public_struct_builder_cannot_escape_into_a_runtime_interface() {
         assert!(error.contains("elaboration failed"), "{error}");
     }
 }
+
+#[test]
+fn package_cli_invokes_public_builders_with_observed_inputs() {
+    let fixture = Fixture::new(
+        "
+        comptime fn run() -> bool {
+            var builder = meta.StructBuilder.new(.name = .Visible);
+            builder.add_field(.flag, bool);
+            let generated = builder.Build();
+            meta.struct_field_names(generated)[0] == .flag
+                and meta.struct_field_types(generated)[0] == bool
+        }
+    ",
+    );
+    let meta = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/meta/lib.fl");
+    for observed in [false, true] {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_luna"));
+        command
+            .args(["--packages-v1", "--package", "17", "900", "app"])
+            .arg(fixture.0.join("lib.fl"))
+            .args(["--package", "42", "901", "meta"])
+            .arg(&meta)
+            .args([
+                "--dependency",
+                "17",
+                "meta",
+                "42",
+                "--primary",
+                "17",
+                "--meta-list-type",
+                "meta.List",
+                "--invoke-comptime",
+                "run",
+            ]);
+        if observed {
+            command.arg("--with-inputs");
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        if observed {
+            assert!(stdout.contains("(result (bool true))"), "{stdout}");
+            assert!(
+                stdout.contains("(source (resolution-id 42) (identity 901)"),
+                "{stdout}"
+            );
+            assert!(stdout.contains("pub struct StructBuilder"), "{stdout}");
+        } else {
+            assert_eq!(stdout.trim(), "(bool true)");
+        }
+    }
+}
+
+#[test]
+fn standalone_cli_executes_builders_and_preserves_source_output_protection() {
+    let fixture = Fixture::new(&format!(
+        "mod meta {{ {} }}
+        comptime fn Generate() -> bool {{
+            let generated = meta.StructBuilder.new().Build();
+            meta.length(meta.struct_field_types(generated)) == 0
+        }}",
+        include_str!("../../../library/meta/lib.fl")
+    ));
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(fixture.0.join("lib.fl"))
+        .args([
+            "--meta-list-type",
+            "input.meta.List",
+            "--invoke-comptime",
+            "Generate",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout).trim(),
+        "(bool true)"
+    );
+    let source = fixture.0.join("lib.fl");
+    let before = std::fs::read(&source).unwrap();
+    let rejected = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(&source)
+        .args([
+            "--meta-list-type",
+            "input.meta.List",
+            "--invoke-comptime",
+            "Generate",
+            "-o",
+        ])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+}
+
+#[test]
+fn sysroot_cli_installs_builder_service_after_loading_meta_bindings() {
+    let fixture = Fixture::new(
+        "
+        comptime fn run() -> bool {
+            var builder = meta.StructBuilder.new();
+            builder.add_field(.flag, bool);
+            meta.struct_field_types(builder.Build())[0] == bool
+        }
+    ",
+    );
+    let root = fixture.0.join("library");
+    for name in ["builtin", "std", "meta"] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+    }
+    std::fs::write(root.join("builtin/lib.fl"), "pub mod prelude {}").unwrap();
+    std::fs::write(root.join("std/lib.fl"), "pub mod prelude {}").unwrap();
+    std::fs::write(
+        root.join("meta/lib.fl"),
+        include_str!("../../../library/meta/lib.fl"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("language-items.conf"),
+        "version = 1\nmeta-list-type = meta.List\n",
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(fixture.0.join("lib.fl"))
+        .arg("--sysroot")
+        .arg(&root)
+        .args(["--invoke-comptime", "run"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "(bool true)"
+    );
+}

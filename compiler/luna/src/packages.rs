@@ -328,6 +328,34 @@ pub(crate) fn compile_observed_for_target(
     observed: Option<&mut CompilationInputs>,
     target: Option<nir::target::TargetData>,
 ) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    compile_observed_for_target_with_invocation(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        emit,
+        output,
+        protocols,
+        selectors,
+        observed,
+        target,
+        None,
+    )
+}
+
+pub(crate) fn compile_observed_for_target_with_invocation(
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    emit: Emit,
+    output: Option<&std::path::Path>,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    observed: Option<&mut CompilationInputs>,
+    target: Option<nir::target::TargetData>,
+    invocation: Option<&mut BuilderInvocation<'_>>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
     let preludes: Vec<_> = builtin.into_iter().collect();
     compile_observed_with_preludes(
         packages,
@@ -341,6 +369,7 @@ pub(crate) fn compile_observed_for_target(
         observed,
         target,
         &preludes,
+        invocation,
     )
 }
 
@@ -356,6 +385,7 @@ pub(crate) fn compile_observed_with_preludes(
     observed: Option<&mut CompilationInputs>,
     target: Option<nir::target::TargetData>,
     preludes: &[u32],
+    invocation: Option<&mut BuilderInvocation<'_>>,
 ) -> Result<(Artifact, elaboration::program::Protocols), String> {
     compile_with_expansion(
         packages,
@@ -370,7 +400,7 @@ pub(crate) fn compile_observed_with_preludes(
         target,
         preludes,
         None,
-        None,
+        invocation,
     )
 }
 
@@ -496,11 +526,67 @@ pub fn compile_and_invoke_with_struct_builders(
     ))
 }
 
-struct BuilderInvocation<'a> {
-    entry: &'a str,
-    structural_fuel: &'a mut usize,
-    invocation_fuel: u64,
-    value: Option<comptime_interpretor::Value>,
+pub(crate) struct BuilderInvocation<'a> {
+    pub(crate) entry: &'a str,
+    pub(crate) structural_fuel: &'a mut usize,
+    pub(crate) invocation_fuel: u64,
+    pub(crate) value: Option<comptime_interpretor::Value>,
+}
+
+impl BuilderInvocation<'_> {
+    pub(crate) fn execute(
+        &mut self,
+        arena: &hir::HirArena,
+        package: &hir::Package<'_>,
+        mut nir: nir::program::Package,
+        primary: u32,
+        identities: &BTreeMap<u32, u64>,
+        protocols: &elaboration::program::Protocols,
+        target: Option<nir::target::TargetData>,
+    ) -> Result<nir::program::Package, String> {
+        let candidate = hir::definitions::fork_package(package, self.structural_fuel)
+            .map_err(|error| format!("builder package preparation failed: {error}"))?;
+        let publisher = elaboration::definitions::StructPublisher::new(
+            arena,
+            candidate,
+            primary,
+            identities.clone(),
+            protocols.clone(),
+            target,
+            *self.structural_fuel,
+        )?;
+        *self.structural_fuel = 0;
+        elaboration::verification::optimization::elide_proven_checks(
+            &mut nir,
+            &mut elaboration::verification::Limits::default(),
+        );
+        let resources = if protocols.copy.is_some() || protocols.drop.is_some() {
+            Some((
+                crate::resources::Selection::Identity(
+                    protocols.copy.ok_or("missing Copy binding")?,
+                ),
+                crate::resources::Selection::Identity(
+                    protocols.drop.ok_or("missing Drop binding")?,
+                ),
+            ))
+        } else {
+            None
+        };
+        let value = crate::invocation::invoke_selected_with_publisher(
+            &nir,
+            self.entry,
+            Some(identities[&primary]),
+            resources,
+            self.invocation_fuel,
+            Some(&publisher),
+        );
+        *self.structural_fuel = publisher.remaining_structural_fuel();
+        self.value = Some(value?);
+        let (_, checked) = publisher.finish();
+        let completed = checked.unwrap_or(nir);
+        crate::protocols::type_constructors::validate(&completed, protocols)?;
+        Ok(completed)
+    }
 }
 
 /// Generated names are not re-resolved into source AST. Callbacks connect
@@ -839,31 +925,15 @@ fn compile_with_expansion(
     .map_err(|e| format!("multi-package elaboration failed: {e}"))?;
     crate::protocols::type_constructors::validate(&nir, &protocols)?;
     let nir = if let Some(invocation) = builder_invocation {
-        let candidate = hir::definitions::fork_package(package, invocation.structural_fuel)
-            .map_err(|error| format!("builder package preparation failed: {error}"))?;
-        let publisher = elaboration::definitions::StructPublisher::new(
+        invocation.execute(
             hir.arena(),
-            candidate,
+            package,
+            nir,
             primary,
-            identities.clone(),
-            protocols.clone(),
+            &identities,
+            &protocols,
             target,
-            *invocation.structural_fuel,
-        )?;
-        *invocation.structural_fuel = 0;
-        let value = crate::invocation::invoke_in_package_with_struct_publisher(
-            &nir,
-            identities[&primary],
-            invocation.entry,
-            invocation.invocation_fuel,
-            &publisher,
-        );
-        *invocation.structural_fuel = publisher.remaining_structural_fuel();
-        invocation.value = Some(value?);
-        let (_, checked) = publisher.finish();
-        let completed = checked.unwrap_or(nir);
-        crate::protocols::type_constructors::validate(&completed, &protocols)?;
-        completed
+        )?
     } else {
         nir
     };
