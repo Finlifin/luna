@@ -322,3 +322,101 @@ fn decimal_transport_round_trips_signed_and_large_magnitudes() {
         text
     );
 }
+
+#[test]
+fn single_word_division_matches_host_arithmetic_across_signs_and_carry_edges() {
+    let mut random = 0xdead_beef_1234_5678u128;
+    let mut dividends = vec![0, 1, u32::MAX as u128, 1u128 << 32, 1u128 << 64, u128::MAX];
+    for _ in 0..256 {
+        random = random
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        dividends.push(random);
+    }
+    for dividend in dividends {
+        for divisor in [1, 2, 3, 10, 65535, 65536, u32::MAX - 1, u32::MAX] {
+            for negative_dividend in [false, true] {
+                for negative_divisor in [false, true] {
+                    let signed = |value: u128, negative| {
+                        let value = Integer::from_u128(value);
+                        if negative { value.negated() } else { value }
+                    };
+                    let numerator = signed(dividend, negative_dividend);
+                    let denominator = signed(divisor as u128, negative_divisor);
+                    let (quotient, remainder) = numerator
+                        .div_rem_trunc(&denominator, &mut Budget::default())
+                        .unwrap();
+                    assert_eq!(
+                        quotient,
+                        signed(
+                            dividend / divisor as u128,
+                            negative_dividend != negative_divisor
+                        )
+                    );
+                    assert_eq!(
+                        remainder,
+                        signed(dividend % divisor as u128, negative_dividend)
+                    );
+                    if quotient.is_zero() {
+                        assert!(!quotient.is_negative());
+                    }
+                    if remainder.is_zero() {
+                        assert!(!remainder.is_negative());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn large_single_word_division_has_linear_fuel_and_atomic_failure() {
+    let dividend = parse(&format!("0x{}", "f".repeat(256 * 8)));
+    let divisor = Integer::from_u128(u32::MAX as u128);
+    let mut budget = Budget::default();
+    let before = budget.steps;
+    let (quotient, remainder) = dividend.div_rem_trunc(&divisor, &mut budget).unwrap();
+    let required = before - budget.steps;
+    assert!(
+        required <= 3 * 256,
+        "small divisors must not use bitwise long division: {required}"
+    );
+    assert!(remainder.is_zero());
+    assert_eq!(quotient, parse(&format!("0x{}", "00000001".repeat(256))));
+    let original = dividend.clone();
+    for steps in 0..required {
+        assert_eq!(
+            dividend.div_rem_trunc(
+                &divisor,
+                &mut Budget {
+                    steps,
+                    ..Budget::default()
+                }
+            ),
+            Err(Error::BudgetExhausted)
+        );
+        assert_eq!(dividend, original);
+    }
+    assert_eq!(
+        dividend
+            .div_rem_trunc(
+                &divisor,
+                &mut Budget {
+                    steps: required,
+                    ..Budget::default()
+                }
+            )
+            .unwrap(),
+        (quotient, remainder)
+    );
+    assert_eq!(
+        dividend.div_rem_trunc(
+            &divisor,
+            &mut Budget {
+                max_limbs: 255,
+                ..Budget::default()
+            }
+        ),
+        Err(Error::SizeLimit)
+    );
+}

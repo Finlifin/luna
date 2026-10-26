@@ -324,6 +324,30 @@ impl Integer {
         if divisor.is_zero() {
             return Err(Error::DivisionByZero);
         }
+        if let [divisor_word] = divisor.limbs.as_slice() {
+            // Base-2^32 long division needs one u64 division per input limb.
+            // The carry is smaller than the divisor, so (carry << 32) | limb
+            // fits u64, including a maximal u32 divisor. Charge traversal and
+            // canonicalization before allocating the quotient.
+            budget.charge(self.limbs.len().saturating_mul(2).saturating_add(1))?;
+            let mut quotient = vec![0; self.limbs.len()];
+            let divisor_word = u64::from(*divisor_word);
+            let mut carry = 0u64;
+            for (limb, output) in self.limbs.iter().zip(&mut quotient).rev() {
+                let dividend = (carry << 32) | u64::from(*limb);
+                *output = (dividend / divisor_word) as u32;
+                carry = dividend % divisor_word;
+            }
+            let remainder = if carry == 0 {
+                vec![]
+            } else {
+                vec![carry as u32]
+            };
+            return Ok((
+                Self::canonical(self.negative != divisor.negative, quotient),
+                Self::canonical(self.negative, remainder),
+            ));
+        }
         let mut quotient = vec![0u32; self.limbs.len()];
         let mut remainder = Self::zero();
         for bit in (0..self.bit_len()).rev() {
