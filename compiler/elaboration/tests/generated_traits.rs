@@ -2,6 +2,7 @@ use elaboration::{definitions::publish, program::Protocols};
 use hir::{
     definitions::{
         DefinitionBatch, DefinitionNodes, Error, assemble_function, assemble_function_declaration,
+        assemble_impl, assemble_trait,
     },
     *,
 };
@@ -80,21 +81,25 @@ fn generated_trait_contract_impl_and_dispatch_publish_together_after_repair() {
     let implementation = batch.reserve().unwrap();
     let method = batch.reserve().unwrap();
     let caller = batch.reserve().unwrap();
-    let mut nodes = DefinitionNodes::new(protocol).unwrap();
-    let item = arena.alloc_item(Item {
-        owner_id: protocol,
-        ident: name("GeneratedProtocol"),
-        span: DUMMY_SP,
-        kind: ItemKind::Trait(TraitDef {
-            super_traits: None,
-            clause_params: &[],
-            clause_constraints: &[],
-            items: vec![contract],
-        }),
-    });
+    let definition = assemble_trait(
+        &arena,
+        protocol,
+        name("GeneratedProtocol"),
+        DUMMY_SP,
+        &mut 100,
+        |_, _| {
+            Ok(TraitDef {
+                super_traits: None,
+                clause_params: &[],
+                clause_constraints: &[],
+                items: vec![contract],
+            })
+        },
+    )
+    .unwrap();
     batch
         .define(
-            nodes.finish(item, &mut 100).unwrap(),
+            definition,
             Some(hir::common::DefId::new(0, protocol.def_id.raw())),
             None,
         )
@@ -103,32 +108,33 @@ fn generated_trait_contract_impl_and_dispatch_publish_together_after_repair() {
         .define(declaration(&arena, contract, "char"), None, None)
         .unwrap();
 
-    let mut nodes = DefinitionNodes::new(implementation).unwrap();
-    let root = nodes.root();
-    let subject = expr(
+    let definition = assemble_impl(
         &arena,
-        &mut nodes,
-        root,
-        ExprKind::Builtin(Symbol::intern("bool")),
+        implementation,
+        name("generated_impl"),
+        DUMMY_SP,
         &mut 100,
+        |nodes, fuel| {
+            let root = nodes.root();
+            let subject = expr(
+                &arena,
+                nodes,
+                root,
+                ExprKind::Builtin(Symbol::intern("bool")),
+                fuel,
+            )?;
+            let target = expr(&arena, nodes, root, reference(protocol), fuel)?;
+            Ok(ImplDef {
+                self_ty: subject,
+                trait_ref: Some(target),
+                clause_params: &[],
+                clause_constraints: &[],
+                items: vec![method],
+            })
+        },
     )
     .unwrap();
-    let target = expr(&arena, &mut nodes, root, reference(protocol), &mut 100).unwrap();
-    let item = arena.alloc_item(Item {
-        owner_id: implementation,
-        ident: name("generated_impl"),
-        span: DUMMY_SP,
-        kind: ItemKind::Impl(ImplDef {
-            self_ty: subject,
-            trait_ref: Some(target),
-            clause_params: &[],
-            clause_constraints: &[],
-            items: vec![method],
-        }),
-    });
-    batch
-        .define(nodes.finish(item, &mut 100).unwrap(), None, None)
-        .unwrap();
+    batch.define(definition, None, None).unwrap();
     let method = assemble_function(
         &arena,
         method,
@@ -289,4 +295,238 @@ fn assembling_a_bodyless_function_does_not_authorize_a_free_standing_contract() 
     );
     assert_eq!(batch.published().num_defs(), 0);
     assert_eq!(batch.published().num_bodies(), 0);
+}
+
+fn associated_value<'a>(arena: &'a HirArena, owner: OwnerId, value: LitKind) -> OwnerInfo<'a> {
+    hir::definitions::assemble_associated(
+        arena,
+        owner,
+        name("enabled"),
+        DUMMY_SP,
+        &mut 100,
+        |nodes, fuel| {
+            let root = nodes.root();
+            let ty = expr(
+                arena,
+                nodes,
+                root,
+                ExprKind::Builtin(Symbol::intern("bool")),
+                fuel,
+            )?;
+            let default = expr(
+                arena,
+                nodes,
+                root,
+                ExprKind::Lit(Lit {
+                    kind: value,
+                    span: DUMMY_SP,
+                }),
+                fuel,
+            )?;
+            Ok(hir::item::AssociatedDecl {
+                parameters: &[],
+                ty,
+                default: Some(default),
+                clause_params: &[],
+                clause_constraints: &[],
+            })
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn generated_associated_defaults_and_overrides_use_atomic_semantic_publication() {
+    check_associated_publication(true);
+}
+
+#[test]
+fn generated_runtime_pure_associated_values_keep_resource_evidence() {
+    check_associated_publication(false);
+}
+
+fn check_associated_publication(comptime: bool) {
+    for override_default in [false, true] {
+        let arena = HirArena::new();
+        let mut package = Package::new();
+        let mut batch = DefinitionBatch::new(&mut package);
+        let protocol = batch.reserve().unwrap();
+        let contract = batch.reserve().unwrap();
+        let implementation = batch.reserve().unwrap();
+        let caller = batch.reserve().unwrap();
+        let value = override_default.then(|| batch.reserve().unwrap());
+        let definition = assemble_trait(
+            &arena,
+            protocol,
+            name("GeneratedProtocol"),
+            DUMMY_SP,
+            &mut 100,
+            |_, _| {
+                Ok(TraitDef {
+                    super_traits: None,
+                    clause_params: &[],
+                    clause_constraints: &[],
+                    items: vec![contract],
+                })
+            },
+        )
+        .unwrap();
+        batch
+            .define(
+                definition,
+                Some(hir::common::DefId::new(0, protocol.def_id.raw())),
+                None,
+            )
+            .unwrap();
+        batch
+            .define(
+                associated_value(&arena, contract, LitKind::Bool(true)),
+                None,
+                None,
+            )
+            .unwrap();
+        let definition = assemble_impl(
+            &arena,
+            implementation,
+            name("generated_impl"),
+            DUMMY_SP,
+            &mut 100,
+            |nodes, fuel| {
+                let root = nodes.root();
+                let self_ty = expr(
+                    &arena,
+                    nodes,
+                    root,
+                    ExprKind::Builtin(Symbol::intern("bool")),
+                    fuel,
+                )?;
+                let trait_ref = Some(expr(&arena, nodes, root, reference(protocol), fuel)?);
+                Ok(ImplDef {
+                    self_ty,
+                    trait_ref,
+                    clause_params: &[],
+                    clause_constraints: &[],
+                    items: value.into_iter().collect(),
+                })
+            },
+        )
+        .unwrap();
+        batch.define(definition, None, None).unwrap();
+        if let Some(value) = value {
+            batch
+                .define(
+                    associated_value(&arena, value, LitKind::Char('x')),
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        let generated = assemble_function(
+            &arena,
+            caller,
+            name("run"),
+            DUMMY_SP,
+            &mut 100,
+            |nodes, fuel| {
+                let root = nodes.root();
+                let result = expr(
+                    &arena,
+                    nodes,
+                    root,
+                    ExprKind::Builtin(Symbol::intern("bool")),
+                    fuel,
+                )?;
+                let body = nodes.reserve(root, fuel)?;
+                let cast = nodes.reserve(body, fuel)?;
+                let subject = expr(
+                    &arena,
+                    nodes,
+                    cast,
+                    ExprKind::Builtin(Symbol::intern("bool")),
+                    fuel,
+                )?;
+                let target = expr(&arena, nodes, cast, reference(protocol), fuel)?;
+                let cast = arena.alloc_expr(Expr {
+                    hir_id: cast,
+                    kind: ExprKind::Cast(subject, target),
+                    span: DUMMY_SP,
+                });
+                nodes.register(Node::Expr(cast), fuel)?;
+                let body = arena.alloc_expr(Expr {
+                    hir_id: body,
+                    kind: ExprKind::Projection(cast, name("enabled")),
+                    span: DUMMY_SP,
+                });
+                let mut signature = sig(result);
+                signature.modifiers.is_comptime = comptime;
+                Ok((signature, body))
+            },
+        )
+        .unwrap();
+        batch.define(generated.definition, None, None).unwrap();
+        batch.body(generated.body_id, generated.body).unwrap();
+        let identities = BTreeMap::from([(0, 73)]);
+        if let Some(value) = value {
+            let before = batch.to_string();
+            assert!(
+                publish(
+                    &mut batch,
+                    &mut 3000,
+                    &identities,
+                    &Protocols::default(),
+                    None
+                )
+                .is_err()
+            );
+            assert_eq!(batch.to_string(), before);
+            assert_eq!(batch.published().num_defs(), 0);
+            assert_eq!(batch.published().num_bodies(), 0);
+            batch
+                .define(
+                    associated_value(&arena, value, LitKind::Bool(false)),
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        let (_, mut checked) = publish(
+            &mut batch,
+            &mut 3000,
+            &identities,
+            &Protocols::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(batch.published().num_bodies(), 1);
+        checked.dispatch_instances =
+            elaboration::materialization::dispatch_instances_for_invocation(
+                &checked,
+                &[iir::InstanceKey {
+                    declaration: nir::DeclarationId {
+                        package: 73,
+                        local: caller.def_id.raw(),
+                    },
+                    arguments: vec![],
+                }],
+                Default::default(),
+            )
+            .unwrap();
+        let mut vm = if comptime {
+            comptime_interpretor::Interpreter::for_comptime(&checked, Default::default())
+        } else {
+            comptime_interpretor::Interpreter::new(&checked, Default::default())
+        }
+        .unwrap();
+        assert_eq!(
+            vm.invoke(
+                nir::DeclarationId {
+                    package: 73,
+                    local: caller.def_id.raw()
+                },
+                vec![]
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(!override_default)
+        );
+    }
 }
