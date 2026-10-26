@@ -8,6 +8,14 @@ Usage: python3 development/cargo.py test -p luna --test execution
 Only /tmp/luna-dev-002/target is cleaned. Source files, Cargo.lock, and the
 registry/download cache are never cleanup targets. Builds and cleanup share
 one lock; use this entrypoint instead of concurrent direct Cargo commands.
+
+After an observed storage failure, retain a soft cache cap at 75% of the
+pre-cleanup target footprint (64 MiB minimum, never above the current cap).
+The default is 2 GiB. The cap lives in /tmp/luna-dev-002/target-cache-limit,
+outside Cargo's cleanup scope. Remove that local file after increasing the
+environment's quota to return to the default. It is a headroom heuristic, not
+a measurement or guarantee of available quota; unrelated disk usage can still
+cause failures. Evidence forwarding errors still never replay completed work.
 """
 from __future__ import annotations
 
@@ -23,6 +31,7 @@ import threading
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = Path("/tmp/luna-dev-002/target")
 MAX_CACHE = 2 * 1024**3
+MIN_CACHE = 64 * 1024**2
 MIN_FREE = 2 * 1024**3
 REBUILDABLE_PACKAGES = ("elaboration", "luna")
 SPACE_ERRORS = ("quota exceeded", "no space left on device", "os error 122", "os error 28")
@@ -72,7 +81,33 @@ class Runner:
 
     def pressure(self) -> bool:
         # df does not expose all container/user quotas. A cache cap is needed too.
-        return self.cache_size() >= MAX_CACHE or shutil.disk_usage(self.target.parent).free < MIN_FREE
+        return self.cache_size() >= self.cache_limit() or shutil.disk_usage(self.target.parent).free < MIN_FREE
+
+    def cache_limit(self) -> int:
+        # Kept outside target so a full Cargo cleanup does not forget observed
+        # quota pressure. This is a local soft limit, not a quota measurement.
+        try:
+            limit = int(self.target.with_name(self.target.name + '-cache-limit').read_text())
+            if MIN_CACHE <= limit <= MAX_CACHE:
+                return limit
+        except (OSError, ValueError):
+            pass
+        return MAX_CACHE
+
+    def remember_pressure(self, observed: int) -> None:
+        if observed <= 0:
+            return
+        limit = min(self.cache_limit(), max(MIN_CACHE, observed * 3 // 4))
+        state = self.target.with_name(self.target.name + '-cache-limit')
+        temporary = state.with_suffix('.tmp')
+        try:
+            # Called under the maintenance lock, after reclaiming storage.
+            temporary.write_text(f'{limit}\n')
+            temporary.replace(state)
+        except OSError as error:
+            diagnostic(f'cargo-cache: could not retain soft limit: {error}')
+            return
+        diagnostic(f'cargo-cache: learned soft cache limit {limit} bytes')
 
     def clean(self, *, full: bool = False, packages: tuple[str, ...] = REBUILDABLE_PACKAGES) -> None:
         command = ["cargo", "clean", "--target-dir", str(self.target)]
@@ -91,8 +126,13 @@ class Runner:
         if force:
             # A reported quota failure is stronger evidence than disk_usage:
             # user/container quotas may be exhausted even below our cache cap.
+            try:
+                observed = self.cache_size()
+            except (OSError, subprocess.SubprocessError, ValueError):
+                observed = 0
             self.clean()
             self.clean(full=True)
+            self.remember_pressure(observed)
             return
         if not self.pressure():
             return

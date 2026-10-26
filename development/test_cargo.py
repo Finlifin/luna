@@ -13,6 +13,55 @@ spec.loader.exec_module(cargo)
 
 
 class CargoCacheTests(unittest.TestCase):
+    def test_quota_cleanup_learns_limit_after_freeing_storage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner = cargo.Runner(Path(temporary), Path(temporary) / 'target')
+            runner.cache_size = Mock(return_value=512 * 1024**2)
+            events = []
+            runner.clean = lambda **kwargs: events.append(runner.cache_limit())
+            runner.reclaim(force=True)
+            self.assertEqual(events, [cargo.MAX_CACHE, cargo.MAX_CACHE])
+            restarted = cargo.Runner(runner.root, runner.target)
+            self.assertEqual(restarted.cache_limit(), 384 * 1024**2)
+            restarted.cache_size = Mock(return_value=400 * 1024**2)
+            with patch.object(cargo.shutil, 'disk_usage', return_value=Mock(free=10 * cargo.MIN_FREE)):
+                self.assertTrue(restarted.pressure())
+                restarted.cache_size.return_value = 300 * 1024**2
+                self.assertFalse(restarted.pressure())
+
+    def test_learned_limit_never_grows_and_has_a_floor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner = cargo.Runner(Path(temporary), Path(temporary) / 'target')
+            runner.remember_pressure(512 * 1024**2)
+            limit = runner.cache_limit()
+            runner.remember_pressure(cargo.MAX_CACHE * 2)
+            self.assertEqual(runner.cache_limit(), limit)
+            runner.remember_pressure(1)
+            self.assertEqual(runner.cache_limit(), cargo.MIN_CACHE)
+            runner.remember_pressure(0)
+            self.assertEqual(runner.cache_limit(), cargo.MIN_CACHE)
+
+    def test_invalid_cache_state_falls_back_and_write_failure_is_nonfatal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner = cargo.Runner(Path(temporary), Path(temporary) / 'target')
+            state = runner.target.with_name('target-cache-limit')
+            self.assertEqual(runner.cache_limit(), cargo.MAX_CACHE)
+            for text in ['broken', '-1', '0', str(cargo.MAX_CACHE + 1)]:
+                state.write_text(text)
+                self.assertEqual(runner.cache_limit(), cargo.MAX_CACHE)
+            with patch.object(Path, 'write_text', side_effect=OSError(errno.EDQUOT, 'full')):
+                runner.remember_pressure(512 * 1024**2)
+            self.assertEqual(runner.cache_limit(), cargo.MAX_CACHE)
+
+    def test_failed_size_probe_does_not_prevent_quota_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner = cargo.Runner(Path(temporary), Path(temporary) / 'target')
+            runner.cache_size = Mock(side_effect=OSError(errno.EDQUOT, 'full'))
+            runner.clean = Mock()
+            runner.reclaim(force=True)
+            self.assertEqual(runner.clean.call_count, 2)
+            self.assertEqual(runner.cache_limit(), cargo.MAX_CACHE)
+
     def test_application_arguments_are_not_reinterpreted(self):
         args = cargo.cargo_arguments(["run", "-p", "luna", "--", "--target-dir=application-data"], Path("/tmp/test-target"))
         self.assertEqual(args[-2:], ["--", "--target-dir=application-data"])
