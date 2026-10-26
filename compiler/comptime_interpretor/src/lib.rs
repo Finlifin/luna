@@ -19,7 +19,9 @@ mod object_values;
 mod objects;
 pub use objects::ObjectProperty;
 mod reflection;
-pub use reflection::{EnumReflection, ReflectedField, ReflectedVariant, StructReflection};
+pub use reflection::{
+    CallableReflection, EnumReflection, ReflectedField, ReflectedVariant, StructReflection,
+};
 mod selected_types;
 pub use comptime_runtime::object::{Entry as ObjectEntry, Object};
 pub use memory::{OwnedGraphCheckpoint, PointerValue, Storage};
