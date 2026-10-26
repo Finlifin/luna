@@ -2,7 +2,7 @@
 """Commit an explicit repository-relative file manifest on dev, without pushing.
 
 Does not reset, clean, stash, force, bypass hooks, or change file contents. The
-index must start empty so another person's staged work cannot enter the commit.
+index must start empty unless --include-staged explicitly adopts only manifest paths.
 On failure, preserve the index for inspection rather than guessing a rollback.
 """
 import argparse
@@ -27,10 +27,14 @@ def main():
                         help='stage only this text patch; its paths must exactly match the manifest')
     parser.add_argument('--dry-run', action='store_true',
                         help='validate and preview the selection without changing the index or HEAD')
+    parser.add_argument('--include-staged', action='store_true',
+                        help='preserve and include already staged manifest paths; reject other staged work')
     args = parser.parse_args()
     if git('branch', '--show-current', capture=True).stdout.strip() != 'dev':
         parser.error('this entrypoint commits only on dev')
-    if git('diff', '--cached', '--name-only', capture=True).stdout:
+    staged = set(filter(None, git('diff', '--cached', '--name-only', '--no-renames', '-z',
+                                 capture=True).stdout.split('\0')))
+    if staged and not args.include_staged:
         parser.error('index is not empty; inspect existing staged work first')
     paths = args.manifest.read_text().splitlines()
     if not paths or len(paths) != len(set(paths)):
@@ -42,6 +46,10 @@ def main():
             parser.error(f'not a repository-relative file path: {name!r}')
         if (ROOT / path).is_dir():
             parser.error(f'directory entries are not allowed: {name}')
+    if not staged.issubset(paths):
+        parser.error('staged paths outside the manifest; inspect existing staged work first')
+    if args.include_staged and args.patch_file:
+        parser.error('--include-staged cannot be combined with --patch-file')
     message = args.message_file.resolve()
     if not message.read_text().strip():
         parser.error('commit message is empty')
@@ -71,12 +79,16 @@ def main():
             git('apply', '--stat', str(patch))
         else:
             git('--literal-pathspecs', 'diff', '--stat', '--', *paths)
+        if staged:
+            git('diff', '--cached', '--stat')
         return 0
     # Literal pathspecs prevent manifest entries from selecting other files.
     if patch:
         git('apply', '--cached', str(patch))
     else:
-        git('--literal-pathspecs', 'add', '--', *paths)
+        unstaged = [name for name in paths if name not in staged]
+        if unstaged:
+            git('--literal-pathspecs', 'add', '--', *unstaged)
     git('diff', '--cached', '--check')
     git('diff', '--cached', '--stat')
     git('commit', '--file', str(message))

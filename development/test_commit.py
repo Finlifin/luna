@@ -97,6 +97,41 @@ class CommitTests(unittest.TestCase):
         self.assertEqual(self.git('show', 'HEAD:shared'), self.working)
         self.assertEqual(self.git('diff'), '')
 
+    def test_adopt_staged_removal_preserves_local_file(self):
+        self.git('rm', '--cached', 'shared')
+        (self.root / '.gitignore').write_text('/shared\n')
+        self.manifest.write_text('shared\n.gitignore\n')
+        self.assertEqual(self.run_entry('--include-staged', partial=False), 0)
+        self.assertNotIn('shared', self.git('ls-tree', '--name-only', 'HEAD'))
+        self.assertEqual((self.root / 'shared').read_text(), self.working)
+        self.assertEqual(self.git('show', 'HEAD:.gitignore'), '/shared\n')
+
+    def test_adopt_preserves_staged_version_and_preview(self):
+        (self.root / 'shared').write_text(self.selected)
+        self.git('add', 'shared')
+        (self.root / 'shared').write_text(self.working)
+        staged = self.git('diff', '--cached')
+        self.run_entry('--include-staged', '--dry-run', partial=False)
+        self.assertEqual(self.git('diff', '--cached'), staged)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
+        self.run_entry('--include-staged', partial=False)
+        self.assertEqual(self.git('show', 'HEAD:shared'), self.selected)
+        self.assertEqual((self.root / 'shared').read_text(), self.working)
+
+    def test_adopt_rejects_staged_paths_outside_manifest(self):
+        self.git('add', 'shared')
+        staged = self.git('diff', '--cached')
+        self.manifest.write_text('different\n')
+        with self.assertRaises(SystemExit):
+            self.run_entry('--include-staged', partial=False)
+        self.assertEqual(self.git('diff', '--cached'), staged)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
+
+    def test_adopt_rejects_patch_mode(self):
+        with self.assertRaises(SystemExit):
+            self.run_entry('--include-staged')
+        self.assertEqual(self.git('diff', '--cached'), '')
+
     def test_partial_commit_includes_new_file_without_staging_other_files(self):
         added = 'new feature\n'
         (self.root / 'new').write_text(added)
