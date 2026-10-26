@@ -21,6 +21,7 @@ mod object_values;
 mod objects;
 pub use objects::ObjectProperty;
 mod generated_structs;
+pub use generated_structs::StructPublicationError;
 mod reflection;
 pub use reflection::{
     CallableReflection, EnumReflection, ReflectedField, ReflectedVariant, StructReflection,

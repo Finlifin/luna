@@ -1,6 +1,30 @@
 //! Atomic installation of completed struct descriptions after checked publication.
 use super::*;
 
+/// Distinguish VM admission from the publisher's final commit failure.
+#[derive(Debug)]
+pub enum StructPublicationError<E> {
+    Admission(Error),
+    Commit(E),
+}
+impl<E: fmt::Display> fmt::Display for StructPublicationError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admission(error) => write!(
+                f,
+                "(struct-publication (admission {}))",
+                nir::QuotedDisplay(&error.to_string())
+            ),
+            Self::Commit(error) => write!(
+                f,
+                "(struct-publication (commit {}))",
+                nir::QuotedDisplay(&error.to_string())
+            ),
+        }
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for StructPublicationError<E> {}
+
 struct Installation<'vm, 'world> {
     vm: &'vm mut Interpreter<'world>,
     definitions: &'world [nir::program::Struct],
@@ -14,6 +38,17 @@ impl Drop for Installation<'_, '_> {
                 self.vm.structs.remove(&definition.declaration);
             }
         }
+    }
+}
+
+impl Installation<'_, '_> {
+    fn commit_with<T, E>(
+        mut self,
+        commit: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, StructPublicationError<E>> {
+        let result = commit().map_err(StructPublicationError::Commit)?;
+        self.committed = true;
+        Ok(result)
     }
 }
 
@@ -32,6 +67,33 @@ impl<'world> Interpreter<'world> {
         &mut self,
         definitions: &'world [nir::program::Struct],
     ) -> Result<(), Error> {
+        match self
+            .install_generated_structs_with(definitions, || Ok::<_, std::convert::Infallible>(()))
+        {
+            Ok(()) => Ok(()),
+            Err(StructPublicationError::Admission(error)) => Err(error),
+            Err(StructPublicationError::Commit(impossible)) => match impossible {},
+        }
+    }
+
+    /// Admit the batch, then run the publisher's commit exactly once. An
+    /// admission failure never calls commit; a commit error or unwind removes
+    /// the VM entries. The callback must itself be transactional on failure;
+    /// arbitrary external side effects cannot be undone by this interpreter.
+    pub fn install_generated_structs_with<T, E>(
+        &mut self,
+        definitions: &'world [nir::program::Struct],
+        commit: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, StructPublicationError<E>> {
+        self.prepare_generated_structs(definitions)
+            .map_err(StructPublicationError::Admission)?
+            .commit_with(commit)
+    }
+
+    fn prepare_generated_structs<'vm>(
+        &'vm mut self,
+        definitions: &'world [nir::program::Struct],
+    ) -> Result<Installation<'vm, 'world>, Error> {
         if !self.comptime_only || self.graph.is_some() || self.cleanup_schedule.is_some() {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
@@ -129,8 +191,7 @@ impl<'world> Interpreter<'world> {
                 installation.vm.admit_type(field, 0)?;
             }
         }
-        installation.committed = true;
-        Ok(())
+        Ok(installation)
     }
 
     fn known_definition(&mut self, id: DeclarationId) -> Result<bool, Error> {

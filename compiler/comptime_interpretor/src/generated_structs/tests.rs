@@ -299,3 +299,53 @@ fn repeated_installation_and_late_failure_preserve_prior_batches_with_a_bounded_
     assert!(vm.reflect_struct(&ty(10_000)).is_ok());
     assert!(vm.reflect_struct(&ty(10_127)).is_ok());
 }
+
+#[test]
+fn publisher_commit_is_called_once_after_admission_and_failure_uninstalls_the_batch() {
+    let package = package();
+    let definitions = [structure(20, vec![("flag", boolean())])];
+    let invalid = [structure(21, vec![("unknown", ty(99))])];
+    let calls = std::cell::Cell::new(0);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let rejected = vm.install_generated_structs_with(&invalid, || {
+        calls.set(calls.get() + 1);
+        Ok::<_, &str>(())
+    });
+    assert!(matches!(
+        rejected,
+        Err(StructPublicationError::Admission(_))
+    ));
+    assert_eq!(calls.get(), 0);
+    let rejected = vm.install_generated_structs_with(&definitions, || {
+        calls.set(calls.get() + 1);
+        Err::<(), _>("publisher\n\"rejected")
+    });
+    assert!(matches!(rejected, Err(StructPublicationError::Commit(_))));
+    assert!(
+        rejected
+            .unwrap_err()
+            .to_string()
+            .contains("publisher\\n\\\"rejected")
+    );
+    assert_eq!(calls.get(), 1);
+    assert!(!vm.structs.contains_key(&id(20)));
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vm.install_generated_structs_with(&definitions, || -> Result<(), ()> {
+            calls.set(calls.get() + 1);
+            panic!("publisher failed");
+        })
+    }));
+    assert!(panic.is_err());
+    assert_eq!(calls.get(), 2);
+    assert!(!vm.structs.contains_key(&id(20)));
+    let receipt = vm
+        .install_generated_structs_with(&definitions, || {
+            calls.set(calls.get() + 1);
+            Ok::<_, ()>(37)
+        })
+        .unwrap();
+    assert_eq!(receipt, 37);
+    assert_eq!(calls.get(), 3);
+    assert!(vm.reflect_struct(&ty(20)).is_ok());
+    assert!(vm.reflect_struct(&ty(10)).is_ok());
+}

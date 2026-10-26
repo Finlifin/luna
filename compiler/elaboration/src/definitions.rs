@@ -3,7 +3,7 @@
 //! This boundary runs the ordinary package elaborator in fresh candidate state.
 //! It does not yet connect a source-level builder or resume a suspended VM.
 use crate::program::{self, Protocols};
-use hir::definitions::{DefinitionBatch, PublicationError};
+use hir::definitions::{DefinitionBatch, PreparedPublication, PublicationError};
 use std::collections::BTreeMap;
 
 /// Publish only after the complete candidate passes ordinary elaboration with
@@ -39,7 +39,31 @@ pub fn publish_with_invocation_budget(
     protocols: &Protocols,
     target: Option<nir::target::TargetData>,
 ) -> Result<(Vec<hir::OwnerId>, nir::program::Package), PublicationError<program::Error>> {
-    batch.publish_checked(structural_fuel, |candidate| {
+    Ok(prepare_with_invocation_budget(
+        batch,
+        structural_fuel,
+        invocation_steps,
+        package_identities,
+        protocols,
+        target,
+    )?
+    .commit())
+}
+
+/// Prepare a semantic candidate once, retaining the original draft until the
+/// caller coordinates external admission and explicitly commits the result.
+pub fn prepare_with_invocation_budget<'batch, 'package, 'hir>(
+    batch: &'batch mut DefinitionBatch<'package, 'hir>,
+    structural_fuel: &mut usize,
+    invocation_steps: &mut u64,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+    target: Option<nir::target::TargetData>,
+) -> Result<
+    PreparedPublication<'batch, 'package, 'hir, nir::program::Package>,
+    PublicationError<program::Error>,
+> {
+    batch.prepare_checked(structural_fuel, |candidate| {
         program::elaborate_packages_with_invocation_budget(
             candidate,
             package_identities,

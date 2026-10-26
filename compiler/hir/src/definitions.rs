@@ -121,6 +121,68 @@ pub struct DefinitionBatch<'package, 'hir> {
     body_slots: HashMap<BodyId, usize>,
     attributes: Vec<crate::DeferredDefinitionAttribute<'hir>>,
 }
+/// An immutable checked candidate holding exclusive access to its original draft.
+/// Dropping it abandons preparation without changing published tables or drafts.
+/// Commit performs no further validation, allocation or user callback.
+pub struct PreparedPublication<'batch, 'package, 'hir, T> {
+    batch: &'batch mut DefinitionBatch<'package, 'hir>,
+    candidate: Package<'hir>,
+    owners: Vec<OwnerId>,
+    checked: T,
+}
+impl<'batch, 'package, 'hir, T> PreparedPublication<'batch, 'package, 'hir, T> {
+    pub fn published(&self) -> &Package<'hir> {
+        self.batch.published()
+    }
+    pub fn candidate(&self) -> &Package<'hir> {
+        &self.candidate
+    }
+    pub fn owners(&self) -> &[OwnerId] {
+        &self.owners
+    }
+    pub fn checked(&self) -> &T {
+        &self.checked
+    }
+
+    /// Transfer the checked output into caller-owned stable storage without
+    /// changing the candidate or rerunning semantic checking.
+    pub fn map_checked<U>(
+        self,
+        map: impl FnOnce(T) -> U,
+    ) -> PreparedPublication<'batch, 'package, 'hir, U> {
+        PreparedPublication {
+            batch: self.batch,
+            candidate: self.candidate,
+            owners: self.owners,
+            checked: map(self.checked),
+        }
+    }
+
+    pub fn commit(self) -> (Vec<OwnerId>, T) {
+        *self.batch.package = self.candidate;
+        self.batch.definitions.clear();
+        self.batch.bodies.clear();
+        self.batch.body_slots.clear();
+        self.batch.attributes.clear();
+        self.batch.base = self.batch.package.num_defs();
+        (self.owners, self.checked)
+    }
+}
+impl<T> fmt::Display for PreparedPublication<'_, '_, '_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(prepared-publication (owners")?;
+        for owner in &self.owners {
+            write!(f, " {owner}")?;
+        }
+        write!(
+            f,
+            ") (candidate-definitions {}) (candidate-bodies {}))",
+            self.candidate.num_defs(),
+            self.candidate.num_bodies()
+        )
+    }
+}
+
 impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
     pub fn new(package: &'package mut Package<'hir>) -> Self {
         Self {
@@ -237,6 +299,17 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         fuel: &mut usize,
         check: impl FnOnce(&Package<'hir>) -> Result<T, E>,
     ) -> Result<(Vec<OwnerId>, T), PublicationError<E>> {
+        Ok(self.prepare_checked(fuel, check)?.commit())
+    }
+
+    /// Check once without publishing. The returned preparation prevents edits
+    /// to this batch until committed or dropped. External admission may fail
+    /// after checking; dropping the preparation retains the repairable draft.
+    pub fn prepare_checked<T, E>(
+        &mut self,
+        fuel: &mut usize,
+        check: impl FnOnce(&Package<'hir>) -> Result<T, E>,
+    ) -> Result<PreparedPublication<'_, 'package, 'hir, T>, PublicationError<E>> {
         self.charge_candidate_copy(fuel)
             .map_err(PublicationError::Structure)?;
         let mut candidate = self.package.clone();
@@ -251,13 +324,12 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         };
         let owners = batch.publish(fuel).map_err(PublicationError::Structure)?;
         let result = check(&candidate).map_err(PublicationError::Check)?;
-        *self.package = candidate;
-        self.definitions.clear();
-        self.bodies.clear();
-        self.body_slots.clear();
-        self.attributes.clear();
-        self.base = self.package.num_defs();
-        Ok((owners, result))
+        Ok(PreparedPublication {
+            batch: self,
+            candidate,
+            owners,
+            checked: result,
+        })
     }
     /// Check every entry before making any mutation. Budget exhaustion is also
     /// transactional; a caller can supply fresh fuel and retry the same draft.

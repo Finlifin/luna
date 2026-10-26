@@ -734,3 +734,73 @@ fn publication_reuses_invocation_budget_and_preserves_failed_attempt_consumption
     .unwrap();
     assert_eq!(10_000 - steps, spent);
 }
+
+#[test]
+fn prepared_hir_and_vm_struct_installation_commit_together_without_rechecking() {
+    use comptime_interpretor::{Budget, Interpreter, StructPublicationError};
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(description(&arena, owner, boolean(), None), None, None)
+        .unwrap();
+    let before = batch.to_string();
+    let baseline = nir::program::Package::default();
+    let mut vm = Interpreter::for_comptime(&baseline, Budget::default()).unwrap();
+    let mut structural_fuel = 100_000;
+    let mut invocation_steps = 1_000_000;
+    let prepared = elaboration::definitions::prepare_with_invocation_budget(
+        &mut batch,
+        &mut structural_fuel,
+        &mut invocation_steps,
+        &identities(),
+        &Protocols::default(),
+        None,
+    )
+    .unwrap()
+    .map_checked(Arc::new);
+    let rejected_world = Arc::clone(prepared.checked());
+    let generated = Term::Nominal {
+        declaration: rejected_world.structs[0].declaration,
+        arguments: vec![],
+    };
+    assert_eq!(prepared.published().num_defs(), 0);
+    let rejected = vm.install_generated_structs_with(&rejected_world.structs, || {
+        drop(prepared);
+        Err::<(), _>("publisher declined")
+    });
+    assert!(matches!(
+        rejected,
+        Err(StructPublicationError::Commit("publisher declined"))
+    ));
+    assert_eq!(batch.to_string(), before);
+    assert_eq!(batch.published().num_defs(), 0);
+    assert!(vm.reflect_struct(&generated).is_err());
+
+    let prepared = elaboration::definitions::prepare_with_invocation_budget(
+        &mut batch,
+        &mut structural_fuel,
+        &mut invocation_steps,
+        &identities(),
+        &Protocols::default(),
+        None,
+    )
+    .unwrap()
+    .map_checked(Arc::new);
+    let checked = Arc::clone(prepared.checked());
+    let fuel_before_commit = structural_fuel;
+    let steps_before_commit = invocation_steps;
+    let (owners, committed) = vm
+        .install_generated_structs_with(&checked.structs, || Ok::<_, ()>(prepared.commit()))
+        .unwrap();
+    assert_eq!(owners, vec![owner]);
+    assert!(Arc::ptr_eq(&checked, &committed));
+    assert_eq!(structural_fuel, fuel_before_commit);
+    assert_eq!(invocation_steps, steps_before_commit);
+    assert_eq!(batch.published().num_defs(), 1);
+    assert_eq!(
+        vm.reflect_struct(&generated).unwrap().fields[0].ty,
+        boolean()
+    );
+}

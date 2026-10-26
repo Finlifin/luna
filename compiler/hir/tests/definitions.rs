@@ -722,3 +722,74 @@ fn explicit_draft_identities_advance_allocator_and_exhaustion_never_wraps() {
     }
     assert_eq!(batch.published().next_definition_index(), u32::MAX);
 }
+
+#[test]
+fn prepared_publication_is_private_until_commit_and_checks_only_once() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(module(&arena, owner, vec![]), None, None)
+        .unwrap();
+    let before = batch.to_string();
+    let calls = std::cell::Cell::new(0);
+    let prepared = batch
+        .prepare_checked(&mut 100, |candidate| {
+            calls.set(calls.get() + 1);
+            Ok::<_, ()>(candidate.num_defs())
+        })
+        .unwrap();
+    assert_eq!(prepared.published().num_defs(), 0);
+    assert_eq!(prepared.candidate().num_defs(), 1);
+    assert_eq!(prepared.owners(), &[owner]);
+    assert_eq!(*prepared.checked(), 1);
+    assert!(prepared.to_string().contains("(candidate-definitions 1)"));
+    drop(prepared);
+    assert_eq!(batch.to_string(), before);
+    assert_eq!(batch.published().num_defs(), 0);
+    let prepared = batch
+        .prepare_checked(&mut 100, |_| {
+            calls.set(calls.get() + 1);
+            Ok::<_, ()>(17usize)
+        })
+        .unwrap()
+        .map_checked(std::sync::Arc::new);
+    let checked = prepared.checked().clone();
+    let (owners, result) = prepared.commit();
+    assert_eq!(owners, vec![owner]);
+    assert!(std::sync::Arc::ptr_eq(&checked, &result));
+    assert_eq!(*result, 17);
+    assert_eq!(calls.get(), 2);
+    assert_eq!(batch.published().num_defs(), 1);
+    assert_eq!(
+        batch.reserve().unwrap().def_id.raw(),
+        owner.def_id.raw() + 1
+    );
+}
+
+#[test]
+fn checked_output_transfer_unwind_leaves_the_draft_repairable() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(module(&arena, owner, vec![]), None, None)
+        .unwrap();
+    let before = batch.to_string();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let prepared = batch
+            .prepare_checked(&mut 100, |_| Ok::<_, ()>(()))
+            .unwrap();
+        let _ = prepared.map_checked(|_| -> () { panic!("storage transfer failed") });
+    }));
+    assert!(panic.is_err());
+    assert_eq!(batch.to_string(), before);
+    assert_eq!(batch.published().num_defs(), 0);
+    batch
+        .prepare_checked(&mut 100, |_| Ok::<_, ()>(()))
+        .unwrap()
+        .commit();
+    assert_eq!(batch.published().num_defs(), 1);
+}

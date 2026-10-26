@@ -51,6 +51,52 @@ the host remains responsible for providing evidence for newly generated types.
 Source builder dispatch during a running expression is still unimplemented.
 This closes the VM catalog-installation step, not the whole builder pipeline.
 
+## Coordinating HIR publication and VM admission
+
+`DefinitionBatch::prepare_checked` checks a private candidate once and returns a
+`PreparedPublication` holding exclusive access to the original draft. Dropping
+the preparation leaves the draft and published package unchanged. Its `commit`
+installs the candidate without further checking or user callbacks. Existing
+`publish_checked` delegates through this preparation. The elaboration adapter
+`prepare_with_invocation_budget` uses ordinary semantic checking and retains
+spent invocation fuel on rejection.
+
+The checked output can move into stable host storage with `map_checked(Arc::new)`.
+The caller retains that storage for the VM's lifetime, then coordinates both
+tables as follows (Rust host integration):
+
+```rust
+let prepared = prepared.map_checked(Arc::new);
+let checked = Arc::clone(prepared.checked());
+let (owners, committed) = vm.install_generated_structs_with(
+    &checked.structs,
+    || Ok::<_, std::convert::Infallible>(prepared.commit()),
+)?;
+```
+
+Pass only newly generated concrete descriptors when the candidate also contains
+previously published structs. Admission failure never calls the final callback.
+A callback error or unwind removes the tentative VM entries. The callback must
+itself leave external publication unchanged on failure; the interpreter cannot
+undo arbitrary host effects. Use the infallible prepared commit as the final
+operation, with no fallible work after it. Neither final commit repeats semantic
+checking nor replays the active invocation. This provides the coordinated host
+boundary; source builder dispatch and suspension/resumption remain unimplemented.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir --test definitions -p elaboration --test definitions --test delivered_types --no-fail-fast
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib -p luna --test source_reflection --test reflected_definitions --test generated_definitions --no-fail-fast
+```
+
+Both exited 0: 30 tests at `/tmp/luna-tools-kjfyr6qo/result.json` and
+227 tests at `/tmp/luna-tools-grkadj0n/result.json` (including the luna library
+tests selected by `--lib`). Tests cover private preparation, abandonment,
+storage-transfer unwind, admission rejection without callback execution,
+callback failure/unwind and retry, and coordinated semantic publication without
+rechecking. Targeted rustfmt and `git diff --check` also passed.
+
 ## Callable type reflection
 
 `Interpreter::reflect_callable` observes a legal callable Type in a comptime
