@@ -1,7 +1,6 @@
 {-
-  Known limitation: flow checking rejects types[0] after the effectful Type
-  argument, even though Source has one field. Expected run result: true.
-  Load meta and primitives, binding --meta-list-type meta.List.
+  Machine arithmetic in a Type argument must preserve its effects while
+  reflection and checked list indexing build the resulting runtime type.
 -}
 use primitives.Type;
 

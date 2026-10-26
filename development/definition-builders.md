@@ -30,11 +30,28 @@ uses ordinary `meta.fold` and passes all four computed-input cases.
 (`/tmp/luna-host-examples-yqf3ouxq`, exit 0), now with a computed dependent-domain
 source application.
 
-Remaining limitation: directly indexing the reflected type list after an
-effectful argument can fail with `flow-error ... unsupported-construct`.
-`development/repros/comptime-effectful-reflection-index.fl` preserves that case;
-the equivalent builder test failed in `/tmp/luna-tools-vq7x0oy_/result.json`.
-This is not claimed fixed by preparing nominal descriptors.
+The later flow integration fixes direct Type/Symbol list indexing after effectful
+arguments (original failure: `/tmp/luna-tools-vq7x0oy_/result.json`). Machine
+arithmetic activates a whole-body flow walk; the missing index case was unrelated
+to nominal descriptor preparation. The walker now visits list and index operands
+in order, returning no arithmetic or alias evidence for the Type/Symbol result.
+Struct reflection/publication operands also remain observable to the walk.
+The VM's checked indexing is unchanged. Other list element domains still require
+their own value/alias transfer; this is not a general collection proof model.
+
+The former repro is now `development/examples/host-effectful-reflection-index.fl`.
+`python3 -B development/check.py --timeout 900 -- test --release -p luna
+--test builder_invocations --test integer_contracts --no-fail-fast` passes 36
+builder and 15 integer-contract tests (`/tmp/luna-tools-m1f00735/result.json`,
+exit 0). The regression encodes receiver/name-index/type-index evaluation order as
+123, rejects both negative and out-of-range indices with `IndexOutOfBounds`, and
+rejects machine overflow in either operand with a range diagnostic.
+`python3 -B development/host_examples.py effectful-reflection-index --release-driver
+--compare-optimization` returns `(bool true)` at LLVM O0 and O3
+(`/tmp/luna-host-examples-ljiy1318`, exit 0).
+The related `--test elaboration --test source_reflection` run passes 450 and 12
+tests respectively (`/tmp/luna-tools-c1316ccl/result.json`, exit 0), using the same
+`development/check.py --timeout 900 -- test --release -p luna` entrypoint.
 
 Required Type expressions now prepare the reachable nominal descriptor graph,
 including nested fields, applied type arguments, parameter domains, enum payloads

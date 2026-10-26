@@ -1164,6 +1164,68 @@ fn early_public_builder_reflects_computed_nominal_applications() {
 }
 
 #[test]
+fn effectful_reflection_indexing_preserves_order_and_bounds() {
+    for position in ["0", "1", "-1"] {
+        let fixture = Fixture::new(&format!(
+            "typealias Type = .Type'builtin;
+            struct Inner {{flag:bool}}
+            struct Source where T {{inner:Inner}}
+            comptime fn Generate() -> Type {{
+                var calls: .u32'builtin = 0;
+                let subject = Source<do {{calls = calls + 1; bool}}>;
+                let types = meta.struct_field_types(subject);
+                let names = meta.struct_field_names(subject);
+                var builder = meta.StructBuilder.new();
+                builder.add_field(
+                    names[do {{calls = calls * 10 + 2; 0}}],
+                    types[do {{calls = calls * 10 + 3; {position}}}]);
+                if calls == 123 {{builder.Build()}} else {{bool}}
+            }}
+            typealias Generated = Generate();
+            impl Generated {{fn read(self) -> bool {{self.inner.flag}}}}
+            fn run() -> bool {{Generated {{inner:Inner {{flag:true}}}}.read()}}
+            comptime fn inspect() -> bool {{true}}"
+        ));
+        let result = fixture.invoke_meta("inspect");
+        if position != "0" {
+            let failure = result.err().expect("out-of-range index must fail");
+            assert!(failure.contains("IndexOutOfBounds"), "{failure}");
+            continue;
+        }
+        let (Artifact::Nir(package), _, _) = result.unwrap() else {
+            panic!("expected NIR")
+        };
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn reflected_type_index_operands_still_require_machine_arithmetic_proofs() {
+    for observation in [
+        "types[do {calls = calls + 1; 0}]",
+        "(do {calls = calls + 1; types})[0]",
+    ] {
+        let fixture = Fixture::new(&format!(
+            "typealias Type = .Type'builtin;
+            comptime fn inspect() -> bool {{
+                let types:meta.List<Type> = [bool];
+                var calls: .u8'builtin = 255;
+                let observed = {observation};
+                true
+            }}"
+        ));
+        let failure = fixture
+            .invoke_meta("inspect")
+            .err()
+            .expect("overflow must fail");
+        assert!(failure.contains("range"), "{failure}");
+    }
+}
+
+#[test]
 fn early_public_builder_preserves_recursive_pointer_field_identity() {
     let fixture = Fixture::new(
         "typealias Type = .Type'builtin;

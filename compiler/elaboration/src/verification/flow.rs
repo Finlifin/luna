@@ -5444,6 +5444,26 @@ impl Walker<'_> {
                 self.child(right, state, depth)?;
                 result = self.unknown_value(&expr.ty)?;
             }
+            K::TypeListIndex(values, index)
+                if matches!(
+                    expr.ty,
+                    Term::Primitive(nir::Primitive::Type | nir::Primitive::Symbol)
+                ) =>
+            {
+                // Immutable type/name observations carry no storage aliases or
+                // arithmetic facts. Their operands still execute in order; the
+                // comptime VM retains the mandatory checked-index operation.
+                // Other element domains need their own value/alias transfer.
+                self.child(values, state, depth)?;
+                self.child(index, state, depth)?;
+                result = self.unknown_value(&expr.ty)?;
+            }
+            K::StructFieldTypes(subject)
+            | K::StructFieldNames(subject)
+            | K::BuildStruct(subject) => {
+                self.child(subject, state, depth)?;
+                result = self.unknown_value(&expr.ty)?;
+            }
             K::Literal(_)
             | K::Local(_)
             | K::Unit
