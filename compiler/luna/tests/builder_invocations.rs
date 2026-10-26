@@ -468,3 +468,62 @@ fn sysroot_cli_installs_builder_service_after_loading_meta_bindings() {
         "(bool true)"
     );
 }
+
+#[test]
+fn unexecuted_builder_paths_do_not_fork_hir_or_spend_structural_budget() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn ready(.build:bool = false) -> bool {{
+            if build {{ .build_struct'builtin(.Skipped, [.flag], [bool]); }}
+            true
+        }}
+    "
+    ));
+    let mut structural = 0;
+    let (Artifact::Nir(package), value, _) =
+        fixture.invoke("ready", &mut structural, 1_000_000).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(value, Value::Bool(true));
+    assert_eq!(structural, 0);
+    assert_eq!(package.structs.len(), 1);
+    let mut structural = 12345;
+    assert_eq!(
+        fixture
+            .invoke("ready", &mut structural, 1_000_000)
+            .unwrap()
+            .1,
+        Value::Bool(true)
+    );
+    assert_eq!(structural, 12345);
+}
+
+#[test]
+fn invalid_invocation_resources_do_not_consume_unused_builder_budget() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX} trait Duplicate {{}} comptime fn ready()->bool {{true}}"
+    ));
+    let mut structural = 12345;
+    let error = compile_and_invoke_with_struct_builders(
+        &fixture.packages(),
+        &[],
+        17,
+        None,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input.List"),
+            copy: Some("input.Duplicate"),
+            ..Default::default()
+        },
+        None,
+        &[],
+        "ready",
+        &mut structural,
+        1_000_000,
+    )
+    .err()
+    .unwrap();
+    assert!(error.contains("missing Drop binding"), "{error}");
+    assert_eq!(structural, 12345);
+}

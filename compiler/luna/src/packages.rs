@@ -544,18 +544,15 @@ impl BuilderInvocation<'_> {
         protocols: &elaboration::program::Protocols,
         target: Option<nir::target::TargetData>,
     ) -> Result<nir::program::Package, String> {
-        let candidate = hir::definitions::fork_package(package, self.structural_fuel)
-            .map_err(|error| format!("builder package preparation failed: {error}"))?;
-        let publisher = elaboration::definitions::StructPublisher::new(
+        let publisher = elaboration::definitions::DeferredStructPublisher::new(
             arena,
-            candidate,
+            package,
             primary,
-            identities.clone(),
-            protocols.clone(),
+            identities,
+            protocols,
             target,
             *self.structural_fuel,
-        )?;
-        *self.structural_fuel = 0;
+        );
         elaboration::verification::optimization::elide_proven_checks(
             &mut nir,
             &mut elaboration::verification::Limits::default(),
@@ -572,6 +569,7 @@ impl BuilderInvocation<'_> {
         } else {
             None
         };
+        *self.structural_fuel = 0;
         let value = crate::invocation::invoke_selected_with_publisher(
             &nir,
             self.entry,
@@ -582,8 +580,7 @@ impl BuilderInvocation<'_> {
         );
         *self.structural_fuel = publisher.remaining_structural_fuel();
         self.value = Some(value?);
-        let (_, checked) = publisher.finish();
-        let completed = checked.unwrap_or(nir);
+        let completed = publisher.finish().unwrap_or(nir);
         crate::protocols::type_constructors::validate(&completed, protocols)?;
         Ok(completed)
     }

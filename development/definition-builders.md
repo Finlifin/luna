@@ -15,7 +15,9 @@ Output files are published only after success, with source protection retained.
 
 The CLI provides a separate structural allowance of 1,000,000 for package
 forking and builder assembly; invocation fuel still bounds executed comptime
-work. Initial required invocations and IIR-only staged builder publication remain
+work. The publication world is initialized only by an executed builder request;
+ordinary invocations and skipped builder branches do not fork HIR or consume
+this structural allowance. Initial required invocations and IIR-only staged builder publication remain
 unsupported. Calling `Action::run` on frozen NIR alone cannot recover the HIR
 publisher. Full repository sysroot acceptance remains blocked by independent
 library gaps; the sysroot routing test uses minimal builtin/std and real meta.
@@ -115,6 +117,33 @@ entries, exhausted budgets and retry, dependency types, configured preludes and
 primary entry identity. Targeted rustfmt and `git diff --check` passed.
 
 ## Compiler-owned struct publisher
+
+`DeferredStructPublisher` borrows the source package and configuration until the
+first request. It then creates one owned `StructPublisher` through budgeted HIR
+forking. Both implement `StructBuildService`, so invocation uses the same checked
+prepare/commit contract. Later requests observe the same committed world; skipped
+branches do not initialize it, and finishing an unused service returns no new
+NIR. Initialization failure retains its diagnostic and spent structural work
+without changing the source package. Its S-expression dump reports whether the
+world has been initialized and the remaining structural allowance.
+
+First-use validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test struct_publisher -p luna --test builder_invocations --no-fail-fast
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations --no-fail-fast
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli comptime_invocation --no-fail-fast
+```
+
+Final applicable results: 4 publisher tests at
+`/tmp/luna-tools-jl0lth1a/result.json`, 11 builder/driver tests at
+`/tmp/luna-tools-8wlvtl5e/result.json`, and 7 invocation regressions at
+`/tmp/luna-tools-054nnyi7/result.json`, all exit 0 (22 distinct tests).
+Tests establish zero structural debit for skipped builder branches and resource
+setup rejection, first-request initialization, unchanged source HIR, continued
+publication in one world, and budget rejection before initialization. Formatting
+and diff checks passed. This removes eager publication-world copying; ordinary
+invocation preparation retains its existing costs.
 
 `elaboration::definitions::StructPublisher` provides the reusable host side of
 source construction. It owns the committed HIR package and the latest checked

@@ -170,3 +170,47 @@ fn destination_and_structural_budget_fail_without_publication() {
     assert_eq!(steps, 1000);
     assert!(publisher.finish().1.is_none());
 }
+
+#[test]
+fn deferred_publication_only_initializes_on_request_and_preserves_committed_state() {
+    use elaboration::definitions::{DeferredStructPublisher, StructBuildService};
+    let arena = hir::HirArena::new();
+    let source = hir::Package::new();
+    let identities = BTreeMap::from([(0, 879)]);
+    let protocols = Default::default();
+    let unused = DeferredStructPublisher::new(&arena, &source, 0, &identities, &protocols, None, 0);
+    assert!(!unused.is_initialized());
+    assert!(unused.to_string().contains("(initialized false)"));
+    assert!(unused.finish().is_none());
+    let publisher =
+        DeferredStructPublisher::new(&arena, &source, 0, &identities, &protocols, None, 100_000);
+    assert_eq!(publisher.remaining_structural_fuel(), 100_000);
+    {
+        let mut steps = 1_000_000;
+        let first = publisher
+            .prepare(&request("First", boolean()), &mut steps)
+            .unwrap();
+        assert!(publisher.is_initialized());
+        let first_ty = Term::Nominal {
+            declaration: first.result,
+            arguments: vec![],
+        };
+        (first.commit)().unwrap();
+        let second = publisher
+            .prepare(&request("Second", first_ty), &mut steps)
+            .unwrap();
+        (second.commit)().unwrap();
+    }
+    assert_eq!(source.num_defs(), 0);
+    assert_eq!(publisher.finish().unwrap().structs.len(), 2);
+    let rejected =
+        DeferredStructPublisher::new(&arena, &source, 0, &identities, &protocols, None, 0);
+    assert!(
+        rejected
+            .prepare(&request("Fail", boolean()), &mut 1000)
+            .is_err()
+    );
+    assert!(!rejected.is_initialized());
+    assert!(rejected.last_diagnostic().unwrap().contains("preparation"));
+    assert!(rejected.finish().is_none());
+}

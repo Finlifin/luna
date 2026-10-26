@@ -1,11 +1,14 @@
 //! Semantic admission of generated definition batches.
 //!
 //! This boundary runs the ordinary package elaborator in fresh candidate state.
-//! It does not yet connect a source-level builder or resume a suspended VM.
+//! Explicit invocation uses the publisher services below; active checker
+//! integration remains separate from these private candidate transactions.
 use crate::program::{self, Protocols};
 use hir::definitions::{DefinitionBatch, PreparedPublication, PublicationError};
 use std::collections::BTreeMap;
+mod deferred_struct_publisher;
 mod struct_publisher;
+pub use deferred_struct_publisher::{DeferredStructPublisher, StructBuildService};
 pub use struct_publisher::StructPublisher;
 
 /// Publish only after the complete candidate passes ordinary elaboration with

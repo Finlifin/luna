@@ -71,7 +71,7 @@ pub(crate) fn invoke_selected_with_publisher(
         crate::resources::Selection<'_>,
     )>,
     fuel: u64,
-    publisher: Option<&elaboration::definitions::StructPublisher<'_>>,
+    publisher: Option<&dyn elaboration::definitions::StructBuildService>,
 ) -> Result<Value, String> {
     if fuel == 0 {
         return Err("invocation fuel must be positive".into());
