@@ -23,10 +23,12 @@ pub use interfaces::{assemble_impl, assemble_trait};
 mod enums;
 pub use enums::{assemble_enum, assemble_enum_definition};
 mod associated;
+mod effects;
 mod functions;
 mod parameters;
 mod types;
 pub use associated::assemble_associated;
+pub use effects::{assemble_effect, assemble_effect_group};
 pub use functions::{AssembledFunction, assemble_function, assemble_function_declaration};
 pub use types::{TypeDeclaration, assemble_newtype, assemble_type_alias};
 
