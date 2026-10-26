@@ -325,8 +325,111 @@ pub(crate) fn compile_observed_for_target(
     output: Option<&std::path::Path>,
     protocols: &elaboration::program::Protocols,
     selectors: crate::protocols::type_constructors::Selectors<'_>,
+    observed: Option<&mut CompilationInputs>,
+    target: Option<nir::target::TargetData>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    let preludes: Vec<_> = builtin.into_iter().collect();
+    compile_observed_with_preludes(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        emit,
+        output,
+        protocols,
+        selectors,
+        observed,
+        target,
+        &preludes,
+    )
+}
+
+pub(crate) fn compile_observed_with_preludes(
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    emit: Emit,
+    output: Option<&std::path::Path>,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    observed: Option<&mut CompilationInputs>,
+    target: Option<nir::target::TargetData>,
+    preludes: &[u32],
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    compile_with_expansion(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        emit,
+        output,
+        protocols,
+        selectors,
+        observed,
+        target,
+        preludes,
+        None,
+    )
+}
+
+/// Host-side definition assembly after source lowering and before ordinary
+/// protocol binding/elaboration. This is not a source-language builder or VM
+/// callback. The callback runs once and must account for its own work using the
+/// shared fuel; it cannot mutate cached HIR. No partially checked NIR is returned.
+/// The caller's callback inputs must participate in any external build cache key.
+/// Every generated owner must have an explicit DefId in a supplied source package;
+/// newly declared clause identities must belong to that same package.
+pub fn compile_with_definitions(
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    target: Option<nir::target::TargetData>,
+    fuel: &mut usize,
+    expand: &mut DefinitionExpander<'_>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    let preludes: Vec<_> = builtin.into_iter().collect();
+    compile_with_expansion(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        Emit::Nir,
+        None,
+        protocols,
+        selectors,
+        None,
+        target,
+        &preludes,
+        Some((fuel, expand)),
+    )
+}
+
+/// Generated names are not re-resolved into source AST. Callbacks connect
+/// definitions using the ordinary resolved HIR identities and owner references.
+pub type DefinitionExpander<'host> = dyn for<'hir> FnMut(
+        &'hir hir::HirArena,
+        &mut hir::definitions::DefinitionBatch<'_, 'hir>,
+        &mut usize,
+    ) -> Result<(), String>
+    + 'host;
+
+fn compile_with_expansion(
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    emit: Emit,
+    output: Option<&std::path::Path>,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
     mut observed: Option<&mut CompilationInputs>,
     target: Option<nir::target::TargetData>,
+    preludes: &[u32],
+    expansion: Option<(&mut usize, &mut DefinitionExpander<'_>)>,
 ) -> Result<(Artifact, elaboration::program::Protocols), String> {
     if emit == Emit::Ast {
         return Err("package sets support HIR or NIR, not AST output".into());
@@ -498,12 +601,13 @@ pub(crate) fn compile_observed_for_target(
         inputs.push((package.resolution_id, vfs));
     }
     let mut references: Vec<_> = inputs.iter_mut().map(|(id, vfs)| (*id, vfs)).collect();
-    let resolved = resolve::build_package_set_with_builtin(
+    let resolved = resolve::build_package_set_with_preludes(
         &session.source_map,
         &instance.diag_ctx,
         &mut references,
         dependencies,
         builtin,
+        preludes,
     )
     .map_err(|e| format!("package resolution failed: {}", e.message()))?;
     if instance.diag_ctx.has_errors() || !resolved.tree.errors.is_empty() {
@@ -556,18 +660,64 @@ pub(crate) fn compile_observed_for_target(
             .diag_ctx
             .failure_summary("multi-package HIR lowering"));
     }
+    let expanded;
+    let package = if let Some((fuel, expand)) = expansion {
+        expanded = {
+            let mut candidate = hir::definitions::fork_package(hir.package(), fuel)
+                .map_err(|error| format!("definition expansion preparation failed: {error}"))?;
+            let mut batch = hir::definitions::DefinitionBatch::new(&mut candidate);
+            expand(hir.arena(), &mut batch, fuel)?;
+            batch
+                .publish(fuel)
+                .map_err(|error| format!("definition expansion publication failed: {error}"))?;
+            for index in hir.package().num_defs()..candidate.num_defs() {
+                let charge = |fuel: &mut usize| -> Result<(), String> {
+                    *fuel = fuel
+                        .checked_sub(1)
+                        .ok_or("generated package identity budget exhausted")?;
+                    Ok(())
+                };
+                charge(fuel)?;
+                let owner = hir::OwnerId::new(hir::LocalDefId::new(index as u32));
+                let identity = candidate
+                    .owner_definition(owner)
+                    .ok_or("generated definition requires an explicit package identity")?;
+                if !resolution_ids.contains(&identity.pkg) {
+                    return Err(format!(
+                        "generated definition uses unknown source package {}",
+                        identity.pkg
+                    ));
+                }
+                let item = candidate
+                    .item(owner)
+                    .ok_or("generated definition is missing")?;
+                for parameter in hir::definitions::declared_clause_parameters(item) {
+                    charge(fuel)?;
+                    if parameter
+                        .definition
+                        .is_some_and(|id| id.pkg != identity.pkg)
+                    {
+                        return Err(
+                            "generated clause parameter belongs to a different package".into()
+                        );
+                    }
+                }
+            }
+            candidate
+        };
+        &expanded
+    } else {
+        hir.package()
+    };
     if emit == Emit::Hir {
-        return Ok((
-            Artifact::Hir(hir.package().dump_to_lisp()),
-            protocols.clone(),
-        ));
+        return Ok((Artifact::Hir(package.dump_to_lisp()), protocols.clone()));
     }
     let identities: BTreeMap<_, _> = packages
         .iter()
         .map(|p| (p.resolution_id, p.identity))
         .collect();
     let protocols = crate::protocols::type_constructors::resolve_source(
-        hir.package(),
+        package,
         &packages
             .iter()
             .map(|p| (p.resolution_id, p.identity, p.name.as_str()))
@@ -586,7 +736,7 @@ pub(crate) fn compile_observed_for_target(
         return Ok((Artifact::Attributes(attributes), protocols));
     }
     let nir = elaboration::program::elaborate_packages_for_target(
-        hir.package(),
+        package,
         &identities,
         &protocols,
         target,
