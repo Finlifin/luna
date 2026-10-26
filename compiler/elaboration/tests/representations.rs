@@ -23,7 +23,10 @@ fn definition(local: u32, field: Term) -> Struct {
         fields: vec![("field".into(), field)],
     }
 }
-fn check(field: Term, tuple: Option<DeclarationId>) -> Result<(), &'static str> {
+fn check(
+    field: Term,
+    tuple: Option<DeclarationId>,
+) -> Result<(), elaboration::representations::Failure> {
     Checker::new(
         tuple,
         &BTreeMap::from([(id(0), definition(0, field))]),
@@ -227,6 +230,7 @@ fn inline_storage_wrappers_cannot_hide_recursive_payloads() {
         assert!(
             check(field.clone(), None)
                 .unwrap_err()
+                .to_string()
                 .contains("recursive by-value"),
             "{field}"
         );
@@ -262,6 +266,7 @@ fn only_bound_tuple_head_exposes_its_type_list_storage() {
     assert!(
         check(field, Some(id(5)))
             .unwrap_err()
+            .to_string()
             .contains("recursive by-value")
     );
 }
@@ -285,6 +290,7 @@ fn forward_edges_and_failed_roots_do_not_poison_completed_roots() {
         checker
             .check(&nominal(99), &mut fuel)
             .unwrap_err()
+            .to_string()
             .contains("missing")
     );
 }
@@ -315,12 +321,14 @@ fn expanding_generic_recursion_is_bounded_before_materialization() {
         checker
             .check(&root, &mut 300)
             .unwrap_err()
+            .to_string()
             .contains("budget")
     );
     assert!(
         checker
             .check(&root, &mut 100_000)
             .unwrap_err()
+            .to_string()
             .contains("budget")
     );
 }
@@ -335,6 +343,7 @@ fn exhausted_attempt_can_be_retried_with_fresh_allowance() {
         checker
             .check(&nominal(0), &mut 0)
             .unwrap_err()
+            .to_string()
             .contains("budget")
     );
     checker.check(&nominal(0), &mut 1000).unwrap();
@@ -383,10 +392,74 @@ fn mixed_struct_enum_newtype_cycle_follows_payload_storage() {
         )
         .check(&nominal(0), &mut 100_000)
         .unwrap_err()
+        .to_string()
         .contains("recursive by-value")
     );
     wrapper.representation = Term::Pointer(Box::new(nominal(0)));
     Checker::new(None, &structs, &enums, &BTreeMap::from([(id(2), wrapper)]))
         .check(&nominal(0), &mut 100_000)
         .unwrap();
+}
+
+#[test]
+fn representation_failures_distinguish_limits_invalid_layouts_and_stale_receipts() {
+    use elaboration::representations::{FailureKind, IncrementalChecker};
+    let package = nir::program::Package::default();
+    assert_eq!(
+        IncrementalChecker::new(&package, &mut 0)
+            .err()
+            .unwrap()
+            .kind,
+        FailureKind::Budget
+    );
+    let mut checker = IncrementalChecker::new(&package, &mut 1000).unwrap();
+    let simple = || vec![definition(1, Term::Primitive(Primitive::Bool))].into();
+    assert_eq!(
+        checker.prepare(simple(), &mut 0).err().unwrap().kind,
+        FailureKind::Budget
+    );
+    assert_eq!(
+        checker
+            .prepare(vec![definition(1, nominal(1))].into(), &mut 1000)
+            .err()
+            .unwrap()
+            .kind,
+        FailureKind::Invalid
+    );
+    let first = checker.prepare(simple(), &mut 1000).unwrap();
+    let stale = checker.prepare(simple(), &mut 1000).unwrap();
+    checker.commit(first).unwrap();
+    assert_eq!(checker.commit(stale).unwrap_err().kind, FailureKind::Stale);
+}
+
+#[test]
+fn newtype_expansion_preserves_budget_and_type_failure_categories() {
+    use elaboration::representations::FailureKind;
+    let wrapper = nir::newtypes::Newtype {
+        declaration: id(1),
+        name: "Wide".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        capture_count: 0,
+        requirements: vec![],
+        capabilities: vec![],
+        representation: Term::Tuple(vec![Term::Primitive(Primitive::Bool); 128]),
+    };
+    let structs = BTreeMap::new();
+    let enums = BTreeMap::new();
+    let newtypes = BTreeMap::from([(id(1), wrapper)]);
+    let mut checker = Checker::new(None, &structs, &enums, &newtypes);
+    assert_eq!(
+        checker.check(&nominal(1), &mut 50).unwrap_err().kind,
+        FailureKind::Budget
+    );
+    checker.check(&nominal(1), &mut 100_000).unwrap();
+    let malformed = Term::Nominal {
+        declaration: id(1),
+        arguments: vec![Term::Primitive(Primitive::Bool)],
+    };
+    assert_eq!(
+        checker.check(&malformed, &mut 100_000).unwrap_err().kind,
+        FailureKind::Invalid
+    );
 }

@@ -3171,7 +3171,7 @@ impl Checker<'_, '_> {
                         },
                         &mut fuel,
                     )
-                    .map_err(|message| error(info.node.expect_item().span, message))?;
+                    .map_err(|failure| error(info.node.expect_item().span, failure.to_string()))?;
             }
         }
         Ok(())

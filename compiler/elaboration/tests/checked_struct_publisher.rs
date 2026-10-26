@@ -211,6 +211,49 @@ fn exhaustion_during_copy_or_validation_never_commits() {
 }
 
 #[test]
+fn representation_budget_is_retryable_and_not_a_type_error() {
+    let mut baseline = baseline();
+    baseline.structs[0].fields = (0..128)
+        .map(|index| (format!("field{index}"), boolean()))
+        .collect();
+    let measured = CheckedStructPublisher::new(&baseline);
+    let mut full = 1_000_000;
+    drop(
+        measured
+            .prepare(id(1), &request(nominal(0)), &mut full)
+            .unwrap(),
+    );
+    let cost = 1_000_000 - full;
+
+    let publisher = CheckedStructPublisher::new(&baseline);
+    let mut short = cost - 1;
+    let failure = publisher
+        .prepare(id(1), &request(nominal(0)), &mut short)
+        .err()
+        .unwrap();
+    assert_eq!(failure.kind, ErrorKind::StepsExhausted);
+    assert_eq!(failure.source, Some(request(nominal(0)).source));
+    let diagnostic = publisher.last_diagnostic().unwrap();
+    assert!(
+        diagnostic.contains("representation") && diagnostic.contains("budget"),
+        "{diagnostic}"
+    );
+    assert_eq!(publisher.published_definition_count(), 0);
+
+    let retry = publisher
+        .prepare(id(1), &request(nominal(0)), &mut 1_000_000)
+        .unwrap();
+    (retry.commit)().unwrap();
+    assert_eq!(publisher.published_definition_count(), 1);
+    let invalid = publisher
+        .prepare(id(2), &request(nominal(2)), &mut 1_000_000)
+        .err()
+        .unwrap();
+    assert_eq!(invalid.kind, ErrorKind::Type);
+    assert_eq!(publisher.published_definition_count(), 1);
+}
+
+#[test]
 fn allocated_publisher_preserves_reserved_frontier_across_discarded_candidates() {
     use elaboration::definitions::{AllocatedStructPublisher, StructBuildService};
     let baseline = baseline();

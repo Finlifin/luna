@@ -143,8 +143,33 @@ dropped receipt or stale commit cannot leave a proof for a reusable identity.
 The existing representation walk still checks every new layout and uncached
 generic application with the caller's budget. The optimization does not unfold
 opaque normal-form heads or treat storage finiteness as type admission.
+Representation failures now retain a structured category: `Budget`, `Invalid`
+or `Stale`. The builder boundary maps these to `StepsExhausted`, `Type` and
+`InvalidCallPlan`, respectively. Index construction, recursive expansion,
+newtype expansion and proof-cache work preserve resource exhaustion instead of
+misreporting an invalid type. Callers can retry with a new allowance; this does
+not automatically retry invocations or guarantee that every bounded query will
+complete. Ordinary source diagnostics still display the specific failure text.
 Defaults, attributes, clauses,
 methods and new implementation evidence require their own checking paths.
+
+Failure-category validation in `/home/fin/luna`, via `python3 -B
+development/check.py --timeout 900 --`:
+
+- `check --release -p elaboration`: exit 0
+  (`/tmp/luna-tools-igybnn1y/result.json`).
+- `test --release -p elaboration --test representations --test
+  checked_struct_publisher --test struct_publisher --no-fail-fast`: 26 passed
+  (`/tmp/luna-tools-a_rgvkk5/result.json`).
+- `test --release -p luna --test builder_invocations --no-fail-fast`: 27 passed
+  (`/tmp/luna-tools-21kd_vxm/result.json`).
+
+All commands exited 0; targeted rustfmt and diff checks passed. A publisher test
+measures complete preparation, retries with one fewer step and confirms a
+representation-budget `StepsExhausted` failure without publication. Renewed fuel
+then commits successfully; real by-value recursion still produces `Type`.
+Separate cases cover index budgets, stale receipts and budget versus malformed
+argument failures inside newtype expansion.
 
 Incremental representation validation in `/home/fin/luna`, through `python3 -B
 development/check.py --timeout 900 --`:

@@ -4,6 +4,46 @@ use nir::{DeclarationId, Sort, Term, program as n};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureKind {
+    Budget,
+    Invalid,
+    Stale,
+}
+
+/// Resource limits are retryable outcomes, not evidence of an invalid layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Failure {
+    pub kind: FailureKind,
+    message: &'static str,
+}
+impl Failure {
+    const fn budget(message: &'static str) -> Self {
+        Self {
+            kind: FailureKind::Budget,
+            message,
+        }
+    }
+    const fn invalid(message: &'static str) -> Self {
+        Self {
+            kind: FailureKind::Invalid,
+            message,
+        }
+    }
+    const fn stale(message: &'static str) -> Self {
+        Self {
+            kind: FailureKind::Stale,
+            message,
+        }
+    }
+}
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+impl std::error::Error for Failure {}
+
 enum Description<'a, T> {
     Borrowed(&'a T),
     Shared(Arc<[T]>, usize),
@@ -80,7 +120,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    pub fn check(&mut self, ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
+    pub fn check(&mut self, ty: &Term, fuel: &mut usize) -> Result<(), Failure> {
         self.visit(ty, &mut HashSet::new(), fuel, 0)
     }
 
@@ -90,8 +130,8 @@ impl<'a> Checker<'a> {
         active: &mut HashSet<Term>,
         fuel: &mut usize,
         depth: usize,
-    ) -> Result<(), &'static str> {
-        const BUDGET: &str = "struct representation expansion budget exhausted";
+    ) -> Result<(), Failure> {
+        const BUDGET: Failure = Failure::budget("struct representation expansion budget exhausted");
         *fuel = fuel.checked_sub(1).ok_or(BUDGET)?;
         if depth >= 128 {
             return Err(BUDGET);
@@ -107,12 +147,14 @@ impl<'a> Checker<'a> {
                 && !self.prior_done.is_some_and(|done| done.contains(ty)) =>
             {
                 if !active.insert(ty.clone()) {
-                    return Err("recursive by-value struct representation or enum payload");
+                    return Err(Failure::invalid(
+                        "recursive by-value struct representation or enum payload",
+                    ));
                 }
                 if let Some(def) = self.structs.get(declaration) {
-                    let parameters = def
-                        .parameter_binders()
-                        .map_err(|_| "invalid struct representation parameters")?;
+                    let parameters = def.parameter_binders().map_err(|_| {
+                        Failure::invalid("invalid struct representation parameters")
+                    })?;
                     for (_, field) in &def.fields {
                         nir::copy_budget::charge_type_substitution(
                             field,
@@ -122,16 +164,16 @@ impl<'a> Checker<'a> {
                         )
                         .map_err(|_| BUDGET)?;
                     }
-                    let fields = def
-                        .instantiate_fields(arguments)
-                        .map_err(|_| "invalid struct type arguments in representation")?;
+                    let fields = def.instantiate_fields(arguments).map_err(|_| {
+                        Failure::invalid("invalid struct type arguments in representation")
+                    })?;
                     for (_, field) in fields {
                         self.visit(&field, active, fuel, depth + 1)?;
                     }
                 } else if let Some(def) = self.enums.get(declaration) {
                     let parameters = def
                         .parameter_binders()
-                        .map_err(|_| "invalid enum representation parameters")?;
+                        .map_err(|_| Failure::invalid("invalid enum representation parameters"))?;
                     for field in def.variants.iter().flat_map(|v| &v.fields) {
                         nir::copy_budget::charge_type_substitution(
                             field,
@@ -141,19 +183,27 @@ impl<'a> Checker<'a> {
                         )
                         .map_err(|_| BUDGET)?;
                     }
-                    let variants = def
-                        .instantiate_variants(arguments)
-                        .map_err(|_| "invalid enum type arguments in representation")?;
+                    let variants = def.instantiate_variants(arguments).map_err(|_| {
+                        Failure::invalid("invalid enum type arguments in representation")
+                    })?;
                     for field in variants.iter().flat_map(|v| &v.fields) {
                         self.visit(field, active, fuel, depth + 1)?;
                     }
                 } else if let Some(def) = self.newtypes.get(declaration) {
                     let representation = def
                         .representation_budgeted(arguments, &[], fuel)
-                        .map_err(|_| "invalid or excessively large newtype representation")?;
+                        .map_err(|failure| match failure {
+                            nir::newtypes::ConversionError::Budget => BUDGET,
+                            nir::newtypes::ConversionError::Type(_)
+                            | nir::newtypes::ConversionError::DuplicateIdentity(_) => {
+                                Failure::invalid("invalid newtype representation")
+                            }
+                        })?;
                     self.visit(&representation, active, fuel, depth + 1)?;
                 } else {
-                    return Err("nominal declaration is missing from representation world");
+                    return Err(Failure::invalid(
+                        "nominal declaration is missing from representation world",
+                    ));
                 }
                 active.remove(ty);
                 self.done.insert(ty.clone());
@@ -219,7 +269,7 @@ pub struct PreparedRepresentations {
 }
 
 impl<'a> IncrementalChecker<'a> {
-    pub fn new(package: &'a n::Package, fuel: &mut usize) -> Result<Self, &'static str> {
+    pub fn new(package: &'a n::Package, fuel: &mut usize) -> Result<Self, Failure> {
         *fuel = fuel
             .checked_sub(
                 package
@@ -230,7 +280,9 @@ impl<'a> IncrementalChecker<'a> {
                     .saturating_add(package.normal_forms.len())
                     .saturating_add(1),
             )
-            .ok_or("struct representation index budget exhausted")?;
+            .ok_or(Failure::budget(
+                "struct representation index budget exhausted",
+            ))?;
         Ok(Self {
             world: Checker {
                 tuple: package
@@ -273,10 +325,12 @@ impl<'a> IncrementalChecker<'a> {
         &self,
         definitions: Arc<[n::Struct]>,
         fuel: &mut usize,
-    ) -> Result<PreparedRepresentations, &'static str> {
+    ) -> Result<PreparedRepresentations, Failure> {
         *fuel = fuel
             .checked_sub(definitions.len().saturating_mul(3).saturating_add(1))
-            .ok_or("struct representation index budget exhausted")?;
+            .ok_or(Failure::budget(
+                "struct representation index budget exhausted",
+            ))?;
         let mut additions = BTreeMap::new();
         for def in definitions.iter() {
             if self.world.structs.get(&def.declaration).is_some()
@@ -284,7 +338,7 @@ impl<'a> IncrementalChecker<'a> {
                 || self.world.newtypes.get(&def.declaration).is_some()
                 || additions.insert(def.declaration, def).is_some()
             {
-                return Err("struct representation identity collision");
+                return Err(Failure::invalid("struct representation identity collision"));
             }
         }
         let mut candidate = Checker {
@@ -308,7 +362,7 @@ impl<'a> IncrementalChecker<'a> {
         // Reserve that work before issuing a receipt, even if it is dropped.
         for ty in &candidate.done {
             nir::type_computations::charge_term(ty, fuel)
-                .map_err(|_| "struct representation memo budget exhausted")?;
+                .map_err(|_| Failure::budget("struct representation memo budget exhausted"))?;
         }
         let done = std::mem::take(&mut candidate.done);
         drop(candidate);
@@ -320,13 +374,15 @@ impl<'a> IncrementalChecker<'a> {
         })
     }
 
-    pub fn commit(&mut self, prepared: PreparedRepresentations) -> Result<(), &'static str> {
+    pub fn commit(&mut self, prepared: PreparedRepresentations) -> Result<(), Failure> {
         let next = self.revision.checked_add(1);
         if !Arc::ptr_eq(&self.identity, &prepared.identity)
             || prepared.revision != self.revision
             || next.is_none()
         {
-            return Err("struct representation candidate is stale or belongs to another world");
+            return Err(Failure::stale(
+                "struct representation candidate is stale or belongs to another world",
+            ));
         }
         let Descriptions::Shared(table) = &mut self.world.structs else {
             unreachable!()

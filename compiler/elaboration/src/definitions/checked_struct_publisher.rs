@@ -137,9 +137,13 @@ impl<'a> CheckedStructPublisher<'a> {
             })();
             charge(budget, before - fuel)?;
             let representation = checked.map_err(|message| {
-                *self.diagnostic.borrow_mut() = Some(message.into());
+                *self.diagnostic.borrow_mut() = Some(message.to_string());
                 Error {
-                    kind: ErrorKind::Type,
+                    kind: match message.kind {
+                        crate::representations::FailureKind::Budget => ErrorKind::StepsExhausted,
+                        crate::representations::FailureKind::Invalid => ErrorKind::Type,
+                        crate::representations::FailureKind::Stale => ErrorKind::InvalidCallPlan,
+                    },
                     source: Some(source),
                 }
             })?;
@@ -171,7 +175,7 @@ impl<'a> CheckedStructPublisher<'a> {
                         .unwrap()
                         .commit(representation)
                         .map_err(|message| {
-                            *self.diagnostic.borrow_mut() = Some(message.into());
+                            *self.diagnostic.borrow_mut() = Some(message.to_string());
                             Error {
                                 kind: ErrorKind::InvalidCallPlan,
                                 source: Some(source),
