@@ -1142,8 +1142,9 @@ impl<'a> Interpreter<'a> {
     fn with_assumptions(
         package: &'a Package,
         assumptions: &[nir::program::TraitRequirement],
-        budget: Budget,
+        mut budget: Budget,
     ) -> Result<Self, Error> {
+        invocation_budget::charge_world_tables(package, &mut budget)?;
         // Build this once before checking body-free runtime identities. Looking
         // through the source Vec for each identity makes world setup quadratic.
         let mut functions = BTreeMap::new();
@@ -1928,6 +1929,10 @@ impl<'a> Interpreter<'a> {
         assumptions: &[nir::program::TraitRequirement],
         budget: Budget,
     ) -> Result<Self, Error> {
+        // Reject an undersized world allowance before phase validation walks
+        // declarations. Actual charging occurs once in with_assumptions.
+        let mut phase_allowance = budget;
+        invocation_budget::charge_world_tables(package, &mut phase_allowance)?;
         nir::phases::validate(package).map_err(|error| Error {
             kind: ErrorKind::PhaseMismatch,
             source: Some(error.source),
@@ -10745,11 +10750,12 @@ mod metered_type_solver_tests {
         )
         .unwrap()
         .with_budgeted_type_solver(&solver);
+        let available = vm.remaining_steps();
         assert_eq!(
             vm.solve_type_predicate(&predicate),
             ContractOutcome::Unknown
         );
-        assert_eq!(vm.remaining_steps(), 3);
+        assert_eq!(vm.remaining_steps(), available - 7);
         vm.solve_type_predicate(&predicate);
         assert_eq!(vm.remaining_steps(), 0);
         vm.solve_type_predicate(&predicate);
@@ -10767,11 +10773,12 @@ mod metered_type_solver_tests {
         )
         .unwrap()
         .with_budgeted_type_solver(&replenish);
+        let available = fresh.remaining_steps();
         assert_eq!(
             fresh.solve_type_predicate(&predicate),
             ContractOutcome::Satisfied
         );
-        assert_eq!(fresh.remaining_steps(), 10);
+        assert_eq!(fresh.remaining_steps(), available);
     }
 }
 

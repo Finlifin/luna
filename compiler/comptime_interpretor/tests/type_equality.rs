@@ -173,18 +173,12 @@ fn malformed_operands_and_comparison_budgets_fail_without_fabricating_results() 
         ErrorKind::Type
     );
     assert!(!interpreter.events().contains(&Event::EnterFunction(id(1))));
+    let mut bounded = Interpreter::new(&package, Budget::default()).unwrap();
+    bounded
+        .charge_preparation((bounded.remaining_steps() - 1) as usize)
+        .unwrap();
     assert_eq!(
-        Interpreter::new(
-            &package,
-            Budget {
-                steps: 1,
-                depth: 128
-            }
-        )
-        .unwrap()
-        .invoke(id(2), vec![])
-        .unwrap_err()
-        .kind,
+        bounded.invoke(id(2), vec![]).unwrap_err().kind,
         ErrorKind::StepsExhausted
     );
     assert_eq!(

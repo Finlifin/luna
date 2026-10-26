@@ -429,14 +429,10 @@ fn property_lookup_rejects_forged_hidden_tags_and_recovers() {
             .unwrap(),
         ObjectProperty::Found(_)
     ));
-    let mut exhausted = Interpreter::for_comptime(
-        &package,
-        Budget {
-            steps: 0,
-            ..Budget::default()
-        },
-    )
-    .unwrap();
+    let mut exhausted = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    exhausted
+        .charge_preparation(exhausted.remaining_steps() as usize)
+        .unwrap();
     assert_eq!(
         exhausted
             .lookup_object_property(&valid, "flag", &Term::Primitive(Primitive::Bool))

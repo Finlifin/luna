@@ -927,9 +927,16 @@ fn rejected_world_premises_do_not_refund_reserved_allowance() {
     assert!(Interpreter::for_comptime_in_budget(&world, &assumptions, &mut budget).is_err());
     assert_eq!(budget.steps, 0);
     // Removing the invalid premise does not silently restore the allowance.
-    let vm = Interpreter::for_comptime_in_budget(&world, &[], &mut budget).unwrap();
-    assert_eq!(vm.remaining_steps(), 0);
+    assert_eq!(
+        Interpreter::for_comptime_in_budget(&world, &[], &mut budget)
+            .err()
+            .unwrap()
+            .kind,
+        ErrorKind::StepsExhausted
+    );
+    assert_eq!(budget.steps, 0);
     budget.steps = 100;
-    assert!(Interpreter::for_comptime_in_budget(&world, &[], &mut budget).is_ok());
-    assert_eq!(budget.steps, 100);
+    let vm = Interpreter::for_comptime_in_budget(&world, &[], &mut budget).unwrap();
+    assert_eq!(budget.steps, vm.remaining_steps());
+    assert!(budget.steps < 100);
 }

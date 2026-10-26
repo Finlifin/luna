@@ -270,3 +270,95 @@ fn scoped_invocation_errors_and_unwinding_keep_spent_fuel() {
     assert_eq!(exhausted.steps, 0);
     assert_eq!(exhausted.depth, 42);
 }
+
+#[test]
+fn declaration_tables_are_bounded_before_world_indexing_and_phase_validation() {
+    let mut world = package(expression(
+        Term::Primitive(P::Bool),
+        K::Literal(Literal::Bool(true)),
+    ));
+    world.functions[0].type_parameters.clear();
+    let template = world.functions[0].clone();
+    world.functions = (1..=128)
+        .map(|index| {
+            let mut function = template.clone();
+            function.declaration = id(index);
+            function
+        })
+        .collect();
+    let before = world.to_string();
+    for comptime in [false, true] {
+        let budget = Budget {
+            steps: 64,
+            depth: 42,
+        };
+        let result = if comptime {
+            Interpreter::for_comptime(&world, budget)
+        } else {
+            Interpreter::new(&world, budget)
+        };
+        assert_eq!(result.err().unwrap().kind, ErrorKind::StepsExhausted);
+    }
+    let mut budget = Budget {
+        steps: 10_000,
+        depth: 42,
+    };
+    let value = Interpreter::with_comptime_in_budget(&world, &[], &mut budget, |vm| {
+        vm.invoke(id(128), vec![])
+    })
+    .unwrap();
+    assert_eq!(value, Value::Bool(true));
+    assert!(budget.steps < 10_000 - 128);
+    assert_eq!(budget.depth, 42);
+    assert_eq!(world.to_string(), before);
+
+    // With a bounded allowance the malformed duplicate is diagnosed normally.
+    // With no allowance neither indexing nor the phase walker should begin.
+    world.functions.push(template);
+    assert_eq!(
+        Interpreter::for_comptime(
+            &world,
+            Budget {
+                steps: 0,
+                depth: 42
+            }
+        )
+        .err()
+        .unwrap()
+        .kind,
+        ErrorKind::StepsExhausted
+    );
+    assert_eq!(
+        Interpreter::for_comptime(&world, Budget::default())
+            .err()
+            .unwrap()
+            .kind,
+        ErrorKind::PhaseMismatch
+    );
+    assert_eq!(
+        Interpreter::new(&world, Budget::default())
+            .err()
+            .unwrap()
+            .kind,
+        ErrorKind::InvalidCallPlan
+    );
+}
+
+#[test]
+fn zero_budget_cannot_create_even_an_empty_scoped_world() {
+    let world = Package::default();
+    let mut budget = Budget {
+        steps: 0,
+        depth: 42,
+    };
+    let mut called = false;
+    let error = Interpreter::with_comptime_in_budget(&world, &[], &mut budget, |_| {
+        called = true;
+        Ok(())
+    })
+    .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::StepsExhausted);
+    assert!(!called);
+    assert_eq!(budget.steps, 0);
+    assert_eq!(budget.depth, 42);
+}

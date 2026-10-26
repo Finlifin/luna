@@ -184,18 +184,12 @@ fn specialization_preserves_the_template_and_bounded_construction_recovers() {
         functions: vec![function(0, specialized)],
         ..Default::default()
     };
+    let mut bounded = Interpreter::new(&package, Budget::default()).unwrap();
+    bounded
+        .charge_preparation((bounded.remaining_steps() - 1) as usize)
+        .unwrap();
     assert_eq!(
-        Interpreter::new(
-            &package,
-            Budget {
-                steps: 1,
-                depth: 128
-            }
-        )
-        .unwrap()
-        .invoke(id(0), vec![])
-        .unwrap_err()
-        .kind,
+        bounded.invoke(id(0), vec![]).unwrap_err().kind,
         ErrorKind::StepsExhausted
     );
     assert_eq!(

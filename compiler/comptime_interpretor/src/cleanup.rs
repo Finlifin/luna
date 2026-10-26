@@ -1975,7 +1975,7 @@ mod copy_budget_tests {
             ErrorKind::StepsExhausted
         );
         // Only the outer visit occurred; no child visitor or destination buffer.
-        assert_eq!(vm.budget.steps, 15);
+        assert_eq!(vm.budget.steps, 14); // World setup and the outer visit each spend one step.
         let Value::Tuple(values) = &source else {
             panic!("tuple")
         };
