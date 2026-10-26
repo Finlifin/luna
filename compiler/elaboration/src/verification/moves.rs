@@ -6206,6 +6206,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         else {
             return Err(error(source, "invalid prepared closure signature"));
         };
+        // Only outward effects expose borrowed arguments to an enclosing handler.
+        let outward_effects = matches!(closure_result.as_ref(), Term::Computation {effects,..} if !effects.is_empty());
         let ClosureArguments {
             pointers: argument_pointers,
             callables: mut argument_callables,
@@ -6292,7 +6294,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     self.pointer_work(targets, source)?;
                     cleanup_targets.insert(slot, BTreeMap::from([(vec![], targets.clone())]));
                 }
-                if !self.effect_memory_inputs.is_empty() {
+                if outward_effects && !self.effect_memory_inputs.is_empty() {
                     let targets = flow
                         .pointers
                         .get(&Place {
@@ -6411,7 +6413,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         pointee: subject.clone(),
                     },
                 );
-                if !self.effect_memory_inputs.is_empty() {
+                if outward_effects && !self.effect_memory_inputs.is_empty() {
                     let targets = argument_pointers
                         .get(&index)
                         .and_then(|fields| fields.get(&vec![]))
@@ -6618,7 +6620,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let mut escaped_captures: Option<State> = None;
         // Locally installed handlers cannot abandon the closure's caller.
         // Only effects exported by this callable's row can cross that boundary.
-        let outward_effects = matches!(closure_result.as_ref(), Term::Computation {effects,..} if !effects.is_empty());
         for (_, escaped) in invocation.effect_exits.iter().filter(|_| outward_effects) {
             let captured = escaped
                 .select_roots(&capture_roots, &mut self.fuel)

@@ -156,3 +156,54 @@ fn handler_access_still_requires_the_affine_pointee_owner() {
         "{error}"
     );
 }
+
+#[test]
+fn unrelated_outer_effect_does_not_strengthen_a_closed_closure_borrow() {
+    for (callback, call) in [
+        ("|| {target.* = true;target.*}", "callback()"),
+        (
+            "|pointer:*bool| {pointer.* = true;pointer.*}",
+            "callback(target)",
+        ),
+        (
+            "|| {twice()# {touch()=>do {target.* = true;target.*},}}",
+            "callback()",
+        ),
+    ] {
+        check(&format!(
+            "struct Owner {{value:bool}}
+            fn produce()->#touch bool {{
+                let owner=Owner{{value:false}};let target=owner.value.ref;
+                let callback={callback};let result={call};result and owner.value
+            }}
+            fn run()->bool {{produce()# {{touch()=>false,}}}}"
+        ));
+    }
+}
+
+#[test]
+fn outward_request_cannot_retire_the_storage_a_callback_will_read() {
+    let package = support::compile(&format!(
+        "{PREFIX}
+        struct Owner {{value:bool}} fn consume(value:Owner) {{}}
+        fn run()->bool {{
+            let owner=Owner{{value:true}};let target=owner.value.ref;
+            let callback=|| -> #touch bool {{let answer=touch()#;target.*}};
+            callback()# {{touch()=>do {{consume(owner);true}},}}
+        }}"
+    ));
+    let error = luna::execution::interpret_with_protocols(
+        &package,
+        "run",
+        "Duplicate",
+        "Retire",
+        1_000_000,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("complete")
+            || error.contains("unavailable")
+            || error.contains("live local Copy"),
+        "{error}"
+    );
+}
