@@ -78,7 +78,7 @@ pub struct Context {
     nominal_constructors: Arc<BTreeSet<DeclarationId>>,
     /// Trusted Tuple classification/layout contracts; never body equations.
     tuple_heads: Arc<BTreeSet<DeclarationId>>,
-    /// Candidate-matching metadata only; never a solver injectivity rule.
+    /// Trusted List domain and candidate metadata; never a solver injectivity rule.
     list_inference_heads: Arc<BTreeSet<DeclarationId>>,
 }
 #[derive(Clone, Copy, Debug)]
@@ -195,6 +195,12 @@ impl Context {
     }
     pub(crate) fn is_list_inference_head(&self, head: DeclarationId) -> bool {
         self.list_inference_heads.contains(&head)
+    }
+    /// Recognize the compiler-bound List domain without unfolding its head.
+    pub(crate) fn is_list_type(&self, ty: &Term) -> bool {
+        matches!(ty, Term::NormalForm { head, sort: Sort::Type, arguments }
+            if self.is_list_inference_head(*head) && arguments.len() == 1
+                && arguments[0].sort() == Sort::Type)
     }
     pub(crate) fn is_tuple_head(&self, head: DeclarationId) -> bool {
         self.tuple_heads.contains(&head)

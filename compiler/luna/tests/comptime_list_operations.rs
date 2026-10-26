@@ -618,3 +618,97 @@ fn list_append_preserves_prior_snapshots_and_effectful_concat_order() {
         Value::Bool(true)
     );
 }
+
+const LIST_VIEW: &str = "
+    typealias Type = .Type'builtin;
+    typealias Integer = .Integer'builtin;
+    trait ListView {
+        assoc Element: Type;
+        comptime fn list_pattern_view_get_len(*self) -> Integer;
+        comptime fn list_pattern_view_get_element(*self, comptime index: Integer) -> Element;
+    }
+    impl ListView for meta.List<T> where T {
+        assoc Element: Type = T;
+        comptime fn list_pattern_view_get_len(*self) -> Integer { meta.length(self.*) }
+        comptime fn list_pattern_view_get_element(*self, comptime index: Integer) -> T {
+            self.*[index]
+        }
+    }
+";
+
+fn compile_list_view(source: &str) -> Result<nir::program::Package, String> {
+    support::compile_with_source_bindings(
+        &format!(
+            "mod meta {{ {} }} {source}",
+            include_str!("../../../library/meta/lib.fl")
+        ),
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input.meta.List"),
+            list_pattern: Some("input.ListView"),
+            ..Default::default()
+        },
+    )
+}
+
+#[test]
+fn real_meta_lists_match_through_comptime_observation_protocol() {
+    let package = compile_list_view(&format!(
+        "{LIST_VIEW}
+        comptime fn pair(values: meta.List<bool>) -> bool {{
+            values match {{ [a, (b if a == b)] => a, _ => false }}
+        }}
+        comptime fn prefix(values: meta.List<bool>) -> bool {{
+            values match {{ [true, false, ..._] => true, _ => false }}
+        }}
+        comptime fn First(values: meta.List<Type>) -> Type {{
+            values match {{ [first, ..._] => first, _ => bool }}
+        }}
+        comptime fn nested(values: meta.List<meta.List<bool>>) -> bool {{
+            values match {{ [[true], []] => true, _ => false }}
+        }}
+        comptime fn run() -> bool {{
+            pair([true, true]) and not pair([true, false])
+                and not pair([]) and not pair([true]) and not pair([true, true, true])
+                and prefix([true, false]) and prefix([true, false, true])
+                and not prefix([true]) and not prefix([false, false])
+                and First([Integer, bool]) == Integer and First([]) == bool
+                and nested([[true], []]) and not nested([[false], []])
+        }}
+    "
+    ))
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 500_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_view_integer_sizes_remain_comptime_only() {
+    let error = compile_list_view(&LIST_VIEW.replace("comptime fn", "fn")).unwrap_err();
+    assert!(error.contains("ListPatternView"), "{error}");
+    let error = compile_list_view(&format!(
+        "{LIST_VIEW}
+        fn bad(values: meta.List<bool>) -> bool {{ values match {{ [] => true, _ => false }} }}
+    "
+    ))
+    .unwrap_err();
+    assert!(error.contains("runtime ListPatternView phase"), "{error}");
+}
+
+#[test]
+fn list_view_binding_does_not_authorize_an_opaque_list_factory() {
+    let source = format!(
+        "{LIST_VIEW}
+        pure comptime fn Hidden<T> -> Type {{ meta.List<T> }}
+        trait Marker {{}}
+        impl Marker for Hidden<bool> {{}}
+    "
+    );
+    let error = compile_list_view(&source).unwrap_err();
+    assert!(
+        error.contains("implementation subject eligibility"),
+        "{error}"
+    );
+}

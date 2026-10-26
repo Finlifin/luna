@@ -41,9 +41,14 @@ pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<Protocol, String>
     };
     let size = result.as_ref().clone();
     let comptime = length.signature.is_comptime_callable();
-    if !matches!(&size, Term::Primitive(p) if *p == Primitive::Usize || p.fixed_integer_layout().is_some_and(|(signed,_)| !signed))
+    if !matches!(&size, Term::Primitive(p) if *p == Primitive::Usize
+        || p.fixed_integer_layout().is_some_and(|(signed,_)| !signed)
+        || (comptime && *p == Primitive::Integer))
     {
-        return Err("ListPatternView length and index require an unsigned size type".into());
+        return Err(
+            "ListPatternView length and index require an unsigned size type or comptime Integer"
+                .into(),
+        );
     }
     let subject = Term::Rigid {
         declaration: interface.self_parameter,

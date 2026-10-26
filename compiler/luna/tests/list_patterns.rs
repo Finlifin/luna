@@ -751,7 +751,7 @@ fn quote_list_extractors_preserve_candidate_order_and_staged_indices() {
         vec!["length", "element", "length", "element", "element"]
     );
     assert!(
-        observed.iter().any(|name| name.ends_with(".callable")),
+        observed.iter().any(|name| name.ends_with("::callable")),
         "{observed:?}"
     );
 }

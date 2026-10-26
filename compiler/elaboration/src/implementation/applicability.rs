@@ -590,11 +590,13 @@ impl ImplementationHead {
             }
         }
         let (shape, eligibility_proof) = match subject {
-            subject if context.is_tuple_type(subject) => (subject.clone(), None),
+            subject if context.is_tuple_type(subject) || context.is_list_type(subject) => {
+                (subject.clone(), None)
+            }
             Term::Rigid { .. } | Term::NormalForm { .. } | Term::AssociatedType { .. } => {
                 match context
                     .structural_view_with_heads_metered(subject, budget, |head| {
-                        context.is_tuple_head(head)
+                        context.is_tuple_head(head) || context.is_list_inference_head(head)
                     })
                     .0
                 {
@@ -624,6 +626,7 @@ impl ImplementationHead {
                 | Term::ComptimeFunction(_)
                 | Term::UnsafeFunction(_)
         ) && !context.is_tuple_type(&shape)
+            && !context.is_list_type(&shape)
         {
             return Err(TypeAssessment::Pending(
                 "user implementation subject eligibility is unresolved".into(),
@@ -1484,6 +1487,7 @@ impl ImplementationHead {
                 | Term::ComptimeFunction(_)
                 | Term::UnsafeFunction(_)
         ) && !context.is_tuple_type(&shape)
+            && !context.is_list_type(&shape)
         {
             return Err(ProofError::Invalid);
         }

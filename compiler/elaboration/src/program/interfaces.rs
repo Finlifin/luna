@@ -410,6 +410,7 @@ impl Checker<'_, '_> {
                             ..
                         }
                 ) && !context.is_tuple_type(&subject)
+                    && !context.is_list_type(&subject)
                 {
                     return Err(error(
                         item.span,

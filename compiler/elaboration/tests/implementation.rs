@@ -3131,3 +3131,69 @@ fn optional_value_indices_infer_type_leaves_and_replay_presence() {
         0
     );
 }
+
+#[test]
+fn list_subject_eligibility_requires_trusted_metadata_at_selection_and_replay() {
+    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    let mut package = nir::program::Package {
+        normal_forms: vec![Head {
+            declaration: id(990),
+            role: Role::TypeList,
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: id(991),
+                binding: nir::program::LocalId {
+                    owner: 990,
+                    index: 0,
+                },
+                kind: Kind::Type,
+                ty: ty(P::Type),
+            }],
+        }],
+        ..Default::default()
+    };
+    let subject = Term::NormalForm {
+        head: id(990),
+        sort: Sort::Type,
+        arguments: vec![ty(P::Bool)],
+    };
+    let implementation = generic(200, var(1), vec![id(1)]);
+    let trusted = Context::from_package(&package).unwrap();
+    let TypeAssessment::Applicable(evidence) =
+        implementation.assess_types(&subject, &[], &trusted, Budget::default())
+    else {
+        panic!("bound List must be an eligible subject");
+    };
+    for context in [
+        trusted.fork(),
+        trusted.theory_context(),
+        trusted.theory_in_scope(vec![]),
+    ] {
+        implementation
+            .verify_type_evidence(&evidence, &subject, &[], &context, Budget::default())
+            .unwrap();
+    }
+    package.normal_forms[0].role = Role::Opaque;
+    let opaque = Context::from_package(&package).unwrap();
+    assert!(matches!(
+        implementation.assess_types(&subject, &[], &opaque, Budget::default()),
+        TypeAssessment::Pending(_)
+    ));
+    assert!(
+        implementation
+            .verify_type_evidence(&evidence, &subject, &[], &opaque, Budget::default())
+            .is_err()
+    );
+    let mut equal = trusted.fork();
+    equal.assume(elaboration::ptc::Formula::equal(var(995), subject));
+    let TypeAssessment::Applicable(evidence) =
+        implementation.assess_types(&var(995), &[], &equal, Budget::default())
+    else {
+        panic!("equality-backed List must be eligible");
+    };
+    assert!(evidence.eligibility_proof.is_some());
+    implementation
+        .verify_type_evidence(&evidence, &var(995), &[], &equal, Budget::default())
+        .unwrap();
+}

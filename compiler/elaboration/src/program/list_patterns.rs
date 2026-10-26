@@ -95,13 +95,21 @@ impl Checker<'_, '_> {
                 n::Expr {
                     source: source(pattern.span),
                     ty: p(P::Bool),
-                    kind: K::ScalarLessEqual(Box::new(arity), Box::new(length)),
+                    kind: if size == p(P::Integer) {
+                        K::IntegerBinary {
+                            op: n::IntegerOp::LessEqual,
+                            left: Box::new(arity),
+                            right: Box::new(length),
+                        }
+                    } else {
+                        K::ScalarLessEqual(Box::new(arity), Box::new(length))
+                    },
                 },
                 n::Pattern::Literal(n::Literal::Bool(true)),
             )
         } else {
             let K::Literal(arity) = arity.kind else {
-                unreachable!("validated unsigned size literal")
+                unreachable!("validated list size literal")
             };
             (length, n::Pattern::Literal(arity))
         };
