@@ -58,6 +58,11 @@ class Runner:
         self.root, self.target = root, target
         self.env = dict(os.environ)
         self.env.update(CARGO_INCREMENTAL="0", CARGO_PROFILE_DEV_DEBUG="0", CARGO_PROFILE_TEST_DEBUG="0")
+        wrappers = ('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER',
+                    'CARGO_BUILD_RUSTC_WRAPPER', 'CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER')
+        if not any(key in self.env for key in wrappers):
+            self.env['RUSTC_WRAPPER'] = str(ROOT / 'development/rustc_rebuild.py')
+            self.env['LUNA_MANAGED_RUSTC_PRUNE'] = '1'
 
     def cache_size(self) -> int:
         if not self.target.exists():
