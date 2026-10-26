@@ -2215,6 +2215,23 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         slot: &Place,
         source: SourceRange,
     ) -> Result<bool, Error> {
+        // A consumed capture has no live pointer slot on this branch. Missing
+        // provenance there must not poison the other branch's guarded cleanup.
+        // Failed projections stay conservative (sum payloads can be opaque to
+        // the ownership shape); only established absence excludes a slot.
+        for depth in 0..=slot.fields.len() {
+            self.fuel = self
+                .fuel
+                .checked_sub(depth + 1)
+                .ok_or_else(|| error(source, "pointer presence budget exhausted"))?;
+            let prefix = Place {
+                root: slot.root,
+                fields: slot.fields[..depth].to_vec(),
+            };
+            if matches!(flow.state.may_be_present(&prefix), Ok(false)) {
+                return Ok(false);
+            }
+        }
         let Some(ty) = flow.types.get(&slot.root) else {
             return Ok(true);
         };
@@ -3430,6 +3447,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .ok_or_else(|| error(source, "handler slot join budget exhausted"))?;
         left.stable_handler_slots
             .retain(|root| right.stable_handler_slots.contains(root));
+        // Pointer joins need each branch's original construction state.
+        self.join_pointer_origins(left, right, source)?;
         left.state = left
             .state
             .join(&right.state, &mut self.fuel)
@@ -3469,7 +3488,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .ok_or_else(|| error(source, "conditional cleanup order budget exhausted"))?;
             left.cleanup_before.entry(*id).or_default().extend(before);
         }
-        self.join_pointer_origins(left, right, source)?;
         let mut callables = BTreeMap::new();
         for (id, value) in &left.callables {
             if let Some(other) = right.callables.get(id) {
