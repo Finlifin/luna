@@ -216,6 +216,13 @@ impl Checker<'_, '_> {
             // result only. Admission still checks definitions and all contracts;
             // no such assumption is published to selection or body checking.
             if let Some(parent) = self.self_containers.get(&scope).copied() {
+                // Associated declarations inherit the implementation's clause
+                // assumptions, just as its method signatures do.
+                for given in self.capabilities.get(&parent).into_iter().flatten() {
+                    if !givens.contains(given) {
+                        givens.push(given.clone());
+                    }
+                }
                 if let ItemKind::Impl(def) = &self.package.item(parent).unwrap().kind {
                     if let Some(interface) = def.trait_ref {
                         let own_subject = self.type_expr(def.self_ty)?;

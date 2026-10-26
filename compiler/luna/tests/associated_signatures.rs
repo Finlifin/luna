@@ -5,6 +5,42 @@ mod support;
 use comptime_interpretor::Value;
 
 #[test]
+fn associated_definition_inherits_only_its_implementation_clause_assumptions() {
+    let source = "typealias Type=.Type'builtin;
+        typealias Char=.char'builtin;
+        trait Source {assoc Item:Type;}
+        trait Forward {assoc Item:Type;}
+        struct Wrapper where T {}
+        impl Source for bool {assoc Item:Type=bool;}
+        impl Source for Char {assoc Item:Type=Char;}
+        impl Forward for Wrapper<T> where T:-Source {
+            assoc Item:Type=T.as(Source).Item;
+        }
+        comptime fn Boolean()->Type {Wrapper<bool>.as(Forward).Item}
+        comptime fn Character()->Type {Wrapper<Char>.as(Forward).Item}";
+    let package = support::compile(source);
+    for (entry, primitive) in [
+        ("Boolean", nir::Primitive::Bool),
+        ("Character", nir::Primitive::Char),
+    ] {
+        assert_eq!(
+            luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+            Value::Type(nir::Term::Primitive(primitive))
+        );
+    }
+    for invalid in [
+        source.replace("where T:-Source", "where T"),
+        format!("{source} comptime fn Invalid()->Type {{Wrapper<.u8'builtin>.as(Forward).Item}}"),
+        format!(
+            "{source} struct Other where U {{}}
+            impl Forward for Other<U> where U {{assoc Item:Type=U.as(Source).Item;}}"
+        ),
+    ] {
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
 fn parent_projection_supplies_method_value_parameter_domain() {
     let source = "typealias Type=.Type'builtin;
         trait Base {assoc Key:Type;}
