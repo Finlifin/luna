@@ -585,3 +585,36 @@ fn list_queries_evaluate_producers_once_and_retain_callback_capture_state() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn list_append_preserves_prior_snapshots_and_effectful_concat_order() {
+    let package = compile(
+        "
+        typealias Integer=.Integer'builtin;
+        comptime fn replace(target:*meta.List<bool>)->meta.List<bool> {
+            target.* = [false]; [true]
+        }
+        comptime fn run()->bool {
+            var values:meta.List<bool> = [true];
+            let snapshot=values;
+            meta.append(values.ref,false);
+            let target=values.ref;
+            target.* = .list_concat'builtin(target.*,replace(target));
+            let frozen=target.*;
+            meta.append(target,false);
+            var nested:meta.List<meta.List<bool>> = [];
+            meta.append(nested.ref,snapshot);
+            meta.append(nested.ref,values);
+            meta.length(snapshot) == 1 and snapshot[0]
+                and meta.length(frozen) == 3 and frozen[0] and not frozen[1] and frozen[2]
+                and meta.length(values) == 4 and not values[3]
+                and meta.length(nested[0]) == 1 and meta.length(nested[1]) == 4
+        }
+    ",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}

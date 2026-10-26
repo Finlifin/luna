@@ -133,8 +133,9 @@ map 可以改变元素域。可选结果仍占据一个列表元素，不自动�
 保留 normal-form 头。回调执行失败立即终止当前调用，不访问后续元素；
 同一个 VM 在失败后仍可执行其他合法调用。
 
-当前 map 用逐次不可变 concat 构造输出，存在随输出规模二次增长的复制
-成本，尚不是线性分配的 builder。foreach 和 fold 不构造额外的结果列表。
+map 的最初实现逐次调用不可变 concat，存在随输出规模二次增长的复制
+成本；后续已改用 append 复用槽位缓冲区，详见下节。foreach 和 fold
+不构造额外的结果列表。
 后续已补齐编译期 List 指针读写（见下节）。Integer `/` 的舍入协议仍未
 接通；失败传播测试使用已支持的列表越界操作。
 
@@ -209,8 +210,8 @@ filter 不丢弃被保留的 null，不展平嵌套列表，筛选 Type 后仍�
 类型工厂的变参输入。输出保留输入 List 的声明身份和元素域。
 
 遍历的是调用时的输入值；回调通过指针替换调用者的列表不会改变遍历
-序列。filter 与 map 一样暂用逐项 concat，最坏复制成本仍是二次的，
-不将此实现称作线性 builder。any/all/find 不构造结果列表。
+序列。filter 与 map 现已改用 append 复用输出槽位缓冲区；完整验证
+仍有二次成本，不将此实现称作线性 builder。any/all/find 不构造结果列表。
 
 本阶段在 `/home/fin/luna` 执行以下检查，退出 0，45 项测试通过。
 报告 `/tmp/luna-tools-5aui1kd2/result.json`。覆盖短路及空输入、生产者
@@ -220,3 +221,50 @@ filter 不丢弃被保留的 null，不展平嵌套列表，筛选 Type 后仍�
 ```sh
 python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_list_operations --test library_meta_objects --test library_protocols --no-fail-fast
 ```
+
+
+## 复用列表槽位缓冲区
+
+`meta.append(target: *List<T>, value: T)` 把单个元素追加到目标槽位。
+这是现有指针读写与 list_concat 的源级组合，不增加新的 IR 节点或
+runtime Copy 权限。map/filter 的输出收集改为调用这个接口。
+
+VM 识别同一局部指针的 `target.* = list_concat(target.*, [value])`。
+仅当后缀为不执行用户代码的列表构造、且没有 runtime 清理调度时，
+复用目标槽位中的 Vec 缓冲区；原有快照已经是独立表示，不受追加影响。
+一般后缀仍走原路径，保留“先取得左值快照，再执行右操作数”的顺序，
+因此右侧回调替换目标不会改变待拼接的旧内容。
+
+追加检查旧值、新后缀与合并后的不可变表示、元素域、声明身份及预算。
+合并验证失败时，在释放存储锁前截去新后缀，保留原内容。长度上限
+在追加前检查；合并表示超过结构工作上限也回滚。该过程不执行用户
+回调，不暴露临时合并状态。完整验证仍逐次扫描前缀，因此总时间及
+验证工作表的分配仍可能二次增长；本轮消除的是反复复制整段列表值
+及其缓冲区的成本，并没有实现线性时间 builder。
+
+本阶段在 `/home/fin/luna` 执行以下检查，退出 0，69 项测试通过，报告
+`/tmp/luna-tools-d_6uayqk/result.json`。预算测试对 bool/Type 及优化/
+普通路径逐一扫描 1–599 步；另覆盖表示上限失败回滚、旧快照保持、
+副作用后缀的求值顺序及实际 map/filter 的库级执行。
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_list_operations --test library_meta_objects --test library_protocols -p comptime_interpretor --test type_list_inputs --no-fail-fast
+```
+
+追加基准把相同输入分别交给优化路径与一般路径；一般路径仅用一个空块
+包裹右侧列表构造，强制保留原来的快照传送。计时包含每次新建空列表槽位、
+取得指针、追加和结果长度校验；不包含解释器及包构造、解析或 LLVM。
+每个进程预热 5 次、测量 20 次，3 个进程取时间中位数。累计分配字节是
+alloc/realloc 请求量，不是峰值内存。
+
+| 256 次追加 | 一般路径时间 ns | 复用路径时间 ns | 一般路径分配字节 | 复用路径分配字节 | 一般/复用执行步数 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| bool | 2,547,177 | 1,143,963 | 16,937,840 | 3,662,128 | 432,928 / 190,112 |
+| Type | 4,690,511 | 2,159,787 | 7,584,568 | 1,359,112 | 584,854 / 281,622 |
+
+执行命令为 `python3 -B development/comptime_bench.py --bench list_append --iterations 20 --repeat 3`。
+构建报告 `/tmp/luna-tools-6es37tcd/result.json`，三个运行报告为
+`/tmp/luna-tools-95sesa9y/result.json`、`/tmp/luna-tools-3vgvn1cn/result.json`、
+`/tmp/luna-tools-5k69qd9n/result.json`，均退出 0。
+这证明追加路径的局部收益，不表示整个编译器或任意 map/filter 回调都有
+相同加速比，也不表示剩余验证成本已变为线性。

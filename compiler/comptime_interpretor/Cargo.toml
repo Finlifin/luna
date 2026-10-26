@@ -19,3 +19,7 @@ harness = false
 [[bench]]
 name = "list_length"
 harness = false
+
+[[bench]]
+name = "list_append"
+harness = false

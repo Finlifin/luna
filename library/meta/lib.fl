@@ -24,6 +24,15 @@ pub pure comptime fn concat(left: List<T>, right: List<T>) -> List<T> where T {
 }
 
 {-
+  Replace a list slot with its old contents followed by one value. Existing
+  snapshots remain independent. The VM may reuse the slot's owned buffer;
+  element admission and representation limits still apply before completion.
+-}
+pub comptime fn append(target: *List<T>, value: T) where T {
+    target.* = .list_concat'builtin(target.*, [value]);
+}
+
+{-
   Traverse a fixed input snapshot in index order. The callback retains its
   comptime closure environment between calls; an empty input never calls it.
   Cache the length once, independently of callback effects.
@@ -52,8 +61,8 @@ where T, A, c: (.Type'builtin).vars.Closure {
 
 {-
   Mapping preserves order and calls transform exactly once per input element.
-  This source implementation uses immutable concatenation; it is a baseline
-  for correctness, not yet a linear-allocation collection builder.
+  Append through the output slot to permit buffer reuse. Full immutable data
+  validation is still required; this is not yet a linear-time builder.
 -}
 pub comptime fn map(values: List<T>, transform: %c comptime fn(T) -> U) -> List<U>
 where T, U, c: (.Type'builtin).vars.Closure {
@@ -61,8 +70,7 @@ where T, U, c: (.Type'builtin).vars.Closure {
     var output: List<U> = [];
     var index: .Integer'builtin = 0;
     while index < count {
-        let item: List<U> = [transform(values[index])];
-        output = concat(output, item);
+        append(output.ref, transform(values[index]));
         index = index + 1;
     }
     output
@@ -108,8 +116,8 @@ where T, c: (.Type'builtin).vars.Closure {
 }
 
 {-
-  Filtering preserves retained elements and their order. Like map, this
-  baseline uses immutable concatenation and can copy quadratically.
+  Filtering preserves retained elements and their order. Like map, it reuses
+  the output slot while retaining the full immutable validation checks.
 -}
 pub comptime fn filter(values: List<T>, pred: %c comptime fn(T) -> bool) -> List<T>
 where T, c: (.Type'builtin).vars.Closure {
@@ -119,8 +127,7 @@ where T, c: (.Type'builtin).vars.Closure {
     while index < count {
         let value = values[index];
         if pred(value) {
-            let item: List<T> = [value];
-            output = concat(output, item);
+            append(output.ref, value);
         }
         index = index + 1;
     }

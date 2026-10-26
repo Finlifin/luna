@@ -588,6 +588,54 @@ impl PointerValue {
             Ok(())
         })
     }
+    /// Extend an owned list buffer without changing any previously copied value.
+    /// Validation runs under the storage lock and must not execute user code.
+    /// On failure, remove the new suffix before exposing the target again.
+    pub(crate) fn append_list_checked(
+        &self,
+        suffix: Value,
+        check: impl FnOnce(&Value) -> Result<(), ErrorKind>,
+    ) -> Result<(), ErrorKind> {
+        self.with_target(|target| {
+            let original = match (&mut *target, suffix) {
+                (Value::TypeList(left), Value::TypeList(right)) => {
+                    let original = left.len();
+                    if original.saturating_add(right.len()) > 100_000 {
+                        return Err(ErrorKind::RepresentationSizeLimit);
+                    }
+                    left.extend(right);
+                    original
+                }
+                (
+                    Value::List {
+                        ty: left_ty,
+                        values: left,
+                    },
+                    Value::List {
+                        ty: right_ty,
+                        values: right,
+                    },
+                ) if *left_ty == right_ty => {
+                    let original = left.len();
+                    if original.saturating_add(right.len()) > 100_000 {
+                        return Err(ErrorKind::RepresentationSizeLimit);
+                    }
+                    left.extend(right);
+                    original
+                }
+                _ => return Err(ErrorKind::Type),
+            };
+            if let Err(error) = check(target) {
+                match target {
+                    Value::TypeList(values) => values.truncate(original),
+                    Value::List { values, .. } => values.truncate(original),
+                    _ => unreachable!(),
+                }
+                return Err(error);
+            }
+            Ok(())
+        })
+    }
     pub(crate) fn project_anonymous(
         &self,
         name: &str,

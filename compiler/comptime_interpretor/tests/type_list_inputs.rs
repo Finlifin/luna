@@ -1339,3 +1339,169 @@ fn list_pointer_rejects_wrong_element_and_identity_without_modifying_storage() {
         );
     }
 }
+
+fn list_append_package(element: P, general: bool) -> (Package, Term, Term) {
+    let (mut package, list, pointer) = list_pointer_package(element);
+    let writer = &mut package.functions[2];
+    let source = writer.body.source;
+    let node = |ty, kind| Expr { source, ty, kind };
+    let Term::Function { parameters, .. } = &mut writer.signature else {
+        unreachable!()
+    };
+    parameters[1].ty = ty(element);
+    let local = node(pointer.clone(), K::Local(writer.parameters[0]));
+    let suffix = node(
+        list.clone(),
+        K::TypeList(vec![node(ty(element), K::Local(writer.parameters[1]))]),
+    );
+    let suffix = if general {
+        node(
+            list.clone(),
+            K::Block {
+                statements: vec![],
+                result: Some(Box::new(suffix)),
+            },
+        )
+    } else {
+        suffix
+    };
+    writer.body = node(
+        ty(P::Void),
+        K::WritePointer {
+            pointer: Box::new(local.clone()),
+            value: Box::new(node(
+                list.clone(),
+                K::ListConcat(
+                    Box::new(node(list.clone(), K::ReadPointer(Box::new(local)))),
+                    Box::new(suffix),
+                ),
+            )),
+        },
+    );
+    (package, list, pointer)
+}
+
+#[test]
+fn list_append_failure_rolls_back_and_success_preserves_snapshots() {
+    use comptime_interpretor::{ErrorKind, Storage};
+    for element in [P::Bool, P::Type] {
+        for general in [false, true] {
+            let (package, list, pointer_ty) = list_append_package(element, general);
+            let original = if element == P::Type {
+                Value::TypeList(vec![ty(P::Bool); 4])
+            } else {
+                Value::List {
+                    ty: list.clone(),
+                    values: vec![Value::Bool(true); 4],
+                }
+            };
+            let item = if element == P::Type {
+                Value::Type(ty(P::Char))
+            } else {
+                Value::Bool(false)
+            };
+            let expected = if element == P::Type {
+                Value::TypeList(vec![
+                    ty(P::Bool),
+                    ty(P::Bool),
+                    ty(P::Bool),
+                    ty(P::Bool),
+                    ty(P::Char),
+                ])
+            } else {
+                Value::List {
+                    ty: list.clone(),
+                    values: vec![
+                        Value::Bool(true),
+                        Value::Bool(true),
+                        Value::Bool(true),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                    ],
+                }
+            };
+            let mut successes = 0;
+            let mut failures = 0;
+            for steps in 1..600 {
+                let owner = Storage::new(original.clone());
+                let mut setup = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let pointer = setup
+                    .invoke_with_typed_values(
+                        id(3),
+                        vec![(list.clone(), Value::Storage(owner.clone()))],
+                    )
+                    .unwrap();
+                let snapshot = setup
+                    .invoke_with_typed_values(id(4), vec![(pointer_ty.clone(), pointer.clone())])
+                    .unwrap();
+                let result = Interpreter::for_comptime(
+                    &package,
+                    Budget {
+                        steps,
+                        ..Budget::default()
+                    },
+                )
+                .and_then(|mut vm| {
+                    vm.invoke_with_typed_values(
+                        id(5),
+                        vec![
+                            (pointer_ty.clone(), pointer.clone()),
+                            (ty(element), item.clone()),
+                        ],
+                    )
+                });
+                match result {
+                    Ok(Value::Unit) => {
+                        successes += 1;
+                        assert_eq!(owner.read().unwrap(), expected);
+                    }
+                    Err(error) => {
+                        failures += 1;
+                        assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                        assert_eq!(owner.read().unwrap(), original);
+                    }
+                    other => panic!("unexpected result {other:?}"),
+                }
+                assert_eq!(snapshot, original);
+            }
+            assert!(successes > 0 && failures > 0);
+        }
+    }
+}
+
+#[test]
+fn list_append_representation_limit_preserves_old_storage_and_recovers() {
+    use comptime_interpretor::{ErrorKind, Storage};
+    let (package, list, pointer_ty) = list_append_package(P::Type, false);
+    let original = Value::TypeList(vec![ty(P::Bool); 49_999]);
+    let owner = Storage::new(original.clone());
+    let mut vm = Interpreter::for_comptime(
+        &package,
+        Budget {
+            steps: 10_000_000,
+            ..Budget::default()
+        },
+    )
+    .unwrap();
+    let pointer = vm
+        .invoke_with_typed_values(id(3), vec![(list.clone(), Value::Storage(owner.clone()))])
+        .unwrap();
+    assert_eq!(
+        vm.invoke_with_typed_values(
+            id(5),
+            vec![
+                (pointer_ty.clone(), pointer.clone()),
+                (ty(P::Type), Value::Type(ty(P::Char)))
+            ]
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::RepresentationSizeLimit
+    );
+    assert_eq!(owner.read().unwrap(), original);
+    assert_eq!(
+        vm.invoke_with_typed_values(id(4), vec![(pointer_ty, pointer)])
+            .unwrap(),
+        original
+    );
+}
