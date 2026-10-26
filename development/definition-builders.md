@@ -22,8 +22,11 @@ Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 -
 test --release -p luna --test builder_invocations --test quote_functions --
 --skip quote_implementations_supply_ordinary_trait_callable_entries`, exit 0,
 26 builder and 103 quote tests passed (`/tmp/luna-tools-ss1f8l9v/result.json`).
-The excluded test independently expects `.callable` but observes the existing
-`::callable` adapter name; its repair is separate from layout synchronization.
+The excluded test independently expected `.callable` but observed the existing
+`::callable` adapter name. That name was subsequently corrected in a separate
+change. The complete `--test quote_functions` group then passed all 104 tests,
+exit 0 (`/tmp/luna-tools-defoous_/result.json`), including direct trait calls,
+generic forwarding and callable-value adapters.
 
 ## Immediate required source invocation
 

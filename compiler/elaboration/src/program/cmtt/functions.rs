@@ -1071,7 +1071,7 @@ fn adapt_ordinary_quote_methods(
             }
             let mut adapter = template.clone();
             adapter.declaration = id;
-            adapter.name = format!("{}::callable", template.name);
+            adapter.name = format!("{}.callable", template.name);
             output.functions.push(adapter);
             if let Some(parameters) = output
                 .function_parameters
