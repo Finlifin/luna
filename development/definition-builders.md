@@ -53,6 +53,20 @@ The related `--test elaboration --test source_reflection` run passes 450 and 12
 tests respectively (`/tmp/luna-tools-c1316ccl/result.json`, exit 0), using the same
 `development/check.py --timeout 900 -- test --release -p luna` entrypoint.
 
+The same flow path now handles a Never-valued index: returning from an operand
+preserves prior effects and skips the remaining operand/index operation. Returning
+from the receiver likewise prevents evaluation of an overflowing index. Regression
+cases use Type, Symbol, bool and u8 lists where no element escapes the early return;
+ordinary returning bool/u8 indexing still needs a separate value-transfer model.
+The original early-return case failed with `unsupported-construct`
+(`/tmp/luna-tools-bmfhpw_s/result.json`). Validation in `/home/fin/luna`:
+`python3 -B development/check.py --timeout 900 -- test --release -p luna
+--test builder_invocations --test integer_contracts --test source_reflection
+--no-fail-fast` passes 37, 15 and 12 tests (`/tmp/luna-tools-w8_oqwz0/result.json`,
+exit 0). The `effectful-reflection-index` native example now uses an early-returning
+comptime `FirstType` helper; the same host command passes O0 and O3
+(`/tmp/luna-host-examples-4cc9bslj`, exit 0).
+
 Required Type expressions now prepare the reachable nominal descriptor graph,
 including nested fields, applied type arguments, parameter domains, enum payloads
 and newtype representations. A budgeted structural walk collects nominal identities;

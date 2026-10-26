@@ -7,12 +7,21 @@ use primitives.Type;
 struct Inner { flag: bool }
 struct Source where T { inner: Inner }
 
+comptime fn FirstType(types: meta.List<Type>) -> Type {
+    var calls: primitives.u8 = 0;
+    let ignored = types[do {
+        calls = calls + 1;
+        return if calls == 1 { types[0] } else { bool };
+    }];
+    bool
+}
+
 comptime fn Generate() -> Type {
     let selected = bool;
     var calls: primitives.u32 = 0;
     let types = meta.struct_field_types(Source<do { calls = calls + 1; selected }>);
     var builder = meta.StructBuilder.new();
-    builder.add_field(.inner, types[0]);
+    builder.add_field(.inner, FirstType(types));
     if calls == 1 { builder.Build() } else { bool }
 }
 

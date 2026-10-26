@@ -5447,12 +5447,16 @@ impl Walker<'_> {
             K::TypeListIndex(values, index)
                 if matches!(
                     expr.ty,
-                    Term::Primitive(nir::Primitive::Type | nir::Primitive::Symbol)
+                    Term::Primitive(
+                        nir::Primitive::Type | nir::Primitive::Symbol | nir::Primitive::Never
+                    )
                 ) =>
             {
                 // Immutable type/name observations carry no storage aliases or
                 // arithmetic facts. Their operands still execute in order; the
                 // comptime VM retains the mandatory checked-index operation.
+                // Never transports no element: returning from either operand
+                // prevents the later operand and indexing from executing.
                 // Other element domains need their own value/alias transfer.
                 self.child(values, state, depth)?;
                 self.child(index, state, depth)?;

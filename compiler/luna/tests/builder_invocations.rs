@@ -1203,6 +1203,50 @@ fn effectful_reflection_indexing_preserves_order_and_bounds() {
 }
 
 #[test]
+fn comptime_list_index_early_return_preserves_prior_effects() {
+    for (domain, value) in [
+        ("Type", "bool"),
+        (".Symbol'builtin", ".ready"),
+        ("bool", "true"),
+        (".u8'builtin", "7"),
+    ] {
+        let fixture = Fixture::new(&format!(
+            "typealias Type = .Type'builtin;
+            comptime fn inspect() -> bool {{
+                let values:meta.List<{domain}> = [{value}];
+                var calls: .u8'builtin = 0;
+                let ignored = values[do {{calls = calls + 1; return calls == 1;}}];
+                var unreachable: .u8'builtin = 255;
+                unreachable = unreachable + 1;
+                false
+            }}"
+        ));
+        let (_, observed, _) = fixture.invoke_meta("inspect").unwrap();
+        assert_eq!(observed, Value::Bool(true));
+    }
+    for (domain, value) in [("Type", "bool"), (".Symbol'builtin", ".ready")] {
+        let fixture = Fixture::new(&format!(
+            "typealias Type = .Type'builtin;
+            comptime fn inspect() -> bool {{
+                let values:meta.List<{domain}> = [{value}];
+                var calls: .u8'builtin = 0;
+                let ignored = (if calls == 0 {{
+                    calls = calls + 1;
+                    return calls == 1;
+                }} else {{values}})[do {{
+                    var unreachable: .u8'builtin = 255;
+                    unreachable = unreachable + 1;
+                    0
+                }}];
+                false
+            }}"
+        ));
+        let (_, observed, _) = fixture.invoke_meta("inspect").unwrap();
+        assert_eq!(observed, Value::Bool(true));
+    }
+}
+
+#[test]
 fn reflected_type_index_operands_still_require_machine_arithmetic_proofs() {
     for observation in [
         "types[do {calls = calls + 1; 0}]",
