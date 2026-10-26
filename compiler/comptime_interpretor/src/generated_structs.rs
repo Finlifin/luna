@@ -254,7 +254,7 @@ impl<'world> Interpreter<'world> {
         Ok(installation)
     }
 
-    fn known_definition(&mut self, id: DeclarationId) -> Result<bool, Error> {
+    pub(super) fn known_definition(&mut self, id: DeclarationId) -> Result<bool, Error> {
         self.tick(None)?;
         if self.structs.contains_key(&id)
             || self.enums.contains_key(&id)

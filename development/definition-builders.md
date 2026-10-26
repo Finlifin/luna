@@ -8,6 +8,48 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Live concrete enum publication
+
+The comptime VM now exposes `install_generated_enums`, its transactional `_with`
+variant and `install_owned_generated_enums_with`. Its enum catalog retains either
+borrowed descriptors or shared immutable batches, so a running VM can outlive the
+producer's temporary batch handle without copying old catalogs or payload trees.
+Reflection, variant construction and name observation use the same catalog.
+
+Admission checks declaration identity across kinds, closed payload Types, variant
+shapes, named-field arity/uniqueness, group paths and formation requirements. All
+candidate identities are temporarily visible together for forward references.
+Admission error, publisher error, solver unwind or publisher unwind removes the
+entire candidate batch and retains previous declarations. Failure consumes budget;
+insertion/rollback work is prepaid. The host commit callback must itself preserve
+its own publication state on failure.
+
+This boundary accepts ordinary concrete enums in a comptime declaration VM.
+It rejects encoded/intrinsic and generic enums, abstract invocation scope and
+runtime/IIR execution. The caller must reserve identities and perform ordinary
+semantic/representation checking first; VM admission is not a finite-layout proof.
+The source EnumBuilder, source dispatch and checked enum publisher are still to
+be connected. Existing encoded source enums remain supported through initial
+package construction.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p comptime_interpretor --lib`, exit 0, 148 tests
+(`/tmp/luna-tools-vuduq2m5/result.json`). Seven new cases cover shared ownership,
+construction/name/reflection, forward pointers, invalid payloads, commit failure,
+unwind, collision/shape/scope rejection, empty-enum formation, phase checks and
+every insufficient admission budget followed by a successful corrected retry.
+
+Source integration command: `python3 -B development/check.py --timeout 900 -- test
+--release -p luna --test enum_groups --test enum_configurations --test encoded_enums
+--test source_reflection --test builder_invocations --no-fail-fast`
+(`/tmp/luna-tools-kpyqawl3/result.json`). It passes 70 tests and exits 101 for one
+unchanged `enum_configurations` assertion: `.base_type Missing` is accepted at
+`Emit::Hir`, where that test expects rejection. `frontend.rs` returns the HIR dump
+before entering elaboration/invocation for this mode, so the failing path does not
+use the VM catalog changed here. The assertion is preserved for separate diagnosis;
+this run is not reported as wholly passing. All 14 encoded-enum, six enum-group,
+12 reflection and 37 builder tests pass. Targeted formatting and diff checks pass.
+
 ## Nested descriptors during early reflection
 
 Computed nominal applications now use the same descriptor closure as literal

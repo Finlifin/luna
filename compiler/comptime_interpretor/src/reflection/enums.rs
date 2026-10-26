@@ -88,14 +88,14 @@ impl Interpreter<'_> {
                 result.map_err(|_| self.failure(ErrorKind::StepsExhausted, None))?;
                 if nominal.ty == *ty {
                     if let iir::NominalDefinition::Enum(definition) = &nominal.definition {
-                        selected = Some(definition);
+                        selected = Some(generated_enums::EnumDefinition::Borrowed(definition));
                     }
                     break;
                 }
             }
             selected
         } else {
-            self.enums.get(declaration).copied()
+            self.enums.get(declaration).cloned()
         }
         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
         self.integer_operation(None, |budget| {

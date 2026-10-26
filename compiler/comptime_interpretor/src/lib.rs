@@ -20,6 +20,8 @@ mod normal_inputs;
 mod object_values;
 mod objects;
 pub use objects::ObjectProperty;
+mod generated_enums;
+pub use generated_enums::EnumPublicationError;
 mod generated_structs;
 pub use generated_structs::{
     PreparedStructAdmission, StructAdmissionSession, StructPublicationError,
@@ -1235,7 +1237,7 @@ pub struct Interpreter<'a> {
     structs: BTreeMap<DeclarationId, generated_structs::StructDefinition<'a>>,
     newtypes: BTreeMap<DeclarationId, &'a nir::newtypes::Newtype>,
     alias_contracts: BTreeMap<DeclarationId, &'a nir::type_aliases::Contract>,
-    enums: BTreeMap<DeclarationId, &'a nir::program::Enum>,
+    enums: BTreeMap<DeclarationId, generated_enums::EnumDefinition<'a>>,
     budget: Budget,
     depth: usize,
     events: Vec<Event>,
@@ -1324,7 +1326,13 @@ impl<'a> Interpreter<'a> {
                     source: None,
                 });
             }
-            if enums.insert(definition.declaration, definition).is_some() {
+            if enums
+                .insert(
+                    definition.declaration,
+                    generated_enums::EnumDefinition::Borrowed(definition),
+                )
+                .is_some()
+            {
                 return Err(Error {
                     kind: ErrorKind::InvalidCallPlan,
                     source: None,
@@ -3921,13 +3929,16 @@ impl<'a> Interpreter<'a> {
                             if *actual == declaration && *actual_args == arguments)
                         })
                         .and_then(|nominal| match &nominal.definition {
-                            iir::NominalDefinition::Enum(definition) => Some(definition),
+                            iir::NominalDefinition::Enum(definition) => {
+                                Some(generated_enums::EnumDefinition::Borrowed(definition))
+                            }
                             _ => None,
                         })
                 } else {
-                    self.enums.get(&declaration).copied()
+                    self.enums.get(&declaration).cloned()
                 };
                 let name = definition
+                    .as_ref()
                     .and_then(|definition| definition.variants.get(index))
                     .map(|variant| variant.name.as_str())
                     .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
@@ -5118,6 +5129,7 @@ impl<'a> Interpreter<'a> {
             None
         };
         let struct_definition = self.structs.get(declaration).cloned();
+        let enum_definition = self.enums.get(declaration).cloned();
         let (parameters, domains, requirements, capabilities) = if let Some(def) = alias {
             (
                 def.parameter_binders(),
@@ -5132,7 +5144,7 @@ impl<'a> Interpreter<'a> {
                 &def.requirements,
                 &def.capabilities,
             )
-        } else if let Some(def) = self.enums.get(declaration).copied() {
+        } else if let Some(def) = enum_definition.as_ref() {
             (
                 def.parameter_binders(),
                 &def.parameter_types,
@@ -7905,13 +7917,16 @@ impl<'a> Interpreter<'a> {
                                     if *actual == declaration && *actual_args == arguments)
                                 })
                                 .and_then(|nominal| match &nominal.definition {
-                                    iir::NominalDefinition::Enum(definition) => Some(definition),
+                                    iir::NominalDefinition::Enum(definition) => {
+                                        Some(generated_enums::EnumDefinition::Borrowed(definition))
+                                    }
                                     _ => None,
                                 })
                         } else {
-                            self.enums.get(&declaration).copied()
+                            self.enums.get(&declaration).cloned()
                         };
                         let layout = definition
+                            .as_ref()
                             .and_then(|definition| definition.encoding.as_ref())
                             .filter(|layout| layout.width() == width)
                             .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
@@ -9022,9 +9037,10 @@ impl Interpreter<'_> {
             return Ok(Flow::Value(Value::Bool(false)));
         }
         let struct_definition = self.structs.get(declaration).cloned();
+        let enum_definition = self.enums.get(declaration).cloned();
         let (binders, domains) = if let Some(def) = struct_definition.as_ref() {
             (def.parameter_binders(), &def.parameter_types)
-        } else if let Some(def) = self.enums.get(declaration).copied() {
+        } else if let Some(def) = enum_definition.as_ref() {
             (def.parameter_binders(), &def.parameter_types)
         } else if let Some(def) = self.newtypes.get(declaration).copied() {
             (def.parameter_binders(), &def.parameter_types)
