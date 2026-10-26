@@ -1,21 +1,28 @@
 # Cargo build output and local scratch projects.
 target/
 /test_project/
+# Workspace members use the root Cargo.lock.
+/compiler/*/Cargo.lock
 
 # Local compiler dumps and generated executables. Keep source/fixture files
 # with these extensions trackable elsewhere in the repository.
 /*.lisp
+/compiler/*/*.lisp
 /mir.dump
+/compiler/*/mir.dump
 /output
 /output.c
 /output.ll
 /output.o
+# Ad-hoc command output at the repository root; keep recorded evidence elsewhere.
+/*.log
 
 # Python caches and local environments used by development scripts.
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.ruff_cache/
 
 # Per-run command reports (result.json, stdout.log and stderr.log).
 # Historical evidence explicitly stored under development/runs stays tracked.
@@ -28,6 +35,10 @@ luna-tools-*/
 *.swp
 *.swo
 *~
+*.rs.bak
+*.fl.bak
+*.orig
+*.rej
 .DS_Store
 
 # Local agent configuration and the author's external draft link.
