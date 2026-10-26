@@ -21,7 +21,9 @@ mod object_values;
 mod objects;
 pub use objects::ObjectProperty;
 mod generated_structs;
-pub use generated_structs::StructPublicationError;
+pub use generated_structs::{
+    PreparedStructAdmission, StructAdmissionSession, StructPublicationError,
+};
 mod struct_build;
 pub use struct_build::{PreparedStructBuild, StructBuildRequest};
 mod reflection;

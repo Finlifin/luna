@@ -1,5 +1,7 @@
 //! Atomic installation of completed struct descriptions after checked publication.
 use super::*;
+mod admission_session;
+pub use admission_session::{PreparedStructAdmission, StructAdmissionSession};
 
 /// Distinguish VM admission from the publisher's final commit failure.
 #[derive(Debug)]

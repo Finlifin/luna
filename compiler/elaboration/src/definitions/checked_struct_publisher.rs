@@ -1,7 +1,7 @@
 //! Concrete, body-free struct publication against completed declaration facts.
 //! This path does not reenter source elaboration or execute an initializer.
 use comptime_interpretor::{
-    Budget, Error, ErrorKind, Interpreter, PreparedStructBuild, StructBuildRequest,
+    Budget, Error, ErrorKind, PreparedStructBuild, StructAdmissionSession, StructBuildRequest,
     StructPublicationError,
 };
 use nir::{DeclarationId, Term, program as n};
@@ -17,6 +17,7 @@ pub struct CheckedStructPublisher<'a> {
     baseline: &'a n::Package,
     published: RefCell<Vec<Arc<[n::Struct]>>>,
     diagnostic: RefCell<Option<String>>,
+    admission: RefCell<Option<StructAdmissionSession<'a>>>,
 }
 impl<'a> CheckedStructPublisher<'a> {
     pub fn new(baseline: &'a n::Package) -> Self {
@@ -24,6 +25,7 @@ impl<'a> CheckedStructPublisher<'a> {
             baseline,
             published: RefCell::new(Vec::new()),
             diagnostic: RefCell::new(None),
+            admission: RefCell::new(None),
         }
     }
     pub fn published_definition_count(&self) -> usize {
@@ -71,10 +73,15 @@ impl<'a> CheckedStructPublisher<'a> {
         let published = self.published.borrow();
         let revision = published.len();
         let source = request.source;
-        let definitions = Interpreter::with_comptime_in_budget(self.baseline, &[], budget, |vm| {
+        let (definitions, receipt) = (|| {
+            let mut admission = self.admission.borrow_mut();
+            if admission.is_none() {
+                *admission = Some(StructAdmissionSession::new(self.baseline, budget)?);
+            }
+            let admission = admission.as_mut().unwrap();
             // Preflight only the new description. Old field trees stay borrowed
-            // or shared, even while the validation VM and indices are rebuilt.
-            let before = usize::try_from(vm.remaining_steps()).unwrap_or(usize::MAX);
+            // or shared; the admission VM retains only committed descriptions.
+            let before = usize::try_from(budget.steps).unwrap_or(usize::MAX);
             let mut fuel = before;
             let copied = (|| {
                 fuel = fuel
@@ -88,7 +95,7 @@ impl<'a> CheckedStructPublisher<'a> {
                 }
                 Ok::<_, ()>(())
             })();
-            vm.charge_preparation(before - fuel)?;
+            charge(budget, before - fuel)?;
             copied.map_err(|_| Error {
                 kind: ErrorKind::StepsExhausted,
                 source: Some(source),
@@ -107,19 +114,12 @@ impl<'a> CheckedStructPublisher<'a> {
                     .collect(),
             }]
             .into();
-            for batch in published.iter().chain(std::iter::once(&definitions)) {
-                match vm.install_owned_generated_structs_with(Arc::clone(batch), || {
-                    Ok::<_, std::convert::Infallible>(())
-                }) {
-                    Ok(()) => (),
-                    Err(StructPublicationError::Admission(error)) => return Err(error),
-                    Err(StructPublicationError::Commit(never)) => match never {},
-                }
-            }
+            let receipt = admission.prepare(Arc::clone(&definitions), budget)?;
             // Type formation above is the same completed-Type admission used
             // for delivered HIR field types. Finite storage is an independent
             // obligation, shared with ordinary source declaration checking.
-            vm.charge_preparation(
+            charge(
+                budget,
                 self.baseline
                     .structs
                     .len()
@@ -156,7 +156,7 @@ impl<'a> CheckedStructPublisher<'a> {
                 .map(|head| head.declaration);
             let mut checker =
                 crate::representations::Checker::from_references(tuple, structs, enums, newtypes);
-            let before = usize::try_from(vm.remaining_steps()).unwrap_or(usize::MAX);
+            let before = usize::try_from(budget.steps).unwrap_or(usize::MAX);
             let mut fuel = before;
             let checked = checker.check(
                 &Term::Nominal {
@@ -165,7 +165,7 @@ impl<'a> CheckedStructPublisher<'a> {
                 },
                 &mut fuel,
             );
-            vm.charge_preparation(before - fuel)?;
+            charge(budget, before - fuel)?;
             checked.map_err(|message| {
                 *self.diagnostic.borrow_mut() = Some(message.into());
                 Error {
@@ -173,9 +173,9 @@ impl<'a> CheckedStructPublisher<'a> {
                     source: Some(source),
                 }
             })?;
-            Ok(definitions)
-        })
-        .map_err(|mut error| {
+            Ok((definitions, receipt))
+        })()
+        .map_err(|mut error: Error| {
             error.source = Some(source);
             error
         })?;
@@ -193,8 +193,18 @@ impl<'a> CheckedStructPublisher<'a> {
                         source: Some(source),
                     });
                 }
-                published.push(committed);
-                Ok(())
+                let mut admission = self.admission.borrow_mut();
+                match admission.as_mut().unwrap().commit_with(receipt, || {
+                    published.push(committed);
+                    Ok::<_, std::convert::Infallible>(())
+                }) {
+                    Ok(()) => Ok(()),
+                    Err(StructPublicationError::Admission(mut error)) => {
+                        error.source = Some(source);
+                        Err(error)
+                    }
+                    Err(StructPublicationError::Commit(never)) => match never {},
+                }
             }),
         })
     }
@@ -207,4 +217,15 @@ impl std::fmt::Display for CheckedStructPublisher<'_> {
             self.published_definition_count()
         )
     }
+}
+
+fn charge(budget: &mut Budget, work: usize) -> Result<(), Error> {
+    budget.steps = budget
+        .steps
+        .checked_sub(u64::try_from(work).unwrap_or(u64::MAX))
+        .ok_or(Error {
+            kind: ErrorKind::StepsExhausted,
+            source: None,
+        })?;
+    Ok(())
 }

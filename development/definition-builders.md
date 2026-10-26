@@ -124,10 +124,40 @@ Preparation retains no candidate on failure or drop. A commit against a changed
 publication revision is rejected, allowing the invoking VM to roll back its
 installation. Later preparation sees earlier committed definitions and can use
 them in fields. Baseline descriptions and committed batches remain borrowed or
-shared; validation still rebuilds its VM and reference indices per request and
-charges this work to the caller's invocation allowance. This is not yet a
-constant-time incremental validation cache. Defaults, attributes, clauses,
+shared. A lazy `StructAdmissionSession` now retains the validation VM and committed
+descriptors, avoiding repeated VM construction and admission of prior generated
+batches. Preparation admits and rolls back a tentative batch, returning an opaque
+receipt tied to the session and publication revision. Commit installs only that
+immutable receipt with prepaid work. Foreign/stale receipts cannot call the host;
+callback failure or unwind rolls back the entries without advancing the revision.
+The session exposes no program execution, host solver or live inference state.
+
+Each attempt borrows its caller's allowance; failure and unwinding return only
+the remaining fuel. Exhaustion can be retried with a separately supplied budget,
+and commit cannot secretly draw on an old allowance. The finite-storage checker
+still builds reference indices and traverses relevant field representations per
+request, charging that work. This is not a constant-time validation cache.
+Defaults, attributes, clauses,
 methods and new implementation evidence require their own checking paths.
+
+Reusable admission validation in `/home/fin/luna`, via `python3 -B
+development/check.py --timeout 900 --`:
+
+- `test --release -p comptime_interpretor --test struct_admission_session`: 5
+  passed (`/tmp/luna-tools-uz_9e_bb/result.json`). Tests cover dropped, foreign and
+  stale receipts; callback rejection and panic rollback; renewed allowances after
+  exhaustion; and prepaid commit without further fuel. With 256 baseline types,
+  consecutive admissions cost the same fuel while a fresh session additionally
+  pays baseline preparation. This measures metered work, not wall-clock speed.
+- `test --release -p elaboration --test checked_struct_publisher --test
+  struct_publisher --test representations --no-fail-fast`: 18 passed
+  (`/tmp/luna-tools-_xrhjz3y/result.json`).
+- `test --release -p luna --test builder_invocations --test source_reflection
+  --no-fail-fast`: 38 passed (`/tmp/luna-tools-o2lnqk1c/result.json`).
+
+All commands exited 0. Targeted rustfmt and `git diff --check` passed. An initial
+check required an explicit error type on the publisher's preparation closure;
+that compile error was corrected before the passing tests above.
 
 Validation in `/home/fin/luna`, via `python3 -B development/check.py
 --timeout 900 --`:
