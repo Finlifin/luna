@@ -39,6 +39,26 @@ resume_statement -> resume expr? (while expr)?
 
 显式的 return、break 和 continue 保留各自合法的词法目标。若目标要求退出正在被处理的主体，需要执行控制后端的退出与清理协议，不能把这些动作重写为一次普通操作返回。
 
+当前资源检查支持直接分支借用安装者的已知指针来源。指针槽的稳定性要求限于处理器生效期间，安装之前或完成之后的直接改绑不因此非法：
+
+```flurry
+effect touch() -> bool;
+
+fn example() -> bool {
+    var left = false;
+    var right = false;
+    var target = left.ref;
+    let result = touch()# {
+        touch() => do { target.* = true; target.* },
+    };
+    target = right.ref;
+    target.* = true;
+    result and left and right
+}
+```
+
+安装期间替换指针槽或包含它的聚合，仍需要尚未完善的 handler 环境写回契约；更新不含指针和代码的数据字段不替换相邻指针来源。取得捕获槽自身的地址可能留下跨安装边界的别名，因此当前实现继续检查外围作用域的地址暴露。来源追踪与目标存活检查分别进行，缩短稳定性检查范围不会允许局部地址逃逸。
+
 ### 错误值属于操作结果契约
 
 操作可以把 !E T 作为 Y。此时 handler 交付的错误是一次正常的操作结果；主体是否传播或消去错误，由自己的 ! 或 match 决定。

@@ -260,14 +260,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         Ok(kept)
     }
 
-    pub(super) fn pointer_slot_mutations(
+    pub(super) fn pointer_slot_exposures(
         &mut self,
         scope: &Expr,
     ) -> Result<std::sync::Arc<BTreeSet<Place>>, Error> {
+        // A closure invocation owns its body's capture cells. Nested closure
+        // bodies use different cells, but the invoked root body must be scanned.
+        let scope = match &scope.kind {
+            K::Closure { body, .. } => body.as_ref(),
+            _ => scope,
+        };
         let mut changed = BTreeSet::new();
-        nir::visit::expression(scope, &mut self.fuel, |node, fuel| {
-            if let Some(slot) = mutated_pointer_slot(node, fuel)? {
-                changed.insert(slot);
+        nir::visit::expression_in_closure_environment(scope, &mut self.fuel, |node, fuel| {
+            if matches!(node.kind, K::AddressOf(_)) {
+                if let Some(slot) = mutated_pointer_slot(node, fuel)? {
+                    changed.insert(slot);
+                }
             }
             Ok(())
         })
@@ -1179,7 +1187,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         }
                         capture_domains.insert(*binding, stable_domains);
                         if !outer.stable_handler_slots.contains(&place.root) {
-                            if let Some(changed) = &outer.pointer_slot_mutations {
+                            if let Some(changed) = &outer.pointer_slot_exposures {
                                 for mutation in changed
                                     .range(place.clone()..)
                                     .take_while(|mutation| mutation.root == place.root)
@@ -1199,18 +1207,35 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                         "handler pointer slot lacks its complete lexical scope",
                                     )
                                 })?;
-                                // Include all exits, contracts and defaults of
-                                // a function, not just the path to installation.
+                                // An alias created outside installation can survive
+                                // into it; retain whole-function exposure checks.
                                 nir::visit::expressions(function, &mut self.fuel, |node, fuel| {
+                                    if matches!(node.kind, K::AddressOf(_)) {
+                                        if let Some(mutation) = mutated_pointer_slot(node, fuel)? {
+                                            check_capture_slot_mutation(
+                                                &mutation, place.root, &layout, fuel,
+                                            )?;
+                                        }
+                                    }
+                                    Ok(())
+                                })
+                                .map_err(|reason| error(installation, reason))?;
+                            }
+                            // Rebinding invalidates the captured provenance only
+                            // while this handler's snapshot is installed.
+                            nir::visit::expression_in_closure_environment(
+                                expression,
+                                &mut self.fuel,
+                                |node, fuel| {
                                     if let Some(mutation) = mutated_pointer_slot(node, fuel)? {
                                         check_capture_slot_mutation(
                                             &mutation, place.root, &layout, fuel,
                                         )?;
                                     }
                                     Ok(())
-                                })
-                                .map_err(|reason| error(installation, reason))?;
-                            }
+                                },
+                            )
+                            .map_err(|reason| error(installation, reason))?;
                         }
                     } else {
                         if code_paths.is_empty()
@@ -1511,7 +1536,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 let outer_effect_loops = std::mem::take(&mut self.effect_loop_targets);
                 let outer_completions = std::mem::take(&mut self.handler_completions);
                 let mut frame = Flow {
-                    pointer_slot_mutations: Some(self.pointer_slot_mutations(expression)?),
+                    pointer_slot_exposures: Some(self.pointer_slot_exposures(expression)?),
                     live: true,
                     ..Default::default()
                 };

@@ -2199,14 +2199,26 @@ fn handler_aggregate_captures_require_stable_live_storage() {
         impl Duplicate for bool {} impl Duplicate for *T where T {}
         struct Link {target:*bool} impl Duplicate for Link {}
         effect touch()->bool;";
-    for setup in [
-        "let captured=do {var flag=false;Link{target:flag.ref}};",
-        "var flag=false;var other=false;var captured=Link{target:flag.ref};captured=Link{target:other.ref};",
-        "var flag=false;var other=false;var captured=Link{target:flag.ref};captured.target=other.ref;",
-        "var flag=false;let captured=Link{target:flag.ref};let exposed=captured.ref;",
+    for (setup, mutation) in [
+        (
+            "let captured=do {var flag=false;Link{target:flag.ref}};",
+            "",
+        ),
+        (
+            "var flag=false;var other=false;var captured=Link{target:flag.ref};",
+            "captured=Link{target:other.ref};",
+        ),
+        (
+            "var flag=false;var other=false;var captured=Link{target:flag.ref};",
+            "captured.target=other.ref;",
+        ),
+        (
+            "var flag=false;let captured=Link{target:flag.ref};let exposed=captured.ref;",
+            "",
+        ),
     ] {
         let source = format!(
-            "{prefix} fn run()->bool {{{setup}touch()# {{touch()=>do {{captured.target.* = true;captured.target.*}},}}}}"
+            "{prefix} fn run()->bool {{{setup}touch()# {{touch()=>do {{{mutation}captured.target.* = true;captured.target.*}},}}}}"
         );
         let package = support::compile(&source);
         assert!(
@@ -2218,7 +2230,7 @@ fn handler_aggregate_captures_require_stable_live_storage() {
                 800_000
             )
             .is_err(),
-            "accepted unstable capture: {setup}"
+            "accepted unstable capture: {setup} {mutation}"
         );
     }
 }
@@ -2318,7 +2330,7 @@ fn handler_pointer_capture_stability_rejects_ancestor_writes_and_addresses() {
         let source = format!(
             "{prefix} fn run()->bool {{var flag=false;var other=false;
             var state=State{{link:Link{{target:flag.ref}},flag:false}};
-            {mutation} touch()# {{touch()=>do {{state.flag=true;state.link.target.*}},}}
+            touch()# {{touch()=>do {{{mutation}state.flag=true;state.link.target.*}},}}
         }}"
         );
         let package = support::compile(&source);
@@ -2694,7 +2706,7 @@ fn handler_variant_capture_rejects_tag_rebinding_even_when_initially_empty() {
     ] {
         let source = format!(
             "{prefix} fn run()->bool {{var flag=false;var captured=Choice.none;
-            {before} touch()# {{touch()=>captured match {{.none=>false,.some(p)=>p.*}},}}
+            touch()# {{touch()=>do {{{before} captured match {{.none=>false,.some(p)=>p.*}}}},}}
         }}"
         );
         let package = support::compile(&source);

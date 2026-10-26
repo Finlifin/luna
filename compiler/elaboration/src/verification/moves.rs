@@ -1830,9 +1830,9 @@ struct Flow {
     effect_borrows: BTreeSet<PlaceId>,
     // Pointer capture slots checked across the full lexical installer.
     stable_handler_slots: BTreeSet<PlaceId>,
-    // Complete enclosing body scan for frames without a function exit contract.
-    // Shared by branches, never inferred from the path currently being checked.
-    pointer_slot_mutations: Option<std::sync::Arc<BTreeSet<Place>>>,
+    // Enclosing capture-cell address exposures for frames without an exit contract.
+    // Shared by branches; direct writes are checked during each installation.
+    pointer_slot_exposures: Option<std::sync::Arc<BTreeSet<Place>>>,
     // Optional necessary conditions for individual physical-slot candidates.
     // Missing metadata never authorizes excluding a target.
     pointer_guards: BTreeMap<Place, PointerTargetGuards>,
@@ -6213,7 +6213,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             domains: mut argument_domains,
         } = prepared;
         let mut inner = Flow {
-            pointer_slot_mutations: Some(self.pointer_slot_mutations(definition)?),
+            pointer_slot_exposures: Some(self.pointer_slot_exposures(definition)?),
             borrowed_scope: self.fresh_borrowed_scope(source)?,
             live: true,
             ..Default::default()
@@ -14382,7 +14382,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     captures: BTreeMap::new(),
                 };
                 let mut inner = Flow {
-                    pointer_slot_mutations: Some(self.pointer_slot_mutations(expr)?),
+                    pointer_slot_exposures: Some(self.pointer_slot_exposures(expr)?),
                     borrowed_scope: self.fresh_borrowed_scope(source)?,
                     live: true,
                     ..Default::default()
