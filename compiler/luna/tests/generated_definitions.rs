@@ -477,3 +477,139 @@ fn source_types_and_functions_feed_generated_definitions_and_runtime_execution()
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn generated_definitions_share_configured_preludes_without_importing_std() {
+    use luna::packages::compile_with_definitions_and_preludes;
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "luna-generated-preludes-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let _cleanup = Cleanup(directory.clone());
+    let mut packages = vec![];
+    for (resolution_id, identity, name, source) in [
+        (7, 73, "input", ""),
+        (
+            42,
+            420,
+            "meta",
+            "pub pure fn meta_ready()->bool {true} pub mod prelude {pub use .meta_ready;}",
+        ),
+        (
+            43,
+            430,
+            "attrs",
+            "pub pure fn attrs_ready()->bool {true} pub mod prelude {pub use .attrs_ready;}",
+        ),
+        (
+            44,
+            440,
+            "std",
+            "pub pure fn std_ready()->bool {true} pub mod prelude {pub use .std_ready;}",
+        ),
+    ] {
+        let root = directory.join(name);
+        std::fs::create_dir(&root).unwrap();
+        let entry = root.join("lib.fl");
+        std::fs::write(&entry, source).unwrap();
+        packages.push(SourcePackage {
+            resolution_id,
+            identity,
+            name: name.into(),
+            entry,
+        });
+    }
+    let dependencies = [resolve::DependencyEdge {
+        requester: 7,
+        alias: "std".into(),
+        provider: 44,
+    }];
+    let source = |extra: &str, condition: &str| {
+        format!(
+            "{extra} struct Source {{flag:bool}} pure fn source()->Source {{Source {{flag: {condition}}}}}"
+        )
+    };
+    std::fs::write(
+        &packages[0].entry,
+        source("", "meta_ready() and attrs_ready()"),
+    )
+    .unwrap();
+    for providers in [&[42u32][..], &[42, 43, 42][..], &[42, 43, 999][..]] {
+        let mut called = false;
+        let rejected = compile_with_definitions_and_preludes(
+            &packages,
+            &dependencies,
+            7,
+            None,
+            &Default::default(),
+            Default::default(),
+            None,
+            providers,
+            &mut 100_000,
+            &mut |_, _, _| {
+                called = true;
+                Ok(())
+            },
+        );
+        assert!(rejected.is_err(), "accepted providers {providers:?}");
+        assert!(!called, "expansion ran before source/provider validation");
+    }
+    for (extra, condition, accepted) in [
+        ("", "meta_ready() and attrs_ready()", true),
+        ("", "meta_ready() and attrs_ready() and std_ready()", false),
+        (
+            "use std.prelude.*;",
+            "meta_ready() and attrs_ready() and std_ready()",
+            true,
+        ),
+    ] {
+        std::fs::write(&packages[0].entry, source(extra, condition)).unwrap();
+        let mut calls = 0;
+        let result = compile_with_definitions_and_preludes(
+            &packages,
+            &dependencies,
+            7,
+            None,
+            &Default::default(),
+            Default::default(),
+            None,
+            &[42, 43],
+            &mut 100_000,
+            &mut |arena, batch, fuel| {
+                calls += 1;
+                expand(arena, batch, fuel, true, false)
+            },
+        );
+        if !accepted {
+            assert!(result.err().unwrap().contains("std_ready"));
+            assert_eq!(calls, 0);
+            continue;
+        }
+        assert_eq!(calls, 1);
+        let (Artifact::Nir(package), _) = result.unwrap() else {
+            panic!("expected NIR")
+        };
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+        let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+        let mut vm =
+            comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+        assert_eq!(
+            vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+}

@@ -948,3 +948,43 @@ Formatting passed at `/tmp/luna-tools-nwko06qw/result.json`; `git diff --check`
 passed. Reservation does not measure every constructor validation operation or
 provide a concurrently shared VM counter; source builder dispatch and live-world
 replacement remain separate work.
+
+### Configured preludes at the host assembly boundary
+
+`luna::packages::compile_with_definitions_and_preludes` accepts the same explicit
+provider IDs used by ordinary multi-package compilation. It resolves source
+imports before invoking the definition callback, then publishes and elaborates
+the generated batch through the existing path. This closes the previous host
+entrypoint's inability to supply meta/build/attrs/verification preludes alongside
+builtin. Provider identity comes from configuration, not a package-name heuristic.
+The older `compile_with_definitions` API retains its builtin-only configuration
+and delegates to the new entrypoint.
+
+The caller supplies the configured default providers, excluding std. Provider
+self-exclusion, ordinary wildcard lookup and declaration identity follow the
+shared resolver. Duplicate or unknown providers and unresolved source imports
+fail before the callback executes. The callback still runs once; this is not a
+source builder API or live VM publication/resumption. Prelude configuration,
+source packages and callback inputs belong in the caller's build cache key.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test generated_definitions --test reflected_definitions --no-fail-fast
+```
+
+Exit 0, three integration tests passed; `/tmp/luna-tools-lp2ayuo9/result.json`.
+The new test uses independent fixture providers, verifies NIR and IIR execution
+of generated definitions calling source functions that rely on both preludes,
+checks missing/duplicate/unknown provider rejection before callback execution,
+and verifies std names are unavailable until an explicit `use std.prelude.*`.
+Existing source-dependent builders, reflection and failure/retry cases also pass.
+The fixture providers do not constitute full sysroot acceptance.
+
+A fresh full sysroot smoke invocation still fails during HIR lowering:
+`/tmp/luna-tools-k_7yhl0i/result.json`, exit 1, using
+`development/reproduce.py --timeout 60 --binary /tmp/luna-dev-002/target/release/luna -- development/examples/library-smoke.fl --sysroot library --interpret run`
+(via `python3 -B`). Its unresolved names include panic, String in builtin
+formatting protocols, and placeholder std allocation/collection/I/O hooks.
+These independent library-contract and implementation gaps remain open; no
+placeholder intrinsic or implicit dependency was introduced to hide them.

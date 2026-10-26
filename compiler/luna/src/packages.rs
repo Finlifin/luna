@@ -392,6 +392,39 @@ pub fn compile_with_definitions(
     expand: &mut DefinitionExpander<'_>,
 ) -> Result<(Artifact, elaboration::program::Protocols), String> {
     let preludes: Vec<_> = builtin.into_iter().collect();
+    compile_with_definitions_and_preludes(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        protocols,
+        selectors,
+        target,
+        &preludes,
+        fuel,
+        expand,
+    )
+}
+
+/// Assemble generated definitions with the same explicit prelude providers as
+/// ordinary package compilation. Provider IDs refer to the supplied packages;
+/// package names do not confer builtin privileges or automatic-import status.
+/// Resolution and provider validation finish before the callback runs. Each
+/// provider excludes its own prelude, and std is imported only when requested
+/// by source. Callers should pass the configured builtin/meta/build/attrs/
+/// verification providers, not std, in `preludes`.
+pub fn compile_with_definitions_and_preludes(
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    target: Option<nir::target::TargetData>,
+    preludes: &[u32],
+    fuel: &mut usize,
+    expand: &mut DefinitionExpander<'_>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
     compile_with_expansion(
         packages,
         dependencies,
@@ -403,7 +436,7 @@ pub fn compile_with_definitions(
         selectors,
         None,
         target,
-        &preludes,
+        preludes,
         Some((fuel, expand)),
     )
 }
