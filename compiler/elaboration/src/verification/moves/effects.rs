@@ -1035,6 +1035,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 let mut captures = Vec::new();
                 let mut pointer_captures = BTreeMap::new();
                 let mut capture_domains = BTreeMap::new();
+                let mut pointer_slot_checks = Vec::new();
                 let mut capture_callables = BTreeMap::new();
                 let mut borrowed_code_roots = BTreeSet::new();
                 let mut borrowed_owner_roots = BTreeSet::new();
@@ -1221,21 +1222,25 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 })
                                 .map_err(|reason| error(installation, reason))?;
                             }
-                            // Rebinding invalidates the captured provenance only
-                            // while this handler's snapshot is installed.
-                            nir::visit::expression_in_closure_environment(
-                                expression,
-                                &mut self.fuel,
-                                |node, fuel| {
-                                    if let Some(mutation) = mutated_pointer_slot(node, fuel)? {
-                                        check_capture_slot_mutation(
-                                            &mutation, place.root, &layout, fuel,
-                                        )?;
-                                    }
-                                    Ok(())
-                                },
-                            )
-                            .map_err(|reason| error(installation, reason))?;
+                            // Defer writes until the arm's complete capture and
+                            // callback evidence can prove its exit invariant.
+                            for leaf in &layout {
+                                super::super::memory::bound_type(&leaf.pointee, &mut self.fuel)
+                                    .map_err(|reason| error(installation, reason))?;
+                                let work = leaf.guards.iter().fold(
+                                    leaf.input_fields
+                                        .len()
+                                        .saturating_add(leaf.storage_fields.len())
+                                        .saturating_add(1),
+                                    |work, (path, _)| {
+                                        work.saturating_add(path.len()).saturating_add(1)
+                                    },
+                                );
+                                self.fuel = self.fuel.checked_sub(work).ok_or_else(|| {
+                                    error(installation, "handler deferred layout budget exhausted")
+                                })?;
+                            }
+                            pointer_slot_checks.push((place.root, layout.clone()));
                         }
                     } else {
                         if code_paths.is_empty()
@@ -1524,6 +1529,35 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     &mut self.fuel,
                 )
                 .map_err(|reason| error(installation, reason))?;
+                let stable_writes = match &parameter_summary {
+                    Some(summary) => super::super::memory::stationary_handler_write_sites(
+                        self.package,
+                        arm,
+                        parameters.len(),
+                        &captures,
+                        &summary.memory,
+                        &mut self.fuel,
+                    )
+                    .map_err(|reason| error(installation, reason))?,
+                    None => BTreeSet::new(),
+                };
+                for (captured, layout) in &pointer_slot_checks {
+                    nir::visit::expression_in_closure_environment(
+                        expression,
+                        &mut self.fuel,
+                        |node, fuel| {
+                            if !stable_writes.contains(&(node as *const Expr as usize)) {
+                                if let Some(mutation) = mutated_pointer_slot(node, fuel)? {
+                                    check_capture_slot_mutation(
+                                        &mutation, *captured, layout, fuel,
+                                    )?;
+                                }
+                            }
+                            Ok(())
+                        },
+                    )
+                    .map_err(|reason| error(installation, reason))?;
+                }
                 let outer_report = std::mem::take(&mut self.report);
                 let outer_pending = std::mem::take(&mut self.pending);
                 let outer_loops = std::mem::take(&mut self.loops);

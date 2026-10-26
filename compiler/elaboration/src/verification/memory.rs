@@ -387,7 +387,7 @@ pub use effects::{
 };
 pub(crate) use effects::{
     data_passing_signature, direct_handler_accesses, direct_handler_accesses_with_code,
-    effect_borrowed_code_layout, effect_data_layout,
+    effect_borrowed_code_layout, effect_data_layout, stationary_handler_write_sites,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -9256,6 +9256,28 @@ fn validate_capture_storage(
     bindings: &BTreeSet<LocalId>,
     fuel: &mut usize,
 ) -> Result<(), String> {
+    validate_capture_storage_except(
+        check_writes,
+        allow_pointer_rebinding,
+        package,
+        body,
+        bindings,
+        fuel,
+        &BTreeSet::new(),
+    )
+}
+
+// Ephemeral expression identities belong to this immutable traversal only.
+// A proven arm exit can authorize its writes, never writes in the installer.
+fn validate_capture_storage_except(
+    check_writes: bool,
+    allow_pointer_rebinding: bool,
+    package: Option<&Package>,
+    body: &Expr,
+    bindings: &BTreeSet<LocalId>,
+    fuel: &mut usize,
+    stable_writes: &BTreeSet<usize>,
+) -> Result<(), String> {
     let mut pending = vec![body];
     while let Some(root) = pending.pop() {
         nir::visit::expression_pruned(root, fuel, |expr, fuel| {
@@ -9268,6 +9290,7 @@ fn validate_capture_storage(
                     let data_field =
                         !place.fields.is_empty() && data_representation(package, &value.ty, fuel)?;
                     if !data_field
+                        && !stable_writes.contains(&(expr as *const Expr as usize))
                         && !(allow_pointer_rebinding
                             && capture_pointer_replacement_layout(package, &value.ty, fuel)?)
                     {

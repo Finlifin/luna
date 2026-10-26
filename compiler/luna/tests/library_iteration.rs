@@ -401,7 +401,7 @@ fn fold_moves_and_reinitializes_affine_accumulator_in_source_order() {
     );
     check_iteration_with_contract_limit(
         &source,
-        Some("captured pointer rebinding requires an environment writeback contract"),
+        Some("borrowed handler data capture must remain complete on every exit"),
     );
 }
 

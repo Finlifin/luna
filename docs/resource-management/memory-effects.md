@@ -949,3 +949,17 @@ fn make_link(slot: **Byte, .target: *Byte = slot.*) -> Link {
 这项扩展只恢复地址来源，不恢复写入前的值事实。返回指针指向已被写成 255 的 Byte 时，旧的 `<= 252` 范围不能支持加法；调用方必须使用调用后的事实或 checked `assumes`。含指针槽替换或无法证明存储保持的摘要仍不能采用此规则。
 
 循环中使用这类返回指针时也可复用指针存储保持证明，包括 `set(slot).* = value` 和返回聚合字段的后续写入。callee 的标量写入仍进入循环写入集合，每层来源槽仍须保持稳定；循环内改绑槽会撤销来源，不因 callee 自身只写标量就忽略调用方的改绑。
+
+对于不含 guard、不会暂停的 direct handler arm，如果完整调用摘要证明每个捕获指针字段在所有完成路径上仍来自原输入字段，可以据此重建整个捕获值，而不要求把整槽赋值一概拒绝。例如保留 `state.target`、更新数据字段：
+
+```flurry
+struct State { target: *bool, next: bool }
+
+fn advance(state: State) -> State {
+    State { target: state.target, next: not state.next }
+}
+```
+
+handler 中的 `state = advance(state)` 可以保留原指针来源；它是否满足 Copy、移动、借用与清理要求，仍由相应资源检查决定。来源保持证明逐字段检查，不能把“字段类型相同”或“退出时还有一个指针”当作证明。字段交换、多个可能来源、局部来源和未决摘要均不满足这项规则。
+
+这份证据只适用于已检查 arm 内的写入，不授权安装者在 handler 存活期间改绑槽位，也不允许对捕获槽位取址。guard 失败可能在恢复写入之前离开，effect 暂停则可能让另一个 handler 观察中间状态；这两种情况仍需要更强的写回契约。variant 条件下的字段及一般跨暂停写回也不由此规则自动放行。

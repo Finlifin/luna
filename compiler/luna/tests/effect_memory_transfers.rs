@@ -2415,13 +2415,19 @@ fn nested_handlers_preserve_pointer_field_stability_with_mutable_data() {
             .unwrap(),
         Value::Bool(true)
     );
-    let unstable = source.replace("state.next=not state.next;", "state.target=state.target;");
-    let package = support::compile(&unstable);
-    assert!(
+    let stationary = source.replace("state.next=not state.next;", "state.target=state.target;");
+    let package = support::compile(&stationary);
+    assert_eq!(
         luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 800_000)
-            .is_err(),
-        "nested cached scan missed pointer slot mutation"
+            .unwrap(),
+        Value::Bool(false),
     );
+    let unstable = source.replace(
+        "state.next=not state.next;",
+        "var other=false;state.target=other.ref;",
+    );
+    let package = support::compile(&unstable);
+    assert_capture_writeback_rejected(&package);
 }
 
 #[test]
@@ -4804,4 +4810,109 @@ fn data_error_catches_keep_before_arm_and_after_memory_writes() {
         .map(|access| access.target.parameter)
         .collect();
     assert_eq!(written, BTreeSet::from([1, 2, 3]));
+}
+
+#[test]
+fn handler_whole_capture_replacement_preserves_each_pointer_origin() {
+    for replacement in [
+        "state=State{target:state.target,next:not state.next};",
+        "state=advance(state);",
+    ] {
+        let source = format!(
+            "
+            trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            impl Duplicate for bool {{}} impl Duplicate for *T where T {{}}
+            struct State {{target:*bool,next:bool}} impl Duplicate for State {{}}
+            fn advance(state:State)->State {{State{{target:state.target,next:not state.next}}}}
+            effect touch()->bool;
+            fn twice()->#touch bool {{let first=touch()#;let second=touch()#;not first and second}}
+            fn run()->bool {{var flag=false;var state=State{{target:flag.ref,next:false}};
+                let result=twice()# {{touch()=>do {{
+                    state.target.* = state.next;{replacement}state.target.*
+                }},}};
+                result and flag and not state.next
+            }}
+        "
+        );
+        let package = support::compile(&source);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .unwrap_or_else(|error| panic!("{replacement}: {error}")),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn stationary_handler_exit_does_not_authorize_installer_rebinding() {
+    let source = "
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        struct State {target:*bool} impl Duplicate for State {}
+        effect touch()->bool;
+        fn run()->bool {
+            var first=false;var second=false;var state=State{target:first.ref};
+            do {state=State{target:second.ref};touch()#}# {
+                touch()=>do {state=State{target:state.target};state.target.*},
+            }
+        }
+    ";
+    let package = support::compile(source);
+    assert_capture_writeback_rejected(&package);
+}
+
+#[test]
+fn handler_capture_exit_rejects_changed_or_joined_pointer_fields() {
+    for replacement in [
+        "state=State{left:state.right,right:state.left};",
+        "state=if choose {State{left:state.right,right:state.right}} else {state};",
+    ] {
+        let source=format!("
+            trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            impl Duplicate for bool {{}} impl Duplicate for *T where T {{}}
+            struct State {{left:*bool,right:*bool}} impl Duplicate for State {{}}
+            effect touch(choose:bool)->bool;
+            fn run()->bool {{var first=false;var second=true;var state=State{{left:first.ref,right:second.ref}};
+                touch(true)# {{touch(choose)=>do {{{replacement}state.left.*}},}}
+            }}
+        ");
+        let package = support::compile(&source);
+        assert_capture_writeback_rejected(&package);
+    }
+}
+
+#[test]
+fn handler_capture_restoration_does_not_hide_guard_or_suspension_mutations() {
+    let prefix = "
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        struct State {target:*bool} impl Duplicate for State {}
+        effect touch()->bool; effect notify()->bool;
+    ";
+    for expression in [
+        "touch()# {touch() if do {state=State{target:other};false}=>do {state=saved;state.target.*},touch()=>state.target.*,}",
+        "(touch()# {touch()=>do {let old=state;state=State{target:other};let ignored=notify()#;state=old;state.target.*},})# {notify()=>state.target.*,}",
+    ] {
+        let source = format!(
+            "{prefix} fn run()->bool {{var first=false;var second=true;var state=State{{target:first.ref}};let saved=state;let other=second.ref;{expression}}}"
+        );
+        let package = support::compile(&source);
+        assert_capture_writeback_rejected(&package);
+    }
+}
+
+fn assert_capture_writeback_rejected(package: &nir::program::Package) {
+    let error =
+        luna::execution::interpret_with_protocols(package, "run", "Duplicate", "Retire", 1_000_000)
+            .unwrap_err();
+    assert!(
+        error.contains("writeback contract") || error.contains("pointer slot rebinding"),
+        "{error}"
+    );
 }

@@ -2253,3 +2253,49 @@ Revisited the prior rejected do-guard fixture: its `count+1` spelling violated t
 Added end-to-end checks for mutations in outer guards of Or arms. Both first-candidate and later-candidate selection increment a local exactly once and transfer that state to fallback; claiming two increments is rejected by the helper precondition. A mutable-subject case updates the source tuple inside the failed guard and confirms that subsequent arms still match the original subject snapshot, while external reads observe the updated tuple. The runtime result and count contract check these independently. Documentation now includes this concrete example.
 
 Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 -- test -p luna --test staged_aggregate_contracts --test match_cleanup` passed 31 + 13 tests, report `/tmp/luna-tools-_cwmcbx9/result.json`. Formatting passed `/tmp/luna-tools-5ai05tsz/result.json`; `git diff --check` passed. No compiler implementation changed, so the full resource suite was not repeated. Changes remain uncommitted on dev.
+
+### Direct handler writes with stationary pointer origins
+
+Direct handler arms can now replace a captured pointer-bearing value when their
+bounded input-pointer exit summary proves that every pointer leaf still has its
+exact original formal origin. The memory and resource analyses share one proof
+helper. No equality between two fields, joined origin set, local target, unknown
+exit, traversed pointer or variant-dependent leaf substitutes for that evidence.
+
+Authorization contains only ephemeral expression identities from the checked
+arm. The installer's computation does not inherit permission to rebind a slot.
+The arm must have no guard or pattern observation and no effect request,
+computation-valued expression or nested handler; a completion invariant cannot
+justify temporary rebinding visible during suspension or before a guard fails.
+Code identity, address exposure, pointer liveness, ownership and cleanup remain
+independent checks. Deferred resource overlap checks retain and charge their
+complete pointer layouts before the arm summary is available.
+
+Verified source cases rebuild a whole record directly and through an ordinary
+function, retain state across repeated requests, and permit nested self-assignment
+of a pointer field. Rejection cases include field exchange, conditional origin
+joins, installer writes, local-pointer escape, failed-guard mutations and an
+intermediate mutation around an outer effect request. Rejection tests check a
+writeback/slot-rebinding diagnostic, not merely any failure.
+
+In `/home/fin/luna`, the following command exited 0 with 225 tests passing
+(94 captured-memory, 98 effect-memory-transfer, 33 iterator tests):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test library_iteration --test effect_memory_transfers --test captured_memory --no-fail-fast
+```
+
+Evidence: `/tmp/luna-tools-i6bg8nj5/result.json`. The first run reached the
+independent resource overlap gate; the next run exposed a stale self-assignment
+rejection and fold's next, still-valid ownership restriction. These were not
+counted as passing runs. The final tests explicitly execute self-assignment and
+reject a fresh local pointer instead.
+
+Unexpanded affine fold still requires its borrowed capture to remain complete on
+every exit. Its pointer provenance gate is now discharged, but moving the
+accumulator through the callback does not by itself prove this stronger ownership
+contract. The regression retains rejection with the current ownership diagnostic;
+expanded execution and existing native checks remain successful. General handler
+writeback across suspension and pointer-bearing lexical search results remain
+separate work. Existing uncommitted formatting in moves/effects.rs is preserved
+outside this change's commit.

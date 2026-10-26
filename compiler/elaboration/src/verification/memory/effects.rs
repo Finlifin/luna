@@ -711,6 +711,7 @@ impl<'a> Infer<'a, '_> {
         let mut row = vec![];
         let mut pointer_captures = BTreeSet::new();
         let mut code_captures = BTreeSet::new();
+        let mut stable_writes = BTreeSet::new();
         for handler in handlers {
             self.step(depth)?;
             let operation = self.effect_operation(&handler.operation)?;
@@ -852,6 +853,14 @@ impl<'a> Infer<'a, '_> {
                     &outer_row,
                     self.fuel,
                 )? {
+                    stable_writes.extend(stationary_handler_write_sites(
+                        self.package,
+                        arm,
+                        parameters.len(),
+                        &captures,
+                        &summary.memory,
+                        self.fuel,
+                    )?);
                     self.may_reject |= summary.memory.may_reject;
                     self.may_run_cleanup |= summary.memory.may_run_cleanup;
                     for (binding, access) in summary.capture_accesses {
@@ -897,7 +906,15 @@ impl<'a> Infer<'a, '_> {
             }
             row.push(operation);
         }
-        validate_borrowed_capture_storage(false, self.package, expr, &pointer_captures, self.fuel)?;
+        validate_capture_storage_except(
+            true,
+            false,
+            self.package,
+            expr,
+            &pointer_captures,
+            self.fuel,
+            &stable_writes,
+        )?;
         row.extend(outer_row);
         let Term::Computation { effects, result } = self.ty(&computation.ty)? else {
             return Err("handler memory subject must be a computation".into());
@@ -1776,7 +1793,15 @@ pub(crate) fn direct_handler_accesses_with_code(
             }
         }
     }
-    if (summary.accesses.is_empty() && summary.capture_accesses.is_empty())
+    if (summary.accesses.is_empty()
+        && summary.capture_accesses.is_empty()
+        && !handler_capture_origins_preserved(
+            Some(package),
+            &summary.memory,
+            parameters.len(),
+            captures,
+            fuel,
+        )?)
         || summary.memory.result_targets.is_some()
         || !summary.memory.pointer_fields.is_empty()
     {
@@ -1785,4 +1810,103 @@ pub(crate) fn direct_handler_accesses_with_code(
     // Variant-qualified parameter paths retain their conditional identity.
     // Guarded captures require stable tag evidence from the installer.
     Ok(Some(summary))
+}
+
+/// A stationary environment needs no caller-relative pointer writeback. Every
+/// pointer leaf must have one exact self origin on every completing path.
+/// Missing, local, joined, traversed and variant-dependent origins do not prove
+/// this invariant. Callable identities have their separate stability checks.
+fn handler_capture_origins_preserved(
+    package: Option<&Package>,
+    summary: &ArgumentSummary,
+    parameter_count: usize,
+    captures: &[(LocalId, Term)],
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    let mut slot = parameter_count;
+    let mut found = false;
+    for (_, ty) in captures {
+        let leaves = pointer_input_layout(package, ty, fuel)?;
+        if leaves.is_empty() {
+            continue;
+        }
+        found = true;
+        for leaf in leaves {
+            *fuel = fuel
+                .checked_sub(leaf.input_fields.len().saturating_add(1))
+                .ok_or("handler capture exit budget exhausted")?;
+            if !leaf.guards.is_empty() {
+                return Ok(false);
+            }
+            let input = CallableInput {
+                parameter: slot,
+                fields: leaf.input_fields.clone(),
+            };
+            let Some(Some(origins)) = summary.input_pointer_exits.get(&input) else {
+                return Ok(false);
+            };
+            if origins.len() != 1 {
+                return Ok(false);
+            }
+            let origin = origins.first().unwrap();
+            if origin.parameter != slot
+                || origin.input_fields != leaf.input_fields
+                || !origin.fields.is_empty()
+                || !origin.through.is_empty()
+                || !origin.conditions.is_empty()
+            {
+                return Ok(false);
+            }
+        }
+        slot += 1;
+    }
+    Ok(found)
+}
+
+// An exit invariant is insufficient if another handler can observe a temporary
+// rebinding during suspension. Effectful calls and nested installations need
+// a stronger all-suspension writeback contract; keep them on the old path.
+fn handler_arm_cannot_suspend(body: &Expr, fuel: &mut usize) -> Result<bool, String> {
+    let mut stable = true;
+    nir::visit::expression_in_closure_environment(body, fuel, |node, _| {
+        if matches!(node.kind, K::EffectRequest { .. } | K::EffectHandle { .. })
+            || matches!(node.ty, Term::Computation { .. })
+        {
+            stable = false;
+        }
+        Ok(())
+    })?;
+    Ok(stable)
+}
+
+/// Return only writes belonging to this arm, with no persisted node identity.
+pub(crate) fn stationary_handler_write_sites(
+    package: Option<&Package>,
+    arm: &nir::program::MatchArm,
+    parameter_count: usize,
+    captures: &[(LocalId, Term)],
+    summary: &ArgumentSummary,
+    fuel: &mut usize,
+) -> Result<BTreeSet<usize>, String> {
+    let mut writes = BTreeSet::new();
+    let (_, guards) = outer_guards(&arm.pattern);
+    if !guards.is_empty()
+        || arm.guard.is_some()
+        || !nir::visit::pattern_observations(&arm.pattern, fuel)?.is_empty()
+        || !handler_arm_cannot_suspend(&arm.body, fuel)?
+        || !handler_capture_origins_preserved(package, summary, parameter_count, captures, fuel)?
+    {
+        return Ok(writes);
+    }
+    *fuel = fuel
+        .checked_sub(captures.len())
+        .ok_or("handler stable capture budget exhausted")?;
+    let bindings: BTreeSet<_> = captures.iter().map(|(binding, _)| *binding).collect();
+    nir::visit::expression_in_closure_environment(&arm.body, fuel, |node, _| {
+        if matches!(&node.kind, K::Assign {place, ..} if bindings.contains(&place.root)) {
+            writes.insert(node as *const Expr as usize);
+        }
+        Ok(())
+    })?;
+    Ok(writes)
 }
