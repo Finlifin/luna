@@ -54,7 +54,7 @@ pub use import::{ImportDirective, ImportKind};
 pub use item_scope::ItemScope;
 pub use module_builder::{
     DependencyEdge, ModuleTree, PackageSetTree, build_module_tree, build_package_set,
-    build_package_set_with_builtin, validate_package_dependencies,
+    build_package_set_with_builtin, build_package_set_with_preludes, validate_package_dependencies,
 };
 pub use resolver::Resolver;
 pub use rib::{Rib, RibKind, RibStack};

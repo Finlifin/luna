@@ -200,6 +200,12 @@ impl<'a> ModuleBuilder<'a> {
                     continue;
                 }
 
+                if !matches!(self.unresolved_imports[i].kind, ImportKind::Glob { .. }) {
+                    // Explicit imports must observe newly installed glob sources
+                    // before deciding that they can fall back to an outer scope.
+                    self.rebuild_globs();
+                }
+
                 match self.try_resolve_import(i) {
                     Ok(resolved) => {
                         self.unresolved_imports[i].resolved = true;
@@ -469,7 +475,31 @@ impl<'a> ModuleBuilder<'a> {
         let directive = &self.unresolved_imports[import_idx];
         let starting_scope = directive.owner_scope;
 
+        // The final name of a bare import is also its first path component.
+        // Resolve it lexically, rather than treating the current container as
+        // an already selected member scope. Explicit anchors remain member-only.
+        if directive.anchor == PathAnchor::Local && directive.path_segments.is_empty() {
+            match &directive.kind {
+                ImportKind::Single { name, .. } => {
+                    let source = self.lexical_import_source(import_idx, *name)?;
+                    return Ok(ResolvedImport::Single(source, *name));
+                }
+                ImportKind::Alias {
+                    original, alias, ..
+                } => {
+                    let source_scope = self.lexical_import_source(import_idx, *original)?;
+                    return Ok(ResolvedImport::Alias {
+                        source_scope,
+                        original: *original,
+                        alias: *alias,
+                    });
+                }
+                _ => {}
+            }
+        }
+
         let target_scope = self.resolve_path_segments(
+            import_idx,
             directive.anchor,
             &directive.path_segments,
             directive.origin_scope.unwrap_or(starting_scope),
@@ -502,9 +532,89 @@ impl<'a> ModuleBuilder<'a> {
         }
     }
 
+    /// Follow installed glob edges as well as unresolved imports. A source
+    /// container may be known before the names exported through it are known.
+    fn import_sources_pending(&self, import_idx: usize, name: Symbol, start: ScopeId) -> bool {
+        let directive = &self.unresolved_imports[import_idx];
+        let mut work = vec![start];
+        let mut visited = std::collections::HashSet::new();
+        while let Some(scope_id) = work.pop() {
+            if !visited.insert(scope_id) {
+                continue;
+            }
+            let Some(scope) = self.scope_tree.get(scope_id) else {
+                continue;
+            };
+            if scope.items.get_local(name).is_some() {
+                continue;
+            }
+            let pending = self
+                .unresolved_imports
+                .iter()
+                .enumerate()
+                .any(|(index, other)| {
+                    if other.resolved || other.owner_scope != scope_id || index == import_idx {
+                        return false;
+                    }
+                    let identical_source = other.owner_scope == directive.owner_scope
+                        && other.anchor == PathAnchor::Local
+                        && other.path_segments.is_empty()
+                        && match other.kind {
+                            ImportKind::Single { name: n, .. } => n == name,
+                            ImportKind::Alias {
+                                original, alias, ..
+                            } => original == name && alias == name,
+                            _ => false,
+                        };
+                    !identical_source
+                        && match &other.kind {
+                            ImportKind::Single { name: n, .. } => *n == name,
+                            ImportKind::Alias { alias, .. } => *alias == name,
+                            ImportKind::Multi { names, .. } => names.contains(&name),
+                            ImportKind::Glob { .. } => true,
+                        }
+                });
+            if pending {
+                return true;
+            }
+            work.extend(scope.items.glob_entries.iter().map(|(source, _)| *source));
+        }
+        false
+    }
+
+    fn lexical_import_source(&self, import_idx: usize, name: Symbol) -> ResolveResult<ScopeId> {
+        let directive = &self.unresolved_imports[import_idx];
+        let missing = || ResolveError::UnresolvedImportSegment {
+            segment: name.to_string(),
+            span: directive.span,
+        };
+        for scope in self
+            .scope_tree
+            .ancestors(directive.origin_scope.unwrap_or(directive.owner_scope))
+        {
+            if scope.items.get_local(name).is_some() {
+                return Ok(scope.id);
+            }
+            if self.import_sources_pending(import_idx, name, scope.id) {
+                return Err(missing());
+            }
+            if scope.items.ambiguous_glob(name) {
+                return Err(ResolveError::InvalidNodeType {
+                    message: format!("ambiguous import source `{name}`"),
+                    span: directive.span,
+                });
+            }
+            if scope.items.unique_glob(name).is_some() {
+                return Ok(scope.id);
+            }
+        }
+        Err(missing())
+    }
+
     /// Walk a path anchor + name segments to find the target scope.
     fn resolve_path_segments(
         &self,
+        import_idx: usize,
         anchor: PathAnchor,
         segments: &[Symbol],
         scope_id: ScopeId,
@@ -542,9 +652,30 @@ impl<'a> ModuleBuilder<'a> {
         // Walk name segments.
         for (index, name) in segments.iter().enumerate() {
             let binding = (if index == 0 && anchor == PathAnchor::Local {
-                self.scope_tree
-                    .ancestors(scope_id)
-                    .find_map(|s| self.lookup_in_scope(*name, s.id))
+                if matches!(
+                    self.unresolved_imports[import_idx].kind,
+                    ImportKind::Glob { .. }
+                ) {
+                    // Glob edges must be installed before their exported name
+                    // sets can be computed; do not wait on those sets here.
+                    let mut selected = None;
+                    for scope in self.scope_tree.ancestors(scope_id) {
+                        if scope.items.ambiguous_glob(*name) {
+                            return Err(ResolveError::InvalidNodeType {
+                                message: format!("ambiguous import source `{name}`"),
+                                span,
+                            });
+                        }
+                        if let Some(binding) = self.lookup_in_scope(*name, scope.id) {
+                            selected = Some(binding);
+                            break;
+                        }
+                    }
+                    selected
+                } else {
+                    let source = self.lexical_import_source(import_idx, *name)?;
+                    self.lookup_in_scope(*name, source)
+                }
             } else {
                 self.lookup_in_scope(*name, scope_id)
             })
@@ -831,9 +962,43 @@ pub fn build_package_set_with_builtin(
     dependencies: &[DependencyEdge],
     builtin: Option<u32>,
 ) -> ResolveResult<PackageSetTree> {
+    let preludes: Vec<_> = builtin.into_iter().collect();
+    build_package_set_with_preludes(
+        source_map,
+        diag_ctx,
+        packages,
+        dependencies,
+        builtin,
+        &preludes,
+    )
+}
+
+/// Prelude providers are explicit package identities, never inferred from names.
+/// Each provider contributes an ordinary non-public glob to every other package.
+pub fn build_package_set_with_preludes(
+    source_map: &SourceMap,
+    diag_ctx: &DiagnosticContext<'_>,
+    packages: &mut [(u32, &mut vfs::Vfs)],
+    dependencies: &[DependencyEdge],
+    builtin: Option<u32>,
+    preludes: &[u32],
+) -> ResolveResult<PackageSetTree> {
     use crate::binding::Visibility;
     let invalid = |message: &str| ResolveError::InternalError(message.into());
     validate_package_dependencies(packages.iter().map(|(id, _)| *id), dependencies, builtin)?;
+    let mut seen = std::collections::HashSet::new();
+    for provider in preludes {
+        if !packages.iter().any(|(id, _)| id == provider) {
+            return Err(ResolveError::InvalidPackageGraph(format!(
+                "prelude provider {provider} is absent"
+            )));
+        }
+        if !seen.insert(*provider) {
+            return Err(ResolveError::InvalidPackageGraph(format!(
+                "duplicate prelude provider {provider}"
+            )));
+        }
+    }
     let mut effective_dependencies = dependencies.to_vec();
     if let Some(builtin) = builtin {
         for (requester, _) in packages.iter() {
@@ -923,9 +1088,9 @@ pub fn build_package_set_with_builtin(
             .define(Symbol::intern(&dependency.alias), binding)
             .map_err(|_| ResolveError::InvalidPackageGraph(format!("dependency from package {} via alias {:?} to package {} conflicts with a package name", dependency.requester, dependency.alias, dependency.provider)))?;
     }
-    if let Some(builtin) = builtin {
+    for provider in preludes {
         for (identity, _) in packages.iter() {
-            if *identity == builtin {
+            if identity == provider {
                 continue;
             }
             let mut import = ImportDirective::new(
@@ -938,7 +1103,7 @@ pub fn build_package_set_with_builtin(
                 vfs::FileId::INVALID,
                 Visibility::Package,
             );
-            import.origin_scope = Some(package_scopes[&builtin]);
+            import.origin_scope = Some(package_scopes[provider]);
             builder.unresolved_imports.push(import);
         }
     }
