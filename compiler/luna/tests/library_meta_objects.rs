@@ -8,6 +8,17 @@ use nir::{Primitive, Term};
 
 const META: &str = include_str!("../../../library/meta/lib.fl");
 
+fn compile(source: &str) -> Result<nir::program::Package, String> {
+    support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input.meta.List"),
+            ..Default::default()
+        },
+    )
+}
+
 #[test]
 fn repository_package_exports_object_for_user_attribute_constructors() {
     let directory = std::env::temp_dir().join(format!("luna-meta-object-{}", std::process::id()));
@@ -34,6 +45,8 @@ fn repository_package_exports_object_for_user_attribute_constructors() {
             "2",
             "--primary",
             "1",
+            "--meta-list-type",
+            "meta.List",
             "--emit",
             "attributes",
         ])
@@ -53,7 +66,7 @@ fn repository_package_exports_object_for_user_attribute_constructors() {
 
 #[test]
 fn public_object_preserves_order_duplicate_keys_and_nested_constants() {
-    let package = support::compile(&format!(
+    let package = compile(&format!(
         "mod meta {{ {META} }}
          use meta.prelude.*;
          const saved = {{ flag: true, 'x', flag: false }};
@@ -62,7 +75,8 @@ fn public_object_preserves_order_duplicate_keys_and_nested_constants() {
              let result = {{ nested: saved, mode: .c }};
              identity(result)
          }}"
-    ));
+    ))
+    .unwrap();
     let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
     let value = vm
         .invoke(support::id(&package, "metadata"), vec![])
@@ -104,9 +118,6 @@ fn public_alias_does_not_allow_runtime_transport_or_wrong_values() {
         "comptime fn invalid() -> Object { true }",
     ] {
         let source = format!("mod meta {{ {META} }} use meta.prelude.*; {body}");
-        assert!(
-            support::compile_with_protocols(&source, &Default::default()).is_err(),
-            "{body}"
-        );
+        assert!(compile(&source).is_err(), "{body}");
     }
 }

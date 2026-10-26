@@ -869,6 +869,10 @@ pub enum ExprKind {
     TypeList(Vec<Expr>),
     /// Checked comptime indexing of a compiler-bound meta.List<T> value.
     TypeListIndex(Box<Expr>, Box<Expr>),
+    /// Length of a checked immutable comptime list.
+    ListLength(Box<Expr>),
+    /// Ordered concatenation preserving the complete List<T> identity.
+    ListConcat(Box<Expr>, Box<Expr>),
     /// A value selected by an interface member. Its declaration identity remains
     /// abstract until implementation evidence fixes the value; defaults are not facts.
     AssociatedValue {
@@ -3025,6 +3029,8 @@ impl fmt::Display for ExprKind {
             Self::TemplateEqual(left, right) => {
                 write!(f, "(template-equal (left {left}) (right {right}))")
             }
+            Self::ListLength(values) => write!(f, "(list-length {values})"),
+            Self::ListConcat(left, right) => write!(f, "(list-concat {left} {right})"),
             Self::TypeListIndex(values, index) => {
                 write!(f, "(type-list-index (values {values}) (index {index}))")
             }
@@ -3367,6 +3373,7 @@ impl Expr {
                     | ExprKind::OptionalPresent(_)
                     | ExprKind::OptionalType(_)
                     | ExprKind::PointerType(_)
+                    | ExprKind::ListLength(_)
                     | ExprKind::BitVecType(_)
                     | ExprKind::IntegerNegate(_)
                     | ExprKind::FloatNegate(_)
@@ -3389,6 +3396,7 @@ impl Expr {
                     | ExprKind::TemplateEqual(_, _)
                     | ExprKind::ScalarEqual(_, _)
                     | ExprKind::TypeEqual(_, _)
+                    | ExprKind::ListConcat(_, _)
                     | ExprKind::TypeListIndex(_, _)
                     | ExprKind::BitEqual(_, _)
                     | ExprKind::BitConcat(_, _)
@@ -3443,6 +3451,7 @@ impl Expr {
                 | ExprKind::OptionalPresent(value)
                 | ExprKind::OptionalType(value)
                 | ExprKind::PointerType(value)
+                | ExprKind::ListLength(value)
                 | ExprKind::BitVecType(value)
                 | ExprKind::IntegerNegate(value)
                 | ExprKind::FloatNegate(value)
@@ -3475,6 +3484,7 @@ impl Expr {
                 | ExprKind::TemplateEqual(a, b)
                 | ExprKind::ScalarEqual(a, b)
                 | ExprKind::TypeEqual(a, b)
+                | ExprKind::ListConcat(a, b)
                 | ExprKind::TypeListIndex(a, b)
                 | ExprKind::BitEqual(a, b)
                 | ExprKind::BitConcat(a, b)
@@ -3818,6 +3828,7 @@ impl Expr {
             | ExprKind::OptionalPresent(value)
             | ExprKind::OptionalType(value)
             | ExprKind::PointerType(value)
+            | ExprKind::ListLength(value)
             | ExprKind::BitVecType(value)
             | ExprKind::IntegerNegate(value)
             | ExprKind::FloatNegate(value)
@@ -3850,6 +3861,7 @@ impl Expr {
             | ExprKind::TemplateEqual(a, b)
             | ExprKind::ScalarEqual(a, b)
             | ExprKind::TypeEqual(a, b)
+            | ExprKind::ListConcat(a, b)
             | ExprKind::TypeListIndex(a, b)
             | ExprKind::BitEqual(a, b)
             | ExprKind::BitConcat(a, b)

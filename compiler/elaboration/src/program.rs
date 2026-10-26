@@ -28,6 +28,7 @@ mod dependent_inputs;
 mod enum_groups;
 mod interfaces;
 mod lexical_inputs;
+mod list_operations;
 mod list_patterns;
 mod literal_conversion;
 mod nominal;
@@ -4431,6 +4432,12 @@ impl Checker<'_, '_> {
                     *owner,
                 ));
                 let head = declaration(self.package, &self.package_identities, *owner);
+                if Some(head) == self.protocols.meta_list
+                    && self.normal_parameters[owner].len() == 1
+                    && self.normal_parameters[owner][0].2 == p(P::Type)
+                {
+                    context.admit_list_inference_head(head);
+                }
                 if Some(head) == self.protocols.tuple
                     && self.normal_type_list_tail(*owner)
                     && self.normal_parameters[owner].len() == 1
@@ -6027,6 +6034,7 @@ impl Checker<'_, '_> {
                 .abstract_parameters(&self.input_binders(&parameters))
                 .map_err(|e| error(expr.span, e.to_string()))?,
         };
+        self.refresh_list_inference_metadata();
         let mut inputs = vec![None; declarations.len()];
         let mut checked = vec![None; declarations.len()];
         for (index, value) in prefix.into_iter().enumerate() {
@@ -9392,6 +9400,9 @@ impl Checker<'_, '_> {
                 }
                 H::Match(value, arms) => self.match_expr(expr, value, arms, expected, partial),
                 H::When(arms) => self.when_expr(expr, arms, expected, partial),
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "list_length" | "list_concat")) => {
+                    self.list_builtin(expr, callee, args, expected)
+                }
                 H::Application(callee, args) => {
                     let quote_head = if let H::NFApplication(head, _) = callee.kind {
                         head
@@ -10192,6 +10203,12 @@ impl Checker<'_, '_> {
                     kind: K::TypeList(fields),
                 });
             }
+        }
+        if expected.is_none() && matches!(expr.kind, H::List(_)) {
+            return Err(context_error(
+                expr.span,
+                "list literal requires an element type context",
+            ));
         }
         if expected == Some(&p(P::Type)) && matches!(expr.kind, H::Tuple(_) | H::Unit) {
             return Err(error(
@@ -12026,6 +12043,8 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::NormalFormType { .. }
         | K::BitVecType(_)
         | K::TypeEqual(..)
+        | K::ListLength(_)
+        | K::ListConcat(..)
         | K::TypeListIndex(..)
         | K::NominalType { .. }
         | K::CheckTypeAlias { .. }

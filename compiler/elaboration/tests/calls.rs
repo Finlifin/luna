@@ -2398,3 +2398,87 @@ fn incompatible_optional_record_relation_cannot_export_an_instance() {
         vec![primitive(P::Char)]
     );
 }
+
+#[test]
+fn bound_list_head_proposes_element_types_without_an_inverse_equality_rule() {
+    use elaboration::ptc::{Context, Equality, Formula, Outcome};
+    use nir::normal_forms::{Head, Kind, Parameter as Input, Role};
+    let head = DeclarationId {
+        package: 98,
+        local: 1,
+    };
+    let list = |element| Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
+    let mut package = nir::program::Package {
+        normal_forms: vec![Head {
+            declaration: head,
+            role: Role::TypeList,
+            requirements: vec![],
+            parameters: vec![Input {
+                declaration: DeclarationId {
+                    package: 98,
+                    local: 2,
+                },
+                binding: nir::program::LocalId { owner: 1, index: 0 },
+                kind: Kind::Type,
+                ty: primitive(P::Type),
+            }],
+        }],
+        ..Default::default()
+    };
+    let context = Context::from_package(&package).unwrap();
+    let definition = scheme(vec![list(generic(0))], generic(0), 1);
+    let actual = list(primitive(P::Bool));
+    for context in [
+        context.clone(),
+        context.theory_context(),
+        context.theory_in_scope(vec![]),
+    ] {
+        let instance = definition
+            .infer_partial_types_in_context(
+                &[Some(actual.clone())],
+                None,
+                &context,
+                Budget::default(),
+            )
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert_eq!(instance.type_arguments, vec![primitive(P::Bool)]);
+        assert_eq!(instance.result, primitive(P::Bool));
+        assert!(
+            definition
+                .infer_partial_types_in_context(
+                    &[Some(actual.clone())],
+                    Some(&primitive(P::Char)),
+                    &context,
+                    Budget::default()
+                )
+                .and_then(|candidate| candidate.finish())
+                .is_err()
+        );
+    }
+    let mut equality_context = context;
+    equality_context.assume(Formula::Equal(Equality(
+        actual.clone(),
+        list(primitive(P::Char)),
+    )));
+    assert!(!matches!(
+        equality_context.prove(
+            Formula::Equal(Equality(primitive(P::Bool), primitive(P::Char))),
+            Budget::default()
+        ),
+        Outcome::Entailed(_)
+    ));
+    package.normal_forms[0].role = Role::Opaque;
+    let opaque = Context::from_package(&package).unwrap();
+    assert!(
+        definition
+            .infer_partial_types_in_context(&[Some(actual)], None, &opaque, Budget::default())
+            .and_then(|candidate| candidate.finish())
+            .is_err()
+    );
+}

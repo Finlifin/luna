@@ -483,6 +483,7 @@ fn charge_node(
                     | K::PointerType(value)
                     | K::AddressOf(value)
                     | K::ReadPointer(value)
+                    | K::ListLength(value)
                     | K::BitVecType(value)
                     | K::FloatNegate(value)
                     | K::IntegerNegate(value)
@@ -506,7 +507,8 @@ fn charge_node(
                         work.push((Node::Expr(value), depth + 1));
                         0
                     }
-                    K::TypeListIndex(left, right)
+                    K::ListConcat(left, right)
+                    | K::TypeListIndex(left, right)
                     | K::TypeEqual(left, right)
                     | K::TemplateEqual(left, right)
                     | K::ScalarEqual(left, right)

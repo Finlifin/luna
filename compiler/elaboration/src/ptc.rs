@@ -78,6 +78,8 @@ pub struct Context {
     nominal_constructors: Arc<BTreeSet<DeclarationId>>,
     /// Trusted Tuple classification/layout contracts; never body equations.
     tuple_heads: Arc<BTreeSet<DeclarationId>>,
+    /// Candidate-matching metadata only; never a solver injectivity rule.
+    list_inference_heads: Arc<BTreeSet<DeclarationId>>,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Budget {
@@ -179,6 +181,7 @@ impl Context {
             congruence_heads: self.congruence_heads.clone(),
             nominal_constructors: self.nominal_constructors.clone(),
             tuple_heads: self.tuple_heads.clone(),
+            list_inference_heads: self.list_inference_heads.clone(),
         }
     }
     pub fn scope(&self) -> &[Vec<Sort>] {
@@ -186,6 +189,12 @@ impl Context {
     }
     pub(crate) fn admit_tuple_head(&mut self, head: DeclarationId) {
         Arc::make_mut(&mut self.tuple_heads).insert(head);
+    }
+    pub(crate) fn admit_list_inference_head(&mut self, head: DeclarationId) {
+        Arc::make_mut(&mut self.list_inference_heads).insert(head);
+    }
+    pub(crate) fn is_list_inference_head(&self, head: DeclarationId) -> bool {
+        self.list_inference_heads.contains(&head)
     }
     pub(crate) fn is_tuple_head(&self, head: DeclarationId) -> bool {
         self.tuple_heads.contains(&head)
@@ -217,6 +226,9 @@ impl Context {
         }
         for head in &package.normal_forms {
             context.admit_congruence(head.declaration);
+            if head.role == nir::normal_forms::Role::TypeList {
+                context.admit_list_inference_head(head.declaration);
+            }
             if head.role == nir::normal_forms::Role::Tuple {
                 context.admit_tuple_head(head.declaration);
             }
@@ -483,6 +495,7 @@ impl Context {
             congruence_heads: self.congruence_heads.clone(),
             nominal_constructors: self.nominal_constructors.clone(),
             tuple_heads: self.tuple_heads.clone(),
+            list_inference_heads: self.list_inference_heads.clone(),
         }
     }
     pub fn prove(&self, goal: Formula, mut budget: Budget) -> Outcome {

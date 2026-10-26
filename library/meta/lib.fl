@@ -11,6 +11,18 @@ pub pure comptime fn List<T> -> .Type'builtin {
     List<T>
 }
 
+{-
+  Immutable list operations execute at comptime. Concatenation preserves the
+  element domain and order, including empty lists and nested List values.
+-}
+pub pure comptime fn length(values: List<T>) -> .Integer'builtin where T {
+    .list_length'builtin(values)
+}
+
+pub pure comptime fn concat(left: List<T>, right: List<T>) -> List<T> where T {
+    .list_concat'builtin(left, right)
+}
+
 pub mod prelude {
     pub use .List;
     pub use .Object;

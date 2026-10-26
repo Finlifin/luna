@@ -11,6 +11,7 @@ use nir::program::{Expr, ExprKind as K, Function, Literal, LocalId};
 use nir::{Primitive, Sort, Term};
 use std::collections::BTreeSet;
 mod error_values;
+mod lists;
 mod patterns;
 mod preparation;
 pub use preparation::{preparation, preparation_with_layouts};
@@ -2306,6 +2307,9 @@ fn fold_input<'layout>(
     }
     if matches!(expr.kind, K::TypeList(_)) {
         return fold_type_list(heads, expr, fuel, depth);
+    }
+    if matches!(expr.kind, K::ListLength(_) | K::ListConcat(..)) {
+        return lists::fold(heads, expr, fuel, depth);
     }
     if matches!(expr.kind, K::TypeListIndex(..)) {
         return fold_type_list_index(heads, expr, fuel, depth);

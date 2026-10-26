@@ -2533,6 +2533,7 @@ pub(super) fn references(
                 | K::OptionalPresent(value)
                 | K::OptionalType(value)
                 | K::PointerType(value)
+                | K::ListLength(value)
                 | K::BitVecType(value)
                 | K::Loop { body: value, .. } => pending.push(Node::Expr(value)),
                 K::ScalarLess(a, b)
@@ -2542,6 +2543,7 @@ pub(super) fn references(
                 | K::TemplateEqual(a, b)
                 | K::ScalarEqual(a, b)
                 | K::TypeEqual(a, b)
+                | K::ListConcat(a, b)
                 | K::TypeListIndex(a, b)
                 | K::BitEqual(a, b)
                 | K::BitConcat(a, b)

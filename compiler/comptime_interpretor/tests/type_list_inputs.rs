@@ -736,3 +736,116 @@ fn use_local_list_index(package: &mut Package) {
         operand.kind = K::Local(index);
     }
 }
+
+fn list_operation_package(element: P, concat: bool) -> (Package, Term) {
+    let (mut package, list) = fixed_list_read_package(element, 1, "0");
+    let function = &mut package.functions[0];
+    let source = function.body.source;
+    let operand = Expr {
+        source,
+        ty: list.clone(),
+        kind: K::Local(function.parameters[0]),
+    };
+    let result = if concat { list.clone() } else { ty(P::Integer) };
+    let Term::Function { result: output, .. } = &mut function.signature else {
+        unreachable!()
+    };
+    *output = Box::new(result.clone());
+    function.body = Expr {
+        source,
+        ty: result,
+        kind: if concat {
+            K::ListConcat(Box::new(operand.clone()), Box::new(operand))
+        } else {
+            K::ListLength(Box::new(operand))
+        },
+    };
+    (package, list)
+}
+
+#[test]
+fn immutable_list_operations_preserve_types_and_enforce_combined_size_limit() {
+    use comptime_interpretor::ErrorKind;
+    for element in [P::Bool, P::Type] {
+        let (mut package, list) = list_operation_package(element, true);
+        let (length, _) = list_operation_package(element, false);
+        let mut length = length.functions[0].clone();
+        length.declaration = id(4);
+        package.functions.push(length);
+        let argument = |count| {
+            if element == P::Type {
+                Value::TypeList(vec![ty(P::Bool); count])
+            } else {
+                Value::List {
+                    ty: list.clone(),
+                    values: vec![Value::Bool(true); count],
+                }
+            }
+        };
+        let mut vm = Interpreter::for_comptime(
+            &package,
+            Budget {
+                steps: 10_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for count in [0, 1, 20_000] {
+            assert_eq!(
+                vm.invoke(id(3), vec![argument(count)]).unwrap(),
+                argument(count * 2)
+            );
+            assert_eq!(
+                vm.invoke(id(4), vec![argument(count)]).unwrap(),
+                Value::Integer(comptime_runtime::Integer::from_u128(count as u128))
+            );
+        }
+        assert_eq!(
+            vm.invoke(
+                id(3),
+                vec![argument(if element == P::Type { 30_000 } else { 50_001 })]
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::RepresentationSizeLimit
+        );
+        assert_eq!(
+            vm.invoke(id(4), vec![argument(1)]).unwrap(),
+            Value::Integer(comptime_runtime::Integer::from_u128(1))
+        );
+    }
+}
+
+#[test]
+fn list_operations_reject_forged_output_domains_and_honor_vm_budget() {
+    use comptime_interpretor::ErrorKind;
+    for concat in [false, true] {
+        let (mut package, list) = list_operation_package(P::Bool, concat);
+        let argument = Value::List {
+            ty: list,
+            values: vec![Value::Bool(true); 32],
+        };
+        let mut vm = Interpreter::for_comptime(
+            &package,
+            Budget {
+                steps: 32,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            vm.invoke(id(3), vec![argument.clone()]).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+        let mut malformed = package.functions[0].clone();
+        malformed.declaration = id(4);
+        malformed.body.ty = ty(P::Bool);
+        package.functions.push(malformed);
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(id(4), vec![argument.clone()]).unwrap_err().kind,
+            ErrorKind::Type
+        );
+        assert!(vm.invoke(id(3), vec![argument]).is_ok());
+    }
+}

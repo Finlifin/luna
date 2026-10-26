@@ -120,3 +120,38 @@ fn folding_rejects_unbound_heads_and_does_not_skip_unfinished_elements() {
     assert!(fold_value_with_layouts(layouts, &empty, &mut 100_000).is_ok());
     assert!(fold_value_with_layouts(layouts, &index(empty, bool_ty, "0"), &mut 100_000).is_err());
 }
+
+#[test]
+fn list_length_and_concat_fold_with_the_original_nominal_identity() {
+    let heads = [head()];
+    let layouts = Layouts::new(&heads, &[]);
+    for element in [Primitive::Bool, Primitive::Type] {
+        let field = if element == Primitive::Type {
+            expr(
+                Term::Primitive(element),
+                K::TypeValue(Term::Primitive(Primitive::Bool)),
+            )
+        } else {
+            boolean(true)
+        };
+        let values = list(Term::Primitive(element), vec![field]);
+        let joined = expr(
+            values.ty.clone(),
+            K::ListConcat(Box::new(values.clone()), Box::new(values.clone())),
+        );
+        let folded = fold_value_with_layouts(layouts, &joined, &mut 100_000).unwrap();
+        assert_eq!(folded.ty, values.ty);
+        let length = expr(
+            Term::Primitive(Primitive::Integer),
+            K::ListLength(Box::new(joined.clone())),
+        );
+        let folded = fold_value_with_layouts(layouts, &length, &mut 100_000).unwrap();
+        assert!(matches!(folded.kind,K::Literal(Literal::Integer(ref n)) if n=="2"));
+        assert!(joined.to_string().contains("(list-concat"));
+        assert!(length.to_string().contains("(list-length"));
+        assert!(fold_value_with_layouts(layouts, &joined, &mut 1).is_err());
+        let mut bad = length;
+        bad.ty = Term::Primitive(Primitive::Bool);
+        assert!(fold_value_with_layouts(layouts, &bad, &mut 100_000).is_err());
+    }
+}
