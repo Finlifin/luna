@@ -129,8 +129,9 @@ impl Display for Package<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(hir-package\n  (root {})\n  (owners",
-            Owner(self.root_mod)
+            "(hir-package\n  (root {})\n  (next-definition {})\n  (owners",
+            Owner(self.root_mod),
+            self.next_definition_index()
         )?;
         for (id, info) in self.owners() {
             write!(f, "\n    (owner (id {}) (node ", Owner(id))?;

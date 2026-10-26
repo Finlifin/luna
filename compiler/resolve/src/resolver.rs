@@ -30,6 +30,11 @@ pub struct Resolver<'a> {
 }
 
 impl<'a> Resolver<'a> {
+    /// The source scan frontier includes clause parameters and all input files.
+    pub fn next_definition_index(&self) -> u32 {
+        self.tree.def_count
+    }
+
     /// Create a resolver that queries against `tree`.
     pub fn new(tree: &'a ModuleTree) -> Self {
         Self {

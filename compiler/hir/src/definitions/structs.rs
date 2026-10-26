@@ -1,8 +1,43 @@
 //! Assemble completed field Type inputs with canonical owner-local identities.
-use super::{DefinitionNodes, Error, error};
+use super::{DefinitionNodes, Error, charge, error};
 use crate::*;
 use rustc_span::Span;
 use std::{fmt, sync::Arc};
+
+/// Assemble a struct whose fields may depend on declaration-side clauses.
+/// The callback reserves fields directly under the root and registers all
+/// expressions and clauses; this helper registers the returned field nodes.
+/// Nested definitions remain separately owned entries in the publication batch.
+/// No type expression or default is evaluated here. Ordinary elaboration checks
+/// them after publication preparation. Arena and callback effects are not undone.
+pub fn assemble_struct_definition<'hir>(
+    arena: &'hir HirArena,
+    owner: OwnerId,
+    name: Ident,
+    span: Span,
+    fuel: &mut usize,
+    make_struct: impl FnOnce(&mut DefinitionNodes<'hir>, &mut usize) -> Result<StructDef<'hir>, Error>,
+) -> Result<OwnerInfo<'hir>, Error> {
+    let mut nodes = DefinitionNodes::new(owner)?;
+    charge(fuel)?;
+    let definition = make_struct(&mut nodes, fuel)?;
+    for field in definition.fields {
+        if nodes.reserved_parent(field.hir_id) != Some(nodes.root()) {
+            return Err(error("field must be reserved under its definition", owner));
+        }
+        nodes.register(Node::FieldDef(field), fuel)?;
+    }
+    for _ in &definition.nested_items {
+        charge(fuel)?;
+    }
+    let item = arena.alloc_item(Item {
+        owner_id: owner,
+        ident: name,
+        span,
+        kind: ItemKind::Struct(definition),
+    });
+    nodes.finish(item, fuel)
+}
 
 /// A completed field description, not a published member or access permission.
 /// Defaults and contextual code continue to use the general HIR assembly path.

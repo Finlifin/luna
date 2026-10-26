@@ -184,3 +184,53 @@ fn default_failures_leave_existing_batch_editable() {
     batch.publish(&mut 100).unwrap();
     assert_eq!(batch.published().num_defs(), 1);
 }
+
+#[test]
+fn general_struct_assembly_checks_callback_budget_and_field_parent() {
+    use hir::definitions::assemble_struct_definition;
+    let arena = HirArena::new();
+    let owner = OwnerId::new(LocalDefId::new(0));
+    let mut called = false;
+    let error = assemble_struct_definition(&arena, owner, name(), DUMMY_SP, &mut 0, |_, _| {
+        called = true;
+        unreachable!()
+    })
+    .unwrap_err();
+    assert_eq!(error.kind, "budget exhausted");
+    assert!(!called);
+    for valid in [false, true] {
+        let result =
+            assemble_struct_definition(&arena, owner, name(), DUMMY_SP, &mut 100, |nodes, fuel| {
+                let root = nodes.root();
+                let container = nodes.reserve(root, fuel)?;
+                let ty = arena.alloc_expr(Expr {
+                    hir_id: container,
+                    kind: ExprKind::TyVoid,
+                    span: DUMMY_SP,
+                });
+                nodes.register(Node::Expr(ty), fuel)?;
+                let field = nodes.reserve(if valid { root } else { container }, fuel)?;
+                let fields = arena.alloc_field_def_slice([FieldDef {
+                    hir_id: field,
+                    ident: name(),
+                    ty,
+                    default: None,
+                    span: DUMMY_SP,
+                }]);
+                Ok(StructDef {
+                    fields,
+                    clause_params: &[],
+                    clause_constraints: &[],
+                    nested_items: vec![],
+                })
+            });
+        if valid {
+            assert!(result.is_ok());
+        } else {
+            assert_eq!(
+                result.unwrap_err().kind,
+                "field must be reserved under its definition"
+            );
+        }
+    }
+}

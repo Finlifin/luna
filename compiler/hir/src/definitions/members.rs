@@ -4,6 +4,28 @@ use crate::common::FnParam;
 use crate::*;
 use std::collections::BTreeSet;
 
+/// Only declarations introduce clause identities; template links borrow them.
+pub fn clauses<'hir>(item: &Item<'hir>) -> &'hir [ClauseParam<'hir>] {
+    match &item.kind {
+        ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) => {
+            sig.clause_params
+        }
+        ItemKind::Struct(def) => def.clause_params,
+        ItemKind::Enum(def) => def.clause_params,
+        ItemKind::Associated(def) => def.clause_params,
+        ItemKind::Impl(def) => def.clause_params,
+        ItemKind::Trait(def) => def.clause_params,
+        ItemKind::EffectGroup(def) => def.clause_params,
+        ItemKind::TypeAlias(_, params, _) | ItemKind::Newtype(_, params, _) => params,
+        ItemKind::FunctionTemplateInstance { .. }
+        | ItemKind::TestTemplateInstance { .. }
+        | ItemKind::Mod(_)
+        | ItemKind::Use(_)
+        | ItemKind::Const(..)
+        | ItemKind::Invalid => &[],
+    }
+}
+
 pub(super) fn validate(item: &Item<'_>, fuel: &mut usize) -> Result<(), Error> {
     let mut members = Members {
         owner: item.owner_id,
@@ -91,8 +113,19 @@ pub(super) fn validate(item: &Item<'_>, fuel: &mut usize) -> Result<(), Error> {
             return Ok(());
         }
     };
+    // Resolved clause references use DefId rather than HirId. Distinct nodes
+    // must not alias the same substitution slot within a signature.
+    let mut clause_definitions = BTreeSet::new();
     for param in params {
         members.id(param.hir_id)?;
+        if let Some(definition) = param.definition {
+            if !definition.is_valid() || !clause_definitions.insert(definition) {
+                return Err(error(
+                    "invalid or duplicate clause definition identity",
+                    item.owner_id,
+                ));
+            }
+        }
     }
     for constraint in constraints {
         members.id(constraint.hir_id)?;

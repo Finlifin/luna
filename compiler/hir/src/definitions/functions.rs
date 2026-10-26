@@ -110,24 +110,13 @@ fn assemble_callable<'hir>(
             owner,
         ));
     }
-    let mut params = Vec::with_capacity(signature.params.len());
-    for (index, param) in signature.params.iter().enumerate() {
-        charge(fuel)?;
-        if nodes.reserved_parent(param.hir_id) != Some(nodes.root())
-            || param.ty.hir_id != param.hir_id
-            || param.index as usize != index
-        {
-            return Err(error(
-                "function parameter identity or index is inconsistent",
-                owner,
-            ));
-        }
-        params.push(BodyParam::from_fn_param(param));
-    }
-    let params = arena.alloc_param_slice(params);
-    for param in params {
-        nodes.register(Node::Param(param), fuel)?;
-    }
+    let params = super::parameters::register_parameters(
+        arena,
+        &mut nodes,
+        signature.params,
+        fuel,
+        "function parameter identity or index is inconsistent",
+    )?;
     let body = if let Some(value) = value {
         nodes.register(Node::Expr(value), fuel)?;
         Some((BodyId::new(value.hir_id), Body { params, value }))

@@ -94,6 +94,9 @@ pub struct Package<'hir> {
     pub member_access: FxHashMap<HirId, std::sync::Arc<[(symbol::DefId, symbol::DefId)]>>,
     definitions: FxHashMap<symbol::DefId, OwnerId>,
     owner_definitions: FxHashMap<OwnerId, symbol::DefId>,
+    // Counts preserve occupancy when replacing owners from unchecked source HIR.
+    clause_definitions: FxHashMap<symbol::DefId, usize>,
+    next_definition_index: u32,
     /// Lexical definition containing a block-local declaration.
     pub lexical_parents: FxHashMap<OwnerId, OwnerId>,
     pub staged_parameter_definitions: FxHashMap<HirId, symbol::DefId>,
@@ -112,12 +115,25 @@ impl<'hir> Package<'hir> {
             member_access: FxHashMap::default(),
             definitions: FxHashMap::default(),
             owner_definitions: FxHashMap::default(),
+            clause_definitions: FxHashMap::default(),
+            next_definition_index: 0,
             lexical_parents: FxHashMap::default(),
             staged_parameter_definitions: FxHashMap::default(),
         }
     }
 
+    /// Reserve the resolver's full scan prefix, including declarations not yet
+    /// lowered and clause identities that have no HIR owner. Never moves back.
+    pub fn reserve_definition_prefix(&mut self, next: u32) {
+        self.next_definition_index = self.next_definition_index.max(next);
+    }
+
+    pub fn next_definition_index(&self) -> u32 {
+        self.next_definition_index
+    }
+
     pub fn bind_definition(&mut self, definition: symbol::DefId, owner: OwnerId) {
+        self.reserve_definition_prefix(definition.index.saturating_add(1));
         self.definitions.insert(definition, owner);
         self.owner_definitions.insert(owner, definition);
     }
@@ -137,6 +153,26 @@ impl<'hir> Package<'hir> {
 
     pub fn insert_owner(&mut self, owner_id: OwnerId, info: OwnerInfo<'hir>) {
         let def_id = owner_id.def_id;
+        if let Some(previous) = self.item(owner_id) {
+            for parameter in definitions::members::clauses(previous) {
+                if let Some(identity) = parameter.definition {
+                    let count = self
+                        .clause_definitions
+                        .get_mut(&identity)
+                        .expect("indexed clause");
+                    *count -= 1;
+                    if *count == 0 {
+                        self.clause_definitions.remove(&identity);
+                    }
+                }
+            }
+        }
+        for parameter in definitions::members::clauses(info.node.expect_item()) {
+            if let Some(identity) = parameter.definition {
+                self.reserve_definition_prefix(identity.index.saturating_add(1));
+                *self.clause_definitions.entry(identity).or_default() += 1;
+            }
+        }
         self.owners.ensure_contains(def_id);
         self.owners[def_id] = Some(info);
     }

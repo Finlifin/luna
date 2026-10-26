@@ -84,6 +84,7 @@ pub fn lower_to_hir<'hir, 'ast, 'resolver: 'ast>(
     resolver: &'resolver mut Resolver<'resolver>,
     file_scope: ScopeId,
 ) {
+    package.reserve_definition_prefix(resolver.next_definition_index());
     let mut ctx = LoweringContext::new(
         ast, file_id, arena, source_map, diag_ctx, package, resolver, file_scope,
     );

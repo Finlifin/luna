@@ -184,3 +184,77 @@ fn pattern_and_expression_variants_retain_their_distinct_payloads() {
     assert!(dump.contains("pattern\\n\\\""), "{dump}");
     // Assembly alone grants no encoding, coverage or layout validity.
 }
+
+#[test]
+fn complete_enum_assembly_preserves_metadata_and_checks_variant_parent() {
+    use hir::definitions::assemble_enum_definition;
+    let arena = HirArena::new();
+    let mut called = false;
+    let error = assemble_enum_definition(&arena, owner(), ident("E"), DUMMY_SP, &mut 0, |_, _| {
+        called = true;
+        unreachable!()
+    })
+    .unwrap_err();
+    assert_eq!(error.kind, "budget exhausted");
+    assert!(!called);
+    for valid in [false, true] {
+        let result = assemble_enum_definition(
+            &arena,
+            owner(),
+            ident("E"),
+            DUMMY_SP,
+            &mut 100,
+            |nodes, fuel| {
+                let root = nodes.root();
+                let metadata = arena.alloc_expr(Expr {
+                    hir_id: nodes.reserve(root, fuel)?,
+                    kind: ExprKind::Lit(Lit {
+                        kind: LitKind::Bool(true),
+                        span: DUMMY_SP,
+                    }),
+                    span: DUMMY_SP,
+                });
+                nodes.register(Node::Expr(metadata), fuel)?;
+                let variants = arena.alloc_variant_slice([Variant {
+                    hir_id: nodes.reserve(if valid { root } else { metadata.hir_id }, fuel)?,
+                    ident: ident("op"),
+                    kind: VariantKind::Unit,
+                    span: DUMMY_SP,
+                }]);
+                Ok(EnumDef {
+                    is_intrinsic: true,
+                    variants,
+                    configurations: vec![Configuration {
+                        ident: ident("setting"),
+                        value: metadata,
+                        span: DUMMY_SP,
+                    }],
+                    clause_params: &[],
+                    clause_constraints: &[],
+                    nested_items: vec![OwnerId::new(LocalDefId::new(9))],
+                })
+            },
+        );
+        if valid {
+            let info = result.unwrap();
+            let ItemKind::Enum(def) = &info.node.expect_item().kind else {
+                panic!()
+            };
+            assert!(def.is_intrinsic);
+            assert_eq!(def.configurations[0].ident, ident("setting"));
+            assert_eq!(def.nested_items, vec![OwnerId::new(LocalDefId::new(9))]);
+            assert!(matches!(
+                info.nodes
+                    .get(def.variants[0].hir_id.local_id)
+                    .unwrap()
+                    .node,
+                Node::Variant(_)
+            ));
+        } else {
+            assert_eq!(
+                result.unwrap_err().kind,
+                "variant must be reserved under its definition"
+            );
+        }
+    }
+}

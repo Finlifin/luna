@@ -470,3 +470,255 @@ fn generated_attributes_keep_order_and_validate_context_before_publication() {
     );
     assert_eq!(batch.published().definition_attributes.len(), 2);
 }
+
+#[test]
+fn clause_definition_aliases_reject_publication_and_allow_repair() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    let first = DefId::new(0, 100);
+    for second in [Some(first), Some(DefId::INVALID), Some(DefId::new(0, 101))] {
+        let clauses =
+            arena.alloc_clause_param_slice([Some(first), second].into_iter().enumerate().map(
+                |(index, definition)| {
+                    let name =
+                        Ident::new(Symbol::intern(if index == 0 { "T" } else { "U" }), DUMMY_SP);
+                    ClauseParam {
+                        hir_id: HirId::new(owner, ItemLocalId::new(index as u32 + 1)),
+                        definition,
+                        name,
+                        kind: ClauseParamKind::Type(name),
+                        span: DUMMY_SP,
+                    }
+                },
+            ));
+        let mut sig = signature();
+        sig.clause_params = clauses;
+        batch
+            .define(
+                info(&arena, owner, ItemKind::FnDeclaration(sig)),
+                None,
+                None,
+            )
+            .unwrap();
+        if second == Some(DefId::new(0, 101)) {
+            assert_eq!(batch.publish(&mut 100).unwrap(), vec![owner]);
+            assert_eq!(batch.published().num_defs(), 1);
+        } else {
+            assert_eq!(
+                batch.publish(&mut 100).unwrap_err().kind,
+                "invalid or duplicate clause definition identity"
+            );
+            assert_eq!(batch.published().num_defs(), 0);
+        }
+    }
+}
+
+#[test]
+fn clause_identities_are_unique_across_batches_and_owner_declarations() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let first = batch.reserve().unwrap();
+    let second = batch.reserve().unwrap();
+    let make = |owner, identity| {
+        let clauses = arena.alloc_clause_param_slice([ClauseParam {
+            hir_id: HirId::new(owner, ItemLocalId::new(1)),
+            definition: Some(identity),
+            name: Ident::new(Symbol::intern("T"), DUMMY_SP),
+            kind: ClauseParamKind::Type(Ident::new(Symbol::intern("T"), DUMMY_SP)),
+            span: DUMMY_SP,
+        }]);
+        let mut sig = signature();
+        sig.clause_params = clauses;
+        info(&arena, owner, ItemKind::FnDeclaration(sig))
+    };
+    let input = DefId::new(0, 100);
+    batch.define(make(first, input), None, None).unwrap();
+    batch.define(make(second, input), None, None).unwrap();
+    assert_eq!(
+        batch.publish(&mut 100).unwrap_err().kind,
+        "clause definition identity is already declared"
+    );
+    assert_eq!(batch.published().num_defs(), 0);
+    batch
+        .define(make(second, DefId::new(0, 101)), None, None)
+        .unwrap();
+    assert_eq!(batch.publish(&mut 100).unwrap(), vec![first, second]);
+    let third = batch.reserve().unwrap();
+    batch.define(make(third, input), None, None).unwrap();
+    assert_eq!(
+        batch.publish(&mut 100).unwrap_err().kind,
+        "clause definition identity is already declared"
+    );
+    batch
+        .define(module(&arena, third, vec![]), Some(input), None)
+        .unwrap();
+    assert_eq!(
+        batch.publish(&mut 100).unwrap_err().kind,
+        "invalid or duplicate definition identity"
+    );
+    assert_eq!(batch.published().num_defs(), 2);
+    batch
+        .define(
+            make(third, DefId::new(0, 102)),
+            Some(DefId::new(0, 103)),
+            None,
+        )
+        .unwrap();
+    assert_eq!(batch.publish(&mut 0).unwrap_err().kind, "budget exhausted");
+    assert_eq!(batch.published().num_defs(), 2);
+    assert_eq!(batch.publish(&mut 100).unwrap(), vec![third]);
+}
+
+#[test]
+fn repeated_small_publications_do_not_rescan_existing_clauses() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let mut expected_cost = None;
+    for index in 0..256 {
+        let owner = batch.reserve().unwrap();
+        let clauses = arena.alloc_clause_param_slice([ClauseParam {
+            hir_id: HirId::new(owner, ItemLocalId::new(1)),
+            definition: Some(DefId::new(0, 1000 + index)),
+            name: Ident::new(Symbol::intern("T"), DUMMY_SP),
+            kind: ClauseParamKind::Type(Ident::new(Symbol::intern("T"), DUMMY_SP)),
+            span: DUMMY_SP,
+        }]);
+        let mut sig = signature();
+        sig.clause_params = clauses;
+        batch
+            .define(
+                info(&arena, owner, ItemKind::FnDeclaration(sig)),
+                None,
+                None,
+            )
+            .unwrap();
+        let mut fuel = 32;
+        batch.publish(&mut fuel).unwrap();
+        assert_eq!(*expected_cost.get_or_insert(32 - fuel), 32 - fuel);
+    }
+    assert_eq!(batch.published().num_defs(), 256);
+}
+
+#[test]
+fn replacing_source_owners_releases_only_their_clause_identities() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let identity = DefId::new(0, 1000);
+    let first = package.alloc_owner_id();
+    let second = package.alloc_owner_id();
+    for owner in [first, second] {
+        let clauses = arena.alloc_clause_param_slice([ClauseParam {
+            hir_id: HirId::new(owner, ItemLocalId::new(1)),
+            definition: Some(identity),
+            name: Ident::new(Symbol::intern("T"), DUMMY_SP),
+            kind: ClauseParamKind::Type(Ident::new(Symbol::intern("T"), DUMMY_SP)),
+            span: DUMMY_SP,
+        }]);
+        let mut sig = signature();
+        sig.clause_params = clauses;
+        package.insert_owner(owner, info(&arena, owner, ItemKind::FnDeclaration(sig)));
+    }
+    package.insert_owner(first, module(&arena, first, vec![]));
+    {
+        let mut batch = DefinitionBatch::new(&mut package);
+        let owner = batch.reserve().unwrap();
+        batch
+            .define(module(&arena, owner, vec![]), Some(identity), None)
+            .unwrap();
+        assert_eq!(
+            batch.publish(&mut 100).unwrap_err().kind,
+            "invalid or duplicate definition identity"
+        );
+        assert_eq!(batch.published().num_defs(), 2);
+    }
+    package.insert_owner(second, module(&arena, second, vec![]));
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(module(&arena, owner, vec![]), Some(identity), None)
+        .unwrap();
+    assert_eq!(batch.publish(&mut 100).unwrap(), vec![owner]);
+}
+
+#[test]
+fn generated_identities_continue_source_frontier_and_publish_transactionally() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    package.reserve_definition_prefix(200);
+    package.reserve_definition_prefix(10);
+    assert_eq!(package.next_definition_index(), 200);
+    {
+        let mut batch = DefinitionBatch::new(&mut package);
+        assert!(batch.reserve_identity(3, &mut 0).is_err());
+        assert_eq!(
+            batch.reserve_identity(3, &mut 1).unwrap(),
+            DefId::new(3, 200)
+        );
+        assert_eq!(batch.published().next_definition_index(), 200);
+    }
+    let mut batch = DefinitionBatch::new(&mut package);
+    let identity = batch.reserve_identity(3, &mut 1).unwrap();
+    assert_eq!(identity, DefId::new(3, 200));
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(module(&arena, owner, vec![]), Some(identity), None)
+        .unwrap();
+    let before = batch.to_string();
+    let rejected = batch.publish_checked(&mut 100, |_| Err::<(), _>("reject"));
+    assert!(matches!(
+        rejected,
+        Err(hir::definitions::PublicationError::Check("reject"))
+    ));
+    assert_eq!(batch.to_string(), before);
+    assert_eq!(batch.published().next_definition_index(), 200);
+    batch
+        .publish_checked(&mut 100, |_| Ok::<_, ()>(()))
+        .unwrap();
+    assert_eq!(batch.published().next_definition_index(), 201);
+    assert_eq!(
+        batch.reserve_identity(9, &mut 1).unwrap(),
+        DefId::new(9, 201)
+    );
+    drop(batch);
+    let mut next = DefinitionBatch::new(&mut package);
+    assert_eq!(
+        next.reserve_identity(3, &mut 1).unwrap(),
+        DefId::new(3, 201)
+    );
+    next.publish(&mut 100).unwrap();
+    assert_eq!(next.published().next_definition_index(), 202);
+}
+
+#[test]
+fn explicit_draft_identities_advance_allocator_and_exhaustion_never_wraps() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(
+            module(&arena, owner, vec![]),
+            Some(DefId::new(0, 500)),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        batch.reserve_identity(0, &mut 1).unwrap(),
+        DefId::new(0, 501)
+    );
+    batch.publish(&mut 100).unwrap();
+    drop(batch);
+    package.reserve_definition_prefix(u32::MAX);
+    let mut batch = DefinitionBatch::new(&mut package);
+    for _ in 0..2 {
+        assert_eq!(
+            batch.reserve_identity(0, &mut 1).unwrap_err().kind,
+            "definition identity exhausted"
+        );
+    }
+    assert_eq!(batch.published().next_definition_index(), u32::MAX);
+}

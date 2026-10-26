@@ -31,47 +31,7 @@ fn attributes(values: &[DeferredDefinitionAttribute<'_>], fuel: &mut usize) -> R
 
 impl DefinitionBatch<'_, '_> {
     pub(super) fn charge_candidate_copy(&self, fuel: &mut usize) -> Result<(), Error> {
-        // Exhaustive destructuring makes new package tables require an explicit
-        // copying decision here. HashMap clone retains allocated bucket storage;
-        // Vec clone copies its logical elements, including sparse index slots.
-        let Package {
-            owners,
-            bodies,
-            root_mod: _,
-            pending_semantics,
-            definition_attributes,
-            member_projections,
-            deferred_member_projections,
-            member_access,
-            definitions,
-            owner_definitions,
-            lexical_parents,
-            staged_parameter_definitions,
-        } = &*self.package;
-        charge(fuel, 1)?;
-        charge(fuel, owners.len())?;
-        for (_, owner) in owners.iter_enumerated() {
-            if let Some(owner) = owner {
-                charge(fuel, owner.nodes.len())?;
-            }
-        }
-        charge(fuel, bodies.capacity())?;
-        charge(fuel, pending_semantics.len())?;
-        for (_, text) in pending_semantics {
-            charge(fuel, text.len())?;
-        }
-        attributes(definition_attributes, fuel)?;
-        for count in [
-            member_projections.capacity(),
-            deferred_member_projections.capacity(),
-            member_access.capacity(),
-            definitions.capacity(),
-            owner_definitions.capacity(),
-            lexical_parents.capacity(),
-            staged_parameter_definitions.capacity(),
-        ] {
-            charge(fuel, count)?;
-        }
+        charge_package(self.package, fuel)?;
         // Bodies, arena nodes and Arc candidate slices only copy references.
         charge(fuel, self.definitions.len())?;
         for definition in self.definitions.iter().flatten() {
@@ -87,4 +47,52 @@ impl DefinitionBatch<'_, '_> {
         attributes(&self.attributes, fuel)?;
         Ok(())
     }
+}
+
+pub(super) fn charge_package(package: &Package<'_>, fuel: &mut usize) -> Result<(), Error> {
+    // Exhaustive destructuring makes new package tables require an explicit
+    // copying decision here. HashMap clone retains allocated bucket storage;
+    // Vec clone copies its logical elements, including sparse index slots.
+    let Package {
+        owners,
+        bodies,
+        root_mod: _,
+        pending_semantics,
+        definition_attributes,
+        member_projections,
+        deferred_member_projections,
+        member_access,
+        definitions,
+        owner_definitions,
+        clause_definitions,
+        next_definition_index: _,
+        lexical_parents,
+        staged_parameter_definitions,
+    } = package;
+    charge(fuel, 1)?;
+    charge(fuel, owners.len())?;
+    for (_, owner) in owners.iter_enumerated() {
+        if let Some(owner) = owner {
+            charge(fuel, owner.nodes.len())?;
+        }
+    }
+    charge(fuel, bodies.capacity())?;
+    charge(fuel, pending_semantics.len())?;
+    for (_, text) in pending_semantics {
+        charge(fuel, text.len())?;
+    }
+    attributes(definition_attributes, fuel)?;
+    for count in [
+        member_projections.capacity(),
+        deferred_member_projections.capacity(),
+        member_access.capacity(),
+        definitions.capacity(),
+        owner_definitions.capacity(),
+        clause_definitions.capacity(),
+        lexical_parents.capacity(),
+        staged_parameter_definitions.capacity(),
+    ] {
+        charge(fuel, count)?;
+    }
+    Ok(())
 }

@@ -175,3 +175,19 @@ fn sparse_hash_table_capacity_is_charged_even_when_empty() {
         .publish_checked(&mut 10_000, |_| Ok::<_, ()>(()))
         .unwrap();
 }
+
+#[test]
+fn source_candidate_fork_is_budgeted_and_keeps_source_tables_unchanged() {
+    let mut source = Package::new();
+    source.reserve_definition_prefix(100);
+    source.pending_semantics.push((DUMMY_SP, "x".repeat(1024)));
+    let before = source.to_string();
+    assert!(hir::definitions::fork_package(&source, &mut 10).is_err());
+    assert_eq!(source.to_string(), before);
+    let mut candidate = hir::definitions::fork_package(&source, &mut 2000).unwrap();
+    candidate.pending_semantics.clear();
+    candidate.reserve_definition_prefix(300);
+    assert_eq!(source.to_string(), before);
+    assert_eq!(source.next_definition_index(), 100);
+    assert_eq!(candidate.next_definition_index(), 300);
+}

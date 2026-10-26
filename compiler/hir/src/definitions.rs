@@ -8,17 +8,27 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use symbol::DefId;
 mod copy_budget;
-mod members;
+pub(crate) mod members;
+pub use members::clauses as declared_clause_parameters;
 mod nodes;
 pub use nodes::DefinitionNodes;
 mod structs;
-pub use structs::{TypedField, assemble_struct, assemble_struct_with_defaults};
+pub use structs::{
+    TypedField, assemble_struct, assemble_struct_definition, assemble_struct_with_defaults,
+};
 mod implementations;
+mod interfaces;
 pub use implementations::assemble_inherent_impl;
+pub use interfaces::{assemble_impl, assemble_trait};
 mod enums;
-pub use enums::assemble_enum;
+pub use enums::{assemble_enum, assemble_enum_definition};
+mod associated;
 mod functions;
+mod parameters;
+mod types;
+pub use associated::assemble_associated;
 pub use functions::{AssembledFunction, assemble_function, assemble_function_declaration};
+pub use types::{TypeDeclaration, assemble_newtype, assemble_type_alias};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
@@ -48,6 +58,17 @@ fn charge(fuel: &mut usize) -> Result<(), Error> {
         owner: None,
     })?;
     Ok(())
+}
+
+/// Fork package tables while sharing immutable arena nodes. Preflight the copy
+/// budget before allocation; edits to the result cannot mutate cached source
+/// tables. The caller must still check generated definitions before execution.
+pub fn fork_package<'hir>(
+    package: &Package<'hir>,
+    fuel: &mut usize,
+) -> Result<Package<'hir>, Error> {
+    copy_budget::charge_package(package, fuel)?;
+    Ok(package.clone())
 }
 
 #[derive(Clone)]
@@ -90,6 +111,7 @@ impl<E: std::error::Error + 'static> std::error::Error for PublicationError<E> {
 pub struct DefinitionBatch<'package, 'hir> {
     package: &'package mut Package<'hir>,
     base: usize,
+    identity_next: u32,
     definitions: Vec<Option<Definition<'hir>>>,
     bodies: Vec<(BodyId, Body<'hir>)>,
     body_slots: HashMap<BodyId, usize>,
@@ -99,6 +121,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
     pub fn new(package: &'package mut Package<'hir>) -> Self {
         Self {
             base: package.num_defs(),
+            identity_next: package.next_definition_index(),
             package,
             definitions: Vec::new(),
             bodies: Vec::new(),
@@ -123,6 +146,20 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         self.definitions.push(None);
         Ok(OwnerId::new(LocalDefId::new(raw)))
     }
+    /// Reserve a resolver identity for a generated owner or clause. The source
+    /// scan prefix is preserved even for declarations without an HIR owner.
+    /// Failed publication retains reservations; dropping an unpublished batch
+    /// discards them. Never expose draft identities as published definitions.
+    pub fn reserve_identity(&mut self, package: u32, fuel: &mut usize) -> Result<DefId, Error> {
+        charge(fuel)?;
+        let mut allocator = symbol::DefIdGen::from_next_index(package, self.identity_next);
+        let identity = allocator.try_next().ok_or(Error {
+            kind: "definition identity exhausted",
+            owner: None,
+        })?;
+        self.identity_next = allocator.count();
+        Ok(identity)
+    }
     fn slot(&self, owner: OwnerId) -> Option<usize> {
         owner
             .def_id
@@ -144,6 +181,14 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         let slot = self
             .slot(owner)
             .ok_or_else(|| error("owner not reserved in this batch", owner))?;
+        if let Some(identity) = identity {
+            self.identity_next = self.identity_next.max(identity.index.saturating_add(1));
+        }
+        for parameter in members::clauses(info.node.expect_item()) {
+            if let Some(identity) = parameter.definition {
+                self.identity_next = self.identity_next.max(identity.index.saturating_add(1));
+            }
+        }
         self.definitions[slot] = Some(Definition {
             info,
             identity,
@@ -194,6 +239,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         let mut batch = DefinitionBatch {
             package: &mut candidate,
             base: self.base,
+            identity_next: self.identity_next,
             definitions: self.definitions.clone(),
             bodies: self.bodies.clone(),
             body_slots: self.body_slots.clone(),
@@ -301,6 +347,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
             if let Some(identity) = definition.identity {
                 if !identity.is_valid()
                     || self.package.definition_owner(identity).is_some()
+                    || self.package.clause_definitions.contains_key(&identity)
                     || !identities.insert(identity)
                 {
                     return Err(error("invalid or duplicate definition identity", owner));
@@ -332,6 +379,20 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
             }
             let item = definition.info.node.expect_item();
             members::validate(item, fuel)?;
+            for parameter in members::clauses(item) {
+                charge(fuel)?;
+                if let Some(identity) = parameter.definition {
+                    if self.package.definition_owner(identity).is_some()
+                        || self.package.clause_definitions.contains_key(&identity)
+                        || !identities.insert(identity)
+                    {
+                        return Err(error(
+                            "clause definition identity is already declared",
+                            owner,
+                        ));
+                    }
+                }
+            }
             let body = match &item.kind {
                 ItemKind::Fn(_, id)
                 | ItemKind::FunctionTemplateInstance { body: id, .. }
@@ -402,6 +463,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
             .definition_attributes
             .append(&mut self.attributes);
         self.body_slots.clear();
+        self.package.reserve_definition_prefix(self.identity_next);
         self.base = self.package.num_defs();
         Ok(owners)
     }
@@ -419,7 +481,11 @@ fn children<'a>(kind: &'a ItemKind<'_>) -> &'a [OwnerId] {
 }
 impl fmt::Display for DefinitionBatch<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(definition-batch (base {}) (definitions", self.base)?;
+        write!(
+            f,
+            "(definition-batch (base {}) (next-definition {}) (definitions",
+            self.base, self.identity_next
+        )?;
         for (index, definition) in self.definitions.iter().enumerate() {
             write!(f, " (definition (owner {})", self.base + index)?;
             match definition {

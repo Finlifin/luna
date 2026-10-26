@@ -254,7 +254,7 @@ fn empty_and_invalid_packages_are_single_complete_expressions() {
     let mut package = Package::new();
     assert_eq!(
         package.to_string(),
-        "(hir-package\n  (root (owner-id 4294967295))\n  (owners)\n  (bodies) (definitions) (member-projections) (deferred-member-projections) (member-access) (lexical-parents) (staged-parameter-definitions) (definition-attributes) (pending-semantics))"
+        "(hir-package\n  (root (owner-id 4294967295))\n  (next-definition 0)\n  (owners)\n  (bodies) (definitions) (member-projections) (deferred-member-projections) (member-access) (lexical-parents) (staged-parameter-definitions) (definition-attributes) (pending-semantics))"
     );
     let item = Item {
         owner_id: owner(0),
@@ -274,7 +274,7 @@ fn empty_and_invalid_packages_are_single_complete_expressions() {
     assert_eq!(output, package.dump_to_lisp());
     let tree = Sexp::parse(&output);
     assert_eq!(tree.tag(), "hir-package");
-    let item = tree.list()[2].list()[1].field("node");
+    let item = tree.list()[3].list()[1].field("node");
     assert_eq!(item.field("kind").tag(), "invalid");
     item.field("name").field("name").text("bad ) ( name");
     assert_id(item.field("id"), 0, 0);
@@ -413,14 +413,14 @@ fn bodies_and_owners_are_ordered_by_complete_ids_and_only_expanded_in_their_tabl
     }
     assert_eq!(one.to_string(), two.to_string());
     let tree = parsed(&one);
-    let owners = &tree.list()[2].list()[1..];
+    let owners = &tree.list()[3].list()[1..];
     assert_eq!(owners.len(), 2);
     owners[0].field("id").list()[1].atom(7);
     owners[1].field("id").list()[1].atom(9);
     let index = &owners[0].list()[3].list()[1];
     assert_id(index.field("id"), 7, 9);
     assert_id(index.field("parent"), 7, 0);
-    let bodies = &tree.list()[3].list()[1..];
+    let bodies = &tree.list()[4].list()[1..];
     assert_eq!(bodies.len(), 4);
     for (entry, (o, l)) in bodies.iter().zip([(7, 1), (7, 5), (8, 0), (9, 1)]) {
         assert_id(entry.field("id"), o, l);
@@ -1154,7 +1154,7 @@ fn function_signatures_preserve_parameters_flags_clauses_return_binding_and_body
         },
     );
     let tree = parsed(&package);
-    let function = tree.list()[2].list()[1].field("node").field("kind");
+    let function = tree.list()[3].list()[1].field("node").field("kind");
     assert_eq!(function.tag(), "fn");
     assert_id(function.field("body"), 7, 0);
     let signature = function.field("signature");
@@ -1221,7 +1221,7 @@ fn function_signatures_preserve_parameters_flags_clauses_return_binding_and_body
             assert_eq!(constraint.field("kind").field("value"), &parsed(&default));
         }
     }
-    let body = tree.list()[3].list()[1].field("value");
+    let body = tree.list()[4].list()[1].field("value");
     assert_eq!(body.field("value"), &parsed(&default));
     assert_eq!(body.field("params").list().len(), 5);
     for (i, param) in body.field("params").list().iter().enumerate() {
