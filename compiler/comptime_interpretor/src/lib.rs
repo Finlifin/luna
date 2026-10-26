@@ -22,6 +22,8 @@ mod objects;
 pub use objects::ObjectProperty;
 mod generated_structs;
 pub use generated_structs::StructPublicationError;
+mod struct_build;
+pub use struct_build::{PreparedStructBuild, StructBuildRequest};
 mod reflection;
 pub use reflection::{
     CallableReflection, EnumReflection, ReflectedField, ReflectedVariant, StructReflection,
@@ -1182,6 +1184,8 @@ enum PointerCopyPermission<'a> {
 }
 
 pub struct Interpreter<'a> {
+    struct_builder:
+        Option<&'a dyn Fn(&StructBuildRequest, &mut u64) -> Result<PreparedStructBuild<'a>, Error>>,
     declaration_world: Option<&'a Package>,
     target: Option<nir::target::TargetData>,
     effect_declarations: BTreeMap<DeclarationId, &'a nir::effects::Declaration>,
@@ -2003,6 +2007,7 @@ impl<'a> Interpreter<'a> {
             comptime_only: false,
             abstract_type_parameters: BTreeSet::new(),
             abstract_value_parameters: BTreeMap::new(),
+            struct_builder: None,
             type_solver: None,
             pointer_copy: None,
             method_parameters,
@@ -3818,6 +3823,7 @@ impl<'a> Interpreter<'a> {
             K::TypeEqual(..) => self.eval_type_equal(expr, environment),
             K::TemplateEqual(..) => self.eval_template_equal(expr, environment),
             K::ListLength(_) | K::ListConcat(..) => self.eval_list_operation(expr, environment),
+            K::BuildStruct(request) => self.eval_struct_build(expr, request, environment),
             K::StructFieldTypes(_) | K::StructFieldNames(_) => {
                 self.eval_struct_fields(expr, environment)
             }

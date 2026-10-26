@@ -132,6 +132,7 @@ impl<'a> Interpreter<'a> {
             comptime_only: false,
             abstract_type_parameters: BTreeSet::new(),
             abstract_value_parameters: BTreeMap::new(),
+            struct_builder: None,
             type_solver: None,
             pointer_copy: None,
             declaration_parameter_sorts: BTreeMap::new(),

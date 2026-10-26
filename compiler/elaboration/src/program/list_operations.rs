@@ -74,6 +74,64 @@ impl Checker<'_, '_> {
         })
     }
 
+    pub(super) fn build_struct_builtin(
+        &mut self,
+        expr: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        if self.runtime_value_context() || self.in_code_body {
+            return Err(error(
+                expr.span,
+                "struct construction requires comptime invocation",
+            ));
+        }
+        let [
+            Arg::Positional(name),
+            Arg::Positional(names),
+            Arg::Positional(types),
+        ] = args
+        else {
+            return Err(error(
+                expr.span,
+                "struct construction requires name, field names and field Types",
+            ));
+        };
+        let head = self.protocols.meta_list.ok_or_else(|| {
+            error(
+                expr.span,
+                "struct construction requires a bound meta.List<T>",
+            )
+        })?;
+        let list = |element| Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments: vec![p(element)],
+        };
+        let values = vec![
+            self.expr(name, Some(&p(P::Symbol)))?,
+            self.expr(names, Some(&list(P::Symbol)))?,
+            self.expr(types, Some(&list(P::Type)))?,
+        ];
+        let ty = p(if values.iter().any(|value| is_never(&value.ty)) {
+            P::Never
+        } else {
+            P::Type
+        });
+        if let Some(expected) = expected {
+            self.require_expression(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            source: source(expr.span),
+            ty,
+            kind: K::BuildStruct(Box::new(n::Expr {
+                source: source(expr.span),
+                ty: Term::Tuple(values.iter().map(|value| value.ty.clone()).collect()),
+                kind: K::Tuple(values),
+            })),
+        })
+    }
+
     pub(super) fn list_builtin(
         &mut self,
         expr: &Expr<'_>,

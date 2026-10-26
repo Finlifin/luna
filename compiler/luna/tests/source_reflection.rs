@@ -260,3 +260,290 @@ fn source_invocation_retains_generated_descriptors_after_publisher_storage_is_dr
     drop(vm);
     assert!(witness.upgrade().is_none());
 }
+
+#[test]
+fn source_struct_build_uses_checked_publication_without_replaying_argument_effects() {
+    use comptime_interpretor::{PreparedStructBuild, StructBuildRequest};
+    use hir::{HirArena, Ident, Symbol};
+    use rustc_span::DUMMY_SP;
+    use std::{
+        cell::{Cell, RefCell},
+        collections::BTreeMap,
+        sync::Arc,
+    };
+    let package = compile(
+        "
+        typealias Type = .Type'builtin;
+        typealias Integer = .Integer'builtin;
+        comptime fn run() -> bool {
+            var count: Integer = 0;
+            let built = .build_struct'builtin(
+                do { count = count * 10 + 1; .Generated },
+                do { count = count * 10 + 2; [.flag] },
+                do { count = count * 10 + 3; [bool] });
+            count == 123 and meta.struct_field_types(built)[0] == bool
+                and meta.struct_field_names(built)[0] == .flag
+        }
+    ",
+    )
+    .unwrap();
+    assert!(package.to_string().contains("(build-struct "));
+    let entry = package
+        .functions
+        .iter()
+        .find(|item| item.name == "run")
+        .unwrap()
+        .declaration;
+    let arena = HirArena::new();
+    let published = RefCell::new(hir::Package::new());
+    let calls = Cell::new(0);
+    let commits = Cell::new(0);
+    let builder = |request: &StructBuildRequest, steps: &mut u64| {
+        calls.set(calls.get() + 1);
+        assert_eq!(published.borrow().num_defs(), 0);
+        assert!(request.to_string().contains("(name \"Generated\")"));
+        let mut candidate = published.borrow().clone();
+        let mut batch = hir::definitions::DefinitionBatch::new(&mut candidate);
+        let owner = batch.reserve().unwrap();
+        let fields: Vec<_> = request
+            .fields
+            .iter()
+            .map(|field| hir::definitions::TypedField {
+                name: Ident::new(Symbol::intern(&field.name), DUMMY_SP),
+                ty: Arc::new(field.ty.clone()),
+                span: DUMMY_SP,
+            })
+            .collect();
+        let mut fuel = 100_000;
+        let info = hir::definitions::assemble_struct(
+            &arena,
+            owner,
+            Ident::new(Symbol::intern(&request.name), DUMMY_SP),
+            &fields,
+            DUMMY_SP,
+            &mut fuel,
+        )
+        .unwrap();
+        batch.define(info, None, None).unwrap();
+        let (_, checked) = elaboration::definitions::publish_with_invocation_budget(
+            &mut batch,
+            &mut fuel,
+            steps,
+            &BTreeMap::from([(0, 77123)]),
+            &Default::default(),
+            None,
+        )
+        .unwrap();
+        let result = checked.structs[0].declaration;
+        let published = &published;
+        let commits = &commits;
+        Ok(PreparedStructBuild {
+            definitions: checked.structs.into(),
+            result,
+            commit: Box::new(move || {
+                *published.borrow_mut() = candidate;
+                commits.set(commits.get() + 1);
+                Ok(())
+            }),
+        })
+    };
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(&package, Default::default())
+        .unwrap()
+        .with_struct_builder(&builder);
+    assert_eq!(vm.invoke(entry, vec![]).unwrap(), Value::Bool(true));
+    assert_eq!(calls.get(), 1);
+    assert_eq!(commits.get(), 1);
+    assert_eq!(published.borrow().num_defs(), 1);
+}
+
+#[test]
+fn source_struct_build_rejects_runtime_wrong_inputs_and_missing_service() {
+    for source in [
+        "fn bad() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag], [bool])}",
+        "comptime fn Bad() -> .Type'builtin {.build_struct'builtin(true, [.flag], [bool])}",
+        "comptime fn Bad() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag])}",
+    ] {
+        assert!(compile(source).is_err(), "{source}");
+    }
+    let package = compile(
+        "comptime fn Build() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag], [bool])}",
+    )
+    .unwrap();
+    assert!(luna::invocation::invoke(&package, "Build", 500_000).is_err());
+}
+
+#[test]
+fn source_struct_build_rejection_does_not_commit_and_can_retry_in_the_same_vm() {
+    use comptime_interpretor::{Error, ErrorKind, PreparedStructBuild, StructBuildRequest};
+    use std::cell::Cell;
+    let package = compile("
+        comptime fn Build() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag], [bool])}
+        comptime fn Mismatch() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag], [])}
+        comptime fn Duplicate() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag, .flag], [bool, bool])}
+    ").unwrap();
+    let entry = |name| {
+        package
+            .functions
+            .iter()
+            .find(|item| item.name == name)
+            .unwrap()
+            .declaration
+    };
+    let mode = Cell::new(0);
+    let calls = Cell::new(0);
+    let commits = Cell::new(0);
+    let builder = |request: &StructBuildRequest, steps: &mut u64| {
+        calls.set(calls.get() + 1);
+        *steps = steps.saturating_sub(7);
+        let fail = Error {
+            kind: ErrorKind::Type,
+            source: Some(request.source),
+        };
+        if mode.get() == 0 {
+            return Err(fail);
+        }
+        let result = nir::DeclarationId {
+            package: 77124,
+            local: 0,
+        };
+        let definition = nir::program::Struct {
+            declaration: result,
+            name: if mode.get() == 1 {
+                "Wrong".into()
+            } else {
+                request.name.clone()
+            },
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            fields: request
+                .fields
+                .iter()
+                .map(|field| (field.name.clone(), field.ty.clone()))
+                .collect(),
+        };
+        let mode = &mode;
+        let commits = &commits;
+        Ok(PreparedStructBuild {
+            definitions: vec![definition].into(),
+            result,
+            commit: Box::new(move || {
+                if mode.get() == 2 {
+                    return Err(fail);
+                }
+                commits.set(commits.get() + 1);
+                Ok(())
+            }),
+        })
+    };
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(&package, Default::default())
+        .unwrap()
+        .with_struct_builder(&builder);
+    for name in ["Mismatch", "Duplicate"] {
+        assert!(vm.invoke(entry(name), vec![]).is_err());
+    }
+    assert_eq!(calls.get(), 0);
+    for failure in 0..3 {
+        mode.set(failure);
+        let before = vm.remaining_steps();
+        assert!(vm.invoke(entry("Build"), vec![]).is_err());
+        assert!(vm.remaining_steps() < before);
+        assert_eq!(commits.get(), 0);
+    }
+    mode.set(3);
+    let Value::Type(generated) = vm.invoke(entry("Build"), vec![]).unwrap() else {
+        panic!("expected Type")
+    };
+    assert_eq!(
+        vm.reflect_struct(&generated).unwrap().fields[0].name,
+        "flag"
+    );
+    assert_eq!(calls.get(), 4);
+    assert_eq!(commits.get(), 1);
+}
+
+#[test]
+fn source_struct_build_shares_budget_and_does_not_request_after_early_return() {
+    use comptime_interpretor::{PreparedStructBuild, StructBuildRequest};
+    use std::cell::Cell;
+    let package = compile(
+        "
+        comptime fn Build() -> .Type'builtin {.build_struct'builtin(.Generated, [.flag], [bool])}
+        comptime fn early() -> bool {
+            .build_struct'builtin(do {return true;}, [.flag], [bool]); false
+        }
+    ",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "early", 500_000).unwrap(),
+        Value::Bool(true)
+    );
+    let entry = package
+        .functions
+        .iter()
+        .find(|item| item.name == "Build")
+        .unwrap()
+        .declaration;
+    let mode = Cell::new(0);
+    let commits = Cell::new(0);
+    let builder = |request: &StructBuildRequest, steps: &mut u64| {
+        if mode.get() == 2 {
+            panic!("host preparation failed")
+        }
+        *steps = if mode.get() == 0 { 0 } else { u64::MAX };
+        let result = nir::DeclarationId {
+            package: 77125,
+            local: 0,
+        };
+        let definition = nir::program::Struct {
+            declaration: result,
+            name: request.name.clone(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            fields: request
+                .fields
+                .iter()
+                .map(|field| (field.name.clone(), field.ty.clone()))
+                .collect(),
+        };
+        let commits = &commits;
+        Ok(PreparedStructBuild {
+            definitions: vec![definition].into(),
+            result,
+            commit: Box::new(move || {
+                commits.set(commits.get() + 1);
+                Ok(())
+            }),
+        })
+    };
+    for current in 0..3 {
+        mode.set(current);
+        let mut vm = comptime_interpretor::Interpreter::for_comptime(&package, Default::default())
+            .unwrap()
+            .with_struct_builder(&builder);
+        let before = vm.remaining_steps();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.invoke(entry, vec![])));
+        match current {
+            0 => {
+                assert!(result.unwrap().is_err());
+                assert_eq!(commits.get(), 0);
+                assert_eq!(vm.remaining_steps(), 0);
+            }
+            1 => {
+                assert!(result.unwrap().is_ok());
+                assert_eq!(commits.get(), 1);
+                assert!(vm.remaining_steps() < before);
+            }
+            _ => {
+                assert!(result.is_err());
+                assert_eq!(commits.get(), 1);
+                assert_eq!(vm.remaining_steps(), 0);
+            }
+        }
+    }
+}

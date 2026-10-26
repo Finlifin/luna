@@ -3,6 +3,57 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Source requests during an existing invocation
+
+The compiler-private `build_struct` primitive accepts a Symbol name,
+`meta.List<Symbol>` field names and `meta.List<Type>` field descriptions. It
+lowers to a `build-struct` NIR node with an internal argument packet; this packet
+does not define a new source tuple type. Operands execute once in source order,
+and ordinary control flow escapes before any publication request. Runtime and
+quoted runtime contexts reject the primitive. There is no public meta wrapper
+or complete `StructBuilder.new/add_field/build` API yet.
+
+`Interpreter::with_struct_builder` supplies a host service receiving an owned
+`StructBuildRequest` and the remaining invocation allowance. The host reserves
+declaration identities and checks a private candidate through ordinary
+elaboration, then returns `PreparedStructBuild`: shared immutable descriptors,
+the result identity, and a final transactional commit callback. The VM checks
+the response against the requested name and fields, admits the descriptors in
+its live catalog and commits before delivering the Type. It continues the same
+invocation without replaying earlier operands. Duplicate names and mismatched
+list lengths reject before the service; a missing service gives an error.
+
+Host code cannot replenish the VM allowance. Host unwind retains the reserved
+allowance rather than refunding unmeasured work. Descriptor admission and final
+commit failures use the existing rollback path. As with the lower-level API,
+the host callback must not publish external state and then fail. The compiler
+integration test constructs real HIR fields from delivered Types, elaborates a
+private package and publishes it only in the final callback; it does not rebuild
+source text or substitute structural registration for semantic checking.
+
+This implements source-to-host dispatch in a configured NIR comptime VM.
+Ordinary compiler invocation sessions do not yet supply the publisher service;
+typealias initialization cannot use it automatically. Defaults, clauses,
+attributes, methods, other definition kinds and integration with an active
+elaboration session remain open. The SoA example is not yet supported end to end.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test source_reflection --no-fail-fast
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib -p nir --test phases --test type_rewrite --test copy_budget --no-fail-fast
+```
+
+Final source run: 11 tests, exit 0, `/tmp/luna-tools-pi3u_crd/result.json`.
+VM/NIR run: 198 tests, exit 0, `/tmp/luna-tools-heqe0t7l/result.json`.
+Coverage includes ordered single evaluation, real HIR semantic publication,
+immediate reflection in the same invocation, malformed requests, missing host,
+host rejection, mismatched responses, commit failure and same-VM retry. Early
+return bypasses dispatch; zero host budget prevents commit; attempted budget
+replenishment is clamped; host unwind retains the reservation. NIR tests cover
+runtime phase rejection, type rewriting, traversal and bounded copying.
+Targeted rustfmt and `git diff --check` passed.
+
 ## Source struct reflection
 
 `meta.struct_field_types(Type)` and `meta.struct_field_names(Type)` expose the

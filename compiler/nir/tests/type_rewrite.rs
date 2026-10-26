@@ -460,12 +460,12 @@ fn capture_failure_does_not_rewrite_later_captures_or_clone_shared_body() {
 
 #[test]
 fn struct_reflection_rewrites_and_visits_its_subject() {
-    for names in [false, true] {
+    for operation in 0..3 {
         let subject = Box::new(expr(K::TypeValue(rigid())));
-        let mut query = expr(if names {
-            K::StructFieldNames(subject)
-        } else {
-            K::StructFieldTypes(subject)
+        let mut query = expr(match operation {
+            0 => K::StructFieldNames(subject),
+            1 => K::StructFieldTypes(subject),
+            _ => K::BuildStruct(subject),
         });
         let original = query.clone();
         let mut visits = 0;

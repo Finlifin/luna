@@ -1352,24 +1352,27 @@ fn declaration_responsibility_survives_specialization_without_wrapping_its_teles
 
 #[test]
 fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annotation() {
-    for names in [false, true] {
+    for operation in 0..3 {
         let mut f = function(1, Phase::Runtime, &[]);
         let subject = Box::new(Expr {
             source: f.body.source,
             ty: Term::Primitive(Primitive::Type),
             kind: K::TypeValue(Term::Primitive(Primitive::Bool)),
         });
-        f.body.kind = if names {
-            K::StructFieldNames(subject)
-        } else {
-            K::StructFieldTypes(subject)
+        f.body.kind = match operation {
+            0 => K::StructFieldNames(subject),
+            1 => K::StructFieldTypes(subject),
+            _ => K::BuildStruct(subject),
         };
         let mut package = Package {
             functions: vec![f],
             ..Default::default()
         };
         let error = nir::phases::validate(&package).unwrap_err();
-        assert!(error.message.contains("struct reflection"), "{error:?}");
+        assert!(
+            error.message.contains("requires comptime invocation"),
+            "{error:?}"
+        );
         package.functions[0].phase = Phase::Comptime;
         // Phase admission is separate from the VM's result-domain validation.
         nir::phases::validate(&package).unwrap();

@@ -873,6 +873,8 @@ pub enum ExprKind {
     ListLength(Box<Expr>),
     StructFieldTypes(Box<Expr>),
     StructFieldNames(Box<Expr>),
+    /// Compiler-private packet: definition name, field names, field Types.
+    BuildStruct(Box<Expr>),
     /// Ordered concatenation preserving the complete List<T> identity.
     ListConcat(Box<Expr>, Box<Expr>),
     /// A value selected by an interface member. Its declaration identity remains
@@ -3033,6 +3035,7 @@ impl fmt::Display for ExprKind {
             }
             Self::ListLength(values) => write!(f, "(list-length {values})"),
             Self::StructFieldTypes(subject) => write!(f, "(struct-field-types {subject})"),
+            Self::BuildStruct(request) => write!(f, "(build-struct {request})"),
             Self::StructFieldNames(subject) => write!(f, "(struct-field-names {subject})"),
             Self::ListConcat(left, right) => write!(f, "(list-concat {left} {right})"),
             Self::TypeListIndex(values, index) => {
@@ -3379,6 +3382,7 @@ impl Expr {
                     | ExprKind::PointerType(_)
                     | ExprKind::ListLength(_)
                     | ExprKind::StructFieldTypes(_)
+                    | ExprKind::BuildStruct(_)
                     | ExprKind::StructFieldNames(_)
                     | ExprKind::BitVecType(_)
                     | ExprKind::IntegerNegate(_)
@@ -3459,6 +3463,7 @@ impl Expr {
                 | ExprKind::PointerType(value)
                 | ExprKind::ListLength(value)
                 | ExprKind::StructFieldTypes(value)
+                | ExprKind::BuildStruct(value)
                 | ExprKind::StructFieldNames(value)
                 | ExprKind::BitVecType(value)
                 | ExprKind::IntegerNegate(value)
@@ -3838,6 +3843,7 @@ impl Expr {
             | ExprKind::PointerType(value)
             | ExprKind::ListLength(value)
             | ExprKind::StructFieldTypes(value)
+            | ExprKind::BuildStruct(value)
             | ExprKind::StructFieldNames(value)
             | ExprKind::BitVecType(value)
             | ExprKind::IntegerNegate(value)

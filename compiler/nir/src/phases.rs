@@ -1134,11 +1134,13 @@ pub fn machine_arithmetic_functions(
                             }
                             work.push(Work::Expr(condition, false, ct));
                         }
-                        K::StructFieldTypes(value) | K::StructFieldNames(value) => {
+                        K::BuildStruct(value)
+                        | K::StructFieldTypes(value)
+                        | K::StructFieldNames(value) => {
                             if !ct {
                                 return Err(fail(
                                     expr.source,
-                                    "struct reflection requires comptime invocation",
+                                    "struct construction or reflection requires comptime invocation",
                                 ));
                             }
                             work.push(Work::Expr(value, false, true));
