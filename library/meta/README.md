@@ -72,6 +72,9 @@ fn example() -> bool {
 `StructBuilder` 并反射源码结构体。固有方法选择检查完整的同名候选集合，
 不会因准备顺序忽略后面的竞争候选。依赖 trait 选择的计算仍须等待完整实现集合。
 `Once`、`Clone`、`Copy` 等协议仍由普通 impl 提供，生成或反射类型不会自动授予它们。
+早期反射也准备嵌套字段及泛型实参所引用的类型描述，并保留递归指针字段的身份。
+可运行的泛型源类型示例见
+[host-generated-nested-struct.fl](../../development/examples/host-generated-nested-struct.fl)。
 默认类型参数不为任意 `T: Type` 提供字段证据，泛型函数体仍须满足其声明约束。
 字段默认代码、属性、泛型子句、方法和 impl
 的构造尚未接入；这里还不是完整 SoA 示例所需的全部 builder 能力。

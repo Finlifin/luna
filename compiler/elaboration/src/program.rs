@@ -9803,6 +9803,11 @@ impl Checker<'_, '_> {
                                 arguments: terms,
                             })
                         };
+                        if self.in_required_comptime {
+                            if let K::TypeValue(ty) = &kind {
+                                self.ensure_invocation_type(ty, expr.span)?;
+                            }
+                        }
                         return Ok(n::Expr {
                             source: source(expr.span),
                             ty,
@@ -10193,7 +10198,7 @@ impl Checker<'_, '_> {
             if self.in_required_comptime {
                 // Early invocations can transport and reflect a nominal Type
                 // before the ordinary declaration pass has built its descriptor.
-                self.ensure_nominal_type(&value, expr.span)?;
+                self.ensure_invocation_type(&value, expr.span)?;
             }
             return Ok(n::Expr {
                 ty,

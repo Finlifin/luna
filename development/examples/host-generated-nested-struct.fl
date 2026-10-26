@@ -1,0 +1,25 @@
+{-
+  Reflect an applied generic source before implementation subjects are ready.
+  The generated record retains the nested field's nominal identity.
+-}
+use primitives.Type;
+
+struct Payload { enabled: bool }
+struct Source where T { payload: T }
+
+comptime fn Wrapped() -> Type {
+    let types = meta.struct_field_types(Source<Payload>);
+    var builder = meta.StructBuilder.new(.name = .Wrapped);
+    builder.add_field(.payload, types[0]);
+    builder.Build()
+}
+
+typealias Generated = Wrapped();
+
+impl Generated {
+    fn enabled(self) -> bool { self.payload.enabled }
+}
+
+fn run() -> bool {
+    Generated { payload: Payload { enabled: true } }.enabled()
+}

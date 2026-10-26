@@ -21,6 +21,33 @@ fn input(value: Term) -> Input {
 }
 
 #[test]
+fn nominal_dependency_walk_is_bounded_and_keeps_opaque_heads_separate() {
+    use nir::type_computations::nominal_declarations_bounded;
+    use std::collections::BTreeSet;
+    let nominal = DeclarationId {
+        package: 4,
+        local: 7,
+    };
+    let ty = Term::NormalForm {
+        head: target(),
+        sort: Sort::Type,
+        arguments: vec![Term::Pointer(Box::new(Term::Nominal {
+            declaration: nominal,
+            arguments: vec![],
+        }))],
+    };
+    let mut found = BTreeSet::new();
+    assert_eq!(
+        nominal_declarations_bounded(&ty, &mut 1, &mut found),
+        Err(Error::Budget)
+    );
+    found.clear();
+    nominal_declarations_bounded(&ty, &mut 100, &mut found).unwrap();
+    assert_eq!(found, BTreeSet::from([nominal]));
+    assert!(!found.contains(&target()));
+}
+
+#[test]
 fn residuals_keep_stable_binders_and_nested_normal_form_heads() {
     let head = DeclarationId {
         package: 1,

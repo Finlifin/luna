@@ -488,6 +488,20 @@ pub fn has_rigid_parameters_bounded(root: &Term, fuel: &mut usize) -> Result<boo
     Ok(found)
 }
 
+/// Collect nominal identities mentioned structurally, without unfolding opaque
+/// normal-form heads or substituting open parameters. The walk is budgeted.
+pub fn nominal_declarations_bounded(
+    root: &Term,
+    fuel: &mut usize,
+    declarations: &mut BTreeSet<DeclarationId>,
+) -> Result<(), Error> {
+    visit_expanded_term(root, fuel, 128, &BTreeMap::new(), &mut |term| {
+        if let Term::Nominal { declaration, .. } = term {
+            declarations.insert(*declaration);
+        }
+    })
+}
+
 fn visit_expanded_term(
     root: &Term,
     fuel: &mut usize,

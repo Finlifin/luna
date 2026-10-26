@@ -43,6 +43,11 @@ MATH_OPTIONS = tuple(argument for operation in MATH_OPERATIONS
                      for argument in ('--host-intrinsic',
                                       f'{operation}=math.target.Scalar.{operation}'))
 EXAMPLES = {
+    'generated-nested-struct': Example('(bool true)',
+        ('--meta-list-type', 'meta.List',
+         '--copy-protocol', 'resources.Copy', '--drop-protocol', 'resources.Drop'),
+        (('meta', 'library/meta/lib.fl'), ('resources', 'library/builtin/resources.fl'),
+         ('primitives', 'library/builtin/primitives.fl'))),
     'generated-struct-methods': Example('(bool true)',
         ('--meta-list-type', 'meta.List',
          '--copy-protocol', 'resources.Copy', '--drop-protocol', 'resources.Drop'),

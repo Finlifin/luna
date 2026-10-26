@@ -646,6 +646,69 @@ impl Checker<'_, '_> {
         result
     }
 
+    /// Execution can inspect nested types before the global declaration pass.
+    /// Close only the reachable descriptor graph, retaining nominal identities
+    /// and stopping at already visited declarations, including pointer cycles.
+    pub(super) fn ensure_invocation_type(&mut self, ty: &Term, span: Span) -> Result<(), Error> {
+        let mut pending = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let result =
+            nir::type_computations::nominal_declarations_bounded(ty, &mut fuel, &mut pending);
+        self.required_steps -= (before - fuel) as u64;
+        result.map_err(|failure| error(span, failure.to_string()))?;
+        while let Some(id) = pending.pop_first() {
+            if !seen.insert(id) {
+                continue;
+            }
+            self.ensure_nominal_type(
+                &Term::Nominal {
+                    declaration: id,
+                    arguments: vec![],
+                },
+                span,
+            )?;
+            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let before = fuel;
+            let result = (|| {
+                let mut collect = |ty: &Term| {
+                    nir::type_computations::nominal_declarations_bounded(
+                        ty,
+                        &mut fuel,
+                        &mut pending,
+                    )
+                };
+                if let Some(definition) = self.structs.get(&id) {
+                    for ty in &definition.parameter_types {
+                        collect(ty)?;
+                    }
+                    for (_, ty) in &definition.fields {
+                        collect(ty)?;
+                    }
+                } else if let Some(definition) = self.enums.get(&id) {
+                    for ty in &definition.parameter_types {
+                        collect(ty)?;
+                    }
+                    for variant in &definition.variants {
+                        for ty in &variant.fields {
+                            collect(ty)?;
+                        }
+                    }
+                } else if let Some(definition) = self.newtypes.get(&id) {
+                    for ty in &definition.parameter_types {
+                        collect(ty)?;
+                    }
+                    collect(&definition.representation)?;
+                }
+                Ok::<_, nir::type_computations::Error>(())
+            })();
+            self.required_steps -= (before - fuel) as u64;
+            result.map_err(|failure| error(span, failure.to_string()))?;
+        }
+        Ok(())
+    }
+
     pub(super) fn ensure_nominal_type(&mut self, ty: &Term, span: Span) -> Result<(), Error> {
         let Term::Nominal {
             declaration: id, ..

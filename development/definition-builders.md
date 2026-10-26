@@ -8,6 +8,33 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Nested descriptors during early reflection
+
+Required Type expressions now prepare the reachable nominal descriptor graph,
+including nested fields, applied type arguments, parameter domains, enum payloads
+and newtype representations. A budgeted structural walk collects nominal identities;
+normal-form heads remain opaque. Each declaration is visited once per preparation,
+so recursive pointer fields terminate without erasing their type identity. Both
+ordinary Type expressions and literal generic applications use this preparation.
+
+The regression originally failed when reflecting `Source { inner: Inner }` before
+the impl world was ready (`/tmp/luna-tools-yn9ruwv9/result.json`). It now executes a
+generated record's nested field read, including the `Generic<Inner>` source variant.
+A separate case reflects and republishes a pointer to a recursively defined Node.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna
+  --test builder_invocations --test elaboration --no-fail-fast`: exit 0,
+  33 builder and 450 elaboration tests (`/tmp/luna-tools-uowt2255/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test --release -p nir
+  --test type_computations`: exit 0, 14 tests including budget exhaustion and
+  opaque-head separation (`/tmp/luna-tools-6upujtoh/result.json`).
+- `python3 -B development/host_examples.py generated-nested-struct
+  generated-struct-methods --release-driver --compare-optimization`: exit 0,
+  both examples return `(bool true)` at LLVM O0 and O3
+  (`/tmp/luna-host-examples-k55gkfhk`).
+
 ## Generated types as ordinary implementation subjects
 
 An impl head can now demand a Type produced through public `meta.StructBuilder`

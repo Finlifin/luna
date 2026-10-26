@@ -1079,6 +1079,59 @@ fn public_builder_operations_can_run_while_preparing_impl_subjects() {
 }
 
 #[test]
+fn early_public_builder_reflects_nested_and_applied_source_types() {
+    for source in ["Source", "Generic<Inner>"] {
+        let fixture = Fixture::new(&format!(
+            "typealias Type = .Type'builtin;
+            struct Inner {{flag:bool}}
+            struct Source {{inner:Inner}}
+            struct Generic where T {{inner:T}}
+            comptime fn Generate() -> Type {{
+                let types = meta.struct_field_types({source});
+                var builder = meta.StructBuilder.new();
+                builder.add_field(.inner, types[0]);
+                builder.Build()
+            }}
+            typealias Generated = Generate();
+            impl Generated {{fn read(self) -> bool {{self.inner.flag}}}}
+            fn run() -> bool {{Generated {{inner:Inner {{flag:true}}}}.read()}}
+            comptime fn inspect() -> bool {{true}}"
+        ));
+        let (Artifact::Nir(package), _, _) = fixture
+            .invoke_meta("inspect")
+            .unwrap_or_else(|error| panic!("{source}: {error}"))
+        else {
+            panic!("expected NIR")
+        };
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn early_public_builder_preserves_recursive_pointer_field_identity() {
+    let fixture = Fixture::new(
+        "typealias Type = .Type'builtin;
+        struct Node {next:?*Node}
+        struct Source {node:*Node}
+        comptime fn Generate() -> Type {
+            var builder = meta.StructBuilder.new();
+            builder.add_field(.node, meta.struct_field_types(Source)[0]);
+            builder.Build()
+        }
+        typealias Generated = Generate();
+        impl Generated {fn marker(*self) -> bool {true}}
+        comptime fn inspect() -> bool {
+            meta.struct_field_types(Generated)[0] == *Node
+        }",
+    );
+    let (_, observed, _) = fixture.invoke_meta("inspect").unwrap();
+    assert_eq!(observed, Value::Bool(true));
+}
+
+#[test]
 fn deferred_annotations_publish_once_per_formed_domain() {
     let fixture = Fixture::new(&format!(
         "{PREFIX}
