@@ -1135,12 +1135,13 @@ pub fn machine_arithmetic_functions(
                             work.push(Work::Expr(condition, false, ct));
                         }
                         K::BuildStruct(value)
+                        | K::BuildEnum(value)
                         | K::StructFieldTypes(value)
                         | K::StructFieldNames(value) => {
                             if !ct {
                                 return Err(fail(
                                     expr.source,
-                                    "struct construction or reflection requires comptime invocation",
+                                    "definition construction or struct reflection requires comptime invocation",
                                 ));
                             }
                             work.push(Work::Expr(value, false, true));

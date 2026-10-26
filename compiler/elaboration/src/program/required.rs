@@ -2593,6 +2593,7 @@ pub(super) fn references(
                 | K::ListLength(value)
                 | K::StructFieldTypes(value)
                 | K::BuildStruct(value)
+                | K::BuildEnum(value)
                 | K::StructFieldNames(value)
                 | K::BitVecType(value)
                 | K::Loop { body: value, .. } => pending.push(Node::Expr(value)),

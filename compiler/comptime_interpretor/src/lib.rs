@@ -1191,6 +1191,8 @@ enum PointerCopyPermission<'a> {
 }
 
 pub struct Interpreter<'a> {
+    enum_builder:
+        Option<&'a dyn Fn(&EnumBuildRequest, &mut u64) -> Result<PreparedEnumBuild<'a>, Error>>,
     struct_builder:
         Option<&'a dyn Fn(&StructBuildRequest, &mut u64) -> Result<PreparedStructBuild<'a>, Error>>,
     declaration_world: Option<&'a Package>,
@@ -2021,6 +2023,7 @@ impl<'a> Interpreter<'a> {
             abstract_type_parameters: BTreeSet::new(),
             abstract_value_parameters: BTreeMap::new(),
             struct_builder: None,
+            enum_builder: None,
             type_solver: None,
             pointer_copy: None,
             method_parameters,
@@ -3837,6 +3840,7 @@ impl<'a> Interpreter<'a> {
             K::TemplateEqual(..) => self.eval_template_equal(expr, environment),
             K::ListLength(_) | K::ListConcat(..) => self.eval_list_operation(expr, environment),
             K::BuildStruct(request) => self.eval_struct_build(expr, request, environment),
+            K::BuildEnum(request) => self.eval_enum_build(expr, request, environment),
             K::StructFieldTypes(_) | K::StructFieldNames(_) => {
                 self.eval_struct_fields(expr, environment)
             }

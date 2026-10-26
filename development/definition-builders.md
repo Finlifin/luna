@@ -8,6 +8,41 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Enum construction in NIR and the comptime VM
+
+`ExprKind::BuildEnum` is a comptime operation with an explicit S-expression dump.
+Copy budgeting, type rewriting, expression visitors, materialization, required
+invocation dependency traversal and verification operand traversal preserve its
+request. Phase validation rejects it in runtime bodies even if its result has been
+misannotated as a runtime type. IIR interpreters have no enum builder configured.
+
+The internal request operand evaluates once to a tuple of enum name, group names,
+variant names, shape symbols, lists of field names and lists of field Types.
+Shape symbols are `unit`, `tuple` and `named`; their field constraints remain
+separate. Lists retain the ordinary meta.List normal-form identity. Evaluation
+propagates early control flow before invoking the host. The VM checks list domains,
+parallel lengths, duplicate variant/field names and formed payload Types before
+calling its `with_enum_builder` callback.
+
+The callback borrows the VM allowance and cannot replenish it. Its result identity
+must name a returned descriptor matching the requested name, groups, shapes and
+payloads; comparison work is charged before walking those trees. The VM then uses
+transactional enum installation, so a failed host commit removes the tentative
+descriptors. This adds executable IR support, not source dispatch: the frontend
+builtin and public meta.EnumBuilder still need connection.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p comptime_interpretor -p nir -p elaboration -p luna --lib
+--test phases --test type_rewrite --test copy_budget
+--test allocated_definition_publisher --test builder_invocations
+--test source_reflection`, exit 0, 610 tests
+(`/tmp/luna-tools-99rtg0t8/result.json`). New VM cases cover installation and
+reflection, shape/runtime rejection without host calls, mismatched host output,
+failed commit rollback, early return and attempted host budget refund. NIR
+regressions also visit/rewrite/copy the new node and reject runtime placement.
+Initial checks found a missing IIR interpreter field initialization and a test
+import; both were fixed before this passing run. Formatting and diff checks pass.
+
 ## Shared request assembly and identity allocation
 
 `EnumBuildRequest` retains the enum name, ordered groups and ordered variants with

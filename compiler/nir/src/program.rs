@@ -875,6 +875,7 @@ pub enum ExprKind {
     StructFieldNames(Box<Expr>),
     /// Compiler-private packet: definition name, field names, field Types.
     BuildStruct(Box<Expr>),
+    BuildEnum(Box<Expr>),
     /// Ordered concatenation preserving the complete List<T> identity.
     ListConcat(Box<Expr>, Box<Expr>),
     /// A value selected by an interface member. Its declaration identity remains
@@ -3039,6 +3040,7 @@ impl fmt::Display for ExprKind {
             Self::ListLength(values) => write!(f, "(list-length {values})"),
             Self::StructFieldTypes(subject) => write!(f, "(struct-field-types {subject})"),
             Self::BuildStruct(request) => write!(f, "(build-struct {request})"),
+            Self::BuildEnum(request) => write!(f, "(build-enum {request})"),
             Self::StructFieldNames(subject) => write!(f, "(struct-field-names {subject})"),
             Self::ListConcat(left, right) => write!(f, "(list-concat {left} {right})"),
             Self::TypeListIndex(values, index) => {
@@ -3393,6 +3395,7 @@ impl Expr {
                     | ExprKind::ListLength(_)
                     | ExprKind::StructFieldTypes(_)
                     | ExprKind::BuildStruct(_)
+                    | ExprKind::BuildEnum(_)
                     | ExprKind::StructFieldNames(_)
                     | ExprKind::BitVecType(_)
                     | ExprKind::IntegerNegate(_)
@@ -3474,6 +3477,7 @@ impl Expr {
                 | ExprKind::ListLength(value)
                 | ExprKind::StructFieldTypes(value)
                 | ExprKind::BuildStruct(value)
+                | ExprKind::BuildEnum(value)
                 | ExprKind::StructFieldNames(value)
                 | ExprKind::BitVecType(value)
                 | ExprKind::IntegerNegate(value)
@@ -3854,6 +3858,7 @@ impl Expr {
             | ExprKind::ListLength(value)
             | ExprKind::StructFieldTypes(value)
             | ExprKind::BuildStruct(value)
+            | ExprKind::BuildEnum(value)
             | ExprKind::StructFieldNames(value)
             | ExprKind::BitVecType(value)
             | ExprKind::IntegerNegate(value)

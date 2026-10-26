@@ -486,6 +486,7 @@ fn charge_node(
                     | K::ListLength(value)
                     | K::StructFieldTypes(value)
                     | K::BuildStruct(value)
+                    | K::BuildEnum(value)
                     | K::StructFieldNames(value)
                     | K::BitVecType(value)
                     | K::FloatNegate(value)

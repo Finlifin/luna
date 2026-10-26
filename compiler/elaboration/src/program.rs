@@ -12009,6 +12009,7 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::ListLength(_)
         | K::StructFieldTypes(_)
         | K::BuildStruct(_)
+        | K::BuildEnum(_)
         | K::StructFieldNames(_)
         | K::ListConcat(..)
         | K::TypeListIndex(..)

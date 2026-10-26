@@ -1352,7 +1352,7 @@ fn declaration_responsibility_survives_specialization_without_wrapping_its_teles
 
 #[test]
 fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annotation() {
-    for operation in 0..3 {
+    for operation in 0..4 {
         let mut f = function(1, Phase::Runtime, &[]);
         let subject = Box::new(Expr {
             source: f.body.source,
@@ -1362,7 +1362,8 @@ fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annot
         f.body.kind = match operation {
             0 => K::StructFieldNames(subject),
             1 => K::StructFieldTypes(subject),
-            _ => K::BuildStruct(subject),
+            2 => K::BuildStruct(subject),
+            _ => K::BuildEnum(subject),
         };
         let mut package = Package {
             functions: vec![f],
