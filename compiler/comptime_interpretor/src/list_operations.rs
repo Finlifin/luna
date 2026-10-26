@@ -30,6 +30,50 @@ impl Interpreter<'_> {
         {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
+        if right.is_none()
+            && self.comptime_only
+            && self.cleanup_schedule.is_none()
+            && let K::Local(binding) = left.kind
+        {
+            // Inputs and constructed lists have already passed admission.
+            // A length observation cannot mutate this immutable representation
+            // and does not deliver or copy any element. Keep the local read's
+            // tick and storage-lock diagnostics, but avoid its full snapshot.
+            self.tick(Some(left.source))?;
+            let local = environment
+                .get(&binding)
+                .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(left.source)))?;
+            let storage = if let Value::Storage(storage) = local {
+                Some(
+                    storage
+                        .0
+                        .try_lock()
+                        .map_err(|_| self.failure(ErrorKind::InvalidPointer, Some(left.source)))?,
+                )
+            } else {
+                None
+            };
+            let value = storage.as_deref().unwrap_or(local);
+            // Comparing the nominal List<T> identity can itself inspect a
+            // large T. Meter that description without walking list elements.
+            let work = self
+                .type_description_work(&left.ty)
+                .ok_or_else(|| self.failure(ErrorKind::Type, Some(left.source)))?;
+            self.integer_operation(Some(left.source), |budget| budget.consume(work))?;
+            let length = match value {
+                Value::TypeList(values) if self.is_type_list_input(&left.ty) => values.len(),
+                Value::List { ty, values }
+                    if *ty == left.ty
+                        && self.list_element(ty).is_some_and(|element| {
+                            *element != Term::Primitive(Primitive::Type)
+                        }) =>
+                {
+                    values.len()
+                }
+                _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
+            };
+            return self.list_length_value(length, expr.source);
+        }
         let mut value = match self.eval(left, environment)? {
             Flow::Value(value) => value,
             flow => return Ok(flow),
@@ -41,11 +85,7 @@ impl Interpreter<'_> {
             _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
         };
         let Some(right) = right else {
-            let count = self.integer_operation(Some(expr.source), |budget| {
-                budget.consume(1)?;
-                Ok(comptime_runtime::Integer::from_u128(length as u128))
-            })?;
-            return Ok(Flow::Value(Value::Integer(count)));
+            return self.list_length_value(length, expr.source);
         };
         let other = match self.eval(right, environment)? {
             Flow::Value(value) => value,
@@ -82,5 +122,13 @@ impl Interpreter<'_> {
             .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(expr.source)))?;
         self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
         Ok(Flow::Value(value))
+    }
+
+    fn list_length_value(&mut self, length: usize, source: SourceRange) -> Result<Flow, Error> {
+        let count = self.integer_operation(Some(source), |budget| {
+            budget.consume(1)?;
+            Ok(comptime_runtime::Integer::from_u128(length as u128))
+        })?;
+        Ok(Flow::Value(Value::Integer(count)))
     }
 }

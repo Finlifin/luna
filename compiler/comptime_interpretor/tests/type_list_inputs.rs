@@ -849,3 +849,268 @@ fn list_operations_reject_forged_output_domains_and_honor_vm_budget() {
         assert!(vm.invoke(id(3), vec![argument]).is_ok());
     }
 }
+
+fn repeated_list_lengths(
+    element: P,
+    reads: usize,
+    storage: bool,
+    general: bool,
+) -> (Package, Term) {
+    let (mut package, list) = list_operation_package(element, false);
+    let function = &mut package.functions[0];
+    let source = function.body.source;
+    let mut read = function.body.clone();
+    if general {
+        let K::ListLength(value) = &mut read.kind else {
+            unreachable!()
+        };
+        **value = Expr {
+            source,
+            ty: list.clone(),
+            kind: K::Block {
+                statements: vec![],
+                result: Some(value.clone()),
+            },
+        };
+    }
+    let mut statements = Vec::new();
+    if storage {
+        statements.push(Expr {
+            source,
+            ty: Term::Pointer(Box::new(list.clone())),
+            kind: K::AddressOf(Box::new(Expr {
+                source,
+                ty: list.clone(),
+                kind: K::Local(function.parameters[0]),
+            })),
+        });
+    }
+    statements.extend(vec![read.clone(); reads - 1]);
+    function.body = Expr {
+        source,
+        ty: ty(P::Integer),
+        kind: K::Block {
+            statements,
+            result: Some(Box::new(read)),
+        },
+    };
+    (package, list)
+}
+
+#[test]
+fn repeated_list_lengths_charge_the_observation_not_every_element() {
+    for element in [P::Bool, P::Type] {
+        for storage in [false, true] {
+            let run = |length, reads, general| {
+                let (package, list) = repeated_list_lengths(element, reads, storage, general);
+                let argument = if element == P::Type {
+                    Value::TypeList(vec![ty(P::Bool); length])
+                } else {
+                    Value::List {
+                        ty: list,
+                        values: vec![Value::Bool(true); length],
+                    }
+                };
+                let mut vm = Interpreter::for_comptime(
+                    &package,
+                    Budget {
+                        steps: 10_000_000,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let before = vm.remaining_steps();
+                assert_eq!(
+                    vm.invoke(id(3), vec![argument]).unwrap(),
+                    Value::Integer(comptime_runtime::Integer::from_u128(length as u128))
+                );
+                before - vm.remaining_steps()
+            };
+            let small = run(1, 64, false) - run(1, 1, false);
+            let large = run(4096, 64, false) - run(4096, 1, false);
+            assert_eq!(small, large, "{element:?} storage={storage}");
+            assert!(large > 0 && large < 1000, "{large}");
+            assert!(run(4096, 64, true) > run(4096, 64, false));
+            assert!(run(0, 64, false) > 0);
+        }
+    }
+}
+
+#[test]
+fn list_length_does_not_accept_a_local_with_a_different_element_domain() {
+    use comptime_interpretor::ErrorKind;
+    for element in [P::Bool, P::Type] {
+        for general in [false, true] {
+            let (mut package, list) = list_operation_package(element, false);
+            let mut malformed = package.functions[0].clone();
+            malformed.declaration = id(4);
+            let K::ListLength(operand) = &mut malformed.body.kind else {
+                unreachable!()
+            };
+            let forged = Term::NormalForm {
+                head: id(1),
+                sort: Sort::Type,
+                arguments: vec![ty(P::Char)],
+            };
+            operand.ty = forged.clone();
+            if general {
+                **operand = Expr {
+                    source: operand.source,
+                    ty: forged,
+                    kind: K::Block {
+                        statements: vec![],
+                        result: Some(operand.clone()),
+                    },
+                };
+            }
+            package.functions.push(malformed);
+            let argument = if element == P::Type {
+                Value::TypeList(vec![ty(P::Bool)])
+            } else {
+                Value::List {
+                    ty: list,
+                    values: vec![Value::Bool(true)],
+                }
+            };
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            assert_eq!(
+                vm.invoke(id(4), vec![argument.clone()]).unwrap_err().kind,
+                ErrorKind::Type
+            );
+            assert_eq!(
+                vm.invoke(id(3), vec![argument]).unwrap(),
+                Value::Integer(comptime_runtime::Integer::from_u128(1))
+            );
+        }
+    }
+}
+
+#[test]
+fn list_length_observes_replacement_and_runs_general_operand_effects() {
+    use nir::program::{Literal, Place};
+    for element in [P::Bool, P::Type] {
+        for storage in [false, true] {
+            for general in [false, true] {
+                let (mut package, list) = repeated_list_lengths(element, 1, storage, false);
+                let function = &mut package.functions[0];
+                let source = function.body.source;
+                let replacement = Expr {
+                    source,
+                    ty: list.clone(),
+                    kind: if element == P::Type {
+                        K::TypeListValue(vec![ty(P::Bool), ty(P::Char)])
+                    } else {
+                        K::TypeList(vec![
+                            Expr {
+                                source,
+                                ty: ty(P::Bool),
+                                kind: K::Literal(Literal::Bool(false))
+                            };
+                            2
+                        ])
+                    },
+                };
+                let assignment = Expr {
+                    source,
+                    ty: ty(P::Void),
+                    kind: K::Assign {
+                        place: Place {
+                            root: function.parameters[0],
+                            fields: vec![],
+                        },
+                        value: Box::new(replacement),
+                    },
+                };
+                let K::Block {
+                    statements,
+                    result: Some(result),
+                } = &mut function.body.kind
+                else {
+                    unreachable!()
+                };
+                if general {
+                    let K::ListLength(operand) = &mut result.kind else {
+                        unreachable!()
+                    };
+                    **operand = Expr {
+                        source,
+                        ty: list.clone(),
+                        kind: K::Block {
+                            statements: vec![assignment],
+                            result: Some(operand.clone()),
+                        },
+                    };
+                } else {
+                    statements.push(assignment);
+                }
+                let argument = if element == P::Type {
+                    Value::TypeList(vec![ty(P::Bool)])
+                } else {
+                    Value::List {
+                        ty: list,
+                        values: vec![Value::Bool(true)],
+                    }
+                };
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                assert_eq!(
+                    vm.invoke(id(3), vec![argument]).unwrap(),
+                    Value::Integer(comptime_runtime::Integer::from_u128(2))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn local_list_length_still_charges_large_element_type_descriptions() {
+    let run = |width, reads| {
+        let (mut package, _) = repeated_list_lengths(P::Bool, reads, false, false);
+        let element = Term::Tuple(vec![ty(P::Bool); width]);
+        let list = Term::NormalForm {
+            head: id(1),
+            sort: Sort::Type,
+            arguments: vec![element],
+        };
+        let function = &mut package.functions[0];
+        let Term::Function { parameters, .. } = &mut function.signature else {
+            unreachable!()
+        };
+        parameters[0].ty = list.clone();
+        let K::Block { statements, result } = &mut function.body.kind else {
+            unreachable!()
+        };
+        for read in statements
+            .iter_mut()
+            .chain(result.iter_mut().map(Box::as_mut))
+        {
+            let K::ListLength(operand) = &mut read.kind else {
+                unreachable!()
+            };
+            operand.ty = list.clone();
+        }
+        let mut vm = Interpreter::for_comptime(
+            &package,
+            Budget {
+                steps: 10_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let before = vm.remaining_steps();
+        assert_eq!(
+            vm.invoke(
+                id(3),
+                vec![Value::List {
+                    ty: list,
+                    values: vec![]
+                }]
+            )
+            .unwrap(),
+            Value::Integer(comptime_runtime::Integer::from_u128(0))
+        );
+        before - vm.remaining_steps()
+    };
+    let small = run(1, 64) - run(1, 1);
+    let large = run(4096, 64) - run(4096, 1);
+    assert!(large > small + 200_000, "{small} -> {large}");
+}

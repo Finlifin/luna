@@ -15,3 +15,7 @@ harness = false
 [[bench]]
 name = "type_list_index"
 harness = false
+
+[[bench]]
+name = "list_length"
+harness = false
