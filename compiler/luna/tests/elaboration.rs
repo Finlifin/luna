@@ -969,6 +969,21 @@ fn struct_definition_checks_defaults_duplicate_fields_and_recursive_storage() {
 }
 
 #[test]
+fn recursive_storage_inside_optional_is_rejected_before_lowering() {
+    rejected("struct Node { next: ?Node }", "recursive by-value");
+    rejected(
+        "struct A { next: ?B } struct B { next: A }",
+        "recursive by-value",
+    );
+    rejected(
+        "struct Node where T { next: ?Node<T> }",
+        "recursive by-value",
+    );
+    accepted("struct Node { next: ?*Node }");
+    accepted("struct Node { next: fn() -> Node }");
+}
+
+#[test]
 fn let_reassignment_is_rejected_but_var_and_field_writes_are_distinct() {
     rejected(
         "fn run() { let value = true; value = false; }",

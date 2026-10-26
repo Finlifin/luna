@@ -3,6 +3,39 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Shared representation validation
+
+`elaboration::representations::Checker` checks completed struct, enum and
+newtype descriptions against an immutable borrowed world. Source elaboration
+and the current HIR builder publisher use this same boundary. The check follows
+by-value optional payloads, anonymous records, error-result branches and closure
+environments, in addition to nominal fields and the configured Tuple head.
+Pointers and function signatures break storage recursion; unrelated normal-form
+heads remain opaque. Missing nominal descriptions are rejected.
+
+A caller supplies one shared expansion allowance. Type traversal, hashing and
+field substitutions are charged before copying growing generic terms. Successful
+nominal applications are memoized; failed attempts leave no active traversal
+state. Reuse across an actual declaration-world mutation requires a new checker.
+This is representation validation, not type formation, visibility checking or
+an allocator for generated declaration identities.
+
+Validation in `/home/fin/luna`, through `python3 -B development/check.py
+--timeout 900 --`:
+
+- `test --release -p elaboration --test representations`: 7 passed, exit 0
+  (`/tmp/luna-tools-wi5g6agd/result.json`).
+- `test --release -p luna --test elaboration --test newtypes --test
+  builder_invocations --no-fail-fast`: source elaboration 450 passed and builder
+  invocation 13 passed. The newtype group had one stale diagnostic assertion
+  (`meta.List<Type>` versus the existing `meta.List<T>` diagnostic), so this
+  combined command exited 101 (`/tmp/luna-tools-xxj7gkjn/result.json`).
+- After the independent assertion correction, `test --release -p luna --test
+  newtypes`: all 211 passed, exit 0 (`/tmp/luna-tools-dlx8wo_h/result.json`).
+
+The source regression rejects direct, mutual and generic optional recursion,
+while accepting optional pointers and callable signatures returning the owner.
+
 ## Type-computation sessions
 
 `type_computations::Session::new_with_struct_builder` configures a checked host

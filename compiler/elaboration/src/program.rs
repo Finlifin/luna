@@ -3112,90 +3112,12 @@ impl Checker<'_, '_> {
         })
     }
     fn check_struct_cycles(&self) -> Result<(), Error> {
-        fn visit(
-            ty: &Term,
-            tuple: Option<DeclarationId>,
-            defs: &BTreeMap<DeclarationId, n::Struct>,
-            enums: &BTreeMap<DeclarationId, n::Enum>,
-            newtypes: &BTreeMap<DeclarationId, nir::newtypes::Newtype>,
-            active: &mut std::collections::HashSet<Term>,
-            done: &mut std::collections::HashSet<Term>,
-            fuel: &mut usize,
-        ) -> Result<(), &'static str> {
-            *fuel = fuel
-                .checked_sub(1)
-                .ok_or("struct representation expansion budget exhausted")?;
-            if active.len() >= 128 {
-                return Err("struct representation expansion budget exhausted");
-            }
-            // Bound expanding generic arguments before hashing/cloning them.
-            nir::type_computations::charge_term(ty, &mut 4096)
-                .map_err(|_| "struct representation expansion budget exhausted")?;
-            match ty {
-                Term::Nominal {
-                    declaration,
-                    arguments,
-                } if !done.contains(ty) => {
-                    if !active.insert(ty.clone()) {
-                        return Err("recursive by-value struct representation or enum payload");
-                    }
-                    if let Some(def) = defs.get(declaration) {
-                        let fields = def
-                            .instantiate_fields(arguments)
-                            .map_err(|_| "invalid struct type arguments in representation")?;
-                        for (_, field) in fields {
-                            visit(&field, tuple, defs, enums, newtypes, active, done, fuel)?;
-                        }
-                    }
-                    if let Some(def) = enums.get(declaration) {
-                        let variants = def
-                            .instantiate_variants(arguments)
-                            .map_err(|_| "invalid enum type arguments in representation")?;
-                        for field in variants.iter().flat_map(|v| &v.fields) {
-                            visit(field, tuple, defs, enums, newtypes, active, done, fuel)?;
-                        }
-                    }
-                    if let Some(def) = newtypes.get(declaration) {
-                        let representation = def
-                            .representation_budgeted(arguments, &[], fuel)
-                            .map_err(|_| "invalid or excessively large newtype representation")?;
-                        visit(
-                            &representation,
-                            tuple,
-                            defs,
-                            enums,
-                            newtypes,
-                            active,
-                            done,
-                            fuel,
-                        )?;
-                    }
-                    active.remove(ty);
-                    done.insert(ty.clone());
-                    Ok(())
-                }
-                Term::NormalForm {
-                    head,
-                    sort: Sort::Type,
-                    arguments,
-                } if Some(*head) == tuple => {
-                    if let [Term::TypeListValue(items)] = arguments.as_slice() {
-                        for item in items {
-                            visit(item, tuple, defs, enums, newtypes, active, done, fuel)?;
-                        }
-                    }
-                    Ok(())
-                }
-                Term::Tuple(items) => {
-                    for item in items {
-                        visit(item, tuple, defs, enums, newtypes, active, done, fuel)?;
-                    }
-                    Ok(())
-                }
-                _ => Ok(()), // pointer/function representations break by-value recursion
-            }
-        }
-        let mut done = std::collections::HashSet::new();
+        let mut representations = crate::representations::Checker::new(
+            self.protocols.tuple,
+            &self.structs,
+            &self.enums,
+            &self.newtypes,
+        );
         let mut fuel = 100_000;
         for (owner, info) in self.package.owners() {
             if matches!(
@@ -3218,20 +3140,15 @@ impl Checker<'_, '_> {
                             sort: self.input_binders(&[declaration])[0].sort,
                         }),
                 );
-                visit(
-                    &Term::Nominal {
-                        declaration: declaration(self.package, &self.package_identities, owner),
-                        arguments,
-                    },
-                    self.protocols.tuple,
-                    &self.structs,
-                    &self.enums,
-                    &self.newtypes,
-                    &mut std::collections::HashSet::new(),
-                    &mut done,
-                    &mut fuel,
-                )
-                .map_err(|message| error(info.node.expect_item().span, message))?;
+                representations
+                    .check(
+                        &Term::Nominal {
+                            declaration: declaration(self.package, &self.package_identities, owner),
+                            arguments,
+                        },
+                        &mut fuel,
+                    )
+                    .map_err(|message| error(info.node.expect_item().span, message))?;
             }
         }
         Ok(())

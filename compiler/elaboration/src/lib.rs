@@ -479,3 +479,6 @@ pub mod indexing;
 pub mod list_patterns;
 
 pub mod literal_conversion;
+
+/// Finite by-value storage checks shared by source and generated declarations.
+pub mod representations;
