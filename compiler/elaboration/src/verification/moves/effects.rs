@@ -1086,13 +1086,19 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 "handler borrowed capture result requires data-only delivery or a proven operand transfer",
                             ));
                         }
-                        if (self.delivery)(ty).map_err(|reason| error(installation, reason))?
-                            != Delivery::Copy
+                        // Code-bearing environments are borrowed below and must
+                        // remain complete on every exit. Their pointer leaves
+                        // still need stable provenance, but borrowing the whole
+                        // environment does not require copying it.
+                        if code_paths.is_empty()
+                            && (self.delivery)(ty).map_err(|reason| error(installation, reason))?
+                                != Delivery::Copy
                         {
-                            return Err(error(
-                                installation,
-                                "handler pointer capture requires Copy evidence",
-                            ));
+                            // Borrow installer-owned data without duplicating its
+                            // cleanup responsibility. Stable pointer slots below
+                            // constrain provenance; every exit must independently
+                            // preserve the complete affine owner.
+                            borrowed_owner_roots.insert(*binding);
                         }
                         let domains = if let Some(domains) = outer.enum_domains.get(&place.root) {
                             copy_enum_domains(domains, &mut self.fuel, installation)?
@@ -1287,7 +1293,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 continue;
                             }
                             let code_ty = self.field_type(ty, fields, installation)?;
-                            self.require_capture_value_layout(&code_ty, installation, 0)?;
+                            if layout.is_empty() {
+                                self.require_capture_value_layout(&code_ty, installation, 0)?;
+                            }
                             let code_place = Place {
                                 root: place.root,
                                 fields: fields.clone(),
