@@ -1825,8 +1825,8 @@ type MemoryTargets = BTreeMap<usize, ValueOrigins>;
 struct Flow {
     cleanup_before: BTreeMap<PlaceId, BTreeSet<PlaceId>>,
     borrowed_scope: u64,
-    // Synthetic nonowned targets whose actual caller origins passed the scalar
-    // handler contract at this invocation. Construction never supplies these.
+    // Nonowned scalar targets admitted by checked caller origins or conditional
+    // input premises. Conditional footprints still require call-site checking.
     effect_borrows: BTreeSet<PlaceId>,
     // Pointer capture slots checked across the full lexical installer.
     stable_handler_slots: BTreeSet<PlaceId>,
@@ -6474,6 +6474,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         let effect_inputs = self.effect_inputs_for(&callable.definition.ty, source)?;
         let memory_inputs = self.copy_effect_memory_inputs(source)?;
+        self.conditional_handler_borrows(&mut inner, &borrowed_roots, source)?;
         let outer_report = std::mem::take(&mut self.report);
         self.report.borrowed_roots = borrowed_roots;
         let outer_captured_callables = std::mem::replace(
@@ -14644,6 +14645,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 // Analyze a possible invocation independently from construction.
                 // Its surviving environment remains stored; return only cleans
                 // invocation-local responsibilities, never retained captures.
+                self.conditional_handler_borrows(&mut inner, &borrowed_roots, source)?;
                 let outer_report = std::mem::take(&mut self.report);
                 // Formation uses the same conditional provenance as invocation.
                 // It is evidence for observations, never ownership of pointees.

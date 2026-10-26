@@ -1995,6 +1995,36 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .extend(borrowed.iter().map(|place| place.root));
         Ok(())
     }
+
+    pub(super) fn conditional_handler_borrows(
+        &mut self,
+        frame: &mut Flow,
+        inputs: &BTreeMap<PlaceId, BorrowedRoot>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        // Like a function's borrowed scalar parameters, these are conditional
+        // premises for a closure body. Its exported footprint must still be
+        // checked against the actual capture/argument targets at every call.
+        // Pointer-bearing storage cannot use this rule: a handler could change
+        // hidden provenance which the scalar footprint does not describe.
+        for input in inputs.keys() {
+            self.fuel = self
+                .fuel
+                .checked_sub(1)
+                .ok_or_else(|| error(source, "closure handler input budget exhausted"))?;
+            let ty = frame
+                .types
+                .get(input)
+                .ok_or_else(|| error(source, "closure handler input has no storage type"))?;
+            if matches!(ty, Term::Primitive(_))
+                && nir::program::intrinsic_pointer_value(ty)
+                && (self.delivery)(ty).map_err(|reason| error(source, reason))? == Delivery::Copy
+            {
+                frame.effect_borrows.insert(*input);
+            }
+        }
+        Ok(())
+    }
     pub(super) fn copy_effect_memory_inputs(
         &mut self,
         source: SourceRange,
