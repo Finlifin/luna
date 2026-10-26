@@ -34,7 +34,7 @@ attribute -> ^expr
 
 ### Prelude
 
-builtin.prelude 默认导入 builtin 之外的所有包，作为包根的一份普通通配来源参与查找。它不具有高于本地声明的特权，也不自动成为当前包的公开接口。
+builtin、meta、build、attrs、verification 各自的 prelude 默认导入，作为包根的普通通配来源参与查找；每个提供者自身不隐式导入自己的 prelude。它们不具有高于本地声明的特权，也不自动成为当前包的公开接口。同一原始声明经多个 prelude 导入时按身份去重。
 
 std.prelude 不默认导入。需要时在包根写 use std.prelude.*；子模块通过普通父级查找使用这些绑定。若两个 prelude 路径提供相同原始声明，按身份去重；真正不同的同名来源仍按通配歧义处理。
 

@@ -451,15 +451,7 @@ fn compile_sysroot(
     // Standalone-driver identities are local to this package set. Build tools
     // needing persistent identities use packages::compile_with_builtin instead.
     let mut next_identity = 1u64;
-    for name in [
-        "builtin",
-        "std",
-        "meta",
-        "build",
-        "attrs",
-        "verification",
-        "math",
-    ] {
+    for name in ["builtin", "std", "meta", "build", "attrs", "verification"] {
         let directory = root.join(name);
         if !directory.exists() && name != "builtin" && name != "std" {
             continue;
@@ -514,7 +506,13 @@ fn compile_sysroot(
         },
         protocols,
     );
-    crate::packages::compile_observed_for_target(
+    let preludes: Vec<_> = packages
+        .iter()
+        .skip(1)
+        .filter(|package| package.name != "std")
+        .map(|package| package.resolution_id)
+        .collect();
+    crate::packages::compile_observed_with_preludes(
         &packages,
         &dependencies,
         0,
@@ -525,6 +523,7 @@ fn compile_sysroot(
         selectors,
         None,
         target,
+        &preludes,
     )
 }
 
