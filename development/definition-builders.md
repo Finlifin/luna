@@ -3,6 +3,11 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+Measured concrete publication costs and a reproducible executable are documented
+in [builder-publication-performance.md](builder-publication-performance.md).
+The comparison isolates retained checking state versus a freshly rebuilt world;
+it is not a whole-compiler or historical-version speedup claim.
+
 ## Generated layouts before behavioral analysis
 
 Body/default/template invocations may publish structs after the initial layout
