@@ -274,3 +274,34 @@ ordinary/storage-backed bindings; the 63 extra reads consume fewer than 2000
 steps in each case. This is a deterministic VM work-budget bound, not a measured
 wall-clock speedup. Bounds failures, subsequent invocation recovery and
 source-list replacement during index evaluation are checked separately.
+
+### Paired indexing measurements
+
+`python3 -B development/comptime_bench.py --bench type_list_index --iterations 100 --repeat 5`
+measures three index forms on the same VM build. The general form wraps the
+literal index in an empty block, selecting snapshot evaluation; it includes that
+extra block's execution overhead. This comparison is not a historical binary
+comparison. Each process warms up five invocations per workload. Initial argument
+allocation, admission and invocation are timed; package and VM construction are
+outside the measured region. The allocator counts allocation/reallocation calls
+and requested bytes, not live or peak memory. Every result is checked.
+
+Five-process medians on the current workspace after `f9a92c53`, 4096 elements:
+
+| Index form | Reads/call | ns/call | Allocations/call | Requested bytes/call | VM steps/call |
+|---|---:|---:|---:|---:|---:|
+| Literal | 1 | 493,636 | 28,706.04 | 1,936,092 | 20,508 |
+| Literal | 64 | 516,913 | 29,213.04 | 2,004,304 | 21,642 |
+| Local | 64 | 560,874 | 29,169.04 | 2,234,580 | 21,265 |
+| General block | 64 | 8,488,573 | 553,693.04 | 33,485,136 | 546,250 |
+
+The 64-read literal workload is about 16.4x faster than its general-path pair,
+with about 18.9x fewer allocation calls. These ratios describe this microbenchmark,
+not whole compilation. Input admission still dominates a single leaf read and
+is a separate optimization opportunity. Primitive type elements do not represent
+the cost of copying deeply structured selected types.
+
+Build report: `/tmp/luna-tools-pi_p2vly/result.json`. All five runs exited 0:
+`/tmp/luna-tools-i05nyx0n/result.json`, `/tmp/luna-tools-ibehgv41/result.json`,
+`/tmp/luna-tools-8yltm80h/result.json`, `/tmp/luna-tools-5a2haqsm/result.json`,
+`/tmp/luna-tools-s0ffjald/result.json`.

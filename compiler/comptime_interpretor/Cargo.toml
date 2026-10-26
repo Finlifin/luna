@@ -11,3 +11,7 @@ iir = { path = "../iir" }
 [[bench]]
 name = "invocation"
 harness = false
+
+[[bench]]
+name = "type_list_index"
+harness = false

@@ -2,6 +2,8 @@
 
 Comptime invocation 性能基准：`python3 -B development/comptime_bench.py --repeat 5`。测量边界、调用帧重构数据及 definition builder 的当前缺口见 [comptime-vm.md](comptime-vm.md)。
 
+类型列表索引基准：`python3 -B development/comptime_bench.py --bench type_list_index --iterations 100 --repeat 5`。每份报告记录字面量、局部索引与通用求值路径的耗时、分配次数、申请字节数及 VM steps；申请字节数是累计分配请求，不是峰值内存。
+
 Cargo 输出转发按最多 64 KiB 的块进行，不按换行积攒整条输出；配额诊断匹配保留跨块尾部。若 stdout/stderr 的转发写入或 flush 失败，入口继续排空子进程管道，等待子进程结束后报告证据交付失败。此时不发布成功回调，也不因为证据故障重跑可能已执行的程序；EDQUOT/ENOSPC 会触发现有缓存清理。清理提示无法写出不阻止清理本身。外层日志文件写入仍由 process_tools 独立处理；这一机制不能把外层丢失的日志恢复出来。
 
 
