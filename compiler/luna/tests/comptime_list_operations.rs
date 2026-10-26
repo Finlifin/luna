@@ -156,3 +156,190 @@ fn ordinary_package_uses_public_list_operations_without_builtin_access() {
         "(bool true)"
     );
 }
+
+#[test]
+fn repository_list_combinators_preserve_callback_order_and_state() {
+    let source = "
+        typealias Integer=.Integer'builtin;
+        comptime fn digits()->meta.List<Integer> {[1,2,3]}
+        comptime fn encode(acc:Integer, digit:Integer)->Integer {acc * 10 + digit}
+        comptime fn total()->Integer {
+            let values:meta.List<Integer> = [1,2,3];
+            let doubled=meta.map(values,|value| value * 2);
+            meta.fold(doubled,0,|sum,value| sum + value)
+        }
+        comptime fn run()->bool {
+            var visits:Integer=0;
+            var calls:Integer=0;
+            let call_count=calls.ref;
+            let mapped=meta.map(digits(),|value| {
+                visits = visits + 1;
+                call_count.* = call_count.* + 1;
+                value + visits
+            });
+            var order:Integer=0;
+            let output=order.ref;
+            meta.foreach(mapped,|value| {output.* = output.* * 10 + value;});
+            let folded=meta.fold(digits(),0,encode);
+            let empty:meta.List<Integer> = [];
+            let untouched=meta.map(empty,|value| {call_count.* = call_count.* + 100;value});
+            meta.foreach(empty,|value| {call_count.* = call_count.* + 100;});
+            let initial=meta.fold(empty,42,|acc,value| {call_count.* = call_count.* + 100;acc + value});
+            visits == 0 and calls == 3 and order == 246 and folded == 123 and initial == 42 and total() == 12
+                and meta.length(untouched) == 0 and meta.length(mapped) == 3
+                and mapped[0] == 2 and mapped[1] == 4 and mapped[2] == 6
+        }
+    ";
+    let package = compile(source).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn mapped_types_feed_variadic_type_factories_without_unfolding_the_head() {
+    let package = compile(
+        "
+        typealias Type=.Type'builtin;
+        typealias Char=.char'builtin;
+        comptime fn fields()->meta.List<Type> {[bool,Char]}
+        comptime fn Pointer(value:Type)->Type {*value}
+        pure comptime fn Packet<...fields:meta.List<Type>>->Type {bool}
+        comptime fn Generated()->Type {Packet<...meta.map(fields(),Pointer)>}
+        comptime fn Direct()->Type {Packet<*bool,*Char>}
+    ",
+    )
+    .unwrap();
+    let generated = luna::invocation::invoke(&package, "Generated", 1_000_000).unwrap();
+    assert!(matches!(
+        generated,
+        Value::Type(nir::Term::NormalForm { .. })
+    ));
+    assert_eq!(
+        generated,
+        luna::invocation::invoke(&package, "Direct", 1_000_000).unwrap()
+    );
+}
+
+#[test]
+fn list_combinators_reject_runtime_callbacks_and_incompatible_accumulators() {
+    for body in [
+        "fn transform(value:bool)->bool {not value} comptime fn bad()->meta.List<bool> {let xs:meta.List<bool> = [true];meta.map(xs,transform)}",
+        "fn visit(value:bool) {} comptime fn bad() {let xs:meta.List<bool> = [true];meta.foreach(xs,visit);}",
+        "comptime fn bad()->bool {let xs:meta.List<bool> = [true];meta.fold(xs,true,|acc,value| 'x')}",
+    ] {
+        assert!(compile(body).is_err(), "accepted {body}");
+    }
+    let package=compile("comptime fn invert(value:bool)->bool {not value} comptime fn run()->bool {let xs:meta.List<bool> = [true];let ys=meta.map(xs,invert);not ys[0]}").unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_map_evaluates_producers_once_and_keeps_owned_inputs_separate() {
+    let package = compile(
+        "
+        typealias Integer=.Integer'builtin;
+        comptime fn input(trace:*Integer)->meta.List<Integer> {
+            trace.* = trace.* * 10 + 1; [1,2,3]
+        }
+        comptime fn increment(value:Integer)->Integer {value + 1}
+        comptime fn producer(trace:*Integer)->comptime fn(Integer)->Integer {
+            trace.* = trace.* * 10 + 2; increment
+        }
+        comptime fn run()->bool {
+            var trace:Integer=0;
+            let mapped=meta.map(input(trace.ref),producer(trace.ref));
+            var original:meta.List<Integer> = [1,2,3];
+            let snapshot=meta.map(original,|value| {original = []; value});
+            trace == 12 and mapped[0] == 2 and mapped[2] == 4
+                and meta.length(original) == 3 and meta.length(snapshot) == 3
+                and snapshot[0] == 1 and snapshot[1] == 2 and snapshot[2] == 3
+        }
+    ",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_map_stops_at_callback_failure_and_the_vm_can_be_used_again() {
+    let package = compile(
+        "
+        typealias Integer=.Integer'builtin;
+        comptime fn select(value:Integer)->Integer {let table:meta.List<Integer> = [10,5];table[value]}
+        comptime fn fail()->meta.List<Integer> {
+            let values:meta.List<Integer> = [0,2,1]; meta.map(values,select)
+        }
+        comptime fn recover()->meta.List<Integer> {
+            let values:meta.List<Integer> = [0,1]; meta.map(values,select)
+        }
+    ",
+    )
+    .unwrap();
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "fail"), vec![])
+            .unwrap_err()
+            .kind,
+        comptime_interpretor::ErrorKind::IndexOutOfBounds
+    );
+    assert_eq!(
+        support::calls(&package, &vm)
+            .iter()
+            .filter(|name| *name == "select")
+            .count(),
+        2
+    );
+    let result = vm.invoke(support::id(&package, "recover"), vec![]).unwrap();
+    let Value::List { values, .. } = result else {
+        panic!("expected typed list")
+    };
+    assert_eq!(
+        values,
+        vec![
+            Value::Integer(comptime_runtime::Integer::from_u128(10)),
+            Value::Integer(comptime_runtime::Integer::from_u128(5))
+        ]
+    );
+}
+
+#[test]
+fn list_map_can_change_domains_without_flattening_optional_or_nested_values() {
+    let package = compile(
+        "
+        typealias Integer=.Integer'builtin;
+        comptime fn select(flag:bool)->?Integer {if flag {7} else {null}}
+        comptime fn packet(flag:bool)->meta.List<bool> {[flag,not flag]}
+        comptime fn run()->bool {
+            let input:meta.List<bool> = [true,false];
+            let optional=meta.map(input,select);
+            let nested=meta.map(input,packet);
+            meta.length(optional) == 2 and meta.length(nested) == 2
+                and (optional[0] match {value? => value == 7,null => false})
+                and (optional[1] match {_? => false,null => true})
+                and meta.length(nested[0]) == 2 and meta.length(nested[1]) == 2
+                and nested[0][0] and not nested[0][1]
+                and not nested[1][0] and nested[1][1]
+        }
+    ",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}

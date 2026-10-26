@@ -23,6 +23,51 @@ pub pure comptime fn concat(left: List<T>, right: List<T>) -> List<T> where T {
     .list_concat'builtin(left, right)
 }
 
+{-
+  Traverse a fixed input snapshot in index order. The callback retains its
+  comptime closure environment between calls; an empty input never calls it.
+  Cache the length once, independently of callback effects.
+-}
+pub comptime fn foreach(values: List<T>, visit: %c comptime fn(T))
+where T, c: (.Type'builtin).vars.Closure {
+    let count = length(values);
+    var index: .Integer'builtin = 0;
+    while index < count {
+        visit(values[index]);
+        index = index + 1;
+    }
+}
+
+pub comptime fn fold(values: List<T>, initial: A, combine: %c comptime fn(A, T) -> A) -> A
+where T, A, c: (.Type'builtin).vars.Closure {
+    let count = length(values);
+    var accumulator = initial;
+    var index: .Integer'builtin = 0;
+    while index < count {
+        accumulator = combine(accumulator, values[index]);
+        index = index + 1;
+    }
+    accumulator
+}
+
+{-
+  Mapping preserves order and calls transform exactly once per input element.
+  This source implementation uses immutable concatenation; it is a baseline
+  for correctness, not yet a linear-allocation collection builder.
+-}
+pub comptime fn map(values: List<T>, transform: %c comptime fn(T) -> U) -> List<U>
+where T, U, c: (.Type'builtin).vars.Closure {
+    let count = length(values);
+    var output: List<U> = [];
+    var index: .Integer'builtin = 0;
+    while index < count {
+        let item: List<U> = [transform(values[index])];
+        output = concat(output, item);
+        index = index + 1;
+    }
+    output
+}
+
 pub mod prelude {
     pub use .List;
     pub use .Object;

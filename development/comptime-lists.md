@@ -98,3 +98,50 @@ python3 -B development/comptime_bench.py --bench list_length --iterations 100 --
 ```sh
 python3 -B development/check.py --timeout 1800 -- test --release -p comptime_interpretor --test type_list_inputs --test type_list_index -p luna --test comptime_list_operations
 ```
+
+## 编译期遍历、映射与折叠
+
+meta 包提供普通的源码级组合操作：
+
+| 接口 | 结果与调用规则 |
+| --- | --- |
+| `meta.foreach(values, visit)` | 按索引顺序调用 `visit`，每个元素一次，返回 void |
+| `meta.map(values, transform)` | 按相同顺序构造 `List<U>`，每个元素调用一次 `transform` |
+| `meta.fold(values, initial, combine)` | 从 initial 开始左折叠，按 `combine(accumulator, element)` 更新结果 |
+
+回调类型为带环境参数的 `comptime fn`，可以传入命名函数或闭包；普通
+runtime fn 不能冒充此阶段的回调。组合函数不声明 pure，因此不会把回调
+的外部写入隐藏成纯计算。空输入不调用回调，map 返回具有正确元素域的
+空列表，fold 返回传入的 initial；普通实参仍按源顺序求值一次。
+
+```flurry
+comptime fn total() -> Integer {
+    let values: meta.List<Integer> = [1, 2, 3];
+    let doubled = meta.map(values, |value| value * 2);
+    meta.fold(doubled, 0, |sum, value| sum + value)
+}
+```
+
+这里 Integer 使用 builtin.prelude 中的公开名称。total 返回 12。
+遍历前只取得一次长度；循环中的索引保持编译期 Integer，适用已接通的
+局部列表索引路径。闭包自己的值捕获保留独立状态，重复调用不重建环境；
+要观察外部计数器的写入，显式捕获指针。修改私有捕获不会改写调用者的
+另一个值副本，也不会改变已经交付给遍历函数的输入序列。
+
+map 可以改变元素域。可选结果仍占据一个列表元素，不自动跳过 null；
+嵌套列表不自动展平。映射 Type 的结果可以直接展开到类型工厂的变参输入，
+保留 normal-form 头。回调执行失败立即终止当前调用，不访问后续元素；
+同一个 VM 在失败后仍可执行其他合法调用。
+
+当前 map 用逐次不可变 concat 构造输出，存在随输出规模二次增长的复制
+成本，尚不是线性分配的 builder。foreach 和 fold 不构造额外的结果列表。
+这批接口不包含 List 指针读写能力的补齐：通过指针替换整个 List 的试验
+仍得到 VM Unsupported；Integer `/` 的舍入协议也尚未接通，不能把这两项
+独立能力算作本阶段已实现。失败传播测试使用已支持的列表越界操作。
+
+本阶段在 `/home/fin/luna` 执行以下命令，退出 0，38 项测试通过；文档中的
+组合示例也包含在源码验收中。报告 `/tmp/luna-tools-9f9hbu14/result.json`。
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_list_operations --test library_meta_objects --test library_protocols --no-fail-fast
+```
