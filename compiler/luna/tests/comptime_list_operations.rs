@@ -269,6 +269,42 @@ fn list_map_evaluates_producers_once_and_keeps_owned_inputs_separate() {
 }
 
 #[test]
+fn list_pointer_replacement_preserves_active_iteration_and_read_snapshots() {
+    let package = compile(
+        "
+        typealias Integer=.Integer'builtin;
+        typealias Type=.Type'builtin;
+        comptime fn run()->bool {
+            var original:meta.List<Integer> = [1,2,3];
+            let slot=original.ref;
+            let before=slot.*;
+            let mapped=meta.map(original,|value| {slot.* = []; value + 1});
+            var types:meta.List<Type> = [bool];
+            let types_slot=types.ref;
+            let old_types=types_slot.*;
+            types_slot.* = [Integer,Type];
+            var nested:meta.List<meta.List<bool>> = [[true]];
+            let nested_slot=nested.ref;
+            let old_nested=nested_slot.*;
+            nested_slot.* = [[false],[]];
+            meta.length(original) == 0 and meta.length(before) == 3
+                and before[0] == 1 and before[2] == 3
+                and meta.length(mapped) == 3 and mapped[0] == 2 and mapped[2] == 4
+                and meta.length(old_types) == 1 and old_types[0] == bool
+                and meta.length(types) == 2 and types[0] == Integer and types[1] == Type
+                and old_nested[0][0] and not nested[0][0]
+                and meta.length(nested[1]) == 0
+        }
+        ",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
 fn list_map_stops_at_callback_failure_and_the_vm_can_be_used_again() {
     let package = compile(
         "

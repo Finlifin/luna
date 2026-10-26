@@ -135,13 +135,43 @@ map 可以改变元素域。可选结果仍占据一个列表元素，不自动�
 
 当前 map 用逐次不可变 concat 构造输出，存在随输出规模二次增长的复制
 成本，尚不是线性分配的 builder。foreach 和 fold 不构造额外的结果列表。
-这批接口不包含 List 指针读写能力的补齐：通过指针替换整个 List 的试验
-仍得到 VM Unsupported；Integer `/` 的舍入协议也尚未接通，不能把这两项
-独立能力算作本阶段已实现。失败传播测试使用已支持的列表越界操作。
+后续已补齐编译期 List 指针读写（见下节）。Integer `/` 的舍入协议仍未
+接通；失败传播测试使用已支持的列表越界操作。
 
 本阶段在 `/home/fin/luna` 执行以下命令，退出 0，38 项测试通过；文档中的
 组合示例也包含在源码验收中。报告 `/tmp/luna-tools-9f9hbu14/result.json`。
 
 ```sh
 python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_list_operations --test library_meta_objects --test library_protocols --no-fail-fast
+```
+
+
+## 编译期列表槽位读写
+
+`ReadPointer` 和 `WritePointer` 在 comptime invocation 中识别已绑定的
+List 类型，并核验完整的不可变数据准入条件；普通 runtime 指针传送的
+Copy 权限规则不变。读取复制值表示，写入先验证新旧表示，再替换槽位。
+类型、元素或预算检查失败不能在验证完成前修改槽位。
+
+```flurry
+comptime fn run()->bool {
+    var values:meta.List<bool> = [true,false];
+    let slot=values.ref;
+    let before=slot.*;
+    let mapped=meta.map(values,|value| {slot.* = []; not value});
+    meta.length(values) == 0 and before[0] and not mapped[0] and mapped[1]
+}
+```
+
+`map` 的回调可以替换调用者的列表，但其输入序列保持调用时的值；
+先前的指针读取也保留独立值。这里没有可变元素视图或 runtime List
+复制承诺，输出物化仍执行原有阶段检查。
+
+本阶段在 `/home/fin/luna` 执行以下检查，退出 0，51 项测试通过，报告
+`/tmp/luna-tools-u24r_czh/result.json`。覆盖 bool/Type 列表的预算扫描、
+拒绝写入后的存储保持及恢复读取、runtime 拒绝、错误域和实际源码的
+回调替换、快照与嵌套列表。
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_list_operations -p comptime_interpretor --test type_list_inputs --test abstract_values --no-fail-fast
 ```

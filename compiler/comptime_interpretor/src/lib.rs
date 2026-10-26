@@ -3520,13 +3520,19 @@ impl<'a> Interpreter<'a> {
                 let Value::Pointer(pointer) = value!(self.eval(pointer, environment)) else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
-                if pointer.pointee != expr.ty || !self.permits_pointer_copy(&expr.ty) {
+                let immutable_list = self.comptime_only
+                    && (self.list_element(&expr.ty).is_some() || self.is_type_list_input(&expr.ty));
+                if pointer.pointee != expr.ty
+                    || (!immutable_list && !self.permits_pointer_copy(&expr.ty))
+                {
                     return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
                 }
                 let value = pointer
                     .inspect(|value| self.copy_representation(value, expr.source, 0))
                     .map_err(|kind| self.failure(kind, Some(expr.source)))??;
-                if !self.has_type(&value, &expr.ty) {
+                if immutable_list {
+                    self.validate_immutable_input(&value, &expr.ty)?;
+                } else if !self.has_type(&value, &expr.ty) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
                 value
@@ -3536,10 +3542,20 @@ impl<'a> Interpreter<'a> {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
                 let value = value!(self.eval(value, environment));
-                if !self.permits_pointer_copy(&pointer.pointee) {
+                let immutable_list = self.comptime_only
+                    && (self.list_element(&pointer.pointee).is_some()
+                        || self.is_type_list_input(&pointer.pointee));
+                if !immutable_list && !self.permits_pointer_copy(&pointer.pointee) {
                     return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
                 }
-                if !self.has_type(&value, &pointer.pointee) {
+                if immutable_list {
+                    // Validate both representations before mutation. Admission
+                    // is budgeted and cannot invoke user code or follow pointers.
+                    self.validate_immutable_input(&value, &pointer.pointee)?;
+                    pointer
+                        .inspect(|old| self.validate_immutable_input(old, &pointer.pointee))
+                        .map_err(|kind| self.failure(kind, Some(expr.source)))??;
+                } else if !self.has_type(&value, &pointer.pointee) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
                 pointer

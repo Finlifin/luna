@@ -1114,3 +1114,228 @@ fn local_list_length_still_charges_large_element_type_descriptions() {
     let large = run(4096, 64) - run(4096, 1);
     assert!(large > small + 200_000, "{small} -> {large}");
 }
+
+fn list_pointer_package(element: P) -> (Package, Term, Term) {
+    let (mut package, list) = fixed_list_read_package(element, 1, "0");
+    let pointer = Term::Pointer(Box::new(list.clone()));
+    let function = &mut package.functions[0];
+    let source = function.body.source;
+    let input = function.parameters[0];
+    let node = |ty, kind| Expr { source, ty, kind };
+    function.signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Runtime,
+            ty: list.clone(),
+        }],
+        result: Box::new(pointer.clone()),
+    };
+    function.body = node(
+        pointer.clone(),
+        K::AddressOf(Box::new(node(list.clone(), K::Local(input)))),
+    );
+    let mut reader = function.clone();
+    reader.declaration = id(4);
+    reader.signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Runtime,
+            ty: pointer.clone(),
+        }],
+        result: Box::new(list.clone()),
+    };
+    reader.body = node(
+        list.clone(),
+        K::ReadPointer(Box::new(node(pointer.clone(), K::Local(input)))),
+    );
+    let mut writer = reader.clone();
+    writer.declaration = id(5);
+    let replacement = LocalId { owner: 3, index: 1 };
+    writer.parameters.push(replacement);
+    writer.signature = Term::Function {
+        parameters: vec![
+            Parameter {
+                sort: Sort::Runtime,
+                ty: pointer.clone(),
+            },
+            Parameter {
+                sort: Sort::ComptimeValue,
+                ty: list.clone(),
+            },
+        ],
+        result: Box::new(ty(P::Void)),
+    };
+    writer.body = node(
+        ty(P::Void),
+        K::WritePointer {
+            pointer: Box::new(node(pointer.clone(), K::Local(input))),
+            value: Box::new(node(list.clone(), K::Local(replacement))),
+        },
+    );
+    package.functions.extend([reader, writer]);
+    (package, list, pointer)
+}
+
+#[test]
+fn comptime_list_pointer_writes_are_atomic_under_budget_exhaustion() {
+    use comptime_interpretor::{ErrorKind, Storage};
+    for element in [P::Bool, P::Type] {
+        let (package, list, pointer_ty) = list_pointer_package(element);
+        let value = |count| {
+            if element == P::Type {
+                Value::TypeList(vec![ty(P::Bool); count])
+            } else {
+                Value::List {
+                    ty: list.clone(),
+                    values: vec![Value::Bool(true); count],
+                }
+            }
+        };
+        let mut failures = 0;
+        let mut successes = 0;
+        for steps in (1..2000).step_by(7) {
+            let original = value(2);
+            let replacement = value(8);
+            let owner = Storage::new(original.clone());
+            let mut setup = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let pointer = setup
+                .invoke_with_typed_values(
+                    id(3),
+                    vec![(list.clone(), Value::Storage(owner.clone()))],
+                )
+                .unwrap();
+            let result = Interpreter::for_comptime(
+                &package,
+                Budget {
+                    steps,
+                    ..Budget::default()
+                },
+            )
+            .and_then(|mut vm| {
+                vm.invoke_with_typed_values(
+                    id(5),
+                    vec![
+                        (pointer_ty.clone(), pointer.clone()),
+                        (list.clone(), replacement.clone()),
+                    ],
+                )
+            });
+            match result {
+                Ok(Value::Unit) => {
+                    successes += 1;
+                    assert_eq!(owner.read().unwrap(), replacement);
+                }
+                Err(error) => {
+                    failures += 1;
+                    assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                    assert_eq!(owner.read().unwrap(), original);
+                }
+                other => panic!("unexpected write result: {other:?}"),
+            }
+            let snapshot = setup
+                .invoke_with_typed_values(id(4), vec![(pointer_ty.clone(), pointer)])
+                .unwrap();
+            assert_eq!(snapshot, owner.read().unwrap());
+        }
+        assert!(failures > 0 && successes > 0);
+    }
+}
+
+#[test]
+fn list_pointer_access_does_not_grant_runtime_copy_permission() {
+    use comptime_interpretor::{ErrorKind, Storage};
+    for element in [P::Bool, P::Type] {
+        let (mut package, list, pointer_ty) = list_pointer_package(element);
+        let original = if element == P::Type {
+            Value::TypeList(vec![])
+        } else {
+            Value::List {
+                ty: list.clone(),
+                values: vec![],
+            }
+        };
+        let owner = Storage::new(original.clone());
+        let pointer = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .invoke_with_typed_values(id(3), vec![(list.clone(), Value::Storage(owner.clone()))])
+            .unwrap();
+        for function in &mut package.functions {
+            function.phase = FunctionPhase::Runtime;
+            if let Term::Function { parameters, .. } = &mut function.signature {
+                for parameter in parameters {
+                    parameter.sort = Sort::Runtime;
+                }
+            }
+        }
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke_with_typed_values(id(4), vec![(pointer_ty.clone(), pointer.clone())])
+                .unwrap_err()
+                .kind,
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            vm.invoke_with_typed_values(
+                id(5),
+                vec![(pointer_ty, pointer), (list, original.clone())]
+            )
+            .unwrap_err()
+            .kind,
+            // Generic lists are rejected at runtime argument admission;
+            // the specialized type-list representation reaches the copy gate.
+            if element == P::Type {
+                ErrorKind::Unsupported
+            } else {
+                ErrorKind::Type
+            }
+        );
+        assert_eq!(owner.read().unwrap(), original);
+    }
+}
+
+#[test]
+fn list_pointer_rejects_wrong_element_and_identity_without_modifying_storage() {
+    use comptime_interpretor::{ErrorKind, Storage};
+    let (package, list, pointer_ty) = list_pointer_package(P::Bool);
+    let original = Value::List {
+        ty: list.clone(),
+        values: vec![Value::Bool(true)],
+    };
+    let owner = Storage::new(original.clone());
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let pointer = vm
+        .invoke_with_typed_values(id(3), vec![(list.clone(), Value::Storage(owner.clone()))])
+        .unwrap();
+    for invalid in [
+        Value::TypeList(vec![ty(P::Bool)]),
+        Value::List {
+            ty: list.clone(),
+            values: vec![Value::Type(ty(P::Bool))],
+        },
+        Value::List {
+            ty: list_type(),
+            values: vec![Value::Bool(false)],
+        },
+        Value::List {
+            ty: list.clone(),
+            values: vec![pointer.clone()],
+        },
+    ] {
+        assert_eq!(
+            vm.invoke_with_typed_values(
+                id(5),
+                vec![
+                    (pointer_ty.clone(), pointer.clone()),
+                    (list.clone(), invalid)
+                ]
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::Type
+        );
+        assert_eq!(owner.read().unwrap(), original);
+        assert_eq!(
+            vm.invoke_with_typed_values(id(4), vec![(pointer_ty.clone(), pointer.clone())])
+                .unwrap(),
+            original
+        );
+    }
+}
