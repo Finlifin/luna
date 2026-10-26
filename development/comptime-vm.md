@@ -248,3 +248,29 @@ checking success. Existing phase tests retain quote/runtime/body collision and
 wrong-phase coverage. Formatting passed at `/tmp/luna-tools-osgt43d6/result.json`;
 `git diff --check` passed. Live sessions still borrow a fixed immutable NIR world;
 this optimization does not add active invocation suspension or world replacement.
+
+## Local type-list indexing
+
+Comptime reads from a local `meta.List<Type>` now borrow its immutable payload
+when the index is an integer literal or a local integer. This also applies to
+locals backed by mutable storage. Each read retains its execution ticks and
+charges the selected type's description before cloning it; unrelated elements
+are not copied again. Initial argument admission still validates the whole list.
+
+Effectful index expressions retain the general evaluation path: the list value
+is obtained before the index executes, even if the index replaces that local.
+Cleanup-scheduled execution also retains the general path. This optimization
+does not change normal-form identity or the representation of Tuple inputs.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --test type_list_index --test type_list_inputs --test instance_budget
+```
+
+All 21 tests passed (`/tmp/luna-tools-wiul9qbr/result.json`). The cost regression
+compares one and 64 reads from 4096 elements, for literal/local indices and
+ordinary/storage-backed bindings; the 63 extra reads consume fewer than 2000
+steps in each case. This is a deterministic VM work-budget bound, not a measured
+wall-clock speedup. Bounds failures, subsequent invocation recovery and
+source-list replacement during index evaluation are checked separately.

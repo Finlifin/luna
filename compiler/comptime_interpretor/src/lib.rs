@@ -23,6 +23,7 @@ pub use reflection::{
     CallableReflection, EnumReflection, ReflectedField, ReflectedVariant, StructReflection,
 };
 mod selected_types;
+mod type_list_index;
 pub use comptime_runtime::object::{Entry as ObjectEntry, Object};
 pub use memory::{OwnedGraphCheckpoint, PointerValue, Storage};
 
@@ -5291,6 +5292,15 @@ impl<'a> Interpreter<'a> {
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
+        if self.comptime_only
+            && self.cleanup_schedule.is_none()
+            && let K::TypeListIndex(values, index) = &expr.kind
+            && self.is_type_list_input(&values.ty)
+            && let K::Local(binding) = values.kind
+            && matches!(index.kind, K::Literal(Literal::Integer(_)) | K::Local(_))
+        {
+            return self.eval_local_type_list_index(expr, values, binding, index, environment);
+        }
         let K::TypeListIndex(values, index) = &expr.kind else {
             unreachable!()
         };
