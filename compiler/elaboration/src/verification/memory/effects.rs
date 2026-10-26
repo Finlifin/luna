@@ -2,7 +2,7 @@
 //! checked separately by the installer. An explicit identity-transfer premise
 //! can carry an operand's pointer and callable provenance; it grants neither dereference nor
 //! lifetime extension. Unreturned alias-bearing inputs require checked Copy
-//! obligations, including when the result is independent data.
+//! obligations or explicit owned-input admission, including when the result is independent data.
 use super::*;
 
 /// Conditional accesses through a pointer supplied in an operation input.
@@ -36,6 +36,9 @@ pub struct EffectInput {
     pub forwarded_parameters: Option<BTreeSet<usize>>,
     /// Conditional checked Copy obligations, including cleanup compatibility.
     pub copy_parameters: BTreeSet<usize>,
+    /// All inputs are consumed by a resource-checked direct handler with a data-only result.
+    /// This premise grants no Copy permission.
+    pub owned_inputs: bool,
     pub parameter_accesses: BTreeSet<EffectParameterAccess>,
 }
 impl EffectInput {
@@ -64,7 +67,11 @@ impl fmt::Display for EffectInput {
         for parameter in &self.copy_parameters {
             write!(f, " {parameter}")?;
         }
-        f.write_str(") (parameter-accesses")?;
+        write!(
+            f,
+            ") (owned-inputs {}) (parameter-accesses",
+            self.owned_inputs
+        )?;
         for access in &self.parameter_accesses {
             write!(f, " {access}")?;
         }
@@ -362,7 +369,13 @@ pub(super) fn validate_inputs(
         let identity_transfer = input.forwarded_parameters.is_some()
             && (effect_transfer_layout(Some(package), result, fuel)?
                 || effect_data_layout(Some(package), result, fuel, 0)?);
-        if !identity_transfer && !effect_data_layout(Some(package), result, fuel, 0)? {
+        let data_result = effect_data_layout(Some(package), result, fuel, 0)?;
+        if input.owned_inputs && (input.abi != nir::effects::Abi::Direct || !data_result) {
+            return Err(
+                "owned effect inputs require direct delivery with a data-only result".into(),
+            );
+        }
+        if !identity_transfer && !data_result {
             return Err("effect memory premise requires data-only direct delivery".into());
         }
         for (index, parameter) in parameters.iter().enumerate() {
@@ -374,7 +387,10 @@ pub(super) fn validate_inputs(
             {
                 continue;
             }
-            if input.copy_parameters.contains(&index)
+            // Direct requests can transfer owned inputs into an admitted
+            // handler. Memory premises describe accesses, not Copy permission;
+            // ownership and cleanup are checked when publishing the premise.
+            if (input.copy_parameters.contains(&index) || input.owned_inputs)
                 && effect_transfer_layout(Some(package), &parameter.ty, fuel)?
             {
                 continue;
@@ -711,6 +727,7 @@ impl<'a> Infer<'a, '_> {
             let mut input = EffectInput {
                 parameter_accesses: Default::default(),
                 copy_parameters,
+                owned_inputs: false,
                 forwarded_parameters,
                 operation: operation.clone(),
                 abi: handler.abi,
@@ -1005,6 +1022,7 @@ impl<'a> Infer<'a, '_> {
                     signature,
                     forwarded_parameters: None,
                     copy_parameters: BTreeSet::new(),
+                    owned_inputs: false,
                     parameter_accesses: BTreeSet::new(),
                 });
             }

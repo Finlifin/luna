@@ -646,6 +646,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             unreachable!()
         };
         let mut established_input = false;
+        let mut admitted_owned_input = false;
         let mut forwarded = None;
         let mut copy_parameters = BTreeSet::new();
         let mut parameter_accesses = BTreeSet::new();
@@ -657,6 +658,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 && &input.signature == signature
             {
                 established_input = true;
+                admitted_owned_input = input.owned_inputs;
                 forwarded = input.forwarded_parameters.clone();
                 copy_parameters = input.copy_parameters.clone();
                 parameter_accesses = input.parameter_accesses.clone();
@@ -664,6 +666,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
         }
         let mut returned_origins = BTreeMap::new();
+        // An admitted direct handler owns its request inputs. A data-only
+        // completion cannot return their pointer dependencies; the installed
+        // access summary and handler cleanup still check every actual access.
+        let consumes_owned_input = admitted_owned_input
+            && abi == nir::effects::Abi::Direct
+            && super::super::memory::effect_data_layout(self.package, result, &mut self.fuel, 0)
+                .map_err(|reason| error(expr.source, reason))?;
         let mut returned_guards: Option<ValuePointerGuards> = None;
         let mut returned_domains: Option<EnumDomains> = None;
         // Input preparation retains already evaluated inputs until the request
@@ -694,6 +703,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 if !origins.is_empty()
                     && !(this.defer_unknown_calls && !established_input)
                     && !discarded_copy
+                    && !consumes_owned_input
                     && (!forwarded
                         .as_ref()
                         .is_some_and(|indices| indices.contains(&slot))
@@ -1552,56 +1562,118 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         frame.memory_exposed |= !pointer_captures.is_empty();
                         let (pattern, mut guards) = outer_guards(&arm.pattern);
                         guards.extend(arm.guard.as_ref());
-                        let mut parameter_origins=BTreeMap::new();
-                        let mut parameter_guards=ValuePointerGuards::new();
+                        let mut parameter_origins = BTreeMap::new();
+                        let mut parameter_guards = ValuePointerGuards::new();
                         if let Some(summary) = &parameter_summary {
                             let mut borrowed = BTreeSet::new();
                             for access in &summary.accesses {
-                                this.fuel=this.fuel.checked_sub(access.input_fields.len()+1)
-                                    .ok_or_else(||error(installation,"handler input field budget exhausted"))?;
-                                if !borrowed.insert((access.parameter,access.input_fields.clone())) {continue;}
-                                let parameter=&parameters[access.parameter].ty;
-                                let leaf=super::super::memory::pointer_input_layout(this.package,parameter,&mut this.fuel)
-                                    .map_err(|reason|error(installation,reason))?.into_iter()
-                                    .find(|leaf|leaf.input_fields==access.input_fields)
-                                    .ok_or_else(||error(installation,"handler input field is not a pointer"))?;
-                                if (this.delivery)(&leaf.pointee).map_err(|reason|error(installation,reason))?!=Delivery::Copy
-                                    || (this.delivery)(parameter).map_err(|reason|error(installation,reason))?!=Delivery::Copy {
-                                    return Err(error(installation,"effect parameter access requires Copy input and scalar storage"));
+                                this.fuel = this
+                                    .fuel
+                                    .checked_sub(access.input_fields.len() + 1)
+                                    .ok_or_else(|| {
+                                        error(installation, "handler input field budget exhausted")
+                                    })?;
+                                if !borrowed.insert((access.parameter, access.input_fields.clone()))
+                                {
+                                    continue;
                                 }
-                                let mut borrowed_root=PlaceId {owner:u64::MAX-1,local:u32::try_from(borrowed.len()-1)
-                                    .map_err(|_|error(installation,"effect borrowed field index overflow"))?};
+                                let parameter = &parameters[access.parameter].ty;
+                                let leaf = super::super::memory::pointer_input_layout(
+                                    this.package,
+                                    parameter,
+                                    &mut this.fuel,
+                                )
+                                .map_err(|reason| error(installation, reason))?
+                                .into_iter()
+                                .find(|leaf| leaf.input_fields == access.input_fields)
+                                .ok_or_else(|| {
+                                    error(installation, "handler input field is not a pointer")
+                                })?;
+                                if (this.delivery)(&leaf.pointee)
+                                    .map_err(|reason| error(installation, reason))?
+                                    != Delivery::Copy
+                                {
+                                    return Err(error(
+                                        installation,
+                                        "effect parameter access requires Copy scalar storage",
+                                    ));
+                                }
+                                let mut borrowed_root = PlaceId {
+                                    owner: u64::MAX - 1,
+                                    local: u32::try_from(borrowed.len() - 1).map_err(|_| {
+                                        error(installation, "effect borrowed field index overflow")
+                                    })?,
+                                };
                                 // Captured pointers may already refer to virtual
                                 // roots from the installer's borrowed parameters.
                                 while frame.types.contains_key(&borrowed_root) {
-                                    this.fuel=this.fuel.checked_sub(1).ok_or_else(||error(installation,"effect borrowed root budget exhausted"))?;
-                                    borrowed_root.local=borrowed_root.local.checked_add(1)
-                                        .ok_or_else(||error(installation,"effect borrowed root index overflow"))?;
+                                    this.fuel = this.fuel.checked_sub(1).ok_or_else(|| {
+                                        error(installation, "effect borrowed root budget exhausted")
+                                    })?;
+                                    borrowed_root.local =
+                                        borrowed_root.local.checked_add(1).ok_or_else(|| {
+                                            error(
+                                                installation,
+                                                "effect borrowed root index overflow",
+                                            )
+                                        })?;
                                 }
-                                let shape=(this.shape)(&leaf.pointee).map_err(|reason|error(installation,reason))?;
-                                frame.state.declare(borrowed_root,&shape,true,&mut this.fuel)
-                                    .map_err(|reason|error(installation,format!("effect parameter borrowed field: {reason:?}")))?;
-                                frame.types.insert(borrowed_root,leaf.pointee.clone());
-                                let mut path=vec![access.parameter];
+                                let shape = (this.shape)(&leaf.pointee)
+                                    .map_err(|reason| error(installation, reason))?;
+                                frame
+                                    .state
+                                    .declare(borrowed_root, &shape, true, &mut this.fuel)
+                                    .map_err(|reason| {
+                                        error(
+                                            installation,
+                                            format!("effect parameter borrowed field: {reason:?}"),
+                                        )
+                                    })?;
+                                frame.types.insert(borrowed_root, leaf.pointee.clone());
+                                let mut path = vec![access.parameter];
                                 path.extend(leaf.storage_fields);
                                 // Distinct variants can share a physical slot.
                                 // Keep all candidates rather than overwriting
                                 // an earlier branch's conditional source.
                                 if !leaf.guards.is_empty() {
-                                    this.charge_pointer_conditions(&leaf.guards,installation)?;
-                                    let guards=leaf.guards.into_iter().map(|(fields,tag)| {
-                                        (std::iter::once(access.parameter).chain(fields).collect(),tag)
-                                    }).collect();
-                                    parameter_guards.entry(path.clone()).or_default()
-                                        .insert(Place {root:borrowed_root,fields:vec![]},guards);
+                                    this.charge_pointer_conditions(&leaf.guards, installation)?;
+                                    let guards = leaf
+                                        .guards
+                                        .into_iter()
+                                        .map(|(fields, tag)| {
+                                            (
+                                                std::iter::once(access.parameter)
+                                                    .chain(fields)
+                                                    .collect(),
+                                                tag,
+                                            )
+                                        })
+                                        .collect();
+                                    parameter_guards.entry(path.clone()).or_default().insert(
+                                        Place {
+                                            root: borrowed_root,
+                                            fields: vec![],
+                                        },
+                                        guards,
+                                    );
                                 }
-                                parameter_origins.entry(path).or_insert_with(BTreeSet::new)
-                                    .insert(Place {root:borrowed_root,fields:vec![]});
-                                frame.memory_exposed=true;
+                                parameter_origins
+                                    .entry(path)
+                                    .or_insert_with(BTreeSet::new)
+                                    .insert(Place {
+                                        root: borrowed_root,
+                                        fields: vec![],
+                                    });
+                                frame.memory_exposed = true;
                                 frame.effect_borrows.insert(borrowed_root);
-                                this.report.borrowed_roots.insert(borrowed_root,BorrowedRoot::Parameter {
-                                    parameter:access.parameter,input_fields:access.input_fields.clone(),pointee:leaf.pointee,
-                                });
+                                this.report.borrowed_roots.insert(
+                                    borrowed_root,
+                                    BorrowedRoot::Parameter {
+                                        parameter: access.parameter,
+                                        input_fields: access.input_fields.clone(),
+                                        pointee: leaf.pointee,
+                                    },
+                                );
                             }
                         }
                         this.bind_pattern_with_pointer_guards(
@@ -1735,6 +1807,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     }
                 }
                 result_inputs.push(EffectResultInput {
+                    owned_inputs: handler.abi == nir::effects::Abi::Direct
+                        && super::super::memory::effect_data_layout(
+                            self.package,
+                            result,
+                            &mut self.fuel,
+                            0,
+                        )
+                        .map_err(|reason| error(installation, reason))?,
                     parameter_accesses,
                     copy_parameters,
                     slot: handler_index,
@@ -1897,8 +1977,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     }
     /// Called only after all installation arms have passed resource analysis.
     /// An established row may mutate stable captures. A proven identity transfer
-    /// retains candidate operand origins; other inputs require data-only layout
-    /// or checked Copy permission before their aliases can be ignored.
+    /// retains candidate operand origins. Completed direct handlers may also
+    /// consume tracked owned inputs when their result has no escaping aliases.
     pub(super) fn installed_effect_memory_inputs(
         &mut self,
         handlers: &[nir::program::EffectHandler],
@@ -2006,17 +2086,25 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             .iter()
                             .all(|slot| parameters.get(*slot).is_some_and(|p| p.ty == **result))
                 });
-            if !identity_transfer
-                && !super::super::memory::effect_data_layout(
-                    self.package,
-                    result,
-                    &mut self.fuel,
-                    0,
-                )
-                .map_err(|reason| error(source, reason))?
-            {
+            let data_result =
+                super::super::memory::effect_data_layout(self.package, result, &mut self.fuel, 0)
+                    .map_err(|reason| error(source, reason))?;
+            if !identity_transfer && !data_result {
                 return Ok(vec![]);
             }
+            self.fuel = self
+                .fuel
+                .checked_sub(results.len().saturating_add(1))
+                .ok_or_else(|| error(source, "owned effect input admission budget exhausted"))?;
+            let owned_input = handler.abi == nir::effects::Abi::Direct
+                && data_result
+                && results.iter().any(|result| {
+                    result.owned_inputs
+                        && result.slot == handler_index
+                        && result.operation == handler.operation
+                        && result.abi == handler.abi
+                        && result.signature == handler.signature
+                });
             let mut copy_parameters = BTreeSet::new();
             for (slot, parameter) in parameters.iter().enumerate() {
                 if identity_transfer
@@ -2036,6 +2124,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     .map_err(|reason| error(source, reason))?
                 {
                     copy_parameters.insert(slot);
+                    continue;
+                }
+                if owned_input
+                    && super::super::memory::effect_transfer_layout(
+                        self.package,
+                        &parameter.ty,
+                        &mut self.fuel,
+                    )
+                    .map_err(|reason| error(source, reason))?
+                {
                     continue;
                 }
                 if !super::super::memory::effect_data_layout(
@@ -2067,6 +2165,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 }
             }
             inputs.push(super::super::memory::EffectInput {
+                owned_inputs: owned_input,
                 parameter_accesses,
                 copy_parameters,
                 forwarded_parameters: forwarded,

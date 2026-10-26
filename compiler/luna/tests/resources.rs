@@ -13747,6 +13747,7 @@ fn conditional_effect_memory_tracks_forwarded_pointer_results() {
     let operation = &package.effects[0];
     let input = memory::EffectInput {
         parameter_accesses: Default::default(),
+        owned_inputs: false,
         copy_parameters: Default::default(),
         operation: nir::effects::Operation {
             declaration: operation.declaration,
@@ -13819,6 +13820,7 @@ fn conditional_effect_memory_preserves_footprints_and_premises() {
     let operation = &package.effects[0];
     let input = memory::EffectInput {
         parameter_accesses: Default::default(),
+        owned_inputs: false,
         copy_parameters: Default::default(),
         forwarded_parameters: None,
         operation: nir::effects::Operation {
@@ -13888,6 +13890,7 @@ fn conditional_effect_memory_checks_instance_identity_and_routing() {
             let arguments = vec![nir::Term::Primitive(p)];
             memory::EffectInput {
                 parameter_accesses: Default::default(),
+                owned_inputs: false,
                 copy_parameters: Default::default(),
                 forwarded_parameters: None,
                 operation: nir::effects::Operation {
@@ -13967,6 +13970,7 @@ fn conditional_effect_memory_does_not_erase_pointer_delivery() {
         let operation = &package.effects[0];
         let input = memory::EffectInput {
             parameter_accesses: Default::default(),
+            owned_inputs: false,
             copy_parameters: Default::default(),
             forwarded_parameters: None,
             operation: nir::effects::Operation {
@@ -14020,6 +14024,7 @@ fn conditional_effect_closure_memory_retains_virtual_capture_accesses() {
         let operation = &package.effects[0];
         let input = memory::EffectInput {
             parameter_accesses: Default::default(),
+            owned_inputs: false,
             copy_parameters: Default::default(),
             forwarded_parameters: None,
             operation: nir::effects::Operation {
@@ -14107,6 +14112,7 @@ fn conditional_effect_closure_memory_orders_parameters_before_captures_and_rejec
         let operation = &package.effects[0];
         let input = memory::EffectInput {
             parameter_accesses: Default::default(),
+            owned_inputs: false,
             copy_parameters: Default::default(),
             forwarded_parameters: None,
             operation: nir::effects::Operation {
@@ -14199,6 +14205,7 @@ fn conditional_effect_data_delivery_preserves_argument_reads_and_rejects_hidden_
         let operation = &package.effects[0];
         let input = memory::EffectInput {
             parameter_accesses: Default::default(),
+            owned_inputs: false,
             copy_parameters: Default::default(),
             forwarded_parameters: None,
             operation: nir::effects::Operation {

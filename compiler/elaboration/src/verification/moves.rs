@@ -1988,6 +1988,7 @@ pub struct EffectResultInput {
     /// Every normal completion transfers one of these complete input operands.
     forwarded_parameters: Option<BTreeSet<usize>>,
     copy_parameters: BTreeSet<usize>,
+    owned_inputs: bool,
     parameter_accesses: BTreeSet<super::memory::EffectParameterAccess>,
 }
 
@@ -2016,6 +2017,7 @@ impl EffectResultInput {
             signature: self.signature.clone(),
             forwarded_parameters: self.forwarded_parameters.clone(),
             copy_parameters: self.copy_parameters.clone(),
+            owned_inputs: self.owned_inputs,
             parameter_accesses: self.parameter_accesses.clone(),
         })
     }
@@ -2063,7 +2065,11 @@ impl fmt::Display for EffectResultInput {
         for parameter in &self.copy_parameters {
             write!(f, " {parameter}")?;
         }
-        f.write_str(") (parameter-accesses")?;
+        write!(
+            f,
+            ") (owned-inputs {}) (parameter-accesses",
+            self.owned_inputs
+        )?;
         for access in &self.parameter_accesses {
             write!(f, " {access}")?;
         }
@@ -18328,6 +18334,7 @@ mod record_shape_tests {
         // Unit-level checked evidence exercises the bridge independently of
         // source installer derivation, which remains a separate prerequisite.
         let mut evidence = EffectResultInput {
+            owned_inputs: false,
             slot: 0,
             operation,
             abi: nir::effects::Abi::Direct,

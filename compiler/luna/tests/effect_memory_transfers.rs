@@ -22,6 +22,7 @@ fn conditional_memory_joins_same_operation_contracts_without_order_dependence() 
         abi: operation.abi,
         signature: operation.signature.clone(),
         forwarded_parameters: Some(BTreeSet::from([selected])),
+        owned_inputs: false,
         copy_parameters: BTreeSet::from([discarded]),
     };
     let infer = |inputs: &[memory::EffectInput]| {
@@ -163,6 +164,7 @@ fn ordinary_effect_can_ignore_checked_copy_pointer_inputs() {
                     forwarded_parameters: Some(std::collections::BTreeSet::from([
                         if body == "left" { 0 } else { 1 },
                     ])),
+                    owned_inputs: false,
                     copy_parameters: std::collections::BTreeSet::from([0, 1]),
                 };
             let summary = elaboration::verification::memory::infer_with_effect_inputs(
@@ -254,6 +256,7 @@ fn conditional_effect_memory_keeps_all_possible_parameter_origins() {
     let operation = &package.effects[0];
     let input = memory::EffectInput {
         parameter_accesses: Default::default(),
+        owned_inputs: false,
         copy_parameters: Default::default(),
         operation: nir::effects::Operation {
             declaration: operation.declaration,
@@ -1189,6 +1192,46 @@ fn scalar_effect_delivery_can_ignore_copy_pointer_without_identity_transfer() {
 }
 
 #[test]
+fn owned_input_premise_cannot_authorize_pointer_results() {
+    use elaboration::verification::memory;
+    let package = support::compile(
+        "effect relay(pointer:*bool)->*bool;
+         fn subject(pointer:*bool)->#relay *bool {relay(pointer)#}",
+    );
+    let operation = &package.effects[0];
+    let mut input = memory::EffectInput {
+        parameter_accesses: Default::default(),
+        operation: nir::effects::Operation {
+            declaration: operation.declaration,
+            arguments: vec![],
+        },
+        abi: operation.abi,
+        signature: operation.signature.clone(),
+        forwarded_parameters: Some(std::collections::BTreeSet::from([0])),
+        owned_inputs: true,
+        copy_parameters: Default::default(),
+    };
+    let infer = |input| {
+        memory::infer_with_effect_inputs(
+            &package,
+            support::id(&package, "subject"),
+            &[],
+            &Default::default(),
+            &Default::default(),
+            &[input],
+            &mut 200_000,
+        )
+    };
+    let error = infer(input.clone()).unwrap_err();
+    assert!(
+        error.contains("owned effect inputs require direct delivery with a data-only result"),
+        "{error}"
+    );
+    input.owned_inputs = false;
+    assert!(infer(input).unwrap().result_targets.is_some());
+}
+
+#[test]
 fn nonidentity_copy_effect_premises_require_checked_pointer_access() {
     use elaboration::verification::memory;
     let package = support::compile(
@@ -1205,6 +1248,7 @@ fn nonidentity_copy_effect_premises_require_checked_pointer_access() {
         abi: operation.abi,
         signature: operation.signature.clone(),
         forwarded_parameters: None,
+        owned_inputs: false,
         copy_parameters: std::collections::BTreeSet::from([0]),
     };
     let infer = |input: memory::EffectInput| {
@@ -1222,7 +1266,10 @@ fn nonidentity_copy_effect_premises_require_checked_pointer_access() {
     assert!(summary.accesses.is_empty());
     assert!(summary.result_targets.is_none());
     input.copy_parameters.clear();
-    assert!(infer(input).is_err());
+    assert!(infer(input.clone()).is_err());
+    input.owned_inputs = true;
+    assert!(format!("{input}").contains("(owned-inputs true)"));
+    assert!(infer(input).is_ok());
 
     for body in ["pointer.*", "do {pointer.* = true;true}"] {
         let source = format!(
@@ -1279,6 +1326,7 @@ fn conditional_effect_parameter_accesses_preserve_argument_snapshots() {
         abi: operation.abi,
         signature: operation.signature.clone(),
         forwarded_parameters: None,
+        owned_inputs: false,
         copy_parameters: BTreeSet::from([0]),
         parameter_accesses: BTreeSet::from([memory::EffectParameterAccess {
             parameter: 0,
@@ -1364,6 +1412,7 @@ fn conditional_effect_parameter_accesses_project_owned_input_fields() {
         abi: operation.abi,
         signature: operation.signature.clone(),
         forwarded_parameters: None,
+        owned_inputs: false,
         copy_parameters: std::collections::BTreeSet::from([0]),
         parameter_accesses: std::collections::BTreeSet::from([memory::EffectParameterAccess {
             parameter: 0,
@@ -1712,7 +1761,7 @@ fn aggregate_handler_pointer_fields_may_alias() {
 }
 
 #[test]
-fn aggregate_handler_access_checks_copy_and_cleanup_compatibility() {
+fn aggregate_handler_access_moves_affine_inputs_and_checks_copy_cleanup_compatibility() {
     for contract in [
         "",
         "impl Duplicate for Link {} impl Retire for Link {fn drop(*self) {}}",
@@ -1727,18 +1776,41 @@ fn aggregate_handler_access_checks_copy_and_cleanup_compatibility() {
             }}}}"
         );
         let package = support::compile(&source);
-        assert!(
-            luna::execution::interpret_with_protocols(
-                &package,
-                "run",
-                "Duplicate",
-                "Retire",
-                600_000
-            )
-            .is_err(),
-            "accepted incompatible input: {contract}"
+        let result = luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            600_000,
         );
+        if contract.is_empty() {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert!(
+                result.is_err(),
+                "accepted incompatible Copy/Drop input: {contract}"
+            );
+        }
     }
+}
+
+#[test]
+fn owned_handler_pointer_inputs_are_not_implicitly_copied() {
+    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        struct Link {target:*bool}
+        effect touch(value:Link);
+        fn run() {
+            var flag=false;
+            let input=Link {target:flag.ref};
+            touch(input)# {touch(value)=>{value.target.* = true;},};
+            touch(input)# {touch(value)=>{value.target.* = false;},};
+        }";
+    let package = support::compile(source);
+    let error =
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 600_000)
+            .unwrap_err();
+    assert!(error.contains("unavailable value"), "{error}");
 }
 
 #[test]
