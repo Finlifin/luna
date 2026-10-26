@@ -365,6 +365,10 @@ impl Interpreter<'_> {
                 }
                 self.admit_type(signature, depth + 1)?;
             }
+            Term::ContextualClosure { context, signature } => {
+                self.admit_type(context, depth + 1)?;
+                self.admit_type(signature, depth + 1)?;
+            }
             Term::ErrorResult { errors, result } => {
                 for label in errors {
                     self.admit_type(label, depth + 1)?;

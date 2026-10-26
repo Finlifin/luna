@@ -3,6 +3,56 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Callable type reflection
+
+`Interpreter::reflect_callable` observes a legal callable Type in a comptime
+invocation. `CallableReflection` retains both the original subject and the
+selected, admitted callable view. The latter retains closure environment Types,
+comptime phase and unsafe responsibility. Completed contextual closures may
+normalize into ordinary closure descriptions; this does not erase the original
+query or authorize a type-identity coercion. Already selected associated Types
+can supply the view, but reflection does not search implementations or unfold
+normal-form heads.
+
+`signature()` returns the entire function telescope. Parameter and result Types
+may reference its earlier binders; extracting a result does not turn it into a
+closed standalone Type. Type-sorted parameters alone do not imply comptime
+execution. `is_comptime()` and `is_unsafe()` observe the actual callable wrappers.
+The S-expression dump retains both descriptions and uses the existing escaped
+Term display. No function body, captured value, parameter name, default, access
+permission or concrete layout is obtained from this observation.
+
+Selection, formation validation and the retained subject copy consume invocation
+fuel. Malformed or unavailable structure, formation rejection, wrong invocation
+phase and exhaustion return no view; a later valid request can succeed with the
+remaining or explicitly replenished budget. Contextual closure admission now
+traverses both the environment description and the signature, including nested
+formation predicates, even before normalization converts a completed context.
+
+This is a compiler-side reflection adapter. Source reflection API naming,
+definition-builder dispatch and suspension/resumption across declaration-world
+publication remain separate work; this API does not implement those features.
+
+Verification from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib --test function_types --test environment_types --test runtime_function_identities --test normal_values --test type_list_inputs
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+All 179 tests passed (125 library tests and 54 integration tests), exit 0,
+at `/tmp/luna-tools-1b7fcmip/result.json`. Six new reflection tests cover scoped
+dependent signatures, runtime/comptime and unsafe combinations, closure context
+normalization, escaped stable dumps, environment/result formation rejection,
+invalid structure, wrong phase, budget exhaustion/replenishment, selected
+associated views and opaque normal-form preservation. The preceding run at
+`/tmp/luna-tools-3vlo2tb5/result.json` exposed an incorrect test expectation that
+a completed contextual closure would remain structurally unchanged. The corrected
+test requires preservation of the original subject and verifies the normalized
+environment/signature separately; normalization semantics were not altered.
+Formatting passed at `/tmp/luna-tools-hu0n882i/result.json`; `git diff --check`
+passed. These results do not establish source-level builder support.
+
 ## Generated node construction
 
 `hir::definitions::DefinitionNodes` provides an owner-local identity/index

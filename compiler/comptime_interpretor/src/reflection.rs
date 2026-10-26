@@ -2,6 +2,8 @@
 use super::*;
 mod enums;
 pub use enums::{EnumReflection, ReflectedVariant};
+mod callables;
+pub use callables::CallableReflection;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReflectedField {
