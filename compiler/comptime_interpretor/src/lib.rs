@@ -22,6 +22,8 @@ mod reflection;
 pub use reflection::{
     CallableReflection, EnumReflection, ReflectedField, ReflectedVariant, StructReflection,
 };
+#[cfg(test)]
+mod scoped_work;
 mod selected_types;
 mod type_list_index;
 pub use comptime_runtime::object::{Entry as ObjectEntry, Object};
@@ -9475,13 +9477,14 @@ fn scoped_term_value_work_with_evidence_in(
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
     target: Option<nir::target::TargetData>,
 ) -> Option<usize> {
-    let mut pending = vec![(
-        ty,
-        0usize,
-        std::rc::Rc::new(Vec::<&[nir::Parameter]>::new()),
-    )];
+    // A leaf needs neither a heap traversal stack nor an empty shared frame.
+    // Allocate pending nodes only for children, and shared binder frames only
+    // when entering a function telescope. Logical work charges stay unchanged.
+    let mut pending = Vec::new();
+    let mut first = Some((ty, 0usize, None::<std::rc::Rc<Vec<&[nir::Parameter]>>>));
     let mut work = 0usize;
-    while let Some((ty, depth, frames)) = pending.pop() {
+    while let Some((ty, depth, frames)) = first.take().or_else(|| pending.pop()) {
+        let frame_slice = frames.as_deref().map_or(&[][..], Vec::as_slice);
         work += 1;
         if depth > 128 || work > 100_000 {
             return None;
@@ -9558,7 +9561,7 @@ fn scoped_term_value_work_with_evidence_in(
                 let mut fuel = 100_000usize.checked_sub(work)?;
                 let before = fuel;
                 let mut bound_domains = BTreeMap::new();
-                for (frame_depth, frame) in frames.iter().rev().enumerate() {
+                for (frame_depth, frame) in frame_slice.iter().rev().enumerate() {
                     fuel = fuel.checked_sub(frame.len().saturating_add(1))?;
                     for (index, parameter) in frame.iter().enumerate() {
                         if parameter.sort != nir::Sort::ComptimeValue {
@@ -9594,7 +9597,7 @@ fn scoped_term_value_work_with_evidence_in(
                             } => bound_domains.get(&(*depth, *index)) == Some(domain),
                             _ => false,
                         },
-                        &frames
+                        &frame_slice
                             .iter()
                             .map(|frame| frame.iter().map(|p| p.sort).collect())
                             .collect::<Vec<_>>(),
@@ -9684,13 +9687,13 @@ fn scoped_term_value_work_with_evidence_in(
                 pending.push((inner, depth + 1, frames.clone()))
             }
             Term::Function { parameters, result } => {
-                work = work.checked_add(frames.len().saturating_add(1))?;
+                work = work.checked_add(frame_slice.len().saturating_add(1))?;
                 if work > 100_000 {
                     return None;
                 }
-                let mut nested = frames.as_ref().clone();
+                let mut nested = frame_slice.to_vec();
                 nested.push(parameters);
-                let frames = std::rc::Rc::new(nested);
+                let frames = Some(std::rc::Rc::new(nested));
                 pending.extend(
                     parameters
                         .iter()

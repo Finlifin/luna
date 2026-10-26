@@ -305,3 +305,39 @@ Build report: `/tmp/luna-tools-pi_p2vly/result.json`. All five runs exited 0:
 `/tmp/luna-tools-i05nyx0n/result.json`, `/tmp/luna-tools-ibehgv41/result.json`,
 `/tmp/luna-tools-8yltm80h/result.json`, `/tmp/luna-tools-5a2haqsm/result.json`,
 `/tmp/luna-tools-s0ffjald/result.json`.
+
+### Lazy validation traversal state
+
+Type-description validation now keeps its initial node and empty binder context
+off the heap. It creates a pending-node vector only when visiting children and
+shared binder frames only when entering function telescopes. Empty function
+telescopes still introduce a frame; sibling nodes retain independent scope
+contexts. Structural/scope validation and logical work charges are unchanged.
+
+The same five-process benchmark command after this change gives these medians
+for 4096 elements (the preceding table is the baseline):
+
+| Index form | Reads/call | ns/call | Allocations/call | Requested bytes/call | VM steps/call |
+|---|---:|---:|---:|---:|---:|
+| Literal | 1 | 290,838 | 4,126.04 | 1,149,532 | 20,508 |
+| Literal | 64 | 312,167 | 4,507.04 | 1,213,712 | 21,642 |
+| Local | 64 | 356,129 | 4,463.04 | 1,443,988 | 21,265 |
+| General block | 64 | 3,842,583 | 4,699.04 | 15,917,328 | 546,250 |
+
+All 18 workload step counts exactly match the baseline. The literal single-read
+case is about 1.70x faster and the general 64-read case about 2.21x faster; the
+general path still copies the full list and requests substantially more bytes.
+Remaining input admission, traversal and cloning costs are not eliminated.
+
+The targeted command below passed 181 tests, including empty-frame scope,
+sibling binder isolation, depth 128/129 and work 100,000/100,001 boundaries:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib --test type_list_index --test type_list_inputs --test instance_budget --test function_types --test environment_types --test normal_values --test type_equality
+```
+
+Test report: `/tmp/luna-tools-skgdmtqz/result.json`. Benchmark build:
+`/tmp/luna-tools-hvy3hvcu/result.json`. All five runs exited 0:
+`/tmp/luna-tools-97zpyz2b/result.json`, `/tmp/luna-tools-7jt7guge/result.json`,
+`/tmp/luna-tools-yp74_5cn/result.json`, `/tmp/luna-tools-4iep_uuu/result.json`,
+`/tmp/luna-tools-iku3sfei/result.json`.
