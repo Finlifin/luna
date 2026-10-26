@@ -341,3 +341,41 @@ Test report: `/tmp/luna-tools-skgdmtqz/result.json`. Benchmark build:
 `/tmp/luna-tools-97zpyz2b/result.json`, `/tmp/luna-tools-7jt7guge/result.json`,
 `/tmp/luna-tools-yp74_5cn/result.json`, `/tmp/luna-tools-4iep_uuu/result.json`,
 `/tmp/luna-tools-iku3sfei/result.json`.
+
+### Allocation-free disposal of leaf descriptions
+
+Freezing an invocation input releases the old type descriptions through
+`Term::drop_iteratively`. That routine now handles its root before allocating a
+pending-child vector. Leaf disposal therefore performs no allocation, including
+owned scalar payloads and empty containers. Descendant disposal is still
+iterative; rejection cleanup does not fall back to recursive host-stack drops.
+
+The same five-process benchmark after this change, 4096 elements:
+
+| Index form | Reads/call | ns/call | Allocations/call | Requested bytes/call | VM steps/call |
+|---|---:|---:|---:|---:|---:|
+| Literal | 1 | 265,908 | 30.04 | 920,156 | 20,508 |
+| Literal | 64 | 285,273 | 411.04 | 984,336 | 21,642 |
+| Local | 64 | 329,487 | 367.04 | 1,214,612 | 21,265 |
+| General block | 64 | 3,854,703 | 603.04 | 15,687,952 | 546,250 |
+
+Across all 18 workloads, allocation calls fall by exactly the list length and
+VM steps remain identical. Fast-path times improve by about 8–9% in the rows
+above; the general-path time is effectively unchanged. Remaining bytes include
+input and frozen-list storage, which this change does not remove.
+
+71 targeted tests passed: 33 NIR disposal/error-result tests at
+`/tmp/luna-tools-m7az___k/result.json`, and 38 VM list/budget/normal-value tests at
+`/tmp/luna-tools-vryat_lr/result.json`. The disposal tests count allocations on
+the current thread and separately release a 65,536-level mixed tree on a bounded
+host stack. Commands ran in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p nir --test type_disposal --test type_disposal_allocations --test error_results
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --test type_list_index --test type_list_inputs --test instance_budget --test normal_values
+```
+
+Benchmark build: `/tmp/luna-tools-1gie_dyk/result.json`. All five runs exited 0:
+`/tmp/luna-tools-dlz4nte5/result.json`, `/tmp/luna-tools-yl5cph9d/result.json`,
+`/tmp/luna-tools-9dd42r38/result.json`, `/tmp/luna-tools-q0bap4rb/result.json`,
+`/tmp/luna-tools-v_77sh16/result.json`.

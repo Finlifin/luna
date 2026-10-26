@@ -461,8 +461,11 @@ impl Term {
     /// Useful after rejecting untrusted/deep input. This is compiler-memory
     /// disposal, not execution of a source-language Drop implementation.
     pub fn drop_iteratively(self) {
-        let mut pending = vec![self];
-        while let Some(term) = pending.pop() {
+        // Releasing a leaf must not allocate a traversal vector of its own.
+        // Descendant disposal remains iterative even for rejected deep input.
+        let mut pending = Vec::new();
+        let mut first = Some(self);
+        while let Some(term) = first.take().or_else(|| pending.pop()) {
             match term {
                 Self::ErrorResult { errors, result } => {
                     pending.extend(errors);
