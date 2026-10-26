@@ -24,6 +24,44 @@ fn compile_bound(source: &str, splice: bool) -> Result<nir::program::Package, St
 }
 
 #[test]
+fn indexed_scalars_establish_domain_bounds_without_inventing_contents() {
+    let package = compile(
+        "typealias Byte=.u8'builtin;
+        comptime fn increment(values:meta.List<Byte>)->Byte {
+            let value=values[0];
+            if value < 255 {value + 1} else {0}
+        }
+        comptime fn counted(flags:meta.List<bool>)->Byte {
+            var count:Byte=0;
+            if flags[0] {count=count + 1;}
+            count
+        }
+        comptime fn run()->bool {
+            increment([254]) == 255 and increment([255]) == 0
+                and counted([true]) == 1 and counted([false]) == 0
+        }",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+
+    for body in [
+        "let value=values[0];value + 1",
+        "let value=values[0];if flags[0] {value + 1} else {0}",
+        "var value=values[0];if value < 255 {value=values[1];value + 1} else {0}",
+    ] {
+        let failure = compile(&format!(
+            "typealias Byte=.u8'builtin;
+            comptime fn invalid(values:meta.List<Byte>,flags:meta.List<bool>)->Byte {{{body}}}"
+        ))
+        .unwrap_err();
+        assert!(failure.contains("range"), "{failure}");
+    }
+}
+
+#[test]
 fn list_length_and_concat_preserve_empty_nested_and_type_elements() {
     let source = "
         typealias Integer=.Integer'builtin;

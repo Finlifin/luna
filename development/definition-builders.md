@@ -36,8 +36,10 @@ arithmetic activates a whole-body flow walk; the missing index case was unrelate
 to nominal descriptor preparation. The walker now visits list and index operands
 in order, returning no arithmetic or alias evidence for the Type/Symbol result.
 Struct reflection/publication operands also remain observable to the walk.
-The VM's checked indexing is unchanged. Other list element domains still require
-their own value/alias transfer; this is not a general collection proof model.
+The VM's checked indexing is unchanged. Primitive elements now retain their domain
+bounds, with no invented constant contents or relationship to another observation.
+Object and structured element domains still require their own alias transfer;
+this is not a general collection proof model or literal-element propagation.
 
 The former repro is now `development/examples/host-effectful-reflection-index.fl`.
 `python3 -B development/check.py --timeout 900 -- test --release -p luna
@@ -57,7 +59,7 @@ The same flow path now handles a Never-valued index: returning from an operand
 preserves prior effects and skips the remaining operand/index operation. Returning
 from the receiver likewise prevents evaluation of an overflowing index. Regression
 cases use Type, Symbol, bool and u8 lists where no element escapes the early return;
-ordinary returning bool/u8 indexing still needs a separate value-transfer model.
+ordinary returning bool/u8 indexing is now handled by primitive domain bounds.
 The original early-return case failed with `unsupported-construct`
 (`/tmp/luna-tools-bmfhpw_s/result.json`). Validation in `/home/fin/luna`:
 `python3 -B development/check.py --timeout 900 -- test --release -p luna
@@ -66,6 +68,18 @@ The original early-return case failed with `unsupported-construct`
 exit 0). The `effectful-reflection-index` native example now uses an early-returning
 comptime `FirstType` helper; the same host command passes O0 and O3
 (`/tmp/luna-host-examples-4cc9bslj`, exit 0).
+
+Scalar-index validation in `/home/fin/luna`: `python3 -B development/check.py
+--timeout 900 -- test --release -p luna --test comptime_list_operations
+--test builder_invocations --test integer_contracts --test target_integers
+--no-fail-fast` passes 26, 37, 15 and 27 tests respectively
+(`/tmp/luna-tools-6bz9ee77/result.json`, exit 0). The new regression executes
+guarded byte increments and Boolean-controlled counters. It rejects an unguarded
+increment, an unrelated Boolean guard, and reuse of an old range after assigning
+a fresh indexed value. `python3 -B development/host_examples.py
+comptime-scalar-index --release-driver --compare-optimization` passes O0 and O3
+(`/tmp/luna-host-examples-jfzpam6e`, exit 0). The example uses the computed scalar
+results to select a runtime Type without granting an unproved arithmetic bound.
 
 Required Type expressions now prepare the reachable nominal descriptor graph,
 including nested fields, applied type arguments, parameter domains, enum payloads

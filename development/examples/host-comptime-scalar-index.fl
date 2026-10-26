@@ -1,0 +1,29 @@
+{-
+  Indexing an unknown byte list supplies byte bounds, not a constant value.
+  The guard establishes the narrower range needed by checked addition.
+-}
+use primitives.Type;
+use primitives.u8;
+
+comptime fn next(values: meta.List<u8>) -> u8 {
+    let value = values[0];
+    if value < 255 { value + 1 } else { 0 }
+}
+
+comptime fn count(flags: meta.List<bool>) -> u8 {
+    var result: u8 = 0;
+    if flags[0] { result = result + 1; }
+    result
+}
+
+comptime fn Domain() -> Type {
+    if next([254]) == 255 and next([255]) == 0 and
+        count([true]) == 1 and count([false]) == 0 {
+        bool
+    } else {
+        u8
+    }
+}
+
+typealias Flag = Domain();
+fn run() -> Flag { true }
