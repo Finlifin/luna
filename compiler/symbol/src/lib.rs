@@ -190,3 +190,103 @@ impl fmt::Display for DefId {
         write!(f, "d{}:{}", self.pkg, self.index)
     }
 }
+
+/// Monotonic definition identities shared by source resolution and generated
+/// declarations. Keep one allocator for a scan/generation session. Reconstruct
+/// only from the authoritative next-unused index, never from the owner count:
+/// clause parameters also consume identities. Dropped drafts need not reuse IDs.
+#[derive(Debug)]
+pub struct DefIdGen {
+    pkg: u32,
+    next: u32,
+}
+
+impl DefIdGen {
+    pub fn new(pkg: u32) -> Self {
+        Self::from_next_index(pkg, 0)
+    }
+
+    /// Resume the resolver's allocation frontier. The caller must supply an
+    /// index beyond every identity it previously allocated, including drafts.
+    pub fn from_next_index(pkg: u32, next: u32) -> Self {
+        Self { pkg, next }
+    }
+
+    /// The maximum index is reserved as the exhausted cursor. Exhaustion never
+    /// wraps around or advances state, even in optimized builds.
+    pub fn try_next(&mut self) -> Option<DefId> {
+        let next = self.next.checked_add(1)?;
+        let id = DefId::new(self.pkg, self.next);
+        self.next = next;
+        Some(id)
+    }
+
+    /// Compatibility entrypoint for source scanners. Fallible generation paths
+    /// should use try_next and report exhaustion through their own diagnostics.
+    pub fn next(&mut self) -> DefId {
+        self.try_next()
+            .expect("definition identity space exhausted")
+    }
+
+    /// Switch package ownership while retaining the global scan frontier.
+    pub fn set_package(&mut self, package: u32) {
+        self.pkg = package;
+    }
+
+    /// Next unused scan index, including identities of discarded declarations.
+    pub fn count(&self) -> u32 {
+        self.next
+    }
+}
+impl Default for DefIdGen {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+impl fmt::Display for DefIdGen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(definition-id-generator (package {}) (next {}))",
+            self.pkg, self.next
+        )
+    }
+}
+
+#[cfg(test)]
+mod definition_id_tests {
+    use super::*;
+
+    #[test]
+    fn source_and_generated_identities_share_a_resumable_frontier() {
+        let mut source = DefIdGen::new(7);
+        assert_eq!(source.next(), DefId::new(7, 0));
+        assert_eq!(source.next(), DefId::new(7, 1));
+        source.set_package(9);
+        assert_eq!(source.next(), DefId::new(9, 2));
+        let mut generated = DefIdGen::from_next_index(7, source.count());
+        assert_eq!(generated.try_next(), Some(DefId::new(7, 3)));
+        assert_eq!(generated.try_next(), Some(DefId::new(7, 4)));
+        assert_eq!(generated.count(), 5);
+        assert_eq!(
+            generated.to_string(),
+            "(definition-id-generator (package 7) (next 5))"
+        );
+    }
+
+    #[test]
+    fn identity_exhaustion_does_not_wrap_or_return_the_invalid_sentinel() {
+        for package in [0, u32::MAX] {
+            let mut generator = DefIdGen::from_next_index(package, u32::MAX - 1);
+            assert_eq!(
+                generator.try_next(),
+                Some(DefId::new(package, u32::MAX - 1))
+            );
+            assert_eq!(generator.try_next(), None);
+            assert_eq!(generator.try_next(), None);
+            assert_eq!(generator.count(), u32::MAX);
+            generator.set_package(3);
+            assert_eq!(generator.try_next(), None);
+        }
+    }
+}
