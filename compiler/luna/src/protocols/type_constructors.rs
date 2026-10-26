@@ -60,6 +60,7 @@ impl Selectors<'_> {
 }
 
 fn resolve_host_tag(
+    paths: &super::source::ModulePaths<'_, '_>,
     hir: &hir::Package<'_>,
     packages: &[(u32, u64, &str)],
     label: &str,
@@ -78,7 +79,8 @@ fn resolve_host_tag(
     let [provider] = providers.as_slice() else {
         return Err(format!("host {label} package is missing or ambiguous"));
     };
-    let owner = super::source::resolve_module_path(hir, provider.0, &parts[1..parts.len() - 1])
+    let owner = paths
+        .resolve(provider.0, &parts[1..parts.len() - 1])
         .ok_or(format!(
             "host {label} enum selector is missing or ambiguous"
         ))?;
@@ -130,6 +132,7 @@ pub(crate) fn resolve_source(
     selectors: Selectors<'_>,
     identities: &Protocols,
 ) -> Result<Protocols, String> {
+    let paths = super::source::ModulePaths::new(hir);
     let mut result = super::splice::resolve_source(hir, packages, selectors.splice, identities)?;
     for (label, selector, target) in [
         ("FMA", selectors.host_fma, &mut result.host_fma),
@@ -143,7 +146,7 @@ pub(crate) fn resolve_source(
         let Some(selector) = selector else {
             continue;
         };
-        let binding = resolve_host_tag(hir, packages, label, selector)?;
+        let binding = resolve_host_tag(&paths, hir, packages, label, selector)?;
         if target.as_ref().is_some_and(|previous| previous != &binding) {
             return Err(format!(
                 "host {label} selector conflicts with driver binding"
@@ -152,7 +155,7 @@ pub(crate) fn resolve_source(
         *target = Some(binding);
     }
     for (operation, selector) in selectors.host_intrinsics {
-        let binding = resolve_host_tag(hir, packages, "intrinsic", selector)?;
+        let binding = resolve_host_tag(&paths, hir, packages, "intrinsic", selector)?;
         if !result
             .host_intrinsics
             .iter()
@@ -246,7 +249,8 @@ pub(crate) fn resolve_source(
                 "{operator} selector package is missing or ambiguous"
             ));
         };
-        let owner = super::source::resolve_module_path(hir, provider.0, &parts[1..])
+        let owner = paths
+            .resolve(provider.0, &parts[1..])
             .ok_or_else(|| format!("{operator} protocol selector is missing or ambiguous"))?;
         if !hir
             .item(owner)
@@ -292,7 +296,8 @@ pub(crate) fn resolve_source(
                 "{label} selector package `{package_name}` is missing or ambiguous"
             ));
         };
-        let owner = super::source::resolve_module_path(hir, provider.0, &components[1..])
+        let owner = paths
+            .resolve(provider.0, &components[1..])
             .ok_or_else(|| format!("{label} selector `{selector}` is missing or ambiguous"))?;
         let item = hir
             .item(owner)
