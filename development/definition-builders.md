@@ -55,6 +55,65 @@ passed. These results do not establish source-level builder support.
 
 ## Generated node construction
 
+`assemble_function` constructs a function descriptor and its separately stored
+body using one `DefinitionNodes` draft. Its callback supplies a complete ordinary
+`FnSig` and the body expression, so parameter dependencies, optional/default
+expressions, clauses and modifiers remain HIR rather than being flattened into
+independent closed Types. This does not infer a signature from callable reflection
+or copy implementation details out of a reflected function Type.
+
+The callback reserves parameters and the body root directly under the owner,
+leaves those nodes unregistered, and reserves/registers all other nodes using the
+shared construction fuel. The assembler derives BodyParams from FnParams, checks
+parameter ordering and mirrored identities, registers them and the body root,
+then finishes the canonical owner index. Pending reservations, duplicate
+registration, invalid parents and exhausted fuel return no assembled function.
+The callback remains responsible for registering every child it constructs;
+this adapter does not recursively discover omitted reservations or perform name
+resolution. Arbitrary callback effects and arena allocations are not rolled back.
+
+`AssembledFunction` returns the definition, BodyId and Body together, with an
+escaped S-expression Display. The caller stages both descriptor and body in the
+same DefinitionBatch before ordinary checked publication. No body is evaluated
+or published by assembly itself. Effect declarations and declaration-only
+functions retain their distinct HIR item kinds. Source builder dispatch and live
+VM suspension/resumption remain unimplemented.
+
+`assemble_function_declaration` uses the same parameter indexing and identity
+checks for a bodyless FnDeclaration. Its callback supplies only FnSig; no BodyId
+or package body is created. The parameter nodes still exist in the owner's index
+for binding lookup. Assembly does not authorize a free-standing bodyless function:
+ordinary publication must find its legitimate trait/template/quote context.
+Trait and impl containers continue to use general DefinitionNodes/ItemKind
+construction, retaining their real membership lists and normal protocol checking.
+
+Generated protocol verification from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir -p elaboration --test function_assembly --test generated_functions --test generated_traits
+```
+
+All seven tests passed, exit 0, at `/tmp/luna-tools-wc4pn47y/result.json`.
+Four HIR tests cover dependent parameter/result references, matching body
+bindings and indexes, modifier preservation, escaped dumps, invalid parameter
+identities and parents, unfinished reservations, exact budgets, replenishment,
+and bodyless declarations without phantom body entries.
+
+The generated-function integration test constructs a function and caller together,
+rejects a Char body against the Bool result without publication, repairs the draft,
+publishes it, and invokes both omitted-default and explicit-argument calls. It
+runs for runtime and comptime functions. The protocol test reserves five owners
+(trait, required method, impl, implementation method and caller), checks a real
+method-signature rejection, repairs the contract, publishes the batch, and invokes
+the caller through trait selection. Declaration references retain explicit source
+DefId mappings. A separate test rejects a free-standing ordinary bodyless function.
+Generic trait/impl clauses, supertrait composition and capability synthesis remain
+on their existing paths and are not established by this static-method coverage.
+
+The preceding run `/tmp/luna-tools-eg_cjbk0/result.json` completed the build after
+automatic quota cleanup but lost log bytes (`evidence-error`, wrapper exit 125).
+The clean rerun above is the verification evidence for this checkpoint.
+
 `hir::definitions::DefinitionNodes` provides an owner-local identity/index
 builder shared by all existing HIR node kinds. Reserve a child under an already
 reserved parent, construct arena nodes with those identities, register each once,
