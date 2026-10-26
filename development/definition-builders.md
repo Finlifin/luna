@@ -8,6 +8,39 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Checked concrete struct and enum publication
+
+`CheckedDefinitionPublisher` now combines the shared declaration admission session
+and incremental finite-storage checker. Both struct and enum batches use the same
+committed world and revision. A preparation retains immutable descriptors and a
+private commit callback; it publishes neither descriptors nor representation proofs.
+A successful commit installs both checking states and retains the generated batch.
+Stale candidates are rejected before representation publication, and a live VM's
+outer installation rolls back if that commit rejects the candidate.
+
+`CheckedStructPublisher` delegates to this service after charging and constructing
+its request descriptor. Existing source struct builders therefore use the shared
+implementation. The new enum path accepts ordinary concrete, closed enum batches,
+including forward payload references; malformed formation and infinite by-value
+storage reject the entire batch. Pointer recursion stays legal. Descriptor kinds
+and declaration identities are preserved when extracting committed additions.
+
+This completes the checked concrete enum publication service. Source EnumBuilder
+syntax/library construction, source dispatch and identity allocation still need
+connection; generic/encoded enum generation needs additional contracts.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p elaboration --test checked_definition_publisher
+--test checked_struct_publisher --test representations --test generated_enums
+--test struct_publisher`, exit 0, 37 tests
+(`/tmp/luna-tools-vhnnwnic/result.json`). Five new cases exercise the live VM,
+shared ownership, alternating kinds, forward batches, formation/representation
+failure, cross-kind stale receipts, external admission rejection and all
+insufficient preparation budgets. Targeted formatting and diff checks pass.
+Source regression with the same wrapper: `test --release -p luna
+--test builder_invocations --test source_reflection`, exit 0, 49 tests
+(`/tmp/luna-tools-dhwxxx_4/result.json`).
+
 ## Shared declaration admission session
 
 `DefinitionAdmissionSession` retains committed struct and enum descriptions in
@@ -22,8 +55,8 @@ are checked across both catalogs.
 Preparation borrows the current caller's budget and prepays installation work;
 commit needs no new fuel. Dropping a receipt publishes nothing and releases its
 shared batch. This adds enum admission to the reusable checking boundary; it does
-not yet expose a source EnumBuilder or a checked enum publisher, and callers still
-owe finite representation checking independently.
+not itself expose a source EnumBuilder; the checked publisher above combines it
+with finite representation checking.
 
 Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
 test --release -p comptime_interpretor --lib --test struct_admission_session`,
@@ -49,8 +82,8 @@ proofs; a commit of either kind invalidates competing receipts. Existing struct
 callers keep using `prepare`, which delegates to the mixed path with no enums.
 Receipt Display includes enum identities in the S-expression dump.
 
-This supplies the finite-storage prerequisite for a checked enum publisher; it
-does not yet connect source EnumBuilder dispatch or replace declaration admission.
+This supplies the finite-storage prerequisite used by the checked publisher above;
+it does not connect source EnumBuilder dispatch or replace declaration admission.
 Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
 test --release -p elaboration --test representations`, exit 0, 18 tests
 (`/tmp/luna-tools-t9lb9eou/result.json`). New cases cover cross-kind cycles and
@@ -80,8 +113,7 @@ This boundary accepts ordinary concrete enums in a comptime declaration VM.
 It rejects encoded/intrinsic and generic enums, abstract invocation scope and
 runtime/IIR execution. The caller must reserve identities and perform ordinary
 semantic/representation checking first; VM admission is not a finite-layout proof.
-The source EnumBuilder, source dispatch and checked enum publisher are still to
-be connected. Existing encoded source enums remain supported through initial
+The source EnumBuilder and source dispatch are still to be connected. Existing encoded source enums remain supported through initial
 package construction.
 
 Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
