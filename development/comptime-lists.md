@@ -30,7 +30,7 @@ IIR 的稳定值折叠只接受已完成的列表数据，保留其完整类型�
 源码验收位于 `compiler/luna/tests/comptime_list_operations.rs`；低层边界
 分别在 `comptime_interpretor/tests/type_list_inputs.rs` 和
 `iir/tests/comptime_lists.rs`。本能力不代表完整 sysroot 或 List 库已经完成；
-切片、迭代与更多集合接口仍需后续实现。
+遍历组合子、查询、切片与区间替换的后续实现见下文。
 
 ## 本阶段验收
 
@@ -268,3 +268,43 @@ alloc/realloc 请求量，不是峰值内存。
 `/tmp/luna-tools-5k69qd9n/result.json`，均退出 0。
 这证明追加路径的局部收益，不表示整个编译器或任意 map/filter 回调都有
 相同加速比，也不表示剩余验证成本已变为线性。
+
+## 切片与区间替换
+
+`meta.slice(values, start, end) -> ?List<T>` 与
+`meta.replace_range(values, start, end, replacement) -> ?List<T>`
+使用半开区间 `[start, end)`；两个边界都是精确的 comptime Integer。
+合法边界满足 `0 <= start <= end <= length(values)`，不截断越界值，
+也不将负索引解释为倒数位置。无效边界返回外层 null；合法空区间
+返回外层有值的空 List。这与元素自身是否为可选类型无关。
+
+```flurry
+comptime fn edit_types() -> ?meta.List<Type> {
+    let fields: meta.List<Type> = [bool, u32, bool];
+    meta.replace_range(fields, 1, 2, [u64, bool])
+}
+
+comptime fn check_slice() -> bool {
+    let values: meta.List<Integer> = [10, 20, 30, 40];
+    meta.slice(values, 1, 3) match {
+        selected? => meta.length(selected) == 2
+            and selected[0] == 20 and selected[1] == 30,
+        null => false,
+    }
+}
+```
+
+空替换列表用于删除，空区间用于插入；`start == end == length(values)`
+在末尾插入。前缀、替换内容、后缀依次进入新列表。T 的 normal-form
+身份、嵌套 List 边界和元素可选层都保持，Type 列表结果可继续作为
+variadic 类型函数的输入。
+
+这些是普通 comptime 函数：所有参数依源顺序求值一次，进入函数后才
+检查边界。即使边界无效，replacement 参数表达式仍然执行；若该表达式
+改写原列表变量，函数仍使用第一个参数已经取得的不可变快照。调用失败
+或 VM 预算耗尽不会伪装成 null。
+
+实现复用现有索引、append 和指针契约，没有增加特权 intrinsic、IR 节点
+或隐式 List-to-runtime 转换。内部 append_range 只在边界检查后调用。
+当前 append 仍检查累计结果，因此这些操作尚不承诺线性时间；它们也不
+自动注册列表模式协议或提供具名 rest 的切片语义。

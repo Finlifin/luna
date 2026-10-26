@@ -134,6 +134,46 @@ where T, c: (.Type'builtin).vars.Closure {
     output
 }
 
+{-
+  Select a half-open interval [start, end). Bounds are exact comptime Integers;
+  invalid bounds return null, while a valid empty interval returns a present
+  empty list. Elements retain their domains and the input remains unchanged.
+-}
+pub comptime fn slice(values: List<T>, start: .Integer'builtin, end: .Integer'builtin)
+    -> ?List<T> where T {
+    let count = length(values);
+    if start < 0 or end < start or end > count { return null; }
+    var output: List<T> = [];
+    append_range(output.ref, values, start, end);
+    output
+}
+
+{-
+  Replace [start, end) with a list of the same element domain. Empty intervals
+  insert; empty replacements remove. All inputs are ordinary once-evaluated
+  arguments. Invalid bounds return null without constructing an output list.
+-}
+pub comptime fn replace_range(values: List<T>, start: .Integer'builtin,
+    end: .Integer'builtin, replacement: List<T>) -> ?List<T> where T {
+    let count = length(values);
+    if start < 0 or end < start or end > count { return null; }
+    var output: List<T> = [];
+    append_range(output.ref, values, 0, start);
+    append_range(output.ref, replacement, 0, length(replacement));
+    append_range(output.ref, values, end, count);
+    output
+}
+
+-- Internal traversal; callers establish the half-open interval bounds first.
+comptime fn append_range(target: *List<T>, values: List<T>,
+    start: .Integer'builtin, end: .Integer'builtin) where T {
+    var index = start;
+    while index < end {
+        append(target, values[index]);
+        index = index + 1;
+    }
+}
+
 pub mod prelude {
     pub use .List;
     pub use .Object;

@@ -712,3 +712,154 @@ fn list_view_binding_does_not_authorize_an_opaque_list_factory() {
         "{error}"
     );
 }
+
+#[test]
+fn list_ranges_preserve_bounds_empty_results_and_input_snapshots() {
+    let package = compile(
+        "
+        typealias Integer = .Integer'builtin;
+        comptime fn run() -> bool {
+            let input: meta.List<Integer> = [10,20,30,40];
+            let middle = meta.slice(input, 1, 3);
+            let full = meta.slice(input, 0, 4);
+            let empty = meta.slice(input, 4, 4);
+            let changed = meta.replace_range(input, 1, 3, [7,8,9]);
+            let inserted = meta.replace_range(input, 0, 0, [7]);
+            let appended = meta.replace_range(input, 4, 4, [9]);
+            let removed = meta.replace_range<Integer>(input, 0, 4, []);
+            (middle match {xs? => meta.length(xs) == 2 and xs[0] == 20 and xs[1] == 30, null => false})
+                and (full match {xs? => meta.length(xs) == 4 and xs[3] == 40, null => false})
+                and (empty match {xs? => meta.length(xs) == 0, null => false})
+                and (changed match {xs? => meta.length(xs) == 5 and xs[0] == 10
+                    and xs[1] == 7 and xs[2] == 8 and xs[3] == 9 and xs[4] == 40, null => false})
+                and (inserted match {xs? => meta.length(xs) == 5 and xs[0] == 7 and xs[1] == 10, null => false})
+                and (appended match {xs? => meta.length(xs) == 5 and xs[4] == 9, null => false})
+                and (removed match {xs? => meta.length(xs) == 0, null => false})
+                and meta.length(input) == 4 and input[1] == 20
+                and (meta.slice<Integer>([], 0, 0) match {xs? => meta.length(xs) == 0, null => false})
+                and (meta.replace_range<Integer>([], 0, 0, [5]) match {xs? => xs[0] == 5, null => false})
+        }
+        comptime fn invalid(start: Integer, end: Integer) -> bool {
+            let input: meta.List<Integer> = [1,2];
+            (meta.slice(input, start, end) match {null => true, _? => false})
+                and (meta.replace_range(input, start, end, [3]) match {null => true, _? => false})
+        }
+        comptime fn rejected() -> bool {
+            invalid(-1, 1) and invalid(2, 1) and invalid(0, 3)
+                and invalid(3, 3) and invalid(-2, -1)
+                and invalid(0, 999999999999999999999999999999999999)
+        }
+        ",
+    ).unwrap();
+    for name in ["run", "rejected"] {
+        assert_eq!(
+            luna::invocation::invoke(&package, name, 1_000_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn list_ranges_keep_nested_optional_and_normal_form_type_domains() {
+    let package = compile(
+        "
+        typealias Integer = .Integer'builtin;
+        typealias Type = .Type'builtin;
+        pure comptime fn Packet<...fields: meta.List<Type>> -> Type {Packet<...fields>}
+        comptime fn Generated() -> Type {
+            let fields: meta.List<Type> = [bool,Integer,bool];
+            meta.replace_range(fields, 1, 2, [bool]) match {
+                xs? => Packet<...xs>, null => bool,
+            }
+        }
+        comptime fn Direct() -> Type {Packet<bool,bool,bool>}
+        comptime fn run() -> bool {
+            let nested: meta.List<meta.List<bool>> = [[true],[],[false]];
+            let optional: meta.List<?Integer> = [7,null,9];
+            (meta.slice(nested, 1, 3) match {xs? => meta.length(xs) == 2
+                and meta.length(xs[0]) == 0 and not xs[1][0], null => false})
+                and (meta.slice(optional, 1, 2) match {xs? => meta.length(xs) == 1
+                    and (xs[0] match {null => true, _? => false}), null => false})
+                and (meta.replace_range<?Integer>(optional, 0, 3, [null]) match {
+                    xs? => meta.length(xs) == 1 and (xs[0] match {null => true, _? => false}), null => false})
+        }
+        ",
+    ).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "Generated", 1_000_000).unwrap(),
+        luna::invocation::invoke(&package, "Direct", 1_000_000).unwrap()
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_ranges_evaluate_arguments_once_before_bounds_checks() {
+    let package = compile(
+        "
+        typealias Integer = .Integer'builtin;
+        comptime fn input(trace: *Integer, value: meta.List<Integer>) -> meta.List<Integer> {
+            trace.* = trace.* * 10 + 1; value
+        }
+        comptime fn bound(trace: *Integer, tag: Integer, value: Integer) -> Integer {
+            trace.* = trace.* * 10 + tag; value
+        }
+        comptime fn replacement(trace: *Integer, original: *meta.List<Integer>) -> meta.List<Integer> {
+            trace.* = trace.* * 10 + 4;
+            original.* = [];
+            [9]
+        }
+        comptime fn run() -> bool {
+            var trace: Integer = 0;
+            var original: meta.List<Integer> = [1,2,3];
+            let changed = meta.replace_range(input(trace.ref, original),
+                bound(trace.ref, 2, 1), bound(trace.ref, 3, 2), replacement(trace.ref, original.ref));
+            let first = trace == 1234 and meta.length(original) == 0
+                and (changed match {xs? => meta.length(xs) == 3 and xs[0] == 1
+                    and xs[1] == 9 and xs[2] == 3, null => false});
+            trace = 0;
+            original = [1,2,3];
+            let invalid = meta.replace_range(input(trace.ref, original),
+                bound(trace.ref, 2, -1), bound(trace.ref, 3, 2), replacement(trace.ref, original.ref));
+            let second = trace == 1234 and meta.length(original) == 0
+                and (invalid match {null => true, _? => false});
+            trace = 0;
+            let selected = meta.slice(input(trace.ref, [7,8,9]),
+                bound(trace.ref, 2, 1), bound(trace.ref, 3, 3));
+            first and second and trace == 123
+                and (selected match {xs? => meta.length(xs) == 2 and xs[0] == 8 and xs[1] == 9, null => false})
+        }
+        ",
+    ).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_ranges_reject_incompatible_inputs_and_propagate_invocation_limits() {
+    for source in [
+        "comptime fn bad() {meta.slice<bool>([true], false, 1);}",
+        "comptime fn bad() {meta.replace_range<bool>([true], 0, 1, [7]);}",
+        "comptime fn bad() {meta.slice<bool>(true, 0, 1);}",
+        "fn bad() {meta.slice<bool>([true], 0, 1);}",
+    ] {
+        assert!(compile(source).is_err(), "{source}");
+    }
+    let package = compile(
+        "comptime fn run() -> bool {
+        meta.slice<bool>([true,false,true,false], 0, 4) match {
+            xs? => meta.length(xs) == 4, null => false,
+        }
+    }",
+    )
+    .unwrap();
+    assert!(luna::invocation::invoke(&package, "run", 1).is_err());
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
