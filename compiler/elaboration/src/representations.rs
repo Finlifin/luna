@@ -2,16 +2,34 @@
 //! heads stay opaque except for the configured language Tuple constructor.
 use nir::{DeclarationId, Sort, Term, program as n};
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+
+enum Description<'a, T> {
+    Borrowed(&'a T),
+    Shared(Arc<[T]>, usize),
+}
+impl<T> Description<'_, T> {
+    fn get(&self) -> &T {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Shared(batch, index) => &batch[*index],
+        }
+    }
+}
 
 enum Descriptions<'a, T> {
     Table(&'a BTreeMap<DeclarationId, T>),
     References(BTreeMap<DeclarationId, &'a T>),
+    Shared(BTreeMap<DeclarationId, Description<'a, T>>),
+    Overlay(&'a Descriptions<'a, T>, BTreeMap<DeclarationId, &'a T>),
 }
 impl<T> Descriptions<'_, T> {
     fn get(&self, id: &DeclarationId) -> Option<&T> {
         match self {
             Self::Table(table) => table.get(id),
             Self::References(table) => table.get(id).copied(),
+            Self::Shared(table) => table.get(id).map(Description::get),
+            Self::Overlay(base, additions) => additions.get(id).copied().or_else(|| base.get(id)),
         }
     }
 }
@@ -24,6 +42,7 @@ pub struct Checker<'a> {
     enums: Descriptions<'a, n::Enum>,
     newtypes: Descriptions<'a, nir::newtypes::Newtype>,
     done: HashSet<Term>,
+    prior_done: Option<&'a HashSet<Term>>,
 }
 impl<'a> Checker<'a> {
     pub fn new(
@@ -38,6 +57,7 @@ impl<'a> Checker<'a> {
             enums: Descriptions::Table(enums),
             newtypes: Descriptions::Table(newtypes),
             done: HashSet::new(),
+            prior_done: None,
         }
     }
 
@@ -56,6 +76,7 @@ impl<'a> Checker<'a> {
             enums: Descriptions::References(enums),
             newtypes: Descriptions::References(newtypes),
             done: HashSet::new(),
+            prior_done: None,
         }
     }
 
@@ -82,7 +103,9 @@ impl<'a> Checker<'a> {
             Term::Nominal {
                 declaration,
                 arguments,
-            } if !self.done.contains(ty) => {
+            } if !self.done.contains(ty)
+                && !self.prior_done.is_some_and(|done| done.contains(ty)) =>
+            {
                 if !active.insert(ty.clone()) {
                     return Err("recursive by-value struct representation or enum payload");
                 }
@@ -175,5 +198,171 @@ impl<'a> Checker<'a> {
             // parameter/result values. Other normal-form heads are not unfolded.
             _ => Ok(()),
         }
+    }
+}
+
+/// Append-only representation world for checked, concrete builder results.
+/// A candidate borrows the committed indices and memoized proofs; its own proof
+/// cache remains isolated until publication. Failed or dropped attempts cannot
+/// teach the committed world anything about a replaceable candidate identity.
+pub struct IncrementalChecker<'a> {
+    world: Checker<'a>,
+    identity: Arc<()>,
+    revision: u64,
+}
+
+pub struct PreparedRepresentations {
+    definitions: Arc<[n::Struct]>,
+    done: HashSet<Term>,
+    identity: Arc<()>,
+    revision: u64,
+}
+
+impl<'a> IncrementalChecker<'a> {
+    pub fn new(package: &'a n::Package, fuel: &mut usize) -> Result<Self, &'static str> {
+        *fuel = fuel
+            .checked_sub(
+                package
+                    .structs
+                    .len()
+                    .saturating_add(package.enums.len())
+                    .saturating_add(package.newtypes.len())
+                    .saturating_add(package.normal_forms.len())
+                    .saturating_add(1),
+            )
+            .ok_or("struct representation index budget exhausted")?;
+        Ok(Self {
+            world: Checker {
+                tuple: package
+                    .normal_forms
+                    .iter()
+                    .find(|head| head.role == nir::normal_forms::Role::Tuple)
+                    .map(|head| head.declaration),
+                structs: Descriptions::Shared(
+                    package
+                        .structs
+                        .iter()
+                        .map(|def| (def.declaration, Description::Borrowed(def)))
+                        .collect(),
+                ),
+                enums: Descriptions::References(
+                    package
+                        .enums
+                        .iter()
+                        .map(|def| (def.declaration, def))
+                        .collect(),
+                ),
+                newtypes: Descriptions::References(
+                    package
+                        .newtypes
+                        .iter()
+                        .map(|def| (def.declaration, def))
+                        .collect(),
+                ),
+                done: HashSet::new(),
+                prior_done: None,
+            },
+            identity: Arc::new(()),
+            revision: 0,
+        })
+    }
+
+    /// Declaration admission must precede this check. This layer checks finite
+    /// storage only; it does not authorize field types, scope or trait evidence.
+    pub fn prepare(
+        &self,
+        definitions: Arc<[n::Struct]>,
+        fuel: &mut usize,
+    ) -> Result<PreparedRepresentations, &'static str> {
+        *fuel = fuel
+            .checked_sub(definitions.len().saturating_mul(3).saturating_add(1))
+            .ok_or("struct representation index budget exhausted")?;
+        let mut additions = BTreeMap::new();
+        for def in definitions.iter() {
+            if self.world.structs.get(&def.declaration).is_some()
+                || self.world.enums.get(&def.declaration).is_some()
+                || self.world.newtypes.get(&def.declaration).is_some()
+                || additions.insert(def.declaration, def).is_some()
+            {
+                return Err("struct representation identity collision");
+            }
+        }
+        let mut candidate = Checker {
+            tuple: self.world.tuple,
+            structs: Descriptions::Overlay(&self.world.structs, additions),
+            enums: Descriptions::Overlay(&self.world.enums, BTreeMap::new()),
+            newtypes: Descriptions::Overlay(&self.world.newtypes, BTreeMap::new()),
+            done: HashSet::new(),
+            prior_done: Some(&self.world.done),
+        };
+        for def in definitions.iter() {
+            candidate.check(
+                &Term::Nominal {
+                    declaration: def.declaration,
+                    arguments: vec![],
+                },
+                fuel,
+            )?;
+        }
+        // Commit hashes these immutable proofs into the persistent cache.
+        // Reserve that work before issuing a receipt, even if it is dropped.
+        for ty in &candidate.done {
+            nir::type_computations::charge_term(ty, fuel)
+                .map_err(|_| "struct representation memo budget exhausted")?;
+        }
+        let done = std::mem::take(&mut candidate.done);
+        drop(candidate);
+        Ok(PreparedRepresentations {
+            definitions,
+            done,
+            identity: Arc::clone(&self.identity),
+            revision: self.revision,
+        })
+    }
+
+    pub fn commit(&mut self, prepared: PreparedRepresentations) -> Result<(), &'static str> {
+        let next = self.revision.checked_add(1);
+        if !Arc::ptr_eq(&self.identity, &prepared.identity)
+            || prepared.revision != self.revision
+            || next.is_none()
+        {
+            return Err("struct representation candidate is stale or belongs to another world");
+        }
+        let Descriptions::Shared(table) = &mut self.world.structs else {
+            unreachable!()
+        };
+        for (index, def) in prepared.definitions.iter().enumerate() {
+            table.insert(
+                def.declaration,
+                Description::Shared(Arc::clone(&prepared.definitions), index),
+            );
+        }
+        self.world.done.extend(prepared.done);
+        self.revision = next.unwrap();
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for IncrementalChecker<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(representation-world (revision {}) (proved {}))",
+            self.revision,
+            self.world.done.len()
+        )
+    }
+}
+impl std::fmt::Display for PreparedRepresentations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(prepared-representations (revision {}) (definitions",
+            self.revision
+        )?;
+        for def in self.definitions.iter() {
+            write!(f, " {}", def.declaration)?;
+        }
+        write!(f, ") (proved {}))", self.done.len())
     }
 }

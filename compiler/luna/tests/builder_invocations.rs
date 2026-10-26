@@ -67,6 +67,41 @@ const PREFIX: &str = "
 ";
 
 #[test]
+fn builder_loop_retains_a_long_chain_of_generated_layouts() {
+    let fixture = Fixture::new(&format!(
+        "{PREFIX}
+        comptime fn Build() -> Type {{
+            var current: Type = Original;
+            var index = 0;
+            while index < 256 {{
+                current = .build_struct'builtin(.Layer, [.inner], [current]);
+                index = index + 1;
+            }}
+            current
+        }}"
+    ));
+    let (Artifact::Nir(package), Value::Type(mut ty), _) =
+        fixture.invoke("Build", &mut 1_000_000, 1_000_000).unwrap()
+    else {
+        panic!("expected generated Type and NIR")
+    };
+    assert_eq!(package.structs.len(), 257);
+    let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let mut visited = std::collections::BTreeSet::new();
+    for _ in 0..256 {
+        let nir::Term::Nominal { declaration, .. } = &ty else {
+            panic!("nominal layer")
+        };
+        assert!(visited.insert(*declaration));
+        let layout = vm.reflect_struct(&ty).unwrap();
+        assert_eq!(layout.fields.len(), 1);
+        assert_eq!(layout.fields[0].name, "inner");
+        ty = layout.fields[0].ty.clone();
+    }
+    assert_eq!(vm.reflect_struct(&ty).unwrap().fields[0].name, "flag");
+}
+
+#[test]
 fn package_driver_returns_generated_types_and_their_checked_world() {
     let fixture = Fixture::new(&format!(
         "{PREFIX}

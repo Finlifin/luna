@@ -134,11 +134,40 @@ The session exposes no program execution, host solver or live inference state.
 
 Each attempt borrows its caller's allowance; failure and unwinding return only
 the remaining fuel. Exhaustion can be retried with a separately supplied budget,
-and commit cannot secretly draw on an old allowance. The finite-storage checker
-still builds reference indices and traverses relevant field representations per
-request, charging that work. This is not a constant-time validation cache.
+and commit cannot secretly draw on an old allowance. Finite-storage validation
+now also uses a lazy append-only `representations::IncrementalChecker`. It builds
+baseline indices once, borrows them through a candidate overlay, and reuses
+committed finite-representation proofs. Candidate descriptions and new proofs
+remain isolated in a revision-bound receipt until publication. A failed batch,
+dropped receipt or stale commit cannot leave a proof for a reusable identity.
+The existing representation walk still checks every new layout and uncached
+generic application with the caller's budget. The optimization does not unfold
+opaque normal-form heads or treat storage finiteness as type admission.
 Defaults, attributes, clauses,
 methods and new implementation evidence require their own checking paths.
+
+Incremental representation validation in `/home/fin/luna`, through `python3 -B
+development/check.py --timeout 900 --`:
+
+- `check --release -p elaboration`: exit 0
+  (`/tmp/luna-tools-oror4qd3/result.json`).
+- `test --release -p elaboration --test representations --test
+  checked_struct_publisher --test struct_publisher --no-fail-fast`: 22 passed
+  (`/tmp/luna-tools-hee0xrut/result.json`). After adding the forward-reference
+  batch case, `test --release -p elaboration --test representations` passed all
+  12 representation tests (`/tmp/luna-tools-4_g4gscy/result.json`).
+- `test --release -p luna --test builder_invocations --test source_reflection
+  --no-fail-fast`: 39 passed (`/tmp/luna-tools-i24p771t/result.json`).
+
+All commands exited 0; targeted rustfmt and diff checks passed. Regression
+coverage includes foreign/stale receipts, discarded and partially checked failed
+batches, budget retry, legal pointer recursion and failed cyclic batches repaired
+using the same identities. With 256 baseline descriptions, a further 256 committed
+wrapper types have equal per-layer metered cost after the initial proof. A source
+builder loop also generates 256 wrappers, then reflects the entire distinct chain
+back to its original field. The initial source fixture missed spaces around `+`;
+it was corrected rather than relaxing the lexer. These are work-budget and
+behavior checks, not an overall wall-clock speedup measurement.
 
 Reusable admission validation in `/home/fin/luna`, via `python3 -B
 development/check.py --timeout 900 --`:

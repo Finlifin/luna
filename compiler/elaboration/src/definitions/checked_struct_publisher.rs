@@ -4,7 +4,7 @@ use comptime_interpretor::{
     Budget, Error, ErrorKind, PreparedStructBuild, StructAdmissionSession, StructBuildRequest,
     StructPublicationError,
 };
-use nir::{DeclarationId, Term, program as n};
+use nir::{DeclarationId, program as n};
 use std::{cell::RefCell, sync::Arc};
 
 /// A committed baseline plus immutable generated descriptions. Identities must
@@ -18,6 +18,7 @@ pub struct CheckedStructPublisher<'a> {
     published: RefCell<Vec<Arc<[n::Struct]>>>,
     diagnostic: RefCell<Option<String>>,
     admission: RefCell<Option<StructAdmissionSession<'a>>>,
+    representations: RefCell<Option<crate::representations::IncrementalChecker<'a>>>,
 }
 impl<'a> CheckedStructPublisher<'a> {
     pub fn new(baseline: &'a n::Package) -> Self {
@@ -26,6 +27,7 @@ impl<'a> CheckedStructPublisher<'a> {
             published: RefCell::new(Vec::new()),
             diagnostic: RefCell::new(None),
             admission: RefCell::new(None),
+            representations: RefCell::new(None),
         }
     }
     pub fn published_definition_count(&self) -> usize {
@@ -73,7 +75,7 @@ impl<'a> CheckedStructPublisher<'a> {
         let published = self.published.borrow();
         let revision = published.len();
         let source = request.source;
-        let (definitions, receipt) = (|| {
+        let (definitions, receipt, representation) = (|| {
             let mut admission = self.admission.borrow_mut();
             if admission.is_none() {
                 *admission = Some(StructAdmissionSession::new(self.baseline, budget)?);
@@ -118,62 +120,30 @@ impl<'a> CheckedStructPublisher<'a> {
             // Type formation above is the same completed-Type admission used
             // for delivered HIR field types. Finite storage is an independent
             // obligation, shared with ordinary source declaration checking.
-            charge(
-                budget,
-                self.baseline
-                    .structs
-                    .len()
-                    .saturating_add(self.baseline.enums.len())
-                    .saturating_add(self.baseline.newtypes.len())
-                    .saturating_add(published.len())
-                    .saturating_add(1),
-            )?;
-            let structs = self
-                .baseline
-                .structs
-                .iter()
-                .chain(published.iter().flat_map(|batch| batch.iter()))
-                .chain(definitions.iter())
-                .map(|def| (def.declaration, def))
-                .collect();
-            let enums = self
-                .baseline
-                .enums
-                .iter()
-                .map(|def| (def.declaration, def))
-                .collect();
-            let newtypes = self
-                .baseline
-                .newtypes
-                .iter()
-                .map(|def| (def.declaration, def))
-                .collect();
-            let tuple = self
-                .baseline
-                .normal_forms
-                .iter()
-                .find(|head| head.role == nir::normal_forms::Role::Tuple)
-                .map(|head| head.declaration);
-            let mut checker =
-                crate::representations::Checker::from_references(tuple, structs, enums, newtypes);
             let before = usize::try_from(budget.steps).unwrap_or(usize::MAX);
             let mut fuel = before;
-            let checked = checker.check(
-                &Term::Nominal {
-                    declaration: identity,
-                    arguments: vec![],
-                },
-                &mut fuel,
-            );
+            let checked = (|| {
+                let mut representations = self.representations.borrow_mut();
+                if representations.is_none() {
+                    *representations = Some(crate::representations::IncrementalChecker::new(
+                        self.baseline,
+                        &mut fuel,
+                    )?);
+                }
+                representations
+                    .as_ref()
+                    .unwrap()
+                    .prepare(Arc::clone(&definitions), &mut fuel)
+            })();
             charge(budget, before - fuel)?;
-            checked.map_err(|message| {
+            let representation = checked.map_err(|message| {
                 *self.diagnostic.borrow_mut() = Some(message.into());
                 Error {
                     kind: ErrorKind::Type,
                     source: Some(source),
                 }
             })?;
-            Ok((definitions, receipt))
+            Ok((definitions, receipt, representation))
         })()
         .map_err(|mut error: Error| {
             error.source = Some(source);
@@ -195,15 +165,27 @@ impl<'a> CheckedStructPublisher<'a> {
                 }
                 let mut admission = self.admission.borrow_mut();
                 match admission.as_mut().unwrap().commit_with(receipt, || {
+                    self.representations
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .commit(representation)
+                        .map_err(|message| {
+                            *self.diagnostic.borrow_mut() = Some(message.into());
+                            Error {
+                                kind: ErrorKind::InvalidCallPlan,
+                                source: Some(source),
+                            }
+                        })?;
                     published.push(committed);
-                    Ok::<_, std::convert::Infallible>(())
+                    Ok::<_, Error>(())
                 }) {
                     Ok(()) => Ok(()),
                     Err(StructPublicationError::Admission(mut error)) => {
                         error.source = Some(source);
                         Err(error)
                     }
-                    Err(StructPublicationError::Commit(never)) => match never {},
+                    Err(StructPublicationError::Commit(error)) => Err(error),
                 }
             }),
         })

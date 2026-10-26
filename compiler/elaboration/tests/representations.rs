@@ -1,6 +1,7 @@
 use elaboration::representations::Checker;
 use nir::{DeclarationId, Primitive, Sort, Term, program::Struct};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 71, local }
@@ -30,6 +31,173 @@ fn check(field: Term, tuple: Option<DeclarationId>) -> Result<(), &'static str> 
         &BTreeMap::new(),
     )
     .check(&nominal(0), &mut 100_000)
+}
+
+#[test]
+fn incremental_dropped_and_failed_candidates_do_not_publish_proofs() {
+    use elaboration::representations::IncrementalChecker;
+    let package = nir::program::Package::default();
+    let checker = IncrementalChecker::new(&package, &mut 100_000).unwrap();
+    let candidate: Arc<[Struct]> = vec![definition(1, Term::Primitive(Primitive::Bool))].into();
+    let weak = Arc::downgrade(&candidate);
+    let prepared = checker.prepare(candidate, &mut 100_000).unwrap();
+    assert!(
+        prepared
+            .to_string()
+            .starts_with("(prepared-representations (revision 0)")
+    );
+    drop(prepared);
+    assert!(weak.upgrade().is_none());
+    assert!(
+        checker
+            .prepare(vec![definition(1, nominal(1))].into(), &mut 100_000)
+            .is_err()
+    );
+    // The first root succeeds before the second root fails. Neither proof may
+    // survive the failed batch, even if its identity is reused for a new layout.
+    assert!(
+        checker
+            .prepare(
+                vec![
+                    definition(1, Term::Primitive(Primitive::Bool)),
+                    definition(2, nominal(2))
+                ]
+                .into(),
+                &mut 100_000
+            )
+            .is_err()
+    );
+    assert!(
+        checker
+            .prepare(vec![definition(1, nominal(1))].into(), &mut 100_000)
+            .is_err()
+    );
+    assert_eq!(
+        checker.to_string(),
+        "(representation-world (revision 0) (proved 0))"
+    );
+}
+
+#[test]
+fn incremental_receipts_are_revision_and_world_bound() {
+    use elaboration::representations::IncrementalChecker;
+    let package = nir::program::Package::default();
+    let mut first = IncrementalChecker::new(&package, &mut 100_000).unwrap();
+    let mut other = IncrementalChecker::new(&package, &mut 100_000).unwrap();
+    let make = || vec![definition(1, Term::Primitive(Primitive::Bool))].into();
+    let foreign = first.prepare(make(), &mut 100_000).unwrap();
+    assert!(other.commit(foreign).is_err());
+    let current = first.prepare(make(), &mut 100_000).unwrap();
+    let stale = first
+        .prepare(
+            vec![definition(2, Term::Primitive(Primitive::Bool))].into(),
+            &mut 100_000,
+        )
+        .unwrap();
+    first.commit(current).unwrap();
+    assert!(first.commit(stale).is_err());
+    assert!(
+        first
+            .prepare(vec![definition(3, nominal(2))].into(), &mut 100_000)
+            .is_err()
+    );
+    assert!(
+        first
+            .prepare(vec![definition(1, nominal(1))].into(), &mut 100_000)
+            .is_err()
+    );
+    let valid = first
+        .prepare(vec![definition(2, nominal(1))].into(), &mut 100_000)
+        .unwrap();
+    first.commit(valid).unwrap();
+    assert_eq!(
+        first.to_string(),
+        "(representation-world (revision 2) (proved 2))"
+    );
+}
+
+#[test]
+fn incremental_checks_reuse_committed_chain_proofs_without_rescanning_the_world() {
+    use elaboration::representations::IncrementalChecker;
+    let package = nir::program::Package {
+        structs: (0..256)
+            .map(|n| definition(n, Term::Primitive(Primitive::Bool)))
+            .collect(),
+        ..Default::default()
+    };
+    let mut checker = IncrementalChecker::new(&package, &mut 100_000).unwrap();
+    let mut steady_cost = None;
+    for index in 256..512 {
+        let mut fuel = 200;
+        let prepared = checker
+            .prepare(
+                vec![definition(index, nominal(index - 1))].into(),
+                &mut fuel,
+            )
+            .unwrap();
+        // Once the baseline leaf is proved, each new wrapper checks one new
+        // layout and a cached child; chain depth and world size do not add cost.
+        if index > 256 {
+            let cost = 200 - fuel;
+            assert_eq!(*steady_cost.get_or_insert(cost), cost);
+        }
+        checker.commit(prepared).unwrap();
+    }
+}
+
+#[test]
+fn incremental_exhaustion_and_recursive_pointer_retry_leave_world_unchanged() {
+    use elaboration::representations::IncrementalChecker;
+    let package = nir::program::Package::default();
+    let mut checker = IncrementalChecker::new(&package, &mut 100_000).unwrap();
+    let large: Arc<[Struct]> = vec![definition(
+        1,
+        Term::Tuple(vec![Term::Primitive(Primitive::Bool); 512]),
+    )]
+    .into();
+    for allowance in [0, 1, 10, 100] {
+        let mut fuel = allowance;
+        assert!(checker.prepare(Arc::clone(&large), &mut fuel).is_err());
+        assert!(fuel <= allowance);
+        assert_eq!(
+            checker.to_string(),
+            "(representation-world (revision 0) (proved 0))"
+        );
+    }
+    let pointer = checker
+        .prepare(
+            vec![definition(1, Term::Pointer(Box::new(nominal(1))))].into(),
+            &mut 100_000,
+        )
+        .unwrap();
+    checker.commit(pointer).unwrap();
+    let wrapper = checker
+        .prepare(vec![definition(2, nominal(1))].into(), &mut 100_000)
+        .unwrap();
+    checker.commit(wrapper).unwrap();
+}
+
+#[test]
+fn incremental_batch_forward_edges_are_checked_before_any_proof_is_committed() {
+    use elaboration::representations::IncrementalChecker;
+    let package = nir::program::Package::default();
+    let mut checker = IncrementalChecker::new(&package, &mut 100_000).unwrap();
+    let cycle = vec![definition(1, nominal(2)), definition(2, nominal(1))];
+    assert!(checker.prepare(cycle.into(), &mut 100_000).is_err());
+    let valid = vec![
+        definition(1, nominal(2)),
+        definition(2, Term::Primitive(Primitive::Bool)),
+    ];
+    let prepared = checker.prepare(valid.into(), &mut 100_000).unwrap();
+    checker.commit(prepared).unwrap();
+    let downstream = checker
+        .prepare(vec![definition(3, nominal(1))].into(), &mut 100_000)
+        .unwrap();
+    checker.commit(downstream).unwrap();
+    assert_eq!(
+        checker.to_string(),
+        "(representation-world (revision 2) (proved 3))"
+    );
 }
 
 #[test]
