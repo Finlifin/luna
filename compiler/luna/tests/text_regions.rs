@@ -1192,3 +1192,83 @@ fn recursive_observations_retry_pending_summaries_and_reject_failed_callees() {
     }
     assert_eq!(infer(&package, "observed", 200_000).unwrap(), summary);
 }
+
+#[test]
+fn immediate_closures_preserve_capture_order_and_local_return_boundaries() {
+    let mut package = support::compile(
+        "typealias str=.str'builtin;
+        fn identity(value:str)->str {(|arg:str|arg)(value)}
+        fn captured(value:str)->str {(||value)()}
+        fn snapshot(a:str,b:str)->str {
+            var slot=a; (|ignored:bool|slot)(do {slot=b;true})
+        }
+        fn nested(a:str,b:str)->str {(|value:str| (|other:str|value)(b))(a)}
+        fn returning(a:str,b:str)->str {let ignored=(|| {return a;})();b}
+        fn reading(a:str,b:str)->str {let ignored=(|| {return a == \"x\";})();b}
+        fn recursive(flag:bool,a:str,b:str)->str {
+            (|| if flag {a} else {recursive(flag,b,a)})()
+        }
+        fn endless(value:str)->str {(|| {while true {}})();value}",
+    );
+    let returning = package
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "returning")
+        .unwrap();
+    let result = nir::program::LocalId {
+        owner: returning.parameters[0].owner,
+        index: u32::MAX - 1,
+    };
+    returning.result_binding = Some(result);
+    returning.postconditions.push(nir::program::Expr {
+        source: returning.body.source,
+        ty: nir::Term::Primitive(nir::Primitive::Bool),
+        kind: nir::program::ExprKind::ScalarEqual(
+            Box::new(nir::program::Expr {
+                source: returning.body.source,
+                ty: nir::Term::Primitive(nir::Primitive::Str),
+                kind: nir::program::ExprKind::Local(result),
+            }),
+            Box::new(nir::program::Expr {
+                source: returning.body.source,
+                ty: nir::Term::Primitive(nir::Primitive::Str),
+                kind: nir::program::ExprKind::Literal(nir::program::Literal::String("x".into())),
+            }),
+        ),
+    });
+    assert_eq!(
+        infer(&package, "returning", 200_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
+    );
+    for name in ["identity", "captured", "snapshot", "nested"] {
+        assert_eq!(
+            infer(&package, name, 200_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])]),
+            "{name}"
+        );
+    }
+    for name in ["returning", "reading"] {
+        assert_eq!(
+            infer(&package, name, 200_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[])]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "reading", 200_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(0, &[])])
+    );
+    assert_eq!(
+        infer(&package, "recursive", 200_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    assert!(
+        infer(&package, "endless", 200_000)
+            .unwrap()
+            .returned
+            .is_none()
+    );
+}

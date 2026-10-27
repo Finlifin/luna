@@ -586,3 +586,39 @@ Two earlier fixture attempts failed before validating that observation path:
 predicate. The latter remains outside `checkable_predicate` admission. The final
 fixture uses the supported computed-pattern observation path; neither keyword
 rules nor contract admission was relaxed.
+
+## Immediate closure invocation
+
+A syntactically available closure callee now has an executable transfer rule.
+Its environment is constructed before source-ordered arguments, preserving the
+captured view even if an argument later reassigns the original caller slot.
+Capture and parameter origins populate a separate invocation environment; writes
+to those bindings do not replace the caller's descriptors. Nested closure bodies
+and named calls retain their character-read dependencies.
+
+The body uses separate return and loop state. A closure-local return contributes
+to the invocation result, not the enclosing function's result or postcondition
+exit environment. Conversely, an exit during callee construction or argument
+preparation still belongs to the caller. A nonreturning closure does not invent
+fallthrough. Named recursion through an immediate closure participates in the
+existing instance fixed point.
+
+Unknown callable values, callable parameters and local closure aliases remain
+unsupported by this analysis. This rule supplies neither resource delivery
+protocols nor permission to invoke a closure with dead captured storage; the
+existing runtime gates remain in place.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 27 tests passed (`/tmp/luna-tools-2pws6xt_/result.json`, exit 0). Source cases
+cover direct parameter and captured returns, capture-before-argument mutation,
+nested invocations, discarded closure-local returns and reads, recursion through
+an immediate closure, and divergence. An explicit NIR result postcondition
+checks that a closure return cannot contaminate the enclosing exit environment.
+The iterator prototype continues to assert rejection by the resource checker.

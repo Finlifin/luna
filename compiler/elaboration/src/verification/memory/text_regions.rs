@@ -1041,6 +1041,51 @@ impl Query<'_, '_> {
                 arguments,
                 parameter_bindings,
             } => {
+                if let K::Closure {
+                    parameters,
+                    captures,
+                    body,
+                } = &callee.kind
+                {
+                    charge(self.fuel, parameters.len().saturating_add(captures.len()))?;
+                    validate_argument_plan(arguments, parameter_bindings, parameters.len())?;
+                    if arguments.iter().any(|argument| argument.is_default) {
+                        return Err("text closure default arguments are not supported".into());
+                    }
+                    // Construct the environment before evaluating inputs: an
+                    // argument may replace a caller slot already captured here.
+                    let Some(environment) = self.expr(callee, locals, returned, next)? else {
+                        return Ok(None);
+                    };
+                    let mut scope = Locals::new();
+                    for (index, capture) in captures.iter().enumerate() {
+                        charge_regions(&environment, self.fuel)?;
+                        let value = project(environment.clone(), &[index], self.fuel)?;
+                        if scope.insert(capture.binding, value).is_some() {
+                            return Err("duplicate text closure capture binding".into());
+                        }
+                    }
+                    for argument in arguments {
+                        let Some(value) = self.expr(&argument.value, locals, returned, next)?
+                        else {
+                            return Ok(None);
+                        };
+                        if scope
+                            .insert(parameters[argument.parameter], value)
+                            .is_some()
+                        {
+                            return Err("text closure parameter overlaps another binding".into());
+                        }
+                    }
+                    let outer_loops = std::mem::take(&mut self.loops);
+                    self.exits.push(None);
+                    let mut closure_returns = None;
+                    let completed = self.expr(body, &mut scope, &mut closure_returns, next);
+                    self.exits.pop();
+                    self.loops = outer_loops;
+                    merge(&mut closure_returns, completed?, self.fuel)?;
+                    return Ok(closure_returns);
+                }
                 let (declaration, types) = match &callee.kind {
                     K::Function(id) => (*id, &[][..]),
                     K::FunctionInstance {
