@@ -726,3 +726,45 @@ callback identity. Unknown callback roots and capturing callbacks crossing a
 named boundary remain rejected. Budget failure followed by recovery passes.
 Formatting passed (`/tmp/luna-tools-lga54ztw/result.json`, exit 0), as did the
 diff check.
+
+## Closed callback code environments
+
+Capturing callbacks can now cross named function boundaries. A query-local
+registry interns a closure's concrete code together with its local callable
+definitions and captured callable identities. Summary keys reference that closed
+code identity. Ordinary captured text remains symbolic input data and is mapped
+through the existing capture paths; it is not baked into the code identity.
+
+Closing a callback recursively closes known callable captures, including nested
+closures, and retains its body's stable local aliases. Invocation temporarily
+installs this code environment, then restores the caller context after success
+or failure. The actual closure value still supplies text origins. Forwarding an
+already closed callback reuses its identity, allowing recursive named calls to
+reach a fixed point. Same-source closures with different captured functions have
+distinct contexts and cannot share an incorrect summary.
+
+Registry construction, comparisons and retained code traversals consume query
+fuel, with a separate closure-environment depth limit. Assignment exclusions and
+unknown callback rejection remain in place. General mutable callable flow,
+callable results returned from other functions, and lifetime/cleanup proof are
+still separate requirements. Closure defaults requiring a prepared code frame
+are not enabled by this stage.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 31 tests passed (`/tmp/luna-tools-wbk4l2hx/result.json`, exit 0). New source
+cases cover captured text through named forwarding and recursion, character
+reads, nested captured closures, and a same-source closure capturing different
+named functions in successive calls. Local aliases inside closed callback bodies
+retain the captured code identity. Unknown callback roots remain rejected;
+budget failure followed by a fresh query succeeds. The earlier named-callback
+rejection test now accepts its concrete captured closure while retaining rejection
+for a root parameter with no supplied code identity.
+Formatting passed (`/tmp/luna-tools-47oxl104/result.json`, exit 0); the diff check
+passed. These checks establish dependency transport, not lifetime permission.

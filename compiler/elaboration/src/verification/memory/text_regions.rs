@@ -27,9 +27,76 @@ type Regions = BTreeMap<Vec<usize>, BTreeSet<TextRegionOrigin>>;
 type Locals = BTreeMap<LocalId, Regions>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum CallbackKey {
+    Named(iir::InstanceKey),
+    Closure(usize),
+}
+impl fmt::Display for CallbackKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Named(key) => key.fmt(f),
+            Self::Closure(id) => write!(f, "(closed-text-callback {id})"),
+        }
+    }
+}
+#[derive(Clone, PartialEq)]
+struct CodeValue {
+    expression: std::sync::Arc<Expr>,
+    closure: Option<usize>,
+}
+impl CodeValue {
+    fn new(expression: Expr) -> Self {
+        Self {
+            expression: std::sync::Arc::new(expression),
+            closure: None,
+        }
+    }
+}
+struct ClosedClosure {
+    expression: std::sync::Arc<Expr>,
+    definitions: BTreeMap<LocalId, CodeValue>,
+    changed: BTreeSet<LocalId>,
+    cost: usize,
+}
+fn index_code_expression(
+    expr: &Expr,
+    fuel: &mut usize,
+    definitions: &mut BTreeMap<LocalId, CodeValue>,
+    seen: &mut BTreeSet<LocalId>,
+    changed: &mut BTreeSet<LocalId>,
+) -> Result<(), String> {
+    match &expr.kind {
+        K::Let { binding, value } => {
+            if !seen.insert(*binding) {
+                changed.insert(*binding);
+            }
+            if matches!(
+                &value.kind,
+                K::Closure { .. } | K::Function(_) | K::FunctionInstance { .. } | K::Local(_)
+            ) {
+                nir::visit::expression(value, fuel, |_, _| Ok(()))?;
+                definitions.insert(*binding, CodeValue::new((**value).clone()));
+            }
+        }
+        K::Assign { place, .. } => {
+            changed.insert(place.root);
+        }
+        K::Closure { captures, .. } => {
+            for capture in captures {
+                if capture.value.is_some() {
+                    changed.insert(capture.binding);
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct SummaryKey {
     instance: iir::InstanceKey,
-    callbacks: Vec<(usize, iir::InstanceKey)>,
+    callbacks: Vec<(usize, CallbackKey)>,
 }
 impl fmt::Display for SummaryKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -185,6 +252,7 @@ pub fn infer_text_regions(
         fuel,
         current: None,
         local_callables: BTreeMap::new(),
+        closed_closures: vec![],
         changed_callables: BTreeSet::new(),
         pending: VecDeque::new(),
         scheduled: HashSet::new(),
@@ -201,7 +269,8 @@ struct Query<'a, 'f> {
     package: &'a Package,
     fuel: &'f mut usize,
     current: Option<SummaryKey>,
-    local_callables: BTreeMap<LocalId, std::sync::Arc<Expr>>,
+    local_callables: BTreeMap<LocalId, CodeValue>,
+    closed_closures: Vec<ClosedClosure>,
     changed_callables: BTreeSet<LocalId>,
     pending: VecDeque<SummaryKey>,
     scheduled: HashSet<SummaryKey>,
@@ -480,39 +549,7 @@ impl Query<'_, '_> {
         let mut seen: BTreeSet<_> = body.parameters.iter().copied().collect();
         let mut changed = BTreeSet::new();
         nir::visit::expressions(body, self.fuel, |expr, fuel| {
-            match &expr.kind {
-                K::Let { binding, value } => {
-                    if !seen.insert(*binding) {
-                        changed.insert(*binding);
-                    }
-                    if matches!(
-                        &value.kind,
-                        K::Closure { .. }
-                            | K::Function(_)
-                            | K::FunctionInstance { .. }
-                            | K::Local(_)
-                    ) {
-                        // Charge the retained subtree before cloning it. The
-                        // usual traversal still checks every nested definition.
-                        nir::visit::expression(value, fuel, |_, _| Ok(()))?;
-                        definitions.insert(*binding, std::sync::Arc::new((**value).clone()));
-                    }
-                }
-                K::Assign { place, .. } => {
-                    changed.insert(place.root);
-                }
-                K::Closure { captures, .. } => {
-                    for capture in captures {
-                        if capture.value.is_some() {
-                            // Restored environments can bind a different value
-                            // under the same lexical identity.
-                            changed.insert(capture.binding);
-                        }
-                    }
-                }
-                _ => {}
-            }
-            Ok(())
+            index_code_expression(expr, fuel, &mut definitions, &mut seen, &mut changed)
         })?;
         definitions.retain(|binding, _| !changed.contains(binding));
         self.local_callables = definitions;
@@ -520,23 +557,20 @@ impl Query<'_, '_> {
         Ok(())
     }
 
-    fn local_callee(&mut self, binding: LocalId) -> Result<std::sync::Arc<Expr>, String> {
+    fn local_callee(&mut self, binding: LocalId) -> Result<CodeValue, String> {
         self.known_local_callee(binding)?.ok_or_else(|| {
             "text region call requires a named concrete callee or stable local callable".into()
         })
     }
 
-    fn known_local_callee(
-        &mut self,
-        binding: LocalId,
-    ) -> Result<Option<std::sync::Arc<Expr>>, String> {
+    fn known_local_callee(&mut self, binding: LocalId) -> Result<Option<CodeValue>, String> {
         let mut binding = binding;
         loop {
             charge(self.fuel, 1)?;
             let Some(value) = self.local_callables.get(&binding) else {
                 return Ok(None);
             };
-            if let K::Local(next) = value.kind {
+            if let K::Local(next) = value.expression.kind {
                 binding = next;
             } else {
                 return Ok(Some(value.clone()));
@@ -544,15 +578,85 @@ impl Query<'_, '_> {
         }
     }
 
-    fn callable_input(&mut self, value: &Expr) -> Result<Option<std::sync::Arc<Expr>>, String> {
-        match &value.kind {
-            K::Local(binding) => self.known_local_callee(*binding),
+    fn callable_input(&mut self, value: &Expr) -> Result<Option<CodeValue>, String> {
+        self.callable_input_at(value, 0)
+    }
+    fn callable_input_at(
+        &mut self,
+        value: &Expr,
+        depth: usize,
+    ) -> Result<Option<CodeValue>, String> {
+        let value = match &value.kind {
+            K::Local(binding) => self.known_local_callee(*binding)?,
             K::Function(_) | K::FunctionInstance { .. } | K::Closure { .. } => {
                 nir::visit::expression(value, self.fuel, |_, _| Ok(()))?;
-                Ok(Some(std::sync::Arc::new(value.clone())))
+                Some(CodeValue::new(value.clone()))
             }
-            _ => Ok(None),
+            _ => None,
+        };
+        value
+            .map(|value| self.close_callable(value, depth))
+            .transpose()
+    }
+    fn close_callable(&mut self, mut value: CodeValue, depth: usize) -> Result<CodeValue, String> {
+        if depth >= 128 {
+            return Err("text callback environment depth exhausted".into());
         }
+        charge(self.fuel, 1)?;
+        if value.closure.is_some() {
+            return Ok(value);
+        }
+        let K::Closure {
+            parameters,
+            captures,
+            body,
+        } = &value.expression.kind
+        else {
+            return Ok(value);
+        };
+        let before = *self.fuel;
+        let mut definitions = BTreeMap::new();
+        let mut changed = BTreeSet::new();
+        let mut seen = parameters.iter().copied().collect();
+        nir::visit::expression(body, self.fuel, |expr, fuel| {
+            index_code_expression(expr, fuel, &mut definitions, &mut seen, &mut changed)
+        })?;
+        definitions.retain(|binding, _| !changed.contains(binding));
+        for capture in captures {
+            charge(self.fuel, 1)?;
+            if changed.contains(&capture.binding) {
+                continue;
+            }
+            let code = if let Some(initializer) = &capture.value {
+                self.callable_input_at(initializer, depth + 1)?
+            } else {
+                self.known_local_callee(capture.binding)?
+                    .map(|code| self.close_callable(code, depth + 1))
+                    .transpose()?
+            };
+            if let Some(code) = code {
+                definitions.insert(capture.binding, code);
+            }
+        }
+        let cost = before.saturating_sub(*self.fuel).saturating_add(1);
+        for (id, known) in self.closed_closures.iter().enumerate() {
+            charge(self.fuel, known.cost.saturating_add(cost))?;
+            if known.expression == value.expression
+                && known.definitions == definitions
+                && known.changed == changed
+            {
+                value.closure = Some(id);
+                return Ok(value);
+            }
+        }
+        value.closure = Some(self.closed_closures.len());
+        self.closed_closures.push(ClosedClosure {
+            expression: value.expression.clone(),
+            definitions,
+            changed,
+            cost,
+        });
+        Ok(value)
     }
 
     fn schedule(&mut self, key: SummaryKey) {
@@ -621,12 +725,14 @@ impl Query<'_, '_> {
         &mut self,
         declaration: DeclarationId,
         arguments: &[Term],
-        callbacks: &[(usize, iir::InstanceKey)],
+        callbacks: &[(usize, CallbackKey)],
     ) -> Result<TextRegionSummary, String> {
         charge(self.fuel, callbacks.len().saturating_add(1))?;
         for (_, callback) in callbacks {
-            for argument in &callback.arguments {
-                bound_type(argument, self.fuel)?;
+            if let CallbackKey::Named(callback) = callback {
+                for argument in &callback.arguments {
+                    bound_type(argument, self.fuel)?;
+                }
             }
         }
         for argument in arguments {
@@ -697,22 +803,34 @@ impl Query<'_, '_> {
                 .get(*parameter)
                 .ok_or("text callback parameter is missing")?;
             if !self.changed_callables.contains(&binding) {
-                let kind = if callback.arguments.is_empty() {
-                    K::Function(callback.declaration)
-                } else {
-                    K::FunctionInstance {
-                        declaration: callback.declaration,
-                        arguments: callback.arguments.clone(),
+                let code = match callback {
+                    CallbackKey::Named(callback) => {
+                        let kind = if callback.arguments.is_empty() {
+                            K::Function(callback.declaration)
+                        } else {
+                            K::FunctionInstance {
+                                declaration: callback.declaration,
+                                arguments: callback.arguments.clone(),
+                            }
+                        };
+                        CodeValue::new(Expr {
+                            source: body.body.source,
+                            ty: parameters[*parameter].ty.clone(),
+                            kind,
+                        })
+                    }
+                    CallbackKey::Closure(id) => {
+                        let closed = self
+                            .closed_closures
+                            .get(*id)
+                            .ok_or("text callback code is unavailable")?;
+                        CodeValue {
+                            expression: closed.expression.clone(),
+                            closure: Some(*id),
+                        }
                     }
                 };
-                self.local_callables.insert(
-                    binding,
-                    std::sync::Arc::new(Expr {
-                        source: body.body.source,
-                        ty: parameters[*parameter].ty.clone(),
-                        kind,
-                    }),
-                );
+                self.local_callables.insert(binding, code);
             }
         }
         let mut locals = Locals::new();
@@ -1186,7 +1304,10 @@ impl Query<'_, '_> {
                     K::Local(binding) => Some(self.local_callee(*binding)?),
                     _ => None,
                 };
-                let code = resolved.as_deref().unwrap_or(callee);
+                let code = resolved
+                    .as_ref()
+                    .map(|code| code.expression.as_ref())
+                    .unwrap_or(callee);
                 if let K::Closure {
                     parameters,
                     captures,
@@ -1226,6 +1347,20 @@ impl Query<'_, '_> {
                         }
                         input_code.push((parameters[argument.parameter], callable));
                     }
+                    let closed_context = resolved.as_ref().and_then(|code| code.closure);
+                    let previous_context = if let Some(id) = closed_context {
+                        let context = &self.closed_closures[id];
+                        charge(self.fuel, context.cost)?;
+                        Some((
+                            std::mem::replace(
+                                &mut self.local_callables,
+                                context.definitions.clone(),
+                            ),
+                            std::mem::replace(&mut self.changed_callables, context.changed.clone()),
+                        ))
+                    } else {
+                        None
+                    };
                     // Install invocation-local code only after every input has
                     // been evaluated in the caller's environment.
                     for (binding, callable) in &mut input_code {
@@ -1249,6 +1384,10 @@ impl Query<'_, '_> {
                         if let Some(previous) = previous {
                             self.local_callables.insert(binding, previous);
                         }
+                    }
+                    if let Some((definitions, changed)) = previous_context {
+                        self.local_callables = definitions;
+                        self.changed_callables = changed;
                     }
                     merge(&mut closure_returns, completed?, self.fuel)?;
                     return Ok(closure_returns);
@@ -1291,19 +1430,25 @@ impl Query<'_, '_> {
                         self.callable_input(&argument.value)?
                     };
                     if let Some(callback) = callback {
-                        let instance = match &callback.kind {
-                            K::Function(declaration) => Some(iir::InstanceKey {
-                                declaration: *declaration,
-                                arguments: vec![],
-                            }),
-                            K::FunctionInstance {
-                                declaration,
-                                arguments,
-                            } => Some(iir::InstanceKey {
-                                declaration: *declaration,
-                                arguments: arguments.clone(),
-                            }),
-                            _ => None,
+                        let instance = if let Some(id) = callback.closure {
+                            Some(CallbackKey::Closure(id))
+                        } else {
+                            match &callback.expression.kind {
+                                K::Function(declaration) => {
+                                    Some(CallbackKey::Named(iir::InstanceKey {
+                                        declaration: *declaration,
+                                        arguments: vec![],
+                                    }))
+                                }
+                                K::FunctionInstance {
+                                    declaration,
+                                    arguments,
+                                } => Some(CallbackKey::Named(iir::InstanceKey {
+                                    declaration: *declaration,
+                                    arguments: arguments.clone(),
+                                })),
+                                _ => None,
+                            }
                         };
                         if let Some(instance) = instance {
                             callbacks.push((argument.parameter, instance));

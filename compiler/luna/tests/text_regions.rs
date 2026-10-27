@@ -1394,7 +1394,7 @@ fn named_higher_order_summaries_separate_callback_instances() {
         fn recursive(flag:bool,a:str,b:str)->str {walk(echo,flag,a,b)}
         fn recursive_static(flag:bool,a:str,b:str)->str {walk(literal,flag,a,b)}
         fn captured(callback:%{value:str} fn()->str)->str {callback()}
-        fn unsupported(value:str)->str {captured(||value)}",
+        fn closure_callback(value:str)->str {captured(||value)}",
     );
     for name in ["input", "forwarded", "specialized"] {
         assert_eq!(
@@ -1421,13 +1421,73 @@ fn named_higher_order_summaries_separate_callback_instances() {
             .unwrap()[&vec![]],
         BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
     );
-    for name in ["apply", "unsupported"] {
+    for name in ["apply", "captured"] {
         assert!(
             infer(&package, name, 300_000)
                 .unwrap_err()
                 .contains("stable local callable")
         );
     }
+    assert_eq!(
+        infer(&package, "closure_callback", 300_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[])])
+    );
     assert!(infer(&package, "recursive", 10).is_err());
     assert!(infer(&package, "recursive", 300_000).is_ok());
+}
+
+#[test]
+fn named_closure_callbacks_close_code_environments_and_transport_text() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn echo(value:str)->str {value}
+        fn literal(value:str)->str {\"static\"}
+        fn invoke(callback:%{value:str} fn()->str)->str {callback()}
+        fn relay(callback:%{value:str} fn()->str)->str {invoke(callback)}
+        fn observe(callback:%{value:str} fn()->bool)->bool {callback()}
+        fn walk(callback:%{value:str} fn()->str,flag:bool)->str {
+            if flag {return callback();}walk(callback,flag)
+        }
+        fn run(callback:%{action:fn(str)->str,value:str} fn()->str)->str {callback()}
+        fn adapt(action:fn(str)->str,value:str)->str {
+            run(|| {let alias=action;alias(value)})
+        }
+        fn input(a:str,b:str)->str {let ignored=adapt(literal,b);adapt(echo,a)}
+        fn static_result(a:str,b:str)->str {let ignored=adapt(echo,a);adapt(literal,b)}
+        fn forwarded(value:str)->str {let callback=||value;relay(callback)}
+        fn reading(value:str)->bool {observe(||value == \"x\")}
+        fn recursive(value:str,flag:bool)->str {walk(||value,flag)}
+        fn invoke_nested(callback:%{inner:%{value:str} fn()->str} fn()->str)->str {callback()}
+        fn nested(value:str)->str {let inner=||value;invoke_nested(||inner())}",
+    );
+    for name in ["input", "forwarded", "recursive", "nested"] {
+        assert_eq!(
+            infer(&package, name, 500_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "static_result", 500_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([Origin::Static])
+    );
+    assert_eq!(
+        infer(&package, "reading", 500_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(0, &[])])
+    );
+    for name in ["invoke", "run", "invoke_nested"] {
+        assert!(
+            infer(&package, name, 500_000)
+                .unwrap_err()
+                .contains("stable local callable")
+        );
+    }
+    assert!(infer(&package, "nested", 10).is_err());
+    assert!(infer(&package, "nested", 500_000).is_ok());
 }
