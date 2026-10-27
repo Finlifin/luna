@@ -5,6 +5,166 @@ mod support;
 use comptime_interpretor::Value;
 
 #[test]
+fn ordinary_for_retires_rejected_current_and_unproduced_items_once() {
+    let source = format!(
+        "{}\n{}\n
+        struct Watch {{seen:*bool,keep:bool}}
+        impl Drop for Watch {{fn drop(*self) {{
+            assumes not self.seen.*.*;
+            self.seen.*.* = true;
+        }}}}
+        fn run()->bool {{
+            var first=false;var second=false;var third=false;
+            var calls:.u32'builtin=0;
+            let counter=calls.ref;
+            let a:?Watch=Watch {{seen:first.ref,keep:false}};
+            let b:?Watch=Watch {{seen:second.ref,keep:true}};
+            let c:?Watch=Watch {{seen:third.ref,keep:true}};
+            for item if item.keep in a.as(Iterator).chain(b).as(Iterator).chain(c).as(Iterator)
+                .inspect(|value| {{assumes counter.* < 3; counter.* = counter.* + 1;}}) {{
+                assumes first and not second and not third;
+                break;
+            }}
+            first and second and third and calls == 2
+        }}
+        fn verify() {{let passed=run();assumes passed;}}",
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    check_iteration_with_budget(
+        &source,
+        Some("handler lexical capture address exposure requires a memory contract"),
+        4_000_000,
+    );
+}
+
+#[test]
+fn ordinary_for_evaluates_input_once_before_installing_delivery_handler() {
+    let source = format!(
+        "{}\n{}\n
+        fn run()->bool {{
+            var inputs:.u32'builtin=0;
+            var outputs:.u32'builtin=0;
+            do {{
+                for item in (do {{
+                    emit_item<bool>(false)#;
+                    let value:?bool=true;
+                    value
+                }}) {{
+                    assumes item and inputs == 1;
+                    assumes outputs < 2; outputs = outputs + 1;
+                }}
+            }}# {{emit_item<bool>(item) => {{
+                assumes not item;
+                assumes inputs < 2; inputs = inputs + 1;
+            }}}};
+            inputs == 1 and outputs == 1
+        }}
+        fn verify() {{let passed=run();assumes passed;}}",
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    check_iteration(&source);
+}
+
+#[test]
+fn ordinary_for_uses_symbolic_iterator_evidence_in_generic_bodies() {
+    let source = format!(
+        "{}\n{}\n
+        inline fn visits(items:I)->.u32'builtin where I:-Iterator {{
+            var count:.u32'builtin=0;
+            for item in items {{assumes count < 3; count = count + 1;}}
+            count
+        }}
+        fn run()->bool {{
+            let first:?bool=false;let second:?bool=true;
+            visits(first.as(Iterator).chain(second)) == 2
+        }}
+        fn verify() {{let passed=run();assumes passed;}}",
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    check_iteration(&source);
+}
+
+#[test]
+fn ordinary_for_consumes_optional_chain_and_skips_failed_patterns() {
+    let source = format!(
+        "{}\n{}\n
+        fn run()->bool {{
+            var count:.u32'builtin=0;
+            let first:?bool=false;
+            let second:?bool=true;
+            for true in first.as(Iterator).chain(second) {{assumes count < 3; count = count + 1;}}
+            let empty:?bool=null;
+            for value in empty {{assumes false;}}
+            count == 1
+        }}
+        fn verify() {{let passed=run();assumes passed;}}",
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    check_iteration(&source);
+}
+
+#[test]
+fn ordinary_for_guards_continue_break_and_return_keep_lexical_targets() {
+    let source = format!(
+        "{}\n{}\n
+        fn stop()->bool {{
+            let value:?bool=true;
+            for item in value {{return item;}}
+            false
+        }}
+        fn run()->bool {{
+            var seen:.u32'builtin=0;
+            var delivered:.u32'builtin=0;
+            let first:?bool=false;
+            let second:?bool=true;
+            for item if true in first.as(Iterator).chain(second) {{
+                assumes seen < 3; seen = seen + 1;
+                if not item {{continue;}}
+                assumes delivered < 2; delivered = delivered + 1;
+                break;
+            }}
+            seen == 2 and delivered == 1 and stop()
+        }}
+        fn verify() {{let passed=run();assumes passed;}}",
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    check_iteration(&source);
+}
+
+#[test]
+fn ordinary_for_nested_labelled_transfers_leave_only_the_target_iteration() {
+    let source = format!(
+        "{}\n{}\n
+        fn run()->bool {{
+            var count:.u32'builtin=0;
+            let a:?bool=false;
+            let b:?bool=true;
+            for:outer item in a.as(Iterator).chain(b) {{
+                let inner:?bool=true;
+                for value in inner {{assumes count < 3; count = count + 1; continue outer;}}
+                assumes false;
+            }}
+            let final_value:?bool=true;
+            for:exit item in final_value {{
+                let inner:?bool=true;
+                for value in inner {{break exit;}}
+                assumes false;
+            }}
+            count == 2
+        }}
+        fn verify() {{let passed=run();assumes passed;}}",
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    check_iteration(&source);
+}
+
+#[test]
 fn repository_iterator_declarations_form_without_resource_implementations() {
     compile_iteration_unbound(include_str!("../../../library/builtin/iterator.fl")).unwrap();
 }
@@ -281,6 +441,7 @@ fn compile_iteration(source: &str) -> nir::program::Package {
         source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
+            iterator: Some("input.Iterator"),
             copy: Some("input.Copy"),
             drop: Some("input.Drop"),
             ..Default::default()

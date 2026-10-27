@@ -10967,8 +10967,7 @@ impl Checker<'_, '_> {
                     },
                 )
             }
-            H::For {..} => return Err(error(expr.span,
-                "for requires iteration protocol elaboration, which is not yet implemented")),
+            H::For {..} => return self.iterator_loop(expr, expected),
             H::Loop(block) => {
                 let identity = local(expr.hir_id);
                 self.loops.push(identity);

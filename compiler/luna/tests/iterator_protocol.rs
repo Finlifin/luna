@@ -98,3 +98,72 @@ fn malformed_push_contracts_are_rejected() {
         assert!(error.contains(expected), "{from} -> {to}: {error}");
     }
 }
+
+#[test]
+fn ordinary_for_requires_evidence_and_checks_its_body() {
+    let source = format!("{VALID} fn bad() {{for item in true {{}}}}");
+    let error = check(&source, "input.Stream").unwrap_err();
+    assert!(error.contains("implementation"), "{error}");
+    let implementation = "impl Stream for bool {
+        assoc Item:(.Type'builtin)=bool;
+        inline fn iterate(self)->#deliver<bool> Unit {deliver<bool>(self)#;}
+    }";
+    let source = format!(
+        "{VALID}{implementation}
+        fn run()->bool {{var seen=false;for item in true {{seen=item;}}seen}}"
+    );
+    let package = check(&source, "input.Stream").unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let invalid = format!(
+        "{VALID}{implementation}
+        fn bad() {{for item if false in true {{let wrong:bool='x';}}}}"
+    );
+    assert!(check(&invalid, "input.Stream").is_err());
+    let invalid = format!(
+        "{VALID}{implementation}
+        comptime fn Bad() {{for item in true {{}}}}"
+    );
+    let error = check(&invalid, "input.Stream").unwrap_err();
+    assert!(error.contains("comptime effect iteration"), "{error}");
+}
+
+#[test]
+fn iterator_delivery_does_not_capture_an_outer_resume() {
+    let declarations = format!(
+        "{VALID}
+        impl Stream for bool {{
+            assoc Item:(.Type'builtin)=bool;
+            inline fn iterate(self)->#deliver<bool> Unit {{deliver<bool>(self)#;}}
+        }}
+        inline effect choose()->bool;
+    "
+    );
+    let invalid = format!(
+        "{declarations}
+        fn bad()->bool {{choose()# {{choose()=>{{
+            for item in true {{resume item;}}
+            false
+        }}}}}}"
+    );
+    let error = check(&invalid, "input.Stream").unwrap_err();
+    assert!(
+        error.contains("resume requires an enclosing direct effect branch"),
+        "{error}"
+    );
+    let valid = format!(
+        "{declarations}
+        fn run()->bool {{
+            var result=false;
+            for item in true {{result=choose()# {{choose()=>resume item}};}}
+            result
+        }}"
+    );
+    let package = check(&valid, "input.Stream").unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}

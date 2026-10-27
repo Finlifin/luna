@@ -1,0 +1,17 @@
+{-
+    Use the shipped sysroot. Iterator comes from builtin.prelude, and the
+    driver binds it through library/language-items.conf.
+-}
+fn run()->bool {
+    let first:?bool=false;
+    let second:?bool=true;
+    for true in first.as(Iterator).chain(second) {
+        return true;
+    }
+    false
+}
+
+test {
+    let present=run();
+    assumes present;
+}

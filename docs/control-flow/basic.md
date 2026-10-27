@@ -59,15 +59,43 @@ continue_stmt -> continue id? (while expr)?
 - 二者为**语句**。
 - **标签**：`for:name` / `while:name`。`break name` / `continue name` 作用到该标签；无标签则作用到最内层循环。label 与普通名称共用[命名空间](../code-organization/scope-and-paths.md)，同名局部绑定可以遮蔽它；选中非标签绑定时静态拒绝，不跳过该绑定重新寻找标签。
 
-当前实现中，普通 `for` 在 HIR 中保留 iterable、模式、守卫、循环身份及主体，尚未展开为可执行 NIR。有界 `Integer` 范围的 `inline for` 已接通展开及 comptime guard，参见[inline 控制流](../comptime/inlining-comptime-code.md)。主语在元素绑定作用域之外解析；元素绑定只进入守卫和循环体，标签按上述名称规则解析。AST lowering 不再生成 `__into_iter__`／`__next__` 等约定方法调用；迭代协议 evidence 与 inline effect 的展开仍待接通，NIR 入口对此明确报错。
+普通 `for` 已接通源码绑定的 `Iterator`：iterable 在元素作用域与交付 handler
+之外求值一次，随后通过普通 trait evidence 调用 `iterate(self)`。生成的 handler
+与生产者可以联合展开；不生成 `__next__` 调用或可选值拉取 ABI。元素模式和 guard
+沿用普通 handler 的观察、匹配提交与失败清理规则。匹配失败跳过该元素；成功后
+进入本轮独立作用域。`continue` 结束本轮，`break` 终止生产者，`return` 返回词法
+所在函数；嵌套标签仍指向源码中的循环。提前退出时，当前元素与生产者尚未交付的
+资源仍须按资源协议清理。
 
-驱动可通过 `--iterator-protocol package.module.Trait`（或 sysroot 的
-`iterator-protocol` 配置项）绑定并检查源码中的迭代协议声明。该声明具有
+```flurry
+fn contains_true()->bool {
+    let first:?bool=false;
+    let second:?bool=true;
+    for true in first.as(Iterator).chain(second) {
+        return true;
+    }
+    false
+}
+```
+
+这里 `Iterator` 来自 builtin prelude。驱动通过
+`--iterator-protocol package.module.Trait` 或 sysroot 的 `iterator-protocol`
+配置项绑定声明；随库提供的默认绑定是 `builtin.iterator.Iterator`。协议具有
 `Item: Type` 和按值接收 `self` 的 runtime `iterate` 方法；后者返回交付元素的
 computation，其唯一操作是接收一个 `Item`、返回 `void` 的 direct inline effect，
 computation 本身也返回 `void`。操作身份从方法签名取得，不要求命名为
-`emit_item`。绑定检查是普通 `for` 降码的前置工作，尚不代表循环已经可执行，
-也不引入 `next` 或可选值拉取 ABI。
+`emit_item`。泛型循环需要对应 trait evidence，不能仅凭同名方法获得迭代能力。
+
+当前接通的是 iterable 本身实现 Iterator 的路径；容器的 `IntoIterator` 转换
+仍待实现。普通 `for` 不因此成为 comptime effect 执行入口；有界 `Integer` 范围
+的 `inline for` 及 comptime invocation 循环见[inline 控制流](../comptime/inlining-comptime-code.md)。
+Guard 保留模式观察阶段的限制，不能把外部状态修改或未证明的失败清理偷偷移入
+成功后的循环主体。需要记录交付次数时，可在生产者的 `inspect` adapter 或循环
+主体中进行；恒假 guard 也不能隐藏主体中的类型或阶段错误。
+
+当前 IR 的 `resume` 尚未携带显式词法目标，因此循环主体不能跨过生成的交付
+handler 去 `resume` 外层 handler；这种路径暂时拒绝，避免恢复到错误的 handler。
+在循环主体内显式安装的 handler 仍可使用自己的 `resume`。
 
 当循环没有可达的正常出口时，其内部类型为 `never`；这不为 `while` 增加结果值或带值 `break`。例如，下面两个函数都不需要在循环之后补一个 `bool` 值：前者不终止，后者通过 `return` 返回。
 

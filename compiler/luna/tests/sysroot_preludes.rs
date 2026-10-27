@@ -50,6 +50,52 @@ fn assert_true(output: std::process::Output) {
 }
 
 #[test]
+fn source_configured_iterator_runs_ordinary_for_from_prelude() {
+    let input = Inputs::new();
+    input.write(
+        "library/builtin/lib.fl",
+        "pub use iterator.*; pub use resources.*; pub mod prelude {pub use iterator.Iterator;}",
+    );
+    input.write(
+        "library/builtin/iterator.fl",
+        include_str!("../../../library/builtin/iterator.fl"),
+    );
+    input.write(
+        "library/builtin/resources.fl",
+        include_str!("../../../library/builtin/resources.fl"),
+    );
+    input.write("library/language-items.conf", "version = 1\niterator-protocol = builtin.iterator.Iterator\ncopy-protocol = builtin.resources.Copy\ndrop-protocol = builtin.resources.Drop\n");
+    for package in ["meta", "build", "attrs", "verification", "std"] {
+        input.write(&format!("library/{package}/lib.fl"), "pub mod prelude {}");
+    }
+    input.write(
+        "input.fl",
+        include_str!("../../../development/repros/ordinary-for-inline-effect.fl"),
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(input.0.join("input.fl"))
+        .arg("--sysroot")
+        .arg(input.0.join("library"))
+        .args([
+            "--test-native",
+            "--inline-functions",
+            "--copy-protocol",
+            "builtin.resources.Copy",
+            "--drop-protocol",
+            "builtin.resources.Drop",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(report.contains("(count 1) (failures 0)"), "{report}");
+}
+
+#[test]
 fn shipped_text_module_exposes_checked_utf8_byte_reads() {
     let input = Inputs::new();
     input.write(

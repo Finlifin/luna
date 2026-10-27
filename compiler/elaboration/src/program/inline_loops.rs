@@ -677,7 +677,7 @@ impl Checker<'_, '_> {
     /// One expanded iteration owns its own runtime bindings and cleanup scope.
     /// The caller supplies already checked prefix bindings; their expressions
     /// remain runtime operations and are never evaluated by this wrapper.
-    fn wrap_inline_iteration(
+    pub(super) fn wrap_inline_iteration(
         &mut self,
         mut checked: n::Expr,
         mut statements: Vec<n::Expr>,
@@ -739,7 +739,7 @@ impl Checker<'_, '_> {
     }
     /// Both the outer exit and each iteration use the caller's compilation
     /// budget. No generated loop receives a fresh, unaccounted traversal cap.
-    fn expanded_loop(
+    pub(super) fn expanded_loop(
         &mut self,
         body: n::Expr,
         identity: n::LocalId,

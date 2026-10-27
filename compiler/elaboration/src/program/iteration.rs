@@ -2,6 +2,244 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    pub(super) fn iterator_loop(
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let H::For {
+            pat,
+            guard,
+            iter,
+            body,
+            ..
+        } = expr.kind
+        else {
+            unreachable!()
+        };
+        let protocol = self.protocols.iterator.ok_or_else(|| {
+            error(
+                expr.span,
+                "for requires iteration protocol elaboration with a bound Iterator",
+            )
+        })?;
+        if self.in_required_comptime
+            || self
+                .signature_owner
+                .and_then(|owner| self.package.item(owner))
+                .is_some_and(|item| {
+                    matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                if sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head)
+                })
+        {
+            return Err(error(
+                expr.span,
+                "comptime effect iteration is not implemented",
+            ));
+        }
+        // Evaluate the iterable before installing the consumer's delivery
+        // handler, and outside both the element scope and the loop target.
+        let iterable = self.expr(iter, None)?;
+        let saved_locals = self.locals.clone();
+        let saved_immutable = self.immutable.clone();
+        let saved_context = self.context.clone();
+        let saved_data = self.generator_data.clone();
+        let saved_partial: BTreeSet<_> = self.partial_staged_bindings.keys().copied().collect();
+        let saved_environment = self.effect_environment.clone();
+        let saved_resume = self.effect_resume_result.clone();
+        let first = self.next_temporary_binding;
+        self.next_temporary_binding = first
+            .checked_add(1)
+            .ok_or_else(|| error(expr.span, "iterator identity space exhausted"))?;
+        let receiver = n::LocalId {
+            owner: u32::MAX,
+            index: first,
+        };
+        let identity = local(expr.hir_id);
+        let at = source(expr.span);
+        let node = |ty, kind| n::Expr {
+            source: at,
+            ty,
+            kind,
+        };
+        self.locals.insert(receiver, iterable.ty.clone());
+        self.loops.push(identity);
+        let checked = (|| {
+            let method = self
+                .selected_method(
+                    iterable.ty.clone(),
+                    Some(n::InterfaceInstance {
+                        declaration: protocol,
+                        arguments: vec![],
+                    }),
+                    "iterate",
+                    expr.span,
+                )?
+                .ok_or_else(|| error(expr.span, "Iterator iterate method unavailable"))?;
+            let call = self.finish_call(
+                expr,
+                method,
+                &[],
+                vec![node(iterable.ty.clone(), K::Local(receiver))],
+                None,
+                None,
+            )?;
+            let Term::Computation { effects, result } = &call.ty else {
+                return Err(error(
+                    expr.span,
+                    "Iterator iterate did not produce a computation",
+                ));
+            };
+            let [operation] = effects.as_slice() else {
+                return Err(error(
+                    expr.span,
+                    "Iterator iterate requires one delivery operation",
+                ));
+            };
+            if **result != p(P::Void) {
+                return Err(error(expr.span, "Iterator iterate must complete with void"));
+            }
+            let operation = operation.clone();
+            let metadata = self.effect_metadata(&operation, expr.span)?;
+            let signature = self.formed_effect_signature(&metadata, &operation, expr.span)?;
+            let Term::Function { parameters, .. } = &signature else {
+                return Err(error(expr.span, "invalid Iterator delivery signature"));
+            };
+            let [parameter] = parameters.as_slice() else {
+                return Err(error(
+                    expr.span,
+                    "Iterator delivery requires one Item argument",
+                ));
+            };
+            let item_type = self.callable_input_view(&parameter.ty, expr.span)?;
+            // Resume currently names the nearest handler in NIR. Do not let
+            // a source resume for an outer branch target this synthetic one.
+            // Explicit nested source handlers establish their own resume scope.
+            self.effect_resume_result = None;
+            self.immutable.extend(pattern_binding_ids(pat));
+            let pattern = self.pattern(pat, &item_type)?;
+            let guard = guard
+                .map(|guard| self.expr(guard, Some(&p(P::Bool))))
+                .transpose()?
+                .map(Box::new);
+            let checked = discard_result(self.block(body, None)?);
+            let pattern = n::Pattern::Tuple(vec![pattern]);
+            let pattern = if let Some(condition) = guard {
+                n::Pattern::Guard {
+                    pattern: Box::new(pattern),
+                    condition,
+                }
+            } else {
+                pattern
+            };
+            let mut connections: BTreeMap<_, _> = saved_locals
+                .keys()
+                .chain(self.loops.iter())
+                .map(|id| (*id, *id))
+                .collect();
+            connections.extend(pattern_binding_ids(pat).into_iter().map(|id| (id, id)));
+            let iteration = self.wrap_inline_iteration(
+                checked,
+                vec![],
+                identity,
+                expr.span,
+                body.span,
+                connections,
+            )?;
+            let handler = n::EffectHandler {
+                operation: operation.clone(),
+                abi: metadata.abi,
+                signature,
+                // Match directly on delivery arguments. Rejection keeps the
+                // original item intact until the catch-all arm retires it;
+                // successful bindings use the ordinary handler move protocol.
+                arms: vec![
+                    n::MatchArm {
+                        pattern,
+                        guard: None,
+                        body: iteration,
+                    },
+                    n::MatchArm {
+                        pattern: n::Pattern::Tuple(vec![n::Pattern::Wild]),
+                        guard: None,
+                        body: node(p(P::Void), K::Unit),
+                    },
+                ],
+                fallback: None,
+            };
+            // The consumer executes in the outer environment. Only the
+            // producer runs with the newly installed delivery operation.
+            let outer = saved_environment.clone().unwrap_or_default();
+            let mut installed = vec![operation];
+            installed.extend_from_slice(&outer);
+            self.effect_environment = Some(installed.clone());
+            let running = self.run_computation(call, Some(&p(P::Void)), expr.span)?;
+            self.effect_environment = saved_environment.clone();
+            let handled = node(
+                p(P::Void),
+                K::EffectHandle {
+                    computation: Box::new(node(
+                        Term::computation(installed.clone(), p(P::Void)),
+                        K::EffectComputation {
+                            effects: installed,
+                            body: Box::new(running),
+                        },
+                    )),
+                    handlers: vec![handler],
+                    outer,
+                },
+            );
+            let looping = self.expanded_loop(
+                node(
+                    p(P::Never),
+                    K::Block {
+                        statements: vec![handled, node(p(P::Never), K::Break(identity))],
+                        result: None,
+                    },
+                ),
+                identity,
+                expr.span,
+            )?;
+            let mut result = node(
+                looping.ty.clone(),
+                K::Block {
+                    statements: vec![node(
+                        p(P::Void),
+                        K::Let {
+                            binding: receiver,
+                            value: Box::new(iterable),
+                        },
+                    )],
+                    result: Some(Box::new(looping)),
+                },
+            );
+            let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let freshened = control::freshen_loop_sites(
+                &mut result,
+                at,
+                &mut self.expansion_sources,
+                &mut fuel,
+            );
+            self.required_steps -= (before - fuel) as u64;
+            freshened.map_err(|reason| error(expr.span, reason))?;
+            if let Some(expected) = expected {
+                self.require_expression(&result.ty, expected, expr.span)?;
+            }
+            Ok(result)
+        })();
+        self.loops.pop();
+        self.locals = saved_locals;
+        self.immutable = saved_immutable;
+        self.context = saved_context;
+        self.generator_data = saved_data;
+        self.partial_staged_bindings
+            .retain(|binding, _| saved_partial.contains(binding));
+        self.effect_environment = saved_environment;
+        self.effect_resume_result = saved_resume;
+        checked
+    }
+
     pub(super) fn validate_iterator_protocol(&self, id: DeclarationId) -> Result<(), Error> {
         let span = rustc_span::DUMMY_SP;
         let fail = |message: &str| error(span, message);
