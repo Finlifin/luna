@@ -20,7 +20,7 @@ caller.
 Source `comptime impl Trait for Subject` contributions retain their phase through
 interface checking and invocation. Complementary method-only contributions merge
 into one implementation descriptor in either declaration order. Inherent
-comptime implementations and cross-phase associated checking remain unsupported.
+comptime implementations and complementary associated merging remain unsupported.
 
 ## Member metadata validation
 
@@ -93,13 +93,29 @@ positional arguments. Type and comptime-value domains remain distinct; free
 identities and opaque heads are preserved. This bounded check does not replace
 head admission, method signature checks or invocation contracts.
 
+## Associated source contributions
+
+A runtime contribution checks runtime associated members and can omit comptime
+members even when they have defaults. A comptime contribution checks comptime
+members and readonly runtime signature data. Explicit member phase annotations
+must agree with the trait contract. Missing required initializers and wrong value
+types retain their existing diagnostics.
+
+Selected associated-value lookup checks comptime membership before consulting
+completed values or initializers. A missing phase cannot recover a default or a
+less precise relationship. Deferred method-signature checks build their Type
+world only from available initializers rather than indexing absent phase members.
+Complementary source contributions with associated declarations still fail
+explicitly: merging method tables alone must not discard a second initializer
+or silently accept inconsistent shared values.
+
 ## Remaining integration
 
 - Interleave metadata queries that themselves depend on interface preparation;
   the current early required-evaluation path supports independent computations.
 - Extend source merging to associated items while preserving shared readonly
-  data consistency. Phase-specific associated implementation checking is
-  currently an explicit refusal.
+  data consistency and each initializer's original generic environment. The
+  source merger still explicitly rejects complementary associated contributions.
 - Complete phase handling in generated-definition publication and specialized
   protocol consumers, including comptime key protocols. Expand source-level
   non-fallback coverage beyond single-contribution relationships.
@@ -204,3 +220,18 @@ failure followed by successful retry. Existing method/default availability,
 coherence, capabilities and associated-value suites remain passing. Workspace
 format check passed (`/tmp/luna-tools-lfr1cwuv/result.json`, exit 0), as did
 `git diff --check`. Cross-phase associated source checking remains unsupported.
+
+Phase-specific associated source checking passed 81 tests in `/home/fin/luna`
+with `python3 -B development/check.py --timeout 900 -- test --release -p luna
+-p elaboration -p comptime_interpretor --test trait_phases --test associated
+--test runtime_function_identities --test library_attributes --test generated_traits`
+(`/tmp/luna-tools-zc49lzr9/result.json`, exit 0). Added source cases cover
+shared readonly Type data with comptime scalar members, renamed generic Type
+initializers, omission of absent-phase members/defaults, wrong-phase definitions,
+missing required values, conflicting explicit annotations, non-fallback, and
+explicit rejection of unfinished complementary associated merging. The first run
+(`/tmp/luna-tools-19q5wydh/result.json`, exit 101) found missing `Type` declarations
+in three fixtures; the no-sysroot helper now declares the builtin alias.
+Formatting passed (`/tmp/luna-tools-guo3xq_8/result.json`, exit 0), as did
+`git diff --check`. Shared associated-value merging remains the next integration
+step; passing single-contribution tests does not establish cross-phase equality.

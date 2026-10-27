@@ -75,7 +75,11 @@ pub(super) fn merge(
             {
                 return Err("implementation phase contributions overlap".into());
             }
-            if !target.associated.is_empty()
+            if target
+                .interface
+                .and_then(|id| traits.get(&id))
+                .is_some_and(|interface| !interface.associated.is_empty())
+                || !target.associated.is_empty()
                 || !contribution.associated.is_empty()
                 || !target.associated_initializers.is_empty()
                 || !contribution.associated_initializers.is_empty()

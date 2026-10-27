@@ -976,22 +976,37 @@ impl Checker<'_, '_> {
             let associated = Vec::new();
             if let Some(interface) = interface {
                 let trait_definition = &traits[&interface];
-                if (phase == n::TraitPhase::Comptime && !trait_definition.associated.is_empty())
-                    || trait_definition
-                        .associated
-                        .iter()
-                        .any(|member| member.phase == n::TraitPhase::Comptime)
-                {
-                    return Err(error(
-                        item.span,
-                        "phase-specific associated implementation checking is not yet implemented",
-                    ));
-                }
                 let arguments: Vec<_> = std::iter::once(subject.clone())
                     .chain(interface_arguments.iter().cloned())
                     .collect();
                 let declared_associated = supplied_associated.clone();
                 for contract in &trait_definition.associated {
+                    if phase == n::TraitPhase::Runtime && contract.phase == n::TraitPhase::Comptime
+                    {
+                        if supplied_associated.contains_key(&contract.name) {
+                            return Err(error(
+                                item.span,
+                                format!(
+                                    "associated value `{}` belongs to the comptime trait phase",
+                                    contract.name
+                                ),
+                            ));
+                        }
+                        continue;
+                    }
+                    if let Some(actual) = supplied_associated.get(&contract.name) {
+                        let actual_owner = self.associated_owner(actual.declaration).unwrap();
+                        if self
+                            .member_phases
+                            .get(&actual_owner)
+                            .is_some_and(|declared| *declared != contract.phase)
+                        {
+                            return Err(error(
+                                item.span,
+                                "implementation associated phase does not match its trait contract",
+                            ));
+                        }
+                    }
                     if supplied.contains_key(&contract.name) {
                         return Err(error(
                             item.span,
@@ -1274,9 +1289,13 @@ impl Checker<'_, '_> {
                     if member.ty != p(P::Type) {
                         continue;
                     }
-                    let (owner, parameters, arguments) = self.associated_initializers
-                        [&(implementation.declaration, member.declaration)]
-                        .clone();
+                    let Some((owner, parameters, arguments)) = self
+                        .associated_initializers
+                        .get(&(implementation.declaration, member.declaration))
+                        .cloned()
+                    else {
+                        continue;
+                    };
                     let span = self.package.item(owner).unwrap().span;
                     let value = self
                         .associated_contract(owner, true)?

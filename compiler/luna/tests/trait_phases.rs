@@ -88,7 +88,7 @@ fn ordinary_implementations_continue_to_elaborate() {
 
 fn phase_source(body: &str) -> String {
     format!(
-        "mod attrs {{{}}} use attrs.comptime_phase as staged; {body}",
+        "mod attrs {{{}}} use attrs.comptime_phase as staged; typealias Type=.Type'builtin; {body}",
         include_str!("../../../library/attrs/lib.fl")
     )
 }
@@ -367,5 +367,136 @@ fn complementary_capability_conditions_accept_alpha_renaming() {
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
         comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn comptime_associated_values_and_shared_signature_types_execute() {
+    let source = phase_source(
+        r#"
+        trait Code {
+            assoc Value: Type = bool;
+            ^staged assoc enabled: bool;
+            ^staged comptime fn value()->Value;
+        }
+        struct Subject {}
+        comptime impl Code for Subject {
+            assoc enabled: bool = true;
+            comptime fn value()->bool {Subject.as(Code).enabled}
+        }
+        comptime fn run()->bool {Subject.as(Code).value()}
+    "#,
+    );
+    let package = support::compile(&source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn runtime_contribution_omits_comptime_associated_members_and_defaults() {
+    let source = phase_source(
+        r#"
+        trait Code { ^staged assoc enabled: bool = true; }
+        struct Subject {}
+        impl Code for Subject {}
+        comptime fn run()->bool {true}
+    "#,
+    );
+    let package = support::compile(&source);
+    assert!(package.implementations[0].associated.is_empty());
+    let missing = source.replace(
+        "comptime fn run()->bool {true}",
+        "comptime fn run()->bool {Subject.as(Code).enabled}",
+    );
+    let diagnostic = support::compile_with_protocols(&missing, &Default::default()).unwrap_err();
+    assert!(
+        diagnostic.contains("lacks comptime trait phase"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn associated_phase_checks_required_values_and_explicit_annotations() {
+    for (implementation, expected) in [
+        (
+            "impl Code for Subject {assoc enabled: bool = true;}",
+            "belongs to the comptime trait phase",
+        ),
+        (
+            "comptime impl Code for Subject {}",
+            "missing required associated value",
+        ),
+        (
+            "comptime impl Code for Subject {^ordinary assoc enabled: bool = true;}",
+            "associated phase does not match",
+        ),
+    ] {
+        let source = phase_source(&format!(
+            r#"
+            const ordinary = {{comptime_phase:false}};
+            trait Code {{ ^staged assoc enabled: bool; }}
+            struct Subject {{}}
+            {implementation}
+        "#
+        ));
+        let diagnostic = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(diagnostic.contains(expected), "{diagnostic}");
+    }
+}
+
+#[test]
+fn generic_comptime_associated_type_specializes_owner_inputs() {
+    let source = phase_source(
+        r#"
+        trait Code { ^staged assoc Value: Type; }
+        struct Subject where T {}
+        comptime impl Code for Subject<T> where T { assoc Value: Type = T; }
+        comptime fn run()->bool {
+            let value: Subject<bool>.as(Code).Value = true;
+            value
+        }
+    "#,
+    );
+    let package = support::compile(&source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn associated_phase_selection_does_not_recover_a_broader_default() {
+    let source = phase_source(
+        r#"
+        trait Code { ^staged assoc enabled: bool = true; }
+        struct Subject where T {}
+        comptime impl Code for Subject<T> where T {}
+        impl Code for Subject<bool> {}
+        comptime fn run()->bool {Subject<bool>.as(Code).enabled}
+    "#,
+    );
+    let diagnostic = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+    assert!(
+        diagnostic.contains("lacks comptime trait phase"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn complementary_associated_values_are_not_silently_discarded() {
+    let source = phase_source(
+        r#"
+        trait Code { assoc Value: Type = bool; }
+        struct Subject {}
+        impl Code for Subject {}
+        comptime impl Code for Subject { assoc Value: Type = .char'builtin; }
+    "#,
+    );
+    let diagnostic = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+    assert!(
+        diagnostic.contains("cross-phase associated implementation merging"),
+        "{diagnostic}"
     );
 }

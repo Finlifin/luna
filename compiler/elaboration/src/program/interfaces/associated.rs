@@ -282,6 +282,29 @@ impl Checker<'_, '_> {
         member: DeclarationId,
         span: Span,
     ) -> Result<n::Expr, Error> {
+        let selected = self
+            .checked_implementations
+            .iter()
+            .find(|item| item.declaration == implementation)
+            .ok_or_else(|| error(span, "unknown associated implementation"))?;
+        if !selected.phases.comptime
+            && self
+                .checked_traits
+                .iter()
+                .find(|interface| Some(interface.declaration) == selected.interface)
+                .and_then(|interface| {
+                    interface
+                        .associated
+                        .iter()
+                        .find(|item| item.declaration == member)
+                })
+                .is_some_and(|member| member.phase == n::TraitPhase::Comptime)
+        {
+            return Err(error(
+                span,
+                "selected implementation lacks comptime trait phase",
+            ));
+        }
         if let Some(value) = self
             .checked_implementations
             .iter()
