@@ -48,6 +48,72 @@ fn function(local: u32, phase: Phase, inputs: &[Sort]) -> Function {
         requirements: vec![],
     }
 }
+
+#[test]
+fn text_queries_validate_packet_domains_in_both_phases() {
+    use nir::program::TextQueryKind as Q;
+    for phase in [Phase::Runtime, Phase::Comptime] {
+        for query in [Q::ByteLength, Q::Byte] {
+            let mut f = function(1, phase, &[]);
+            let mut values = vec![Expr {
+                source: f.body.source,
+                ty: Term::Primitive(Primitive::Str),
+                kind: K::Literal(Literal::String("🦀".into())),
+            }];
+            if query == Q::Byte {
+                values.push(Expr {
+                    source: f.body.source,
+                    ty: Term::Primitive(Primitive::U64),
+                    kind: K::Literal(Literal::UnsignedInteger(0)),
+                });
+            }
+            let result = if query == Q::ByteLength {
+                Term::Primitive(Primitive::U64)
+            } else {
+                Term::Optional(Box::new(Term::Primitive(Primitive::U8)))
+            };
+            f.signature = Term::Function {
+                parameters: vec![],
+                result: Box::new(result.clone()),
+            };
+            f.body = Expr {
+                source: f.body.source,
+                ty: result,
+                kind: K::TextQuery {
+                    query,
+                    subject: Box::new(Expr {
+                        source: f.body.source,
+                        ty: Term::Tuple(values.iter().map(|v| v.ty.clone()).collect()),
+                        kind: K::Tuple(values),
+                    }),
+                },
+            };
+            let package = Package {
+                functions: vec![f],
+                ..Default::default()
+            };
+            nir::phases::validate(&package).unwrap();
+            for damage in 0..3 {
+                let mut invalid = package.clone();
+                let expr = &mut invalid.functions[0].body;
+                let K::TextQuery { subject, .. } = &mut expr.kind else {
+                    unreachable!()
+                };
+                match damage {
+                    0 => expr.ty = Term::Primitive(Primitive::Bool),
+                    1 => subject.ty = Term::Tuple(vec![]),
+                    _ => {
+                        subject.ty = Term::Tuple(vec![
+                            Term::Primitive(Primitive::Bool);
+                            if query == Q::Byte { 2 } else { 1 }
+                        ])
+                    }
+                }
+                assert!(nir::phases::validate(&invalid).is_err());
+            }
+        }
+    }
+}
 fn call(target: &Function, arguments: Vec<(usize, Expr)>) -> Expr {
     flag(K::Call {
         callee: Box::new(Expr {

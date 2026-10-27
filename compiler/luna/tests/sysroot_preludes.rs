@@ -50,6 +50,27 @@ fn assert_true(output: std::process::Output) {
 }
 
 #[test]
+fn shipped_text_module_exposes_checked_utf8_byte_reads() {
+    let input = Inputs::new();
+    input.write(
+        "library/builtin/lib.fl",
+        "pub use primitives.*; pub mod text {pub use text_bytes.*;} pub mod prelude {pub use primitives.*;}",
+    );
+    input.write(
+        "library/builtin/primitives.fl",
+        include_str!("../../../library/builtin/primitives.fl"),
+    );
+    input.write(
+        "library/builtin/text_bytes.fl",
+        include_str!("../../../library/builtin/text_bytes.fl"),
+    );
+    for package in ["meta", "build", "attrs", "verification", "std"] {
+        input.write(&format!("library/{package}/lib.fl"), "pub mod prelude {}");
+    }
+    assert_true(input.run("use builtin.text; fn run()->bool {let length=text.byte_length(\"é\");let byte=text.byte(\"é\",1);let valid=byte match {value?=>value == 169,null=>false};length == 2 and valid}"));
+}
+
+#[test]
 fn five_default_preludes_deduplicate_identity_and_std_stays_explicit() {
     let input = Inputs::new();
     input.write(

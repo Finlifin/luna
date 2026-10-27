@@ -426,6 +426,7 @@ fn walk_roots<'a>(
                     | K::NewtypeConvert(value)
                     | K::Snapshot(value)
                     | K::TakeBits(value)
+                    | K::TextQuery { subject: value, .. }
                     | K::SymbolName(value)
                     | K::EnumName(value)
                     | K::Not(value)
@@ -835,6 +836,7 @@ fn walk_mut(
                     | K::NewtypeConvert(value)
                     | K::Snapshot(value)
                     | K::TakeBits(value)
+                    | K::TextQuery { subject: value, .. }
                     | K::SymbolName(value)
                     | K::EnumName(value)
                     | K::Not(value)

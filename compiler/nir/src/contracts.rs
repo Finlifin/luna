@@ -203,6 +203,7 @@ pub fn remap_predicate(
             | K::NewtypeConvert(v)
             | K::Snapshot(v)
             | K::TakeBits(v)
+            | K::TextQuery { subject: v, .. }
             | K::SymbolName(v)
             | K::EnumName(v)
             | K::UnsafeScope(v)

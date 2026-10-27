@@ -529,6 +529,7 @@ fn scan<'a>(
                 | K::BitConvert(value)
                 | K::Snapshot(value)
                 | K::TakeBits(value)
+                | K::TextQuery { subject: value, .. }
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::Not(value)

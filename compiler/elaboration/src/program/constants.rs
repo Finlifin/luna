@@ -2750,6 +2750,7 @@ impl Checker<'_, '_> {
                 | K::CheckPredicate(value)
                 | K::Snapshot(value)
                 | K::TakeBits(value)
+                | K::TextQuery { subject: value, .. }
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::BitConvert(value)

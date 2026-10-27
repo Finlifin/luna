@@ -5431,6 +5431,7 @@ impl Walker<'_> {
             K::FloatNegate(value)
             | K::BitSlice { value, .. }
             | K::TakeBits(value)
+            | K::TextQuery { subject: value, .. }
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::BitConvert(value) => {
@@ -6884,6 +6885,7 @@ fn exportable_postcondition(
             | K::BitSlice { value: a, .. }
             | K::Snapshot(a)
             | K::TakeBits(a)
+            | K::TextQuery { subject: a, .. }
             | K::SymbolName(a)
             | K::EnumName(a)
             | K::BitConvert(a)

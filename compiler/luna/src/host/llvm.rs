@@ -16,6 +16,7 @@ mod patterns;
 mod pointers;
 mod records;
 mod strings;
+mod text_queries;
 use nir::program::{Expr, ExprKind as K, Function, IntegerOp as Op, Literal, LocalId};
 use nir::{Primitive as P, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1413,6 +1414,7 @@ impl Emitter<'_> {
                 value
             }
             K::EnumName(value) => self.enum_name(value, depth)?,
+            K::TextQuery { subject, query } => self.text_query(expr, subject, *query, depth)?,
             K::ScalarEqual(a, b)
             | K::ScalarLess(a, b)
             | K::ScalarLessEqual(a, b)

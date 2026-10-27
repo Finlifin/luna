@@ -43,6 +43,7 @@ mod purity;
 mod refinements;
 mod required;
 mod splicing;
+mod text_queries;
 mod trait_inputs;
 mod type_defaults;
 pub(crate) use cmtt::{expand_bound_quote, expand_materialized_quotes};
@@ -9438,6 +9439,9 @@ impl Checker<'_, '_> {
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "list_length" | "list_concat")) => {
                     self.list_builtin(expr, callee, args, expected)
                 }
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "str_byte_length" | "str_byte")) => {
+                    self.text_builtin(expr, callee, args, expected)
+                }
                 H::Application(callee, args) => {
                     let quote_head = if let H::NFApplication(head, _) = callee.kind {
                         head
@@ -11709,6 +11713,7 @@ fn readonly_guard_operand(expr: &n::Expr, fuel: &mut u64, span: Span) -> Result<
             | K::Not(value)
             | K::BitConvert(value)
             | K::TakeBits(value)
+            | K::TextQuery { subject: value, .. }
             | K::SymbolName(value)
             | K::BitSlice { value, .. } => pending.push((value, depth + 1)),
             K::IntegerBinary { left, right, .. }
@@ -12047,6 +12052,7 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::BitConvert(value)
         | K::Snapshot(value)
         | K::TakeBits(value)
+        | K::TextQuery { subject: value, .. }
         | K::SymbolName(value)
         | K::EnumName(value)
         | K::FloatNegate(value)

@@ -2412,6 +2412,12 @@ impl<'a> Analysis<'a> {
                 self.set_code_fields(fields);
                 true
             }
+            K::TextQuery { subject, query } => {
+                // This primitive consumes an immutable text observation and
+                // returns scalar data; it does not copy arbitrary input owners.
+                query.validate(&subject.ty, &value.ty)
+                    && self.expression(subject, private, returns, depth + 1)
+            }
             K::Not(inner)
             | K::FloatNegate(inner)
             | K::BitConvert(inner)

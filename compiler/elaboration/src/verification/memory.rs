@@ -5374,6 +5374,7 @@ impl<'a> Infer<'a, '_> {
             | K::NewtypeConvert(value)
             | K::Snapshot(value)
             | K::TakeBits(value)
+            | K::TextQuery { subject: value, .. }
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::BitSlice { value, .. } => self.check_guard(value, depth + 1),
@@ -7413,6 +7414,7 @@ impl<'a> Infer<'a, '_> {
             | K::BitConvert(value)
             | K::Snapshot(value)
             | K::TakeBits(value)
+            | K::TextQuery { subject: value, .. }
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::BitSlice { value, .. } => self.walk(value, depth + 1)?,

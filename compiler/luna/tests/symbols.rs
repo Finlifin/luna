@@ -865,7 +865,7 @@ fn host_symbol_text_lowering_is_bounded_and_recovers_without_repreparation() {
     let prepared = luna::host::prepare_with_protocols(&package, "run", 100000, copy, drop).unwrap();
     let error = luna::host::llvm_ir_prepared(&prepared, 1024).unwrap_err();
     assert!(
-        error.contains("host text literal budget exhausted"),
+        error.contains("host text lookup budget exhausted"),
         "{error}"
     );
     let ir = luna::host::llvm_ir_prepared(&prepared, 100000).unwrap();

@@ -1265,6 +1265,12 @@ pub fn machine_arithmetic_functions(
                         | K::EnumName(value)
                         | K::Not(value)
                         | K::Loop { body: value, .. } => work.push(Work::Expr(value, false, ct)),
+                        K::TextQuery { subject, query } => {
+                            if !query.validate(&subject.ty, &expr.ty) {
+                                return Err(fail(expr.source, "text query domain mismatch"));
+                            }
+                            work.push(Work::Expr(subject, false, ct));
+                        }
                         K::WritePointer {
                             pointer: a,
                             value: b,

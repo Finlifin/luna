@@ -4062,6 +4062,39 @@ impl<'a> Interpreter<'a> {
                 };
                 Ok(Flow::Value(Value::String(name)))
             }
+            K::TextQuery { subject, query } => {
+                if !query.validate(&subject.ty, &expr.ty) {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                }
+                let Value::Tuple(values) = value!(self.eval(subject, environment)) else {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                };
+                let Some(Value::String(text)) = values.first() else {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                };
+                match query {
+                    nir::program::TextQueryKind::ByteLength if values.len() == 1 => {
+                        Ok(Flow::Value(Value::UnsignedInteger(text.len() as u128)))
+                    }
+                    nir::program::TextQueryKind::Byte if values.len() == 2 => {
+                        let Value::UnsignedInteger(index) = values[1] else {
+                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                        };
+                        if index > u64::MAX as u128 {
+                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                        }
+                        let byte = usize::try_from(index)
+                            .ok()
+                            .and_then(|index| text.as_bytes().get(index));
+                        Ok(Flow::Value(Value::Optional {
+                            ty: expr.ty.clone(),
+                            value: byte
+                                .map(|byte| Box::new(Value::UnsignedInteger(u128::from(*byte)))),
+                        }))
+                    }
+                    _ => Err(self.failure(ErrorKind::Type, Some(expr.source))),
+                }
+            }
             K::Snapshot(value) => {
                 if value.ty != expr.ty {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
