@@ -402,3 +402,23 @@ Validation in `/home/fin/luna`:
 
 This completes the fixed-signature source-to-VM path, not value-dependent
 callable signatures or completed IIR instances containing unevaluated packets.
+
+Nested dynamic calls exposed a required-dependency classification bug: a second
+reference to an already expanded bodyless member entered ordinary function
+checking and failed with `required comptime call needs a function body`.
+Member identities now remain contract references after expansion; only a
+default body sharing that identity is eligible for ordinary body checking.
+The regression invokes two implementations of the same member in sequence,
+transports both Bool values, and evaluates the result in a required constant.
+
+In `/home/fin/luna`, `python3 -B development/check.py --timeout 900 -- test
+--release -p luna -p elaboration -p comptime_interpretor --test
+dynamic_trait_clauses --test trait_phases` passed all 38 tests
+(`/tmp/luna-tools-w_9grso7/result.json`, exit 0). The regression failed before
+the repair (`/tmp/luna-tools-8aa_4c5o/result.json`, exit 101).
+`python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+passed (`/tmp/luna-tools-y6vn_drl/result.json`, exit 0).
+The related source regressions also passed: `python3 -B development/check.py
+--timeout 900 -- test --release -p luna -p elaboration -p comptime_interpretor
+--test execution trait`, 94 tests passed, 1,269 unrelated tests filtered
+(`/tmp/luna-tools-3x69y3nz/result.json`, exit 0). `git diff --check` passed.

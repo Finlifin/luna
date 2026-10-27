@@ -1630,16 +1630,19 @@ impl Checker<'_, '_> {
                     }
                     break;
                 };
-                if !expanded_members.contains(&id)
-                    && self.checked_traits.iter().any(|interface| {
-                        interface
-                            .methods
-                            .iter()
-                            .any(|member| member.declaration == id)
-                    })
-                {
-                    members.insert(id);
-                    continue;
+                if let Some(member) = self.checked_traits.iter().find_map(|interface| {
+                    interface
+                        .methods
+                        .iter()
+                        .find(|member| member.declaration == id)
+                }) {
+                    // Repeated packet references still name a contract, not a
+                    // function body. Only an inherited default can reuse that
+                    // identity as an executable dependency after expansion.
+                    if !expanded_members.contains(&id) || member.default != Some(id) {
+                        members.insert(id);
+                        continue;
+                    }
                 }
                 if !seen.insert(id) {
                     continue;

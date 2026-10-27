@@ -173,3 +173,24 @@ fn source_dynamic_trait_clauses_evaluate_once_before_explicit_arguments() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn required_dynamic_trait_calls_prepare_nested_dispatch() {
+    let text = source(
+        "comptime fn choose(value:bool)->bool where flag:bool {Other.as(Choose).choose<flag>(.value=value)}",
+        r#"
+        struct Other {}
+        comptime impl Choose for Other {
+            comptime fn choose(value:bool)->bool where flag:bool {value}
+        }
+        comptime fn use_it(flag:bool)->bool {Subject.as(Choose).choose<flag>()}
+        const selected = use_it(true) and not use_it(false);
+        comptime fn run()->bool {selected}
+    "#,
+    );
+    let package = support::compile(&text);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
