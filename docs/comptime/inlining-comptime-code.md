@@ -64,6 +64,20 @@ comptime fn check_choices() -> bool {
 
 普通 `for` 的边界即使是编译时常量，也不等同于 `inline for`。前者没有强制展开的语义承诺。
 
+在闭合类型的 comptime 函数中，有界 Integer 范围也可以由普通参数供应。整个循环由 comptime VM 执行，不需要在检查定义时按范围复制主体：
+
+```flurry
+comptime fn sum_before(end: Integer) -> Integer {
+    var sum: Integer = 0;
+    inline for index in 0..end {
+        sum = sum + index;
+    }
+    sum
+}
+```
+
+起止边界按源码顺序各求值一次。每轮绑定不可变的索引，再执行模式观察、guard 和主体；guard 失败或 `continue` 进入下一轮，带标签的控制转移仍指向相应循环。`..=` 包含末端，空范围不执行模式观察、guard 或主体，但主体仍参加类型与阶段检查。边界和游标使用精确 Integer 算术，执行工作量受 comptime VM 预算限制；这不改变生成 runtime 残余时 inline 循环的展开要求。
+
 ### 失败
 
 必须在编译时确定的分支条件或展开结构，在所需输入已经绑定后仍无法合法求值时，为编译错误。普通 runtime 条件应使用对应的 runtime 控制流。

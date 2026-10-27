@@ -11190,15 +11190,7 @@ impl Checker<'_, '_> {
             }
             H::InlineControl(value)
                 if matches!(value.kind, H::If(..) | H::When(..) | H::Match(..))
-                    && !self.in_code_body
-                    && !self.checking_open_behavior
-                    && self.captures.last().is_none_or(|frame| frame.comptime)
-                    && self.signature_owner.is_some_and(|owner| {
-                        !self.open_functions.contains_key(&owner)
-                            && self.package.item(owner).is_some_and(|item|
-                                matches!(&item.kind, ItemKind::Fn(sig, _)
-                                    if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head))
-                    }) => {
+                    && self.closed_comptime_control_body() => {
                 // This body executes wholly at comptime. Keep typed branch
                 // control in the VM so ordinary arguments and mutable locals
                 // are observed at invocation, without changing their ABI sorts.

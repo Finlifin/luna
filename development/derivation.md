@@ -1023,3 +1023,42 @@ git diff --check
 - New cases cover direct and nested calls, snapshots of mutable arguments,
   argument producer counts/order, mutable callee locals, if/when/match,
   short-circuit selector effects and rejection of invalid uncalled bodies.
+
+## Invocation-time inline Integer ranges
+
+Closed comptime bodies lower bounded inline Integer ranges to checked VM loops.
+Endpoint producers run once in source order before the loop's bindings. A
+private cursor advances before the iteration scope, whose immutable snapshot
+supplies the pattern and guard. The existing iteration wrapper preserves
+continue/break targets and per-iteration scopes. Integer arithmetic is exact;
+VM execution budgets bound work without allocating one body per index.
+
+The complete loop body remains in checked NIR even for a statically empty
+range. The initial regression run exposed an existing omission: an uncalled
+comptime function with an empty inline range silently lost an invalid runtime
+call in its body. Keeping the body allows ordinary phase checking to reject it.
+Quoted runtime code, open residual specialization and tuple enumeration keep
+their existing paths. No new IR node or dump syntax is introduced.
+
+Initial report: `/tmp/luna-tools-q4eq7yh4/result.json`. Dynamic range execution
+failed on an unavailable ordinary boundary input, and the empty-body rejection
+case was incorrectly accepted. Several other initial fixtures required spaces
+around the infix `+`; those fixtures were corrected before implementation
+validation.
+
+Validation in `/home/fin/luna` (exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_inline_loops --test comptime_clause_inputs --test inline_control --test derivation --test quote_functions
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- 482 tests passed: comptime ranges 9, comptime clause inputs 43, derivation 77,
+  inline controls 249, quote functions 104.
+  Report: `/tmp/luna-tools-dxn3ieog/result.json`.
+- Formatting: `/tmp/luna-tools-ax27rqbt/result.json`.
+- Range cases cover endpoint and guard effect order, transformed patterns,
+  nested inline selectors, labelled continue, break/return, empty ranges,
+  negative/inclusive and beyond-u128 boundaries, loop-index immutability,
+  phase/type rejection and invocation budget exhaustion.

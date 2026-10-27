@@ -1,5 +1,6 @@
 //! Bounded source-range unrolling; runtime bodies retain their own scopes.
 use super::*;
+mod comptime_ranges;
 
 impl Checker<'_, '_> {
     /// Check availability without invoking an inactive staged computation.
@@ -131,6 +132,9 @@ impl Checker<'_, '_> {
                 "inline for currently requires a bounded comptime Integer range",
             ));
         };
+        if self.closed_comptime_control_body() {
+            return self.comptime_range(expr, start, end, inclusive, expected);
+        }
         let suppressed = self.in_unselected_inline
             && self
                 .inline_selection
