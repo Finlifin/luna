@@ -768,3 +768,40 @@ rejection test now accepts its concrete captured closure while retaining rejecti
 for a root parameter with no supplied code identity.
 Formatting passed (`/tmp/luna-tools-47oxl104/result.json`, exit 0); the diff check
 passed. These checks establish dependency transport, not lifetime permission.
+
+## Prepared default callback frames
+
+Default inputs now receive both text origins and known code identities from
+already-prepared callee parameters. The default expression's local definitions
+are indexed in that frame. A default may alias an earlier callback, construct a
+closure over earlier inputs, or invoke an earlier callback; these actions do not
+consult the caller's lexical code bindings. Explicit inputs still evaluate in
+the caller frame before their values are installed under callee identities.
+
+Each default analysis restores the caller's code, mutation-exclusion and loop
+contexts on success or failure. Its return state and postcondition-exit frame are
+isolated, and a nonlocal default return remains an error. Unknown code remains
+unknown rather than being inferred from a coincidentally matching caller binding.
+
+Text-derived source defaults still require P3 certification. The new regression
+uses typed explicit source calls and installs NIR default frames to test this
+transfer rule independently; it does not relax source purity or resource gates.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions default_callbacks_use_prepared_code_and_capture_frames -- --exact
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 32 tests passed (`/tmp/luna-tools-7_zb46tz/result.json`, exit 0). The exact
+new test was rerun after the final nested-default fixture addition and passed
+(`/tmp/luna-tools-5a1cc24o/result.json`, exit 0). It covers a default alias of a
+named callback, a default capturing earlier text, copying a prepared closure,
+invoking an earlier callback to compute a default, and a default closure capturing
+an earlier closure parameter. Budget failure and a subsequent fresh query pass.
+Formatting passed (`/tmp/luna-tools-z6gkdv20/result.json`, exit 0), as did the
+diff check. Text default coverage here is NIR transfer evidence, not source P3
+certification or runtime lifetime permission.

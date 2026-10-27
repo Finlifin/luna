@@ -1491,3 +1491,116 @@ fn named_closure_callbacks_close_code_environments_and_transport_text() {
     assert!(infer(&package, "nested", 10).is_err());
     assert!(infer(&package, "nested", 500_000).is_ok());
 }
+
+#[test]
+fn default_callbacks_use_prepared_code_and_capture_frames() {
+    use nir::program::{CallArgument, Expr, ExprKind as K};
+    use nir::{Primitive as P, Term};
+    // Text-derived defaults still need source P3 evidence. These typed explicit
+    // calls isolate default-frame transport at NIR without relaxing that gate.
+    let mut package = support::compile(
+        "typealias str=.str'builtin;
+        fn echo(value:str)->str {value}
+        fn literal(value:str)->str {\"static\"}
+        fn equal(value:str)->bool {value == \"x\"}
+        fn choose(value:str,action:fn(str)->str,fallback:fn(str)->str)->str {fallback(value)}
+        fn forwarded(value:str)->str {choose(value,echo,literal)}
+        fn take(value:str,callback:%{value:str} fn()->str)->str {callback()}
+        fn closed(value:str)->str {take(value,||value)}
+        fn repeat(value:str,first:%{value:str} fn()->str,second:%{value:str} fn()->str)->str {second()}
+        fn copied(value:str)->str {repeat(value,||value,||value)}
+        fn evaluate(value:str,callback:fn(str)->bool,answer:bool)->bool {answer}
+        fn observing(value:str)->bool {evaluate(value,equal,false)}
+        fn nested(value:str,inner:%{value:str} fn()->str,outer:%{inner:%{value:str} fn()->str} fn()->str)->str {outer()}
+        fn nested_default(value:str)->str {let inner=||value;nested(value,inner,||inner())}",
+    );
+    let targets: Vec<_> = package
+        .functions
+        .iter()
+        .filter(|f| ["choose", "take", "repeat", "evaluate", "nested"].contains(&f.name.as_str()))
+        .cloned()
+        .collect();
+    for function in &mut package.functions {
+        nir::visit::expression_mut(&mut function.body, &mut 100_000, |expr, _| {
+            let K::Call {
+                callee,
+                arguments,
+                parameter_bindings,
+            } = &mut expr.kind
+            else {
+                return Ok(());
+            };
+            let K::Function(id) = callee.kind else {
+                return Ok(());
+            };
+            let Some(target) = targets.iter().find(|f| f.declaration == id) else {
+                return Ok(());
+            };
+            *parameter_bindings = target.parameters.clone();
+            let index = arguments.len() - 1;
+            arguments[index].is_default = true;
+            match target.name.as_str() {
+                "choose" | "repeat" => {
+                    arguments[index].value.kind = K::Local(target.parameters[1]);
+                }
+                "take" | "nested" => {
+                    let capture_parameter = if target.name == "take" { 0 } else { 1 };
+                    let K::Closure { captures, body, .. } = &mut arguments[index].value.kind else {
+                        panic!("closure input");
+                    };
+                    let original = captures[0].binding;
+                    captures[0].binding = target.parameters[capture_parameter];
+                    nir::visit::expression_mut(
+                        std::sync::Arc::make_mut(body),
+                        &mut 100_000,
+                        |expr, _| {
+                            if matches!(expr.kind, K::Local(id) if id == original) {
+                                expr.kind = K::Local(target.parameters[capture_parameter]);
+                            }
+                            Ok(())
+                        },
+                    )?;
+                }
+                "evaluate" => {
+                    let source = arguments[index].value.source;
+                    let Term::Function { parameters, .. } = &target.signature else {
+                        panic!("function signature");
+                    };
+                    arguments[index].value.kind = K::Call {
+                        callee: Box::new(Expr {
+                            source,
+                            ty: parameters[1].ty.clone(),
+                            kind: K::Local(target.parameters[1]),
+                        }),
+                        arguments: vec![CallArgument {
+                            parameter: 0,
+                            is_default: false,
+                            value: Expr {
+                                source,
+                                ty: Term::Primitive(P::Str),
+                                kind: K::Local(target.parameters[0]),
+                            },
+                        }],
+                        parameter_bindings: vec![],
+                    };
+                }
+                _ => unreachable!(),
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+    for name in ["forwarded", "closed", "copied", "nested_default"] {
+        assert_eq!(
+            infer(&package, name, 500_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "observing", 500_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(0, &[])])
+    );
+    assert!(infer(&package, "closed", 10).is_err());
+    assert!(infer(&package, "closed", 500_000).is_ok());
+}

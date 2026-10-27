@@ -659,6 +659,45 @@ impl Query<'_, '_> {
         Ok(value)
     }
 
+    fn default_input(
+        &mut self,
+        value: &Expr,
+        prepared: &Locals,
+        prepared_code: &BTreeMap<LocalId, CodeValue>,
+        depth: usize,
+    ) -> Result<(Option<Regions>, Option<CodeValue>), String> {
+        let mut scope = self.locals_copy(prepared)?;
+        charge(
+            self.fuel,
+            prepared_code.len().saturating_add(prepared.len()),
+        )?;
+        let mut definitions = prepared_code.clone();
+        let mut seen = prepared.keys().copied().collect();
+        let mut changed = BTreeSet::new();
+        nir::visit::expression(value, self.fuel, |expr, fuel| {
+            index_code_expression(expr, fuel, &mut definitions, &mut seen, &mut changed)
+        })?;
+        definitions.retain(|binding, _| !changed.contains(binding));
+        let caller_code = std::mem::replace(&mut self.local_callables, definitions);
+        let caller_changed = std::mem::replace(&mut self.changed_callables, changed);
+        let caller_loops = std::mem::take(&mut self.loops);
+        self.exits.push(None);
+        let mut returned = None;
+        let result = (|| {
+            let code = self.callable_input(value)?;
+            let result = self.expr(value, &mut scope, &mut returned, depth)?;
+            if returned.is_some() {
+                return Err("text default argument cannot return from its caller".into());
+            }
+            Ok((result, code))
+        })();
+        self.exits.pop();
+        self.loops = caller_loops;
+        self.local_callables = caller_code;
+        self.changed_callables = caller_changed;
+        result
+    }
+
     fn schedule(&mut self, key: SummaryKey) {
         if self.scheduled.insert(key.clone()) {
             self.pending.push_back(key);
@@ -1415,20 +1454,26 @@ impl Query<'_, '_> {
                 }
                 let mut actual = BTreeMap::new();
                 let mut prepared = Locals::new();
+                let mut prepared_code = BTreeMap::new();
                 let mut callbacks = Vec::new();
                 for argument in arguments {
-                    let callback = if argument.is_default {
-                        // A default's local identities belong to its prepared
-                        // callee frame, not the current caller's code bindings.
-                        match &argument.value.kind {
-                            K::Function(_) | K::FunctionInstance { .. } => {
-                                self.callable_input(&argument.value)?
-                            }
-                            _ => None,
-                        }
+                    let (value, callback) = if argument.is_default {
+                        self.default_input(&argument.value, &prepared, &prepared_code, next)?
                     } else {
-                        self.callable_input(&argument.value)?
+                        let code = self.callable_input(&argument.value)?;
+                        (self.expr(&argument.value, locals, returned, next)?, code)
                     };
+                    let Some(value) = value else {
+                        return Ok(None);
+                    };
+                    if has_defaults {
+                        let binding = parameter_bindings[argument.parameter];
+                        charge_regions(&value, self.fuel)?;
+                        prepared.insert(binding, value.clone());
+                        if let Some(code) = &callback {
+                            prepared_code.insert(binding, code.clone());
+                        }
+                    }
                     if let Some(callback) = callback {
                         let instance = if let Some(id) = callback.closure {
                             Some(CallbackKey::Closure(id))
@@ -1453,30 +1498,6 @@ impl Query<'_, '_> {
                         if let Some(instance) = instance {
                             callbacks.push((argument.parameter, instance));
                         }
-                    }
-                    let value = if argument.is_default {
-                        let mut scope = self.locals_copy(&prepared)?;
-                        let caller_loops = std::mem::take(&mut self.loops);
-                        let mut default_returns = None;
-                        let result =
-                            self.expr(&argument.value, &mut scope, &mut default_returns, next);
-                        self.loops = caller_loops;
-                        let result = result?;
-                        if default_returns.is_some() {
-                            return Err(
-                                "text default argument cannot return from its caller".into()
-                            );
-                        }
-                        result
-                    } else {
-                        self.expr(&argument.value, locals, returned, next)?
-                    };
-                    let Some(value) = value else {
-                        return Ok(None);
-                    };
-                    if has_defaults {
-                        charge_regions(&value, self.fuel)?;
-                        prepared.insert(parameter_bindings[argument.parameter], value.clone());
                     }
                     if actual.insert(argument.parameter, value).is_some() {
                         return Err("duplicate text region call argument".into());
