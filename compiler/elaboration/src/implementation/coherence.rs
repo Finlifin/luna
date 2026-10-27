@@ -8,6 +8,7 @@ use nir::program::TypePredicate;
 #[derive(Clone, Debug)]
 pub enum PairAssessment {
     DifferentInterfaces,
+    DistinctTypeHeads,
     OrderedPrecision { left: usize, right: usize },
     Disjoint(Proof),
     NotDisjoint(Witness),
@@ -17,9 +18,18 @@ impl PairAssessment {
     pub fn is_proved(&self) -> bool {
         matches!(
             self,
-            Self::DifferentInterfaces | Self::OrderedPrecision { .. } | Self::Disjoint(_)
+            Self::DifferentInterfaces
+                | Self::DistinctTypeHeads
+                | Self::OrderedPrecision { .. }
+                | Self::Disjoint(_)
         )
     }
+}
+
+// Only admitted rigid outer constructors can bypass the full query. Replay
+// recomputes this same theory decision from the indexed heads.
+fn distinct_type_heads(left: &ImplementationHead, right: &ImplementationHead) -> bool {
+    crate::ptc::distinct_outer_type_heads(&left.subject, &right.subject)
 }
 
 // An overapproximation of value-index overlap. Known record/scalar
@@ -459,26 +469,31 @@ impl Index {
     )> {
         let count = self.entries.len();
         let pairs = count.checked_mul(count.saturating_sub(1))? / 2;
+        // One pass counts solver obligations; the second emits/replays pairs.
         let remaining = budget
             .steps
-            .checked_sub(count.checked_mul(2)?.checked_add(pairs)?)?;
+            .checked_sub(count.checked_mul(2)?.checked_add(pairs.checked_mul(2)?)?)?;
+        let entries: Vec<_> = self.entries.values().collect();
         let mut groups = std::collections::BTreeMap::new();
-        for entry in self.entries.values() {
-            if let Some(interface) = entry.head.interface {
-                let size = groups.entry((interface, entry.precision)).or_insert(0usize);
-                *size += 1;
+        for (i, a) in entries.iter().enumerate() {
+            let Some(interface) = a.head.interface else {
+                continue;
+            };
+            for b in &entries[i + 1..] {
+                if b.head.interface == Some(interface)
+                    && a.precision == b.precision
+                    && !distinct_type_heads(&a.head, &b.head)
+                {
+                    *groups.entry((interface, a.precision)).or_insert(0usize) += 1;
+                }
             }
         }
-        // Share proof work across independent interface/precision groups first.
-        // A large scalar protocol must not starve an unrelated generic pair.
-        let active = groups.values().filter(|size| **size > 1).count();
-        let group_budget = remaining / active.max(1);
+        // Distinct outer constructors need no full PTC query and must not dilute
+        // the allowance of constraints within the same declaration family.
+        let group_budget = remaining / groups.len().max(1);
         let allowances = groups
             .into_iter()
-            .filter_map(|(key, size)| {
-                let obligations = size * size.saturating_sub(1) / 2;
-                (obligations > 0).then(|| (key, group_budget / obligations))
-            })
+            .map(|(key, obligations)| (key, group_budget / obligations))
             .collect();
         Some((pairs, allowances))
     }
@@ -517,6 +532,8 @@ impl Index {
                     matches!(assessment, PairAssessment::DifferentInterfaces)
                 } else if a.precision != b.precision {
                     matches!(assessment, PairAssessment::OrderedPrecision { left,right } if *left == a.precision && *right == b.precision)
+                } else if distinct_type_heads(&a.head, &b.head) {
+                    matches!(assessment, PairAssessment::DistinctTypeHeads)
                 } else if let PairAssessment::Disjoint(proof) = assessment {
                     a.head.verify_disjointness(
                         &b.head,
@@ -567,6 +584,8 @@ impl Index {
                         left: a.precision,
                         right: b.precision,
                     }
+                } else if distinct_type_heads(&a.head, &b.head) {
+                    PairAssessment::DistinctTypeHeads
                 } else {
                     a.head.assess_type_overlap(
                         &b.head,
@@ -589,6 +608,7 @@ impl fmt::Display for PairAssessment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DifferentInterfaces => write!(f, "(different-interfaces)"),
+            Self::DistinctTypeHeads => write!(f, "(distinct-type-heads)"),
             Self::OrderedPrecision { left, right } => {
                 write!(f, "(ordered-precision {left} {right})")
             }

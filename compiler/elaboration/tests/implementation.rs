@@ -37,6 +37,52 @@ fn add(index: &mut Index, n: u32, subject: Term) {
 }
 
 #[test]
+fn nominal_head_separation_reserves_solver_work_for_same_family_constraints() {
+    use elaboration::{implementation::PairAssessment, ptc::Context};
+    use nir::program::TypePredicate;
+    let mut index = Index::default();
+    for member in 0..70 {
+        add(&mut index, 1000 + member, node(2000 + member, vec![var(1)]));
+    }
+    for (declaration, primitive) in [(1100, P::Bool), (1101, P::Char)] {
+        let mut implementation = head(declaration, node(3000, vec![var(1)]));
+        implementation.requirements = vec![TypePredicate::Equal(var(1), ty(primitive))];
+        index.insert(implementation, Budget::default()).unwrap();
+    }
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(3000));
+    let budget = Budget {
+        steps: 20_000,
+        ..Budget::default()
+    };
+    let report = index.check_type_coherence(&context, budget);
+    assert!(
+        report.is_proved(),
+        "{:?}",
+        report
+            .pairs
+            .iter()
+            .find(|(_, _, result)| !result.is_proved())
+    );
+    assert!(index.verify_type_coherence(&report, &context, budget));
+    assert!(report.to_string().contains("(distinct-type-heads)"));
+    let mut forged = report.clone();
+    forged.pairs.last_mut().unwrap().2 = PairAssessment::DistinctTypeHeads;
+    assert!(!index.verify_type_coherence(&forged, &context, budget));
+    let exhausted = Budget {
+        steps: 100,
+        ..budget
+    };
+    assert!(!index.check_type_coherence(&context, exhausted).is_proved());
+    assert!(!index.verify_type_coherence(&report, &context, exhausted));
+    let mut duplicate = head(1102, node(3000, vec![var(1)]));
+    duplicate.requirements = vec![TypePredicate::Equal(var(1), ty(P::Bool))];
+    index.insert(duplicate, Budget::default()).unwrap();
+    assert!(!index.check_type_coherence(&context, budget).is_proved());
+    assert!(!index.verify_type_coherence(&report, &context, budget));
+}
+
+#[test]
 fn coherence_budget_keeps_generic_pairs_usable_beside_large_scalar_groups() {
     check_coherence_group_budget(false);
 }
@@ -1554,10 +1600,15 @@ fn coherence_replay_rejects_missing_pairs_forged_proofs_and_stale_worlds() {
         implementation::PairAssessment,
         ptc::{Context, Formula},
     };
-    let context = Context::default();
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(10));
     let mut index = Index::default();
-    add(&mut index, 200, ty(P::Bool));
-    add(&mut index, 201, ty(P::Char));
+    for (declaration, primitive) in [(200, P::Bool), (201, P::Char)] {
+        let mut implementation = head(declaration, node(10, vec![var(1)]));
+        implementation.requirements =
+            vec![nir::program::TypePredicate::Equal(var(1), ty(primitive))];
+        index.insert(implementation, Budget::default()).unwrap();
+    }
     let report = index.check_type_coherence(&context, Budget::default());
     assert!(index.verify_type_coherence(&report, &context, Budget::default()));
     let mut removed = report.clone();

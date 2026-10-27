@@ -1096,6 +1096,64 @@ fn constructor(term: &Term) -> Option<Head> {
         _ => None,
     }
 }
+
+/// Constant-work disjointness for admitted outer type constructors. Reuse the
+/// theory's constructor identities, without inspecting inputs or assuming
+/// injectivity. Unit aliases, projections, opaque computations and callable
+/// binders deliberately stay on the ordinary proof path.
+pub(crate) fn distinct_outer_type_heads(left: &Term, right: &Term) -> bool {
+    let head = |term: &Term| match term {
+        Term::Primitive(_)
+        | Term::Optional(_)
+        | Term::Pointer(_)
+        | Term::ComptimeFunction(_)
+        | Term::UnsafeFunction(_)
+        | Term::Tuple(_)
+        | Term::Nominal { .. } => constructor(term),
+        _ => None,
+    };
+    matches!((head(left), head(right)), (Some(left), Some(right)) if left != right)
+}
+
+#[cfg(test)]
+mod outer_type_head_tests {
+    use super::*;
+
+    #[test]
+    fn cheap_separation_agrees_with_full_constructor_proofs() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let character = Term::Primitive(Primitive::Char);
+        for (left, right) in [
+            (boolean.clone(), character.clone()),
+            (
+                Term::Pointer(Box::new(boolean.clone())),
+                Term::Optional(Box::new(boolean.clone())),
+            ),
+            (
+                Term::Tuple(vec![boolean.clone()]),
+                Term::Tuple(vec![boolean.clone(), character]),
+            ),
+        ] {
+            assert!(distinct_outer_type_heads(&left, &right));
+            let outcome =
+                Context::default().prove(Formula::equal(left, right).negate(), Budget::default());
+            assert!(matches!(outcome, Outcome::Entailed(_)), "{outcome}");
+        }
+    }
+
+    #[test]
+    fn shared_heads_and_unit_aliases_still_need_the_full_query() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        assert!(!distinct_outer_type_heads(
+            &Term::Primitive(Primitive::Unit),
+            &Term::Tuple(vec![])
+        ));
+        assert!(!distinct_outer_type_heads(
+            &Term::Pointer(Box::new(boolean)),
+            &Term::Pointer(Box::new(Term::Primitive(Primitive::Char)))
+        ));
+    }
+}
 impl Context {
     /// Forward congruence premises for an admitted pair of heads. Consumers
     /// must prove every returned pair equal; this does not grant injectivity or
