@@ -2,6 +2,14 @@
 use super::*;
 use hir::common::{DefId, FnParam, Ident};
 
+/// One successful pattern output; its type is inferred independently of siblings.
+pub(in crate::program) struct GenerationBinding<'h> {
+    pub id: HirId,
+    pub name: Ident,
+    pub annotation: Option<&'h Expr<'h>>,
+    pub span: rustc_span::Span,
+}
+
 fn synthetic(rebind: &mut Rebind<'_, '_>, index: u32) -> HirId {
     rebind.id(HirId::new(OwnerId::INVALID, hir::ItemLocalId::new(index)))
 }
@@ -36,7 +44,7 @@ pub(in crate::program) fn input_group<'h>(
     owner: OwnerId,
     arguments: &[Arg<'h>],
     parameters: &[FnParam<'h>],
-    locals: &[&'h Expr<'h>],
+    locals: &[GenerationBinding<'h>],
     computations: &[&'h Expr<'h>],
     exported: &BTreeSet<usize>,
     definitions: &HashMap<DefId, DefId>,
@@ -133,13 +141,8 @@ pub(in crate::program) fn input_group<'h>(
             statements.push(rebind.expr(computation, 0)?.clone());
         }
         for (offset, original) in locals.iter().enumerate() {
-            let E::Let(binding) = original.kind else {
-                unreachable!()
-            };
-            let hir::PatternKind::Binding(_, name, _) = binding.pattern.kind else {
-                unreachable!()
-            };
-            let binding_id = rebind.bindings[&binding.pattern.hir_id];
+            let name = original.name;
+            let binding_id = rebind.bindings[&original.id];
             let index = parameters.len() + offset;
             let synthetic_index = u32::try_from(index)
                 .ok()

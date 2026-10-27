@@ -4,6 +4,7 @@ use hir::common::DefId;
 use hir::definitions::DefinitionBatch;
 use hir::{ExprKind as E, HirArena, ItemKind, OwnerId, OwnerInfo, OwnerNode, Package};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+mod bindings;
 mod captures;
 mod diagnostics;
 pub(super) use diagnostics::with_context;
@@ -22,7 +23,7 @@ fn charge(fuel: &mut usize, span: rustc_span::Span) -> Result<(), Error> {
 }
 struct StrategyBody<'h> {
     members: Vec<OwnerId>,
-    locals: Vec<&'h hir::Expr<'h>>,
+    locals: Vec<function_templates::GenerationBinding<'h>>,
     computations: Vec<&'h hir::Expr<'h>>,
 }
 
@@ -59,20 +60,14 @@ fn members<'h>(
         };
         match statement.kind {
             E::Let(binding) => {
-                if binding.guard.is_some()
-                    || binding.otherwise.is_some()
-                    || binding.init.is_none()
-                    || !matches!(
-                        binding.pattern.kind,
-                        hir::PatternKind::Binding(hir::common::BindingMode::ByValue, _, None)
-                    )
+                if binding.guard.is_some() || binding.otherwise.is_some() || binding.init.is_none()
                 {
                     return Err(unsupported(
                         statement.span,
-                        "destructuring or guarded strategy bindings",
+                        "guarded or uninitialized strategy bindings",
                     ));
                 }
-                locals.push(statement);
+                bindings::collect(&binding.pattern, binding.ty, &mut locals, fuel)?;
                 computations.push(statement);
             }
             E::Item(owner)
@@ -285,17 +280,14 @@ pub(super) fn expand<'h>(
             inputs.push((parameter, owner, identity));
         }
         let mut locals = Vec::new();
-        for expression in local_bindings {
-            charge(fuel, expression.span)?;
-            let E::Let(binding) = expression.kind else {
-                unreachable!()
-            };
+        for binding in local_bindings {
+            charge(fuel, binding.span)?;
             let owner = batch.reserve().map_err(|e| error(span, e.to_string()))?;
             let identity = batch
                 .reserve_identity(pkg, fuel)
                 .map_err(|e| error(span, e.to_string()))?;
             captures.insert(
-                binding.pattern.hir_id,
+                binding.id,
                 function_templates::InputCapture::Definition(identity),
             );
             capture_slots.insert(identity, generator.parameters.len() + locals.len());
@@ -375,7 +367,7 @@ pub(super) fn expand<'h>(
                         source,
                         arena,
                         owner,
-                        binding.ty,
+                        binding.annotation,
                         binding.span,
                         group_identity,
                         generator.parameters.len() + index,

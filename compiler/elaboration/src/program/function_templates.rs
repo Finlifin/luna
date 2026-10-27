@@ -7,7 +7,7 @@ use hir::{Expr, ExprKind as E, HirArena, HirId, ItemKind, OwnerId, Package};
 use std::collections::{BTreeSet, HashMap};
 mod generation_attributes;
 mod generation_inputs;
-pub(super) use generation_inputs::{input_draft, input_group, value_draft};
+pub(super) use generation_inputs::{GenerationBinding, input_draft, input_group, value_draft};
 mod member_clone;
 pub(super) use generation_attributes::relocate as relocate_generation_attributes;
 mod patterns;

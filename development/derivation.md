@@ -722,3 +722,39 @@ git diff --check
   so it did not establish interpreter execution. The final bounded-loop fixture
   explicitly checks exhaustion of the comptime execution budget instead.
 - Formatting: exit 0, `/tmp/luna-tools-k1l4lh29/result.json`; diff check passed.
+
+## Capturing strategy pattern outputs
+
+The generation environment now reserves captures per successful pattern binding,
+not per outer let statement. An iterative, fuel-bounded pattern traversal records
+binding identities in source order. Original declarations still execute once
+through ordinary pattern checking and invocation; this collector does not decide
+whether a pattern is exhaustive or which branch matches.
+
+Each component is exported with its independently inferred type. An annotation
+on a whole struct/list/tuple pattern is not reused as the component type. A plain
+by-value root binding retains its explicit annotation and its capture dependency
+closure. Captures use HIR identities rather than names, including across local
+shadowing; only demanded outputs cross the materialization boundary.
+
+Outer guards, fallback branches and uninitialized declarations still need
+additional generation control-flow support. Existing restrictions on nested
+member emission, generic environments and persistent captured values remain.
+
+Checks in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Derive suite: 49 passed, exit 0, `/tmp/luna-tools-m02iifiq/result.json`.
+  New coverage includes annotated nested heterogeneous struct outputs, associated
+  values and runtime method captures, mutable destructuring, shadowed names,
+  independent requests, wildcard phase checking and unused invalid fields.
+- The initial build failed because HirId is not ordered; membership deduplication
+  now uses a hash set while output order follows the explicit traversal stack.
+- Formatting: exit 0, `/tmp/luna-tools-dt6bptmm/result.json`; diff check passed.
+- This suite does not establish end-to-end support for every pattern protocol;
+  those continue to require their ordinary protocol bindings and checking.

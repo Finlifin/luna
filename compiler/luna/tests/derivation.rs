@@ -600,3 +600,69 @@ fn conditional_member_emission_is_not_published_unconditionally() {
     let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
     assert!(error.contains("nested generation definitions"), "{error}");
 }
+
+#[test]
+fn nested_strategy_patterns_capture_individually_typed_outputs() {
+    let package = compile_with_strategy_bool_splice(
+        r#"
+        typealias u32 = .u32'builtin;
+        struct Inner { flag: bool }
+        struct Config { inner: Inner, code: u32 }
+        trait Flag { assoc code: u32; fn flag()->bool; }
+        derive fn configured for Flag {
+            let {inner: {flag: answer}, code: number}: Config = Config {
+                inner: Inner {flag: true}, code: 7
+            };
+            assoc code: u32 = number;
+            fn flag()->bool { answer }
+        }
+        struct Subject {}
+        derive Flag.use(configured) for Subject;
+        fn run()->bool {Subject.as(Flag).flag() and Subject.as(Flag).code == 7}
+        "#,
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn mutable_strategy_pattern_outputs_preserve_shadowed_bindings() {
+    let package = compile_with_strategy_bool_splice(
+        r#"
+        struct Config { flag: bool }
+        trait Flag { fn flag()->bool; }
+        derive fn configured(input: bool) for Flag {
+            var {flag} = Config {flag: input};
+            flag = not flag;
+            let previous = flag;
+            let {flag} = Config {flag: not previous};
+            fn flag()->bool {not previous and flag}
+        }
+        struct First {}
+        struct Second {}
+        derive Flag.use(configured(true)) for First;
+        derive Flag.use(configured(false)) for Second;
+        fn run()->bool {First.as(Flag).flag() and not Second.as(Flag).flag()}
+        "#,
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn wildcard_strategy_patterns_do_not_discard_phase_checks() {
+    let source = "trait Flag {} fn runtime_value()->bool {true} derive fn configured for Flag {let _=runtime_value();} struct Subject {} derive Flag.use(configured) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("runtime function"), "{error}");
+}
+
+#[test]
+fn unused_strategy_pattern_outputs_still_validate_field_names() {
+    let source = "struct Config {flag:bool} trait Flag {} derive fn configured for Flag {let {missing}=Config {flag:true};} struct Subject {} derive Flag.use(configured) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("unknown struct pattern field"), "{error}");
+}
