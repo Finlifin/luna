@@ -292,6 +292,15 @@ impl<'h> Rebind<'_, 'h> {
             }
         }
         let kind = match &expr.kind {
+            E::ResolvedClauseParam(name, id) => E::ResolvedClauseParam(
+                *name,
+                self.definitions.get(id).copied().ok_or_else(|| {
+                    error(
+                        expr.span,
+                        "generated clause reference requires an explicit identity substitution",
+                    )
+                })?,
+            ),
             E::ResolvedFnParam(name, id) => E::ResolvedFnParam(*name, self.id(*id)),
             E::ResolvedLocal(name, id) => E::ResolvedLocal(*name, self.id(*id)),
             E::ResolvedLoopLabel(name, id) => E::ResolvedLoopLabel(*name, self.id(*id)),

@@ -194,3 +194,52 @@ python3 -B development/check.py --timeout 900 -- test --release -p luna --test t
 ```
 
 Report: `/tmp/luna-tools-ncpdebmu/result.json`. `git diff --check` passed.
+
+## Generic member binders and attributes
+
+Member cloning now accepts generic method clauses when the caller supplies a
+fresh resolver identity for every clause parameter. Type, positional, optional,
+variadic, trait-bound and quoted clause forms are rebuilt under the same budget.
+References in defaults, domains, return types, contracts and bodies use the
+provided identity mapping. Missing, unchanged or duplicate clause identities are
+rejected. DefinitionBatch remains responsible for checking identity collisions
+against the published package. This supersedes the earlier blanket rejection of
+method clauses; it does not substitute the enclosing strategy's input values.
+
+Drafts also carry attributes and a parameter/clause node index. Attribute order,
+configuration keys and source text survive copying. A prefix attribute keeps its
+original outer lexical expression and owner, as required by source lowering;
+a definition-local configuration expression is rebound to the generated owner.
+Member-target attributes point to remapped parameter or clause identities. The
+returned nodes must be installed in OwnerInfo and the returned attributes passed
+to DefinitionBatch::set_attributes before candidate checking. Unknown member
+attribute targets are rejected instead of being silently discarded.
+
+Staged function parameter identities are still unsupported in this draft path
+and now explicitly rejected, rather than losing their source identity metadata.
+General generation-input substitution, allocation/publication of staged parameter
+identities and the complete derive expansion remain outstanding. Prefix
+attributes capturing strategy inputs still require the enclosing generation
+context; this change preserves that context rather than evaluating the inputs.
+
+Checks in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib member_clone
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+- Member cloning: 6 passed, exit 0, `/tmp/luna-tools-py14a1up/result.json`.
+- Formatting: exit 0, `/tmp/luna-tools-mkzkm2hz/result.json`.
+- The new tests publish two independent generic methods and check dependent
+  defaults/return references. Attribute publication checks prefix versus local
+  lookup contexts, source ordering, configuration keys and remapped parameter
+  targets while leaving source metadata unchanged.
+
+Signature-template regressions passed as well (18 tests, exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test test_templates signature_template
+```
+
+Report: `/tmp/luna-tools-yspdak7y/result.json`. `git diff --check` passed.

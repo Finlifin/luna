@@ -1,6 +1,8 @@
 //! Rebind a method draft before installing it into a generated implementation.
 use super::*;
 use hir::common::DefId;
+mod attributes;
+mod clauses;
 
 /// This is an unpublished draft. Callers must transfer resolver metadata using
 /// `bindings`, publish bodies and run ordinary implementation checks. Resolver
@@ -9,6 +11,8 @@ pub(in crate::program) struct ClonedMember<'h> {
     pub item: hir::Item<'h>,
     pub bodies: Vec<(hir::BodyId, hir::Body<'h>)>,
     pub bindings: HashMap<HirId, HirId>,
+    pub nodes: hir::OwnerNodes<'h>,
+    pub attributes: Vec<hir::DeferredDefinitionAttribute<'h>>,
     pub resolution: Vec<(HirId, hir::definitions::ResolutionEvidence)>,
 }
 
@@ -39,12 +43,6 @@ pub(in crate::program) fn clone_member<'h>(
             ));
         }
     };
-    if !signature.clause_params.is_empty() {
-        return Err(error(
-            item.span,
-            "generated method clause identities require substitution support",
-        ));
-    }
     *fuel = fuel
         .checked_sub(definitions.len())
         .ok_or_else(|| error(item.span, "generated member identity budget exhausted"))?;
@@ -61,9 +59,19 @@ pub(in crate::program) fn clone_member<'h>(
     let result = (|| {
         rebind.charge(item.span, 0)?;
         let mut signature = signature.clone();
+        signature.clause_params = rebind.clauses(signature.clause_params)?;
         let mut parameters = Vec::new();
         for parameter in signature.params {
             rebind.charge(parameter.span, 0)?;
+            if source
+                .staged_parameter_definitions
+                .contains_key(&parameter.hir_id)
+            {
+                return Err(error(
+                    parameter.span,
+                    "generated staged parameter identity publication is not implemented",
+                ));
+            }
             let mut parameter = parameter.clone();
             parameter.hir_id = rebind.id(parameter.hir_id);
             parameter.ty = rebind.ty(&parameter.ty, 0)?;
@@ -98,16 +106,39 @@ pub(in crate::program) fn clone_member<'h>(
             Some(body) => ItemKind::Fn(signature, body),
             None => ItemKind::FnDeclaration(signature),
         };
+        let attributes = rebind.attributes(member)?;
         let resolution = rebind.resolution()?;
-        Ok((item, resolution))
+        let mut nodes = hir::OwnerNodes::new();
+        let signature = match &item.kind {
+            ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature) => signature,
+            _ => unreachable!(),
+        };
+        for parameter in signature.params {
+            let parameter = arena.alloc_param(hir::body::BodyParam::from_fn_param(parameter));
+            nodes.insert(
+                parameter.hir_id.local_id,
+                hir::ItemLocalId::new(0),
+                hir::Node::Param(parameter),
+            );
+        }
+        for parameter in signature.clause_params {
+            nodes.insert(
+                parameter.hir_id.local_id,
+                hir::ItemLocalId::new(0),
+                hir::Node::ClauseParam(parameter),
+            );
+        }
+        Ok((item, resolution, attributes, nodes))
     })();
     *fuel = rebind.budget;
-    let (item, resolution) = result?;
+    let (item, resolution, attributes, nodes) = result?;
     Ok(ClonedMember {
         item,
         bodies: rebind.bodies,
         bindings: rebind.bindings,
         resolution,
+        attributes,
+        nodes,
     })
 }
 

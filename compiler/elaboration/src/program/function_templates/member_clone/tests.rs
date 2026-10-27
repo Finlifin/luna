@@ -217,3 +217,217 @@ fn cloned_resolution_remaps_both_candidate_roles_and_publishes_atomically() {
         .unwrap();
     assert_eq!(source.member_projections.len(), 1);
 }
+
+fn generic_fixture<'h>(arena: &'h HirArena) -> (Package<'h>, OwnerId, DefId, DefId) {
+    let (mut source, member) = fixture(arena, false);
+    let first = DefId::new(0, 40);
+    let second = DefId::new(0, 41);
+    let name = Ident::new(Symbol::intern("T"), DUMMY_SP);
+    let reference = arena.alloc_expr(Expr {
+        hir_id: HirId::new(member, ItemLocalId::new(5)),
+        kind: E::ResolvedClauseParam(name.name, first),
+        span: DUMMY_SP,
+    });
+    let domain = arena.alloc_expr(Expr {
+        hir_id: HirId::new(member, ItemLocalId::new(6)),
+        kind: E::TyType,
+        span: DUMMY_SP,
+    });
+    let mut item = source.item(member).unwrap().clone();
+    let ItemKind::Fn(signature, _) = &mut item.kind else {
+        panic!()
+    };
+    signature.clause_params = arena.alloc_clause_param_slice(vec![
+        hir::ClauseParam {
+            hir_id: HirId::new(member, ItemLocalId::new(3)),
+            definition: Some(first),
+            name,
+            kind: hir::clause::ClauseParamKind::Type(name),
+            span: DUMMY_SP,
+        },
+        hir::ClauseParam {
+            hir_id: HirId::new(member, ItemLocalId::new(4)),
+            definition: Some(second),
+            name: Ident::new(Symbol::intern("U"), DUMMY_SP),
+            kind: hir::clause::ClauseParamKind::Optional(name, domain, reference),
+            span: DUMMY_SP,
+        },
+    ]);
+    signature.return_ty = Some(reference);
+    source.insert_owner(
+        member,
+        OwnerInfo {
+            node: OwnerNode::Item(arena.alloc_item(item)),
+            nodes: OwnerNodes::new(),
+        },
+    );
+    (source, member, first, second)
+}
+
+#[test]
+fn generic_method_defaults_and_returns_use_fresh_clause_identities() {
+    let arena = HirArena::new();
+    let (source, member, first, second) = generic_fixture(&arena);
+    let mut destination = source.clone();
+    let mut batch = hir::definitions::DefinitionBatch::new(&mut destination);
+    for _ in 0..2 {
+        let owner = batch.reserve().unwrap();
+        let first_new = batch.reserve_identity(0, &mut 1000).unwrap();
+        let second_new = batch.reserve_identity(0, &mut 1000).unwrap();
+        let draft = clone_member(
+            &source,
+            &arena,
+            member,
+            owner,
+            &HashMap::from([(first, first_new), (second, second_new)]),
+            &mut 1000,
+        )
+        .unwrap();
+        let ItemKind::Fn(signature, _) = &draft.item.kind else {
+            panic!()
+        };
+        assert_eq!(signature.clause_params[0].definition, Some(first_new));
+        assert!(
+            matches!(signature.return_ty.unwrap().kind, E::ResolvedClauseParam(_, id) if id == first_new)
+        );
+        let hir::clause::ClauseParamKind::Optional(_, _, default) = signature.clause_params[1].kind
+        else {
+            panic!()
+        };
+        assert!(matches!(default.kind, E::ResolvedClauseParam(_, id) if id == first_new));
+        batch
+            .define(
+                OwnerInfo {
+                    node: OwnerNode::Item(arena.alloc_item(draft.item)),
+                    nodes: draft.nodes,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        for (id, body) in draft.bodies {
+            batch.body(id, body).unwrap();
+        }
+    }
+    batch.publish(&mut 1000).unwrap();
+    let owner = OwnerId::new(hir::LocalDefId::new(99));
+    for mapping in [
+        HashMap::new(),
+        HashMap::from([(first, first), (second, second)]),
+        HashMap::from([(first, DefId::new(0, 80)), (second, DefId::new(0, 80))]),
+    ] {
+        assert!(clone_member(&source, &arena, member, owner, &mapping, &mut 1000).is_err());
+    }
+}
+
+#[test]
+fn member_attributes_keep_order_targets_and_distinct_lexical_contexts() {
+    use hir::{AttributeTarget as Target, DeferredDefinitionAttribute as Attribute};
+    let arena = HirArena::new();
+    let (mut source, member, first, second) = generic_fixture(&arena);
+    let outer = source.alloc_owner_id();
+    let outer_item = arena.alloc_item(Item {
+        owner_id: outer,
+        ident: Ident::new(Symbol::intern("outer"), DUMMY_SP),
+        kind: ItemKind::Mod(hir::ModDef {
+            items: vec![member],
+        }),
+        span: DUMMY_SP,
+    });
+    source.insert_owner(
+        outer,
+        OwnerInfo {
+            node: OwnerNode::Item(outer_item),
+            nodes: OwnerNodes::new(),
+        },
+    );
+    let outer_value = arena.alloc_expr(Expr {
+        hir_id: HirId::new(outer, ItemLocalId::new(1)),
+        kind: E::TyType,
+        span: DUMMY_SP,
+    });
+    let ItemKind::Fn(signature, _) = &source.item(member).unwrap().kind else {
+        panic!()
+    };
+    let local_value = signature.return_ty.unwrap();
+    source.definition_attributes = vec![
+        Attribute {
+            target: Target::Definition(member),
+            lexical_owner: outer,
+            expression: "prefix".into(),
+            value: outer_value,
+            configuration_key: None,
+            span: DUMMY_SP,
+        },
+        Attribute {
+            target: Target::Definition(member),
+            lexical_owner: member,
+            expression: "T".into(),
+            value: local_value,
+            configuration_key: Some("configuration".into()),
+            span: DUMMY_SP,
+        },
+        Attribute {
+            target: Target::Member(HirId::make_owner(member)),
+            lexical_owner: outer,
+            expression: "parameter".into(),
+            value: outer_value,
+            configuration_key: None,
+            span: DUMMY_SP,
+        },
+    ];
+    let mut destination = source.clone();
+    let mut batch = hir::definitions::DefinitionBatch::new(&mut destination);
+    let owner = batch.reserve().unwrap();
+    let first_new = batch.reserve_identity(0, &mut 1000).unwrap();
+    let second_new = batch.reserve_identity(0, &mut 1000).unwrap();
+    let draft = clone_member(
+        &source,
+        &arena,
+        member,
+        owner,
+        &HashMap::from([(first, first_new), (second, second_new)]),
+        &mut 1000,
+    )
+    .unwrap();
+    assert_eq!(draft.attributes.len(), 3);
+    assert_eq!(draft.attributes[0].lexical_owner, outer);
+    assert!(std::ptr::eq(draft.attributes[0].value, outer_value));
+    assert_eq!(draft.attributes[1].lexical_owner, owner);
+    assert!(
+        matches!(draft.attributes[1].value.kind, E::ResolvedClauseParam(_, id) if id == first_new)
+    );
+    assert!(
+        matches!(draft.attributes[2].target, Target::Member(id) if id == draft.bindings[&HirId::make_owner(member)])
+    );
+    batch
+        .define(
+            OwnerInfo {
+                node: OwnerNode::Item(arena.alloc_item(draft.item)),
+                nodes: draft.nodes,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    for (id, body) in draft.bodies {
+        batch.body(id, body).unwrap();
+    }
+    batch.set_attributes(draft.attributes);
+    batch.set_resolution(draft.resolution);
+    batch
+        .publish_checked(&mut 1000, |candidate| {
+            assert_eq!(candidate.definition_attributes.len(), 6);
+            assert_eq!(candidate.definition_attributes[3].expression, "prefix");
+            assert_eq!(
+                candidate.definition_attributes[4]
+                    .configuration_key
+                    .as_deref(),
+                Some("configuration")
+            );
+            assert_eq!(candidate.definition_attributes[5].expression, "parameter");
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+    assert_eq!(source.definition_attributes.len(), 3);
+}
