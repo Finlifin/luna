@@ -113,20 +113,61 @@ Additional staging regression: `python3 -B development/check.py --timeout 900
 527 CMTT and 25 library protocol tests
 (`/tmp/luna-tools-eceatj1d/result.json`).
 
-A separate, pre-existing invocation gap remains: ordinary comptime locals cannot
-supply generic function clause inputs. Even Boolean input reproduces it in
-[comptime-local-clause-input.fl](repros/comptime-local-clause-input.fl).
-The current driver rejected that reproduction with “required comptime input
-(local ...) is not available” (`/tmp/luna-tools-qwozxuxv/result.json`, exit 1).
-Constant clause inputs and local Object arguments to normal-form heads are covered
-by the passing tests. Neither the tests nor documentation treats the general
-local-clause path as complete.
+The original Boolean local-clause failure in
+[comptime-local-clause-input.fl](repros/comptime-local-clause-input.fl) is now
+covered by the invocation-time implementation below. Its earlier unavailable
+input diagnostic (`/tmp/luna-tools-qwozxuxv/result.json`) predates that fix.
 
 Initial source fixtures needed clause syntax corrections. Later failures exposed
 an obsolete “Object inputs unsupported” assertion and the separate ordinary
 function admission path, both corrected. An attempted negative Type comparison
 was replaced with representation assertions: unresolved equality must not be
 reported as false. Targeted formatting and `git diff --check` pass.
+
+### Invocation-time function clause inputs
+
+Ordinary comptime functions with a known callable signature can receive local
+values in explicit positional clauses. NIR preserves the expressions in
+`(comptime-function-instance (declaration ...) (inputs ...))`. The VM evaluates
+them once in source order before ordinary arguments, freezes their values, and
+delegates to the existing instance cache. Returning from an input expression
+skips later inputs and arguments. Each callable retains its selected snapshot;
+changing the local variable afterward does not modify that callable.
+
+Input domain validation and type requirements run on cache hits too. Failed
+admission does not publish a partial instance. Object/List inputs retain their
+original domains, and static Type clauses can specialize later value domains.
+This is invocation work: definition checking does not execute the generator or
+unfold normal-form heads. Runtime use remains rejected. NIR phase validation,
+dependency collection, substitution, copy accounting and Display traverse the
+new operands.
+
+The current frontend route requires all positional clause inputs explicitly,
+without inherited lexical inputs or optional ordinary parameters. Callable
+signatures and clause domains cannot depend on value-clause binders. Named and
+defaulted clauses, open functions, quoted bodies and more general dependent
+signatures retain their existing elaboration paths; this stage does not claim
+their dynamic local-value support is complete.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p luna -p nir -p comptime_interpretor --lib --test
+comptime_clause_inputs --test library_meta_objects --test phases --test
+type_rewrite --test copy_budget`: exit 0, 330 tests
+(`/tmp/luna-tools-o5rexmuu/result.json`). Tests include source-order side effects,
+early return, immutable callable snapshots, cache reuse and contract rechecks,
+failed-input recovery, malformed domains, phase rejection and S-expression dump.
+
+After aligning first-class callable conversion with the existing path, the
+`comptime_clause_inputs` and `library_meta_objects` suites passed again (25 tests,
+`/tmp/luna-tools-pw95y44k/result.json`). Native verification through
+`python3 -B development/host_examples.py comptime-clause-inputs --release-driver
+--compare-optimization` passed at O0 and O3
+(`/tmp/luna-host-examples-vs51l7cn/summary.json`). Workspace formatting check
+passed (`/tmp/luna-tools-2gl_ptj0/result.json`).
+The existing CMTT and library protocol regression suites also pass (527 + 25
+tests, `/tmp/luna-tools-t6jiyu4l/result.json`), using `python3 -B
+development/check.py --timeout 900 -- test --release -p luna --test cmtt
+--test library_protocols`.
 
 ### Schema Type evidence
 

@@ -469,3 +469,14 @@ fn struct_reflection_charges_subject_copy_before_allocation() {
     check(&expr(K::StructFieldTypes(Box::new(large()))));
     check(&expr(K::StructFieldNames(Box::new(large()))));
 }
+
+#[test]
+fn dynamic_instance_copy_accounts_for_clause_operands() {
+    check(&expr(K::ComptimeFunctionInstance {
+        declaration: nir::DeclarationId {
+            package: 1,
+            local: 1,
+        },
+        subject: Box::new(large()),
+    }));
+}

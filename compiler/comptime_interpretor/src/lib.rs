@@ -9,6 +9,7 @@
 //! not yet admitted. Limits are resource outcomes, not language type errors.
 mod admission;
 mod cleanup;
+mod dynamic_instances;
 mod environment;
 mod field_access;
 mod iir_execution;
@@ -3879,6 +3880,9 @@ impl<'a> Interpreter<'a> {
             K::BuildStruct(request) => self.eval_struct_build(expr, request, environment),
             K::BuildEnum(request) => self.eval_enum_build(expr, request, environment),
             K::EnumStructure { .. } => self.eval_enum_structure(expr, environment),
+            K::ComptimeFunctionInstance { .. } => {
+                self.eval_comptime_function_instance(expr, environment)
+            }
             K::ObjectEdit { .. } => self.eval_object_edit(expr, environment),
             K::ObjectQuery { .. } => self.eval_object_query(expr, environment),
             K::StructFieldTypes(_) | K::StructFieldNames(_) => {

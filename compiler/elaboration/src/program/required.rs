@@ -2478,6 +2478,13 @@ pub(super) fn references(
                 K::EffectRequest { arguments, .. } => {
                     pending.extend(arguments.iter().map(Node::Expr))
                 }
+                K::ComptimeFunctionInstance {
+                    declaration,
+                    subject,
+                } => {
+                    output.insert(*declaration);
+                    pending.push(Node::Expr(subject));
+                }
                 K::Function(id)
                 | K::FunctionInstance {
                     declaration: id, ..

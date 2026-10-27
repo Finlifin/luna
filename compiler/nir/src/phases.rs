@@ -758,7 +758,10 @@ pub fn machine_arithmetic_functions(
                             }
                             if !parameter_bindings.is_empty() {
                                 let target = match &callee.kind {
-                                    K::Function(id)
+                                    K::ComptimeFunctionInstance {
+                                        declaration: id, ..
+                                    }
+                                    | K::Function(id)
                                     | K::FunctionInstance {
                                         declaration: id, ..
                                     } => parameter_frames.get(id),
@@ -1133,6 +1136,34 @@ pub fn machine_arithmetic_functions(
                                 ));
                             }
                             work.push(Work::Expr(condition, false, ct));
+                        }
+                        K::ComptimeFunctionInstance {
+                            declaration,
+                            subject,
+                        } => {
+                            let target = functions
+                                .get(declaration)
+                                .ok_or_else(|| error("function phase declaration is missing"))?;
+                            if !ct || target.0 != Phase::Comptime || !expr.ty.is_comptime_callable()
+                            {
+                                return Err(error(
+                                    "dynamic function instantiation requires comptime invocation",
+                                ));
+                            }
+                            if expr.ty.is_unsafe_callable() != target.2 {
+                                return Err(error(
+                                    "function value type does not preserve its declaration responsibility",
+                                ));
+                            }
+                            if target.1 {
+                                machine_owners.insert(function.declaration);
+                                if !_callee {
+                                    return Err(error(
+                                        "function value would erase program preconditions; callable program contracts are not implemented",
+                                    ));
+                                }
+                            }
+                            work.push(Work::Expr(subject, false, true));
                         }
                         K::BuildStruct(value)
                         | K::BuildEnum(value)

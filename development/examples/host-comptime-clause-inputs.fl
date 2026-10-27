@@ -1,0 +1,16 @@
+{-
+  Each clause instantiation snapshots the current comptime value. The selected
+  callable keeps that snapshot after the caller changes its local variable.
+-}
+comptime fn select() -> bool where flag:bool { flag }
+
+comptime fn configured() -> <|-bool> {
+    var flag = true;
+    let first = select<flag>;
+    flag = false;
+    let second = select<flag>;
+    let result = first() and not second();
+    '(result)
+}
+
+fn run() -> bool { ~<configured()> }

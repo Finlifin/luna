@@ -939,6 +939,12 @@ pub enum ExprKind {
         subject: Box<Expr>,
         query: EnumStructureQuery,
     },
+    /// Evaluate and freeze clause operands before creating a comptime callable.
+    /// The callable signature is already known; the packet retains input domains.
+    ComptimeFunctionInstance {
+        declaration: DeclarationId,
+        subject: Box<Expr>,
+    },
     ObjectEdit {
         subject: Box<Expr>,
         operation: ObjectEditKind,
@@ -3115,6 +3121,15 @@ impl fmt::Display for ExprKind {
             Self::EnumStructure { subject, query } => {
                 write!(f, "(enum-structure (query {query}) {subject})")
             }
+            Self::ComptimeFunctionInstance {
+                declaration,
+                subject,
+            } => {
+                write!(
+                    f,
+                    "(comptime-function-instance (declaration {declaration}) (inputs {subject}))"
+                )
+            }
             Self::ObjectEdit { subject, operation } => {
                 write!(f, "(object-edit (operation {operation}) {subject})")
             }
@@ -3479,6 +3494,7 @@ impl Expr {
                     | ExprKind::EnumStructure { .. }
                     | ExprKind::ObjectQuery { .. }
                     | ExprKind::ObjectEdit { .. }
+                    | ExprKind::ComptimeFunctionInstance { .. }
                     | ExprKind::StructFieldNames(_)
                     | ExprKind::BitVecType(_)
                     | ExprKind::IntegerNegate(_)
@@ -3564,6 +3580,7 @@ impl Expr {
                 | ExprKind::EnumStructure { subject: value, .. }
                 | ExprKind::ObjectQuery { subject: value, .. }
                 | ExprKind::ObjectEdit { subject: value, .. }
+                | ExprKind::ComptimeFunctionInstance { subject: value, .. }
                 | ExprKind::StructFieldNames(value)
                 | ExprKind::BitVecType(value)
                 | ExprKind::IntegerNegate(value)
@@ -3948,6 +3965,7 @@ impl Expr {
             | ExprKind::EnumStructure { subject: value, .. }
             | ExprKind::ObjectQuery { subject: value, .. }
             | ExprKind::ObjectEdit { subject: value, .. }
+            | ExprKind::ComptimeFunctionInstance { subject: value, .. }
             | ExprKind::StructFieldNames(value)
             | ExprKind::BitVecType(value)
             | ExprKind::IntegerNegate(value)

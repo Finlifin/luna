@@ -25,6 +25,7 @@ mod cmtt;
 mod constants;
 mod defaults;
 mod dependent_inputs;
+mod dynamic_instances;
 mod enum_groups;
 mod interfaces;
 mod lexical_inputs;
@@ -5162,6 +5163,17 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(expr.span, "generic function has no HIR owner"))?;
         self.ensure_signature(owner, expr.span)?;
         let lexical = self.lexical_function_arguments(owner, expr.span)?;
+        if lexical.is_empty() {
+            if let Some(value) =
+                self.comptime_function_instance(expr, owner, args, None, allow_optional)?
+            {
+                return if allow_optional {
+                    Ok(value)
+                } else {
+                    self.callable_value_view(value, expected, expr.span)
+                };
+            }
+        }
         if allow_optional {
             if let Some(arguments) =
                 self.partial_positional_clause_prefix(owner, args, &lexical, expr.span)?
@@ -6552,7 +6564,10 @@ impl Checker<'_, '_> {
             return self.deliver_comptime_result(expr, value, expected);
         }
         let direct_id = match &callee.kind {
-            K::Function(id)
+            K::ComptimeFunctionInstance {
+                declaration: id, ..
+            }
+            | K::Function(id)
             | K::FunctionInstance {
                 declaration: id, ..
             } => Some(*id),
@@ -12055,6 +12070,7 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::EnumStructure { .. }
         | K::ObjectQuery { .. }
         | K::ObjectEdit { .. }
+        | K::ComptimeFunctionInstance { .. }
         | K::StructFieldNames(_)
         | K::ListConcat(..)
         | K::TypeListIndex(..)

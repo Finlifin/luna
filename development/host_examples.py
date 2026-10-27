@@ -43,6 +43,7 @@ MATH_OPTIONS = tuple(argument for operation in MATH_OPERATIONS
                      for argument in ('--host-intrinsic',
                                       f'{operation}=math.target.Scalar.{operation}'))
 EXAMPLES = {
+    'comptime-clause-inputs': Example('(bool true)'),
     'object-inputs': Example('(bool true)',
         ('--meta-list-type', 'meta.List',
          '--copy-protocol', 'resources.Copy', '--drop-protocol', 'resources.Drop'),

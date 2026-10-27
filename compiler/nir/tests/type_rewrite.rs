@@ -516,3 +516,24 @@ fn struct_reflection_rewrites_and_visits_its_subject() {
         assert_eq!(nodes, 2);
     }
 }
+
+#[test]
+fn dynamic_instance_operands_participate_in_type_rewriting() {
+    let mut value = expr(K::ComptimeFunctionInstance {
+        declaration: nir::DeclarationId {
+            package: 1,
+            local: 1,
+        },
+        subject: Box::new(expr(K::TypeValue(rigid()))),
+    });
+    let mut visits = 0;
+    value
+        .rewrite_types(&mut |_| {
+            visits += 1;
+            Ok::<_, ()>(Term::Primitive(Primitive::Bool))
+        })
+        .unwrap();
+    assert_eq!(visits, 3);
+    assert!(value.to_string().contains("(comptime-function-instance"));
+    assert!(!value.to_string().contains("(rigid"));
+}

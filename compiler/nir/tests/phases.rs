@@ -1407,3 +1407,32 @@ fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annot
         nir::phases::validate(&package).unwrap();
     }
 }
+
+#[test]
+fn dynamic_comptime_instances_preserve_phase_and_responsibility() {
+    let target = function(2, Phase::Comptime, &[]);
+    let mut caller = function(1, Phase::Comptime, &[]);
+    let mut expression = call(&target, vec![]);
+    let K::Call { callee, .. } = &mut expression.kind else {
+        panic!()
+    };
+    callee.kind = K::ComptimeFunctionInstance {
+        declaration: target.declaration,
+        subject: Box::new(Expr {
+            source: callee.source,
+            ty: Term::Tuple(vec![]),
+            kind: K::Tuple(vec![]),
+        }),
+    };
+    caller.body = expression;
+    let mut package = Package {
+        functions: vec![caller, target],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    package.functions[0].phase = Phase::Runtime;
+    assert!(nir::phases::validate(&package).is_err());
+    package.functions[0].phase = Phase::Comptime;
+    package.functions[1].is_unsafe = true;
+    assert!(nir::phases::validate(&package).is_err());
+}

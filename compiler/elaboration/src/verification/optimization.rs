@@ -283,6 +283,7 @@ fn visit(
         | K::EnumStructure { subject: value, .. }
         | K::ObjectQuery { subject: value, .. }
         | K::ObjectEdit { subject: value, .. }
+        | K::ComptimeFunctionInstance { subject: value, .. }
         | K::StructFieldNames(value)
         | K::BitVecType(value)
         | K::IntegerNegate(value)
