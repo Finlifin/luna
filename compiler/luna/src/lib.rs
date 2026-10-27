@@ -9,6 +9,7 @@ pub mod packages;
 pub mod protocols;
 
 pub mod resources;
+pub mod text_regions;
 
 pub mod cleanup;
 

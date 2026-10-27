@@ -9218,3 +9218,134 @@ fn hir_retains_source_identity_frontier_including_clause_parameters() {
     let again = sandbox.run(&["input.fl", "--emit", "hir"]);
     assert_eq!(dump, hir_dump(&again));
 }
+
+#[test]
+fn text_region_cli_reports_source_dependencies_and_preserves_failed_output() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "typealias str=.str'builtin;
+        fn invoke(callback:%{value:str} fn()->str)->str {callback()}
+        fn run(value:str)->str {let observed=value == \"x\";invoke(||value)}
+        fn generic(value:T)->T where T {value}
+        comptime fn compile_time()->bool {true}
+        fn unknown(callback:fn(str)->str,value:str)->str {callback(value)}",
+    );
+    let output = sandbox.run(&["input.fl", "--analyze-text-regions", "run"]);
+    let dump = success(&output);
+    single_sexpression(dump);
+    assert!(dump.starts_with("(text-region-summary"), "{dump}");
+    assert!(
+        dump.contains("(reads (static-text-region) (parameter-text-region 0 (fields)))"),
+        "{dump}"
+    );
+    assert!(
+        dump.contains("(returned (view (fields) (origins (parameter-text-region 0 (fields)))))"),
+        "{dump}"
+    );
+    for (entry, message) in [
+        ("missing", "was not found"),
+        ("generic", "nongeneric wrapper"),
+        ("compile_time", "ordinary runtime"),
+        ("unknown", "stable local callable"),
+    ] {
+        sandbox.write("result.lisp", OLD_OUTPUT);
+        let output = sandbox.run(&[
+            "input.fl",
+            "--analyze-text-regions",
+            entry,
+            "--output",
+            "result.lisp",
+        ]);
+        failure(&output, 1);
+        assert!(details(&output).contains(message), "{}", details(&output));
+        assert_eq!(fs::read(sandbox.path("result.lisp")).unwrap(), OLD_OUTPUT);
+    }
+    let output = sandbox.run(&["input.fl", "--analyze-text-regions", "run", "--fuel", "1"]);
+    failure(&output, 1);
+    assert!(
+        details(&output).contains("budget exhausted"),
+        "{}",
+        details(&output)
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--analyze-text-regions",
+        "run",
+        "--output",
+        "result.lisp",
+    ]);
+    assert!(success(&output).is_empty());
+    assert_eq!(
+        fs::read_to_string(sandbox.path("result.lisp"))
+            .unwrap()
+            .trim(),
+        dump.trim()
+    );
+}
+
+#[test]
+fn text_region_cli_rejects_conflicting_actions_and_permissions() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", VALID);
+    for extra in [
+        vec!["--emit", "nir"],
+        vec!["--interpret", "requested_entry"],
+        vec!["--test"],
+        vec!["--copy-protocol", "Copy"],
+        vec!["--drop-protocol", "Drop"],
+        vec!["--analyze-text-regions", "requested_entry"],
+        vec!["--fuel", "0"],
+    ] {
+        let mut arguments = vec!["input.fl", "--analyze-text-regions", "requested_entry"];
+        arguments.extend(extra);
+        failure(&sandbox.run(&arguments), 2);
+    }
+}
+
+#[test]
+fn text_region_cli_selects_primary_package_and_tracks_provider_calls() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "client.fl",
+        "use dep.echo; fn run(value:.str'builtin)->.str'builtin {echo(value)}",
+    );
+    sandbox.write(
+        "provider.fl",
+        "pub fn echo(value:.str'builtin)->.str'builtin {value} fn run()->.str'builtin {\"wrong\"}",
+    );
+    let output = sandbox.run(&[
+        "--packages-v1",
+        "--package",
+        "7",
+        "701",
+        "client",
+        "client.fl",
+        "--package",
+        "9",
+        "901",
+        "provider",
+        "provider.fl",
+        "--primary",
+        "7",
+        "--dependency",
+        "7",
+        "dep",
+        "9",
+        "--analyze-text-regions",
+        "run",
+        "--with-inputs",
+    ]);
+    let dump = success(&output);
+    single_sexpression(dump);
+    assert!(dump.contains("(text-region-summary"), "{dump}");
+    assert!(
+        dump.contains("(parameter-text-region 0 (fields))"),
+        "{dump}"
+    );
+    assert!(!dump.contains("(static-text-region)"), "{dump}");
+    assert!(
+        dump.contains("(source (resolution-id 9) (identity 901)"),
+        "{dump}"
+    );
+}

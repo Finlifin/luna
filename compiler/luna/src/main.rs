@@ -269,6 +269,25 @@ fn main() -> ExitCode {
                     output::write_stdout(&dump)
                 }
             }),
+        Command::AnalyzeTextRegions {
+            options,
+            entry,
+            fuel,
+        } => frontend::compile(&options)
+            .and_then(|artifact| {
+                let frontend::Artifact::Nir(package) = artifact else {
+                    return Err("text region analysis requires NIR".into());
+                };
+                luna::text_regions::analyze_in_package(&package, 0, &entry, fuel)
+                    .map(|summary| summary.to_string())
+            })
+            .and_then(|dump| {
+                if let Some(path) = &options.output {
+                    output::write_file(&options.input, path, &dump)
+                } else {
+                    output::write_stdout(&dump)
+                }
+            }),
         Command::AnalyzeResources {
             options,
             entry,

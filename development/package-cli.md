@@ -53,7 +53,7 @@ or repeated ordinary options retain the single-entry CLI's validation.
 
 The same package request also accepts `--interpret <entry>`,
 `--invoke-comptime <entry>`, `--instantiate <entry>`, or
-`--analyze-resources <entry>`, or `--test`, `--test-native`, `--emit-llvm <entry>`, `--emit-object <entry>`, `--emit-bitcode <entry>`, `--emit-asm <entry>`, or `--build <entry>` instead of `--emit`.
+`--analyze-resources <entry>`, `--analyze-text-regions <entry>`, or `--test`, `--test-native`, `--emit-llvm <entry>`, `--emit-object <entry>`, `--emit-bitcode <entry>`, `--emit-asm <entry>`, or `--build <entry>` instead of `--emit`.
 Ordinary source tests are described in [source-tests.md](source-tests.md). These actions elaborate NIR
 and select the entry by the primary package's **semantic identity**, so an
 identically named dependency function is not selected. Existing action rules
@@ -73,6 +73,21 @@ client's runtime entry through the reference interpreter, or `--instantiate run`
 to export its concrete IIR graph. Invocation only admits comptime entries;
 interpretation and instantiation retain their runtime entry checks. Conflicting
 actions and action-specific flags without their action are usage errors.
+
+`--analyze-text-regions <entry>` selects a nongeneric ordinary runtime function
+without unresolved type/capability assumptions. Runtime parameters remain symbolic
+inputs; no argument values or Copy/Drop options are required. The result is the
+stable `(text-region-summary ...)` S-expression describing character reads and
+returned backing-region dependencies. It does not prove region liveness, cleanup,
+or memory safety. Unsupported transfers and exhausted fuel return an error rather
+than a partial summary. Like other text actions, failures preserve an existing
+output file; `--with-inputs` wraps the summary with observed package inputs.
+The resident compile-only stream does not accept this action.
+
+```sh
+luna source.fl --analyze-text-regions inspect --fuel 100000
+luna source.fl --analyze-text-regions inspect --output text-regions.lisp
+```
 
 AST export remains unsupported in package-set mode.
 `--emit-llvm` emits host LLVM IR; `--opt-level 0|1|2|3` optionally verifies and

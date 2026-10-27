@@ -805,3 +805,36 @@ an earlier closure parameter. Budget failure and a subsequent fresh query pass.
 Formatting passed (`/tmp/luna-tools-z6gkdv20/result.json`, exit 0), as did the
 diff check. Text default coverage here is NIR transfer evidence, not source P3
 certification or runtime lifetime permission.
+
+## Source and package CLI inspection
+
+`--analyze-text-regions <entry>` now runs this analysis from ordinary source or
+an explicit `--packages-v1` request. The entry must be an ordinary nongeneric
+runtime function without unresolved type/capability assumptions. Runtime
+parameters remain symbolic; the function is not executed. Primary-package
+semantic identity disambiguates dependency functions with the same name.
+
+The output is the existing text-region summary S-expression. `--fuel`, atomic
+`--output`, and the package `--with-inputs` envelope are supported. Conflicting
+actions and Copy/Drop options are rejected; the command does not acquire resource
+permissions or certify complete memory safety. Unsupported dependencies, missing
+entries and exhausted budgets fail without replacing previous output. The
+resident compile-only stream continues to reject analysis actions.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli text_region_cli
+python3 -B development/check.py --timeout 900 -- test --release -p luna --lib cli
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli resource_cli
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+Three new black-box CLI tests passed (`/tmp/luna-tools-a1lozou5/result.json`,
+exit 0), covering captured callbacks, comparison reads, output shape, entry and
+phase rejection, budgets, preserved output, conflicting options, provider calls
+and primary-package selection. Nine existing CLI unit tests passed
+(`/tmp/luna-tools-t1vakrbs/result.json`, exit 0), as did the three existing resource
+CLI tests (`/tmp/luna-tools-b646bl0t/result.json`, exit 0). Formatting passed
+(`/tmp/luna-tools-6uqsn06p/result.json`, exit 0); the diff check passed.

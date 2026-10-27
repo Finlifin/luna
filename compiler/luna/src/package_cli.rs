@@ -75,6 +75,10 @@ pub enum Action {
         inline: bool,
         protocols: Option<(String, String)>,
     },
+    AnalyzeTextRegions {
+        entry: String,
+        fuel: u64,
+    },
     Analyze {
         entry: String,
         fuel: u64,
@@ -159,6 +163,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--instantiate"
                 | "--interpret"
                 | "--analyze-resources"
+                | "--analyze-text-regions"
                 | "--test-filter"
                 | "--test-timeout-ms"
                 | "--fuel"
@@ -339,6 +344,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 protocols,
             },
         ),
+        Command::AnalyzeTextRegions {
+            options,
+            entry,
+            fuel,
+        } => (options, Action::AnalyzeTextRegions { entry, fuel }),
         Command::AnalyzeResources {
             options,
             entry,
@@ -820,6 +830,10 @@ impl Action {
                     _ => crate::execution::interpret_in_package(&package, identity, entry, *fuel),
                 };
                 value.map(|v| v.to_string())
+            }
+            Action::AnalyzeTextRegions { entry, fuel } => {
+                crate::text_regions::analyze_in_package(&package, identity, entry, *fuel)
+                    .map(|summary| summary.to_string())
             }
             Action::Analyze {
                 entry, fuel, drop, ..

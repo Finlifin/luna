@@ -1,9 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-pub const USAGE: &str = "Usage: luna <input.fl> [--emit hir|ast|nir|attributes|merged-attributes | --build <entry> | --emit-llvm <entry> | --emit-bitcode <entry> | --emit-object <entry> | --emit-asm <entry> | --test | --test-native | --list-tests | --invoke-comptime <name> | --instantiate <name> | --interpret <name> [--inline-functions] [--copy-protocol <trait> --drop-protocol <trait>] | --analyze-resources <name> --copy-protocol <trait> [--drop-protocol <trait>]] [--fuel <steps>] [--output <path>] [--host-fma <package.Enum.variant>] [--host-sqrt <package.Enum.variant>] [--host-copysign <package.Enum.variant>] [--host-intrinsic <operation=package.Enum.variant>] [--sysroot <library-path>] [--splice-protocol <trait|package.trait>] [--meta-list-type <package.definition> --tuple-type <package.definition>] [--add-protocol <package.trait>] [--index-protocol <package.trait>] [--ord-protocol <package.trait>] [--eq-protocol <package.trait>] [--list-pattern-protocol <package.trait>] [--literal-into-protocol <package.trait>]\n       luna --packages-v1 --package <id> <identity> <name> <entry> ... --primary <id> [--dependency <requester> <alias> <provider>] [--builtin <id>] [--with-inputs] [--emit hir|nir] [--output <path>]\n       luna --packages-stream-v1 [--cache-entries <count>]\n       luna --help";
+pub const USAGE: &str = "Usage: luna <input.fl> [--emit hir|ast|nir|attributes|merged-attributes | --build <entry> | --emit-llvm <entry> | --emit-bitcode <entry> | --emit-object <entry> | --emit-asm <entry> | --test | --test-native | --list-tests | --invoke-comptime <name> | --instantiate <name> | --interpret <name> [--inline-functions] [--copy-protocol <trait> --drop-protocol <trait>] | --analyze-text-regions <name> | --analyze-resources <name> --copy-protocol <trait> [--drop-protocol <trait>]] [--fuel <steps>] [--output <path>] [--host-fma <package.Enum.variant>] [--host-sqrt <package.Enum.variant>] [--host-copysign <package.Enum.variant>] [--host-intrinsic <operation=package.Enum.variant>] [--sysroot <library-path>] [--splice-protocol <trait|package.trait>] [--meta-list-type <package.definition> --tuple-type <package.definition>] [--add-protocol <package.trait>] [--index-protocol <package.trait>] [--ord-protocol <package.trait>] [--eq-protocol <package.trait>] [--list-pattern-protocol <package.trait>] [--literal-into-protocol <package.trait>]\n       luna --packages-v1 --package <id> <identity> <name> <entry> ... --primary <id> [--dependency <requester> <alias> <provider>] [--builtin <id>] [--with-inputs] [--emit hir|nir] [--output <path>]\n       luna --packages-stream-v1 [--cache-entries <count>]\n       luna --help";
 
-pub const HELP: &str = "Luna source frontend\n\nUsage: luna <input.fl> [--emit hir|ast|nir|attributes|merged-attributes | --build <entry> | --emit-llvm <entry> | --emit-bitcode <entry> | --emit-object <entry> | --emit-asm <entry> | --test | --test-native | --list-tests | --invoke-comptime <name> | --instantiate <name> | --interpret <name> [--inline-functions] [--copy-protocol <trait> --drop-protocol <trait>] | --analyze-resources <name> --copy-protocol <trait> [--drop-protocol <trait>]] [--fuel <steps>] [--output <path>] [--host-fma <package.Enum.variant>] [--host-sqrt <package.Enum.variant>] [--host-copysign <package.Enum.variant>] [--host-intrinsic <operation=package.Enum.variant>] [--sysroot <library-path>] [--splice-protocol <trait|package.trait>] [--meta-list-type <package.definition> --tuple-type <package.definition>] [--add-protocol <package.trait>] [--index-protocol <package.trait>] [--ord-protocol <package.trait>] [--eq-protocol <package.trait>] [--list-pattern-protocol <package.trait>] [--literal-into-protocol <package.trait>]\n       luna --help\n\n  --build <entry>    Build a native host executable (requires --output; paired Copy/Drop options verify resources)\n  --emit-bitcode <entry> Emit verified, optimized LLVM bitcode (requires --output)\n  --emit-object <entry>  Emit a relocatable host object without linking (requires --output)\n  --emit-asm <entry>   Emit host assembly without linking (stdout or --output)\n  --emit-llvm <entry>  Emit LLVM IR for the supported host subset\n  --host-fma <package.Enum.variant>  Bind one host FMA tag for build, LLVM output or native tests (nested module paths supported)\n  --host-sqrt <package.Enum.variant>  Bind one host square-root tag\n  --host-copysign <package.Enum.variant>  Bind one host sign-copy tag\n  --host-intrinsic <operation=package.Enum.variant>  Repeatable explicit scalar math binding: fma/sqrt/copysign/floor/ceil/trunc/roundeven/round/fabs/sin/cos/exp/exp2/log/log2/log10/pow/minimum/maximum/bitreverse/ctpop/ctlz/cttz/bswap/fshl/fshr/minimumnum/maximumnum/isnan/isinf/isfinite/isnormal/issubnormal/signbit/add_sat/sub_sat/min/max/abs/bit_and/bit_or/bit_xor\n  --opt-level 0|1|2|3  LLVM optimization (build default: 0; explicit level optimizes LLVM dumps)\n  --emit hir|ast|nir|attributes|merged-attributes     Dump HIR (default), AST, typed NIR, or evaluated attribute descriptions\n  --invoke-comptime <name>  Invoke a comptime function; paired Copy/Drop options enable pointer transfers\n  --instantiate <name>  Dump the concrete IIR dependency graph of a runtime entry\n  --test            Reference-execute ordinary tests in the primary package\n  --test-native     LLVM-compile and run tests\n  --test-timeout-ms <ms>  Native runtime deadline per test (default: 10000)\n  --list-tests      Discover primary-package tests without executing them\n  --test-filter <text>  Select labels containing this text (--test, --test-native or --list-tests)\n  --interpret <name>  Reference-execute IIR; both protocol options enable checked cleanup\n  --discard-result  Retire the host entry result using paired Copy/Drop protocols\n  --inline-functions  Expand eligible inline fn calls (requires --interpret, --build, --emit-object, --emit-bitcode, --emit-asm, --emit-llvm or tests and both protocols)\n  --analyze-resources <name>  Report ownership obligations (does not lower Drop or certify full safety)\n  --copy-protocol <trait>  Explicit source Copy identity for analysis, execution or comptime pointer transfers\n  --drop-protocol <trait>  Source Drop identity; analyze plans or execute them with --interpret\n  --fuel <steps>    Positive per-stage/per-query work budget (default: 100000)\n  --output <path>    Write the dump or result to a file (default: stdout)\n  --sysroot <path>   Use a library directory containing builtin/ and std/\n                     NIR reads optional language-items.conf defaults; explicit bindings override them\n  --splice-protocol <trait|package.trait>  Bind runtime conversion of comptime constants (qualified module paths supported)\n  --meta-list-type  Bind List by package.definition or package.module.definition\n  --tuple-type      Bind Tuple by package.definition or package.module.definition (requires List)\n  --add-protocol / --sub-protocol / --mul-protocol / --div-protocol / --rem-protocol / --neg-protocol / --not-protocol\n                    Bind arithmetic by package.trait or package.module.trait\n  --iterator-protocol  Bind the inline Iterator contract by package.module.trait\n  --into-iterator-protocol  Bind iterable conversion by package.module.trait\n  --list-pattern-protocol  Bind ListPatternView by package.module.trait\n  --eq-protocol     Bind Eq equality operators by package.module.trait\n  --ord-protocol    Bind Ord ordering operators by package.module.trait\n  --index-protocol  Bind Index by package.trait or package.module.trait\n  --literal-into-protocol  Bind literal suffix conversion by package.trait or package.module.trait\n  --help            Show this help\n  --                Treat remaining arguments as input paths\n\nA main.fl/lib.fl input scans its parent as the source root; other inputs compile alone.\n\nExplicit package compilation: luna --packages-v1 --package <id> <identity> <name> <entry> ... --primary <id>\n  --dependency <requester> <alias> <provider>  Supply a direct dependency (repeatable)\n  --builtin <id>                             Designate an explicitly supplied builtin package\n  --with-inputs                              Wrap the result with observed source inputs\n  --emit hir|nir|attributes|merged-attributes and --output <path>          Select output (HIR by default)\n  --interpret, --invoke-comptime, --instantiate, --analyze-resources, --emit-llvm, --emit-asm, --emit-object, --emit-bitcode, --build and tests also accept package sets.\n  Action budgets and resource protocol flags follow the ordinary CLI rules.\n  Source protocol/type selector options are also accepted; no sysroot is injected.\n  IDs are decimal u32 resolution IDs and u64 semantic identities; entry paths are OS paths.\n\nResident frontend: luna --packages-stream-v1 [--cache-entries <count>]\n  Read LF-terminated hex argument frames from stdin; emit one response per frame.\n  Default cache capacity is 8; 0 disables retention. Only HIR/NIR/attribute inspection is accepted.\n  Framing and response details: development/package-cli.md.\n\nExit status: 0 on success, 1 on compilation, invocation or I/O errors, 2 on invalid usage.\n";
+pub const HELP: &str = "Luna source frontend\n\nUsage: luna <input.fl> [--emit hir|ast|nir|attributes|merged-attributes | --build <entry> | --emit-llvm <entry> | --emit-bitcode <entry> | --emit-object <entry> | --emit-asm <entry> | --test | --test-native | --list-tests | --invoke-comptime <name> | --instantiate <name> | --interpret <name> [--inline-functions] [--copy-protocol <trait> --drop-protocol <trait>] | --analyze-text-regions <name> | --analyze-resources <name> --copy-protocol <trait> [--drop-protocol <trait>]] [--fuel <steps>] [--output <path>] [--host-fma <package.Enum.variant>] [--host-sqrt <package.Enum.variant>] [--host-copysign <package.Enum.variant>] [--host-intrinsic <operation=package.Enum.variant>] [--sysroot <library-path>] [--splice-protocol <trait|package.trait>] [--meta-list-type <package.definition> --tuple-type <package.definition>] [--add-protocol <package.trait>] [--index-protocol <package.trait>] [--ord-protocol <package.trait>] [--eq-protocol <package.trait>] [--list-pattern-protocol <package.trait>] [--literal-into-protocol <package.trait>]\n       luna --help\n\n  --build <entry>    Build a native host executable (requires --output; paired Copy/Drop options verify resources)\n  --emit-bitcode <entry> Emit verified, optimized LLVM bitcode (requires --output)\n  --emit-object <entry>  Emit a relocatable host object without linking (requires --output)\n  --emit-asm <entry>   Emit host assembly without linking (stdout or --output)\n  --emit-llvm <entry>  Emit LLVM IR for the supported host subset\n  --host-fma <package.Enum.variant>  Bind one host FMA tag for build, LLVM output or native tests (nested module paths supported)\n  --host-sqrt <package.Enum.variant>  Bind one host square-root tag\n  --host-copysign <package.Enum.variant>  Bind one host sign-copy tag\n  --host-intrinsic <operation=package.Enum.variant>  Repeatable explicit scalar math binding: fma/sqrt/copysign/floor/ceil/trunc/roundeven/round/fabs/sin/cos/exp/exp2/log/log2/log10/pow/minimum/maximum/bitreverse/ctpop/ctlz/cttz/bswap/fshl/fshr/minimumnum/maximumnum/isnan/isinf/isfinite/isnormal/issubnormal/signbit/add_sat/sub_sat/min/max/abs/bit_and/bit_or/bit_xor\n  --opt-level 0|1|2|3  LLVM optimization (build default: 0; explicit level optimizes LLVM dumps)\n  --emit hir|ast|nir|attributes|merged-attributes     Dump HIR (default), AST, typed NIR, or evaluated attribute descriptions\n  --invoke-comptime <name>  Invoke a comptime function; paired Copy/Drop options enable pointer transfers\n  --instantiate <name>  Dump the concrete IIR dependency graph of a runtime entry\n  --test            Reference-execute ordinary tests in the primary package\n  --test-native     LLVM-compile and run tests\n  --test-timeout-ms <ms>  Native runtime deadline per test (default: 10000)\n  --list-tests      Discover primary-package tests without executing them\n  --test-filter <text>  Select labels containing this text (--test, --test-native or --list-tests)\n  --interpret <name>  Reference-execute IIR; both protocol options enable checked cleanup\n  --discard-result  Retire the host entry result using paired Copy/Drop protocols\n  --inline-functions  Expand eligible inline fn calls (requires --interpret, --build, --emit-object, --emit-bitcode, --emit-asm, --emit-llvm or tests and both protocols)\n  --analyze-text-regions <name>  Dump text read/return dependencies; does not certify memory safety\n  --analyze-resources <name>  Report ownership obligations (does not lower Drop or certify full safety)\n  --copy-protocol <trait>  Explicit source Copy identity for analysis, execution or comptime pointer transfers\n  --drop-protocol <trait>  Source Drop identity; analyze plans or execute them with --interpret\n  --fuel <steps>    Positive per-stage/per-query work budget (default: 100000)\n  --output <path>    Write the dump or result to a file (default: stdout)\n  --sysroot <path>   Use a library directory containing builtin/ and std/\n                     NIR reads optional language-items.conf defaults; explicit bindings override them\n  --splice-protocol <trait|package.trait>  Bind runtime conversion of comptime constants (qualified module paths supported)\n  --meta-list-type  Bind List by package.definition or package.module.definition\n  --tuple-type      Bind Tuple by package.definition or package.module.definition (requires List)\n  --add-protocol / --sub-protocol / --mul-protocol / --div-protocol / --rem-protocol / --neg-protocol / --not-protocol\n                    Bind arithmetic by package.trait or package.module.trait\n  --iterator-protocol  Bind the inline Iterator contract by package.module.trait\n  --into-iterator-protocol  Bind iterable conversion by package.module.trait\n  --list-pattern-protocol  Bind ListPatternView by package.module.trait\n  --eq-protocol     Bind Eq equality operators by package.module.trait\n  --ord-protocol    Bind Ord ordering operators by package.module.trait\n  --index-protocol  Bind Index by package.trait or package.module.trait\n  --literal-into-protocol  Bind literal suffix conversion by package.trait or package.module.trait\n  --help            Show this help\n  --                Treat remaining arguments as input paths\n\nA main.fl/lib.fl input scans its parent as the source root; other inputs compile alone.\n\nExplicit package compilation: luna --packages-v1 --package <id> <identity> <name> <entry> ... --primary <id>\n  --dependency <requester> <alias> <provider>  Supply a direct dependency (repeatable)\n  --builtin <id>                             Designate an explicitly supplied builtin package\n  --with-inputs                              Wrap the result with observed source inputs\n  --emit hir|nir|attributes|merged-attributes and --output <path>          Select output (HIR by default)\n  --interpret, --invoke-comptime, --instantiate, --analyze-text-regions, --analyze-resources, --emit-llvm, --emit-asm, --emit-object, --emit-bitcode, --build and tests also accept package sets.\n  Action budgets and resource protocol flags follow the ordinary CLI rules.\n  Source protocol/type selector options are also accepted; no sysroot is injected.\n  IDs are decimal u32 resolution IDs and u64 semantic identities; entry paths are OS paths.\n\nResident frontend: luna --packages-stream-v1 [--cache-entries <count>]\n  Read LF-terminated hex argument frames from stdin; emit one response per frame.\n  Default cache capacity is 8; 0 disables retention. Only HIR/NIR/attribute inspection is accepted.\n  Framing and response details: development/package-cli.md.\n\nExit status: 0 on success, 1 on compilation, invocation or I/O errors, 2 on invalid usage.\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emit {
@@ -63,6 +63,11 @@ pub enum Command {
         inline_functions: bool,
         optimization: Option<crate::host::OptimizationLevel>,
         protocols: Option<(String, String)>,
+    },
+    AnalyzeTextRegions {
+        options: Options,
+        entry: String,
+        fuel: u64,
     },
     AnalyzeResources {
         options: Options,
@@ -179,6 +184,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     let mut inline_functions = false;
     let mut discard_result = false;
     let mut resources = None;
+    let mut text_regions = None;
     let mut copy_protocol = None;
     let mut drop_protocol = None;
     let mut fuel = None;
@@ -299,6 +305,17 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                             ));
                         }
                     });
+                    continue;
+                }
+                Some("--analyze-text-regions") => {
+                    if text_regions.is_some() {
+                        return Err("--analyze-text-regions may only be specified once".into());
+                    }
+                    text_regions = Some(
+                        option_value(&mut args, "--analyze-text-regions")?
+                            .into_string()
+                            .map_err(|_| "text region entry must be valid UTF-8")?,
+                    );
                     continue;
                 }
                 Some("--analyze-resources") => {
@@ -596,6 +613,19 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             return Err("exactly one input path is required".into());
         }
     }
+    if text_regions.is_some()
+        && (host.is_some()
+            || tests
+            || resources.is_some()
+            || interpret.is_some()
+            || instantiate.is_some()
+            || entry.is_some()
+            || emit.is_some()
+            || copy_protocol.is_some()
+            || drop_protocol.is_some())
+    {
+        return Err("--analyze-text-regions cannot be combined with other actions or resource protocol flags".into());
+    }
     if test_timeout.is_some() && !native_tests {
         return Err("--test-timeout-ms requires --test-native".into());
     }
@@ -703,6 +733,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
         return Err("--invoke-comptime cannot be combined with --emit".into());
     }
     if host.is_none()
+        && text_regions.is_none()
         && resources.is_none()
         && entry.is_none()
         && instantiate.is_none()
@@ -710,13 +741,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
         && fuel.is_some()
     {
         return Err(
-            "--fuel requires --invoke-comptime, --instantiate, --interpret or --analyze-resources"
+            "--fuel requires --invoke-comptime, --instantiate, --interpret or --analyze-resources or --analyze-text-regions"
                 .into(),
         );
     }
     let options = Options {
         input: input.ok_or_else(|| "an input path is required".to_string())?,
         emit: if host.is_some()
+            || text_regions.is_some()
             || resources.is_some()
             || entry.is_some()
             || instantiate.is_some()
@@ -741,6 +773,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
         literal_into_protocol,
     };
     crate::frontend::source_protocols(&options).validate_stage(options.emit)?;
+    if let Some(entry) = text_regions {
+        return Ok(Command::AnalyzeTextRegions {
+            options,
+            entry,
+            fuel: fuel.unwrap_or(100_000),
+        });
+    }
     if let Some((entry, output_kind)) = host {
         return Ok(Command::Host {
             host_fma,
