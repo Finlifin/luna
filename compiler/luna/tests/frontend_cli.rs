@@ -23,7 +23,10 @@ fn derivation_strategy_hir_preserves_generation_inputs_and_members() {
     let dump = hir_dump(&output);
     assert!(dump.contains("(deriver "), "{dump}");
     assert!(dump.contains("(name \"configured\")"), "{dump}");
-    assert!(dump.contains("(resolved-fn-param (name \"flag\")"), "{dump}");
+    assert!(
+        dump.contains("(resolved-fn-param (name \"flag\")"),
+        "{dump}"
+    );
     assert!(dump.contains("(associated "), "{dump}");
     let output = sandbox.run(&["input.fl", "--emit", "nir"]);
     failure(&output, 1);

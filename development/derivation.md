@@ -81,7 +81,7 @@ expansion diagnostic rather than accepting a partially generated implementation.
 The HIR publication regression rejects a strategy whose body was never supplied,
 without changing the published definition count.
 
-Final HIR integration commands in `/home/fin/luna` (exit 0):
+Final HIR integration commands in `/home/fin/luna` (tests exit 0; format correction noted below):
 
 ```sh
 python3 -B development/check.py --timeout 900 -- test --release -p hir -p resolve --tests
@@ -95,3 +95,9 @@ python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
   not import a sysroot prelude. Generation-input captures remain
   `resolved-fn-param` references to the strategy's parameter identity; they are
   not new method-local variables. The assertions reflect that distinction.
+
+The last assertion wording edit required rustfmt line wrapping. The format check
+reported by `/tmp/luna-tools-25cdrxxe/result.json` exited 1; the main commit's
+format-pass line was premature. A follow-up formats that assertion only and
+rechecks formatting. The 104 passing behavioral tests are unaffected; no tests
+were rerun solely for whitespace.
