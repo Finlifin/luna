@@ -25,6 +25,33 @@ impl fmt::Display for TextRegionOrigin {
 type Regions = BTreeMap<Vec<usize>, BTreeSet<TextRegionOrigin>>;
 type Locals = BTreeMap<LocalId, Regions>;
 
+struct LoopRegions {
+    identity: LocalId,
+    bindings: Vec<LocalId>,
+    exits: Option<Locals>,
+    backedges: Option<Locals>,
+}
+
+fn join_locals(
+    target: &mut Option<Locals>,
+    source: &Locals,
+    bindings: &[LocalId],
+    fuel: &mut usize,
+) -> Result<(), String> {
+    let target = target.get_or_insert_with(Locals::new);
+    for binding in bindings {
+        charge(fuel, 1)?;
+        let value = source
+            .get(binding)
+            .ok_or("text loop lost an outer binding")?;
+        charge_regions(value, fuel)?;
+        let mut joined = target.remove(binding);
+        merge(&mut joined, Some(value.clone()), fuel)?;
+        target.insert(*binding, joined.unwrap());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextRegionSummary {
     pub declaration: DeclarationId,
@@ -138,6 +165,7 @@ pub fn infer_text_regions(
         fuel,
         active: vec![],
         reads: vec![],
+        loops: vec![],
         cache: HashMap::new(),
         metadata: Round::default(),
     }
@@ -148,6 +176,7 @@ struct Query<'a, 'f> {
     fuel: &'f mut usize,
     active: Vec<iir::InstanceKey>,
     reads: Vec<BTreeSet<TextRegionOrigin>>,
+    loops: Vec<LoopRegions>,
     cache: HashMap<iir::InstanceKey, TextRegionSummary>,
     metadata: Round<'static>,
 }
@@ -215,7 +244,9 @@ impl Query<'_, '_> {
         self.active.push(key.clone());
         self.reads.push(BTreeSet::new());
         let mut returned = None;
+        let caller_loops = std::mem::take(&mut self.loops);
         let checked = self.expr(&body.body, &mut locals, &mut returned, 0);
+        self.loops = caller_loops;
         self.active.pop();
         let reads = self.reads.pop().unwrap();
         merge(&mut returned, checked?, self.fuel)?;
@@ -397,6 +428,13 @@ impl Query<'_, '_> {
                 if self.expr(condition, locals, returned, next)?.is_none() {
                     return Ok(None);
                 }
+                if let Some(condition) = constant_bool(condition, 0) {
+                    return match (condition, else_branch) {
+                        (true, _) => self.expr(then_branch, locals, returned, next),
+                        (false, Some(branch)) => self.expr(branch, locals, returned, next),
+                        (false, None) => Ok(empty),
+                    };
+                }
                 let mut left = self.locals_copy(locals)?;
                 let mut right = self.locals_copy(locals)?;
                 let mut result = self.expr(then_branch, &mut left, returned, next)?;
@@ -418,6 +456,59 @@ impl Query<'_, '_> {
                 }
                 merge(&mut result, otherwise, self.fuel)?;
                 Ok(result)
+            }
+            K::Loop { identity, body } => {
+                let mut head = self.locals_copy(locals)?;
+                let bindings: Vec<_> = head.keys().copied().collect();
+                let mut exits = None;
+                loop {
+                    let mut iteration = self.locals_copy(&head)?;
+                    self.loops.push(LoopRegions {
+                        identity: *identity,
+                        bindings: bindings.clone(),
+                        exits: None,
+                        backedges: None,
+                    });
+                    let result = self.expr(body, &mut iteration, returned, next);
+                    let mut flow = self.loops.pop().unwrap();
+                    if result?.is_some() {
+                        join_locals(&mut flow.backedges, &iteration, &bindings, self.fuel)?;
+                    }
+                    if let Some(outgoing) = flow.exits {
+                        join_locals(&mut exits, &outgoing, &bindings, self.fuel)?;
+                    }
+                    let Some(backedges) = flow.backedges else {
+                        break;
+                    };
+                    let mut joined = Some(self.locals_copy(&head)?);
+                    join_locals(&mut joined, &backedges, &bindings, self.fuel)?;
+                    let joined = joined.unwrap();
+                    if joined == head {
+                        break;
+                    }
+                    head = joined;
+                }
+                if let Some(exits) = exits {
+                    *locals = exits;
+                    Ok(empty)
+                } else {
+                    Ok(None)
+                }
+            }
+            K::Break(identity) | K::Continue(identity) => {
+                let flow = self
+                    .loops
+                    .iter_mut()
+                    .rev()
+                    .find(|flow| flow.identity == *identity)
+                    .ok_or("text region loop target is unavailable")?;
+                let target = if matches!(&expr.kind, K::Break(_)) {
+                    &mut flow.exits
+                } else {
+                    &mut flow.backedges
+                };
+                join_locals(target, locals, &flow.bindings, self.fuel)?;
+                Ok(None)
             }
             K::Return(value) => {
                 let value = match value {

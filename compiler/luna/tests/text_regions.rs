@@ -248,3 +248,69 @@ fn local_writes_replace_subtrees_and_join_only_live_successors() {
             .is_empty()
     );
 }
+
+#[test]
+fn loop_fixed_points_preserve_backedges_and_labeled_exits() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn echo(value:str)->str {value}
+        fn zero(flag:bool,a:str,b:str)->str {var slot=a;while flag {slot=b;} slot}
+        fn once(a:str,b:str)->str {var slot=a;while true {slot=b;break;} slot}
+        fn carried(flag:bool,a:str,b:str,c:str)->str {
+            var x=a;var y=b;
+            while flag {x=echo(y);y=c;continue;}
+            x
+        }
+        fn labeled(flag:bool,a:str,b:str)->str {
+            var slot=a;
+            while:outer true {
+                while true {slot=b;break outer;}
+            }
+            slot
+        }
+        fn continued(flag:bool,a:str,b:str,c:str)->str {
+            var x=a;var y=b;
+            while:outer flag {
+                while true {x=y;y=c;continue outer;}
+            }
+            x
+        }
+        fn skipped(value:str)->str {var slot=value;while false {slot=\"dead\";} slot}
+        fn diverged(value:str)->str {while true {continue;}}
+        fn returned(value:str)->str {while true {return value;}}",
+    );
+    assert_eq!(
+        infer(&package, "zero", 100_000).unwrap().returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    for name in ["once", "labeled"] {
+        let expected = if name == "once" { 1 } else { 2 };
+        assert_eq!(
+            infer(&package, name, 100_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(expected, &[])])
+        );
+    }
+    let carried = infer(&package, "carried", 100_000).unwrap();
+    assert_eq!(
+        carried.returned.as_ref().unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[]), parameter(3, &[])])
+    );
+    for name in ["skipped", "returned"] {
+        assert_eq!(
+            infer(&package, name, 100_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])])
+        );
+    }
+    assert!(
+        infer(&package, "diverged", 100_000)
+            .unwrap()
+            .returned
+            .is_none()
+    );
+    assert_eq!(
+        infer(&package, "continued", 100_000).unwrap().returned,
+        carried.returned
+    );
+    assert!(infer(&package, "carried", 20).is_err());
+    assert_eq!(infer(&package, "carried", 100_000).unwrap(), carried);
+}

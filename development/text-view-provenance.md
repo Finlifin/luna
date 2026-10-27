@@ -126,7 +126,7 @@ composition, region liveness and invalidation checks are still required.
 
 Completed summaries are reused only inside one immutable query. Missing code,
 indirect calls, recursion, pointer transfers, default-argument transport,
-pattern matching, loops, error-row repacking and explicit program contracts remain
+pattern matching, error-row repacking and explicit program contracts remain
 rejected in this analysis. They are never converted into static or empty-origin
 evidence. The existing runtime resource checker still rejects unsupported text
 views; this new analysis has not replaced that gate or exported the iterator.
@@ -180,3 +180,36 @@ return, sibling-field preservation and clearing an optional payload. A byte-read
 case checks that reads retain the old origin while the return uses the new one.
 The workspace formatting check passed (`/tmp/luna-tools-hx76gvbt/result.json`,
 exit 0), as did `git diff --check`.
+
+## Loop fixed points
+
+Text origins now flow across NIR loop backedges until the incoming environment
+stabilizes. The initial environment remains part of the loop-head join; body
+fallthrough and explicit continues supply backedges. Breaks supply a separate
+exit environment, and lexical target identities route nested/labeled transfers.
+Only bindings present at the target loop entry survive these transfers.
+
+Known boolean conditions exclude unreachable branches. A loop without any normal
+exit does not invent a returned value; explicit returns retain their own origin
+summary. Named callee analysis uses a separate loop stack, so callee-local control
+flow cannot bind to caller loops. Fuel bounds repeated traversal and dependency
+joins, and exhausted inference does not publish a provisional result.
+
+This computes a conservative origin fixed point, not termination or lifetime
+proofs. Pointer writes, pattern matching and implicit cleanup remain separate
+unsupported transfers or obligations as described above.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All eleven tests passed (`/tmp/luna-tools-4ehhtw2d/result.json`, exit 0).
+Loop cases cover zero iterations, guaranteed replacement before break,
+multi-iteration dependencies with a named call, nested labeled break/continue,
+unreachable bodies, infinite loops, returns and budget failure/recovery.
+Formatting passed (`/tmp/luna-tools-ghrf7e0x/result.json`, exit 0), as did the
+diff check. The runtime provenance gate remains in place.
