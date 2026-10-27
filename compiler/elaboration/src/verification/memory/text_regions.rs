@@ -169,6 +169,7 @@ pub fn infer_text_regions(
         package,
         fuel,
         current: None,
+        local_callables: BTreeMap::new(),
         pending: VecDeque::new(),
         scheduled: HashSet::new(),
         dependents: HashMap::new(),
@@ -184,6 +185,7 @@ struct Query<'a, 'f> {
     package: &'a Package,
     fuel: &'f mut usize,
     current: Option<iir::InstanceKey>,
+    local_callables: BTreeMap<LocalId, std::sync::Arc<Expr>>,
     pending: VecDeque<iir::InstanceKey>,
     scheduled: HashSet<iir::InstanceKey>,
     dependents: HashMap<iir::InstanceKey, Vec<iir::InstanceKey>>,
@@ -456,6 +458,65 @@ impl Query<'_, '_> {
         }
     }
 
+    fn index_local_callables(&mut self, body: &Function) -> Result<(), String> {
+        let mut definitions = BTreeMap::new();
+        let mut seen: BTreeSet<_> = body.parameters.iter().copied().collect();
+        let mut changed = BTreeSet::new();
+        nir::visit::expressions(body, self.fuel, |expr, fuel| {
+            match &expr.kind {
+                K::Let { binding, value } => {
+                    if !seen.insert(*binding) {
+                        changed.insert(*binding);
+                    }
+                    if matches!(
+                        &value.kind,
+                        K::Closure { .. }
+                            | K::Function(_)
+                            | K::FunctionInstance { .. }
+                            | K::Local(_)
+                    ) {
+                        // Charge the retained subtree before cloning it. The
+                        // usual traversal still checks every nested definition.
+                        nir::visit::expression(value, fuel, |_, _| Ok(()))?;
+                        definitions.insert(*binding, std::sync::Arc::new((**value).clone()));
+                    }
+                }
+                K::Assign { place, .. } => {
+                    changed.insert(place.root);
+                }
+                K::Closure { captures, .. } => {
+                    for capture in captures {
+                        if capture.value.is_some() {
+                            // Restored environments can bind a different value
+                            // under the same lexical identity.
+                            changed.insert(capture.binding);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
+        definitions.retain(|binding, _| !changed.contains(binding));
+        self.local_callables = definitions;
+        Ok(())
+    }
+
+    fn local_callee(&mut self, binding: LocalId) -> Result<std::sync::Arc<Expr>, String> {
+        let mut binding = binding;
+        loop {
+            charge(self.fuel, 1)?;
+            let value = self.local_callables.get(&binding).ok_or(
+                "text region call requires a named concrete callee or stable local callable",
+            )?;
+            if let K::Local(next) = value.kind {
+                binding = next;
+            } else {
+                return Ok(value.clone());
+            }
+        }
+    }
+
     fn schedule(&mut self, key: iir::InstanceKey) {
         if self.scheduled.insert(key.clone()) {
             self.pending.push_back(key);
@@ -568,6 +629,7 @@ impl Query<'_, '_> {
         let body = body
             .instantiate_parameters(&binders, arguments)
             .map_err(|e| e.to_string())?;
+        self.index_local_callables(&body)?;
         let Term::Function { parameters, result } = body.signature.callable_signature() else {
             return Err("text region inference requires a callable signature".into());
         };
@@ -1041,11 +1103,16 @@ impl Query<'_, '_> {
                 arguments,
                 parameter_bindings,
             } => {
+                let resolved = match &callee.kind {
+                    K::Local(binding) => Some(self.local_callee(*binding)?),
+                    _ => None,
+                };
+                let code = resolved.as_deref().unwrap_or(callee);
                 if let K::Closure {
                     parameters,
                     captures,
                     body,
-                } = &callee.kind
+                } = &code.kind
                 {
                     charge(self.fuel, parameters.len().saturating_add(captures.len()))?;
                     validate_argument_plan(arguments, parameter_bindings, parameters.len())?;
@@ -1086,7 +1153,7 @@ impl Query<'_, '_> {
                     merge(&mut closure_returns, completed?, self.fuel)?;
                     return Ok(closure_returns);
                 }
-                let (declaration, types) = match &callee.kind {
+                let (declaration, types) = match &code.kind {
                     K::Function(id) => (*id, &[][..]),
                     K::FunctionInstance {
                         declaration,
@@ -1094,6 +1161,9 @@ impl Query<'_, '_> {
                     } => (*declaration, arguments.as_slice()),
                     _ => return Err("text region call requires a named concrete callee".into()),
                 };
+                if self.expr(callee, locals, returned, next)?.is_none() {
+                    return Ok(None);
+                }
                 let (body, _) = self.package.runtime_body_checked(declaration, types)?;
                 charge(
                     self.fuel,

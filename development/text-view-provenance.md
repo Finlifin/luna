@@ -622,3 +622,37 @@ nested invocations, discarded closure-local returns and reads, recursion through
 an immediate closure, and divergence. An explicit NIR result postcondition
 checks that a closure return cannot contaminate the enclosing exit environment.
 The iterator prototype continues to assert rejection by the resource checker.
+
+## Stable local callable identities
+
+Each concrete body now indexes local definitions whose callable identity is
+stable: named functions, concrete instances, closure literals and alias chains.
+Any assignment to a binding (including a field assignment), duplicate definition,
+or explicit restored capture under that identity excludes it from this index.
+Resolution is fuel-bounded. This is deliberately conservative about mutation;
+it does not guess a candidate when a callable may have changed.
+
+The index supplies code only. Invocation evaluates the actual local value and
+uses its stored text-region environment, preserving captures made before a later
+assignment to an outer source variable. Alias copying, nested captured callables,
+branch-local invocation and named recursion share the existing transfer rules.
+Unknown callable inputs, assigned callable identities, and callable results from
+other functions still require additional value-flow tracking. Runtime lifetime
+and resource checks are unchanged.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 28 tests passed (`/tmp/luna-tools-bbvcawl9/result.json`, exit 0). Added source
+cases cover named aliases, closure aliases retaining earlier captures, captured
+callables inside another closure, reads, branches, recursion, changed-callable
+rejection, and budget failure followed by recovery. Formatting passed
+(`/tmp/luna-tools-cdeokr21/result.json`, exit 0); the diff check passed.
+An initial compile failure (`/tmp/luna-tools-s1ckbo7x/result.json`, exit 101)
+identified that LocalId provides ordering rather than hashing; the local index
+uses ordered maps/sets without changing LocalId or its identity contract.

@@ -1272,3 +1272,54 @@ fn immediate_closures_preserve_capture_order_and_local_return_boundaries() {
             .is_none()
     );
 }
+
+#[test]
+fn stable_local_callables_keep_stored_capture_origins() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn echo(value:str)->str {value}
+        fn other(value:str)->str {\"static\"}
+        fn named(value:str)->str {let action=echo;let alias=action;alias(value)}
+        fn captured(a:str,b:str)->str {
+            var slot=a;let action=||slot;let alias=action;slot=b;alias()
+        }
+        fn nested(value:str)->str {
+            let action=||value;let wrapper=||action();wrapper()
+        }
+        fn read(value:str)->bool {let action=||value == \"x\";action()}
+        fn branch(flag:bool,a:str,b:str)->str {
+            let action=|value:str|value;if flag {action(a)}else{action(b)}
+        }
+        fn recursive(flag:bool,a:str,b:str)->str {
+            let action=||if flag {a}else{recursive(flag,b,a)};action()
+        }
+        fn changed(flag:bool,value:str)->str {
+            var action=echo;if flag {action=other;}action(value)
+        }",
+    );
+    for name in ["named", "captured", "nested"] {
+        assert_eq!(
+            infer(&package, name, 200_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "read", 200_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(0, &[])])
+    );
+    for name in ["branch", "recursive"] {
+        assert_eq!(
+            infer(&package, name, 200_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[]), parameter(2, &[])]),
+            "{name}"
+        );
+    }
+    assert!(
+        infer(&package, "changed", 200_000)
+            .unwrap_err()
+            .contains("stable local callable")
+    );
+    assert!(infer(&package, "nested", 1).is_err());
+    assert!(infer(&package, "nested", 200_000).is_ok());
+}
