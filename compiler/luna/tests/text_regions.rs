@@ -1604,3 +1604,97 @@ fn default_callbacks_use_prepared_code_and_capture_frames() {
     assert!(infer(&package, "closed", 10).is_err());
     assert!(infer(&package, "closed", 500_000).is_ok());
 }
+
+#[test]
+fn returned_callables_transport_identity_with_captured_text() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn echo(value:str)->str {value}
+        fn named()->fn(str)->str {echo}
+        fn factory(value:str)->%{value:str} fn()->str {||value}
+        fn relay(value:str)->%{value:str} fn()->str {factory(value)}
+        fn pass(callback:%{value:str} fn()->str)->%{value:str} fn()->str {callback}
+        struct Holder {callback:%{value:str} fn()->str}
+        fn wrapped(value:str)->Holder {Holder {callback:||value}}
+        fn stored(value:str)->str {let callback=factory(value);callback()}
+        fn immediate(value:str)->str {factory(value)()}
+        fn forwarded(value:str)->str {let callback=relay(value);callback()}
+        fn passed(value:str)->str {let callback=pass(factory(value));callback()}
+        fn field(value:str)->str {let holder=wrapped(value);holder.callback()}
+        fn function(value:str)->str {let callback=named();callback(value)}
+        fn maybe(flag:bool,value:str)->?%{value:str} fn()->str {if flag {||value}else{null}}
+        fn optional(flag:bool,value:str,fallback:str)->str {
+            let callback?=maybe(flag,value) else {return fallback;};callback()
+        }",
+    );
+    for name in [
+        "stored",
+        "immediate",
+        "forwarded",
+        "passed",
+        "field",
+        "function",
+    ] {
+        assert_eq!(
+            infer(&package, name, 500_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "optional", 500_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    assert!(infer(&package, "passed", 10).is_err());
+    assert!(infer(&package, "passed", 500_000).is_ok());
+}
+
+#[test]
+fn callable_value_flow_replaces_assignments_and_rejects_unknown_joins() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn echo(value:str)->str {value}
+        fn literal(value:str)->str {\"static\"}
+        struct Holder {callback:fn(str)->str}
+        fn assigned(value:str)->str {var action=echo;action=literal;action(value)}
+        fn field(value:str)->str {var holder=Holder {callback:echo};holder.callback=literal;holder.callback(value)}
+        fn copied(value:str)->str {var action=echo;let saved=action;action=literal;saved(value)}
+        fn captured(value:str)->str {
+            var action=echo;let saved=||action(value);action=literal;saved()
+        }
+        fn choose(flag:bool)->fn(str)->str {if flag {echo}else{literal}}
+        fn mixed(flag:bool,value:str)->str {let action=choose(flag);action(value)}
+        fn unknown(flag:bool,holder:Holder,value:str)->str {
+            let action=if flag {echo}else{holder.callback};action(value)
+        }
+        fn same(flag:bool,value:str)->str {let action=if flag {echo}else{echo};action(value)}",
+    );
+    for name in ["assigned", "field"] {
+        assert_eq!(
+            infer(&package, name, 500_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([Origin::Static]),
+            "{name}"
+        );
+    }
+    for name in ["copied", "captured"] {
+        assert_eq!(
+            infer(&package, name, 500_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "same", 500_000).unwrap().returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[])])
+    );
+    for name in ["mixed", "unknown"] {
+        assert!(
+            infer(&package, name, 500_000)
+                .unwrap_err()
+                .contains("stable local callable")
+        );
+    }
+}

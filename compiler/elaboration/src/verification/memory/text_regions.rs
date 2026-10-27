@@ -23,7 +23,45 @@ impl fmt::Display for TextRegionOrigin {
         }
     }
 }
-type Regions = BTreeMap<Vec<usize>, BTreeSet<TextRegionOrigin>>;
+type TextFields = BTreeMap<Vec<usize>, BTreeSet<TextRegionOrigin>>;
+type CodeFields = BTreeMap<Vec<usize>, Option<CallbackKey>>;
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Regions {
+    text: TextFields,
+    // None is an unknown or nonuniform callable, not an absent variant.
+    code: CodeFields,
+}
+impl Regions {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+impl std::ops::Deref for Regions {
+    type Target = TextFields;
+    fn deref(&self) -> &TextFields {
+        &self.text
+    }
+}
+impl std::ops::DerefMut for Regions {
+    fn deref_mut(&mut self) -> &mut TextFields {
+        &mut self.text
+    }
+}
+impl From<TextFields> for Regions {
+    fn from(text: TextFields) -> Self {
+        Self {
+            text,
+            code: BTreeMap::new(),
+        }
+    }
+}
+#[derive(Clone, PartialEq, Eq)]
+struct Summary {
+    declaration: DeclarationId,
+    arguments: Vec<Term>,
+    reads: BTreeSet<TextRegionOrigin>,
+    returned: Option<Regions>,
+}
 type Locals = BTreeMap<LocalId, Regions>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -45,6 +83,25 @@ struct CodeValue {
     closure: Option<usize>,
 }
 impl CodeValue {
+    fn key(&self) -> Option<CallbackKey> {
+        if let Some(id) = self.closure {
+            return Some(CallbackKey::Closure(id));
+        }
+        match &self.expression.kind {
+            K::Function(declaration) => Some(CallbackKey::Named(iir::InstanceKey {
+                declaration: *declaration,
+                arguments: vec![],
+            })),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => Some(CallbackKey::Named(iir::InstanceKey {
+                declaration: *declaration,
+                arguments: arguments.clone(),
+            })),
+            _ => None,
+        }
+    }
     fn new(expression: Expr) -> Self {
         Self {
             expression: std::sync::Arc::new(expression),
@@ -191,7 +248,15 @@ fn charge(fuel: &mut usize, amount: usize) -> Result<(), String> {
     Ok(())
 }
 fn charge_regions(regions: &Regions, fuel: &mut usize) -> Result<(), String> {
-    for (path, origins) in regions {
+    for (path, code) in &regions.code {
+        charge(fuel, path.len().saturating_add(1))?;
+        if let Some(CallbackKey::Named(instance)) = code {
+            for argument in &instance.arguments {
+                bound_type(argument, fuel)?;
+            }
+        }
+    }
+    for (path, origins) in &regions.text {
         charge(fuel, path.len().saturating_add(1))?;
         for origin in origins {
             charge(
@@ -205,6 +270,18 @@ fn charge_regions(regions: &Regions, fuel: &mut usize) -> Result<(), String> {
     }
     Ok(())
 }
+fn merge_code(target: &mut CodeFields, source: CodeFields) {
+    for (path, code) in source {
+        target
+            .entry(path)
+            .and_modify(|previous| {
+                if *previous != code {
+                    *previous = None;
+                }
+            })
+            .or_insert(code);
+    }
+}
 fn merge(
     target: &mut Option<Regions>,
     source: Option<Regions>,
@@ -212,29 +289,47 @@ fn merge(
 ) -> Result<(), String> {
     if let Some(source) = source {
         charge_regions(&source, fuel)?;
-        let target = target.get_or_insert_with(BTreeMap::new);
-        for (path, origins) in source {
-            target.entry(path).or_default().extend(origins);
+        let target = target.get_or_insert_with(Regions::new);
+        merge_code(&mut target.code, source.code);
+        for (path, origins) in source.text {
+            target.text.entry(path).or_default().extend(origins);
         }
     }
     Ok(())
 }
 fn project(regions: Regions, prefix: &[usize], fuel: &mut usize) -> Result<Regions, String> {
     charge_regions(&regions, fuel)?;
-    Ok(regions
-        .into_iter()
-        .filter_map(|(path, origins)| {
-            path.strip_prefix(prefix)
-                .map(|rest| (rest.to_vec(), origins))
-        })
-        .collect())
+    Ok(Regions {
+        text: regions
+            .text
+            .into_iter()
+            .filter_map(|(path, value)| {
+                path.strip_prefix(prefix).map(|rest| (rest.to_vec(), value))
+            })
+            .collect(),
+        code: regions
+            .code
+            .into_iter()
+            .filter_map(|(path, value)| {
+                path.strip_prefix(prefix).map(|rest| (rest.to_vec(), value))
+            })
+            .collect(),
+    })
 }
 fn prefix(regions: Regions, prefix: &[usize], fuel: &mut usize) -> Result<Regions, String> {
     charge_regions(&regions, fuel)?;
     let mut output = Regions::new();
-    for (path, origins) in regions {
+    for (path, value) in regions.text {
         charge(fuel, prefix.len())?;
-        output.insert(prefix.iter().copied().chain(path).collect(), origins);
+        output
+            .text
+            .insert(prefix.iter().copied().chain(path).collect(), value);
+    }
+    for (path, value) in regions.code {
+        charge(fuel, prefix.len())?;
+        output
+            .code
+            .insert(prefix.iter().copied().chain(path).collect(), value);
     }
     Ok(output)
 }
@@ -264,6 +359,12 @@ pub fn infer_text_regions(
         metadata: Round::default(),
     }
     .solve(declaration, arguments)
+    .map(|summary| TextRegionSummary {
+        declaration: summary.declaration,
+        arguments: summary.arguments,
+        reads: summary.reads,
+        returned: summary.returned.map(|value| value.text),
+    })
 }
 struct Query<'a, 'f> {
     package: &'a Package,
@@ -278,7 +379,7 @@ struct Query<'a, 'f> {
     reads: Vec<BTreeSet<TextRegionOrigin>>,
     loops: Vec<LoopRegions>,
     exits: Vec<Option<ExitRegions>>,
-    cache: HashMap<SummaryKey, TextRegionSummary>,
+    cache: HashMap<SummaryKey, Summary>,
     metadata: Round<'static>,
 }
 impl Query<'_, '_> {
@@ -557,12 +658,6 @@ impl Query<'_, '_> {
         Ok(())
     }
 
-    fn local_callee(&mut self, binding: LocalId) -> Result<CodeValue, String> {
-        self.known_local_callee(binding)?.ok_or_else(|| {
-            "text region call requires a named concrete callee or stable local callable".into()
-        })
-    }
-
     fn known_local_callee(&mut self, binding: LocalId) -> Result<Option<CodeValue>, String> {
         let mut binding = binding;
         loop {
@@ -659,6 +754,41 @@ impl Query<'_, '_> {
         Ok(value)
     }
 
+    fn code_value(&self, key: &CallbackKey, expr: &Expr) -> Result<CodeValue, String> {
+        match key {
+            CallbackKey::Closure(id) => {
+                let code = self
+                    .closed_closures
+                    .get(*id)
+                    .ok_or("text callable result code is unavailable")?;
+                Ok(CodeValue {
+                    expression: code.expression.clone(),
+                    closure: Some(*id),
+                })
+            }
+            CallbackKey::Named(instance) => Ok(CodeValue::new(Expr {
+                source: expr.source,
+                ty: expr.ty.clone(),
+                kind: if instance.arguments.is_empty() {
+                    K::Function(instance.declaration)
+                } else {
+                    K::FunctionInstance {
+                        declaration: instance.declaration,
+                        arguments: instance.arguments.clone(),
+                    }
+                },
+            })),
+        }
+    }
+    fn result_code(&self, value: &Regions, expr: &Expr) -> Result<Option<CodeValue>, String> {
+        value
+            .code
+            .get(&vec![])
+            .and_then(Option::as_ref)
+            .map(|key| self.code_value(key, expr))
+            .transpose()
+    }
+
     fn default_input(
         &mut self,
         value: &Expr,
@@ -684,8 +814,12 @@ impl Query<'_, '_> {
         self.exits.push(None);
         let mut returned = None;
         let result = (|| {
-            let code = self.callable_input(value)?;
             let result = self.expr(value, &mut scope, &mut returned, depth)?;
+            let code = result
+                .as_ref()
+                .map(|result| self.result_code(result, value))
+                .transpose()?
+                .flatten();
             if returned.is_some() {
                 return Err("text default argument cannot return from its caller".into());
             }
@@ -704,11 +838,7 @@ impl Query<'_, '_> {
         }
     }
 
-    fn solve(
-        &mut self,
-        declaration: DeclarationId,
-        arguments: &[Term],
-    ) -> Result<TextRegionSummary, String> {
+    fn solve(&mut self, declaration: DeclarationId, arguments: &[Term]) -> Result<Summary, String> {
         self.function(declaration, arguments)?;
         let mut deferred = Vec::<(SummaryKey, String)>::new();
         while let Some(key) = self.pending.pop_front() {
@@ -756,7 +886,7 @@ impl Query<'_, '_> {
         &mut self,
         declaration: DeclarationId,
         arguments: &[Term],
-    ) -> Result<TextRegionSummary, String> {
+    ) -> Result<Summary, String> {
         self.function_with_callbacks(declaration, arguments, &[])
     }
 
@@ -765,7 +895,7 @@ impl Query<'_, '_> {
         declaration: DeclarationId,
         arguments: &[Term],
         callbacks: &[(usize, CallbackKey)],
-    ) -> Result<TextRegionSummary, String> {
+    ) -> Result<Summary, String> {
         charge(self.fuel, callbacks.len().saturating_add(1))?;
         for (_, callback) in callbacks {
             if let CallbackKey::Named(callback) = callback {
@@ -796,7 +926,7 @@ impl Query<'_, '_> {
             // Every discovered instance is analyzed before a result escapes.
             self.cache.insert(
                 key.clone(),
-                TextRegionSummary {
+                Summary {
                     declaration,
                     arguments: arguments.to_vec(),
                     reads: BTreeSet::new(),
@@ -813,7 +943,7 @@ impl Query<'_, '_> {
         Ok(summary.clone())
     }
 
-    fn analyze(&mut self, key: &SummaryKey) -> Result<TextRegionSummary, String> {
+    fn analyze(&mut self, key: &SummaryKey) -> Result<Summary, String> {
         let declaration = key.instance.declaration;
         let arguments = key.instance.arguments.as_slice();
         let (body, arguments) = self.package.runtime_body_checked(declaration, arguments)?;
@@ -875,6 +1005,13 @@ impl Query<'_, '_> {
         let mut locals = Locals::new();
         for (parameter, (id, ty)) in body.parameters.iter().zip(parameters).enumerate() {
             let mut regions = Regions::new();
+            regions.code = owned_callable_bottom(Some(self.package), &ty.ty, self.fuel, true)?
+                .into_keys()
+                .map(|path| (path, None))
+                .collect();
+            if let Some((_, code)) = key.callbacks.iter().find(|(index, _)| *index == parameter) {
+                regions.code.insert(vec![], Some(code.clone()));
+            }
             for leaf in borrowed_input_layout(Some(self.package), &ty.ty, self.fuel)? {
                 if let BorrowedInputLeaf::Text(leaf) = leaf {
                     regions.insert(
@@ -948,7 +1085,7 @@ impl Query<'_, '_> {
                 }
             }
         }
-        let summary = TextRegionSummary {
+        let summary = Summary {
             declaration,
             arguments: key.instance.arguments.clone(),
             reads,
@@ -1006,24 +1143,55 @@ impl Query<'_, '_> {
         let next = depth + 1;
         let mut empty = Some(Regions::new());
         match &expr.kind {
-            K::Literal(nir::program::Literal::String(_)) => Ok(Some(BTreeMap::from([(
-                vec![],
-                BTreeSet::from([TextRegionOrigin::Static]),
-            )]))),
-            K::Literal(_) | K::Unit | K::Function(_) | K::FunctionInstance { .. } => Ok(empty),
+            K::Literal(nir::program::Literal::String(_)) => Ok(Some(Regions::from(
+                BTreeMap::from([(vec![], BTreeSet::from([TextRegionOrigin::Static]))]),
+            ))),
+            K::Literal(_) | K::Unit => Ok(empty),
+            K::Function(declaration) => {
+                empty.as_mut().unwrap().code.insert(
+                    vec![],
+                    Some(CallbackKey::Named(iir::InstanceKey {
+                        declaration: *declaration,
+                        arguments: vec![],
+                    })),
+                );
+                Ok(empty)
+            }
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => {
+                empty.as_mut().unwrap().code.insert(
+                    vec![],
+                    Some(CallbackKey::Named(iir::InstanceKey {
+                        declaration: *declaration,
+                        arguments: arguments.clone(),
+                    })),
+                );
+                Ok(empty)
+            }
             K::Local(id) => {
                 let regions = locals.get(id).ok_or("text region local is unavailable")?;
                 charge_regions(regions, self.fuel)?;
-                Ok(Some(regions.clone()))
+                let mut regions = regions.clone();
+                if !regions.code.contains_key(&vec![])
+                    && matches!(expr.ty.callable_signature(), Term::Function { .. })
+                {
+                    if let Some(code) = self.known_local_callee(*id)? {
+                        let code = self.close_callable(code, 0)?;
+                        regions.code.insert(vec![], code.key());
+                    }
+                }
+                Ok(Some(regions))
             }
             K::SymbolName(value) | K::EnumName(value) => {
                 if self.expr(value, locals, returned, next)?.is_none() {
                     return Ok(None);
                 }
-                Ok(Some(BTreeMap::from([(
+                Ok(Some(Regions::from(BTreeMap::from([(
                     vec![],
                     BTreeSet::from([TextRegionOrigin::Static]),
-                )])))
+                )]))))
             }
             K::Tuple(fields) | K::Record { fields, .. } | K::AnonymousRecord { fields } => {
                 for (index, field) in fields.iter().enumerate() {
@@ -1138,7 +1306,9 @@ impl Query<'_, '_> {
                 // A write replaces exactly this subtree, including an absent
                 // optional payload. Unrelated sibling dependencies survive.
                 target.retain(|fields, _| !fields.starts_with(&path));
-                target.extend(replacement);
+                target.code.retain(|fields, _| !fields.starts_with(&path));
+                target.code.extend(replacement.code);
+                target.text.extend(replacement.text);
                 Ok(empty)
             }
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
@@ -1339,14 +1509,13 @@ impl Query<'_, '_> {
                 arguments,
                 parameter_bindings,
             } => {
-                let resolved = match &callee.kind {
-                    K::Local(binding) => Some(self.local_callee(*binding)?),
-                    _ => None,
+                let Some(callee_value) = self.expr(callee, locals, returned, next)? else {
+                    return Ok(None);
                 };
-                let code = resolved
-                    .as_ref()
-                    .map(|code| code.expression.as_ref())
-                    .unwrap_or(callee);
+                let resolved = self.result_code(&callee_value, callee)?.ok_or(
+                    "text region call requires a named concrete callee or stable local callable",
+                )?;
+                let code = resolved.expression.as_ref();
                 if let K::Closure {
                     parameters,
                     captures,
@@ -1360,9 +1529,7 @@ impl Query<'_, '_> {
                     }
                     // Construct the environment before evaluating inputs: an
                     // argument may replace a caller slot already captured here.
-                    let Some(environment) = self.expr(callee, locals, returned, next)? else {
-                        return Ok(None);
-                    };
+                    let environment = callee_value;
                     let mut scope = Locals::new();
                     for (index, capture) in captures.iter().enumerate() {
                         charge_regions(&environment, self.fuel)?;
@@ -1373,11 +1540,11 @@ impl Query<'_, '_> {
                     }
                     let mut input_code = Vec::new();
                     for argument in arguments {
-                        let callable = self.callable_input(&argument.value)?;
                         let Some(value) = self.expr(&argument.value, locals, returned, next)?
                         else {
                             return Ok(None);
                         };
+                        let callable = self.result_code(&value, &argument.value)?;
                         if scope
                             .insert(parameters[argument.parameter], value)
                             .is_some()
@@ -1386,7 +1553,7 @@ impl Query<'_, '_> {
                         }
                         input_code.push((parameters[argument.parameter], callable));
                     }
-                    let closed_context = resolved.as_ref().and_then(|code| code.closure);
+                    let closed_context = resolved.closure;
                     let previous_context = if let Some(id) = closed_context {
                         let context = &self.closed_closures[id];
                         charge(self.fuel, context.cost)?;
@@ -1439,9 +1606,6 @@ impl Query<'_, '_> {
                     } => (*declaration, arguments.as_slice()),
                     _ => return Err("text region call requires a named concrete callee".into()),
                 };
-                if self.expr(callee, locals, returned, next)?.is_none() {
-                    return Ok(None);
-                }
                 let (body, _) = self.package.runtime_body_checked(declaration, types)?;
                 charge(
                     self.fuel,
@@ -1460,8 +1624,13 @@ impl Query<'_, '_> {
                     let (value, callback) = if argument.is_default {
                         self.default_input(&argument.value, &prepared, &prepared_code, next)?
                     } else {
-                        let code = self.callable_input(&argument.value)?;
-                        (self.expr(&argument.value, locals, returned, next)?, code)
+                        let value = self.expr(&argument.value, locals, returned, next)?;
+                        let code = value
+                            .as_ref()
+                            .map(|value| self.result_code(value, &argument.value))
+                            .transpose()?
+                            .flatten();
+                        (value, code)
                     };
                     let Some(value) = value else {
                         return Ok(None);
@@ -1510,7 +1679,8 @@ impl Query<'_, '_> {
                 let Some(result) = summary.returned else {
                     return Ok(None);
                 };
-                for (path, origins) in result {
+                empty.as_mut().unwrap().code = result.code;
+                for (path, origins) in result.text {
                     let translated = self.translate(&origins, &actual)?;
                     empty.as_mut().unwrap().insert(path, translated);
                 }
@@ -1564,7 +1734,11 @@ impl Query<'_, '_> {
                 };
                 charge_regions(&regions, self.fuel)?;
                 let mut transported = Regions::new();
-                for (mut path, origins) in regions {
+                for (mut path, code) in regions.code {
+                    remap_error_path(&mut path, &mapping, self.fuel)?;
+                    merge_code(&mut transported.code, BTreeMap::from([(path, code)]));
+                }
+                for (mut path, origins) in regions.text {
                     // Repack the destination slot, not its backing origin:
                     // caller parameter paths still identify the original input.
                     remap_error_path(&mut path, &mapping, self.fuel)?;
@@ -1582,6 +1756,7 @@ impl Query<'_, '_> {
                     .transpose()
             }
             K::Closure { captures, .. } => {
+                let mut captured_code = Vec::new();
                 for (index, capture) in captures.iter().enumerate() {
                     let value = if let Some(value) = &capture.value {
                         let Some(value) = self.expr(value, locals, returned, next)? else {
@@ -1589,18 +1764,47 @@ impl Query<'_, '_> {
                         };
                         value
                     } else {
-                        let value = locals
-                            .get(&capture.binding)
-                            .ok_or("text capture origin is unavailable")?;
-                        charge_regions(value, self.fuel)?;
-                        value.clone()
+                        let local = Expr {
+                            source: expr.source,
+                            ty: capture.ty.clone(),
+                            kind: K::Local(capture.binding),
+                        };
+                        self.expr(&local, locals, returned, next)?
+                            .ok_or("text capture origin is unavailable")?
                     };
+                    let code = self.result_code(
+                        &value,
+                        &Expr {
+                            source: expr.source,
+                            ty: capture.ty.clone(),
+                            kind: K::Local(capture.binding),
+                        },
+                    )?;
+                    captured_code.push((capture.binding, code));
                     merge(
                         &mut empty,
                         Some(prefix(value, &[index], self.fuel)?),
                         self.fuel,
                     )?;
                 }
+                for (binding, code) in &mut captured_code {
+                    *code = match code.take() {
+                        Some(code) => self.local_callables.insert(*binding, code),
+                        None => self.local_callables.remove(binding),
+                    };
+                }
+                let code = self.callable_input(expr);
+                for (binding, previous) in captured_code {
+                    self.local_callables.remove(&binding);
+                    if let Some(previous) = previous {
+                        self.local_callables.insert(binding, previous);
+                    }
+                }
+                empty
+                    .as_mut()
+                    .unwrap()
+                    .code
+                    .insert(vec![], code?.and_then(|code| code.key()));
                 Ok(empty)
             }
             K::Snapshot(value) | K::UnsafeScope(value) => self.expr(value, locals, returned, next),
@@ -1685,7 +1889,7 @@ impl Query<'_, '_> {
                     // Text comparison observes characters, not just the view
                     // descriptor. Non-text scalar operands have no regions.
                     charge_regions(&regions, self.fuel)?;
-                    for origins in regions.into_values() {
+                    for origins in regions.text.into_values() {
                         self.reads.last_mut().unwrap().extend(origins);
                     }
                 }

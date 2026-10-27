@@ -838,3 +838,46 @@ and primary-package selection. Nine existing CLI unit tests passed
 (`/tmp/luna-tools-t1vakrbs/result.json`, exit 0), as did the three existing resource
 CLI tests (`/tmp/luna-tools-b646bl0t/result.json`, exit 0). Formatting passed
 (`/tmp/luna-tools-6uqsn06p/result.json`, exit 0); the diff check passed.
+
+## Callable identities in value flow
+
+Internal abstract values now carry callable identities by field path alongside
+text origins. Function summaries retain both domains during fixed-point solving;
+the public text summary still exports only character reads and text dependencies.
+Calls consume the evaluated callee value once, so a named function or captured
+closure returned by a factory can be invoked immediately, stored in a local,
+forwarded, projected from an aggregate or unpacked from an optional.
+
+Projection, construction, assignment, return joins and error representation
+transport preserve code paths together with text paths. An assignment replaces
+both domains for its destination subtree. Copies retain the earlier identity,
+and closure construction saves callable captures from the evaluated values.
+Consequently a deterministic reassignment can be followed by a call without
+reusing stale lexical definition metadata.
+
+Callable input leaves start unknown unless specialized code is supplied. Joins
+preserve one identity only when all present alternatives agree; conflicting or
+unknown identities become unknown and are rejected if invoked. This prevents a
+known branch from erasing an unknown aggregate callback. General multi-candidate
+invocation remains unimplemented. Runtime ownership, cleanup and lifetime gates
+are unchanged by this value-flow extension.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli text_region_cli
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 34 analysis/layout/prototype tests passed
+(`/tmp/luna-tools-ty_blvq3/result.json`, exit 0), including returned factories,
+immediate invocation, forwarding, aggregate and optional projection, deterministic
+assignments, copies and captures before reassignment, equal and conflicting
+branch identities, unknown input callbacks, and budget failure recovery. All
+three text-region CLI tests passed (`/tmp/luna-tools-d9tdwdlk/result.json`,
+exit 0). Formatting passed (`/tmp/luna-tools-77nvmybs/result.json`, exit 0), as did
+the diff check. Callable fields passed inside aggregate parameters still need
+path-sensitive specialization across named function boundaries; this stage does
+not claim that support or runtime lifetime/cleanup certification.
