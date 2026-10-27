@@ -147,6 +147,11 @@ fn generated_definition_attributes_cannot_bypass_semantic_admission() {
         )
         .unwrap();
     for configuration_key in [None, Some("representation".into())] {
+        let expected = if configuration_key.is_none() {
+            "type mismatch: expected (primitive Object), found (primitive bool)"
+        } else {
+            "elaboration is not implemented for definition attribute or modifier `representation`"
+        };
         batch.set_attributes(vec![DeferredDefinitionAttribute {
             target: AttributeTarget::Definition(owner),
             lexical_owner: owner,
@@ -165,11 +170,7 @@ fn generated_definition_attributes_cannot_bypass_semantic_admission() {
         )
         .unwrap_err();
         assert!(matches!(error, PublicationError::Check(_)), "{error}");
-        assert!(
-            error
-                .to_string()
-                .contains("elaboration is not implemented for definition")
-        );
+        assert!(error.to_string().contains(expected), "{error}");
         assert_eq!(batch.to_string(), before);
         assert_eq!(batch.published().num_defs(), 0);
         assert!(batch.published().definition_attributes.is_empty());

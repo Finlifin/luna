@@ -73,6 +73,12 @@ fn declaration<'a>(arena: &'a HirArena, owner: OwnerId, ty: &str) -> OwnerInfo<'
 
 #[test]
 fn generated_trait_contract_impl_and_dispatch_publish_together_after_repair() {
+    for phase in [ImplementationPhase::Runtime, ImplementationPhase::Comptime] {
+        generated_phase_publication_after_repair(phase);
+    }
+}
+
+fn generated_phase_publication_after_repair(phase: ImplementationPhase) {
     let arena = HirArena::new();
     let mut package = Package::new();
     let mut batch = DefinitionBatch::new(&mut package);
@@ -125,7 +131,7 @@ fn generated_trait_contract_impl_and_dispatch_publish_together_after_repair() {
             )?;
             let target = expr(&arena, nodes, root, reference(protocol), fuel)?;
             Ok(ImplDef {
-                phase: hir::ImplementationPhase::Runtime,
+                phase,
                 self_ty: subject,
                 trait_ref: Some(target),
                 clause_params: &[],
@@ -219,6 +225,53 @@ fn generated_trait_contract_impl_and_dispatch_publish_together_after_repair() {
     batch
         .body(generated_caller.body_id, generated_caller.body)
         .unwrap();
+    let flag = Expr {
+        hir_id: HirId::new(contract, ItemLocalId::new(100)),
+        kind: ExprKind::Lit(Lit {
+            kind: LitKind::Bool(true),
+            span: DUMMY_SP,
+        }),
+        span: DUMMY_SP,
+    };
+    if phase == ImplementationPhase::Comptime {
+        batch.set_attributes(vec![DeferredDefinitionAttribute {
+            target: AttributeTarget::Definition(contract),
+            lexical_owner: contract,
+            expression: "generated phase metadata".into(),
+            value: &flag,
+            configuration_key: Some("comptime_phase".into()),
+            span: DUMMY_SP,
+        }]);
+        let complement = batch.reserve().unwrap();
+        let definition = assemble_impl(
+            &arena,
+            complement,
+            name("runtime_complement"),
+            DUMMY_SP,
+            &mut 100,
+            |nodes, fuel| {
+                let root = nodes.root();
+                let subject = expr(
+                    &arena,
+                    nodes,
+                    root,
+                    ExprKind::Builtin(Symbol::intern("bool")),
+                    fuel,
+                )?;
+                let target = expr(&arena, nodes, root, reference(protocol), fuel)?;
+                Ok(ImplDef {
+                    phase: ImplementationPhase::Runtime,
+                    self_ty: subject,
+                    trait_ref: Some(target),
+                    clause_params: &[],
+                    clause_constraints: &[],
+                    items: vec![],
+                })
+            },
+        )
+        .unwrap();
+        batch.define(definition, None, None).unwrap();
+    }
     let identities = BTreeMap::from([(0, 73)]);
     let before = batch.to_string();
     let rejected = publish(
@@ -238,6 +291,7 @@ fn generated_trait_contract_impl_and_dispatch_publish_together_after_repair() {
     assert_eq!(batch.to_string(), before);
     assert_eq!(batch.published().num_defs(), 0);
     assert_eq!(batch.published().num_bodies(), 0);
+    assert!(batch.published().definition_attributes.is_empty());
     batch
         .define(declaration(&arena, contract, "bool"), None, None)
         .unwrap();
@@ -249,11 +303,38 @@ fn generated_trait_contract_impl_and_dispatch_publish_together_after_repair() {
         None,
     )
     .unwrap();
-    assert_eq!(batch.published().num_defs(), 5);
+    assert_eq!(
+        batch.published().num_defs(),
+        if phase == ImplementationPhase::Comptime {
+            6
+        } else {
+            5
+        }
+    );
+    assert_eq!(checked.implementations.len(), 1);
+    assert!(checked.implementations[0].phases.runtime);
+    assert_eq!(
+        checked.implementations[0].phases.comptime,
+        phase == ImplementationPhase::Comptime
+    );
+    assert_eq!(
+        checked.traits[0].methods[0].phase,
+        if phase == ImplementationPhase::Comptime {
+            nir::program::TraitPhase::Comptime
+        } else {
+            nir::program::TraitPhase::Runtime
+        }
+    );
     assert_eq!(
         batch.published().num_bodies(),
         2,
         "bodyless contract must not create a phantom body"
+    );
+    assert!(
+        checked
+            .functions
+            .iter()
+            .all(|function| function.phase == nir::program::FunctionPhase::Runtime)
     );
     let mut vm =
         comptime_interpretor::Interpreter::new(&checked, comptime_interpretor::Budget::default())

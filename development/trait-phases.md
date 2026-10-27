@@ -135,6 +135,17 @@ relationship blocks a broader comptime implementation; no phase-filtered retry
 occurs. Existing signature, domain, type requirement and program contract checks
 remain in force. Runtime comparison protocol selection is unchanged.
 
+## Generated HIR publication
+
+`DefinitionBatch` publication uses ordinary elaboration on a private candidate.
+Generated implementation phases and structured member configuration therefore
+follow the same phase admission and complementary merging paths as source
+syntax. This is distinct from the VM-facing concrete definition publisher,
+which currently publishes struct/enum descriptors, not arbitrary trait bodies.
+The HIR regression checks rejection without publication, repair of the retained
+draft, merged availability and actual invocation. Membership does not rewrite
+function execution signatures.
+
 ## Remaining integration
 
 - Interleave metadata queries that themselves depend on interface preparation;
@@ -142,8 +153,8 @@ remain in force. Runtime comparison protocol selection is unchanged.
 - Extend shared generic associated-program equality beyond identical checked
   structure using program-level evidence; retain bounded conservative rejection
   when equality cannot be established.
-- Complete phase handling in generated-definition publication and remaining
-  protocol consumers. Builtin Eq/Hash library declarations still expose runtime
+- Extend VM-facing builders beyond their current nominal descriptors and
+  finish remaining protocol consumers. Builtin Eq/Hash library declarations still expose runtime
   methods; the executable cache-key fixtures explicitly declare comptime members.
 - Connect dynamic trait-method clause preparation without erasing interface
   origin, defaults, preconditions, postconditions, or selected instance identity.
@@ -299,3 +310,19 @@ obligations, hashing and memoization continue to pass with explicit comptime
 phase declarations. Formatting passed (`/tmp/luna-tools-z81ayc0m/result.json`,
 exit 0); `git diff --check` passed. This does not complete builtin Eq/Hash's
 library-level two-phase interface design or migrate its runtime declarations.
+
+Generated HIR phase publication passed 18 tests in `/home/fin/luna` with
+`python3 -B development/check.py --timeout 900 -- test --release -p elaboration
+--test generated_traits --test definitions --test attribute_phases
+--test attribute_merge`
+(`/tmp/luna-tools-bns70dez/result.json`, exit 0). The generated-trait test now
+runs both ordinary and comptime membership, the latter with a runtime complement.
+It checks failed signature admission leaves the draft and published metadata
+unchanged, repair preserves phase metadata, one merged implementation is
+published, and invocation returns the expected value. Function execution phases
+remain runtime in both cases, explicitly testing their independence from member
+membership. The initial run (`/tmp/luna-tools-3hakswtn/result.json`, exit 101)
+and diagnostic rerun (`/tmp/luna-tools-_4uyv2xu/result.json`, exit 101) exposed an
+obsolete blanket unsupported-attribute assertion. It now requires the actual
+Object-domain mismatch or unsupported named consumer diagnostic while preserving
+all transactional assertions. No production behavior was changed in this step.
