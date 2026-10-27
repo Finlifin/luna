@@ -1642,9 +1642,21 @@ impl<'a> Interpreter<'a> {
                 } else {
                     implementation.type_parameters.clone()
                 };
+                if type_parameters.len() != expected_parameters.len() + member.type_parameters.len()
+                {
+                    return Err(invalid());
+                }
                 if !type_parameters.starts_with(&expected_parameters)
-                    || type_parameters.len()
-                        != expected_parameters.len() + member.type_parameters.len()
+                    && !nir::function_parameters::equivalent_prefix_domains(
+                        &expected_parameters,
+                        &type_parameters[..expected_parameters.len()],
+                        &declaration_parameter_domains,
+                        &mut trait_parameter_fuel,
+                    )
+                    .map_err(|_| Error {
+                        kind: ErrorKind::StepsExhausted,
+                        source: None,
+                    })?
                 {
                     return Err(invalid());
                 }

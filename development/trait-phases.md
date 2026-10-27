@@ -17,10 +17,10 @@ keyword as an unevaluated generic attribute. HIR S-expression dumps include the
 phase. General generated-definition assembly preserves the field supplied by its
 caller.
 
-Single source `comptime impl Trait for Subject` contributions now retain their
-phase through interface checking and invocation. Inherent comptime implementations
-remain explicitly unsupported. Complementary source contributions still require
-body/associated-value merging before they can be admitted together.
+Source `comptime impl Trait for Subject` contributions retain their phase through
+interface checking and invocation. Complementary method-only contributions merge
+into one implementation descriptor in either declaration order. Inherent
+comptime implementations and cross-phase associated checking remain unsupported.
 
 ## Member metadata validation
 
@@ -54,9 +54,12 @@ its revision unchanged; successful additions invalidate older query results.
 Phase lookup consumes the common type-resolution result, preserves deferred or
 conflicting selection, and reports a missing phase on the selected relationship
 without searching less precise candidates. Index and phase-result dumps include
-both relationship and contribution identities. Source comptime contributions use
-this admission path, but a complementary existing source contribution is still
-rejected until descriptor/body merging is implemented. The pairing API compares applicability conditions by bounded PTC proofs of both
+both relationship and contribution identities. Both source phases use this
+admission path. Checked contributions merge method tables in trait declaration
+order, retaining each body and its original parameter identities. Capability
+conditions must have equal alpha-normalized sets; different conditions are
+rejected before publishing the merged world. The pairing API compares
+applicability conditions by bounded PTC proofs of both
 implications, with only the declaration binder scope and no caller assumptions.
 This accepts reordered/grouped conditions, redundant truths and equivalent
 logical forms without asserting that either condition holds at a call site.
@@ -84,13 +87,19 @@ selected phase, and explicit method projections diagnose a missing phase on the
 selected relationship. Single comptime contributions can execute ordinary
 comptime methods, including generic owners and available trait defaults.
 
+For complementary methods with renamed implementation inputs, VM admission
+checks alpha-equivalence of the input-domain telescopes before transporting
+positional arguments. Type and comptime-value domains remain distinct; free
+identities and opaque heads are preserved. This bounded check does not replace
+head admission, method signature checks or invocation contracts.
+
 ## Remaining integration
 
 - Interleave metadata queries that themselves depend on interface preparation;
   the current early required-evaluation path supports independent computations.
-- Merge complementary source descriptors and bodies after common relationship
-  selection. Preserve shared associated-item consistency. Phase-specific
-  associated implementation checking is currently an explicit refusal.
+- Extend source merging to associated items while preserving shared readonly
+  data consistency. Phase-specific associated implementation checking is
+  currently an explicit refusal.
 - Complete phase handling in generated-definition publication and specialized
   protocol consumers, including comptime key protocols. Expand source-level
   non-fallback coverage beyond single-contribution relationships.
@@ -179,3 +188,19 @@ Normal compilation remains strict; raw inspection can retain the original
 Objects without applying an invalid phase plan. The final run includes this
 repair and the existing failed-output preservation regression. Formatting passed
 (`/tmp/luna-tools-ck12hcrm/result.json`); `git diff --check` passed as well.
+
+Complementary source method merging passed 209 tests in `/home/fin/luna` with
+`python3 -B development/check.py --timeout 900 -- test --release -p nir
+-p comptime_interpretor -p luna -p elaboration --test trait_phases
+--test runtime_function_identities --test implementation_phases
+--test implementation --test generated_traits --test library_attributes
+--test capabilities --test associated`
+(`/tmp/luna-tools-8q6b86s5/result.json`, exit 0). Source tests execute both
+contribution orders, renamed generic inputs with parameterized trait instances,
+Bool value inputs, and matching alpha-renamed capability conditions; differing
+capability conditions are rejected. NIR telescope checks cover dependent value
+domains, free identities, missing metadata, malformed scope/domain and budget
+failure followed by successful retry. Existing method/default availability,
+coherence, capabilities and associated-value suites remain passing. Workspace
+format check passed (`/tmp/luna-tools-lfr1cwuv/result.json`, exit 0), as did
+`git diff --check`. Cross-phase associated source checking remains unsupported.

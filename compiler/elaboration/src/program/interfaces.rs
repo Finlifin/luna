@@ -6,6 +6,7 @@ mod associated;
 mod declarations;
 mod early_inherent;
 mod parents;
+mod phase_contributions;
 mod program_contracts;
 mod signatures;
 
@@ -324,6 +325,7 @@ impl Checker<'_, '_> {
         // member. A head is candidate data, not evidence of a complete trait
         // implementation; keep this index private until all checks succeed.
         let mut headers = Vec::new();
+        let mut relationships = BTreeMap::new();
         for (owner, info) in self.package.owners() {
             let item = info.node.expect_item();
             self.signature_owner = Some(owner);
@@ -438,25 +440,18 @@ impl Checker<'_, '_> {
                     interface_arguments: interface_arguments.clone(),
                     requirements: requirements.clone(),
                 };
-                let comptime = matches!(&item.kind, ItemKind::Impl(def) if def.phase == hir::ImplementationPhase::Comptime);
-                if comptime {
-                    let own = head.declaration;
-                    let relationship = index
-                        .insert_phase(head, hir::ImplementationPhase::Comptime, Budget::default())
+                let phase = match &item.kind {
+                    ItemKind::Impl(def) => def.phase,
+                    _ => hir::ImplementationPhase::Runtime,
+                };
+                let own = head.declaration;
+                let relationship =
+                    index
+                        .insert_phase(head, phase, Budget::default())
                         .map_err(|e| {
                             error(item.span, format!("implementation admission failed: {e:?}"))
                         })?;
-                    if relationship != own {
-                        return Err(error(
-                            item.span,
-                            "complementary source implementation merging is not yet implemented",
-                        ));
-                    }
-                } else {
-                    index.insert(head, Budget::default()).map_err(|e| {
-                        error(item.span, format!("implementation admission failed: {e:?}"))
-                    })?;
-                }
+                relationships.insert(own, relationship);
             } else {
                 crate::implementation::inherent_ownership(
                     &subject,
@@ -1093,6 +1088,23 @@ impl Checker<'_, '_> {
                 methods,
             });
         }
+        let mut implementations = phase_contributions::merge(
+            implementations,
+            &relationships,
+            &traits,
+            &mut self.required_steps,
+        )
+        .map_err(|(identity, message)| {
+            let span = self
+                .package
+                .owners()
+                .find_map(|(owner, info)| {
+                    matches_declaration(self.package, &self.package_identities, owner, identity)
+                        .then_some(info.node.expect_item().span)
+                })
+                .unwrap_or_default();
+            error(span, message)
+        })?;
         let coherence_context = self.nominal_context();
         inherent_index
             .check_coherence(&coherence_context, Budget::default())

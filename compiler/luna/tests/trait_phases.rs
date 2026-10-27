@@ -261,3 +261,111 @@ fn source_phase_selection_never_falls_back_from_a_more_precise_relationship() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
+#[test]
+fn complementary_source_contributions_merge_in_either_order() {
+    for reverse in [false, true] {
+        let runtime = "impl Code for Subject {comptime fn ordinary()->bool {true}}";
+        let comptime = "comptime impl Code for Subject {comptime fn staged_value()->bool {false}}";
+        let implementations = if reverse {
+            format!("{comptime} {runtime}")
+        } else {
+            format!("{runtime} {comptime}")
+        };
+        let source = phase_source(&format!(
+            "\n            trait Code {{comptime fn ordinary()->bool; ^staged comptime fn staged_value()->bool;}}\n            struct Subject {{}}\n            {implementations}\n            comptime fn run()->bool {{Subject.as(Code).ordinary() and not Subject.as(Code).staged_value()}}\n        "
+        ));
+        let package = support::compile(&source);
+        assert_eq!(package.implementations.len(), 1);
+        let implementation = &package.implementations[0];
+        assert!(implementation.phases.runtime && implementation.phases.comptime);
+        assert_eq!(
+            implementation
+                .methods
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ordinary", "staged_value"]
+        );
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn complementary_generic_contributions_keep_each_method_input_telescope() {
+    for reverse in [false, true] {
+        let runtime =
+            "impl Code<T> for Subject<T> where T {comptime fn ordinary(value:T)->T {value}}";
+        let comptime = "comptime impl Code<U> for Subject<U> where U {comptime fn staged_value(value:U)->U {value}}";
+        let implementations = if reverse {
+            format!("{comptime} {runtime}")
+        } else {
+            format!("{runtime} {comptime}")
+        };
+        let source = phase_source(&format!(
+            "\n            trait Code where E {{comptime fn ordinary(value:E)->E; ^staged comptime fn staged_value(value:E)->E;}}\n            struct Subject where T {{}}\n            {implementations}\n            comptime fn run()->bool {{Subject<bool>.as(Code<bool>).ordinary(true) and not Subject<bool>.as(Code<bool>).staged_value(false)}}\n        "
+        ));
+        let package = support::compile(&source);
+        assert_eq!(package.implementations.len(), 1);
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn complementary_contributions_reject_different_capability_conditions() {
+    let source = phase_source(
+        "\n        trait Bound {}\n        trait Code {comptime fn ordinary()->bool; ^staged comptime fn staged_value()->bool;}\n        struct Subject where T {}\n        impl Code for Subject<T> where T:-Bound {comptime fn ordinary()->bool {true}}\n        comptime impl Code for Subject<U> where U {comptime fn staged_value()->bool {true}}\n    ",
+    );
+    assert!(support::compile_with_protocols(&source, &Default::default()).is_err());
+}
+
+#[test]
+fn complementary_value_input_contributions_transport_the_selected_value() {
+    let source = phase_source(
+        "\n        trait Code {comptime fn ordinary()->bool; ^staged comptime fn staged_value()->bool;}\n        struct Subject where flag:bool {}\n        impl Code for Subject<flag> where flag:bool {comptime fn ordinary()->bool {flag}}\n        comptime impl Code for Subject<other> where other:bool {comptime fn staged_value()->bool {not other}}\n        comptime fn run()->bool {Subject<true>.as(Code).ordinary() and not Subject<true>.as(Code).staged_value()}\n    ",
+    );
+    let package = support::compile(&source);
+    assert_eq!(package.implementations.len(), 1);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn complementary_capability_conditions_accept_alpha_renaming() {
+    let source = phase_source(
+        r#"
+        trait Bound {}
+        struct Element {}
+        impl Bound for Element {}
+        trait Code {
+            comptime fn ordinary()->bool;
+            ^staged comptime fn staged_value()->bool;
+        }
+        struct Subject where T {}
+        impl Code for Subject<T> where T:-Bound {
+            comptime fn ordinary()->bool {true}
+        }
+        comptime impl Code for Subject<U> where U:-Bound {
+            comptime fn staged_value()->bool {false}
+        }
+        comptime fn run()->bool {
+            Subject<Element>.as(Code).ordinary()
+                and not Subject<Element>.as(Code).staged_value()
+        }
+    "#,
+    );
+    let package = support::compile(&source);
+    assert_eq!(package.implementations.len(), 2);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
