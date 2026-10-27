@@ -114,6 +114,26 @@ fn remap_descriptor_roots(value: &mut Regions, mapping: &BTreeMap<DescriptorRoot
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct StorageKey {
+    declaration: DeclarationId,
+    arguments: Vec<Term>,
+    actual: BTreeMap<usize, Regions>,
+    storage: BTreeMap<usize, Regions>,
+    readonly: Option<&'static str>,
+}
+#[derive(Clone, Default, PartialEq, Eq)]
+struct StorageSummary {
+    returned: Option<Regions>,
+    storage: Option<BTreeMap<usize, Regions>>,
+    reads: BTreeSet<TextRegionOrigin>,
+}
+struct StorageEntry {
+    key: StorageKey,
+    summary: StorageSummary,
+    cost: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum CallbackKey {
     Named(iir::InstanceKey),
@@ -431,7 +451,8 @@ pub fn infer_text_regions(
         current: None,
         local_callables: BTreeMap::new(),
         closed_closures: vec![],
-        storage_calls: vec![],
+        storage_entries: vec![],
+        solving_storage: false,
         next_storage_frame: 0,
         readonly_storage: None,
         changed_callables: BTreeSet::new(),
@@ -458,7 +479,8 @@ struct Query<'a, 'f> {
     current: Option<SummaryKey>,
     local_callables: BTreeMap<LocalId, CodeValue>,
     closed_closures: Vec<ClosedClosure>,
-    storage_calls: Vec<DeclarationId>,
+    storage_entries: Vec<StorageEntry>,
+    solving_storage: bool,
     next_storage_frame: usize,
     readonly_storage: Option<&'static str>,
     changed_callables: BTreeSet<LocalId>,
@@ -1245,26 +1267,160 @@ impl Query<'_, '_> {
         Ok(summary)
     }
 
-    // Analyze pointer-bearing calls in the caller's storage context. Ordinary
-    // value calls still use reusable symbolic summaries. Recursive storage
-    // effects need a relational fixed point and must not reuse value summaries.
+    // Canonical frame numbers describe input alias topology, independent of
+    // source bindings and the invocation-local IDs used by closure frames.
     fn call_with_storage(
         &mut self,
         declaration: DeclarationId,
         arguments: &[Term],
-        actual: BTreeMap<usize, Regions>,
+        mut actual: BTreeMap<usize, Regions>,
         locals: &mut Locals,
-        depth: usize,
+        _depth: usize,
     ) -> Result<Option<Regions>, String> {
-        if self
-            .current
-            .as_ref()
-            .is_some_and(|key| key.instance.declaration == declaration)
-            || self.storage_calls.contains(&declaration)
-        {
-            return Err("recursive text descriptor calls require relational memory effects".into());
+        let before = *self.fuel;
+        let mut mapping = BTreeMap::new();
+        let mut restore = BTreeMap::new();
+        let mut storage = BTreeMap::new();
+        let mut pending = VecDeque::new();
+        for value in actual.values() {
+            charge_regions(value, self.fuel)?;
+            pending.extend(value.places.values().flatten().map(|(root, _)| *root));
         }
-        let (body, arguments) = self.package.runtime_body_checked(declaration, arguments)?;
+        while let Some(root) = pending.pop_front() {
+            charge(self.fuel, 1)?;
+            if mapping.contains_key(&root) {
+                continue;
+            }
+            let value = locals
+                .get_storage(&root)
+                .ok_or("text call descriptor storage is no longer live")?;
+            charge_regions(value, self.fuel)?;
+            let id = storage.len();
+            let canonical = DescriptorRoot::Frame(id);
+            mapping.insert(root, canonical);
+            restore.insert(canonical, root);
+            pending.extend(value.places.values().flatten().map(|(root, _)| *root));
+            storage.insert(id, value.clone());
+        }
+        for value in actual.values_mut().chain(storage.values_mut()) {
+            remap_descriptor_roots(value, &mapping);
+        }
+        for argument in arguments {
+            bound_type(argument, self.fuel)?;
+        }
+        let key = StorageKey {
+            declaration,
+            arguments: arguments.to_vec(),
+            actual,
+            storage,
+            readonly: self.readonly_storage,
+        };
+        let cost = before.saturating_sub(*self.fuel).saturating_add(1);
+        let mut found = None;
+        for (id, entry) in self.storage_entries.iter().enumerate() {
+            charge(self.fuel, entry.cost.saturating_add(cost))?;
+            if entry.key == key {
+                found = Some(id);
+                break;
+            }
+        }
+        let id = if let Some(id) = found {
+            id
+        } else {
+            let id = self.storage_entries.len();
+            self.storage_entries.push(StorageEntry {
+                key,
+                summary: StorageSummary::default(),
+                cost,
+            });
+            id
+        };
+        if !self.solving_storage {
+            self.solving_storage = true;
+            let result = self.solve_storage();
+            self.solving_storage = false;
+            result?;
+        }
+        let summary = &self.storage_entries[id].summary;
+        charge(self.fuel, summary.reads.len())?;
+        self.reads
+            .last_mut()
+            .unwrap()
+            .extend(summary.reads.iter().cloned());
+        let Some(value) = &summary.returned else {
+            return Ok(None);
+        };
+        charge_regions(value, self.fuel)?;
+        let mut value = value.clone();
+        remap_descriptor_roots(&mut value, &restore);
+        let storage = summary
+            .storage
+            .as_ref()
+            .ok_or("text storage summary lacks normal exit state")?;
+        for (canonical, root) in &restore {
+            let DescriptorRoot::Frame(id) = canonical else {
+                unreachable!()
+            };
+            let output = storage
+                .get(id)
+                .ok_or("text storage summary lost an input slot")?;
+            charge_regions(output, self.fuel)?;
+            let mut output = output.clone();
+            remap_descriptor_roots(&mut output, &restore);
+            *locals
+                .get_storage_mut(root)
+                .ok_or("text call lost caller storage")? = output;
+        }
+        Ok(Some(value))
+    }
+
+    fn solve_storage(&mut self) -> Result<(), String> {
+        loop {
+            let count = self.storage_entries.len();
+            let mut changed = false;
+            let mut failure = None;
+            for id in 0..count {
+                charge(self.fuel, self.storage_entries[id].cost)?;
+                let key = self.storage_entries[id].key.clone();
+                let mut next = match self.analyze_storage(&key) {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        failure = Some(error);
+                        continue;
+                    }
+                };
+                let previous = &self.storage_entries[id].summary;
+                charge(self.fuel, previous.reads.len())?;
+                next.reads.extend(previous.reads.iter().cloned());
+                if let Some(value) = &previous.returned {
+                    charge_regions(value, self.fuel)?;
+                    merge(&mut next.returned, Some(value.clone()), self.fuel)?;
+                }
+                if let Some(storage) = &previous.storage {
+                    let output = next.storage.get_or_insert_with(BTreeMap::new);
+                    for (slot, value) in storage {
+                        charge_regions(value, self.fuel)?;
+                        let mut joined = output.remove(slot);
+                        merge(&mut joined, Some(value.clone()), self.fuel)?;
+                        output.insert(*slot, joined.unwrap());
+                    }
+                }
+                if next != *previous {
+                    self.storage_entries[id].summary = next;
+                    changed = true;
+                }
+            }
+            if changed || self.storage_entries.len() != count {
+                continue;
+            }
+            return failure.map_or(Ok(()), Err);
+        }
+    }
+
+    fn analyze_storage(&mut self, key: &StorageKey) -> Result<StorageSummary, String> {
+        let (body, arguments) = self
+            .package
+            .runtime_body_checked(key.declaration, &key.arguments)?;
         if body.phase != FunctionPhase::Runtime || body.type_parameters.len() != arguments.len() {
             return Err("text descriptor call requires a concrete runtime body".into());
         }
@@ -1275,14 +1431,20 @@ impl Query<'_, '_> {
         let body = body
             .instantiate_parameters(&binders, arguments)
             .map_err(|e| e.to_string())?;
-        let mut scope = self.locals_copy(locals)?;
-        for (parameter, value) in actual {
+        let mut scope = Locals {
+            bindings: BTreeMap::new(),
+            frames: key.storage.clone(),
+        };
+        // Fresh closure frames must never collide with canonical input roots.
+        self.next_storage_frame = self.next_storage_frame.max(scope.frames.len());
+        for (parameter, value) in &key.actual {
             let binding = *body
                 .parameters
-                .get(parameter)
+                .get(*parameter)
                 .ok_or("text descriptor parameter is missing")?;
-            if scope.insert(binding, value).is_some() {
-                return Err("text descriptor call storage frame overlaps its caller".into());
+            charge_regions(value, self.fuel)?;
+            if scope.insert(binding, value.clone()).is_some() {
+                return Err("text descriptor parameter identity mismatch".into());
             }
         }
         for snapshot in &body.entry_snapshots {
@@ -1298,7 +1460,8 @@ impl Query<'_, '_> {
         let definitions = std::mem::take(&mut self.local_callables);
         let changed = std::mem::take(&mut self.changed_callables);
         let loops = std::mem::take(&mut self.loops);
-        self.storage_calls.push(declaration);
+        let readonly = std::mem::replace(&mut self.readonly_storage, key.readonly);
+        self.reads.push(BTreeSet::new());
         self.exits.push(Some(ExitRegions {
             bindings: scope.keys().copied().collect(),
             locals: None,
@@ -1309,11 +1472,12 @@ impl Query<'_, '_> {
                 self.contract(predicate, &scope)?;
             }
             let mut returned = None;
-            let completed = self.expr(&body.body, &mut scope, &mut returned, depth)?;
+            let completed = self.expr(&body.body, &mut scope, &mut returned, 0)?;
             if completed.is_some() {
                 self.record_exit(&scope)?;
             }
             merge(&mut returned, completed, self.fuel)?;
+            let mut storage = None;
             if let Some(value) = &returned {
                 let mut exit = self
                     .exits
@@ -1324,15 +1488,11 @@ impl Query<'_, '_> {
                     .locals
                     .take()
                     .ok_or("text descriptor call has no normal exit state")?;
-                // Only caller storage may survive a callee's frame. Check
-                // indirect writes too: a callee must not stash its local address.
-                for value in std::iter::once(value)
-                    .chain(locals.keys().filter_map(|id| exit.get(id)))
-                    .chain(exit.frames.values())
-                {
+                for value in std::iter::once(value).chain(exit.frames.values()) {
                     charge_regions(value, self.fuel)?;
                     for (root, _) in value.places.values().flatten() {
-                        if !locals.contains_storage(root) {
+                        if !matches!(root, DescriptorRoot::Frame(id) if key.storage.contains_key(id))
+                        {
                             return Err("text descriptor address escapes its callee frame".into());
                         }
                     }
@@ -1344,21 +1504,24 @@ impl Query<'_, '_> {
                 for predicate in &body.postconditions {
                     self.contract(predicate, &exit)?;
                 }
-                locals.frames = std::mem::take(&mut exit.frames);
-                for (binding, value) in locals.iter_mut() {
-                    *value = exit
-                        .remove(binding)
-                        .ok_or("text descriptor call lost caller storage")?;
-                }
+                storage = Some(exit.frames);
             }
-            Ok(returned)
+            Ok(StorageSummary {
+                returned,
+                storage,
+                reads: BTreeSet::new(),
+            })
         })();
         self.exits.pop();
-        self.storage_calls.pop();
+        let reads = self.reads.pop().unwrap();
+        self.readonly_storage = readonly;
         self.local_callables = definitions;
         self.changed_callables = changed;
         self.loops = loops;
-        checked
+        checked.map(|mut summary| {
+            summary.reads = reads;
+            summary
+        })
     }
 
     fn translate(

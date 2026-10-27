@@ -1153,3 +1153,50 @@ invocation overhead without pinning every internal accounting operation.
 Formatting passed (`/tmp/luna-tools-xc59l4tc/result.json`, exit 0), as did the
 diff check. Recursive pointer-effect fixed points and text lifetime proofs remain
 unimplemented; the optimization does not change those restrictions.
+
+## Recursive descriptor-state fixed points
+
+Pointer-bearing named calls now canonicalize the reachable descriptor graph.
+Input order and logical field paths assign stable frame numbers; actual alias
+sharing, current text/callable values, type arguments and read-only context are
+part of the key. Caller binding IDs and temporary closure frame IDs are not.
+Returned pointers and normal-exit storage states are translated back through the
+caller's mapping, preserving same-slot aliases and parameter permutations.
+
+The query iterates all discovered storage contexts from no-normal-return bottom.
+Each successful iteration monotonically joins returned dependencies, character
+reads and normal-exit slot values. Recursive and mutually recursive calls consume
+the current approximation; unresolved body errors are retried after growth and
+must be resolved before publishing a result. A nonreturning recursive call can
+still contribute reads. Ordinary value-summary dependencies continue through the
+existing query worklist. Context discovery, graph traversal and comparisons are
+metered, so unbounded context growth fails the query budget rather than granting
+an approximation without evidence.
+
+Local-address escape checks still apply at each normalized callee boundary.
+Read-only observations and defaults use separate context keys from ordinary
+calls. This is abstract dependency/effect propagation, not a proof of recursion
+termination, runtime Copy legality, cleanup or backing-character liveness.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli text_region_cli
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 45 analysis/layout/prototype tests passed
+(`/tmp/luna-tools-9u7yeowv/result.json`, exit 0), covering direct/mutual recursion,
+parameter permutation, shared aliases, changed storage contexts, recursive local
+slots, generic pointer returns, nonreturning reads, unknown callback failure and
+budget recovery. The observation regression also first populates a writable
+context, then requires the same helper in a read-only context to fail. All three
+CLI tests passed (`/tmp/luna-tools-74ajau8i/result.json`, exit 0).
+Formatting passed (`/tmp/luna-tools-5gnzulyl/result.json`, exit 0), as did the
+diff check. The initial run (`/tmp/luna-tools-21gfhpg_/result.json`, exit 101)
+passed existing dependency cases but a new fixture used `private` as a function
+name; renaming it to `local_storage` resolved the parse failure without changing
+the parser or semantic expectations. The former recursive-call rejection case
+now correctly reports no normal return for an unproductive recursive body.

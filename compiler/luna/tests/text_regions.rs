@@ -1916,8 +1916,9 @@ fn named_descriptor_calls_update_shared_storage_and_join_normal_exits() {
     );
     assert!(
         infer(&package, "recursion", 500_000)
-            .unwrap_err()
-            .contains("recursive text descriptor calls")
+            .unwrap()
+            .returned
+            .is_none()
     );
     assert!(
         infer(&package, "escaping", 500_000)
@@ -2083,13 +2084,16 @@ fn pattern_observations_reject_indirect_descriptor_writes() {
         fn observed(value:str)->str {
             var text=value;let pointer=text.ref;
             true match {_ and change(pointer) is true=>text,_=>text,}
-        }",
+        }
+        fn reused()->str {var text=\"changed\";let pointer=text.ref;let ignored=change(pointer);true match {_ and change(pointer) is true=>text,_=>text,}}",
     );
-    let error = infer(&package, "observed", 500_000).unwrap_err();
-    assert!(
-        error.contains("text observation cannot write through pointers"),
-        "{error}"
-    );
+    for name in ["observed", "reused"] {
+        let error = infer(&package, name, 500_000).unwrap_err();
+        assert!(
+            error.contains("text observation cannot write through pointers"),
+            "{name}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -2157,4 +2161,62 @@ fn closure_storage_reachability_preserves_transitive_aliases_and_cycles() {
     );
     assert!(infer(&package, "cycle", 10).is_err());
     assert!(infer(&package, "cycle", 500_000).is_ok());
+}
+
+#[test]
+fn recursive_descriptor_effects_converge_over_aliases_and_storage_states() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn fill(flag:bool,pointer:*str,value:str) {if flag {pointer.* = value;return;};fill(flag,pointer,value)}
+        fn left(flag:bool,pointer:*str,value:str) {if flag {pointer.* = value;return;};right(flag,pointer,value)}
+        fn right(flag:bool,pointer:*str,value:str) {left(flag,pointer,value)}
+        fn alternate(flag:bool,first:*str,second:*str) {if flag {first.* = second.*;return;};alternate(flag,second,first)}
+        fn choose(flag:bool,pointer:*str,value:str)->str {if flag {return pointer.*;};pointer.* = value;choose(flag,pointer,value)}
+        fn local(flag:bool,pointer:*str)->str {if flag {return pointer.*;};let copy=pointer.*;local(flag,copy.ref)}
+        fn identity(flag:bool,pointer:*T)->*T where T {if flag {return pointer;};identity<T>(flag,pointer)}
+        fn forever(pointer:*str,value:str) {let observed=pointer.* == \"x\";pointer.* = value;forever(pointer,value)}
+        fn broken(flag:bool,pointer:*str,action:fn(*str)->str)->str {if flag {return action(pointer);};broken(flag,pointer,action)}
+        fn rejected(flag:bool,value:str,action:fn(*str)->str)->str {broken(flag,value.ref,action)}
+        fn direct(flag:bool,first:str,second:str)->str {var value=first;fill(flag,value.ref,second);value}
+        fn mutual(flag:bool,first:str,second:str)->str {var value=first;left(flag,value.ref,second);value}
+        fn reordered(flag:bool,first:str,second:str)->str {var a=first;var b=second;alternate(flag,a.ref,b.ref);a}
+        fn shared(flag:bool,value:str)->str {var text=value;alternate(flag,text.ref,text.ref);text}
+        fn result(flag:bool,first:str,second:str)->str {var text=first;choose(flag,text.ref,second)}
+        fn local_storage(flag:bool,value:str)->str {local(flag,value.ref)}
+        fn generic(flag:bool,value:str)->str {identity(flag,value.ref).*}
+        fn diverged(first:str,second:str)->str {var text=first;forever(text.ref,second);text}",
+    );
+    for (name, index) in [
+        ("direct", 2),
+        ("mutual", 2),
+        ("shared", 1),
+        ("local_storage", 1),
+        ("generic", 1),
+    ] {
+        assert_eq!(
+            infer(&package, name, 2_000_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(index, &[])]),
+            "{name}"
+        );
+    }
+    for name in ["reordered", "result"] {
+        assert_eq!(
+            infer(&package, name, 2_000_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[]), parameter(2, &[])]),
+            "{name}"
+        );
+    }
+    let diverged = infer(&package, "diverged", 2_000_000).unwrap();
+    assert!(diverged.returned.is_none());
+    assert_eq!(
+        diverged.reads,
+        BTreeSet::from([Origin::Static, parameter(0, &[]), parameter(1, &[])])
+    );
+    assert!(
+        infer(&package, "rejected", 2_000_000)
+            .unwrap_err()
+            .contains("stable local callable")
+    );
+    assert!(infer(&package, "mutual", 10).is_err());
+    assert!(infer(&package, "mutual", 2_000_000).is_ok());
 }
