@@ -7,6 +7,7 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         owner: OwnerId,
         args: &[Arg<'_>],
+        prefix: &[Term],
         expected: Option<&Term>,
         allow_optional: bool,
     ) -> Result<Option<n::Expr>, Error> {
@@ -22,15 +23,15 @@ impl Checker<'_, '_> {
         {
             return Ok(None);
         }
-        // Inherited inputs and value-dependent callable signatures still need
-        // a separate invocation plan before their callable type can be formed.
+        // Value-dependent callable signatures still need a separate invocation
+        // plan before their callable type can be formed.
         let parameters = self
             .type_parameters
             .get(&owner)
             .cloned()
             .unwrap_or_default();
         if parameters.is_empty()
-            || self.type_clause_params(owner).len() != parameters.len()
+            || self.type_clause_params(owner).len() + prefix.len() != parameters.len()
             || !args
                 .iter()
                 .all(|arg| matches!(arg, Arg::Positional(_) | Arg::Named(..) | Arg::Expand(_)))
@@ -41,13 +42,29 @@ impl Checker<'_, '_> {
         {
             return Ok(None);
         }
-        let domains = self.trait_domains(owner)?;
+        let declared_domains = self.trait_domains(owner)?;
+        let prefix_binders = self.input_binders(&parameters[..prefix.len()]);
+        let domains = declared_domains
+            .iter()
+            .map(|domain| {
+                domain
+                    .instantiate_parameters_in_scope(
+                        &prefix_binders,
+                        prefix,
+                        &self.call_input_frames(),
+                    )
+                    .map_err(|failure| error(expr.span, failure.to_string()))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
         if domains.iter().all(|domain| *domain == p(P::Type)) {
             return Ok(None);
         }
         let Some(signature) = self.known_callable_signature(owner) else {
             return Ok(None);
         };
+        let signature = signature
+            .instantiate_parameters_in_scope(&prefix_binders, prefix, &self.call_input_frames())
+            .map_err(|failure| error(expr.span, failure.to_string()))?;
         let value_parameters: Vec<_> = parameters
             .iter()
             .zip(&domains)
@@ -75,8 +92,15 @@ impl Checker<'_, '_> {
                 .filter(|clause| !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
                 .count();
             let mut statements = Vec::new();
-            let inputs =
-                self.prepared_nominal_inputs(owner, args, count, &mut statements, expr.span)?;
+            let inputs = self.prepared_clause_inputs_in_domains(
+                owner,
+                args,
+                count,
+                &mut statements,
+                expr.span,
+                &domains[prefix.len()..],
+                &parameters[prefix.len()..],
+            )?;
             let mut supplied = vec![None; clauses.len()];
             let mut positional = 0;
             for (name, value) in inputs {
@@ -92,17 +116,34 @@ impl Checker<'_, '_> {
             self.context = self.binder_context(owner);
             self.in_required_comptime = true;
             let mut operands = Vec::new();
-            let mut symbols = Vec::new();
-            for (slot, supplied) in supplied.into_iter().enumerate() {
+            let mut symbols = prefix.to_vec();
+            for (slot, term) in prefix.iter().enumerate() {
+                self.alias_substitution
+                    .insert(parameters[slot], std::sync::Arc::new(term.clone()));
+                self.alias_value_bindings.remove(&parameters[slot]);
+                self.normal_default_bindings.remove(&parameters[slot]);
+                operands.push(n::Expr {
+                    source: source(expr.span),
+                    ty: domains[slot].clone(),
+                    kind: if domains[slot] == p(P::Type) {
+                        K::TypeValue(term.clone())
+                    } else {
+                        K::ComptimeValue(term.clone())
+                    },
+                });
+            }
+            for (own_slot, supplied) in supplied.into_iter().enumerate() {
+                let slot = prefix.len() + own_slot;
                 let value = if let Some(value) = supplied {
                     value
                 } else {
-                    let hir::clause::ClauseParamKind::Optional(_, _, default) = clauses[slot].kind
+                    let hir::clause::ClauseParamKind::Optional(_, _, default) =
+                        clauses[own_slot].kind
                     else {
                         return Err(error(expr.span, "type argument count mismatch"));
                     };
                     if self.active_type_defaults.len() >= 64
-                        || !self.active_type_defaults.insert((owner, slot))
+                        || !self.active_type_defaults.insert((owner, own_slot))
                     {
                         return Err(error(expr.span, "cyclic or excessively deep type default"));
                     }
@@ -110,7 +151,7 @@ impl Checker<'_, '_> {
                         let domain = self.substituted_trait_domain(&domains[slot], expr.span)?;
                         self.expr(default, Some(&domain))
                     })();
-                    self.active_type_defaults.remove(&(owner, slot));
+                    self.active_type_defaults.remove(&(owner, own_slot));
                     self.bind_type_input(value?, &mut statements, expr.span)?
                 };
                 match &value.kind {

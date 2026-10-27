@@ -268,3 +268,68 @@ fn later_named_type_inputs_still_check_unused_function_bodies() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn nested_functions_freeze_lexical_and_local_clause_inputs_together() {
+    assert_eq!(
+        invoke(
+            "
+        comptime fn outer()->bool where inherited:bool {
+            comptime fn inner()->bool where local:bool {inherited and local}
+            var value=true;
+            let first=inner<value>;
+            value=false;
+            let second=inner<value>;
+            first() and not second()
+        }
+        comptime fn run()->bool {outer<true>() and not outer<false>()}
+    "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn nested_defaults_reuse_lexical_types_and_values() {
+    assert_eq!(
+        invoke(
+            "
+        comptime fn outer()->T where T,seed:T {
+            comptime fn inner()->T where .value:T=seed {value}
+            inner<>()
+        }
+        comptime fn run()->bool {outer<bool,true>() and not outer<bool,false>()}
+    "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn nested_invocations_reuse_the_current_lexical_instance() {
+    assert_eq!(
+        invoke(
+            "
+        comptime fn outer()->bool where inherited:bool {
+            comptime fn inner()->bool where value:bool,.last:bool=inherited {
+                if value {let next=false;inner<next>()} else {last}
+            }
+            let value=true;inner<value>()
+        }
+        comptime fn run()->bool {outer<true>() and not outer<false>()}
+    "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn inherited_clause_slots_cannot_be_supplied_by_the_caller() {
+    for inputs in ["true,true", ".inherited=false,true"] {
+        let source = format!(
+            "comptime fn outer()->bool where inherited:bool {{comptime fn inner()->bool where value:bool {{inherited and value}} inner<{inputs}>()}} comptime fn run()->bool {{outer<true>()}}"
+        );
+        let error = compile(&source).unwrap_err();
+        assert!(error.contains("argument"), "{inputs}: {error}");
+    }
+}

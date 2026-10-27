@@ -239,16 +239,37 @@ impl<'h> Checker<'_, 'h> {
         span: Span,
         domains: &[Term],
     ) -> Result<Vec<(Option<hir::common::Ident>, n::Expr)>, Error> {
+        let parameters = self.type_parameters[&owner].clone();
+        self.prepared_clause_inputs_in_domains(
+            owner,
+            args,
+            count,
+            statements,
+            span,
+            domains,
+            &parameters,
+        )
+    }
+
+    pub(super) fn prepared_clause_inputs_in_domains(
+        &mut self,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        count: usize,
+        statements: &mut Vec<n::Expr>,
+        span: Span,
+        domains: &[Term],
+        parameters: &[DeclarationId],
+    ) -> Result<Vec<(Option<hir::common::Ident>, n::Expr)>, Error> {
         if domains.iter().all(|domain| *domain == p(P::Type)) {
             return self.prepared_type_inputs(args, count, statements, span);
         }
         if let Some(expanded) = normal::literal_spreads(args) {
-            return self.prepared_nominal_inputs_in_domains(
-                owner, &expanded, count, statements, span, domains,
+            return self.prepared_clause_inputs_in_domains(
+                owner, &expanded, count, statements, span, domains, parameters,
             );
         }
         let clauses = self.type_clause_params(owner);
-        let parameters = self.type_parameters[&owner].clone();
         let mut positional = 0;
         let mut inputs = Vec::new();
         let mut known_binders = Vec::new();

@@ -5163,16 +5163,14 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(expr.span, "generic function has no HIR owner"))?;
         self.ensure_signature(owner, expr.span)?;
         let lexical = self.lexical_function_arguments(owner, expr.span)?;
-        if lexical.is_empty() {
-            if let Some(value) =
-                self.comptime_function_instance(expr, owner, args, None, allow_optional)?
-            {
-                return if allow_optional {
-                    Ok(value)
-                } else {
-                    self.callable_value_view(value, expected, expr.span)
-                };
-            }
+        if let Some(value) =
+            self.comptime_function_instance(expr, owner, args, &lexical, None, allow_optional)?
+        {
+            return if allow_optional {
+                Ok(value)
+            } else {
+                self.callable_value_view(value, expected, expr.span)
+            };
         }
         if allow_optional {
             if let Some(arguments) =

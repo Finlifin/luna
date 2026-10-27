@@ -5,6 +5,14 @@
 comptime fn select() -> bool where flag:bool { flag }
 comptime fn defaulted() -> bool where flag:bool, .inverse:bool=not flag { inverse }
 
+comptime fn inherited() -> bool where seed:bool {
+    comptime fn nested() -> bool where value:bool, .fallback:bool=seed {
+        value and fallback
+    }
+    let value = true;
+    nested<value>()
+}
+
 comptime fn configured() -> <|-bool> {
     var flag = true;
     let first = select<flag>;
@@ -12,7 +20,8 @@ comptime fn configured() -> <|-bool> {
     let second = select<flag>;
     let from_default = defaulted<flag>();
     let overridden = defaulted<flag, .inverse=flag>();
-    let result = first() and not second() and from_default and not overridden;
+    let result = first() and not second() and from_default and not overridden
+        and inherited<true>() and not inherited<false>();
     '(result)
 }
 

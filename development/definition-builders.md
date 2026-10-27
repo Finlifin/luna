@@ -151,8 +151,17 @@ parameter order. Returning while preparing any input skips later inputs,
 defaults and the call. Completed Type clauses trigger a final domain check even
 when a named Type input follows its value input or the caller is never invoked.
 
-The route still excludes inherited lexical inputs and optional ordinary
-parameters. Callable signatures and clause domains cannot depend on value-clause
+Inherited lexical clause inputs are fixed by the enclosing instance and placed
+before the local function's own inputs in the invocation packet. Explicit
+argument routing uses only the local declaration's parameter identities and
+domains, so a caller cannot supply or override inherited slots. Defaults can
+reference inherited Types and values. Recursive local calls retain the current
+outer instance, while different outer instances produce independent snapshots.
+This uses the existing lexical staged-input representation; it does not add an
+invocation environment for capturing ordinary comptime function parameters.
+
+The route still excludes optional ordinary parameters. Callable signatures and
+clause domains cannot depend on value-clause
 binders. Open functions, quoted bodies and more general dependent signatures
 retain their existing elaboration paths; this stage does not claim their dynamic
 local-value support is complete.
@@ -189,6 +198,17 @@ input. The expanded native example passed O0/O3 using the same host command abov
 an undeclared Type alias and an omitted function return type; both were corrected
 before the final run. Final workspace formatting check passed at
 `/tmp/luna-tools-zh7a833z/result.json`.
+
+Inherited clause validation in `/home/fin/luna` with the same three-suite command
+passed 572 tests (20 + 527 + 25), `/tmp/luna-tools-ln3a8ctw/result.json`.
+New cases exercise fixed outer values, inherited Type/value defaults, recursive
+local instantiation and rejection of attempts to supply inherited slots.
+After aligning the default-cycle key with the local clause slot, the final
+`comptime_clause_inputs` suite passed all 20 tests again
+(`/tmp/luna-tools-b9azgx5m/result.json`). The expanded native example passed
+at O0/O3 (`/tmp/luna-host-examples-b3uvnywp/summary.json`), and workspace
+formatting passed (`/tmp/luna-tools-l07eqbqk/result.json`). Commands use the same
+check, host example and formatting entrypoints described above; all exited 0.
 
 ### Schema Type evidence
 
