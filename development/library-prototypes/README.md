@@ -19,3 +19,9 @@ String/formatting dependencies so the real builtin package can load. This is
 that boundary, not completion of stage E: allocation, containers, formatting,
 I/O and owned strings remain required development work. Do not reintroduce
 placeholder bodies or aliases merely to make the names resolve.
+
+`builtin/text_iteration.fl` is a new executable algorithm prototype, not a
+historical shipped interface. Its tests demonstrate byte order and loop control
+in unchecked interpretation and retain the checked-execution rejection. It
+requires [text-view provenance](../text-view-provenance.md) before public export;
+adding Copy alone cannot discharge that dependency.
