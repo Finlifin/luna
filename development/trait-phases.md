@@ -176,8 +176,9 @@ for those locals. Explicit arguments still precede default evaluation.
   when equality cannot be established.
 - Extend VM-facing builders beyond their current nominal descriptors and
   finish remaining protocol consumers. Builtin Eq now supplies primitive
-  comptime comparisons alongside runtime comparisons. Hash declares both
-  operations but still needs concrete library implementations and derivation.
+  comptime comparisons alongside runtime comparisons. Hash supplies Bool and
+  fixed-width integer implementations in both phases; target-sized integers,
+  other scalar/aggregate domains and derivation remain unfinished.
 - Extend dynamic trait clauses beyond fixed callable signatures and known
   Self/interface inputs. Completed IIR instances currently reject unevaluated
   packets explicitly; source comptime invocation retains origin, specialized
@@ -491,3 +492,29 @@ Validation in `/home/fin/luna`, all commands use
 
 `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
 passed (`/tmp/luna-tools-y0o__o5n/result.json`, exit 0); `git diff --check` passed.
+
+Builtin Hash now implements both phases for Bool and the ten fixed-width integer
+types. Bool maps to 0/1; integer representations up to 64 bits widen with zero
+extension, including the representation bits of signed values. A 128-bit value
+xors its two 64-bit halves using BitVec operations. These are deterministic
+non-cryptographic scalar hashes; different values may collide and still require
+Eq. The implementation does not introduce implicit numeric casts, depend on
+LLVM-only math intrinsics during comptime execution, or truncate away the high
+half of a wide integer.
+
+In `/home/fin/luna`, `python3 -B development/check.py --timeout 900 -- test
+--release -p luna -p elaboration -p comptime_interpretor --test library_hash
+--test library_comptime_comparison` passed six tests
+(`/tmp/luna-tools-2vg4ouxw/result.json`, exit 0). Hash cases execute fourteen
+scalar boundary inputs in both phases, including signed minima and 128-bit high
+halves. A deliberate collision is rejected by Eq, and LLVM O0/O3 native tests
+verify representative hashes. The shipped-file CLI regression also passed with
+`--test frontend_cli shipped_clone_protocol_preserves_noncopy_sources`
+(`/tmp/luna-tools-nh4x4v8j/result.json`, exit 0). Initial tests exposed that Bool
+has no supported bit view (now mapped explicitly) and assumes cannot contain
+ordinary calls (the test binds results before its predicates).
+
+Formatting check passed via `python3 -B development/command.py --timeout 120 --
+cargo fmt --all -- --check` (`/tmp/luna-tools-ex7mg0ab/result.json`, exit 0).
+`git diff --check` passed. Target-sized integers, characters, symbols, compound
+keys and derivation are not covered by these new Hash implementations.

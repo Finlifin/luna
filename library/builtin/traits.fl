@@ -32,6 +32,134 @@ pub trait Hash {
     comptime fn comptime_hash(self) -> u64;
 }
 
+{-
+    Scalar hashes preserve all representation bits up to 64 bits. Wider
+    integers fold both 64-bit halves with xor. Equal values must hash equally;
+    collisions are resolved with Eq. These are not cryptographic hashes.
+-}
+impl Hash for bool {
+    fn hash(self) -> u64 {
+        if self { 1 } else { 0 }
+    }
+}
+impl Hash for .u8'builtin {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for .u16'builtin {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for .u32'builtin {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for .u64'builtin {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for .i8'builtin {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for .i16'builtin {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for .i32'builtin {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for .i64'builtin {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for .u128'builtin {
+    fn hash(self) -> u64 {
+        let bits = self'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+impl Hash for .i128'builtin {
+    fn hash(self) -> u64 {
+        let bits = self'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+comptime impl Hash for bool {
+    comptime fn comptime_hash(self) -> u64 {
+        if self { 1 } else { 0 }
+    }
+}
+comptime impl Hash for .u8'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+comptime impl Hash for .u16'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+comptime impl Hash for .u32'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+comptime impl Hash for .u64'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+comptime impl Hash for .i8'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+comptime impl Hash for .i16'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+comptime impl Hash for .i32'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+comptime impl Hash for .i64'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+comptime impl Hash for .u128'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        let bits = self'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+comptime impl Hash for .i128'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        let bits = self'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+
 -- ── Conversion ─────────────────────────────────────────────────────────────
 
 pub use conversion.{Into, From};
