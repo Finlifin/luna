@@ -7,7 +7,9 @@ use hir::{Expr, ExprKind as E, HirArena, HirId, ItemKind, OwnerId, Package};
 use std::collections::{BTreeSet, HashMap};
 mod generation_attributes;
 mod generation_inputs;
-pub(super) use generation_inputs::{GenerationBinding, input_draft, input_group, value_draft};
+pub(super) use generation_inputs::{
+    GenerationBinding, execution_draft, input_draft, input_group, subject_draft, value_draft,
+};
 mod member_clone;
 pub(super) use generation_attributes::relocate as relocate_generation_attributes;
 mod patterns;
@@ -84,6 +86,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             member_owner: None,
             captures: HashMap::new(),
             capture_uses: BTreeSet::new(),
+            self_type: None,
         };
         let mut sig = formal.clone();
         let params = formal
@@ -172,6 +175,7 @@ struct Rebind<'s, 'h> {
     member_owner: Option<OwnerId>,
     captures: HashMap<HirId, InputCapture>,
     capture_uses: BTreeSet<hir::common::DefId>,
+    self_type: Option<&'h Expr<'h>>,
 }
 impl<'h> Rebind<'_, 'h> {
     fn charge(&mut self, span: rustc_span::Span, depth: usize) -> Result<(), Error> {
@@ -321,6 +325,11 @@ impl<'h> Rebind<'_, 'h> {
                     expr.span,
                     "generated member capture requires an explicit substitution",
                 ));
+            }
+        }
+        if matches!(expr.kind, E::TySelf) {
+            if let Some(subject) = self.self_type {
+                return self.expr(subject, depth);
             }
         }
         let kind = match &expr.kind {
@@ -702,6 +711,7 @@ pub(super) fn implementation_draft<'h>(
         member_owner: Some(request_owner),
         captures: captures.clone(),
         capture_uses: BTreeSet::new(),
+        self_type: None,
     };
     let result = (|| {
         let clause_params = rebind.clauses(request.clause_params)?;

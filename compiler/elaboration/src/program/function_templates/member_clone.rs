@@ -88,6 +88,7 @@ pub(in crate::program) fn clone_member_with_inputs<'h>(
         member_owner: Some(member),
         captures: captures.clone(),
         capture_uses: BTreeSet::new(),
+        self_type: None,
     };
     let result = (|| {
         rebind.charge(item.span, 0)?;

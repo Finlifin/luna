@@ -103,6 +103,21 @@ derive FormatLabel<.text>.use(label_from_text("record")) for Record;
 
 这里的字符串在派生时交付给策略。生成方法使用编译时值时，仍遵循普通的跨阶段 Splice 规则；策略输入不会赋予绕过转换协议的权限。
 
+可选命名输入遵循普通调用规则：未提供时在本次派生中计算缺省值；显式提供时不执行该缺省计算。前面的输入可以参与后面输入的缺省表达式。
+
+~~~flurry
+derive fn label_with_default(.text: str = "record") for FormatLabel<.text> {
+    fn label(*self) -> str { text }
+}
+
+struct DefaultRecord {}
+struct CustomRecord {}
+derive FormatLabel<.text>.use(label_with_default()) for DefaultRecord;
+derive FormatLabel<.text>.use(label_with_default(.text = "custom")) for CustomRecord;
+~~~
+
+实参的求值顺序不因命名输入与声明顺序不同而改变。重复供参、未知参数名以及输入类型错误仍按普通调用规则诊断。
+
 选择另一个策略不会制造第二层方法身份：
 
 ~~~flurry

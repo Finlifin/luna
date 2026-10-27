@@ -787,3 +787,50 @@ git diff --check
   successful requests, executed failure branches for failed patterns and guards,
   and ordinary diagnostics for missing/non-diverging fallback and initialization.
 - Formatting: `/tmp/luna-tools-8ob3op0g/result.json`; diff check passed.
+
+## Ordinary calls for generation inputs
+
+Each closed generation request now has a private comptime execution function and
+a cached invocation constant. The function retains parameter declarations,
+including optional defaults; the invocation retains the original argument list.
+Ordinary argument routing, contextual typing and default evaluation therefore
+handle named supply and omission without reordering actual expressions into
+parameter order in a separate strategy matcher.
+
+Every input of the private execution function receives a fresh staged identity.
+This preserves the previous generation-block guarantee that earlier Type inputs
+can determine later input types. It does not turn source derivers into callable
+functions. Generated members still capture demanded completed values, with
+ordinary Splice and materialization restrictions.
+
+The implementation caches its Self type in a private constant. The execution
+function substitutes references to that constant, rather than re-evaluating the
+source subject expression. It is not an extra trait method and does not alter
+method membership or implementation overlap. Existing IR nodes and their
+S-expression displays represent the private function, call and constants.
+
+Checks in `/home/fin/luna` (final commands all exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test default_calls
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib member_clone
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Derive suite: 58 passed, `/tmp/luna-tools-da4clnuf/result.json`. New cases
+  cover dependent defaults, named overrides, reverse named supply, skipped and
+  executed divergent defaults, per-subject Self defaults, explicit staged input
+  identities and ordinary duplicate/name/count/type rejection.
+- Default-call suite: 43 passed, `/tmp/luna-tools-v91zfvec/result.json`.
+- Member-clone suite: 9 passed, `/tmp/luna-tools-5lb6awfv/result.json`.
+- Formatting: `/tmp/luna-tools-cqs417jg/result.json`; diff check passed.
+- Initial build needed an iterator type correction. The first executing suite
+  exposed lost comptime identity for dependent Type inputs and one obsolete
+  strategy-specific count diagnostic assertion. Fresh staged input identities
+  fixed the implementation regression; the diagnostic now follows ordinary
+  call routing while retaining derivation source notes.
+- Closed explicit calls only: variadic/specialized parameter protocols, generic
+  strategy environments, default strategy selection and conditional member
+  emission remain outside this change. No compilation speedup is claimed.

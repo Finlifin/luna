@@ -33,6 +33,7 @@ pub(in crate::program) fn relocate<'h>(
         member_owner: Some(OwnerId::INVALID),
         captures: captures.clone(),
         capture_uses: BTreeSet::new(),
+        self_type: None,
     };
     let result = (|| {
         for (member, _) in members {

@@ -136,6 +136,7 @@ fn remaps_generated_definition_references_without_rewriting_external_ones() {
         definitions: HashMap::from([(old, new)]),
         captures: HashMap::new(),
         capture_uses: BTreeSet::new(),
+        self_type: None,
         member_owner: Some(owner),
     };
     for (input, expected) in [(old, new), (external, external)] {

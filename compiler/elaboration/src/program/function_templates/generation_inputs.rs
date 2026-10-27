@@ -38,12 +38,14 @@ fn finish<'h>(
     }
 }
 
-pub(in crate::program) fn input_group<'h>(
+pub(in crate::program) fn execution_draft<'h>(
     source: &Package<'h>,
     arena: &'h HirArena,
     owner: OwnerId,
-    arguments: &[Arg<'h>],
+    strategy: OwnerId,
+    subject: &'h Expr<'h>,
     parameters: &[FnParam<'h>],
+    input_stages: &HashMap<HirId, DefId>,
     locals: &[GenerationBinding<'h>],
     computations: &[&'h Expr<'h>],
     exported: &BTreeSet<usize>,
@@ -64,73 +66,42 @@ pub(in crate::program) fn input_group<'h>(
         definitions: definitions.clone(),
         captures: HashMap::new(),
         capture_uses: BTreeSet::new(),
-        member_owner: Some(OwnerId::INVALID),
+        self_type: Some(subject),
+        member_owner: Some(strategy),
     };
     let result = (|| {
         rebind.charge(span, 0)?;
         let mut entries = Vec::new();
         let mut statements = Vec::new();
-        for (index, (argument, parameter)) in arguments.iter().zip(parameters).enumerate() {
-            let Arg::Positional(value) = argument else {
-                return Err(error(
-                    span,
-                    "strategy input requires positional argument matching",
-                ));
-            };
-            let value = rebind.expr(value, 0)?;
-            let T::Positional(parameter_type) = parameter.ty.kind else {
-                return Err(error(
-                    parameter.span,
-                    "strategy input requires positional parameter matching",
-                ));
-            };
-            let parameter_type = rebind.expr(parameter_type, 0)?;
-            rebind.budget = rebind
-                .budget
-                .checked_sub(6)
-                .ok_or_else(|| error(span, "strategy input binding budget exhausted"))?;
-            let base = u32::try_from(index)
-                .ok()
-                .and_then(|i| i.checked_mul(4))
-                .and_then(|i| i.checked_add(10))
-                .ok_or_else(|| error(span, "strategy input local identity overflow"))?;
-            let binding = synthetic(&mut rebind, base);
-            let declaration = synthetic(&mut rebind, base + 1);
-            let statement = synthetic(&mut rebind, base + 2);
-            let reference = synthetic(&mut rebind, base + 3);
-            let name = Ident::new(hir::Symbol::intern(&format!("$input_{index}")), value.span);
-            let declaration = arena.alloc_let_decl(hir::LetDecl {
-                hir_id: declaration,
-                mutable: false,
-                comptime: true,
-                pattern: hir::Pattern {
-                    hir_id: binding,
-                    span: value.span,
-                    kind: hir::PatternKind::Binding(hir::common::BindingMode::ByValue, name, None),
-                },
-                guard: None,
-                otherwise: None,
-                ty: Some(parameter_type),
-                init: Some(value),
-                span: value.span,
-            });
-            statements.push(Expr {
-                hir_id: statement,
-                span: value.span,
-                kind: E::Let(declaration),
-            });
-            rebind
-                .captures
-                .insert(parameter.hir_id, InputCapture::Local(binding));
+        let mut cloned_parameters = Vec::new();
+        let mut staged_parameters = Vec::new();
+        for (index, parameter) in parameters.iter().enumerate() {
+            rebind.charge(parameter.span, 0)?;
+            let mut cloned = parameter.clone();
+            cloned.hir_id = rebind.id(parameter.hir_id);
+            cloned.ty = rebind.ty(&parameter.ty, 0)?;
+            cloned.ty.flags |= hir::common::TPARAM_COMPTIME;
+            let identity = input_stages
+                .get(&parameter.hir_id)
+                .copied()
+                .ok_or_else(|| {
+                    error(
+                        parameter.span,
+                        "strategy input has no fresh staged identity",
+                    )
+                })?;
+            staged_parameters.push((cloned.hir_id, identity));
+            let reference = synthetic(&mut rebind, 10 + index as u32);
             let value = arena.alloc_expr(Expr {
                 hir_id: reference,
-                span: value.span,
+                span: parameter.span,
                 kind: if exported.contains(&index) {
-                    E::ResolvedLocal(name.name, binding)
+                    E::ResolvedFnParam(parameter.name.name, cloned.hir_id)
                 } else {
                     E::Unit
                 },
             });
+            cloned_parameters.push(cloned);
             entries.push(hir::expr::ObjectEntry::Property(hir::expr::FieldExpr {
                 ident: Ident::new(hir::Symbol::intern(&format!("input_{index}")), value.span),
                 expr: value,
@@ -146,8 +117,7 @@ pub(in crate::program) fn input_group<'h>(
             let index = parameters.len() + offset;
             let synthetic_index = u32::try_from(index)
                 .ok()
-                .and_then(|i| i.checked_mul(4))
-                .and_then(|i| i.checked_add(13))
+                .and_then(|i| i.checked_add(10))
                 .ok_or_else(|| error(original.span, "strategy local identity overflow"))?;
             let reference = synthetic(&mut rebind, synthetic_index);
             rebind.charge(original.span, 0)?;
@@ -194,10 +164,102 @@ pub(in crate::program) fn input_group<'h>(
             span,
             kind: E::Block(block),
         });
-        Ok((ty as &_, value as &_, rebind.resolution()?))
+        Ok((
+            ty as &_,
+            value as &_,
+            rebind.resolution()?,
+            cloned_parameters,
+            staged_parameters,
+        ))
     })();
     *fuel = rebind.budget;
-    let (ty, value, resolution) = result?;
+    let (ty, value, resolution, parameters, staged_parameters) = result?;
+    let body_id = hir::BodyId::new(synthetic(&mut rebind, 4));
+    let parameters = arena.alloc_fn_param_slice(parameters);
+    let mut draft = finish(rebind, "$derive_execute", span, ty, value, resolution);
+    draft.item.kind = ItemKind::Fn(
+        hir::item::FnSig {
+            params: parameters,
+            return_ty: Some(ty),
+            return_bind: None,
+            return_binding: None,
+            modifiers: hir::item::FnModifiers {
+                is_comptime: true,
+                ..Default::default()
+            },
+            clause_params: &[],
+            clause_constraints: &[],
+            span,
+        },
+        body_id,
+    );
+    draft.bodies.push((
+        body_id,
+        hir::Body {
+            params: arena
+                .alloc_param_slice(parameters.iter().map(hir::body::BodyParam::from_fn_param)),
+            value,
+        },
+    ));
+    for parameter in parameters {
+        let parameter = arena.alloc_param(hir::body::BodyParam::from_fn_param(parameter));
+        draft.nodes.insert(
+            parameter.hir_id.local_id,
+            hir::ItemLocalId::new(0),
+            hir::Node::Param(parameter),
+        );
+    }
+    draft.staged_parameters = staged_parameters;
+    Ok(draft)
+}
+
+pub(in crate::program) fn input_group<'h>(
+    source: &Package<'h>,
+    arena: &'h HirArena,
+    owner: OwnerId,
+    execution: DefId,
+    arguments: &[Arg<'h>],
+    span: rustc_span::Span,
+    fuel: &mut usize,
+) -> Result<ClonedMember<'h>, Error> {
+    let mut rebind = Rebind {
+        source,
+        arena,
+        namespace: owner,
+        bindings: HashMap::new(),
+        budget: *fuel,
+        bodies: Vec::new(),
+        definitions: HashMap::new(),
+        captures: HashMap::new(),
+        capture_uses: BTreeSet::new(),
+        self_type: None,
+        member_owner: Some(OwnerId::INVALID),
+    };
+    let head = arena.alloc_expr(Expr {
+        hir_id: HirId::new(OwnerId::INVALID, hir::ItemLocalId::new(0)),
+        span,
+        kind: E::ResolvedDef {
+            name: hir::Symbol::intern("$derive_execute"),
+            def_id: execution,
+            has_clause_param: false,
+        },
+    });
+    let call = arena.alloc_expr(Expr {
+        hir_id: HirId::new(OwnerId::INVALID, hir::ItemLocalId::new(1)),
+        span,
+        kind: E::Application(head, arena.alloc_arg_slice(arguments.to_vec())),
+    });
+    let result = rebind.expr(call, 0);
+    *fuel = rebind.budget;
+    let value = result?;
+    let ty_id = synthetic(&mut rebind, 2);
+    let ty = arena.alloc_expr(Expr {
+        hir_id: ty_id,
+        span,
+        kind: E::Builtin(hir::Symbol::intern("Object")),
+    });
+    let resolution = rebind.resolution()?;
+    *fuel = rebind.budget;
     Ok(finish(
         rebind,
         "$derive_inputs",
@@ -219,11 +281,14 @@ pub(in crate::program) fn input_draft<'h>(
     captures: &HashMap<HirId, InputCapture>,
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
-    let T::Positional(ty) = parameter.ty.kind else {
-        return Err(error(
-            parameter.span,
-            "strategy input requires positional parameter matching",
-        ));
+    let ty = match parameter.ty.kind {
+        T::Positional(ty) | T::Optional(_, ty, _) => ty,
+        _ => {
+            return Err(error(
+                parameter.span,
+                "unsupported strategy parameter shape",
+            ));
+        }
     };
     value_draft(
         source,
@@ -264,6 +329,7 @@ pub(in crate::program) fn value_draft<'h>(
         definitions: definitions.clone(),
         captures: captures.clone(),
         capture_uses: BTreeSet::new(),
+        self_type: None,
         member_owner: Some(OwnerId::INVALID),
     };
     let result = (|| {
@@ -307,4 +373,41 @@ pub(in crate::program) fn value_draft<'h>(
         value,
         resolution,
     ))
+}
+
+/// Cache the implementation's subject identity instead of re-evaluating its expression.
+pub(in crate::program) fn subject_draft<'h>(
+    arena: &'h HirArena,
+    owner: OwnerId,
+    span: rustc_span::Span,
+    fuel: &mut usize,
+) -> Result<ClonedMember<'h>, Error> {
+    *fuel = fuel
+        .checked_sub(3)
+        .ok_or_else(|| error(span, "strategy subject capture budget exhausted"))?;
+    let ty = arena.alloc_expr(Expr {
+        hir_id: HirId::new(owner, hir::ItemLocalId::new(1)),
+        span,
+        kind: E::TyType,
+    });
+    let value = arena.alloc_expr(Expr {
+        hir_id: HirId::new(owner, hir::ItemLocalId::new(2)),
+        span,
+        kind: E::TySelf,
+    });
+    Ok(ClonedMember {
+        item: hir::Item {
+            owner_id: owner,
+            ident: Ident::new(hir::Symbol::intern("$derive_subject"), span),
+            span,
+            kind: ItemKind::Const(ty, value),
+        },
+        bodies: Vec::new(),
+        bindings: HashMap::new(),
+        nodes: hir::OwnerNodes::new(),
+        attributes: Vec::new(),
+        staged_parameters: Vec::new(),
+        resolution: Vec::new(),
+        capture_uses: BTreeSet::new(),
+    })
 }

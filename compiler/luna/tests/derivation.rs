@@ -58,7 +58,9 @@ fn non_strategy_selections_and_generation_statements_are_not_silently_accepted()
     ] {
         let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
         assert!(
-            error.contains("strategy") || error.contains("derivation expansion"),
+            error.contains("strategy")
+                || error.contains("derivation expansion")
+                || error.contains("argument count mismatch"),
             "{error}"
         );
     }
@@ -307,10 +309,7 @@ fn generated_member_errors_preserve_strategy_and_all_use_sites() {
 fn expansion_failures_report_sources_but_unrelated_errors_do_not() {
     let invalid = "trait Flag {} derive fn invalid(value:bool) for Flag {} struct Subject {} derive Flag.use(invalid) for Subject;";
     let error = support::compile_with_protocols(invalid, &Default::default()).unwrap_err();
-    assert!(
-        error.contains("derivation strategy input count mismatch"),
-        "{error}"
-    );
+    assert!(error.contains("argument count mismatch"), "{error}");
     assert!(
         error.contains("derivation strategy `invalid` defined here"),
         "{error}"
@@ -446,16 +445,22 @@ fn strategy_inputs_participate_in_complete_interface_matching() {
 
 #[test]
 fn strategy_input_call_shapes_are_not_silently_discarded() {
-    for source in [
-        "trait Flag {} derive fn configured(value:bool) for Flag {} struct Subject {} derive Flag.use(configured(true,false)) for Subject;",
-        "trait Flag {} derive fn configured(value:bool) for Flag {} struct Subject {} derive Flag.use(configured(.value=true)) for Subject;",
-        "trait Flag {} derive fn configured(lambda value:fn()->bool) for Flag {} struct Subject {} derive Flag.use(configured(||true)) for Subject;",
+    for (source, expected) in [
+        (
+            "trait Flag {} derive fn configured(value:bool) for Flag {} struct Subject {} derive Flag.use(configured(true,false)) for Subject;",
+            "argument count mismatch",
+        ),
+        (
+            "trait Flag {} derive fn configured(value:bool) for Flag {} struct Subject {} derive Flag.use(configured(.value=true)) for Subject;",
+            "no named parameter entry",
+        ),
+        (
+            "trait Flag {} derive fn configured(lambda value:fn()->bool) for Flag {} struct Subject {} derive Flag.use(configured(||true)) for Subject;",
+            "specialized strategy parameter matching",
+        ),
     ] {
         let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
-        assert!(
-            error.contains("strategy input") || error.contains("strategy parameter"),
-            "{error}"
-        );
+        assert!(error.contains(expected), "{error}");
         assert!(!error.contains("parsing failed"), "{error}");
     }
 }
@@ -721,4 +726,109 @@ fn strategy_binding_failures_use_ordinary_declaration_checks() {
         let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
         assert!(error.contains(expected), "{error}");
     }
+}
+
+#[test]
+fn strategy_optional_inputs_use_dependent_defaults_and_named_overrides() {
+    let package = compile_with_strategy_bool_splice(
+        r#"
+        trait Flag {fn flag()->bool;}
+        derive fn configured(seed:bool,.value:bool=not seed) for Flag {
+            fn flag()->bool {value}
+        }
+        struct First {}
+        struct Second {}
+        derive Flag.use(configured(false)) for First;
+        derive Flag.use(configured(false,.value=false)) for Second;
+        fn run()->bool {First.as(Flag).flag() and not Second.as(Flag).flag()}
+        "#,
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn supplied_strategy_inputs_skip_default_invocation() {
+    let package = compile_with_strategy_bool_splice(
+        r#"
+        trait Flag {fn flag()->bool;}
+        comptime fn stuck()->bool {while true {}}
+        derive fn configured(.left:bool=stuck(),.right:bool=left) for Flag {
+            fn flag()->bool {left and not right}
+        }
+        struct Subject {}
+        derive Flag.use(configured(.right=false,.left=true)) for Subject;
+        fn run()->bool {Subject.as(Flag).flag()}
+        "#,
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn optional_only_strategy_defaults_preserve_the_subject_type() {
+    let package = support::compile(
+        r#"
+        typealias Type=.Type'builtin;
+        trait Source {assoc Item:Type;fn make()->Item;}
+        derive fn configured(.T:Type=Self) for Source {
+            assoc Item:Type=T;
+            fn make()->Item {Self {}}
+        }
+        struct Subject {}
+        struct Other {}
+        derive Source.use(configured()) for Subject;
+        derive Source.use(configured()) for Other;
+        fn run()->bool {
+            let first:Subject=Subject.as(Source).make();
+            let second:Other=Other.as(Source).make();
+            true
+        }
+        "#,
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn strategy_optional_input_errors_follow_ordinary_call_rules() {
+    for (call, expected) in [
+        (
+            "configured(.value=true,.value=false)",
+            "parameter supplied more than once",
+        ),
+        ("configured(.missing=true)", "no named parameter entry"),
+        ("configured(true)", "argument count mismatch"),
+        ("configured(.value=())", "type mismatch"),
+    ] {
+        let source = format!(
+            "trait Flag {{}} derive fn configured(.value:bool=true) for Flag {{}} struct Subject {{}} derive Flag.use({call}) for Subject;"
+        );
+        let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn explicit_staged_strategy_inputs_keep_fresh_parameter_identities() {
+    let package = compile_with_strategy_bool_splice(
+        "trait Flag {fn flag()->bool;} derive fn configured(comptime value:bool) for Flag {fn flag()->bool {value}} struct First {} struct Second {} derive Flag.use(configured(true)) for First; derive Flag.use(configured(false)) for Second; fn run()->bool {First.as(Flag).flag() and not Second.as(Flag).flag()}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn omitted_strategy_defaults_execute_even_when_the_input_is_unused() {
+    let source = "trait Flag {} comptime fn stuck()->bool {while true {}} derive fn configured(.value:bool=stuck()) for Flag {} struct Subject {} derive Flag.use(configured()) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("step budget exhausted"), "{error}");
 }

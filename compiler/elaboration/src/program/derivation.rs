@@ -136,13 +136,7 @@ pub(super) fn expand<'h>(
             let ItemKind::Deriver(generator) = &source.item(strategy).unwrap().kind else {
                 unreachable!()
             };
-            if arguments.len() != generator.parameters.len() {
-                return Err(error(
-                    selection.span,
-                    "derivation strategy input count mismatch",
-                ));
-            }
-            if (!arguments.is_empty() || !strategies[&strategy].computations.is_empty())
+            if (!generator.parameters.is_empty() || !strategies[&strategy].computations.is_empty())
                 && !request.clause_params.is_empty()
             {
                 return Err(unsupported(
@@ -150,7 +144,7 @@ pub(super) fn expand<'h>(
                     "strategy inputs in generic request environments",
                 ));
             }
-            for (argument, parameter) in arguments.iter().zip(generator.parameters) {
+            for parameter in generator.parameters {
                 charge(fuel, parameter.span)?;
                 if parameter.ty.flags & !hir::common::TPARAM_COMPTIME != 0 {
                     return Err(unsupported(
@@ -158,15 +152,26 @@ pub(super) fn expand<'h>(
                         "specialized strategy parameter matching",
                     ));
                 }
-                if !matches!(argument, hir::common::Arg::Positional(_))
-                    || !matches!(parameter.ty.kind, hir::common::TyParamKind::Positional(_))
-                {
+                if !matches!(
+                    parameter.ty.kind,
+                    hir::common::TyParamKind::Positional(_)
+                        | hir::common::TyParamKind::Optional(..)
+                ) {
                     return Err(unsupported(
-                        selection.span,
-                        "named, default or variadic strategy input matching",
+                        parameter.span,
+                        "variadic strategy parameter matching",
                     ));
                 }
             }
+            *fuel = fuel
+                .checked_sub(arguments.len().saturating_add(generator.parameters.len()))
+                .ok_or_else(|| error(selection.span, "strategy input routing budget exhausted"))?;
+            super::arguments::route_arguments(
+                arguments,
+                Some(generator.parameters),
+                generator.parameters.len(),
+                selection.span,
+            )?;
             selected.insert(strategy);
             omitted.insert(owner);
             requests.push((owner, request, strategy, arguments));
@@ -248,9 +253,10 @@ pub(super) fn expand<'h>(
         let mut captures = HashMap::new();
         let mut capture_slots = HashMap::new();
         let mut inputs = Vec::new();
+        let mut input_stages = HashMap::new();
         let local_bindings = &strategies[&strategy].locals;
         let computations = &strategies[&strategy].computations;
-        let group = if arguments.is_empty() && computations.is_empty() {
+        let group = if generator.parameters.is_empty() && computations.is_empty() {
             None
         } else {
             let owner = batch.reserve().map_err(|e| error(span, e.to_string()))?;
@@ -259,12 +265,39 @@ pub(super) fn expand<'h>(
                 .map_err(|e| error(span, e.to_string()))?;
             Some((owner, identity))
         };
+        let execution = if group.is_some() {
+            Some((
+                batch.reserve().map_err(|e| error(span, e.to_string()))?,
+                batch
+                    .reserve_identity(pkg, fuel)
+                    .map_err(|e| error(span, e.to_string()))?,
+            ))
+        } else {
+            None
+        };
+        let subject_capture = if group.is_some() {
+            Some((
+                batch.reserve().map_err(|e| error(span, e.to_string()))?,
+                batch
+                    .reserve_identity(pkg, fuel)
+                    .map_err(|e| error(span, e.to_string()))?,
+            ))
+        } else {
+            None
+        };
         for parameter in generator.parameters {
             charge(fuel, parameter.span)?;
             let owner = batch.reserve().map_err(|e| error(span, e.to_string()))?;
             let identity = batch
                 .reserve_identity(pkg, fuel)
                 .map_err(|e| error(span, e.to_string()))?;
+            let stage = batch
+                .reserve_identity(pkg, fuel)
+                .map_err(|e| error(span, e.to_string()))?;
+            input_stages.insert(parameter.hir_id, stage);
+            if let Some(old) = source.staged_parameter_definitions.get(&parameter.hir_id) {
+                mapping.insert(*old, stage);
+            }
             captures.insert(
                 parameter.hir_id,
                 function_templates::InputCapture::Definition(identity),
@@ -334,6 +367,7 @@ pub(super) fn expand<'h>(
             group
                 .iter()
                 .map(|(owner, _)| *owner)
+                .chain(subject_capture.iter().map(|(owner, _)| *owner))
                 .chain(inputs.iter().map(|(_, owner, _)| *owner))
                 .chain(locals.iter().map(|(_, owner, _)| *owner))
                 .chain(owners.iter().map(|(_, owner, _)| *owner))
@@ -386,17 +420,46 @@ pub(super) fn expand<'h>(
         )?;
         let exported = captures::retain_used(&mut drafts, &capture_slots, arena, fuel)?;
         if let Some((owner, identity)) = group {
+            let (execution_owner, execution_identity) = execution.unwrap();
+            let (subject_owner, subject_identity) = subject_capture.unwrap();
+            drafts.push((
+                function_templates::subject_draft(arena, subject_owner, span, fuel)?,
+                subject_identity,
+            ));
+            let subject = arena.alloc_expr(hir::Expr {
+                hir_id: hir::HirId::new(subject_owner, hir::ItemLocalId::new(3)),
+                span,
+                kind: E::ResolvedDef {
+                    name: hir::Symbol::intern("$derive_subject"),
+                    def_id: subject_identity,
+                    has_clause_param: false,
+                },
+            });
+            drafts.push((
+                function_templates::execution_draft(
+                    source,
+                    arena,
+                    execution_owner,
+                    strategy,
+                    subject,
+                    generator.parameters,
+                    &input_stages,
+                    local_bindings,
+                    computations,
+                    &exported,
+                    &mapping,
+                    span,
+                    fuel,
+                )?,
+                execution_identity,
+            ));
             drafts.push((
                 function_templates::input_group(
                     source,
                     arena,
                     owner,
+                    execution_identity,
                     arguments,
-                    generator.parameters,
-                    local_bindings,
-                    computations,
-                    &exported,
-                    &mapping,
                     span,
                     fuel,
                 )?,
