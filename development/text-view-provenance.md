@@ -453,3 +453,18 @@ The existing inferred-error regression group passed sixteen tests
 (`/tmp/luna-tools-lg74csqc/result.json`, exit 0), including nested product
 conversion and retained Tuple heads. Formatting passed
 (`/tmp/luna-tools-_6bm5tmh/result.json`, exit 0), as did the diff check.
+
+## Source propagation integration
+
+Source `?` and `!` already lower to the matching and return forms handled by this
+analysis; they need no separate text transfer rule. The integration test checks
+optional presence, distinct error/success text payloads, widening on an early
+error return, and a text comparison after successful propagation. The later read
+depends on the success payload and its other operand, while the error return
+retains the input error payload's origin.
+
+From `/home/fin/luna`,
+`python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions optional_and_error_propagation_keep_separate_exit_dependencies -- --exact`
+passed (`/tmp/luna-tools-c1h08fj3/result.json`, exit 0). This adds source-level
+composition evidence for the existing transfer rules; it does not certify
+cleanup or safe runtime execution of text views.

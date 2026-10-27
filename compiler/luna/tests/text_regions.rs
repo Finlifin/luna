@@ -817,3 +817,64 @@ fn error_row_transport_moves_view_slots_without_rewriting_origins() {
     assert!(infer(&package, "product", 1).is_err());
     assert!(infer(&package, "product", 100_000).is_ok());
 }
+
+#[test]
+fn optional_and_error_propagation_keep_separate_exit_dependencies() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn optional(value:?str)->?str {let text=value?;text}
+        fn errors(value:!str str)->!str str {let text=value!;text}
+        fn widened(value:!str str)->![bool,str] str {let text=value!;text}
+        fn read_after(value:!str str,other:str)->!str bool {let text=value!;text == other}",
+    );
+    let optional = infer(&package, "optional", 100_000).unwrap();
+    assert_eq!(
+        optional.returned.unwrap()[&vec![usize::MAX, 1, 0]],
+        BTreeSet::from([parameter(0, &[usize::MAX, 1, 0])])
+    );
+    let errors = infer(&package, "errors", 100_000).unwrap();
+    let returned = errors.returned.unwrap();
+    for tag in [0, 1] {
+        assert_eq!(
+            returned[&vec![usize::MAX, tag, 0]],
+            BTreeSet::from([parameter(0, &[usize::MAX, tag, 0])])
+        );
+    }
+    let widening = package
+        .functions
+        .iter()
+        .find(|f| f.name == "widened")
+        .unwrap();
+    let nir::Term::Function { result, .. } = widening.signature.callable_signature() else {
+        panic!("signature")
+    };
+    let nir::Term::ErrorResult { errors, .. } = result.as_ref() else {
+        panic!("error result")
+    };
+    let tag = errors
+        .iter()
+        .position(|ty| *ty == nir::Term::Primitive(nir::Primitive::Str))
+        .unwrap()
+        + 1;
+    let widened = infer(&package, "widened", 100_000)
+        .unwrap()
+        .returned
+        .unwrap();
+    assert_eq!(
+        widened[&vec![usize::MAX, tag, 0]],
+        BTreeSet::from([parameter(0, &[usize::MAX, 1, 0])])
+    );
+    assert_eq!(
+        widened[&vec![usize::MAX, 0, 0]],
+        BTreeSet::from([parameter(0, &[usize::MAX, 0, 0])])
+    );
+    let after = infer(&package, "read_after", 100_000).unwrap();
+    assert_eq!(
+        after.reads,
+        BTreeSet::from([parameter(0, &[usize::MAX, 0, 0]), parameter(1, &[])])
+    );
+    assert_eq!(
+        after.returned.unwrap()[&vec![usize::MAX, 1, 0]],
+        BTreeSet::from([parameter(0, &[usize::MAX, 1, 0])])
+    );
+}
