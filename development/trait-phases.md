@@ -667,3 +667,32 @@ python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
   protocols. Corrected fixtures keep the required constant evaluation in its
   comptime phase, inspect pointer side effects in the VM and exercise native
   early return separately; no protocol validation was relaxed.
+
+## Text Eq and Hash
+
+`str` now provides runtime/comptime Eq and Hash members. Equality compares the
+complete UTF-8 contents; embedded zero bytes do not terminate comparison and
+canonically equivalent but differently encoded Unicode strings remain distinct.
+FNV-1a hashing includes every byte, including zero bytes. Symbol Hash delegates
+to the corresponding str Hash phase after observing its name, preserving its
+previous results and sharing the library implementation.
+
+Validation in `/home/fin/luna` (all commands exited 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna -p elaboration -p comptime_interpretor --test library_hash --test library_comptime_comparison
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli shipped_library_files_use_current_syntax
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+- Hash/comparison: 12 passed, `/tmp/luna-tools-7z268kg3/result.json`. Text fixed
+  vectors cover empty, ASCII, multibyte and embedded-zero inputs in both phases
+  and LLVM O0/O3. Eq tests distinguish composed/decomposed Unicode and changes
+  after an embedded zero. Both str and Symbol key adapters compare separately
+  allocated contents and recover after budget exhaustion. Existing target-width,
+  scalar and Symbol fixed-vector regressions pass.
+- Shipped library syntax: 1 passed, `/tmp/luna-tools-l6149f2j/result.json`.
+- Format: `/tmp/luna-tools-2rhu6215/result.json`.
+
+This supplies immutable str protocols, not owned String, collection storage or
+aggregate Hash derivation. Hashes remain non-cryptographic implementation details.

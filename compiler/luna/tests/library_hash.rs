@@ -179,7 +179,7 @@ fn symbol_hashes_follow_utf8_content_in_both_phases_and_native_code() {
 }
 
 #[test]
-fn symbol_cache_keys_compare_content_and_recover_after_budget_exhaustion() {
+fn text_and_symbol_cache_keys_compare_content_and_recover_after_budget_exhaustion() {
     use comptime_executor::{Context, KeyProtocol};
     let package = support::compile(&source(""));
     let mut items = intrinsic::LangItems::new();
@@ -199,36 +199,41 @@ fn symbol_cache_keys_compare_content_and_recover_after_budget_exhaustion() {
         )
     });
     items.bind_source_traits(&package, &bindings).unwrap();
-    let mut protocol = luna::comptime_keys::Protocol::prepare(
-        &package,
-        &items,
-        &nir::Term::Primitive(nir::Primitive::Symbol),
-        Default::default(),
-    )
-    .unwrap();
-    let first = Value::Symbol("é".repeat(128).into());
-    let same = Value::Symbol("é".repeat(128).into());
-    let different = Value::Symbol("e".repeat(128).into());
-    assert!(protocol.hash(&first, &mut Context::new(1)).is_err());
-    let mut context = Context::new(4_000_000);
-    let hash = protocol.hash(&first, &mut context).unwrap();
-    assert_eq!(hash, protocol.hash(&same, &mut context).unwrap());
-    assert!(protocol.equivalent(&first, &same, &mut context).unwrap());
-    assert!(
-        !protocol
-            .equivalent(&first, &different, &mut context)
-            .unwrap()
-    );
-    // The empty name is admitted by the VM Symbol domain even though a source
-    // symbol literal normally spells an identifier.
-    assert_eq!(
-        protocol
-            .hash(&Value::Symbol("".into()), &mut context)
-            .unwrap(),
-        protocol
-            .hash(&Value::Symbol(String::new().into()), &mut context)
-            .unwrap()
-    );
+    for primitive in [nir::Primitive::Symbol, nir::Primitive::Str] {
+        let value = |text: String| {
+            if primitive == nir::Primitive::Symbol {
+                Value::Symbol(text.into())
+            } else {
+                Value::String(text.into())
+            }
+        };
+        let mut protocol = luna::comptime_keys::Protocol::prepare(
+            &package,
+            &items,
+            &nir::Term::Primitive(primitive),
+            Default::default(),
+        )
+        .unwrap();
+        let first = value("é".repeat(128));
+        let same = value("é".repeat(128));
+        let different = value("e".repeat(128));
+        assert!(protocol.hash(&first, &mut Context::new(1)).is_err());
+        let mut context = Context::new(4_000_000);
+        let hash = protocol.hash(&first, &mut context).unwrap();
+        assert_eq!(hash, protocol.hash(&same, &mut context).unwrap());
+        assert!(protocol.equivalent(&first, &same, &mut context).unwrap());
+        assert!(
+            !protocol
+                .equivalent(&first, &different, &mut context)
+                .unwrap()
+        );
+        // The empty name is admitted by the VM Symbol domain even though a source
+        // symbol literal normally spells an identifier.
+        assert_eq!(
+            protocol.hash(&value("".to_owned()), &mut context).unwrap(),
+            protocol.hash(&value(String::new()), &mut context).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -296,4 +301,61 @@ fn target_sized_hashes_execute_on_the_native_target() {
         .execute_test(&ir, std::time::Duration::from_secs(5))
         .unwrap();
     }
+}
+
+#[test]
+fn text_hashes_and_equality_observe_complete_utf8_contents() {
+    for (literal, expected) in [
+        ("\"\"", 0xcbf29ce484222325u64),
+        ("\"a\"", 0xaf63dc4c8601ec8cu64),
+        ("\"é\"", 0x0ac21707b7181e01u64),
+        ("\"a\\0b\"", 0xe5d29919042666b2u64),
+    ] {
+        let package = support::compile(&source(&format!(
+            "fn run()->u64 {{{literal}.as(Hash).hash()}} comptime fn staged()->u64 {{{literal}.as(Hash).comptime_hash()}} fn verify() {{let value=run();assumes value == {expected};}}"
+        )));
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
+            Value::UnsignedInteger(expected.into())
+        );
+        assert_eq!(
+            luna::invocation::invoke(&package, "staged", 1_000_000).unwrap(),
+            Value::UnsignedInteger(expected.into())
+        );
+        let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
+        for optimization in [
+            luna::host::OptimizationLevel::O0,
+            luna::host::OptimizationLevel::O3,
+        ] {
+            luna::host::Toolchain {
+                optimization,
+                ..Default::default()
+            }
+            .execute_test(&ir, std::time::Duration::from_secs(5))
+            .unwrap();
+        }
+    }
+    let body = r#"fn run()->bool {
+        "é".as(Eq).eq("é") and "é".as(Eq).ne("é")
+        and "a\0b".as(Eq).ne("a\0c") and "".as(Eq).ne("a")
+    }"#;
+    let staged = body
+        .replace("fn run", "comptime fn staged")
+        .replace(".eq(", ".comptime_eq(")
+        .replace(".ne(", ".comptime_ne(");
+    let package = support::compile(&source(&format!(
+        "{body}{staged} fn verify() {{let valid=run();assumes valid;}}"
+    )));
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "staged", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+    let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
+    luna::host::Toolchain::default()
+        .execute_test(&ir, std::time::Duration::from_secs(5))
+        .unwrap();
 }

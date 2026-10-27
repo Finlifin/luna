@@ -224,3 +224,14 @@ comptime impl Eq for .usize'builtin {
 comptime impl Eq for .isize'builtin {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
+
+{-
+    Text equality observes the complete UTF-8 contents, including embedded
+    zero bytes. It neither compares storage identities nor normalizes Unicode.
+-}
+impl Eq for .str'builtin {
+    fn eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .str'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}

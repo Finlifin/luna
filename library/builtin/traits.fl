@@ -173,14 +173,14 @@ comptime impl Hash for .char'builtin {
 }
 
 {-
-    Symbol hashes use FNV-1a over the UTF-8 name, never the interned address.
+    Text hashes use FNV-1a over UTF-8 bytes, never backing storage addresses.
     Multiplication is widened to u128 and the low 64 bits are selected
     explicitly. This deterministic hash is not collision-resistant; Eq must
     still decide equality. Runtime and comptime use the same recurrence.
 -}
-impl Hash for .Symbol'builtin {
+impl Hash for .str'builtin {
     fn hash(self) -> u64 {
-        let name = self'tag_name;
+        let name = self;
         let length = .str_byte_length'builtin(name);
         var index: u64 = 0;
         var state: u64 = 14695981039346656037;
@@ -202,9 +202,9 @@ impl Hash for .Symbol'builtin {
     }
 }
 
-comptime impl Hash for .Symbol'builtin {
+comptime impl Hash for .str'builtin {
     comptime fn comptime_hash(self) -> u64 {
-        let name = self'tag_name;
+        let name = self;
         let length = .str_byte_length'builtin(name);
         var index: u64 = 0;
         var state: u64 = 14695981039346656037;
@@ -223,6 +223,18 @@ comptime impl Hash for .Symbol'builtin {
             index = index + 1;
         }
         state
+    }
+}
+
+impl Hash for .Symbol'builtin {
+    fn hash(self) -> u64 {
+        self'tag_name.as(Hash).hash()
+    }
+}
+
+comptime impl Hash for .Symbol'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        self'tag_name.as(Hash).comptime_hash()
     }
 }
 
