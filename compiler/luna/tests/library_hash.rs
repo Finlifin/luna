@@ -6,7 +6,7 @@ use comptime_interpretor::Value;
 
 fn source(body: &str) -> String {
     format!(
-        "{} struct String {{}}\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\npub use traits.*;\n{body}",
+        "{}\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\npub use traits.*;\n{body}",
         include_str!("../../../library/builtin/primitives.fl"),
         include_str!("../../../library/builtin/comparison.fl"),
         include_str!("../../../library/builtin/resources.fl"),

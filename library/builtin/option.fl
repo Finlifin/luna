@@ -1,7 +1,7 @@
 {-
     Operations on the language's optional type. Each ?T layer preserves the
     complete T value; no library enum or declaration binding defines this type.
-    Panic-dependent unwrap is kept in option_unwrap.fl.
+    Panic-dependent unwrap remains a draft in development/library-prototypes.
 -}
 
 pub trait OptionalOps where T {

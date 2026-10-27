@@ -8,9 +8,7 @@ pub use primitives.*;
 pub use tuple.Tuple;
 pub use traits.*;
 pub use option.OptionalOps;
-pub use option_unwrap.OptionalUnwrap;
 pub use result.ErrorResultOps;
-pub use result_unwrap.ErrorResultUnwrap;
 pub use iterator.{Iterator, FromIterator, emit_item, MapIterator, FilterIterator, FilterMapIterator, FlatMapIterator, TakeWhileIterator, SkipWhileIterator, TakeIterator, SkipIterator, ChainIterator, InspectIterator};
 pub use ops.*;
 
@@ -29,9 +27,7 @@ pub mod prelude {
     pub use tuple.Tuple;
     pub use traits.*;
     pub use option.OptionalOps;
-    pub use option_unwrap.OptionalUnwrap;
     pub use result.ErrorResultOps;
-    pub use result_unwrap.ErrorResultUnwrap;
     pub use iterator.{Iterator, FromIterator};
     pub use ops.*;
 }

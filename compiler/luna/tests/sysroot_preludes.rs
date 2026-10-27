@@ -96,6 +96,52 @@ fn source_configured_iterator_runs_ordinary_for_from_prelude() {
 }
 
 #[test]
+fn complete_shipped_sysroot_runs_tuple_optional_math_and_iteration() {
+    let input = Inputs::new();
+    input.write(
+        "input.fl",
+        "
+        fn run()->bool {
+            let pair:Tuple<bool,bool> = (true,false);
+            let (yes,no)=pair;
+            let query:?bool=yes;
+            let present=query.as(OptionalOps<bool>).is_some();
+            let value:?bool=yes;
+            let number:f64=4.0;
+            let root=math.sqrt(number);
+            for item in value {return item and not no and present and root == 2.0;}
+            false
+        }
+        test {let passed=run();assumes passed;}
+    ",
+    );
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(input.0.join("input.fl"))
+        .arg("--sysroot")
+        .arg(library)
+        .args([
+            "--test-native",
+            "--inline-functions",
+            "--copy-protocol",
+            "builtin.resources.Copy",
+            "--drop-protocol",
+            "builtin.resources.Drop",
+            "--fuel",
+            "4000000",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(report.contains("(count 1) (failures 0)"), "{report}");
+}
+
+#[test]
 fn shipped_text_module_exposes_checked_utf8_byte_reads() {
     let input = Inputs::new();
     input.write(

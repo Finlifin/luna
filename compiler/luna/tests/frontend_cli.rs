@@ -3206,11 +3206,8 @@ fn shipped_library_files_use_current_syntax() {
         "library/builtin/resources.fl",
         "library/builtin/ops.fl",
         "library/builtin/iterator.fl",
-        "library/std/collections.fl",
         "library/builtin/option.fl",
         "library/builtin/result.fl",
-        "library/std/fmt.fl",
-        "library/std/io.fl",
         "library/builtin/primitives.fl",
     ] {
         let output = run_command(
@@ -3266,12 +3263,16 @@ fn shipped_optional_module_resolves_without_enum_substitute() {
 }
 
 #[test]
-fn shipped_result_methods_execute_both_variants_and_generic_callbacks() {
+fn draft_result_unwrap_composes_with_shipped_result_callbacks() {
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for name in ["primitives", "result", "result_unwrap"] {
         fs::copy(
-            repository.join(format!("library/builtin/{name}.fl")),
+            repository.join(if name == "result_unwrap" {
+                format!("development/library-prototypes/builtin/{name}.fl")
+            } else {
+                format!("library/builtin/{name}.fl")
+            }),
             sandbox.path(format!("{name}.fl")),
         )
         .unwrap();
@@ -3303,7 +3304,7 @@ fn shipped_result_methods_execute_both_variants_and_generic_callbacks() {
 }
 
 #[test]
-fn shipped_result_methods_execute_from_an_importing_package() {
+fn draft_result_unwrap_executes_from_an_importing_package() {
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
@@ -3319,7 +3320,7 @@ fn shipped_result_methods_execute_from_an_importing_package() {
     )
     .unwrap();
     fs::copy(
-        repository.join("library/builtin/result_unwrap.fl"),
+        repository.join("development/library-prototypes/builtin/result_unwrap.fl"),
         sandbox.path("library/std/result_unwrap.fl"),
     )
     .unwrap();
@@ -3345,12 +3346,16 @@ fn shipped_result_methods_execute_from_an_importing_package() {
 }
 
 #[test]
-fn shipped_optional_methods_execute_without_declaration_binding() {
+fn draft_optional_unwrap_composes_with_shipped_operations() {
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for name in ["primitives", "option", "option_unwrap"] {
         fs::copy(
-            repository.join(format!("library/builtin/{name}.fl")),
+            repository.join(if name == "option_unwrap" {
+                format!("development/library-prototypes/builtin/{name}.fl")
+            } else {
+                format!("library/builtin/{name}.fl")
+            }),
             sandbox.path(format!("{name}.fl")),
         )
         .unwrap();

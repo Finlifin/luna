@@ -107,7 +107,7 @@ argument matching instead of introducing an extra LetPattern temporary. Fixture
 corrections use Flurry do-blocks, checked arithmetic bounds and automatic file
 modules; no external guard mutation was permitted to bypass observation checks.
 
-### Full sysroot blocker
+### Historical full sysroot blocker
 
 ```text
 python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/repros/ordinary-for-inline-effect.fl --sysroot /home/fin/luna/library --interpret run --inline-functions --copy-protocol builtin.resources.Copy --drop-protocol builtin.resources.Drop --fuel 4000000
@@ -120,3 +120,8 @@ legacy intrinsic names. These files were not changed by this iteration stage.
 The repro is verified by the minimal sysroot integration fixture above, but the
 complete shipped library must still have these independent resolution defects
 repaired before that exact full-sysroot command can pass.
+
+Subsequent [sysroot integration](sysroot-integration.md) moved unfinished
+prototypes out of the compiled tree and repaired coherence budget allocation.
+The same repro now passes against the complete repository sysroot through
+`--test-native`, which also supplies the required target layout facts.

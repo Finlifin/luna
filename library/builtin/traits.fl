@@ -8,18 +8,6 @@
 -- Comparison protocols can be loaded without formatting/owned strings.
 pub use comparison.{Eq, Ord, Ordering};
 
--- ── Display / Debug ────────────────────────────────────────────────────────
-
--- #[lang = "display"]
-pub trait Display {
-    fn fmt(self) -> String;
-}
-
--- #[lang = "debug"]
-pub trait Debug {
-    fn debug_fmt(self) -> String;
-}
-
 -- Resource protocols live separately from formatting and owned strings.
 pub use resources.{Once, Clone, Copy, Drop};
 
