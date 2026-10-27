@@ -35,7 +35,7 @@ type DescriptorPlaces = BTreeMap<Vec<usize>, Option<DescriptorTargets>>;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Regions {
     text: TextFields,
-    // None is an unknown or nonuniform callable, not an absent variant.
+    // None is unknown code or incompatible closure environments, not absence.
     code: CodeFields,
     places: DescriptorPlaces,
 }
@@ -140,12 +140,20 @@ struct StorageEntry {
 enum CallbackKey {
     Named(iir::InstanceKey),
     Closure(usize),
+    Alternatives(Vec<iir::InstanceKey>),
 }
 impl fmt::Display for CallbackKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Named(key) => key.fmt(f),
             Self::Closure(id) => write!(f, "(closed-text-callback {id})"),
+            Self::Alternatives(keys) => {
+                f.write_str("(text-callback-alternatives")?;
+                for key in keys {
+                    write!(f, " {key}")?;
+                }
+                f.write_str(")")
+            }
         }
     }
 }
@@ -329,6 +337,23 @@ fn charge(fuel: &mut usize, amount: usize) -> Result<(), String> {
         .ok_or("text region inference budget exhausted")?;
     Ok(())
 }
+fn charge_callback(code: &CallbackKey, fuel: &mut usize) -> Result<(), String> {
+    let keys = match code {
+        CallbackKey::Named(key) => std::slice::from_ref(key),
+        CallbackKey::Alternatives(keys) => keys.as_slice(),
+        CallbackKey::Closure(_) => {
+            charge(fuel, 1)?;
+            return Ok(());
+        }
+    };
+    for key in keys {
+        charge(fuel, 1)?;
+        for argument in &key.arguments {
+            bound_type(argument, fuel)?;
+        }
+    }
+    Ok(())
+}
 fn charge_regions(regions: &Regions, fuel: &mut usize) -> Result<(), String> {
     for (path, place) in &regions.places {
         charge(fuel, path.len().saturating_add(1))?;
@@ -340,10 +365,8 @@ fn charge_regions(regions: &Regions, fuel: &mut usize) -> Result<(), String> {
     }
     for (path, code) in &regions.code {
         charge(fuel, path.len().saturating_add(1))?;
-        if let Some(CallbackKey::Named(instance)) = code {
-            for argument in &instance.arguments {
-                bound_type(argument, fuel)?;
-            }
+        if let Some(code) = code {
+            charge_callback(code, fuel)?;
         }
     }
     for (path, origins) in &regions.text {
@@ -360,20 +383,48 @@ fn charge_regions(regions: &Regions, fuel: &mut usize) -> Result<(), String> {
     }
     Ok(())
 }
-fn merge_known<T: PartialEq>(
-    target: &mut BTreeMap<Vec<usize>, Option<T>>,
-    source: BTreeMap<Vec<usize>, Option<T>>,
-) {
+fn merge_known(
+    target: &mut CodeFields,
+    source: CodeFields,
+    fuel: &mut usize,
+) -> Result<(), String> {
     for (path, code) in source {
-        target
-            .entry(path)
-            .and_modify(|previous| {
-                if *previous != code {
-                    *previous = None;
+        charge(fuel, path.len().saturating_add(1))?;
+        let Some(previous) = target.get_mut(&path) else {
+            target.insert(path, code);
+            continue;
+        };
+        if let Some(key) = previous.as_ref() {
+            charge_callback(key, fuel)?;
+        }
+        if *previous == code {
+            continue;
+        }
+        let names = |key: &Option<CallbackKey>| match key {
+            Some(CallbackKey::Named(key)) => Some(vec![key.clone()]),
+            Some(CallbackKey::Alternatives(keys)) => Some(keys.clone()),
+            _ => None,
+        };
+        *previous = match (names(previous), names(&code)) {
+            (Some(mut left), Some(right)) => {
+                for key in right {
+                    // Bound each structural comparison before deduplication.
+                    for existing in &left {
+                        charge(fuel, 1)?;
+                        for argument in &existing.arguments {
+                            bound_type(argument, fuel)?;
+                        }
+                    }
+                    if !left.contains(&key) {
+                        left.push(key);
+                    }
                 }
-            })
-            .or_insert(code);
+                Some(CallbackKey::Alternatives(left))
+            }
+            _ => None,
+        };
     }
+    Ok(())
 }
 fn merge_places(target: &mut DescriptorPlaces, source: DescriptorPlaces) {
     for (path, targets) in source {
@@ -399,7 +450,7 @@ fn merge(
     if let Some(source) = source {
         charge_regions(&source, fuel)?;
         let target = target.get_or_insert_with(Regions::new);
-        merge_known(&mut target.code, source.code);
+        merge_known(&mut target.code, source.code, fuel)?;
         merge_places(&mut target.places, source.places);
         for (path, origins) in source.text {
             target.text.entry(path).or_default().extend(origins);
@@ -895,6 +946,7 @@ impl Query<'_, '_> {
 
     fn code_value(&self, key: &CallbackKey, expr: &Expr) -> Result<CodeValue, String> {
         match key {
+            CallbackKey::Alternatives(_) => Err("multiple text callees require dispatch".into()),
             CallbackKey::Closure(id) => {
                 let code = self
                     .closed_closures
@@ -924,6 +976,7 @@ impl Query<'_, '_> {
             .code
             .get(&vec![])
             .and_then(Option::as_ref)
+            .filter(|key| !matches!(key, CallbackKey::Alternatives(_)))
             .map(|key| self.code_value(key, expr))
             .transpose()
     }
@@ -1077,11 +1130,7 @@ impl Query<'_, '_> {
         charge(self.fuel, callbacks.len().saturating_add(1))?;
         for (_, path, callback) in callbacks {
             charge(self.fuel, path.len())?;
-            if let CallbackKey::Named(callback) = callback {
-                for argument in &callback.arguments {
-                    bound_type(argument, self.fuel)?;
-                }
-            }
+            charge_callback(callback, self.fuel)?;
         }
         for argument in arguments {
             bound_type(argument, self.fuel)?;
@@ -1170,6 +1219,7 @@ impl Query<'_, '_> {
                             kind,
                         })
                     }
+                    CallbackKey::Alternatives(_) => continue,
                     CallbackKey::Closure(id) => {
                         let closed = self
                             .closed_closures
@@ -1591,6 +1641,140 @@ impl Query<'_, '_> {
             charge_regions(regions, self.fuel)?;
         }
         Ok(locals.clone())
+    }
+    fn invoke_named(
+        &mut self,
+        declaration: DeclarationId,
+        types: &[Term],
+        actual: BTreeMap<usize, Regions>,
+        callbacks: &[(usize, Vec<usize>, CallbackKey)],
+        locals: &mut Locals,
+        depth: usize,
+    ) -> Result<Option<Regions>, String> {
+        let mut output = Some(Regions::new());
+        if actual
+            .values()
+            .any(|value| value.places.values().any(Option::is_some))
+        {
+            return self.call_with_storage(declaration, types, actual, locals, depth);
+        }
+        let summary = self.function_with_callbacks(declaration, types, callbacks)?;
+        let reads = self.translate(&summary.reads, &actual)?;
+        self.reads.last_mut().unwrap().extend(reads);
+        let Some(result) = summary.returned else {
+            return Ok(None);
+        };
+        output.as_mut().unwrap().places = result.places;
+        output.as_mut().unwrap().code = result.code;
+        for (path, origins) in result.text {
+            let translated = self.translate(&origins, &actual)?;
+            output.as_mut().unwrap().insert(path, translated);
+        }
+        Ok(output)
+    }
+    fn named_call(
+        &mut self,
+        candidates: &[iir::InstanceKey],
+        arguments: &[nir::program::CallArgument],
+        parameter_bindings: &[LocalId],
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        depth: usize,
+    ) -> Result<Option<Regions>, String> {
+        if candidates.is_empty() {
+            return Err("text callable candidates are empty".into());
+        }
+        let first = &candidates[0];
+        let has_defaults = arguments.iter().any(|argument| argument.is_default);
+        charge(
+            self.fuel,
+            arguments.len().saturating_add(parameter_bindings.len()),
+        )?;
+        for candidate in candidates {
+            charge(self.fuel, 1)?;
+            let (body, _) = self
+                .package
+                .runtime_body_checked(candidate.declaration, &candidate.arguments)?;
+            validate_argument_plan(arguments, parameter_bindings, body.parameters.len())?;
+            if has_defaults && parameter_bindings != &body.parameters {
+                return Err("text default parameter frame does not match callee".into());
+            }
+        }
+        let mut actual = BTreeMap::new();
+        let mut prepared = Locals::new();
+        let mut prepared_code = BTreeMap::new();
+        let mut callbacks = Vec::new();
+        for argument in arguments {
+            let (value, callback) = if argument.is_default {
+                self.default_input(&argument.value, &prepared, &prepared_code, locals, depth)?
+            } else {
+                let value = self.expr(&argument.value, locals, returned, depth)?;
+                let code = value
+                    .as_ref()
+                    .map(|value| self.result_code(value, &argument.value))
+                    .transpose()?
+                    .flatten();
+                (value, code)
+            };
+            let Some(value) = value else {
+                return Ok(None);
+            };
+            if has_defaults {
+                let binding = parameter_bindings[argument.parameter];
+                charge_regions(&value, self.fuel)?;
+                prepared.insert(binding, value.clone());
+                if let Some(code) = &callback {
+                    prepared_code.insert(binding, code.clone());
+                }
+            }
+            charge_regions(&value, self.fuel)?;
+            for (path, code) in &value.code {
+                if let Some(code) = code {
+                    callbacks.push((argument.parameter, path.clone(), code.clone()));
+                }
+            }
+            if actual.insert(argument.parameter, value).is_some() {
+                return Err("duplicate text region call argument".into());
+            }
+        }
+
+        callbacks.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        if candidates.len() == 1 {
+            return self.invoke_named(
+                first.declaration,
+                &first.arguments,
+                actual,
+                &callbacks,
+                locals,
+                depth,
+            );
+        }
+        let bindings = locals.keys().copied().collect::<Vec<_>>();
+        let mut exits = None;
+        let mut output = None;
+        for candidate in candidates {
+            charge(self.fuel, 1)?;
+            for value in actual.values() {
+                charge_regions(value, self.fuel)?;
+            }
+            let mut scope = self.locals_copy(locals)?;
+            let result = self.invoke_named(
+                candidate.declaration,
+                &candidate.arguments,
+                actual.clone(),
+                &callbacks,
+                &mut scope,
+                depth,
+            )?;
+            if result.is_some() {
+                join_locals(&mut exits, &scope, &bindings, self.fuel)?;
+            }
+            merge(&mut output, result, self.fuel)?;
+        }
+        if let Some(exits) = exits {
+            *locals = exits;
+        }
+        Ok(output)
     }
     fn expr(
         &mut self,
@@ -2108,6 +2292,18 @@ impl Query<'_, '_> {
                 let Some(callee_value) = self.expr(callee, locals, returned, next)? else {
                     return Ok(None);
                 };
+                if let Some(Some(CallbackKey::Alternatives(candidates))) =
+                    callee_value.code.get(&vec![])
+                {
+                    return self.named_call(
+                        candidates,
+                        arguments,
+                        parameter_bindings,
+                        locals,
+                        returned,
+                        next,
+                    );
+                }
                 let resolved = self.result_code(&callee_value, callee)?.ok_or(
                     "text region call requires a named concrete callee or stable local callable",
                 )?;
@@ -2284,79 +2480,17 @@ impl Query<'_, '_> {
                     } => (*declaration, arguments.as_slice()),
                     _ => return Err("text region call requires a named concrete callee".into()),
                 };
-                let (body, _) = self.package.runtime_body_checked(declaration, types)?;
-                charge(
-                    self.fuel,
-                    arguments.len().saturating_add(parameter_bindings.len()),
-                )?;
-                validate_argument_plan(arguments, parameter_bindings, body.parameters.len())?;
-                let has_defaults = arguments.iter().any(|argument| argument.is_default);
-                if has_defaults && parameter_bindings != &body.parameters {
-                    return Err("text default parameter frame does not match callee".into());
-                }
-                let mut actual = BTreeMap::new();
-                let mut prepared = Locals::new();
-                let mut prepared_code = BTreeMap::new();
-                let mut callbacks = Vec::new();
-                for argument in arguments {
-                    let (value, callback) = if argument.is_default {
-                        self.default_input(
-                            &argument.value,
-                            &prepared,
-                            &prepared_code,
-                            locals,
-                            next,
-                        )?
-                    } else {
-                        let value = self.expr(&argument.value, locals, returned, next)?;
-                        let code = value
-                            .as_ref()
-                            .map(|value| self.result_code(value, &argument.value))
-                            .transpose()?
-                            .flatten();
-                        (value, code)
-                    };
-                    let Some(value) = value else {
-                        return Ok(None);
-                    };
-                    if has_defaults {
-                        let binding = parameter_bindings[argument.parameter];
-                        charge_regions(&value, self.fuel)?;
-                        prepared.insert(binding, value.clone());
-                        if let Some(code) = &callback {
-                            prepared_code.insert(binding, code.clone());
-                        }
-                    }
-                    charge_regions(&value, self.fuel)?;
-                    for (path, code) in &value.code {
-                        if let Some(code) = code {
-                            callbacks.push((argument.parameter, path.clone(), code.clone()));
-                        }
-                    }
-                    if actual.insert(argument.parameter, value).is_some() {
-                        return Err("duplicate text region call argument".into());
-                    }
-                }
-                if actual
-                    .values()
-                    .any(|value| value.places.values().any(Option::is_some))
-                {
-                    return self.call_with_storage(declaration, types, actual, locals, next);
-                }
-                callbacks.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-                let summary = self.function_with_callbacks(declaration, types, &callbacks)?;
-                let reads = self.translate(&summary.reads, &actual)?;
-                self.reads.last_mut().unwrap().extend(reads);
-                let Some(result) = summary.returned else {
-                    return Ok(None);
-                };
-                empty.as_mut().unwrap().places = result.places;
-                empty.as_mut().unwrap().code = result.code;
-                for (path, origins) in result.text {
-                    let translated = self.translate(&origins, &actual)?;
-                    empty.as_mut().unwrap().insert(path, translated);
-                }
-                Ok(empty)
+                self.named_call(
+                    &[iir::InstanceKey {
+                        declaration,
+                        arguments: types.to_vec(),
+                    }],
+                    arguments,
+                    parameter_bindings,
+                    locals,
+                    returned,
+                    next,
+                )
             }
             K::TextQuery { subject, query } => {
                 let Some(value) = self.expr(subject, locals, returned, next)? else {
@@ -2412,7 +2546,11 @@ impl Query<'_, '_> {
                 }
                 for (mut path, code) in regions.code {
                     remap_error_path(&mut path, &mapping, self.fuel)?;
-                    merge_known(&mut transported.code, BTreeMap::from([(path, code)]));
+                    merge_known(
+                        &mut transported.code,
+                        BTreeMap::from([(path, code)]),
+                        self.fuel,
+                    )?;
                 }
                 for (mut path, origins) in regions.text {
                     // Repack the destination slot, not its backing origin:

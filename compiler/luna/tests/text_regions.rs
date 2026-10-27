@@ -1315,10 +1315,12 @@ fn stable_local_callables_keep_stored_capture_origins() {
             "{name}"
         );
     }
-    assert!(
+    assert_eq!(
         infer(&package, "changed", 200_000)
-            .unwrap_err()
-            .contains("stable local callable")
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
     );
     assert!(infer(&package, "nested", 1).is_err());
     assert!(infer(&package, "nested", 200_000).is_ok());
@@ -1690,7 +1692,11 @@ fn callable_value_flow_replaces_assignments_and_rejects_unknown_joins() {
         infer(&package, "same", 500_000).unwrap().returned.unwrap()[&vec![]],
         BTreeSet::from([parameter(1, &[])])
     );
-    for name in ["mixed", "unknown"] {
+    assert_eq!(
+        infer(&package, "mixed", 500_000).unwrap().returned.unwrap()[&vec![]],
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
+    );
+    for name in ["unknown"] {
         assert!(
             infer(&package, name, 500_000)
                 .unwrap_err()
@@ -2341,4 +2347,89 @@ fn descriptor_pointer_slot_updates_preserve_alias_and_evaluation_order() {
             .unwrap_err()
             .contains("target is unknown")
     );
+}
+
+#[test]
+fn finite_named_callees_join_results_reads_and_independent_storage_effects() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn echo(value:str)->str {value}
+        fn literal(value:str)->str {\"static\"}
+        fn invoke(action:fn(str)->str,value:str)->str {action(value)}
+        fn recur(flag:bool,action:fn(str)->str,value:str)->str {
+            if flag {return action(value);};recur(flag,action,value)
+        }
+        fn higher(flag:bool,value:str)->str {invoke(if flag {echo}else{literal},value)}
+        fn recursive(flag:bool,value:str)->str {recur(flag,if flag {echo}else{literal},value)}
+        fn captured(flag:bool,value:str)->str {
+            let selected=if flag {echo}else{literal};let closure=||selected(value);closure()
+        }
+        fn fill(pointer:*str,value:str) {pointer.* = value;}
+        fn observe(pointer:*str,value:str) {let observed=pointer.* == value;}
+        fn storage(flag:bool,first:str,second:str)->str {
+            var value=first;let action=if flag {fill}else{observe};action(value.ref,second);value
+        }
+        fn read(pointer:*str)->str {pointer.*}
+        fn absent(pointer:*str)->str {\"static\"}
+        fn read_dispatch(flag:bool,value:str)->str {
+            let action=if flag {read}else{absent};action(value.ref)
+        }
+        fn rejected(flag:bool,external:*str)->str {
+            let action=if flag {read}else{absent};action(external)
+        }
+        fn evaluated_once(flag:bool,first:str,second:str)->str {
+            var previous=first;var current=second;let action=if flag {echo}else{literal};
+            let ignored=action(do {let saved=previous;previous=current;current=saved;saved});previous
+        }
+        fn selected_before_input(flag:bool,value:str)->str {
+            var action=if flag {echo}else{literal};action(do {action=literal;value})
+        }
+        fn spin(value:str)->str {let seen=value == \"spin\";spin(value)}
+        fn partial(flag:bool,value:str)->str {let action=if flag {echo}else{spin};action(value)}",
+    );
+    for name in [
+        "higher",
+        "recursive",
+        "captured",
+        "read_dispatch",
+        "selected_before_input",
+    ] {
+        assert_eq!(
+            infer(&package, name, 2_000_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([Origin::Static, parameter(1, &[])]),
+            "{name}"
+        );
+    }
+    let storage = infer(&package, "storage", 2_000_000).unwrap();
+    assert_eq!(
+        storage.returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    assert_eq!(
+        storage.reads,
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    assert_eq!(
+        infer(&package, "evaluated_once", 2_000_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(2, &[])])
+    );
+    let partial = infer(&package, "partial", 2_000_000).unwrap();
+    assert_eq!(
+        partial.returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[])])
+    );
+    assert_eq!(
+        partial.reads,
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
+    );
+    assert!(
+        infer(&package, "rejected", 2_000_000)
+            .unwrap_err()
+            .contains("target is unknown")
+    );
+    assert!(infer(&package, "recursive", 10).is_err());
+    assert!(infer(&package, "recursive", 2_000_000).is_ok());
 }

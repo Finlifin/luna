@@ -1234,3 +1234,46 @@ passed (`/tmp/luna-tools-eltwc440/result.json`, exit 0), as did the diff check.
 This extends dependency analysis; runtime Copy legality, cleanup and backing
 character lifetime certification remain separate requirements. Callable code
 identity joins still require a single known identity for invocation.
+
+## Finite named callable alternatives
+
+Branch joins now preserve deduplicated alternatives of concrete named function
+instances instead of replacing every differing identity with unknown code.
+These identities travel through returns, aggregate fields, closure captures and
+higher-order parameter summaries. Unknown code remains absorbing. Different
+closure identities still require correlated code/environment alternatives and
+are not enabled by this change.
+
+Named invocation has a shared input-preparation path. The callee value is fixed
+before input evaluation, and arguments are evaluated once in source order.
+Every possible callee is checked against the argument plan; default preparation
+still requires the selected declaration's parameter identities. Each candidate
+then runs against an independent copy of the same post-argument storage state.
+Only normally returning candidates contribute output storage, while all
+candidates contribute observed character reads. Returned dependencies and
+normal-exit states join conservatively. A failed candidate rejects the whole
+query; a successful alternative cannot conceal an unknown pointer dereference.
+Recursive candidates use the existing value and storage fixed-point solvers.
+Candidate traversal, structural comparisons and type payloads consume fuel.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli text_region_cli
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 48 analysis/layout/prototype tests passed
+(`/tmp/luna-tools-pw4chgn0/result.json`, exit 0), including higher-order calls,
+recursion, captured choices, independent storage effects, reads from a
+nonreturning candidate, callee-before-input order, once-only argument evaluation,
+unknown-pointer rejection and budget recovery. Three CLI regressions passed
+(`/tmp/luna-tools-8p71as5i/result.json`, exit 0). Formatting passed
+(`/tmp/luna-tools-p3ryf7q1/result.json`, exit 0), as did the diff check.
+The initial run (`/tmp/luna-tools-fxrg0imx/result.json`, exit 101) passed the new
+cases but found an old test expecting conditional reassignment of a named
+function variable to fail. It now asserts the correct union of static and
+parameter origins. No runtime ABI, Copy permission or backing lifetime
+certification is introduced by this analysis extension.
