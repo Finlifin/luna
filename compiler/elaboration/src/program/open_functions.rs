@@ -7322,7 +7322,13 @@ impl Checker<'_, '_> {
                     .iter()
                     .find(|route| route.parameter == *slot)
                     .unwrap();
-                let context = route.retained_collection_context(self, values);
+                let context = route.retained_collection_context(
+                    self,
+                    values,
+                    &candidate
+                        .parameter_input_context(index)
+                        .map_err(|e| call_inference_error(expr.span, e))?,
+                );
                 candidate
                     .constrain_parameter_context(index, &context, crate::ptc::Budget::default())
                     .map_err(|e| call_inference_error(expr.span, e))?;

@@ -1,6 +1,7 @@
 //! Extended application shares ordinary positional routing, while colon
 //! properties remain a distinct input protocol from named whole-value supply.
 use super::*;
+pub(super) mod layout;
 
 impl Checker<'_, '_> {
     pub(super) fn extended_call(
@@ -377,6 +378,8 @@ impl Checker<'_, '_> {
             kind: K::Local(binding),
         };
         let mut packet = std::mem::replace(&mut arguments[slot].value, local);
+        layout::unprepare_packet(&mut packet, expr.span)?;
+        let field_positions = layout::field_positions(&packet.ty, expr.span)?;
         let K::AnonymousRecord { fields } = &mut packet.kind else {
             return Err(error(
                 expr.span,
@@ -398,12 +401,11 @@ impl Checker<'_, '_> {
             .map(|(slot, _)| slot)
             .collect();
         let mut positional_slots = positional_slots.into_iter();
-        let mut fields = fields.iter_mut();
         // Argument inference may check these in a different order. Runtime
         // evaluation always uses the original producer order, exactly once.
         for input in args {
             let value = match input {
-                Arg::Named(..) => fields.next().expect("one field per property"),
+                Arg::Named(name, _) => &mut fields[field_positions[name.name.as_str()]],
                 Arg::Positional(_) | Arg::PostLambda(_) => {
                     &mut arguments[positional_slots.next().expect("one anchored input")].value
                 }
@@ -606,6 +608,8 @@ impl Checker<'_, '_> {
         let K::Let { value, .. } = &mut packet.kind else {
             unreachable!()
         };
+        layout::unprepare_packet(value, expr.span)?;
+        let field_positions = layout::field_positions(&value.ty, expr.span)?;
         let K::AnonymousRecord { fields } = &mut value.kind else {
             return Err(error(
                 expr.span,
@@ -614,11 +618,10 @@ impl Checker<'_, '_> {
         };
         let mut remaining = statements.into_iter();
         let mut prepared: Vec<_> = remaining.by_ref().take(receiver_count).collect();
-        let mut fields = fields.iter_mut();
         for argument in args {
             match argument {
-                Arg::Named(..) => self.stage_property_input(
-                    fields.next().expect("one field per property"),
+                Arg::Named(name, _) => self.stage_property_input(
+                    &mut fields[field_positions[name.name.as_str()]],
                     &mut prepared,
                     expr.span,
                 )?,
@@ -700,32 +703,30 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&[(String, crate::calls::InputContext)]>,
     ) -> Result<n::Expr, Error> {
-        if let Some(fields) = partial {
-            if fields.len() != properties.len()
-                || fields
-                    .iter()
-                    .zip(properties)
-                    .any(|((name, _), property)| name != property.ident.name.as_str())
-            {
-                return Err(error(
-                    expr.span,
-                    "property argument fields do not match the expected record shape",
-                ));
-            }
-        }
         let context = expected
             .map(|ty| self.structural_type(ty, expr.span))
             .transpose()?;
+        let names: Option<Vec<_>> = match &context {
+            Some(Term::Record(fields)) => {
+                Some(fields.iter().map(|(name, _)| name.clone()).collect())
+            }
+            _ => partial.map(|fields| fields.iter().map(|(name, _)| name.clone()).collect()),
+        };
+        let order = layout::property_order(properties, names.as_deref(), expr.span)?;
         let mut fields = Vec::new();
         let mut types = Vec::new();
         for property in properties {
             let partial_field = partial
-                .and_then(|fields| fields.get(types.len()))
+                .and_then(|fields| {
+                    fields
+                        .iter()
+                        .find(|(name, _)| name == property.ident.name.as_str())
+                })
                 .map(|(_, context)| context);
             let field_context = match &context {
                 Some(Term::Record(types)) => types
-                    .get(fields.len())
-                    .filter(|(name, _)| name == property.ident.name.as_str())
+                    .iter()
+                    .find(|(name, _)| name == property.ident.name.as_str())
                     .map(|(_, ty)| ty),
                 _ => match partial_field {
                     Some(crate::calls::InputContext::Known(ty)) => Some(ty),
@@ -750,14 +751,10 @@ impl Checker<'_, '_> {
         // argument inference, even when a producer exits. collect_properties
         // stages every producer and propagates Never to the whole call before
         // publishing NIR; no packet is constructed along that exit path.
-        let ty = Term::Record(types);
+        let packet = self.finish_property_packet(expr.span, types, fields, &order)?;
         if let Some(expected) = expected {
-            self.require(&ty, expected, expr.span)?;
+            self.require(&packet.ty, expected, expr.span)?;
         }
-        Ok(n::Expr {
-            ty,
-            source: source(expr.span),
-            kind: K::AnonymousRecord { fields },
-        })
+        Ok(packet)
     }
 }

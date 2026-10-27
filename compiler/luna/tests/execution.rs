@@ -45709,14 +45709,6 @@ fn property_peer_inference_preserves_producer_order_and_exits() {
             false,
         ),
     ] {
-        let prefix = if properties.starts_with("callback:") {
-            prefix.replace(
-                "value:sample<T>(),callback:exemplar<T,U>",
-                "callback:exemplar<T,U>,value:sample<T>()",
-            )
-        } else {
-            prefix.to_owned()
-        };
         let source = format!(
             "{prefix} fn run()->Tuple<bool, bool> {{var state=false;let result=apply {{{properties}}};(result,state)}}"
         );

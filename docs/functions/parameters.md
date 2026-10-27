@@ -654,6 +654,21 @@ C 的省略号参数通过可变参数访问机制读取，不能等同于保留
 
 对于收集包，区分源表达式计算与包布局：先后次序来自源码，字段偏移来自目标布局。把字段按对齐要求重排，不授权重排字段输入的输出、写入或失败。收集过程的暂存槽也须记录哪些责任已经转入最终包。
 
+属性输入按名字取得目标字段的类型上下文，不能按它在调用中的序号匹配。例如下列调用先计算 `right`，再计算 `left`，但交给 `inspect` 的包使用 `Config` 的字段布局：
+
+```flurry
+comptime fn schema(...fields: T) -> T where T { fields }
+const MODEL = schema { left: true, right: false };
+typealias Config = MODEL'type;
+
+comptime fn inspect(...fields: Config) -> bool {
+    fields.left and not fields.right
+}
+const answer = inspect { right: false, left: true };
+```
+
+这个规则作用于属性收集过程。它不意味着把已经构造的记录值直接供应给形参时，可以跳过通常的类型相等检查。泛型包构造调用仍可从外层获得预期类型，并在构造时采用该布局。
+
 ## 编译器实现引导
 
 建立“形参 → 供应来源”表。每项至多一个最终供应来源，来源可能是显式值、收集计划、implicit 协议或默认表达式。

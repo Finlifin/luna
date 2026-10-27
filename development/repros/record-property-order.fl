@@ -1,7 +1,7 @@
 {-
-    Known ordinary-call limitation: a property packet written in a different
-    field order from its declared record domain is currently rejected.
-    This reproduction does not use derive; strategy calls share this path.
+    Regression: property inputs may differ from the target record layout.
+    The packet is constructed in the declared layout, while producers retain
+    source evaluation order. Ordinary calls and strategies share this path.
 -}
 comptime fn schema(...fields: T) -> T where T { fields }
 const MODEL = schema { left: true, right: false };

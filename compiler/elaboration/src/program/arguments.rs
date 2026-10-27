@@ -73,6 +73,7 @@ impl<'h> RoutedArgument<'h> {
         &self,
         checker: &Checker<'_, '_>,
         values: &[Option<n::Expr>],
+        domain: &crate::calls::InputContext,
     ) -> crate::calls::InputContext {
         use crate::calls::InputContext as C;
         let fields = values
@@ -85,13 +86,38 @@ impl<'h> RoutedArgument<'h> {
             })
             .collect::<Vec<_>>();
         match self.property_fields() {
-            Some(properties) => C::Record(
-                properties
+            Some(properties) => {
+                let fields: Vec<_> = properties
                     .iter()
                     .zip(fields)
                     .map(|(property, field)| (property.ident.name.to_string(), field))
-                    .collect(),
-            ),
+                    .collect();
+                let target_names: Option<Vec<&str>> = match domain {
+                    C::Record(target) => {
+                        Some(target.iter().map(|(name, _)| name.as_str()).collect())
+                    }
+                    C::Known(Term::Record(target)) => {
+                        Some(target.iter().map(|(name, _)| name.as_str()).collect())
+                    }
+                    _ => None,
+                };
+                if let Some(target) = target_names {
+                    let names: BTreeSet<_> = fields.iter().map(|(name, _)| name.as_str()).collect();
+                    if names.len() == fields.len()
+                        && target.len() == fields.len()
+                        && target.iter().copied().collect::<BTreeSet<_>>() == names
+                    {
+                        let mut by_name: BTreeMap<_, _> = fields.into_iter().collect();
+                        return C::Record(
+                            target
+                                .iter()
+                                .map(|name| (name.to_string(), by_name.remove(*name).unwrap()))
+                                .collect(),
+                        );
+                    }
+                }
+                C::Record(fields)
+            }
             None => match checker.protocols.tuple {
                 Some(head) => C::NormalTuple { head, fields },
                 None => C::Tuple(fields),
@@ -419,25 +445,25 @@ impl Checker<'_, '_> {
             None => route.source_inputs().map(|(_, input)| input).collect(),
         };
         let count = inputs.len();
-        let record_context = |fields: Vec<(String, C)>| -> Result<Vec<C>, Error> {
+        let mut record_order = (0..count).collect::<Vec<_>>();
+        let mut record_context = |fields: Vec<(String, C)>| -> Result<Vec<C>, Error> {
             let Some(properties) = properties else {
                 return Err(error(
                     call.span,
                     "default variadic collection requires a tuple type",
                 ));
             };
-            if fields.len() != properties.len()
-                || fields
-                    .iter()
-                    .zip(properties)
-                    .any(|((name, _), property)| name != property.ident.name.as_str())
-            {
-                return Err(error(
-                    call.span,
-                    "property argument fields do not match the expected record shape",
-                ));
-            }
-            Ok(fields.into_iter().map(|(_, context)| context).collect())
+            let names = fields
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            record_order =
+                super::extended::layout::property_order(properties, Some(&names), call.span)?;
+            let mut fields: BTreeMap<_, _> = fields.into_iter().collect();
+            Ok(properties
+                .iter()
+                .map(|property| fields.remove(property.ident.name.as_str()).unwrap())
+                .collect())
         };
         let fields = match context {
             C::Known(ty) => match self.structural_type(ty, call.span)? {
@@ -524,7 +550,10 @@ impl Checker<'_, '_> {
                     (property.ident.name.to_string(), ty)
                 })
                 .collect();
-            (Term::Record(types), K::AnonymousRecord { fields: values })
+            return Ok((
+                Some(self.finish_property_packet(call.span, types, values, &record_order)?),
+                true,
+            ));
         } else {
             let ty = if values.iter().any(|value| is_never(&value.ty)) {
                 p(P::Never)

@@ -901,7 +901,7 @@ fn strategy_extended_collections_preserve_record_fields() {
             fn flag()->bool {result}
         }
         struct Subject {}
-        derive Flag.use(configured {left:true,right:false}) for Subject;
+        derive Flag.use(configured {right:false,left:true}) for Subject;
         fn run()->bool {Subject.as(Flag).flag()}
         "#,
     );

@@ -6183,9 +6183,13 @@ impl Checker<'_, '_> {
                 if values.is_empty() {
                     continue;
                 }
-                let context = inputs[*index]
-                    .unwrap()
-                    .retained_collection_context(self, values);
+                let context = inputs[*index].unwrap().retained_collection_context(
+                    self,
+                    values,
+                    &candidate
+                        .parameter_input_context(*index)
+                        .map_err(|e| call_inference_error(expr.span, e))?,
+                );
                 candidate
                     .constrain_parameter_context(*index, &context, crate::ptc::Budget::default())
                     .map_err(|e| call_inference_error(expr.span, e))?;
