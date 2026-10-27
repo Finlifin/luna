@@ -153,13 +153,17 @@ fn index_code_expression(
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct SummaryKey {
     instance: iir::InstanceKey,
-    callbacks: Vec<(usize, CallbackKey)>,
+    callbacks: Vec<(usize, Vec<usize>, CallbackKey)>,
 }
 impl fmt::Display for SummaryKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(text-summary-key {} (callbacks", self.instance)?;
-        for (parameter, callback) in &self.callbacks {
-            write!(f, " (parameter {parameter} {callback})")?;
+        for (parameter, path, callback) in &self.callbacks {
+            write!(f, " (parameter {parameter} (path")?;
+            for field in path {
+                write!(f, " {field}")?;
+            }
+            write!(f, ") {callback})")?;
         }
         f.write_str("))")
     }
@@ -894,10 +898,11 @@ impl Query<'_, '_> {
         &mut self,
         declaration: DeclarationId,
         arguments: &[Term],
-        callbacks: &[(usize, CallbackKey)],
+        callbacks: &[(usize, Vec<usize>, CallbackKey)],
     ) -> Result<Summary, String> {
         charge(self.fuel, callbacks.len().saturating_add(1))?;
-        for (_, callback) in callbacks {
+        for (_, path, callback) in callbacks {
+            charge(self.fuel, path.len())?;
             if let CallbackKey::Named(callback) = callback {
                 for argument in &callback.arguments {
                     bound_type(argument, self.fuel)?;
@@ -966,7 +971,10 @@ impl Query<'_, '_> {
         if parameters.len() != body.parameters.len() {
             return Err("text region parameter identity mismatch".into());
         }
-        for (parameter, callback) in &key.callbacks {
+        for (parameter, path, callback) in &key.callbacks {
+            if !path.is_empty() {
+                continue;
+            }
             let binding = *body
                 .parameters
                 .get(*parameter)
@@ -1009,8 +1017,12 @@ impl Query<'_, '_> {
                 .into_keys()
                 .map(|path| (path, None))
                 .collect();
-            if let Some((_, code)) = key.callbacks.iter().find(|(index, _)| *index == parameter) {
-                regions.code.insert(vec![], Some(code.clone()));
+            for (_, path, code) in key
+                .callbacks
+                .iter()
+                .filter(|(index, _, _)| *index == parameter)
+            {
+                regions.code.insert(path.clone(), Some(code.clone()));
             }
             for leaf in borrowed_input_layout(Some(self.package), &ty.ty, self.fuel)? {
                 if let BorrowedInputLeaf::Text(leaf) = leaf {
@@ -1643,36 +1655,17 @@ impl Query<'_, '_> {
                             prepared_code.insert(binding, code.clone());
                         }
                     }
-                    if let Some(callback) = callback {
-                        let instance = if let Some(id) = callback.closure {
-                            Some(CallbackKey::Closure(id))
-                        } else {
-                            match &callback.expression.kind {
-                                K::Function(declaration) => {
-                                    Some(CallbackKey::Named(iir::InstanceKey {
-                                        declaration: *declaration,
-                                        arguments: vec![],
-                                    }))
-                                }
-                                K::FunctionInstance {
-                                    declaration,
-                                    arguments,
-                                } => Some(CallbackKey::Named(iir::InstanceKey {
-                                    declaration: *declaration,
-                                    arguments: arguments.clone(),
-                                })),
-                                _ => None,
-                            }
-                        };
-                        if let Some(instance) = instance {
-                            callbacks.push((argument.parameter, instance));
+                    charge_regions(&value, self.fuel)?;
+                    for (path, code) in &value.code {
+                        if let Some(code) = code {
+                            callbacks.push((argument.parameter, path.clone(), code.clone()));
                         }
                     }
                     if actual.insert(argument.parameter, value).is_some() {
                         return Err("duplicate text region call argument".into());
                     }
                 }
-                callbacks.sort_by_key(|(parameter, _)| *parameter);
+                callbacks.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
                 let summary = self.function_with_callbacks(declaration, types, &callbacks)?;
                 let reads = self.translate(&summary.reads, &actual)?;
                 self.reads.last_mut().unwrap().extend(reads);

@@ -881,3 +881,35 @@ exit 0). Formatting passed (`/tmp/luna-tools-77nvmybs/result.json`, exit 0), as 
 the diff check. Callable fields passed inside aggregate parameters still need
 path-sensitive specialization across named function boundaries; this stage does
 not claim that support or runtime lifetime/cleanup certification.
+
+## Aggregate callback parameter specialization
+
+Named-call summary keys now include the parameter index, logical field path and
+known callable identity for every supplied callable leaf. Previously only the
+parameter root could specialize a call, losing code carried by record fields or
+variant payloads. Callee input values install these identities at their original
+paths; unspecified leaves remain unknown. Text origins remain symbolic inputs
+and are substituted separately when the summary returns to its caller.
+
+Keys are ordered by parameter and path, and path storage is charged to the query
+budget. The S-expression key dump exposes each `(path ...)`. This supports
+nested aggregate forwarding, optional payload callbacks and captured closures
+inside records without conflating different field arrangements or bypassing
+unknown-call rejection. It does not add multi-target invocation, variant
+feasibility pruning, runtime text permissions or lifetime/cleanup proofs.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 35 tests passed (`/tmp/luna-tools-b9g7d8ci/result.json`, exit 0). The new
+source regression checks distinct record fields, nested forwarding, differently
+specialized calls in one caller, optional unpacking, captured text closures,
+recursive aggregate forwarding, unknown callbacks and budget failure recovery.
+Formatting passed (`/tmp/luna-tools-r16cccsz/result.json`, exit 0), as did the
+diff check. Optional input variants remain conservatively joined, so the test
+expects both the payload dependency and the absent-branch static result.

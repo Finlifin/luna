@@ -1698,3 +1698,71 @@ fn callable_value_flow_replaces_assignments_and_rejects_unknown_joins() {
         );
     }
 }
+
+#[test]
+fn aggregate_callbacks_specialize_named_calls_by_parameter_and_field_path() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn echo(value:str)->str {value}
+        fn literal(value:str)->str {\"static\"}
+        struct Pair {first:fn(str)->str,second:fn(str)->str}
+        struct Wrapper {pair:Pair}
+        fn first(pair:Pair,value:str)->str {pair.first(value)}
+        fn second(pair:Pair,value:str)->str {pair.second(value)}
+        fn nested(wrapper:Wrapper,value:str)->str {first(wrapper.pair,value)}
+        fn relay(pair:Pair,value:str)->str {second(pair,value)}
+        fn input(value:str)->str {nested(Wrapper {pair:Pair {first:echo,second:literal}},value)}
+        fn static_result(value:str)->str {relay(Pair {first:echo,second:literal},value)}
+        fn separated(flag:bool,value:str)->str {
+            if flag {first(Pair {first:echo,second:literal},value)}
+            else {first(Pair {first:literal,second:echo},value)}
+        }
+        fn optional(callback:?(fn(str)->str),value:str)->str {
+            let action?=callback else {return \"absent\";};action(value)
+        }
+        fn unpack(value:str)->str {optional(echo,value)}
+        struct Captured {callback:%{value:str} fn()->str}
+        fn invoke(holder:Captured)->str {holder.callback()}
+        fn captured(value:str)->str {invoke(Captured {callback:||value})}
+        fn recur(pair:Pair,value:str,flag:bool)->str {
+            if flag {first(pair,value)}else{recur(pair,value,true)}
+        }
+        fn recursive(value:str,flag:bool)->str {recur(Pair {first:echo,second:literal},value,flag)}
+        fn unknown(pair:Pair,value:str)->str {first(pair,value)}",
+    );
+    for name in ["input", "captured", "recursive"] {
+        assert_eq!(
+            infer(&package, name, 500_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "static_result", 500_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([Origin::Static])
+    );
+    assert_eq!(
+        infer(&package, "separated", 500_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
+    );
+    assert_eq!(
+        infer(&package, "unpack", 500_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([Origin::Static, parameter(0, &[])])
+    );
+    assert!(
+        infer(&package, "unknown", 500_000)
+            .unwrap_err()
+            .contains("stable local callable")
+    );
+    assert!(infer(&package, "recursive", 10).is_err());
+    assert!(infer(&package, "recursive", 500_000).is_ok());
+}
