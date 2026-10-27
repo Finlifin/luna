@@ -1220,6 +1220,49 @@ fn dynamic_trait_clauses_do_not_erase_interface_program_checks() {
 }
 
 #[test]
+fn dynamic_trait_lookup_cost_is_independent_of_unrelated_members() {
+    let base = dynamic_trait_package();
+    let mut expanded = base.clone();
+    for index in 0..128 {
+        let mut interface = base.traits[0].clone();
+        interface.declaration = id(100 + index * 3);
+        interface.self_parameter = interface.declaration;
+        interface.methods[0].declaration = id(101 + index * 3);
+        interface.methods[0].type_parameters = vec![id(102 + index * 3)];
+        expanded.traits.push(interface);
+    }
+    let cost = |package: &Package| {
+        let mut vm = Interpreter::for_comptime(package, Budget::default()).unwrap();
+        let before = vm.remaining_steps();
+        for ty in [Primitive::Bool, Primitive::U8, Primitive::Bool] {
+            assert_eq!(
+                vm.invoke(id(1), vec![Value::Type(Term::Primitive(ty))])
+                    .unwrap(),
+                Value::Bool(true)
+            );
+        }
+        before - vm.remaining_steps()
+    };
+    assert_eq!(cost(&base), cost(&expanded));
+}
+
+#[test]
+fn dynamic_trait_lookup_preserves_ambiguous_origin_rejection() {
+    let mut package = dynamic_trait_package();
+    let mut other = package.traits[0].clone();
+    other.declaration = id(100);
+    other.self_parameter = id(100);
+    package.traits.push(other);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(1), vec![Value::Type(Term::Primitive(Primitive::Bool))])
+            .unwrap_err()
+            .kind,
+        ErrorKind::InvalidCallPlan
+    );
+}
+
+#[test]
 fn dynamic_trait_clauses_reject_contract_erasure_and_missing_phases() {
     let mut package = dynamic_trait_package();
     package.traits[0].methods[0]

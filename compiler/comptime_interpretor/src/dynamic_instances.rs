@@ -105,18 +105,17 @@ impl Interpreter<'_> {
         else {
             return Ok(PreparedTraitInstance::Unrelated);
         };
-        let work = self.method_contracts.len();
-        self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
-        let mut candidates = self
-            .method_contracts
-            .iter()
-            .filter(|((_, member), _)| member == declaration);
-        let Some((&(interface, member), (parameters, contract))) = candidates.next() else {
+        self.integer_operation(Some(expr.source), |budget| budget.consume(1))?;
+        let Some(origin) = self.method_origins.get(declaration) else {
             return Ok(PreparedTraitInstance::Unrelated);
         };
-        if candidates.next().is_some() {
-            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
-        }
+        let interface =
+            origin.ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
+        let member = *declaration;
+        let (parameters, contract) = self
+            .method_contracts
+            .get(&(interface, member))
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
         if !self.comptime_only
             || !contract.signature.is_comptime_callable()
             || !expr.ty.is_comptime_callable()

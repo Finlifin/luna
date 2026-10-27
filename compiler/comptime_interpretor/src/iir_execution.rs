@@ -140,6 +140,7 @@ impl<'a> Interpreter<'a> {
             declaration_parameter_domains: BTreeMap::new(),
             method_parameters: HashMap::new(),
             method_contracts: HashMap::new(),
+            method_origins: HashMap::new(),
             assumed_interfaces: HashSet::new(),
             implemented_interfaces: graph
                 .dispatch

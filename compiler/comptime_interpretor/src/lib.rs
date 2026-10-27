@@ -1260,6 +1260,8 @@ pub struct Interpreter<'a> {
     declaration_parameter_sorts: BTreeMap<DeclarationId, nir::Sort>,
     declaration_parameter_domains: BTreeMap<DeclarationId, Term>,
     method_parameters: HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>,
+    // None records an ambiguous member identity across different interfaces.
+    method_origins: HashMap<DeclarationId, Option<DeclarationId>>,
     method_contracts: HashMap<
         (DeclarationId, DeclarationId),
         (
@@ -2058,11 +2060,16 @@ impl<'a> Interpreter<'a> {
             })
             .collect();
         let mut method_contracts = HashMap::new();
+        let mut method_origins = HashMap::new();
         for contract in &package.traits {
             let parameters = contract
                 .binders_with_self(&mut trait_parameter_fuel)
                 .map_err(|_| invalid())?;
             for member in &contract.methods {
+                method_origins
+                    .entry(member.declaration)
+                    .and_modify(|origin| *origin = None)
+                    .or_insert(Some(contract.declaration));
                 let mut binders = parameters.clone();
                 binders.extend(input_binders(&member.type_parameters));
                 method_contracts.insert(
@@ -2105,6 +2112,7 @@ impl<'a> Interpreter<'a> {
             declaration_parameter_sorts,
             declaration_parameter_domains,
             method_contracts,
+            method_origins,
             implemented_interfaces: worlds,
             assumed_interfaces,
             method_bodies,

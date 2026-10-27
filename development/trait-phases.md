@@ -422,3 +422,24 @@ The related source regressions also passed: `python3 -B development/check.py
 --timeout 900 -- test --release -p luna -p elaboration -p comptime_interpretor
 --test execution trait`, 94 tests passed, 1,269 unrelated tests filtered
 (`/tmp/luna-tools-3x69y3nz/result.json`, exit 0). `git diff --check` passed.
+
+Dynamic packet origin lookup now uses an index built alongside VM method
+contracts. Previously every packet scanned all contracts, even when it named
+an ordinary function. Initialization records ambiguous cross-interface member
+identities explicitly, preserving `InvalidCallPlan` at use. Lookup now consumes
+one budget step and performs a hash lookup instead of charging and scanning the
+entire member catalog. The index belongs to the immutable interpreter world;
+IIR-only interpreters initialize an empty index.
+
+A regression compares invocation work after construction for the same three
+calls with zero or 128 unrelated additional members. Both consume equal steps;
+this is an operation-budget scaling check, not a wall-clock speedup claim.
+An ambiguous-origin regression also passes. In `/home/fin/luna`, validation used
+`python3 -B development/check.py --timeout 900 -- test --release -p nir
+-p comptime_interpretor --test runtime_function_identities --test instance_budget
+--test calls` (`/tmp/luna-tools-71o828n3/result.json`, exit 0).
+The initial compile caught the missing IIR constructor field, now initialized;
+an initial broader command omitted the `nir` package owning `calls` and did not
+run tests. Formatting check passed with `python3 -B development/command.py
+--timeout 120 -- cargo fmt --all -- --check`
+(`/tmp/luna-tools-yq2mer5a/result.json`, exit 0); `git diff --check` passed.
