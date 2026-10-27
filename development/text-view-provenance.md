@@ -1057,3 +1057,55 @@ ordinary writes after default evaluation and budget recovery. The source bool
 pointer default also passes and preserves the preceding text comparison's read
 dependencies. Formatting passed (`/tmp/luna-tools-bn46y7u3/result.json`, exit 0),
 as did the diff check. This does not establish source admission for text defaults.
+
+## Closure descriptor storage frames
+
+Closure invocation now separates lexical capture bindings from the caller's
+storage identities. Caller slots are moved into query-local storage frames;
+captured and argument pointer roots are remapped to those frames. Captured text
+values remain snapshots in the closure's lexical environment. Consequently a
+closure can retain the old text value while a captured pointer replaces the
+external descriptor, without conflating the two under one source `LocalId`.
+
+Storage frames participate in branch, pattern and loop joins, normal-return
+collection, named pointer calls and default preparation. Closure arguments are
+evaluated before the caller storage snapshot is installed, while the closure
+capture values were already evaluated with the callee. Normal exits restore
+caller slots and their original address identities. Return values and indirect
+writes cannot retain addresses of closure-local storage. Frame identities are
+bounded query-local analysis data and do not alter source or IR binding IDs.
+
+This adds pointer captures, closure pointer parameters, nested closures and
+closures passed through named functions to the dependency query. Runtime Copy,
+cleanup and backing-character lifetime verification remain separate gates.
+
+Observation-only pointer access is also propagated through named calls. A
+regression demonstrated that a computed pattern could call a helper which wrote
+the caller descriptor and still receive a successful summary. The query now
+carries the read-only observation context into that helper, rejecting the write
+instead of allowing candidate-state rollback to hide it. Default preparation
+uses the same scoped mechanism with its own diagnostic.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli text_region_cli
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 42 analysis/layout/prototype tests passed
+(`/tmp/luna-tools-hqwd928b/result.json`, exit 0), including capture-versus-storage
+separation, pointer arguments and returns, nested/named/repeated closure calls,
+argument order, early exits, loop convergence, escaped local addresses, budget
+recovery and indirect observation-write rejection. All three CLI tests passed
+(`/tmp/luna-tools-mb8t2l7t/result.json`, exit 0). Formatting passed
+(`/tmp/luna-tools-6y3ppi0j/result.json`, exit 0), as did the diff check.
+
+The first build (`/tmp/luna-tools-4phtntwq/result.json`, exit 101) exposed two
+snapshot insertion borrow errors after the environment refactor; cloning before
+insertion fixed them. The next run (`/tmp/luna-tools-9t4cf6em/result.json`, exit
+101) passed closure cases but reproduced the indirect observation-write hole.
+The final run verifies the scoped read-only fix. Recursive pointer-effect calls
+still need relational fixed points; this stage does not certify text liveness.

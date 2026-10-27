@@ -1793,6 +1793,7 @@ fn local_descriptor_pointers_preserve_backing_origins_and_replace_slots() {
     for (name, index) in [
         ("read", 0),
         ("crossing", 0),
+        ("captured", 0),
         ("replace", 1),
         ("saved", 0),
         ("field", 1),
@@ -1840,7 +1841,6 @@ fn local_descriptor_pointers_preserve_backing_origins_and_replace_slots() {
         ("unknown", "target is unknown"),
         ("ambiguous", "target is unknown"),
         ("dangling", "escapes its local scope"),
-        ("captured", "cannot capture local descriptor addresses"),
     ] {
         let error = infer(&package, name, 500_000).unwrap_err();
         assert!(error.contains(message), "{name}: {error}");
@@ -2016,4 +2016,78 @@ fn admitted_scalar_pointer_default_preserves_text_observation_dependencies() {
         BTreeSet::from([Origin::Static, parameter(0, &[])])
     );
     assert!(summary.returned.unwrap().is_empty());
+}
+
+#[test]
+fn closure_descriptor_frames_separate_captures_from_external_storage() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn replace(pointer:*str,value:str) {pointer.* = value;}
+        fn apply(callback:%{pointer:*str,value:str} fn()->str)->str {callback()}
+        fn read(value:str)->str {let pointer=value.ref;let action=||pointer.*;action()}
+        fn returning(value:str)->str {let pointer=value.ref;let action=||pointer;let alias=action();alias.*}
+        fn order(first:str,second:str)->str {var value=first;let pointer=value.ref;(|ignored:bool| pointer.*)(do {value=second;false})}
+        fn written(first:str,second:str)->str {var value=first;let pointer=value.ref;let action=|| {pointer.* = second;};action();value}
+        fn snapshot(first:str,second:str)->str {var value=first;let pointer=value.ref;let action=|| {pointer.* = second;value};action()}
+        fn external(first:str,second:str)->str {var value=first;let pointer=value.ref;let action=|| {pointer.* = second;value};let saved=action();value}
+        fn input(first:str,second:str)->str {var value=first;(|pointer:*str| {pointer.* = second;})(value.ref);value}
+        fn forwarded(first:str,second:str)->str {var value=first;let pointer=value.ref;let action=|| {replace(pointer,second);};action();value}
+        fn repeated(first:str,second:str)->str {var value=first;let pointer=value.ref;let action=||pointer.*;let before=action();pointer.* = second;action()}
+        fn cycle(flag:bool,first:str,second:str)->str {var value=first;let pointer=value.ref;let action=|| {pointer.* = second;};while flag {action();};value}
+        fn nested(first:str,second:str)->str {var value=first;let pointer=value.ref;let outer=|| {let inner=|| {pointer.* = second;};inner();};outer();value}
+        fn joined(flag:bool,first:str,second:str)->str {var value=first;let pointer=value.ref;let action=|| {if flag {pointer.* = second;return;};};action();value}
+        fn looped(flag:bool,first:str,second:str)->str {var value=first;let pointer=value.ref;let action=|| {while flag {pointer.* = second;};};action();value}
+        fn passed(first:str,value:str)->str {var text=first;let pointer=text.ref;let saved=apply(|| {pointer.* = value;pointer.*});text}
+        fn escape(value:str)->*str {(|| {let local=value;local.ref})()}
+        fn stored(value:str)->str {var pointer=value.ref;let address=pointer.ref;let action=|| {let local=value;address.* = local.ref;};action();pointer.*}",
+    );
+    for (name, index) in [
+        ("read", 0),
+        ("returning", 0),
+        ("order", 1),
+        ("written", 1),
+        ("snapshot", 0),
+        ("external", 1),
+        ("input", 1),
+        ("forwarded", 1),
+        ("nested", 1),
+        ("repeated", 1),
+        ("passed", 1),
+    ] {
+        assert_eq!(
+            infer(&package, name, 1_000_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(index, &[])]),
+            "{name}"
+        );
+    }
+    for name in ["joined", "looped", "cycle"] {
+        assert_eq!(
+            infer(&package, name, 1_000_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[]), parameter(2, &[])]),
+            "{name}"
+        );
+    }
+    for name in ["escape", "stored"] {
+        let error = infer(&package, name, 1_000_000).unwrap_err();
+        assert!(error.contains("escapes"), "{name}: {error}");
+    }
+    assert!(infer(&package, "nested", 10).is_err());
+    assert!(infer(&package, "nested", 1_000_000).is_ok());
+}
+
+#[test]
+fn pattern_observations_reject_indirect_descriptor_writes() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn change(pointer:*str)->bool {pointer.* = \"changed\";true}
+        fn observed(value:str)->str {
+            var text=value;let pointer=text.ref;
+            true match {_ and change(pointer) is true=>text,_=>text,}
+        }",
+    );
+    let error = infer(&package, "observed", 500_000).unwrap_err();
+    assert!(
+        error.contains("text observation cannot write through pointers"),
+        "{error}"
+    );
 }

@@ -25,7 +25,12 @@ impl fmt::Display for TextRegionOrigin {
 }
 type TextFields = BTreeMap<Vec<usize>, BTreeSet<TextRegionOrigin>>;
 type CodeFields = BTreeMap<Vec<usize>, Option<CallbackKey>>;
-type DescriptorPlaces = BTreeMap<Vec<usize>, Option<(LocalId, Vec<usize>)>>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum DescriptorRoot {
+    Local(LocalId),
+    Frame(usize),
+}
+type DescriptorPlaces = BTreeMap<Vec<usize>, Option<(DescriptorRoot, Vec<usize>)>>;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Regions {
     text: TextFields,
@@ -65,7 +70,49 @@ struct Summary {
     reads: BTreeSet<TextRegionOrigin>,
     returned: Option<Regions>,
 }
-type Locals = BTreeMap<LocalId, Regions>;
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Locals {
+    bindings: BTreeMap<LocalId, Regions>,
+    frames: BTreeMap<usize, Regions>,
+}
+impl Locals {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn contains_storage(&self, root: &DescriptorRoot) -> bool {
+        self.get_storage(root).is_some()
+    }
+    fn get_storage(&self, root: &DescriptorRoot) -> Option<&Regions> {
+        match root {
+            DescriptorRoot::Local(id) => self.bindings.get(id),
+            DescriptorRoot::Frame(id) => self.frames.get(id),
+        }
+    }
+    fn get_storage_mut(&mut self, root: &DescriptorRoot) -> Option<&mut Regions> {
+        match root {
+            DescriptorRoot::Local(id) => self.bindings.get_mut(id),
+            DescriptorRoot::Frame(id) => self.frames.get_mut(id),
+        }
+    }
+}
+impl std::ops::Deref for Locals {
+    type Target = BTreeMap<LocalId, Regions>;
+    fn deref(&self) -> &Self::Target {
+        &self.bindings
+    }
+}
+impl std::ops::DerefMut for Locals {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.bindings
+    }
+}
+fn remap_descriptor_roots(value: &mut Regions, mapping: &BTreeMap<DescriptorRoot, DescriptorRoot>) {
+    for (root, _) in value.places.values_mut().flatten() {
+        if let Some(replacement) = mapping.get(root) {
+            *root = *replacement;
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum CallbackKey {
@@ -190,6 +237,12 @@ fn join_locals(
     fuel: &mut usize,
 ) -> Result<(), String> {
     let target = target.get_or_insert_with(Locals::new);
+    for (id, value) in &source.frames {
+        charge_regions(value, fuel)?;
+        let mut joined = target.frames.remove(id);
+        merge(&mut joined, Some(value.clone()), fuel)?;
+        target.frames.insert(*id, joined.unwrap());
+    }
     for binding in bindings {
         charge(fuel, 1)?;
         let value = source
@@ -379,7 +432,8 @@ pub fn infer_text_regions(
         local_callables: BTreeMap::new(),
         closed_closures: vec![],
         storage_calls: vec![],
-        readonly_default_storage: false,
+        next_storage_frame: 0,
+        readonly_storage: None,
         changed_callables: BTreeSet::new(),
         pending: VecDeque::new(),
         scheduled: HashSet::new(),
@@ -405,7 +459,8 @@ struct Query<'a, 'f> {
     local_callables: BTreeMap<LocalId, CodeValue>,
     closed_closures: Vec<ClosedClosure>,
     storage_calls: Vec<DeclarationId>,
-    readonly_default_storage: bool,
+    next_storage_frame: usize,
+    readonly_storage: Option<&'static str>,
     changed_callables: BTreeSet<LocalId>,
     pending: VecDeque<SummaryKey>,
     scheduled: HashSet<SummaryKey>,
@@ -452,7 +507,12 @@ impl Query<'_, '_> {
         })?;
         let outer_loops = std::mem::take(&mut self.loops);
         let mut returned = None;
+        let previous_readonly = std::mem::replace(
+            &mut self.readonly_storage,
+            Some("text observation cannot write through pointers"),
+        );
         let result = self.expr(value, locals, &mut returned, depth);
+        self.readonly_storage = previous_readonly;
         self.loops = outer_loops;
         let result = result?;
         if returned.is_some() {
@@ -592,7 +652,7 @@ impl Query<'_, '_> {
                     charge_regions(value, self.fuel)?;
                     remapped.insert(*to, value.clone());
                 }
-                locals.extend(remapped);
+                locals.extend(remapped.bindings);
                 Ok(matched)
             }
             Pattern::Observe { binding, inner } => {
@@ -842,7 +902,7 @@ impl Query<'_, '_> {
         } else {
             Locals::new()
         };
-        for (binding, value) in prepared {
+        for (binding, value) in prepared.iter() {
             charge_regions(value, self.fuel)?;
             if scope.insert(*binding, value.clone()).is_some() {
                 return Err("text default storage frame overlaps its caller".into());
@@ -863,7 +923,10 @@ impl Query<'_, '_> {
         let caller_changed = std::mem::replace(&mut self.changed_callables, changed);
         let caller_loops = std::mem::take(&mut self.loops);
         self.exits.push(None);
-        let caller_readonly = std::mem::replace(&mut self.readonly_default_storage, true);
+        let caller_readonly = std::mem::replace(
+            &mut self.readonly_storage,
+            Some("text default argument cannot write through pointers"),
+        );
         let mut returned = None;
         let result = (|| {
             let result = self.expr(value, &mut scope, &mut returned, depth)?;
@@ -878,14 +941,17 @@ impl Query<'_, '_> {
             if let Some(value) = &result {
                 charge_regions(value, self.fuel)?;
                 for (root, _) in value.places.values().flatten() {
-                    if !caller_storage.contains_key(root) {
+                    if !caller_storage.contains_storage(root) {
                         return Err(
                             "text default descriptor address escapes its preparation frame".into(),
                         );
                     }
                 }
                 if has_storage {
-                    for (binding, value) in caller_storage {
+                    if scope.frames != caller_storage.frames {
+                        return Err("text default argument modifies caller storage".into());
+                    }
+                    for (binding, value) in caller_storage.iter() {
                         if scope.get(binding) != Some(value) {
                             return Err("text default argument modifies caller storage".into());
                         }
@@ -894,7 +960,7 @@ impl Query<'_, '_> {
             }
             Ok((result, code))
         })();
-        self.readonly_default_storage = caller_readonly;
+        self.readonly_storage = caller_readonly;
         self.exits.pop();
         self.loops = caller_loops;
         self.local_callables = caller_code;
@@ -1111,7 +1177,8 @@ impl Query<'_, '_> {
                 .get(&snapshot.parameter)
                 .ok_or("text entry snapshot parameter is unavailable")?;
             charge_regions(value, self.fuel)?;
-            if locals.insert(snapshot.binding, value.clone()).is_some() {
+            let value = value.clone();
+            if locals.insert(snapshot.binding, value).is_some() {
                 return Err("text entry snapshot binding is not fresh".into());
             }
         }
@@ -1223,7 +1290,8 @@ impl Query<'_, '_> {
                 .get(&snapshot.parameter)
                 .ok_or("text descriptor snapshot parameter is missing")?;
             charge_regions(value, self.fuel)?;
-            if scope.insert(snapshot.binding, value.clone()).is_some() {
+            let value = value.clone();
+            if scope.insert(snapshot.binding, value).is_some() {
                 return Err("text descriptor snapshot binding is not fresh".into());
             }
         }
@@ -1258,12 +1326,13 @@ impl Query<'_, '_> {
                     .ok_or("text descriptor call has no normal exit state")?;
                 // Only caller storage may survive a callee's frame. Check
                 // indirect writes too: a callee must not stash its local address.
-                for value in
-                    std::iter::once(value).chain(locals.keys().filter_map(|id| exit.get(id)))
+                for value in std::iter::once(value)
+                    .chain(locals.keys().filter_map(|id| exit.get(id)))
+                    .chain(exit.frames.values())
                 {
                     charge_regions(value, self.fuel)?;
                     for (root, _) in value.places.values().flatten() {
-                        if !locals.contains_key(root) {
+                        if !locals.contains_storage(root) {
                             return Err("text descriptor address escapes its callee frame".into());
                         }
                     }
@@ -1275,6 +1344,7 @@ impl Query<'_, '_> {
                 for predicate in &body.postconditions {
                     self.contract(predicate, &exit)?;
                 }
+                locals.frames = std::mem::take(&mut exit.frames);
                 for (binding, value) in locals.iter_mut() {
                     *value = exit
                         .remove(binding)
@@ -1319,8 +1389,8 @@ impl Query<'_, '_> {
     }
 
     fn locals_copy(&mut self, locals: &Locals) -> Result<Locals, String> {
-        charge(self.fuel, locals.len())?;
-        for regions in locals.values() {
+        charge(self.fuel, locals.len().saturating_add(locals.frames.len()))?;
+        for regions in locals.values().chain(locals.frames.values()) {
             charge_regions(regions, self.fuel)?;
         }
         Ok(locals.clone())
@@ -1402,7 +1472,7 @@ impl Query<'_, '_> {
                     .as_mut()
                     .unwrap()
                     .places
-                    .insert(vec![], Some((root, path)));
+                    .insert(vec![], Some((DescriptorRoot::Local(root), path)));
                 Ok(empty)
             }
             K::PointerField { pointer, index, .. }
@@ -1429,14 +1499,14 @@ impl Query<'_, '_> {
                     .and_then(Option::as_ref)
                     .ok_or("text descriptor pointer target is unknown")?;
                 let value = locals
-                    .get(root)
+                    .get_storage(root)
                     .ok_or("text descriptor storage is no longer live")?;
                 charge_regions(value, self.fuel)?;
                 Ok(Some(project(value.clone(), path, self.fuel)?))
             }
             K::WritePointer { pointer, value } => {
-                if self.readonly_default_storage {
-                    return Err("text default argument cannot write through pointers".into());
+                if let Some(message) = self.readonly_storage {
+                    return Err(message.into());
                 }
                 let Some(pointer) = self.expr(pointer, locals, returned, next)? else {
                     return Ok(None);
@@ -1451,7 +1521,7 @@ impl Query<'_, '_> {
                 };
                 let replacement = prefix(value, path, self.fuel)?;
                 let target = locals
-                    .get_mut(root)
+                    .get_storage_mut(root)
                     .ok_or("text descriptor storage is no longer live")?;
                 charge_regions(target, self.fuel)?;
                 target.text.retain(|fields, _| !fields.starts_with(path));
@@ -1608,15 +1678,17 @@ impl Query<'_, '_> {
                     for value in result
                         .iter()
                         .chain(locals.keys().filter_map(|id| scope.get(id)))
+                        .chain(scope.frames.values())
                     {
                         for (root, _) in value.places.values().flatten() {
-                            if !locals.contains_key(root) {
+                            if !locals.contains_storage(root) {
                                 return Err(
                                     "text descriptor address escapes its local scope".into()
                                 );
                             }
                         }
                     }
+                    locals.frames = std::mem::take(&mut scope.frames);
                     for (id, value) in locals.iter_mut() {
                         *value = scope.remove(id).ok_or("text region scope lost a local")?;
                     }
@@ -1645,6 +1717,18 @@ impl Query<'_, '_> {
                     Some(branch) => self.expr(branch, &mut right, returned, next)?,
                     None => empty,
                 };
+                for (id, value) in &mut locals.frames {
+                    let mut joined = None;
+                    if result.is_some() {
+                        merge(&mut joined, left.frames.remove(id), self.fuel)?;
+                    }
+                    if otherwise.is_some() {
+                        merge(&mut joined, right.frames.remove(id), self.fuel)?;
+                    }
+                    if let Some(joined) = joined {
+                        *value = joined;
+                    }
+                }
                 for (id, value) in locals.iter_mut() {
                     let mut joined = None;
                     if result.is_some() {
@@ -1836,11 +1920,6 @@ impl Query<'_, '_> {
                         else {
                             return Ok(None);
                         };
-                        if value.places.values().any(Option::is_some) {
-                            return Err(
-                                "text closure input requires descriptor memory effects".into()
-                            );
-                        }
                         let callable = self.result_code(&value, &argument.value)?;
                         if scope
                             .insert(parameters[argument.parameter], value)
@@ -1849,6 +1928,25 @@ impl Query<'_, '_> {
                             return Err("text closure parameter overlaps another binding".into());
                         }
                         input_code.push((parameters[argument.parameter], callable));
+                    }
+                    let mut storage_map = BTreeMap::new();
+                    let mut storage_restore = BTreeMap::new();
+                    let caller = self.locals_copy(locals)?;
+                    scope.frames = caller.frames;
+                    for (binding, value) in caller.bindings {
+                        let id = self.next_storage_frame;
+                        self.next_storage_frame = id
+                            .checked_add(1)
+                            .ok_or("text storage frame identity exhausted")?;
+                        let source = DescriptorRoot::Local(binding);
+                        let target = DescriptorRoot::Frame(id);
+                        storage_map.insert(source, target);
+                        storage_restore.insert(target, source);
+                        scope.frames.insert(id, value);
+                    }
+                    for value in scope.bindings.values_mut().chain(scope.frames.values_mut()) {
+                        charge_regions(value, self.fuel)?;
+                        remap_descriptor_roots(value, &storage_map);
                     }
                     let closed_context = resolved.closure;
                     let previous_context = if let Some(id) = closed_context {
@@ -1877,10 +1975,19 @@ impl Query<'_, '_> {
                         *callable = old;
                     }
                     let outer_loops = std::mem::take(&mut self.loops);
-                    self.exits.push(None);
+                    self.exits.push(Some(ExitRegions {
+                        bindings: scope.keys().copied().collect(),
+                        locals: None,
+                    }));
                     let mut closure_returns = None;
                     let completed = self.expr(body, &mut scope, &mut closure_returns, next);
-                    self.exits.pop();
+                    let completed = completed.and_then(|value| {
+                        if value.is_some() {
+                            self.record_exit(&scope)?;
+                        }
+                        Ok(value)
+                    });
+                    let exit = self.exits.pop().unwrap().unwrap().locals;
                     self.loops = outer_loops;
                     for (binding, previous) in input_code {
                         self.local_callables.remove(&binding);
@@ -1893,6 +2000,33 @@ impl Query<'_, '_> {
                         self.changed_callables = changed;
                     }
                     merge(&mut closure_returns, completed?, self.fuel)?;
+                    if let Some(value) = &mut closure_returns {
+                        let mut exit = exit.ok_or("text closure has no normal exit storage")?;
+                        for value in std::iter::once(&mut *value).chain(exit.frames.values_mut()) {
+                            charge_regions(value, self.fuel)?;
+                            for (root, _) in value.places.values().flatten() {
+                                if !matches!(root, DescriptorRoot::Frame(_)) {
+                                    return Err(
+                                        "text descriptor address escapes its closure frame".into(),
+                                    );
+                                }
+                            }
+                            remap_descriptor_roots(value, &storage_restore);
+                        }
+                        for (target, source) in &storage_restore {
+                            let (DescriptorRoot::Frame(id), DescriptorRoot::Local(binding)) =
+                                (target, source)
+                            else {
+                                unreachable!()
+                            };
+                            let value = exit
+                                .frames
+                                .remove(id)
+                                .ok_or("text closure lost caller storage")?;
+                            locals.insert(*binding, value);
+                        }
+                        locals.frames = exit.frames;
+                    }
                     return Ok(closure_returns);
                 }
                 let (declaration, types) = match &code.kind {
@@ -2067,9 +2201,6 @@ impl Query<'_, '_> {
                         self.expr(&local, locals, returned, next)?
                             .ok_or("text capture origin is unavailable")?
                     };
-                    if value.places.values().any(Option::is_some) {
-                        return Err("text closure cannot capture local descriptor addresses".into());
-                    }
                     let code = self.result_code(
                         &value,
                         &Expr {
