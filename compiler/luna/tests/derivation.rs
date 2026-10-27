@@ -455,7 +455,7 @@ fn strategy_input_call_shapes_are_not_silently_discarded() {
             "no named parameter entry",
         ),
         (
-            "trait Flag {} derive fn configured(lambda value:fn()->bool) for Flag {} struct Subject {} derive Flag.use(configured(||true)) for Subject;",
+            "trait Flag {} derive fn configured(quote value:bool) for Flag {} struct Subject {} derive Flag.use(configured(true)) for Subject;",
             "specialized strategy parameter matching",
         ),
     ] {
@@ -939,5 +939,108 @@ fn extended_strategy_call_failures_preserve_phase_checks_and_source_notes() {
     assert!(
         error.contains("derive use site of strategy `configured`"),
         "{error}"
+    );
+}
+
+#[test]
+fn strategy_implicit_inputs_preserve_named_supply_and_dependent_defaults() {
+    for (parameters, inputs) in [
+        ("implicit enabled:bool,.value:bool=enabled", ".enabled=true"),
+        (
+            "implicit enabled:bool,.value:bool=enabled",
+            ".value=true,.enabled=false",
+        ),
+        ("implicit comptime T:.Type'builtin,value:T", "true,.T=bool"),
+    ] {
+        let source = format!(
+            "trait Flag {{fn flag()->bool;}} derive fn configured({parameters}) for Flag {{fn flag()->bool {{value}}}} struct Subject {{}} derive Flag.use(configured({inputs})) for Subject;fn run()->bool {{Subject.as(Flag).flag()}}"
+        );
+        let package = compile_with_strategy_bool_splice(&source);
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn strategy_lambda_inputs_run_during_generation() {
+    for selected in [
+        "configured(true) do {not _0}",
+        "configured(true,|value|not value)",
+        "configured(true,not _0)",
+    ] {
+        let source = format!(
+            "trait Flag {{fn flag()->bool;}} derive fn configured(value:bool,lambda action:comptime fn(bool)->bool) for Flag {{let result=not action(value);fn flag()->bool {{result}}}} struct Subject {{}} derive Flag.use({selected}) for Subject;fn run()->bool {{Subject.as(Flag).flag()}}"
+        );
+        let package = compile_with_strategy_bool_splice(&source);
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn strategy_parameter_protocols_keep_ordinary_rejections() {
+    for (parameters, inputs, expected) in [
+        ("implicit value:bool", "()", "automatic supply protocol"),
+        ("implicit value:bool", "(true)", "positional"),
+        (
+            "implicit value:bool",
+            "(.value=true,.value=false)",
+            "supplied more than once",
+        ),
+        ("implicit value:bool", "(.value='x')", "type"),
+        (
+            "lambda first:comptime fn()->bool,lambda second:comptime fn()->bool",
+            "() do {true}",
+            "ambiguous",
+        ),
+        (
+            "lambda action:comptime fn()->bool",
+            "() do {runtime()}",
+            "runtime",
+        ),
+    ] {
+        let source = format!(
+            "fn runtime()->bool {{true}} trait Flag {{}} derive fn configured({parameters}) for Flag {{}} struct Subject {{}} derive Flag.use(configured{inputs}) for Subject;"
+        );
+        let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains(expected), "{source}: {error}");
+        assert!(!error.contains("parsing failed"), "{error}");
+    }
+}
+
+#[test]
+fn strategy_post_do_composes_with_implicit_inputs_and_spreads() {
+    let source = "comptime fn identity(value:T)->T where T {value}
+        trait Flag {fn flag()->bool;}
+        derive fn configured(lambda action:comptime fn(bool)->bool,value:bool,implicit enabled:bool) for Flag {
+            let result=enabled and action(value);
+            fn flag()->bool {result}
+        }
+        struct Subject {}
+        derive Flag.use(configured(...identity((false,)),.enabled=true) do {not _0}) for Subject;
+        fn run()->bool {Subject.as(Flag).flag()}";
+    let package = compile_strategy_tuple(source).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn unused_strategy_callbacks_are_checked_but_not_invoked() {
+    let source = "comptime fn forever()->bool {forever()}
+        trait Flag {fn flag()->bool;}
+        derive fn configured(lambda action:comptime fn()->bool) for Flag {fn flag()->bool {true}}
+        struct Subject {}
+        derive Flag.use(configured() do {forever()}) for Subject;
+        fn run()->bool {Subject.as(Flag).flag()}";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
     );
 }

@@ -147,7 +147,10 @@ pub(super) fn expand<'h>(
             }
             for parameter in generator.parameters {
                 charge(fuel, parameter.span)?;
-                if parameter.ty.flags & !hir::common::TPARAM_COMPTIME != 0 {
+                let supported_flags = hir::common::TPARAM_COMPTIME
+                    | hir::common::TPARAM_IMPLICIT
+                    | hir::common::TPARAM_LAMBDA;
+                if parameter.ty.flags & !supported_flags != 0 {
                     return Err(unsupported(
                         parameter.span,
                         "specialized strategy parameter matching",

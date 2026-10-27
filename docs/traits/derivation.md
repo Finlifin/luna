@@ -118,6 +118,39 @@ derive FormatLabel<.text>.use(label_with_default(.text = "custom")) for CustomRe
 
 实参的求值顺序不因命名输入与声明顺序不同而改变。重复供参、未知参数名以及输入类型错误仍按普通调用规则诊断。
 
+`implicit` 不改变策略输入的阶段。显式供应仍写成 `.name = value`；前面的 implicit 输入也可以参与后面的缺省计算：
+
+~~~flurry
+trait FeatureFlag {
+    fn enabled() -> bool;
+}
+
+derive fn configured(implicit enabled: bool, .value: bool = enabled)
+for FeatureFlag {
+    fn enabled() -> bool { value }
+}
+
+struct Feature {}
+derive FeatureFlag.use(configured(.enabled = true)) for Feature;
+~~~
+
+这里生成方法对 `value` 的使用仍须满足普通 Splice 协议。当前实现支持显式命名供应；未供应的 implicit 输入仍由普通调用系统诊断，不能把当前尚未实现的自动供应当成默认 `false` 或省略参数。
+
+`lambda` 标记可以把 post-do 代码交付给策略的编译时回调。下面的回调在构造实现时计算结果，生成方法只读取该结果：
+
+~~~flurry
+derive fn transformed(value: bool, lambda action: comptime fn(bool) -> bool)
+for FeatureFlag {
+    let result = action(value);
+    fn enabled() -> bool { result }
+}
+
+struct Transformed {}
+derive FeatureFlag.use(transformed(false) do { not _0 }) for Transformed;
+~~~
+
+也可以显式交付 `transformed(false, |value| not value)`。回调按需执行；未使用的回调仍接受类型与阶段检查，但不会仅因作为实参被交付就调用其主体。多个 lambda 入口的歧义及 runtime 调用泄漏均按普通 comptime 调用规则拒绝。
+
 变参输入交付一个完整的收集值。下面的策略先在编译时解构两个标志，只让生成方法捕获计算出的布尔结果：
 
 ~~~flurry

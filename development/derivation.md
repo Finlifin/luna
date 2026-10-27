@@ -873,3 +873,34 @@ python3 -B development/reproduce.py --binary /tmp/luna-dev-002/target/release/lu
   This establishes forwarding of supported packets, not support for record
   layout permutation. Keep the reproduction for follow-up in ordinary call
   preparation; do not treat this limitation as a new language restriction.
+
+## Implicit and lambda strategy inputs
+
+The strategy input gate now preserves implicit and lambda flags when cloning
+its ordinary comptime execution function. Named implicit inputs can provide
+staged types and feed dependent defaults. Lambda inputs accept explicit
+callbacks, tactics and post-do bodies, including alongside computed spreads
+and implicit supplies. Callback bodies execute only when the strategy calls
+them; unused callbacks are still type/phase checked without invocation.
+
+No separate protocol implementation was added. Ordinary routing retains
+ambiguity, duplicate, positional-versus-named and phase diagnostics. Automatic
+implicit supply remains unsupported by the ordinary caller. Quote, error,
+catch and other specialized strategy flags remain outside this stage, as do
+generic strategy environments and default strategy selection.
+
+Checks in `/home/fin/luna` (all exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Derivation: 68 passed; `/tmp/luna-tools-ulgxvd3d/result.json`.
+- Formatting: `/tmp/luna-tools-yo2earfh/result.json`.
+- Five new tests cover named supplies, dependent defaults and staged Type
+  identities; explicit lambdas/tactics and post-do; spread composition; unused
+  divergent callbacks; and missing/duplicate/ambiguous/wrong-stage rejection.
+- The former lambda-specific unsupported test now checks an unsupported quote
+  flag, retaining a guard against silently dropping unimplemented protocols.
