@@ -243,3 +243,61 @@ python3 -B development/check.py --timeout 900 -- test --release -p luna --test t
 ```
 
 Report: `/tmp/luna-tools-yspdak7y/result.json`. `git diff --check` passed.
+
+## Staged parameter identity publication
+
+DefinitionBatch now accepts generated comptime parameter registrations through
+`set_staged_parameters`. Targets must name actual comptime parameters in the
+draft. Registrations participate in the same identity set as definitions and
+clause parameters, including staged identities already present in source HIR.
+Duplicate bindings, invalid identities, reused identities and runtime/nonparameter
+targets are rejected before mutation. Registering an identity advances the draft
+allocation frontier; committing also advances the package frontier.
+
+Prepared candidates expose the table to ordinary checking. Failed checks,
+exhausted fuel and abandoned preparations leave the published table unchanged.
+The registrations are consumed on successful publication and rendered in stable
+S-expression order. Copying the draft and scanning existing staged identities
+are budgeted; the existing public lowering table is scanned once per publication
+rather than assuming that its identities are free.
+
+Generated method drafts now remap each comptime parameter's source identity to an
+explicit fresh identity and return the registrations with the signature/body.
+Callers must pass the complete registration list to the definition batch before
+checking. Missing source identities or fresh mappings remain errors. This
+supersedes the earlier rejection of generated methods with staged parameters.
+It does not yet substitute captured strategy inputs or wire derive execution.
+
+Checks in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir --tests
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib member_clone
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+- HIR suites: 74 passed, exit 0, `/tmp/luna-tools-ju1hm0jk/result.json`.
+- Member cloning: 7 passed, exit 0, `/tmp/luna-tools-53mabdfp/result.json`.
+- Formatting: exit 0, `/tmp/luna-tools-34nf9avz/result.json`.
+- Publication tests cover failed checking, discarded preparations, exhaustion,
+  allocation after publication, malformed targets and identity conflicts. The
+  member regression publishes two independently rebound staged parameter sets.
+
+The first end-to-end builder run found a regression in module registration:
+6 builder-invocation tests exhausted publication fuel because providers.rs still
+budgeted only the module entries. The entrypoint now also budgets the existing
+staged identity scan; empty publication batches skip the scan. The failure report
+is `/tmp/luna-tools-tkb9orgg/result.json` (46 passed, 6 failed; the generated
+suite was not reached). This was a new integration regression, not a baseline
+failure. Final format check after the fix passed:
+`/tmp/luna-tools-hy683eqs/result.json`.
+
+After the budget fix, both end-to-end suites passed (52 builder invocations and
+2 generated-definition tests, exit 0), `/tmp/luna-tools-zxv2jxtc/result.json`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test generated_definitions --test builder_invocations
+```
+
+The final HIR rerun also passed (74 tests, exit 0),
+`/tmp/luna-tools-57szjqrg/result.json`. `git diff --check` passed.

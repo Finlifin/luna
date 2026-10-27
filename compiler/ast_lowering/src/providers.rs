@@ -82,7 +82,13 @@ fn lower_package_ast(db: &Db) -> Arc<HirPackageBox> {
                 && pending_identities.insert(scope.owner_def)
         })
         .collect();
-    let mut publication_fuel = missing.len().saturating_mul(4).saturating_add(1);
+    // Publication also checks that generated module identities do not collide
+    // with the resolver identities of already-lowered comptime parameters.
+    let mut publication_fuel = missing
+        .len()
+        .saturating_mul(4)
+        .saturating_add(package.staged_parameter_definitions.len())
+        .saturating_add(1);
     let mut generated = hir::definitions::DefinitionBatch::new(&mut package);
     for scope in missing {
         let owner = generated

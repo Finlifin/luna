@@ -933,3 +933,140 @@ fn resolution_evidence_rejects_foreign_duplicate_and_invalid_entries() {
     batch.set_resolution(Vec::new());
     batch.publish(&mut 1000).unwrap();
 }
+
+fn staged_method<'h>(arena: &'h HirArena, owner: OwnerId, staged: bool) -> OwnerInfo<'h> {
+    let binding = HirId::new(owner, ItemLocalId::new(1));
+    let ty = arena.alloc_expr(Expr {
+        hir_id: HirId::new(owner, ItemLocalId::new(2)),
+        kind: ExprKind::TyType,
+        span: DUMMY_SP,
+    });
+    let mut parameter_type =
+        hir::common::TyParam::new(binding, hir::common::TyParamKind::Positional(ty), DUMMY_SP);
+    if staged {
+        parameter_type = parameter_type.with_comptime();
+    }
+    let parameter = hir::common::FnParam {
+        hir_id: binding,
+        name: Ident::new(Symbol::intern("T"), DUMMY_SP),
+        index: 0,
+        ty: parameter_type,
+        span: DUMMY_SP,
+    };
+    let mut signature = signature();
+    signature.params = arena.alloc_fn_param_slice(vec![parameter]);
+    info(arena, owner, ItemKind::FnDeclaration(signature))
+}
+
+#[test]
+fn staged_parameter_identities_publish_atomically_and_reserve_the_namespace() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    let binding = HirId::new(owner, ItemLocalId::new(1));
+    let identity = DefId::new(0, 100);
+    batch
+        .define(staged_method(&arena, owner, true), None, None)
+        .unwrap();
+    batch.set_staged_parameters(vec![(binding, identity)]);
+    assert!(batch.to_string().contains("(staged-parameters (parameter"));
+    assert!(batch.publish(&mut 0).is_err());
+    assert!(batch.published().staged_parameter_definitions.is_empty());
+    let result = batch.publish_checked(&mut 1000, |candidate| {
+        assert_eq!(candidate.staged_parameter_definitions[&binding], identity);
+        Err::<(), _>("reject")
+    });
+    assert!(matches!(
+        result,
+        Err(hir::definitions::PublicationError::Check("reject"))
+    ));
+    assert_eq!(batch.published().num_defs(), 0);
+    assert!(batch.published().staged_parameter_definitions.is_empty());
+    let prepared = batch
+        .prepare_checked(&mut 1000, |_| Ok::<_, ()>(()))
+        .unwrap();
+    drop(prepared);
+    assert!(batch.published().staged_parameter_definitions.is_empty());
+    batch
+        .publish_checked(&mut 1000, |_| Ok::<_, ()>(()))
+        .unwrap();
+    assert_eq!(
+        batch.published().staged_parameter_definitions[&binding],
+        identity
+    );
+    assert!(batch.reserve_identity(0, &mut 1000).unwrap().index > identity.index);
+    let second = batch.reserve().unwrap();
+    batch
+        .define(module(&arena, second, vec![]), Some(identity), None)
+        .unwrap();
+    assert_eq!(
+        batch.publish(&mut 1000).unwrap_err().kind,
+        "invalid or duplicate definition identity"
+    );
+    batch
+        .define(module(&arena, second, vec![]), None, None)
+        .unwrap();
+    batch.publish(&mut 1000).unwrap();
+    assert_eq!(batch.published().staged_parameter_definitions.len(), 1);
+}
+
+#[test]
+fn staged_parameter_publication_rejects_bad_targets_and_identity_collisions() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    let runtime = batch.reserve().unwrap();
+    let declared = DefId::new(0, 12);
+    batch
+        .define(staged_method(&arena, owner, true), Some(declared), None)
+        .unwrap();
+    batch
+        .define(staged_method(&arena, runtime, false), None, None)
+        .unwrap();
+    let binding = HirId::new(owner, ItemLocalId::new(1));
+    let identity = DefId::new(0, 20);
+    for (entries, expected) in [
+        (
+            vec![(HirId::new(runtime, ItemLocalId::new(1)), identity)],
+            "staged identity target is not a draft comptime parameter",
+        ),
+        (
+            vec![(HirId::new(owner, ItemLocalId::new(99)), identity)],
+            "staged identity target is not a draft comptime parameter",
+        ),
+        (
+            vec![(binding, identity), (binding, DefId::new(0, 21))],
+            "duplicate staged parameter binding",
+        ),
+        (
+            vec![(binding, DefId::INVALID)],
+            "invalid or duplicate staged parameter identity",
+        ),
+        (
+            vec![(binding, declared)],
+            "invalid or duplicate definition identity",
+        ),
+    ] {
+        batch.set_staged_parameters(entries);
+        assert_eq!(batch.publish(&mut 1000).unwrap_err().kind, expected);
+        assert_eq!(batch.published().num_defs(), 0);
+        assert!(batch.published().staged_parameter_definitions.is_empty());
+    }
+    batch.set_staged_parameters(vec![(binding, identity)]);
+    batch.publish(&mut 1000).unwrap();
+    let new_owner = batch.reserve().unwrap();
+    batch
+        .define(staged_method(&arena, new_owner, true), None, None)
+        .unwrap();
+    let new_binding = HirId::new(new_owner, ItemLocalId::new(1));
+    batch.set_staged_parameters(vec![(new_binding, identity)]);
+    assert_eq!(
+        batch.publish(&mut 1000).unwrap_err().kind,
+        "invalid or duplicate staged parameter identity"
+    );
+    batch.set_staged_parameters(vec![(new_binding, DefId::new(0, 30))]);
+    batch.publish(&mut 1000).unwrap();
+    assert_eq!(batch.published().staged_parameter_definitions.len(), 2);
+}

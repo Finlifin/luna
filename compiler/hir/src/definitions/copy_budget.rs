@@ -45,6 +45,7 @@ impl DefinitionBatch<'_, '_> {
         charge(fuel, self.bodies.len())?;
         charge(fuel, self.body_slots.capacity())?;
         charge(fuel, self.resolution.len())?;
+        charge(fuel, self.staged_parameters.len())?;
         attributes(&self.attributes, fuel)?;
         Ok(())
     }

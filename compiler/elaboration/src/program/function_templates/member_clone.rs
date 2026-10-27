@@ -13,6 +13,7 @@ pub(in crate::program) struct ClonedMember<'h> {
     pub bindings: HashMap<HirId, HirId>,
     pub nodes: hir::OwnerNodes<'h>,
     pub attributes: Vec<hir::DeferredDefinitionAttribute<'h>>,
+    pub staged_parameters: Vec<(HirId, DefId)>,
     pub resolution: Vec<(HirId, hir::definitions::ResolutionEvidence)>,
 }
 
@@ -61,16 +62,30 @@ pub(in crate::program) fn clone_member<'h>(
         let mut signature = signature.clone();
         signature.clause_params = rebind.clauses(signature.clause_params)?;
         let mut parameters = Vec::new();
+        let mut staged_parameters = Vec::new();
         for parameter in signature.params {
             rebind.charge(parameter.span, 0)?;
-            if source
-                .staged_parameter_definitions
-                .contains_key(&parameter.hir_id)
-            {
-                return Err(error(
-                    parameter.span,
-                    "generated staged parameter identity publication is not implemented",
-                ));
+            if parameter.ty.is_comptime() {
+                let old = source
+                    .staged_parameter_definitions
+                    .get(&parameter.hir_id)
+                    .ok_or_else(|| {
+                        error(
+                            parameter.span,
+                            "generated staged parameter has no source identity",
+                        )
+                    })?;
+                let new = definitions
+                    .get(old)
+                    .copied()
+                    .filter(|new| new != old && new.is_valid())
+                    .ok_or_else(|| {
+                        error(
+                            parameter.span,
+                            "generated staged parameter requires a fresh definition identity",
+                        )
+                    })?;
+                staged_parameters.push((rebind.id(parameter.hir_id), new));
             }
             let mut parameter = parameter.clone();
             parameter.hir_id = rebind.id(parameter.hir_id);
@@ -128,10 +143,10 @@ pub(in crate::program) fn clone_member<'h>(
                 hir::Node::ClauseParam(parameter),
             );
         }
-        Ok((item, resolution, attributes, nodes))
+        Ok((item, resolution, attributes, nodes, staged_parameters))
     })();
     *fuel = rebind.budget;
-    let (item, resolution, attributes, nodes) = result?;
+    let (item, resolution, attributes, nodes, staged_parameters) = result?;
     Ok(ClonedMember {
         item,
         bodies: rebind.bodies,
@@ -139,6 +154,7 @@ pub(in crate::program) fn clone_member<'h>(
         resolution,
         attributes,
         nodes,
+        staged_parameters,
     })
 }
 
