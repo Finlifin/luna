@@ -758,3 +758,32 @@ git diff --check
 - Formatting: exit 0, `/tmp/luna-tools-dt6bptmm/result.json`; diff check passed.
 - This suite does not establish end-to-end support for every pattern protocol;
   those continue to require their ordinary protocol bindings and checking.
+
+## Strategy declaration guards and failure branches
+
+Outer strategy declarations now enter the ordinary let/var checker with their
+guard and fallback branch intact. Successful pattern outputs are available to
+the guard and subsequent generated members; failure branches run through the
+same comptime invocation and must diverge. Refutable declarations without an
+else and non-diverging else branches retain the ordinary diagnostics.
+
+No separate initialization semantics are introduced for strategies. The current
+ordinary checker still requires an initializer, so an uninitialized declaration
+now reports that concrete limitation instead of a derivation-expansion error.
+A failed generation invocation cannot complete the generated package checks or
+publish a usable implementation. Early strategy returns and conditional member
+emission still require a generation result/control-flow model beyond this path.
+
+Checks in `/home/fin/luna` (all exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Derive suite: 52 passed, `/tmp/luna-tools-w6lqieeu/result.json`.
+  New cases cover guard access to matched outputs and outer inputs, independent
+  successful requests, executed failure branches for failed patterns and guards,
+  and ordinary diagnostics for missing/non-diverging fallback and initialization.
+- Formatting: `/tmp/luna-tools-8ob3op0g/result.json`; diff check passed.

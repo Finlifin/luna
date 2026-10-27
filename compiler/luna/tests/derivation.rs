@@ -666,3 +666,59 @@ fn unused_strategy_pattern_outputs_still_validate_field_names() {
     let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
     assert!(error.contains("unknown struct pattern field"), "{error}");
 }
+
+#[test]
+fn strategy_guards_see_successful_pattern_outputs_and_outer_inputs() {
+    let package = compile_with_strategy_bool_splice(
+        r#"
+        struct Config {flag: bool}
+        trait Flag {fn flag()->bool;}
+        derive fn configured(expected: bool) for Flag {
+            let {flag: selected} if selected == expected = Config {flag: expected}
+                else {while true {}};
+            fn flag()->bool {selected}
+        }
+        struct First {}
+        struct Second {}
+        derive Flag.use(configured(true)) for First;
+        derive Flag.use(configured(false)) for Second;
+        fn run()->bool {First.as(Flag).flag() and not Second.as(Flag).flag()}
+        "#,
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn failed_strategy_patterns_and_guards_execute_the_failure_branch() {
+    for binding in [
+        "let true = false else {while true {}};",
+        "let selected if selected = false else {while true {}};",
+    ] {
+        let source = format!(
+            "trait Flag {{}} derive fn configured for Flag {{{binding}}} struct Subject {{}} derive Flag.use(configured) for Subject;"
+        );
+        let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains("step budget exhausted"), "{error}");
+    }
+}
+
+#[test]
+fn strategy_binding_failures_use_ordinary_declaration_checks() {
+    for (binding, expected) in [
+        ("let selected if selected = true;", "refutable let pattern"),
+        (
+            "let selected if selected = true else {()};",
+            "let else branch must diverge",
+        ),
+        ("var selected:bool;", "requires an initializer"),
+    ] {
+        let source = format!(
+            "trait Flag {{}} derive fn configured for Flag {{{binding}}} struct Subject {{}} derive Flag.use(configured) for Subject;"
+        );
+        let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
+}

@@ -60,13 +60,6 @@ fn members<'h>(
         };
         match statement.kind {
             E::Let(binding) => {
-                if binding.guard.is_some() || binding.otherwise.is_some() || binding.init.is_none()
-                {
-                    return Err(unsupported(
-                        statement.span,
-                        "guarded or uninitialized strategy bindings",
-                    ));
-                }
                 bindings::collect(&binding.pattern, binding.ty, &mut locals, fuel)?;
                 computations.push(statement);
             }
