@@ -101,3 +101,47 @@ reported by `/tmp/luna-tools-25cdrxxe/result.json` exited 1; the main commit's
 format-pass line was premature. A follow-up formats that assertion only and
 rechecks formatting. The 104 passing behavioral tests are unaffected; no tests
 were rerun solely for whitespace.
+
+## Generated method drafts
+
+The shared HIR rebinder now has a method-draft entrypoint. Each invocation uses
+an unoccupied destination owner, clones the signature, contracts and bodies,
+and returns the identity map needed for resolver metadata transfer. Explicit
+old/new definition mappings redirect references between generated methods;
+references outside that mapping retain their original definition identity.
+No source package or published definition is mutated by cloning.
+
+A source receiver and body may both use local zero. Mapping that identity to a
+new definition root would produce a forbidden parameter identity. The rebinder
+instead allocates a fresh nonzero identity and preserves references from both
+the signature and body. The regression clones the same method twice and sends
+both drafts through DefinitionBatch publication, checking distinct receiver
+identities and preserved body references.
+
+Foreign parameter/local captures currently require substitution and are rejected.
+Method clause parameters are also rejected until their definition identities can
+be instantiated. This is an internal draft operation, not executable derivation:
+strategy selection, generation-input interpretation, metadata/attribute transfer,
+and normal implementation checking still need integration. Existing derive
+requests retain their explicit pending-expansion diagnostic.
+
+Checks in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib member_clone
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+- Member clone: 3 passed, exit 0, `/tmp/luna-tools-unj8z151/result.json`.
+- Format: exit 0, `/tmp/luna-tools-wyh_9z80/result.json`.
+- Initial test compilation exposed a fixture Ident/Symbol mismatch; the first
+  executable test run then rejected differing parameter/type-parameter IDs in
+  the fixture. Both fixture errors were corrected before the passing run.
+
+The shared-rebinder regression command also passed (18 tests, exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test test_templates signature_template
+```
+
+Report: `/tmp/luna-tools-ngy1qj9z/result.json`. `git diff --check` passed.

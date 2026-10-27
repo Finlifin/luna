@@ -5,7 +5,9 @@ use hir::clause::ClauseConstraintKind as C;
 use hir::common::{Arg, TyParam, TyParamKind as T};
 use hir::{Expr, ExprKind as E, HirArena, HirId, ItemKind, OwnerId, Package};
 use std::collections::HashMap;
+mod member_clone;
 mod patterns;
+pub(super) use member_clone::{ClonedMember, clone_member};
 
 pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Package<'h>, Error> {
     let mut package = source.clone();
@@ -73,6 +75,8 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
                 .collect(),
             budget: 100_000,
             bodies: Vec::new(),
+            definitions: HashMap::new(),
+            member_owner: None,
         };
         let mut sig = formal.clone();
         let params = formal
@@ -153,6 +157,8 @@ struct Rebind<'s, 'h> {
     bindings: HashMap<HirId, HirId>,
     budget: usize,
     bodies: Vec<(hir::BodyId, hir::body::Body<'h>)>,
+    definitions: HashMap<hir::common::DefId, hir::common::DefId>,
+    member_owner: Option<OwnerId>,
 }
 impl<'h> Rebind<'_, 'h> {
     fn charge(&mut self, span: rustc_span::Span, depth: usize) -> Result<(), Error> {
@@ -276,6 +282,16 @@ impl<'h> Rebind<'_, 'h> {
     fn expr(&mut self, expr: &Expr<'h>, depth: usize) -> Result<&'h Expr<'h>, Error> {
         self.charge(expr.span, depth)?;
         let depth = depth + 1;
+        if let E::ResolvedFnParam(_, id) | E::ResolvedLocal(_, id) = &expr.kind {
+            if self.member_owner.is_some_and(|owner| id.owner != owner)
+                && !self.bindings.contains_key(id)
+            {
+                return Err(error(
+                    expr.span,
+                    "generated member capture requires an explicit substitution",
+                ));
+            }
+        }
         let kind = match &expr.kind {
             E::ResolvedFnParam(name, id) => E::ResolvedFnParam(*name, self.id(*id)),
             E::ResolvedLocal(name, id) => E::ResolvedLocal(*name, self.id(*id)),
@@ -307,8 +323,16 @@ impl<'h> Rebind<'_, 'h> {
             ),
             E::BreakTo(id) => E::BreakTo(self.id(*id)),
             E::ContinueTo(id) => E::ContinueTo(self.id(*id)),
-            E::ResolvedDef { .. }
-            | E::Builtin(_)
+            E::ResolvedDef {
+                name,
+                def_id,
+                has_clause_param,
+            } => E::ResolvedDef {
+                name: *name,
+                def_id: self.definitions.get(def_id).copied().unwrap_or(*def_id),
+                has_clause_param: *has_clause_param,
+            },
+            E::Builtin(_)
             | E::Lit(_)
             | E::TyType
             | E::TyVoid
