@@ -1,6 +1,12 @@
 //! Clause computations use the ordinary function-instance cache and contracts.
 use super::*;
 
+pub(super) enum PreparedTraitInstance {
+    Unrelated,
+    Ready(Expr),
+    Control(Flow),
+}
+
 impl Interpreter<'_> {
     pub(super) fn evaluate_instance_default(
         &mut self,
@@ -37,11 +43,87 @@ impl Interpreter<'_> {
         self.evaluate_default(construction, &prepared, defaults, caller)
     }
 
+    pub(super) fn prepare_dynamic_trait_instance(
+        &mut self,
+        expr: &Expr,
+        environment: &mut Environment,
+    ) -> Result<PreparedTraitInstance, Error> {
+        let K::ComptimeFunctionInstance {
+            declaration,
+            subject,
+        } = &expr.kind
+        else {
+            return Ok(PreparedTraitInstance::Unrelated);
+        };
+        let work = self.method_contracts.len();
+        self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
+        let mut candidates = self
+            .method_contracts
+            .iter()
+            .filter(|((_, member), _)| member == declaration);
+        let Some((&(interface, member), (parameters, contract))) = candidates.next() else {
+            return Ok(PreparedTraitInstance::Unrelated);
+        };
+        if candidates.next().is_some() {
+            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
+        }
+        if !self.comptime_only
+            || !contract.signature.is_comptime_callable()
+            || !expr.ty.is_comptime_callable()
+        {
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
+        }
+        let count = parameters.len();
+        let interface_count = count
+            .checked_sub(1 + contract.type_parameters.len())
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
+        let Term::Tuple(domains) = &subject.ty else {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        };
+        if domains.len() != count || count < 1 + interface_count {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        let values = match self.eval(subject, environment)? {
+            Flow::Value(Value::Tuple(values)) => values,
+            Flow::Value(_) => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
+            flow => return Ok(PreparedTraitInstance::Control(flow)),
+        };
+        if values.len() != domains.len() {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        self.integer_operation(Some(expr.source), |budget| budget.consume(values.len()))?;
+        let mut inputs = Vec::with_capacity(values.len());
+        for (value, domain) in values.into_iter().zip(domains) {
+            if !self.has_type(&value, domain) {
+                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            }
+            inputs.push(self.residual_input_term(value, expr.source)?);
+        }
+        Ok(PreparedTraitInstance::Ready(Expr {
+            source: expr.source,
+            ty: expr.ty.clone(),
+            kind: K::TraitMethod {
+                interface,
+                member,
+                subject: inputs[0].clone(),
+                interface_arguments: inputs[1..1 + interface_count].to_vec(),
+                method_arguments: inputs[1 + interface_count..].to_vec(),
+            },
+        }))
+    }
+
     pub(super) fn eval_comptime_function_instance(
         &mut self,
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
+        match self.prepare_dynamic_trait_instance(expr, environment)? {
+            PreparedTraitInstance::Ready(method) => {
+                return self.eval_trait_method(&method, environment, false);
+            }
+            PreparedTraitInstance::Control(flow) => return Ok(flow),
+            PreparedTraitInstance::Unrelated => {}
+        }
         let K::ComptimeFunctionInstance {
             declaration,
             subject,

@@ -8233,6 +8233,17 @@ impl<'a> Interpreter<'a> {
         else {
             unreachable!("call preparation")
         };
+        let prepared_trait;
+        let callee = match self.prepare_dynamic_trait_instance(callee, environment)? {
+            dynamic_instances::PreparedTraitInstance::Ready(method) => {
+                prepared_trait = method;
+                &prepared_trait
+            }
+            dynamic_instances::PreparedTraitInstance::Control(flow) => {
+                return Ok(PreparedCall::Control(flow));
+            }
+            dynamic_instances::PreparedTraitInstance::Unrelated => callee.as_ref(),
+        };
         let this = self;
         let interface_program = if let K::TraitMethod {
             method_arguments,

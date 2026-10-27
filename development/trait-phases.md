@@ -146,6 +146,21 @@ The HIR regression checks rejection without publication, repair of the retained
 draft, merged availability and actual invocation. Membership does not rewrite
 function execution signatures.
 
+## Dynamic trait-member packets
+
+NIR's internal `ComptimeFunctionInstance` can name a trait member declaration.
+Its packet orders Self, interface inputs, then method inputs. The VM evaluates
+and freezes this packet before rebuilding a `TraitMethod`; direct calls then use
+the existing interface parameter bindings, selection, phase checks and program
+contracts. A method with interface preconditions cannot escape as a plain
+callable value. Packet shape, domains, ambiguous member identities and comptime
+execution are checked before dispatch; lookup and freezing consume VM budget.
+The existing S-expression dump retains the declaration and packet explicitly.
+
+This VM path is a prerequisite, not source syntax completion. Source clause
+preparation still routes trait methods through the static path, and dynamic
+trait defaults and IIR instance preparation need further integration.
+
 ## Remaining integration
 
 - Interleave metadata queries that themselves depend on interface preparation;
@@ -156,8 +171,9 @@ function execution signatures.
 - Extend VM-facing builders beyond their current nominal descriptors and
   finish remaining protocol consumers. Builtin Eq/Hash library declarations still expose runtime
   methods; the executable cache-key fixtures explicitly declare comptime members.
-- Connect dynamic trait-method clause preparation without erasing interface
-  origin, defaults, preconditions, postconditions, or selected instance identity.
+- Connect source elaboration and call-default specialization to the dynamic
+  trait-member packet path. VM direct calls retain origin and program checks;
+  source dynamic trait-method clause preparation remains unfinished.
 
 The existing dynamic inherent-method implementation is not evidence that trait
 phase selection or dynamic trait-method clauses are complete.
@@ -326,3 +342,15 @@ and diagnostic rerun (`/tmp/luna-tools-_4uyv2xu/result.json`, exit 101) exposed 
 obsolete blanket unsupported-attribute assertion. It now requires the actual
 Object-domain mismatch or unsupported named consumer diagnostic while preserving
 all transactional assertions. No production behavior was changed in this step.
+
+Dynamic trait-member packet interpretation passed 100 targeted tests in
+`/home/fin/luna` with `python3 -B development/check.py --timeout 900 -- test
+--release -p nir -p comptime_interpretor --test runtime_function_identities
+--test calls --test types`
+(`/tmp/luna-tools-g0fd5my0/result.json`, exit 0). Raw checked NIR tests exercise
+invocation with multiple method Type inputs, interface pre/postcondition failures,
+rejection of contracted callable escape, missing comptime phases, malformed
+packet arity, and a failed type requirement followed by a successful invocation.
+The initial run (`/tmp/luna-tools-f1k849_z/result.json`, exit 0) passed before the
+last two boundary cases were added. Existing function-call and type tests also
+pass. This is VM-level evidence, not source dynamic-trait-clause or IIR support.

@@ -941,6 +941,8 @@ pub enum ExprKind {
     },
     /// Evaluate and freeze clause operands before creating a comptime callable.
     /// The callable signature is already known; the packet retains input domains.
+    /// A trait member declaration retains its origin: packet inputs are Self,
+    /// interface inputs, then member inputs, and dispatch uses the trait contract.
     ComptimeFunctionInstance {
         declaration: DeclarationId,
         subject: Box<Expr>,

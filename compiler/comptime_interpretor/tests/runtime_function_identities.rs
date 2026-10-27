@@ -1114,3 +1114,187 @@ fn comptime_functions_execute_under_either_membership_phase() {
         assert!(Interpreter::for_comptime(&package, Budget::default()).is_err());
     }
 }
+
+fn dynamic_trait_package() -> Package {
+    let mut package = trait_package();
+    package.runtime_function_identities.clear();
+    let boolean = Term::Primitive(Primitive::Bool);
+    let callable = signature(boolean.clone()).with_comptime_phase(true);
+    let source = SourceRange { start: 50, end: 60 };
+    let binding = nir::program::LocalId { owner: 1, index: 0 };
+    let mut body = package.functions[0].clone();
+    body.declaration = id(2);
+    body.name = "make".into();
+    body.type_parameters = vec![id(3)];
+    body.signature = signature(boolean.clone());
+    body.body = Expr {
+        source,
+        ty: boolean.clone(),
+        kind: K::Literal(nir::program::Literal::Bool(true)),
+    };
+    package.functions.push(body);
+    package.traits[0].methods[0].signature = callable.clone().into();
+    package.traits[0].methods[0].phase = nir::program::TraitPhase::Comptime;
+    package.implementations[0].phases = nir::program::ImplementationPhases {
+        runtime: false,
+        comptime: true,
+    };
+    package.functions[0].signature = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::Runtime,
+            ty: Term::Primitive(Primitive::Type),
+        }],
+        result: Box::new(boolean.clone()),
+    };
+    package.functions[0].parameters = vec![binding];
+    let packet = Expr {
+        source,
+        ty: Term::Tuple(vec![Term::Primitive(Primitive::Type); 2]),
+        kind: K::Tuple(vec![
+            Expr {
+                source,
+                ty: Term::Primitive(Primitive::Type),
+                kind: K::TypeValue(boolean.clone()),
+            },
+            Expr {
+                source,
+                ty: Term::Primitive(Primitive::Type),
+                kind: K::Local(binding),
+            },
+        ]),
+    };
+    package.functions[0].body = Expr {
+        source,
+        ty: boolean,
+        kind: K::Call {
+            callee: Box::new(Expr {
+                source,
+                ty: callable,
+                kind: K::ComptimeFunctionInstance {
+                    declaration: id(5),
+                    subject: Box::new(packet),
+                },
+            }),
+            arguments: vec![],
+            parameter_bindings: vec![],
+        },
+    };
+    package
+}
+
+#[test]
+fn dynamic_trait_clauses_select_the_originating_contract_and_instance() {
+    let package = dynamic_trait_package();
+    assert!(format!("{package}").contains("comptime-function-instance"));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for ty in [Primitive::Bool, Primitive::U8] {
+        assert_eq!(
+            vm.invoke(id(1), vec![Value::Type(Term::Primitive(ty))])
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn dynamic_trait_clauses_do_not_erase_interface_program_checks() {
+    for postcondition in [false, true] {
+        let mut package = dynamic_trait_package();
+        let false_value = Expr {
+            source: SourceRange { start: 70, end: 80 },
+            ty: Term::Primitive(Primitive::Bool),
+            kind: K::Literal(nir::program::Literal::Bool(false)),
+        };
+        let program = &mut package.traits[0].methods[0].program;
+        if postcondition {
+            program.postconditions.push(false_value);
+        } else {
+            program.preconditions.push(false_value);
+        }
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert!(
+            vm.invoke(id(1), vec![Value::Type(Term::Primitive(Primitive::Bool))])
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn dynamic_trait_clauses_reject_contract_erasure_and_missing_phases() {
+    let mut package = dynamic_trait_package();
+    package.traits[0].methods[0]
+        .program
+        .preconditions
+        .push(Expr {
+            source: SourceRange { start: 70, end: 80 },
+            ty: Term::Primitive(Primitive::Bool),
+            kind: K::Literal(nir::program::Literal::Bool(true)),
+        });
+    let K::Call { callee, .. } = package.functions[0].body.kind.clone() else {
+        unreachable!()
+    };
+    package.functions[0].body = *callee;
+    let result = package.functions[0].body.ty.clone();
+    if let Term::Function { result: output, .. } = &mut package.functions[0].signature {
+        *output = Box::new(result);
+    }
+    assert!(Interpreter::for_comptime(&package, Budget::default()).is_err());
+    let mut package = dynamic_trait_package();
+    package.implementations[0].phases = nir::program::ImplementationPhases::default();
+    package.implementations[0].methods.clear();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert!(
+        vm.invoke(id(1), vec![Value::Type(Term::Primitive(Primitive::Bool))])
+            .is_err()
+    );
+}
+
+#[test]
+fn dynamic_trait_clause_failure_does_not_poison_later_selection() {
+    let mut package = dynamic_trait_package();
+    package.traits[0].methods[0]
+        .requirements
+        .push(nir::program::TypePredicate::Equal(
+            Term::Rigid {
+                declaration: id(3),
+                sort: Sort::Type,
+            },
+            Term::Primitive(Primitive::Bool),
+        ));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert!(
+        vm.invoke(id(1), vec![Value::Type(Term::Primitive(Primitive::U8))])
+            .is_err()
+    );
+    assert_eq!(
+        vm.invoke(id(1), vec![Value::Type(Term::Primitive(Primitive::Bool))])
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn dynamic_trait_clause_packet_requires_every_declared_input() {
+    let mut package = dynamic_trait_package();
+    let K::Call { callee, .. } = &mut package.functions[0].body.kind else {
+        unreachable!()
+    };
+    let K::ComptimeFunctionInstance { subject, .. } = &mut callee.kind else {
+        unreachable!()
+    };
+    let Term::Tuple(domains) = &mut subject.ty else {
+        unreachable!()
+    };
+    domains.pop();
+    let K::Tuple(values) = &mut subject.kind else {
+        unreachable!()
+    };
+    values.pop();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(1), vec![Value::Type(Term::Primitive(Primitive::Bool))])
+            .unwrap_err()
+            .kind,
+        ErrorKind::Type
+    );
+}

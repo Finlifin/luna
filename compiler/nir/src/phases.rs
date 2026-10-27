@@ -1181,9 +1181,28 @@ pub fn machine_arithmetic_functions(
                             declaration,
                             subject,
                         } => {
-                            let target = functions
-                                .get(declaration)
-                                .ok_or_else(|| error("function phase declaration is missing"))?;
+                            let member = package
+                                .traits
+                                .iter()
+                                .flat_map(|interface| &interface.methods)
+                                .find(|member| member.declaration == *declaration);
+                            let trait_target;
+                            let target = if let Some(member) = member {
+                                trait_target = (
+                                    if member.signature.is_comptime_callable() {
+                                        Phase::Comptime
+                                    } else {
+                                        Phase::Runtime
+                                    },
+                                    !member.program.preconditions.is_empty(),
+                                    member.is_unsafe,
+                                );
+                                &trait_target
+                            } else {
+                                functions
+                                    .get(declaration)
+                                    .ok_or_else(|| error("function phase declaration is missing"))?
+                            };
                             if !ct || target.0 != Phase::Comptime || !expr.ty.is_comptime_callable()
                             {
                                 return Err(error(
