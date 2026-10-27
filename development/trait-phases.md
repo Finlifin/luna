@@ -182,6 +182,12 @@ for those locals. Explicit arguments still precede default evaluation.
   packets explicitly; source comptime invocation retains origin, specialized
   defaults and program checks.
 
+A runtime entry can already consume the result of a fixed-signature dynamic
+trait computation through a bound `Splice` protocol. Required invocation freezes
+the comptime wrapper and member calculation before IIR instantiation, leaving
+runtime conversion semantics intact. This does not authorize runtime inputs to
+the comptime wrapper or permit an unevaluated dynamic packet in IIR.
+
 The existing dynamic inherent-method implementation is not evidence that trait
 phase selection or dynamic trait-method clauses are complete.
 
@@ -443,3 +449,14 @@ an initial broader command omitted the `nir` package owning `calls` and did not
 run tests. Formatting check passed with `python3 -B development/command.py
 --timeout 120 -- cargo fmt --all -- --check`
 (`/tmp/luna-tools-yq2mer5a/result.json`, exit 0); `git diff --check` passed.
+
+The runtime handoff is now covered by a source-to-IIR regression with an explicit
+ordinary `Splice.splice(comptime data:Self)` implementation. It checks the IIR
+contains only runtime functions and no `choose`/`use_it` comptime bodies, executes
+the same entry with both Bool runtime inputs, and rejects forwarding a runtime
+input into the comptime wrapper. This path already worked; no production change
+was needed. All ten dynamic-trait source tests passed in `/home/fin/luna` with
+`python3 -B development/check.py --timeout 900 -- test --release -p luna
+-p elaboration -p comptime_interpretor --test dynamic_trait_clauses`
+(`/tmp/luna-tools-inirtfel/result.json`, exit 0). This is evidence for completed
+invocation before IIR, not for retaining dynamic packets inside IIR.

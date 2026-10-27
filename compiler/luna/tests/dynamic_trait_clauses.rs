@@ -194,3 +194,39 @@ fn required_dynamic_trait_calls_prepare_nested_dispatch() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn runtime_entries_freeze_dynamic_trait_computations_before_iir() {
+    let text = source(
+        "comptime fn choose(value:bool)->bool where flag:bool {value}",
+        r#"
+        typealias Type=.Type'builtin;
+        trait Splice {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}
+        impl Splice for bool {
+            assoc RuntimeTarget:Type=bool;
+            fn splice(comptime data:bool)->bool {data}
+        }
+        comptime fn use_it(flag:bool)->bool {Subject.as(Choose).choose<flag>()}
+        fn run(value:bool)->bool {value and use_it(true) and not use_it(false)}
+    "#,
+    );
+    let package =
+        support::compile_with_bindings(&text, &Default::default(), Some("Splice")).unwrap();
+    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    assert!(graph.functions.iter().all(|instance| {
+        instance.function.phase == nir::program::FunctionPhase::Runtime
+            && !matches!(instance.function.name.as_str(), "choose" | "use_it")
+    }));
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    for value in [false, true] {
+        assert_eq!(
+            vm.invoke_instance(&graph.roots[0], vec![Value::Bool(value)])
+                .unwrap(),
+            Value::Bool(value)
+        );
+    }
+    let invalid = text.replace("use_it(true)", "use_it(value)");
+    let error =
+        support::compile_with_bindings(&invalid, &Default::default(), Some("Splice")).unwrap_err();
+    assert!(error.contains("runtime"), "{error}");
+}
