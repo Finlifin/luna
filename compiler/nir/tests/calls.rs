@@ -187,6 +187,7 @@ fn method_contract_summary_preserves_and_instantiates_local_binders() {
         sort: Sort::Type,
     };
     let contract = MethodContract {
+        phase: Default::default(),
         is_quote: false,
         pure: true,
         is_unsafe: false,

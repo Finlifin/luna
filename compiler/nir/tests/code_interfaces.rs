@@ -285,6 +285,7 @@ fn method_signature_preserves_category_through_specialization() {
 #[test]
 fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
     let method = nir::program::MethodContract {
+        phase: Default::default(),
         is_quote: false,
         pure: true,
         is_unsafe: false,

@@ -55,6 +55,7 @@ fn contract() -> Trait {
         requirements: vec![],
         capabilities: vec![],
         associated: vec![AssociatedContract {
+            phase: Default::default(),
             declaration: id(2),
             name: "Element".into(),
             ty: ty(P::Type),
@@ -64,6 +65,7 @@ fn contract() -> Trait {
 }
 fn implementation(subject: Term, result: Term) -> Implementation {
     Implementation {
+        phases: Default::default(),
         associated_initializers: vec![],
         parameter_types: vec![],
         declaration: id(4),

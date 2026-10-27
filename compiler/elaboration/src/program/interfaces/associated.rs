@@ -42,6 +42,7 @@ impl Checker<'_, '_> {
                 None
             };
             Ok(n::AssociatedContract {
+                phase: Default::default(),
                 declaration: declaration(self.package, &self.package_identities, owner),
                 name: item.ident.name.to_string(),
                 ty,

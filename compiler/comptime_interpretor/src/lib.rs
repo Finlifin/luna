@@ -1561,6 +1561,9 @@ impl<'a> Interpreter<'a> {
         let mut worlds = HashMap::new();
         let mut implementations = BTreeMap::new();
         for implementation in &package.implementations {
+            if !implementation.phases.runtime && !implementation.phases.comptime {
+                return Err(invalid());
+            }
             if implementations
                 .insert(implementation.declaration, implementation)
                 .is_some()
@@ -1570,6 +1573,9 @@ impl<'a> Interpreter<'a> {
             let concrete =
                 implementation.type_parameters.is_empty() && implementation.requirements.is_empty();
             let Some(interface) = implementation.interface_instance() else {
+                if implementation.phases.comptime {
+                    return Err(invalid());
+                }
                 continue;
             };
             let contract = traits.get(&interface.declaration).ok_or_else(invalid)?;
@@ -1610,6 +1616,12 @@ impl<'a> Interpreter<'a> {
                 }
             }
             for member in &contract.methods {
+                if !implementation.phases.contains(member.phase) {
+                    if supplied.contains_key(&member.name) {
+                        return Err(invalid());
+                    }
+                    continue;
+                }
                 let body = **supplied.get(&member.name).ok_or_else(invalid)?;
                 let (phase, type_parameters) = if let Some(function) = functions.get(&body) {
                     (function.phase, &function.type_parameters)
@@ -1736,6 +1748,11 @@ impl<'a> Interpreter<'a> {
                     .iter()
                     .find(|m| m.declaration == *member)
                     .ok_or_else(invalid)?;
+                if member_contract.phase == nir::program::TraitPhase::Comptime
+                    && !implementation.phases.comptime
+                {
+                    return Err(invalid());
+                }
                 let inputs: Vec<_> = std::iter::once(instance.subject.clone())
                     .chain(instance.interface_arguments.iter().cloned())
                     .collect();
@@ -1784,6 +1801,11 @@ impl<'a> Interpreter<'a> {
                     .iter()
                     .find(|m| m.declaration == *member)
                     .ok_or_else(invalid)?;
+                if member_contract.phase == nir::program::TraitPhase::Comptime
+                    && !implementation.phases.comptime
+                {
+                    return Err(invalid());
+                }
                 let member_inputs: Vec<_> = std::iter::once(instance.subject.clone())
                     .chain(instance.interface_arguments.iter().cloned())
                     .collect();
@@ -1860,6 +1882,9 @@ impl<'a> Interpreter<'a> {
                     .iter()
                     .find(|m| m.declaration == method.member)
                     .ok_or_else(invalid)?;
+                if !implementation.phases.contains(member.phase) {
+                    return Err(invalid());
+                }
                 if member.type_parameters.len() != method.method_arguments.len()
                     || !method_keys.insert((method.member, method.method_arguments.clone()))
                 {

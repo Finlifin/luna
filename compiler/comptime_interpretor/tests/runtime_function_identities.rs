@@ -181,6 +181,7 @@ fn trait_package() -> Package {
         self_parameter: id(4),
         name: "Factory".into(),
         methods: vec![nir::program::MethodContract {
+            phase: Default::default(),
             is_quote: false,
             pure: false,
             is_unsafe: false,
@@ -202,6 +203,7 @@ fn trait_package() -> Package {
         }],
     });
     package.implementations.push(nir::program::Implementation {
+        phases: Default::default(),
         associated_initializers: vec![],
         parameter_types: vec![],
         associated: vec![],
@@ -295,6 +297,7 @@ fn generator_method_contract_cannot_enter_ordinary_interpreter_dispatch() {
         self_parameter: id(40),
         name: "Generator".into(),
         methods: vec![nir::program::MethodContract {
+            phase: Default::default(),
             is_quote: false,
             pure: false,
             is_unsafe: false,
@@ -939,4 +942,175 @@ fn rejected_world_premises_do_not_refund_reserved_allowance() {
     let vm = Interpreter::for_comptime_in_budget(&world, &[], &mut budget).unwrap();
     assert_eq!(budget.steps, vm.remaining_steps());
     assert!(budget.steps < 100);
+}
+
+#[test]
+fn trait_membership_phase_is_independent_of_function_execution_phase() {
+    let mut package = trait_package();
+    package.traits[0].methods[0].phase = nir::program::TraitPhase::Comptime;
+    package.implementations[0].phases = nir::program::ImplementationPhases {
+        runtime: false,
+        comptime: true,
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert!(matches!(
+        vm.invoke(id(1), vec![]).unwrap(),
+        Value::RuntimeTraitMethod(_)
+    ));
+    assert!(
+        package.traits[0].methods[0]
+            .to_string()
+            .contains("(phase comptime)")
+    );
+    assert!(
+        package.implementations[0]
+            .to_string()
+            .contains("(phases (runtime false) (comptime true))")
+    );
+}
+
+#[test]
+fn unavailable_phase_cannot_supply_methods_or_defaults() {
+    let mut package = trait_package();
+    package.traits[0].methods[0].phase = nir::program::TraitPhase::Comptime;
+    assert!(nir::phases::validate(&package).is_err());
+    assert!(Interpreter::new(&package, Budget::default()).is_err());
+    package.implementations[0].methods.clear();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(1), vec![]).unwrap_err().kind,
+        ErrorKind::UnmaterializedDispatch
+    );
+    package.traits[0].methods[0].default = Some(id(2));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(1), vec![]).unwrap_err().kind,
+        ErrorKind::UnmaterializedDispatch
+    );
+}
+
+#[test]
+fn available_phase_requires_all_its_methods_but_not_other_phase_methods() {
+    let mut package = trait_package();
+    let mut missing = package.traits[0].methods[0].clone();
+    missing.declaration = id(7);
+    missing.name = "other".into();
+    missing.phase = nir::program::TraitPhase::Comptime;
+    package.traits[0].methods.push(missing);
+    assert!(Interpreter::for_comptime(&package, Budget::default()).is_ok());
+    package.implementations[0].phases.comptime = true;
+    assert!(Interpreter::for_comptime(&package, Budget::default()).is_err());
+    package.implementations[0]
+        .methods
+        .push(("other".into(), id(2)));
+    assert!(Interpreter::for_comptime(&package, Budget::default()).is_ok());
+}
+
+#[test]
+fn empty_implementation_phase_set_is_invalid_in_nir_and_vm() {
+    let mut package = trait_package();
+    package.implementations[0].phases.runtime = false;
+    assert!(nir::phases::validate(&package).is_err());
+    assert!(Interpreter::new(&package, Budget::default()).is_err());
+}
+
+#[test]
+fn associated_dispatch_requires_its_phase_and_retains_shared_runtime_values() {
+    let mut package = trait_package();
+    let value = Expr {
+        source: SourceRange { start: 1, end: 2 },
+        ty: Term::Primitive(Primitive::Bool),
+        kind: K::Literal(nir::program::Literal::Bool(true)),
+    };
+    package.traits[0]
+        .associated
+        .push(nir::program::AssociatedContract {
+            phase: nir::program::TraitPhase::Comptime,
+            declaration: id(8),
+            name: "flag".into(),
+            ty: value.ty.clone(),
+            default: None,
+        });
+    package.implementations[0]
+        .associated
+        .push((id(8), value.clone()));
+    package
+        .dispatch_instances
+        .push(nir::program::DispatchInstance {
+            interface: id(4),
+            interface_arguments: vec![],
+            subject: Term::Primitive(Primitive::Bool),
+            implementation: id(6),
+            arguments: vec![],
+            methods: vec![],
+            associated: vec![(id(8), value)],
+            associated_initializers: vec![],
+        });
+    assert!(Interpreter::new(&package, Budget::default()).is_err());
+    package.implementations[0].phases.comptime = true;
+    assert!(Interpreter::new(&package, Budget::default()).is_ok());
+    package.traits[0].associated[0].phase = nir::program::TraitPhase::Runtime;
+    package.implementations[0].phases.runtime = false;
+    package.implementations[0].methods.clear();
+    assert!(Interpreter::new(&package, Budget::default()).is_ok());
+    assert!(
+        package.traits[0].associated[0]
+            .to_string()
+            .contains("(phase runtime)")
+    );
+}
+
+#[test]
+fn comptime_functions_execute_under_either_membership_phase() {
+    for phase in [
+        nir::program::TraitPhase::Runtime,
+        nir::program::TraitPhase::Comptime,
+    ] {
+        let mut package = trait_package();
+        package.runtime_function_identities.clear();
+        let boolean = Term::Primitive(Primitive::Bool);
+        let mut body = package.functions[0].clone();
+        body.declaration = id(2);
+        body.name = "make".into();
+        body.signature = signature(boolean.clone());
+        body.body = Expr {
+            source: SourceRange { start: 1, end: 2 },
+            ty: boolean.clone(),
+            kind: K::Literal(nir::program::Literal::Bool(true)),
+        };
+        package.functions.push(body);
+        let callable = signature(boolean.clone()).with_comptime_phase(true);
+        let member = &mut package.traits[0].methods[0];
+        member.phase = phase;
+        member.type_parameters.clear();
+        member.signature = callable.clone().into();
+        package.implementations[0].phases = nir::program::ImplementationPhases {
+            runtime: phase == nir::program::TraitPhase::Runtime,
+            comptime: phase == nir::program::TraitPhase::Comptime,
+        };
+        package.functions[0].signature = signature(boolean.clone());
+        package.functions[0].body = Expr {
+            source: SourceRange { start: 1, end: 2 },
+            ty: boolean,
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source: SourceRange { start: 1, end: 2 },
+                    ty: callable,
+                    kind: K::TraitMethod {
+                        interface: id(4),
+                        interface_arguments: vec![],
+                        subject: Term::Primitive(Primitive::Bool),
+                        member: id(5),
+                        method_arguments: vec![],
+                    },
+                }),
+                arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(vm.invoke(id(1), vec![]).unwrap(), Value::Bool(true));
+        package.functions[1].phase = FunctionPhase::Runtime;
+        assert!(Interpreter::for_comptime(&package, Budget::default()).is_err());
+    }
 }

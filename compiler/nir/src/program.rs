@@ -2071,9 +2071,58 @@ impl fmt::Display for MethodInstance {
     }
 }
 
+/// Interface membership, independent of a function's execution phase.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TraitPhase {
+    #[default]
+    Runtime,
+    Comptime,
+}
+impl fmt::Display for TraitPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Runtime => "runtime",
+            Self::Comptime => "comptime",
+        })
+    }
+}
+
+/// The contributions admitted for one selected implementation relationship.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImplementationPhases {
+    pub runtime: bool,
+    pub comptime: bool,
+}
+impl Default for ImplementationPhases {
+    fn default() -> Self {
+        Self {
+            runtime: true,
+            comptime: false,
+        }
+    }
+}
+impl ImplementationPhases {
+    pub fn contains(self, phase: TraitPhase) -> bool {
+        match phase {
+            TraitPhase::Runtime => self.runtime,
+            TraitPhase::Comptime => self.comptime,
+        }
+    }
+}
+impl fmt::Display for ImplementationPhases {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(phases (runtime {}) (comptime {}))",
+            self.runtime, self.comptime
+        )
+    }
+}
+
 /// A declared associated value. Type is one possible value type.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AssociatedContract {
+    pub phase: TraitPhase,
     pub declaration: DeclarationId,
     pub name: String,
     pub ty: Term,
@@ -2083,8 +2132,8 @@ impl fmt::Display for AssociatedContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(associated {} (name {:?}) (type {}) (default",
-            self.declaration, self.name, self.ty
+            "(associated {} (name {:?}) (phase {}) (type {}) (default",
+            self.declaration, self.name, self.phase, self.ty
         )?;
         if let Some(value) = &self.default {
             write!(f, " {value}")?;
@@ -2110,6 +2159,7 @@ pub struct Trait {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct MethodContract {
+    pub phase: TraitPhase,
     /// Deterministic code application required by the interface; independent
     /// of execution phase and purity. Never authorizes a runtime call fallback.
     pub is_quote: bool,
@@ -2135,6 +2185,7 @@ pub struct MethodContract {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Implementation {
+    pub phases: ImplementationPhases,
     /// Ordered declaration domains; empty denotes all Type parameters.
     pub parameter_types: Vec<Term>,
     /// Values indexed by the originating interface member, in declaration order.
@@ -2203,9 +2254,10 @@ impl fmt::Display for MethodContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(method {} (name {:?}) (quote {}) (pure {}) (unsafe {}) (by-value-receiver {}) (by-reference-receiver {}) (signature {}) (requires",
+            "(method {} (name {:?}) (phase {}) (quote {}) (pure {}) (unsafe {}) (by-value-receiver {}) (by-reference-receiver {}) (signature {}) (requires",
             self.declaration,
             self.name,
+            self.phase,
             self.is_quote,
             self.pure,
             self.is_unsafe,
@@ -2246,7 +2298,11 @@ impl Implementation {
 }
 impl fmt::Display for Implementation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(implementation {} (type-parameters", self.declaration)?;
+        write!(
+            f,
+            "(implementation {} {} (type-parameters",
+            self.declaration, self.phases
+        )?;
         for parameter in &self.type_parameters {
             write!(f, " {parameter}")?;
         }

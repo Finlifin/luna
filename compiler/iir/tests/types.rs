@@ -427,6 +427,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
         },
         subject: primitive(Primitive::Bool),
         methods: vec![nir::program::MethodContract {
+            phase: Default::default(),
             is_quote: false,
             pure: false,
             is_unsafe: false,

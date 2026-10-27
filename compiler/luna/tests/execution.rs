@@ -11725,6 +11725,7 @@ fn parameterized_interface_package() -> Package {
         name: "Echo".into(),
         parents: vec![],
         methods: vec![n::MethodContract {
+            phase: Default::default(),
             is_quote: false,
             pure: false,
             is_unsafe: false,
@@ -11771,6 +11772,7 @@ fn parameterized_interface_package() -> Package {
     ] {
         let ty = T::Primitive(primitive);
         package.implementations.push(n::Implementation {
+            phases: Default::default(),
             associated_initializers: vec![],
             parameter_types: vec![],
             associated: vec![],
@@ -12009,6 +12011,7 @@ fn parameterized_interface_nir_parent_requirements_keep_their_arguments() {
     });
     for (n, primitive) in [(0, Primitive::Bool), (1, Primitive::Char)] {
         package.implementations.push(Implementation {
+            phases: Default::default(),
             associated_initializers: vec![],
             parameter_types: vec![],
             associated: vec![],

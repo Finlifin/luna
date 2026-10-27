@@ -156,6 +156,7 @@ impl Checker<'_, '_> {
         self.locals = saved_locals;
         let program = program?;
         Ok(n::MethodContract {
+            phase: Default::default(),
             is_quote: signature.modifiers.is_quote,
             pure: signature.modifiers.is_pure,
             is_unsafe: signature.modifiers.is_unsafe,
@@ -1019,6 +1020,7 @@ impl Checker<'_, '_> {
                 ));
             }
             implementations.push(n::Implementation {
+                phases: Default::default(),
                 associated_initializers: vec![],
                 parameter_types: parameters
                     .iter()

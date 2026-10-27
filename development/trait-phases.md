@@ -62,6 +62,24 @@ Head identity remains structural: this does not unfold normal-form bodies or
 infer equality from their implementations. Exhaustion or an undetermined proof
 leaves the index unchanged rather than publishing a separate competing relation.
 
+## Checked IR and VM membership
+
+NIR member contracts now retain a `TraitPhase` independently of callable
+execution signatures. An implementation records its available runtime/comptime
+contributions with `ImplementationPhases`; dumps include both kinds of metadata.
+Existing source construction still supplies the runtime defaults until attribute
+application and source contribution merging are connected.
+
+NIR phase validation rejects an empty contribution set, unsupported inherent
+comptime contributions, and methods supplied for an unavailable phase. VM world
+admission requires methods only from available phases and rejects supplied
+methods from unavailable phases. Missing phases cannot recover a trait default.
+Explicit dispatch also checks member phase availability. Comptime-associated
+values require the comptime contribution; readonly runtime associated data can
+remain shared by a comptime contribution. Function execution phase validation
+continues independently. These checks apply to checked NIR/VM worlds; they do
+not yet make source `comptime impl` executable.
+
 ## Remaining integration
 
 - Apply validated phase metadata to trait methods and associated members
@@ -125,3 +143,18 @@ that incorrectly treated unvalidated countermodels as proved inequivalence;
 tests now explicitly require conservative rejection and unchanged query state.
 Budget exhaustion is checked across insufficient allowances and successful retry.
 Workspace format check passed (`/tmp/luna-tools-xrsyzwq0/result.json`).
+
+NIR/VM membership integration passed 250 tests in `/home/fin/luna` with
+`python3 -B development/check.py --timeout 900 -- test --release -p nir
+-p comptime_interpretor -p elaboration -p iir -p luna
+--test runtime_function_identities --test calls --test code_interfaces
+--test nominal_parameters --test associated --test capabilities --test types
+--test trait_phases`
+(`/tmp/luna-tools-h2n031k3/result.json`, exit 0). Tests include actual comptime
+method invocation under each membership phase, runtime identity transport,
+missing-phase/default rejection, phase-specific completeness, associated value
+availability and shared runtime data. Existing source phase rejection remains
+tested. The first run (`/tmp/luna-tools-qxodd4dl/result.json`, exit 101) failed
+the new NIR membership rejection assertion against the earlier compiled library;
+the final run rebuilt the completed validator and passed. Workspace formatting
+passed (`/tmp/luna-tools-dh3zh63p/result.json`), as did `git diff --check`.

@@ -277,6 +277,7 @@ fn completed_nominal_integer_indices_must_fit_without_truncation() {
 fn synthetic_impls_share_container_binders_only_with_identical_domains() {
     let declaration = record(vec![Term::Primitive(P::Type), Term::Primitive(P::Bool)]);
     let implementation = nir::program::Implementation {
+        phases: Default::default(),
         associated_initializers: vec![],
         parameter_types: declaration.parameter_types.clone(),
         type_parameters: declaration.type_parameters.clone(),

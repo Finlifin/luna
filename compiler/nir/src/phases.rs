@@ -125,11 +125,51 @@ pub fn machine_arithmetic_functions(
                 message,
             })?;
     }
+    let mut membership_fuel = 100_000usize;
+    let mut membership = BTreeMap::new();
+    for interface in &package.traits {
+        let mut methods = BTreeMap::new();
+        for member in &interface.methods {
+            membership_fuel = membership_fuel
+                .checked_sub(1 + member.name.len())
+                .ok_or(Error {
+                    source: SourceRange { start: 0, end: 0 },
+                    message: "trait phase validation budget exhausted",
+                })?;
+            methods.insert(member.name.as_str(), member.phase);
+        }
+        membership.insert(interface.declaration, methods);
+    }
     for definition in &package.implementations {
+        if (!definition.phases.runtime && !definition.phases.comptime)
+            || (definition.interface.is_none() && definition.phases.comptime)
+        {
+            return Err(Error {
+                source: SourceRange { start: 0, end: 0 },
+                message: "invalid implementation phase availability",
+            });
+        }
         definition.parameter_binders().map_err(|_| Error {
             source: SourceRange { start: 0, end: 0 },
             message: "invalid implementation parameter domains",
         })?;
+        if let Some(members) = definition.interface.and_then(|id| membership.get(&id)) {
+            for (name, _) in &definition.methods {
+                membership_fuel = membership_fuel.checked_sub(1 + name.len()).ok_or(Error {
+                    source: SourceRange { start: 0, end: 0 },
+                    message: "trait phase validation budget exhausted",
+                })?;
+                if members
+                    .get(name.as_str())
+                    .is_some_and(|phase| !definition.phases.contains(*phase))
+                {
+                    return Err(Error {
+                        source: SourceRange { start: 0, end: 0 },
+                        message: "implementation method belongs to an unavailable trait phase",
+                    });
+                }
+            }
+        }
     }
     // Identity membership is queried for every retained callable. Index once:
     // scanning function vectors here makes snapshot admission quadratic.

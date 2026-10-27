@@ -973,6 +973,7 @@ mod view_tests {
             requirements: vec![],
             capabilities: vec![],
             associated: vec![AssociatedContract {
+                phase: Default::default(),
                 declaration: id(2),
                 name: "Element".into(),
                 ty: Term::Primitive(Primitive::Type),
@@ -1176,6 +1177,7 @@ mod shared_cache_tests {
             requirements: vec![],
             capabilities: vec![],
             associated: vec![AssociatedContract {
+                phase: Default::default(),
                 declaration: id(2),
                 name: "Element".into(),
                 ty: Term::Primitive(Primitive::Type),
@@ -1183,6 +1185,7 @@ mod shared_cache_tests {
             }],
         }];
         let implementations = vec![Implementation {
+            phases: Default::default(),
             associated_initializers: vec![],
             parameter_types: vec![],
             declaration: id(3),

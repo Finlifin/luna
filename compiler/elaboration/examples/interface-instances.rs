@@ -20,6 +20,7 @@ fn main() {
     });
     for (local, primitive) in [(20, Primitive::Bool), (21, Primitive::Char)] {
         package.implementations.push(Implementation {
+            phases: Default::default(),
             associated_initializers: vec![],
             parameter_types: vec![],
             associated: vec![],

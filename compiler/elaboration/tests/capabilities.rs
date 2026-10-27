@@ -28,6 +28,7 @@ fn implementation(
     capabilities: Vec<TraitRequirement>,
 ) -> Implementation {
     Implementation {
+        phases: Default::default(),
         associated_initializers: vec![],
         parameter_types: vec![],
         associated: vec![],
