@@ -468,3 +468,38 @@ From `/home/fin/luna`,
 passed (`/tmp/luna-tools-c1h08fj3/result.json`, exit 0). This adds source-level
 composition evidence for the existing transfer rules; it does not certify
 cleanup or safe runtime execution of text views.
+
+
+## Scalar computations surrounding text reads
+
+Integer/float arithmetic, scalar bit operations and conversions now evaluate
+their operands in order before returning an empty text-origin map. Earlier reads
+and exits remain part of the expression's control flow. Dynamic bit-window
+endpoints likewise follow the value in evaluation order. Arithmetic and bit
+bounds remain independent proof obligations; this origin analysis does not
+certify them.
+
+Target intrinsics use `nir::intrinsics::checked` before their inputs are analyzed.
+Only admitted scalar operations have the no-hidden-memory behavior needed here;
+a tag without a valid binding is rejected. Their input expressions can still read
+text, update local origins or exit early, and retain those dependencies.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All twenty-three tests passed (`/tmp/luna-tools-elk7xe93/result.json`, exit 0).
+The byte-scanning fixture covers UTF-8, empty input, early success and failure,
+integer index updates and explicit BitVec zero-extension. Its unchecked
+interpreter result is asserted separately from its read summary. The scalar
+intrinsic case covers float negation/addition, text-dependent FMA inputs, missing
+admission rejection and recovery using the original package.
+
+Earlier runs failed on fixture syntax (`+` whitespace,
+`/tmp/luna-tools-zsy6ttq2`) and an unsupported direct u8-to-u64 conversion protocol
+(`/tmp/luna-tools-4burvanw`). The corrected fixture uses the existing `bitvec`
+view conversion; neither parsing nor conversion protocols were relaxed.

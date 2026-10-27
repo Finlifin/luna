@@ -1051,9 +1051,47 @@ impl Query<'_, '_> {
             | K::RequirePredicate(value)
             | K::EnsurePredicate(value)
             | K::CheckPredicate(value)
-            | K::Not(value) => Ok(self
+            | K::Not(value)
+            | K::FloatNegate(value)
+            | K::IntegerNegate(value)
+            | K::BitConvert(value)
+            | K::TakeBits(value)
+            | K::IntegerRepresentation(value)
+            | K::BitSlice { value, .. } => Ok(self
                 .expr(value, locals, returned, next)?
                 .map(|_| Regions::new())),
+            K::IntegerBinary { left, right, .. }
+            | K::FloatBinary { left, right, .. }
+            | K::BitEqual(left, right)
+            | K::BitConcat(left, right)
+            | K::BitIndex(left, right)
+            | K::TemplateEqual(left, right) => {
+                for operand in [left, right] {
+                    if self.expr(operand, locals, returned, next)?.is_none() {
+                        return Ok(None);
+                    }
+                }
+                Ok(empty)
+            }
+            K::BitWindow { value, start, end } => {
+                for operand in [value, start, end] {
+                    if self.expr(operand, locals, returned, next)?.is_none() {
+                        return Ok(None);
+                    }
+                }
+                Ok(empty)
+            }
+            K::Intrinsic { inputs, .. } => {
+                // Only admitted scalar operations have no hidden memory
+                // behavior. Their source-ordered inputs may still read text.
+                nir::intrinsics::checked(expr).map_err(|e| e.to_string())?;
+                for input in inputs {
+                    if self.expr(input, locals, returned, next)?.is_none() {
+                        return Ok(None);
+                    }
+                }
+                Ok(empty)
+            }
             K::And(left, right) | K::Or(left, right) => {
                 if self.expr(left, locals, returned, next)?.is_none() {
                     return Ok(None);

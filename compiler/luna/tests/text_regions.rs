@@ -878,3 +878,80 @@ fn optional_and_error_propagation_keep_separate_exit_dependencies() {
         BTreeSet::from([parameter(0, &[usize::MAX, 1, 0])])
     );
 }
+
+#[test]
+fn scalar_index_operations_preserve_text_scan_dependencies() {
+    let package = support::compile(&format!(
+        "{} mod text {{ {} }}
+        fn contains(value:str,needle:u8)->bool {{
+            let length=text.byte_length(value);var index:u64=0;
+            while index < length {{
+                let byte?=text.byte(value,index) else {{return false;}};
+                if byte'bitvec.as(u64) == needle'bitvec.as(u64) {{return true;}}
+                index = index + 1;
+            }}
+            false
+        }}
+        fn run()->bool {{contains(\"Aé\",169) and not contains(\"Aé\",0) and not contains(\"\",65)}}",
+        include_str!("../../../library/builtin/primitives.fl"),
+        include_str!("../../../library/builtin/text_bytes.fl")
+    ));
+    let scan = infer(&package, "contains", 100_000).unwrap();
+    assert_eq!(scan.reads, BTreeSet::from([parameter(0, &[])]));
+    assert!(scan.returned.unwrap().is_empty());
+    assert_eq!(
+        infer(&package, "run", 100_000).unwrap().reads,
+        BTreeSet::from([Origin::Static])
+    );
+    // Algorithm execution is deliberately separate from resource permission.
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn admitted_scalar_intrinsics_keep_input_reads_and_reject_missing_bindings() {
+    let package = support::compile_with_source_bindings(
+        "typealias str=.str'builtin;typealias F=.f64'builtin;
+        ^intrinsic_enum enum Ops {fma}
+        fn observed(value:str)->F {
+            let weight:F=if value == \"x\" {2.0}else{3.0};
+            unsafe {Ops.fma'intrinsic(-weight + 1.0,weight,weight).as(F)}
+        }",
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            host_fma: Some("input.Ops.fma"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let summary = infer(&package, "observed", 100_000).unwrap();
+    assert_eq!(
+        summary.reads,
+        BTreeSet::from([Origin::Static, parameter(0, &[])])
+    );
+    assert!(summary.returned.unwrap().is_empty());
+    let mut invalid = package.clone();
+    let function = invalid
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "observed")
+        .unwrap();
+    let mut removed = 0;
+    nir::visit::expression_mut(&mut function.body, &mut 100_000, |expr, _| {
+        if let nir::program::ExprKind::Intrinsic { binding, .. } = &mut expr.kind {
+            assert!(binding.take().is_some());
+            removed += 1;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(removed, 1);
+    assert!(
+        infer(&invalid, "observed", 100_000)
+            .unwrap_err()
+            .contains("admission")
+    );
+    assert!(infer(&package, "observed", 100_000).is_ok());
+}
