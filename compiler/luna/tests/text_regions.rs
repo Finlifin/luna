@@ -1837,9 +1837,15 @@ fn local_descriptor_pointers_preserve_backing_origins_and_replace_slots() {
         observed.returned.unwrap()[&vec![]],
         BTreeSet::from([parameter(1, &[])])
     );
+    assert_eq!(
+        infer(&package, "ambiguous", 500_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
     for (name, message) in [
         ("unknown", "target is unknown"),
-        ("ambiguous", "target is unknown"),
         ("dangling", "escapes its local scope"),
     ] {
         let error = infer(&package, name, 500_000).unwrap_err();
@@ -2219,4 +2225,69 @@ fn recursive_descriptor_effects_converge_over_aliases_and_storage_states() {
     );
     assert!(infer(&package, "mutual", 10).is_err());
     assert!(infer(&package, "mutual", 2_000_000).is_ok());
+}
+
+#[test]
+fn finite_descriptor_aliases_union_reads_and_weakly_update_possible_slots() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        struct Pair {left:str,right:str}
+        fn pick(flag:bool,first:*str,second:*str)->*str {if flag {first}else{second}}
+        fn recurse(flag:bool,first:*str,second:*str)->*str {if flag {return first;};recurse(flag,second,first)}
+        fn mutate(flag:bool,pointer:*str,value:str) {if flag {pointer.* = value;return;};mutate(flag,pointer,value)}
+        fn recursive_write(flag:bool,first:str,second:str,replacement:str)->str {var a=first;var b=second;let pointer=pick(flag,a.ref,b.ref);mutate(flag,pointer,replacement);a}
+        fn closure_write(flag:bool,first:str,second:str,replacement:str)->str {var a=first;var b=second;let pointer=pick(flag,a.ref,b.ref);let action=|| {pointer.* = replacement;};action();a}
+        fn called(flag:bool,first:str,second:str)->str {pick(flag,first.ref,second.ref).*}
+        fn recursive(flag:bool,first:str,second:str)->str {recurse(flag,first.ref,second.ref).*}
+        fn closure(flag:bool,first:str,second:str)->str {let pointer=pick(flag,first.ref,second.ref);let action=||pointer.*;action()}
+        fn indirect(flag:bool,first:str,second:str)->str {let a=first.ref;let b=second.ref;let pointer=if flag {a.ref}else{b.ref};pointer.*.*}
+        fn field_read(flag:bool,first:str,second:str)->str {let a=Pair {left:first,right:first};let b=Pair {left:second,right:second};let pointer=if flag {a.ref}else{b.ref};pointer.*.left}
+        fn left(flag:bool,first:str,second:str,replacement:str)->str {var a=first;var b=second;let pointer=pick(flag,a.ref,b.ref);pointer.* = replacement;a}
+        fn right(flag:bool,first:str,second:str,replacement:str)->str {var a=first;var b=second;let pointer=pick(flag,a.ref,b.ref);pointer.* = replacement;b}
+        fn same(flag:bool,first:str,replacement:str)->str {var value=first;let pointer=pick(flag,value.ref,value.ref);pointer.* = replacement;value}
+        fn field_write(flag:bool,first:str,second:str,replacement:str)->str {var pair=Pair {left:first,right:second};let pointer=pick(flag,pair.left.ref,pair.right.ref);pointer.* = replacement;pair.left}
+        fn unknown(flag:bool,pointer:*str,value:str)->str {let selected=if flag {value.ref}else{pointer};selected.*}
+        fn leaking(flag:bool,pointer:*str)->*str {if flag {return pointer;};let local=\"local\";local.ref}
+        fn escaped(flag:bool,value:str)->str {leaking(flag,value.ref).*}",
+    );
+    for name in ["called", "recursive", "closure", "indirect", "field_read"] {
+        assert_eq!(
+            infer(&package, name, 2_000_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[]), parameter(2, &[])]),
+            "{name}"
+        );
+    }
+    for name in ["left", "field_write", "recursive_write", "closure_write"] {
+        assert_eq!(
+            infer(&package, name, 2_000_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[]), parameter(3, &[])]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "right", 2_000_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(2, &[]), parameter(3, &[])])
+    );
+    assert_eq!(
+        infer(&package, "same", 2_000_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(2, &[])])
+    );
+    assert!(
+        infer(&package, "unknown", 2_000_000)
+            .unwrap_err()
+            .contains("target is unknown")
+    );
+    assert!(
+        infer(&package, "escaped", 2_000_000)
+            .unwrap_err()
+            .contains("escapes")
+    );
+    assert!(infer(&package, "recursive", 10).is_err());
+    assert!(infer(&package, "recursive", 2_000_000).is_ok());
 }

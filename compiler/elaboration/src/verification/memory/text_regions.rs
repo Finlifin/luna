@@ -30,7 +30,8 @@ enum DescriptorRoot {
     Local(LocalId),
     Frame(usize),
 }
-type DescriptorPlaces = BTreeMap<Vec<usize>, Option<(DescriptorRoot, Vec<usize>)>>;
+type DescriptorTargets = BTreeSet<(DescriptorRoot, Vec<usize>)>;
+type DescriptorPlaces = BTreeMap<Vec<usize>, Option<DescriptorTargets>>;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Regions {
     text: TextFields,
@@ -107,10 +108,11 @@ impl std::ops::DerefMut for Locals {
     }
 }
 fn remap_descriptor_roots(value: &mut Regions, mapping: &BTreeMap<DescriptorRoot, DescriptorRoot>) {
-    for (root, _) in value.places.values_mut().flatten() {
-        if let Some(replacement) = mapping.get(root) {
-            *root = *replacement;
-        }
+    for targets in value.places.values_mut().flatten() {
+        *targets = std::mem::take(targets)
+            .into_iter()
+            .map(|(root, path)| (mapping.get(&root).copied().unwrap_or(root), path))
+            .collect();
     }
 }
 
@@ -330,8 +332,10 @@ fn charge(fuel: &mut usize, amount: usize) -> Result<(), String> {
 fn charge_regions(regions: &Regions, fuel: &mut usize) -> Result<(), String> {
     for (path, place) in &regions.places {
         charge(fuel, path.len().saturating_add(1))?;
-        if let Some((_, fields)) = place {
-            charge(fuel, fields.len().saturating_add(1))?;
+        if let Some(targets) = place {
+            for (_, fields) in targets {
+                charge(fuel, fields.len().saturating_add(1))?;
+            }
         }
     }
     for (path, code) in &regions.code {
@@ -371,6 +375,22 @@ fn merge_known<T: PartialEq>(
             .or_insert(code);
     }
 }
+fn merge_places(target: &mut DescriptorPlaces, source: DescriptorPlaces) {
+    for (path, targets) in source {
+        match target.entry(path) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(targets);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                match (entry.get_mut(), targets) {
+                    (Some(previous), Some(incoming)) => previous.extend(incoming),
+                    (previous, None) => *previous = None,
+                    (None, Some(_)) => (),
+                }
+            }
+        }
+    }
+}
 fn merge(
     target: &mut Option<Regions>,
     source: Option<Regions>,
@@ -380,7 +400,7 @@ fn merge(
         charge_regions(&source, fuel)?;
         let target = target.get_or_insert_with(Regions::new);
         merge_known(&mut target.code, source.code);
-        merge_known(&mut target.places, source.places);
+        merge_places(&mut target.places, source.places);
         for (path, origins) in source.text {
             target.text.entry(path).or_default().extend(origins);
         }
@@ -962,7 +982,7 @@ impl Query<'_, '_> {
             }
             if let Some(value) = &result {
                 charge_regions(value, self.fuel)?;
-                for (root, _) in value.places.values().flatten() {
+                for (root, _) in value.places.values().flatten().flatten() {
                     if !caller_storage.contains_storage(root) {
                         return Err(
                             "text default descriptor address escapes its preparation frame".into(),
@@ -1284,7 +1304,14 @@ impl Query<'_, '_> {
         let mut pending = VecDeque::new();
         for value in actual.values() {
             charge_regions(value, self.fuel)?;
-            pending.extend(value.places.values().flatten().map(|(root, _)| *root));
+            pending.extend(
+                value
+                    .places
+                    .values()
+                    .flatten()
+                    .flatten()
+                    .map(|(root, _)| *root),
+            );
         }
         while let Some(root) = pending.pop_front() {
             charge(self.fuel, 1)?;
@@ -1299,7 +1326,14 @@ impl Query<'_, '_> {
             let canonical = DescriptorRoot::Frame(id);
             mapping.insert(root, canonical);
             restore.insert(canonical, root);
-            pending.extend(value.places.values().flatten().map(|(root, _)| *root));
+            pending.extend(
+                value
+                    .places
+                    .values()
+                    .flatten()
+                    .flatten()
+                    .map(|(root, _)| *root),
+            );
             storage.insert(id, value.clone());
         }
         for value in actual.values_mut().chain(storage.values_mut()) {
@@ -1490,7 +1524,7 @@ impl Query<'_, '_> {
                     .ok_or("text descriptor call has no normal exit state")?;
                 for value in std::iter::once(value).chain(exit.frames.values()) {
                     charge_regions(value, self.fuel)?;
-                    for (root, _) in value.places.values().flatten() {
+                    for (root, _) in value.places.values().flatten().flatten() {
                         if !matches!(root, DescriptorRoot::Frame(id) if key.storage.contains_key(id))
                         {
                             return Err("text descriptor address escapes its callee frame".into());
@@ -1631,11 +1665,10 @@ impl Query<'_, '_> {
                     return Err("text descriptor address root is unavailable".into());
                 }
                 path.reverse();
-                empty
-                    .as_mut()
-                    .unwrap()
-                    .places
-                    .insert(vec![], Some((DescriptorRoot::Local(root), path)));
+                empty.as_mut().unwrap().places.insert(
+                    vec![],
+                    Some(BTreeSet::from([(DescriptorRoot::Local(root), path)])),
+                );
                 Ok(empty)
             }
             K::PointerField { pointer, index, .. }
@@ -1648,24 +1681,36 @@ impl Query<'_, '_> {
                     .get_mut(&vec![])
                     .and_then(Option::as_mut)
                     .ok_or("text descriptor pointer target is unknown")?;
-                charge(self.fuel, target.1.len().saturating_add(1))?;
-                target.1.push(*index);
+                for (root, mut path) in std::mem::take(target) {
+                    charge(self.fuel, path.len().saturating_add(1))?;
+                    path.push(*index);
+                    target.insert((root, path));
+                }
                 Ok(Some(value))
             }
             K::ReadPointer(pointer) => {
                 let Some(value) = self.expr(pointer, locals, returned, next)? else {
                     return Ok(None);
                 };
-                let (root, path) = value
+                let targets = value
                     .places
                     .get(&vec![])
                     .and_then(Option::as_ref)
+                    .filter(|targets| !targets.is_empty())
                     .ok_or("text descriptor pointer target is unknown")?;
-                let value = locals
-                    .get_storage(root)
-                    .ok_or("text descriptor storage is no longer live")?;
-                charge_regions(value, self.fuel)?;
-                Ok(Some(project(value.clone(), path, self.fuel)?))
+                let mut result = None;
+                for (root, path) in targets {
+                    let value = locals
+                        .get_storage(root)
+                        .ok_or("text descriptor storage is no longer live")?;
+                    charge_regions(value, self.fuel)?;
+                    merge(
+                        &mut result,
+                        Some(project(value.clone(), path, self.fuel)?),
+                        self.fuel,
+                    )?;
+                }
+                Ok(result)
             }
             K::WritePointer { pointer, value } => {
                 if let Some(message) = self.readonly_storage {
@@ -1674,25 +1719,37 @@ impl Query<'_, '_> {
                 let Some(pointer) = self.expr(pointer, locals, returned, next)? else {
                     return Ok(None);
                 };
-                let (root, path) = pointer
+                let targets = pointer
                     .places
                     .get(&vec![])
                     .and_then(Option::as_ref)
+                    .filter(|targets| !targets.is_empty())
                     .ok_or("text descriptor pointer target is unknown")?;
                 let Some(value) = self.expr(value, locals, returned, next)? else {
                     return Ok(None);
                 };
-                let replacement = prefix(value, path, self.fuel)?;
-                let target = locals
-                    .get_storage_mut(root)
-                    .ok_or("text descriptor storage is no longer live")?;
-                charge_regions(target, self.fuel)?;
-                target.text.retain(|fields, _| !fields.starts_with(path));
-                target.code.retain(|fields, _| !fields.starts_with(path));
-                target.places.retain(|fields, _| !fields.starts_with(path));
-                target.text.extend(replacement.text);
-                target.code.extend(replacement.code);
-                target.places.extend(replacement.places);
+                for (root, path) in targets {
+                    charge_regions(&value, self.fuel)?;
+                    let replacement = prefix(value.clone(), path, self.fuel)?;
+                    let target = locals
+                        .get_storage_mut(root)
+                        .ok_or("text descriptor storage is no longer live")?;
+                    charge_regions(target, self.fuel)?;
+                    if targets.len() == 1 {
+                        target.text.retain(|fields, _| !fields.starts_with(path));
+                        target.code.retain(|fields, _| !fields.starts_with(path));
+                        target.places.retain(|fields, _| !fields.starts_with(path));
+                        target.text.extend(replacement.text);
+                        target.code.extend(replacement.code);
+                        target.places.extend(replacement.places);
+                    } else {
+                        // Only one candidate is written at runtime. Keep each
+                        // candidate's old value for executions selecting another.
+                        let mut joined = Some(target.clone());
+                        merge(&mut joined, Some(replacement), self.fuel)?;
+                        *target = joined.unwrap();
+                    }
+                }
                 Ok(empty)
             }
             K::SymbolName(value) | K::EnumName(value) => {
@@ -1843,7 +1900,7 @@ impl Query<'_, '_> {
                         .chain(locals.keys().filter_map(|id| scope.get(id)))
                         .chain(scope.frames.values())
                     {
-                        for (root, _) in value.places.values().flatten() {
+                        for (root, _) in value.places.values().flatten().flatten() {
                             if !locals.contains_storage(root) {
                                 return Err(
                                     "text descriptor address escapes its local scope".into()
@@ -2100,7 +2157,14 @@ impl Query<'_, '_> {
                     let mut reachable = VecDeque::new();
                     for value in scope.values() {
                         charge_regions(value, self.fuel)?;
-                        reachable.extend(value.places.values().flatten().map(|(root, _)| *root));
+                        reachable.extend(
+                            value
+                                .places
+                                .values()
+                                .flatten()
+                                .flatten()
+                                .map(|(root, _)| *root),
+                        );
                     }
                     while let Some(source) = reachable.pop_front() {
                         charge(self.fuel, 1)?;
@@ -2118,7 +2182,14 @@ impl Query<'_, '_> {
                         let target = DescriptorRoot::Frame(id);
                         storage_map.insert(source, target);
                         storage_restore.insert(target, source);
-                        reachable.extend(value.places.values().flatten().map(|(root, _)| *root));
+                        reachable.extend(
+                            value
+                                .places
+                                .values()
+                                .flatten()
+                                .flatten()
+                                .map(|(root, _)| *root),
+                        );
                         scope.frames.insert(id, value.clone());
                     }
                     for value in scope.bindings.values_mut().chain(scope.frames.values_mut()) {
@@ -2181,7 +2252,7 @@ impl Query<'_, '_> {
                         let mut exit = exit.ok_or("text closure has no normal exit storage")?;
                         for value in std::iter::once(&mut *value).chain(exit.frames.values_mut()) {
                             charge_regions(value, self.fuel)?;
-                            for (root, _) in value.places.values().flatten() {
+                            for (root, _) in value.places.values().flatten().flatten() {
                                 if !storage_restore.contains_key(root) {
                                     return Err(
                                         "text descriptor address escapes its closure frame".into(),
@@ -2337,7 +2408,7 @@ impl Query<'_, '_> {
                 let mut transported = Regions::new();
                 for (mut path, place) in regions.places {
                     remap_error_path(&mut path, &mapping, self.fuel)?;
-                    merge_known(&mut transported.places, BTreeMap::from([(path, place)]));
+                    merge_places(&mut transported.places, BTreeMap::from([(path, place)]));
                 }
                 for (mut path, code) in regions.code {
                     remap_error_path(&mut path, &mapping, self.fuel)?;

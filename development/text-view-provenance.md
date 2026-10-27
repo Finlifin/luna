@@ -1200,3 +1200,37 @@ passed existing dependency cases but a new fixture used `private` as a function
 name; renaming it to `local_storage` resolved the parse failure without changing
 the parser or semantic expectations. The former recursive-call rejection case
 now correctly reports no normal return for an unproductive recursive body.
+
+## Finite descriptor target sets
+
+Descriptor addresses now retain a finite set of known storage targets across
+branch and recursive-summary joins. Reads union the dependencies of every
+candidate. Writes to a singleton replace the selected subtree; writes with
+multiple candidates weakly join the replacement into each possible slot,
+preserving its old value for executions that select another slot. Duplicate
+addresses collapse to one target and retain precise replacement behavior.
+
+Field projection, indirect loads, named-call canonicalization and closure frame
+mapping preserve all candidates. Reachability and escape checks visit every
+candidate, and work accounting includes each candidate path. Unknown targets
+remain absorbing at joins: adding a known address cannot authorize an unknown
+pointer. A dead or escaping candidate is not silently discarded.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions finite_descriptor_aliases_union_reads_and_weakly_update_possible_slots
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 46 analysis/layout/prototype tests passed
+(`/tmp/luna-tools-_6eu5kja/result.json`, exit 0). The final focused regression
+also passed (`/tmp/luna-tools-7k22z47s/result.json`, exit 0), including recursive
+and captured-pointer writes, projected fields, indirect loads, same-target
+replacement, unknown alternatives, escapes and budget recovery. Formatting
+passed (`/tmp/luna-tools-eltwc440/result.json`, exit 0), as did the diff check.
+This extends dependency analysis; runtime Copy legality, cleanup and backing
+character lifetime certification remain separate requirements. Callable code
+identity joins still require a single known identity for invocation.
