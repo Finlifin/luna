@@ -430,6 +430,8 @@ pub enum NodeKind {
     ExtendTraitDef, // a, b, N, c
     // derive expr for expr clauses?
     DeriveDef, // a, b, N
+    // derive fn id (parameter*)? for expr clauses? block
+    DeriverDef, // a, N, b, N, c (name, inputs, trait, clauses, body)
 
     // case id (parameter*) (-> result)? clauses? block
     CaseDef, // a, N, b, N, c
@@ -855,7 +857,9 @@ impl NodeKind {
             Lambda | WhileMatch => NodeType::DoubleWithMultiChildren,
 
             // Complex children patterns
-            Function | FunctionTemplateInstanceWithParams => NodeType::FunctionDefChildren, // a, N, b, N, c
+            Function | FunctionTemplateInstanceWithParams | DeriverDef => {
+                NodeType::FunctionDefChildren
+            } // a, N, b, N, c
             NormalFormHeadDef | CaseDef => NodeType::NormalFormHeadDefChildren, // a, N, b, N, c
             AlgebraicEffect => NodeType::AlgebraicEffectChildren,               // a, N, b, N, c
             StructDef | EnumDef | EffectEnumDef | UnionDef | ImplDef | ExtendDef

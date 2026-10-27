@@ -1409,6 +1409,10 @@ impl Parser<'_> {
         self.scoped_with_expected_prefix(TokenKind::Derive.as_ref(), |p| {
             p.eat_tokens(1); // eat the 'derive'
 
+            if p.eat_token(TokenKind::Fn) {
+                return p.finish_deriver_definition();
+            }
+
             let trait_expr = p.try_expr_without_extended_call()?;
             if trait_expr == 0 {
                 return Err(ParseError::invalid_syntax(
@@ -1443,6 +1447,70 @@ impl Parser<'_> {
                 .add_multiple_children(clauses)
                 .build(&mut p.ast))
         })
+    }
+
+    // The strategy has a trait target, not a function return type. Its input
+    // parameters are kept separately from the generated member signatures.
+    fn finish_deriver_definition(&mut self) -> ParseResult {
+        let id = self.try_id()?;
+        if id == 0 {
+            return Err(ParseError::invalid_syntax(
+                "Expected a strategy name after `derive fn`".into(),
+                self.peek_next_token().kind,
+                self.next_token_span(),
+            ));
+        }
+        let params = if self.peek(TokenKind::LParen.as_ref()) {
+            self.try_multi_with_bracket(
+                &[Rule::comma("strategy parameter", |p| p.try_param())],
+                (TokenKind::LParen, TokenKind::RParen),
+            )?
+        } else {
+            vec![]
+        };
+        if !self.eat_token(TokenKind::For) {
+            return Err(ParseError::unexpected_token(
+                TokenKind::For,
+                self.peek_next_token().kind,
+                self.next_token_span(),
+            ));
+        }
+        let target = self.try_expr_without_extended_call()?;
+        if target == 0 {
+            return Err(ParseError::invalid_syntax(
+                "Expected a trait expression after `for` in derive strategy".into(),
+                self.peek_next_token().kind,
+                self.next_token_span(),
+            ));
+        }
+        let clauses = self.try_clauses()?;
+        if !self.peek(TokenKind::LBrace.as_ref()) {
+            return Err(ParseError::invalid_syntax(
+                "Expected a block after derive strategy declaration".into(),
+                self.peek_next_token().kind,
+                self.next_token_span(),
+            ));
+        }
+        let members = self.try_multi_with_bracket(
+            &[
+                Rule::semicolon("associated declaration", |p| p.try_assoc_decl()),
+                Rule::comma("property", |p| p.try_property()),
+                Rule::semicolon("statement or definition", |p| {
+                    p.try_statement_or_definition()
+                }),
+            ],
+            (TokenKind::LBrace, TokenKind::RBrace),
+        )?;
+        let body = NodeBuilder::new(NodeKind::Block, self.current_span())
+            .add_multiple_children(members)
+            .build(&mut self.ast);
+        Ok(NodeBuilder::new(NodeKind::DeriverDef, self.current_span())
+            .add_single_child(id)
+            .add_multiple_children(params)
+            .add_single_child(target)
+            .add_multiple_children(clauses)
+            .add_single_child(body)
+            .build(&mut self.ast))
     }
 
     /// Effect groups contain operation signatures, not ordinary enum payloads.
