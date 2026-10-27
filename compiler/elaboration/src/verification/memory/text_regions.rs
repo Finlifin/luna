@@ -181,20 +181,23 @@ struct Query<'a, 'f> {
     metadata: Round<'static>,
 }
 impl Query<'_, '_> {
+    // Return success knowledge only after accounting for the checks reached in
+    // source order. A later known mismatch cannot erase earlier character reads.
     fn bind_pattern(
         &mut self,
         pattern: &Pattern,
         ty: &Term,
         regions: &Regions,
+        value: Option<&Expr>,
         locals: &mut Locals,
         depth: usize,
-    ) -> Result<(), String> {
+    ) -> Result<Option<bool>, String> {
         if depth >= 128 {
             return Err("text region pattern depth exhausted".into());
         }
         charge(self.fuel, 1)?;
         match pattern {
-            Pattern::Wild | Pattern::Unit => Ok(()),
+            Pattern::Wild | Pattern::Unit => Ok(Some(true)),
             Pattern::Literal(literal) => {
                 if matches!(literal, nir::program::Literal::String(_)) {
                     charge_regions(regions, self.fuel)?;
@@ -205,13 +208,15 @@ impl Query<'_, '_> {
                             .extend(origins.iter().cloned());
                     }
                 }
-                Ok(())
+                Ok(value.and_then(|value| known_pattern(pattern, value, 0)))
             }
             Pattern::Binding { binding, inner } => {
-                self.bind_pattern(inner, ty, regions, locals, depth + 1)?;
-                charge_regions(regions, self.fuel)?;
-                locals.insert(*binding, regions.clone());
-                Ok(())
+                let matched = self.bind_pattern(inner, ty, regions, value, locals, depth + 1)?;
+                if matched != Some(false) {
+                    charge_regions(regions, self.fuel)?;
+                    locals.insert(*binding, regions.clone());
+                }
+                Ok(matched)
             }
             Pattern::Tuple(patterns)
             | Pattern::Record {
@@ -224,12 +229,30 @@ impl Query<'_, '_> {
                 if patterns.len() != fields.len() {
                     return Err("text pattern field arity mismatch".into());
                 }
+                let values = value.and_then(|value| match &value.kind {
+                    K::Tuple(fields) | K::Record { fields, .. } | K::AnonymousRecord { fields } => {
+                        Some(fields.as_slice())
+                    }
+                    _ => None,
+                });
+                let mut matched = Some(true);
                 for (index, (pattern, ty)) in patterns.iter().zip(fields).enumerate() {
                     charge_regions(regions, self.fuel)?;
                     let nested = project(regions.clone(), &[index], self.fuel)?;
-                    self.bind_pattern(pattern, &ty, &nested, locals, depth + 1)?;
+                    match self.bind_pattern(
+                        pattern,
+                        &ty,
+                        &nested,
+                        values.and_then(|v| v.get(index)),
+                        locals,
+                        depth + 1,
+                    )? {
+                        Some(false) => return Ok(Some(false)),
+                        None => matched = None,
+                        Some(true) => (),
+                    }
                 }
-                Ok(())
+                Ok(matched)
             }
             Pattern::OptionalAbsent
             | Pattern::OptionalPresent(_)
@@ -237,15 +260,46 @@ impl Query<'_, '_> {
             | Pattern::ErrorResult { .. } => {
                 let (tag, patterns, fields) =
                     owned_variant_pattern(Some(self.package), pattern, ty, self.fuel)?;
+                let constructor = match value {
+                    Some(value)
+                        if matches!(
+                            &value.kind,
+                            K::Variant { .. }
+                                | K::OptionalAbsent
+                                | K::OptionalPresent(_)
+                                | K::ErrorConvert { .. }
+                        ) =>
+                    {
+                        Some(owned_constructor(value, self.fuel)?)
+                    }
+                    _ => None,
+                };
+                if constructor
+                    .as_ref()
+                    .is_some_and(|(_, actual)| *actual != Some(tag))
+                {
+                    return Ok(Some(false));
+                }
+                let mut matched = constructor.as_ref().map(|_| true);
                 for (index, (pattern, ty)) in patterns.iter().zip(fields).enumerate() {
                     charge_regions(regions, self.fuel)?;
                     let nested = project(regions.clone(), &[VARIANT_FIELD, tag, index], self.fuel)?;
-                    self.bind_pattern(pattern, &ty, &nested, locals, depth + 1)?;
+                    let value = constructor
+                        .as_ref()
+                        .and_then(|(values, _)| values.get(index));
+                    match self.bind_pattern(pattern, &ty, &nested, value, locals, depth + 1)? {
+                        Some(false) => return Ok(Some(false)),
+                        None => matched = None,
+                        Some(true) => (),
+                    }
                 }
-                Ok(())
+                Ok(matched)
             }
             Pattern::Remap { pattern, bindings } => {
-                self.bind_pattern(pattern, ty, regions, locals, depth + 1)?;
+                let matched = self.bind_pattern(pattern, ty, regions, value, locals, depth + 1)?;
+                if matched == Some(false) {
+                    return Ok(matched);
+                }
                 let mut remapped = Locals::new();
                 for (from, to) in bindings {
                     let value = locals
@@ -255,7 +309,7 @@ impl Query<'_, '_> {
                     remapped.insert(*to, value.clone());
                 }
                 locals.extend(remapped);
-                Ok(())
+                Ok(matched)
             }
             _ => Err(
                 "text region executable or alternative pattern transport is not implemented".into(),
@@ -564,13 +618,19 @@ impl Query<'_, '_> {
                     if let Some(guard) = &arm.guard {
                         guards.push(guard);
                     }
-                    let matches = known_pattern(pattern, value, 0);
+                    let mut scope = self.locals_copy(&input)?;
+                    let matches = self.bind_pattern(
+                        pattern,
+                        &value.ty,
+                        &regions,
+                        Some(value),
+                        &mut scope,
+                        next,
+                    )?;
                     if matches == Some(false) {
                         pending = Some(input);
                         continue;
                     }
-                    let mut scope = self.locals_copy(&input)?;
-                    self.bind_pattern(pattern, &value.ty, &regions, &mut scope, next)?;
                     if matches != Some(true) {
                         pending = Some(input);
                     }

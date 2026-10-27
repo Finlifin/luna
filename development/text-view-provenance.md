@@ -320,3 +320,34 @@ input copies and local text temporaries. The existing default-call and runtime
 purity suites passed 43 and 64 tests respectively
 (`/tmp/luna-tools-pa79jaft/result.json`, exit 0). Formatting passed
 (`/tmp/luna-tools-ayhlzsuw/result.json`, exit 0), as did the diff check.
+
+
+## Reads on failed structural patterns
+
+A whole-pattern mismatch does not prove that matching performed no reads. For
+example, `(text, false)` matched against `("x", true)` compares text before the
+second field fails. The initial structural-match implementation skipped that
+first read when the complete pattern was known to fail.
+
+Pattern binding now returns match knowledge after visiting fields in matching
+order. It retains reached string comparisons and stops at the first known
+mismatch. Known variant tags select payload traversal before field matching;
+unknown tags remain conservative. Failed candidates do not evaluate their guards
+or bodies. The same traversal binds successful fields and remaps exported names,
+so match knowledge cannot bypass the dependency walk.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions failed_structural_patterns_keep_only_reads_reached_before_mismatch -- --exact
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+The exact regression failed before the fix with a missing parameter read
+(`/tmp/luna-tools-keu_g4lm/result.json`, exit 101). After the fix, all sixteen
+tests passed (`/tmp/luna-tools-4t4cbqky/result.json`, exit 0), including earlier
+and later field mismatches, matching prefixes, enum payloads and skipped guards.
+Formatting passed (`/tmp/luna-tools-q2pkpgg5/result.json`, exit 0), as did the
+diff check. Existing runtime permission restrictions remain unchanged.

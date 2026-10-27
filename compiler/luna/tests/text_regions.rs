@@ -543,3 +543,32 @@ fn static_text_defaults_have_construction_evidence_without_copying_inputs() {
         );
     }
 }
+
+#[test]
+fn failed_structural_patterns_keep_only_reads_reached_before_mismatch() {
+    let package = support::compile_with_tuple(
+        "typealias str=.str'builtin;
+        enum Choice {Empty,Pair(str,bool)}
+        fn enum_earlier(value:str)->bool {Choice.Pair(value,false) match {.Pair(\"x\",true)=>true,_=>false,}}
+        fn guard_skipped(value:str,other:str)->bool {(value,false) match {(\"x\",true) if other == \"y\"=>true,_=>false,}}
+        fn earlier(value:str)->bool {(value,false) match {(\"x\",true)=>true,_=>false,}}
+        fn later(value:str)->bool {(false,value) match {(true,\"x\")=>true,_=>false,}}
+        fn matched(value:str)->bool {(true,value) match {(true,\"x\")=>true,_=>false,}}",
+    );
+    assert_eq!(
+        infer(&package, "earlier", 100_000).unwrap().reads,
+        BTreeSet::from([parameter(0, &[])])
+    );
+    assert!(infer(&package, "later", 100_000).unwrap().reads.is_empty());
+    for name in ["enum_earlier", "guard_skipped"] {
+        assert_eq!(
+            infer(&package, name, 100_000).unwrap().reads,
+            BTreeSet::from([parameter(0, &[])])
+        );
+    }
+
+    assert_eq!(
+        infer(&package, "matched", 100_000).unwrap().reads,
+        BTreeSet::from([parameter(0, &[])])
+    );
+}
