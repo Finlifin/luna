@@ -10,9 +10,11 @@ mod inherent;
 pub use coherence::{CoherenceReport, PairAssessment};
 pub use inherent::{InherentHead, InherentIndex};
 mod ownership;
+mod phases;
 pub use applicability::{HeadMatch, TypeAssessment, TypeEvidence, TypeResolution};
 use nir::{DeclarationId, Sort, Term};
 pub use ownership::{Ownership, OwnershipError, inherent as inherent_ownership};
+pub use phases::PhaseSelection;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -38,6 +40,8 @@ pub enum Error {
     BudgetExhausted,
     DuplicateDeclaration(DeclarationId),
     Ownership(OwnershipError),
+    InvalidPhaseHead(String),
+    AmbiguousPhaseRelationship,
 }
 fn spend(fuel: &mut usize) -> Result<(), Error> {
     *fuel = fuel.checked_sub(1).ok_or(Error::BudgetExhausted)?;
@@ -374,12 +378,14 @@ struct Entry {
     key: Key,
     arguments: Vec<Key>,
     precision: usize,
+    phases: [Option<DeclarationId>; 2],
 }
 pub struct Index {
     pub(crate) parameter_domains: BTreeMap<DeclarationId, Term>,
     pub(crate) nominal_layouts: nir::program::Package,
     identity: u64,
     entries: BTreeMap<DeclarationId, Entry>,
+    contributions: BTreeSet<DeclarationId>,
     buckets: BTreeMap<Option<DeclarationId>, BTreeSet<DeclarationId>>,
     revision: u64,
 }
@@ -390,6 +396,7 @@ impl Default for Index {
             nominal_layouts: Default::default(),
             identity: crate::unique(),
             entries: BTreeMap::new(),
+            contributions: BTreeSet::new(),
             buckets: BTreeMap::new(),
             revision: 0,
         }
@@ -522,7 +529,7 @@ impl Index {
         self.revision
     }
     pub fn insert(&mut self, head: ImplementationHead, budget: Budget) -> Result<(), Error> {
-        if self.entries.contains_key(&head.declaration) {
+        if self.contributions.contains(&head.declaration) {
             return Err(Error::DuplicateDeclaration(head.declaration));
         }
         let mut fuel = budget.steps;
@@ -537,10 +544,12 @@ impl Index {
             .map(|ty| Key::with_fuel(ty, &mut fuel, budget.max_depth))
             .collect::<Result<_, _>>()?;
         // Publish only after all keys have validated successfully.
+        self.contributions.insert(head.declaration);
         self.buckets
             .entry(head.interface)
             .or_default()
             .insert(head.declaration);
+        let phases = [Some(head.declaration), None];
         self.entries.insert(
             head.declaration,
             Entry {
@@ -548,6 +557,7 @@ impl Index {
                 key: key.cut(precision),
                 arguments,
                 precision,
+                phases,
             },
         );
         self.revision += 1;
@@ -740,7 +750,13 @@ impl fmt::Display for Index {
             write!(f, " (parameter-domain {id} {domain})")?;
         }
         for (id, entry) in &self.entries {
-            write!(f, " (implementation (id {id}) (interface ")?;
+            write!(f, " (implementation (id {id}) (phases")?;
+            for (phase, contribution) in ["runtime", "comptime"].into_iter().zip(entry.phases) {
+                if let Some(contribution) = contribution {
+                    write!(f, " ({phase} {contribution})")?;
+                }
+            }
+            f.write_str(") (interface ")?;
             match entry.head.interface {
                 Some(id) => write!(f, "{id}")?,
                 None => f.write_str("open")?,

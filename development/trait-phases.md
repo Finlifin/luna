@@ -38,14 +38,33 @@ This validator is not yet wired into executable elaboration. Attribute inspectio
 does not by itself authorize phase selection, and the existing explicit rejection
 of comptime implementation selection remains in force.
 
+## Shared relationship index
+
+The implementation index now has `insert_phase` and `select_phase`. Complementary
+contributions with identical alpha-bound normalized heads, ordered parameter
+domains, interface inputs and requirements share one relationship entry. Each
+contribution retains its declaration identity. Ordinary `insert` keeps runtime
+behavior. Same-phase duplicates still participate in ordinary coherence; open
+interface identities cannot be paired. Insertion failure leaves the index and
+its revision unchanged; successful additions invalidate older query results.
+
+Phase lookup consumes the common type-resolution result, preserves deferred or
+conflicting selection, and reports a missing phase on the selected relationship
+without searching less precise candidates. Index and phase-result dumps include
+both relationship and contribution identities. This remains index-level work:
+source attribute application, phase-specific member completeness, shared
+associated-item checking, and executable dispatch are still unconnected. The
+pairing API expects already-normalized applicability predicates; it does not
+prove arbitrary logical equivalence between differently represented conditions.
+
 ## Remaining integration
 
 - Apply validated phase metadata to trait methods and associated members
   independently of their function execution signature, integrating its required
   computations with interface preparation rather than eagerly running bodies.
-- Group complementary implementation contributions by the confirmed normalized
-  head and applicability relation, select the relationship first, then require
-  the requested phase. Preserve shared associated-item consistency.
+- Feed normalized source contributions into the shared relationship index,
+  select the relationship first, then require the requested phase. Preserve
+  shared associated-item consistency and phase-specific member completeness.
 - Carry phase through checked implementation metadata, member lookup, execution,
   and generated-definition publication. Add missing-phase and non-fallback tests.
 - Connect dynamic trait-method clause preparation without erasing interface
@@ -76,3 +95,16 @@ Member metadata validation passed 20 tests with
 target and Bool-domain rejection, budget failure/retry, unrelated metadata,
 real attrs package/prelude resolution, and the existing implementation-phase
 boundary. They do not demonstrate executable two-phase selection.
+
+Shared relationship indexing passed 85 tests (73 existing implementation tests
+and 12 phase tests) with
+`python3 -B development/check.py --timeout 900 -- test --release -p elaboration
+--test implementation_phases --test implementation`
+(`/tmp/luna-tools-9z5hynz0/result.json`, exit 0). Checks cover complementary
+generic heads in both insertion orders, mixed-sort domains, free identities,
+opaque heads, missing-phase non-fallback, deferred selection, coherence conflicts,
+open interfaces, stale queries and atomic budget retry. The preceding run
+(`/tmp/luna-tools-r1hy0go2/result.json`, exit 101) reproduced unbound requirement
+capture against the library compiled before the scope fix; the final run includes
+that fix and passes its rejection regression. Workspace formatting passed
+(`/tmp/luna-tools-l2puwhb9/result.json`); `git diff --check` also passed.
