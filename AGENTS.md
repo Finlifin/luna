@@ -27,6 +27,30 @@
 - 协调者负责最终合并、检查和提交；其他角色提交限定范围的补丁或任务提交，不共同修改集成分支。
 - 当前任务已有的提交、合并等授权持续有效，不重复索取。没有相应授权时不推送、发布或执行破坏性清理；任务本地的可逆操作按工作需要执行。
 
+### Commit message 格式
+
+- 标题统一使用 `type(scope): summary`，恢复早期提交的分类与范围标记。`type` 使用 `feat`、`fix`、`refactor`、`perf`、`test`、`docs`、`build` 或 `chore`；`scope` 使用实际子系统，如 `elaboration`、`comptime`、`nir`、`meta`、`attrs`、`dev`。标题用英文祈使句，说明具体行为变化，尽量不超过 72 字符，不用泛泛的 update、improve 或 progress 代替内容。
+- 标题后空一行，正文固定包含 `Changes:` 和 `Validation:` 两节，每节用 `- ` 列出要点，节间空一行。`Changes:` 说明解决的问题、最终行为及关键语义边界，不罗列文件名或工作流水账。
+- `Validation:` 写实际执行的检查命令或明确的测试入口、范围与结果；测试数量只能作补充，不能代替检查范围。长命令可引用随提交保存的开发记录中的准确命令。未运行的检查明确标注未运行及原因；文档变更写明检查方式和无需构建的原因，不编造测试通过。
+- 存在未接通路径、已知限制或后续依赖时，增加 `Limitations:` 节，准确区分本次交付与尚未实现的能力；没有实质限制时省略，不添加模板占位。破坏兼容的变更另用 `BREAKING CHANGE:` 说明影响及迁移方式。
+- 英文正文按约 72–80 列合理换行，保留实际换行和列表，不写成一整段。提交前检查 message 文件与暂存 diff 一致；使用 `development/commit.py --message-file` 传入完整正文。常规提交沿用已有脚本授权，不因消息格式调整再次请求授权。
+
+示例结构（尖括号内容应替换为本次事实）：
+
+```text
+fix(comptime): preserve clause input evaluation order
+
+Changes:
+- <Problem and resulting behavior.>
+- <Relevant implementation or semantic boundary.>
+
+Validation:
+- <Exact check command or recorded entrypoint>: <actual result>.
+
+Limitations:
+- <Remaining unsupported behavior, only when applicable.>
+```
+
 ## 3. 基础角色
 
 四种角色是工作范围分类，由当前开发者按需承担；不要求分别启动代理。默认单代理开发，用户明确要求并行协作时再分派。
