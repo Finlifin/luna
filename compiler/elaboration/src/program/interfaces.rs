@@ -2480,6 +2480,20 @@ impl Checker<'_, '_> {
         &self,
         value: &n::Expr,
     ) -> Option<(OwnerId, Vec<Term>)> {
+        if let K::ComptimeFunctionInstance {
+            declaration: id,
+            subject,
+        } = &value.kind
+        {
+            let owner = self.package.owners().find_map(|(owner, _)| {
+                matches_declaration(self.package, &self.package_identities, owner, *id)
+                    .then_some(owner)
+            })?;
+            return Some((
+                owner,
+                self.comptime_instance_clause_evidence(owner, subject)?,
+            ));
+        }
         let (id, arguments) = match &value.kind {
             K::FunctionInstance {
                 declaration,

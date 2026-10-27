@@ -564,37 +564,11 @@ impl Checker<'_, '_> {
             })?
             .clone();
         let (parameters, arguments) = match &callee.kind {
-            K::ComptimeFunctionInstance { subject, .. } => {
-                let packet = match &subject.kind {
-                    K::Block {
-                        result: Some(result),
-                        ..
-                    } => result.as_ref(),
-                    _ => subject.as_ref(),
-                };
-                let K::Tuple(inputs) = &packet.kind else {
-                    return Err(error(span, "invalid comptime clause input packet"));
-                };
-                let parameters = self.type_parameters[&owner].clone();
-                if inputs.len() != parameters.len() {
-                    return Err(error(span, "comptime clause input arity mismatch"));
-                }
-                let arguments = parameters
-                    .iter()
-                    .zip(inputs)
-                    .map(|(id, input)| {
-                        if let K::TypeValue(ty) = &input.kind {
-                            ty.clone()
-                        } else {
-                            Term::Rigid {
-                                declaration: *id,
-                                sort: Sort::ComptimeValue,
-                            }
-                        }
-                    })
-                    .collect();
-                (parameters, arguments)
-            }
+            K::ComptimeFunctionInstance { subject, .. } => (
+                self.type_parameters[&owner].clone(),
+                self.comptime_instance_clause_evidence(owner, subject)
+                    .ok_or_else(|| error(span, "invalid comptime clause input packet"))?,
+            ),
             K::FunctionInstance { arguments, .. } => {
                 (self.type_parameters[&owner].clone(), arguments.clone())
             }

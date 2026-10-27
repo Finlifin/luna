@@ -384,3 +384,37 @@ fn explicit_ordinary_input_runs_after_clause_snapshot() {
         comptime fn run()->bool {var flag=true;let result=choose<flag>(change(flag.ref));result and not flag}
     "),Value::Bool(true));
 }
+
+#[test]
+fn ordinary_type_requirements_use_dynamic_instances_clause_types() {
+    assert_eq!(invoke("
+        comptime fn choose(comptime Actual:.Type'builtin)->bool where Expected,flag:bool,requires Actual==Expected {flag}
+        comptime fn run()->bool {let flag=true;choose<bool,flag>(bool)}
+    "),Value::Bool(true));
+    let error=compile("comptime fn choose(comptime Actual:.Type'builtin)->bool where Expected,flag:bool,requires Actual==Expected {flag} comptime fn unused()->bool {let flag=true;choose<bool,flag>(.char'builtin)}").unwrap_err();
+    assert!(!error.contains("arity"), "{error}");
+}
+
+#[test]
+fn ordinary_capabilities_use_dynamic_clause_types() {
+    let declarations = "trait Accept where Expected {} impl Accept<bool> for bool {} comptime fn choose(comptime Actual:.Type'builtin)->bool where Expected,flag:bool,requires Actual:-Accept<Expected> {flag}";
+    assert_eq!(
+        invoke(&format!(
+            "{declarations} comptime fn run()->bool {{let flag=true;choose<bool,flag>(bool)}}"
+        )),
+        Value::Bool(true)
+    );
+    let error=compile(&format!("{declarations} comptime fn unused()->bool {{let flag=true;choose<bool,flag>(.char'builtin)}}")).unwrap_err();
+    assert!(!error.contains("expected 2 arguments, got 0"), "{error}");
+}
+
+#[test]
+fn inherited_types_are_retained_for_ordinary_type_requirements() {
+    assert_eq!(invoke("
+        comptime fn outer()->bool where Expected {
+            comptime fn choose(comptime Actual:.Type'builtin,.value:bool=flag)->bool where flag:bool,requires Actual==Expected {value}
+            let flag=true;choose<flag>(Expected)
+        }
+        comptime fn run()->bool {outer<bool>()}
+    "),Value::Bool(true));
+}

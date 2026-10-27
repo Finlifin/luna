@@ -2,6 +2,42 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    /// Definition-side evidence only: pending values retain declaration rigids.
+    /// The invocation packet remains the authority for their actual snapshots.
+    pub(super) fn comptime_instance_clause_evidence(
+        &self,
+        owner: OwnerId,
+        subject: &n::Expr,
+    ) -> Option<Vec<Term>> {
+        let packet = match &subject.kind {
+            K::Block {
+                result: Some(result),
+                ..
+            } => result.as_ref(),
+            _ => subject,
+        };
+        let K::Tuple(inputs) = &packet.kind else {
+            return None;
+        };
+        let parameters = self.type_parameters.get(&owner)?;
+        if inputs.len() != parameters.len() {
+            return None;
+        }
+        Some(
+            parameters
+                .iter()
+                .zip(inputs)
+                .map(|(id, input)| match &input.kind {
+                    K::TypeValue(ty) | K::ComptimeValue(ty) => ty.clone(),
+                    _ => Term::Rigid {
+                        declaration: *id,
+                        sort: Sort::ComptimeValue,
+                    },
+                })
+                .collect(),
+        )
+    }
+
     pub(super) fn comptime_function_instance(
         &mut self,
         expr: &Expr<'_>,

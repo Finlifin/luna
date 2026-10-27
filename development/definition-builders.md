@@ -169,6 +169,13 @@ changing a source local during an ordinary argument does not change its already
 frozen clause snapshot. Explicit overrides skip default evaluation. The existing
 default stability, phase, ordering and cleanup checks remain in place.
 
+Ordinary Type and trait requirements use the same definition-side clause evidence
+as defaults. Known Type inputs and inherited inputs are retained; not-yet-evaluated
+value inputs remain declaration rigids. The actual invocation packet still owns
+their values. This prevents an explicit comptime instance from being checked as
+though it had an empty clause telescope when a requirement also references an
+ordinary comptime Type parameter. It does not assert unknown value equalities.
+
 Callable signatures and clause domains cannot depend on value-clause
 binders. Open functions, quoted bodies and more general dependent signatures
 retain their existing elaboration paths; this stage does not claim their dynamic
@@ -233,6 +240,18 @@ passed (`/tmp/luna-tools-7nm09mi_/result.json`).
 Final CMTT regression also passed all 527 tests using `python3 -B
 development/check.py --timeout 900 -- test --release -p luna --test cmtt`
 (`/tmp/luna-tools-3gz17vq3/result.json`, exit 0).
+
+Ordinary-requirement integration validation in `/home/fin/luna`:
+`python3 -B development/check.py --timeout 900 -- test --release -p luna
+--test comptime_clause_inputs --test default_calls --test cmtt
+--test library_protocols` passed 622 tests (27 + 43 + 527 + 25),
+`/tmp/luna-tools-m0o8ce98/result.json`. Before the fix the valid ordinary-Type
+requirement reproduction failed with "expected 2 arguments, got 0"
+(`/tmp/luna-tools-trvcf1h0/result.json`, exit 101). Tests now cover both equality
+and trait requirements, rejected mismatches in unused callers, and inherited
+Type/default combinations. Native O0/O3 passed
+(`/tmp/luna-host-examples-a7vlld69/summary.json`), and workspace formatting passed
+(`/tmp/luna-tools-465xaxac/result.json`).
 
 ### Schema Type evidence
 
