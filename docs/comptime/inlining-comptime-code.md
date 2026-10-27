@@ -39,6 +39,23 @@ ordinary normalization 要检查相应分支中的操作，而不只是等待一
 
 inline 条件可以是任意 comptime bool 表达式。编译器尝试提取良定义命题；不能提取时，按未知 bool 检查相应分支，不因此增加路径事实。条件未知不等于条件为 false，也不等于可以提前执行两侧副作用。
 
+在闭合类型的 comptime 函数体内，普通参数与可变局部变量也由本次 comptime invocation 供应。`inline if`、`inline when` 和 inline 模式分支可以保留为编译期 VM 的受检控制流；选择发生在调用期间，不要求在检查函数定义时就取得实参，也不把普通参数改成另一种 ABI 参数。例如：
+
+```flurry
+comptime fn choose(flag: bool) -> bool {
+    inline if flag { true } else { false }
+}
+
+comptime fn check_choices() -> bool {
+    var flag = true;
+    let first = choose(flag);
+    flag = false;
+    first and not choose(flag)
+}
+```
+
+两次调用分别观察当时的值；条件只按实际控制流求值，未选分支不执行。所有分支仍检查类型与阶段，不能在未选分支中调用仅供 runtime 使用的函数。quoted runtime 代码与需要生成 runtime 残余的开放实例继续使用相应的 inline 特化路径。
+
 ### Inline 循环
 
 `inline for` 在编译时确定展开结构。遍历元组的结构时，元素的位置和类型可以在编译时用于选择代码，元素值仍可以属于 runtime。

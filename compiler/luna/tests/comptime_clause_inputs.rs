@@ -573,3 +573,98 @@ fn closed_comptime_staged_body_checks_unselected_operations() {
         "{error}"
     );
 }
+
+#[test]
+fn ordinary_comptime_inputs_select_inline_branches_per_invocation() {
+    assert_eq!(
+        invoke(
+            "comptime fn choose(flag:bool)->bool {inline if flag {true} else {false}}
+         comptime fn run()->bool {choose(true) and not choose(false)}"
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn ordinary_comptime_inline_calls_snapshot_mutable_arguments_once() {
+    assert_eq!(
+        invoke(
+            "comptime fn choose(flag:bool)->bool {inline if flag {true} else {false}}
+         comptime fn forward(flag:bool)->bool {choose(flag)}
+         comptime fn mark(state:*.Integer'builtin,digit:.Integer'builtin,value:bool)->bool {
+             state.* = state.* * 10 + digit; value
+         }
+         comptime fn run()->bool {
+             var trace:.Integer'builtin=0;
+             var flag=true;
+             let first=forward(mark(trace.ref,1,flag));
+             flag=false;
+             let second=forward(mark(trace.ref,2,flag));
+             first and not second and trace==12
+         }"
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn ordinary_comptime_inline_when_and_match_use_invocation_values() {
+    for body in [
+        "inline when {flag=>true,else=>false}",
+        "inline if flag is do {true=>true,false=>false}",
+        "var state=flag; state=not state; inline if state {false} else {true}",
+    ] {
+        assert_eq!(
+            invoke(&format!(
+                "comptime fn choose(flag:bool)->bool {{{body}}}
+             comptime fn run()->bool {{choose(true) and not choose(false)}}"
+            )),
+            Value::Bool(true),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_comptime_inline_when_short_circuits_selector_effects() {
+    assert_eq!(
+        invoke(
+            "comptime fn mark(state:*.Integer'builtin,digit:.Integer'builtin,value:bool)->bool {
+             state.* = state.* * 10 + digit; value
+         }
+         comptime fn choose(trace:*.Integer'builtin)->bool {
+             inline when {
+                 mark(trace,1,false)=>false,
+                 mark(trace,2,true)=>true,
+                 mark(trace,3,true)=>false,
+                 else=>false
+             }
+         }
+         comptime fn run()->bool {
+             var trace:.Integer'builtin=0;
+             let result=choose(trace.ref);
+             result and trace==12
+         }"
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn ordinary_comptime_inline_controls_keep_definition_checks() {
+    for body in [
+        "inline if flag {true} else {runtime_value()}",
+        "inline when {flag=>true,else=>runtime_value()}",
+        "inline if flag is do {true=>true,false=>runtime_value()}",
+        "inline if flag {true} else {()}",
+    ] {
+        let source = format!(
+            "fn runtime_value()->bool {{true}} comptime fn choose(flag:bool)->bool {{{body}}}"
+        );
+        assert!(
+            compile(&source).is_err(),
+            "accepted unused invalid body: {body}"
+        );
+    }
+    assert!(compile("fn choose(flag:bool)->bool {inline if flag {true} else {false}}").is_err());
+}

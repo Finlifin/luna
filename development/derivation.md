@@ -987,3 +987,39 @@ git diff --check
 - This does not implement conditional member emission, default selection or
   general generic strategy execution. Ordinary comptime parameters without a
   staged parameter sort are not covered by this registration change.
+
+## Ordinary comptime inputs in inline branches
+
+Closed comptime bodies now retain typed if/when/match controls for execution by
+comptime invocation. This permits ordinary parameters and mutable local values
+in inline selectors without changing their ABI sorts or attempting to freeze
+them while checking the definition. The compiler still checks every branch;
+the VM runs only the selected path and preserves selector order.
+
+The dispatch excludes quoted runtime code, runtime closures, open-function
+specialization, normal-form heads and ordinary-behavior evidence. Inline range
+expansion is unchanged. This does not complete general value-dependent body
+types or dynamic member generation.
+
+Initial reproduction: `/tmp/luna-tools-xn0oxl3q/result.json` rejected the direct
+call because the ordinary selector input was unavailable during definition
+checking. The second fixture initially had `.*=` without separator whitespace;
+that fixture was corrected to the existing `.* =` syntax before validation.
+
+Validation in `/home/fin/luna` (all exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_clause_inputs --test derivation --test default_calls --test comptime_memory --test comptime_object_contracts --test staged_aggregate_contracts
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test inline_control --test quote_functions
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Invocation/derivation regressions: 213 passed;
+  `/tmp/luna-tools-c6zwkbrq/result.json`.
+- Existing runtime inline controls and quote functions passed;
+  `/tmp/luna-tools-o55g1bk5/result.json`.
+- Formatting: `/tmp/luna-tools-_vb6eftf/result.json`.
+- New cases cover direct and nested calls, snapshots of mutable arguments,
+  argument producer counts/order, mutable callee locals, if/when/match,
+  short-circuit selector effects and rejection of invalid uncalled bodies.
