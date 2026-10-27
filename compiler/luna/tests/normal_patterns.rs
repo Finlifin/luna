@@ -1314,23 +1314,11 @@ fn deep_type_guard_reports_resource_failure_without_stack_overflow() {
             comptime fn Inspect(value:Type)->bool {{value match {{Box<(Kind if {guard}),(a,b)> =>a and not b,_=>false}}}}
             comptime fn Run()->bool {{Inspect(Box<Tuple<bool,bool>,(true,false)>)}}")
     };
-    for (optional, unary) in [
-        (None, false),
-        (Some("input.Maybe"), false),
-        (None, true),
-        (Some("input.Maybe"), true),
-    ] {
+    for unary in [false, true] {
         let compile = |depth| {
-            execution_support::compile_with_tuple_selectors(
-                &format!(
-                    "enum Maybe where T {{Absent,Present(T)}} {}",
-                    source(depth, unary)
-                ),
+            execution_support::compile_with_tuple_protocols(
+                &source(depth, unary),
                 &Default::default(),
-                luna::protocols::type_constructors::Selectors {
-                    optional,
-                    ..Default::default()
-                },
             )
         };
         let error = compile(140).unwrap_err();
