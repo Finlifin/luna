@@ -207,3 +207,63 @@ fn generated_attributes_still_require_an_implemented_consumer() {
         "{error}"
     );
 }
+
+#[test]
+fn generic_requests_rebind_subjects_and_generated_self_independently() {
+    let package = support::compile(
+        "typealias u32=.u32'builtin; trait Echo {fn echo(value:Self)->Self;} derive fn identity for Echo {fn echo(value:Self)->Self {value}} struct First where T {} struct Second where T {} derive Echo.use(identity) for First<T> where T; derive Echo.use(identity) for Second<T> where T; fn first(value:First<bool>)->bool {true} fn second(value:Second<u32>)->bool {true} fn run()->bool {first(First<bool>.as(Echo).echo(First<bool>{})) and second(Second<u32>.as(Echo).echo(Second<u32>{}))}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn generic_request_requirements_control_implementation_availability() {
+    for clauses in ["where T:-Bound", "where T, requires T:-Bound"] {
+        let source = format!(
+            "trait Bound {{}} struct Allowed {{}} impl Bound for Allowed {{}} struct Denied {{}} trait Flag {{fn flag()->bool;}} derive fn enabled for Flag {{fn flag()->bool {{true}}}} struct Subject where T {{}} derive Flag.use(enabled) for Subject<T> {clauses}; fn run()->bool {{Subject<Allowed>.as(Flag).flag()}}"
+        );
+        let package = support::compile(&source);
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+        let rejected = source.replace("Subject<Allowed>.as", "Subject<Denied>.as");
+        let error = support::compile_with_protocols(&rejected, &Default::default()).unwrap_err();
+        assert!(!error.contains("not implemented"), "{error}");
+        assert!(
+            error.contains("implementation") || error.contains("obligation"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn value_parameterized_requests_preserve_subject_identity() {
+    let source = "trait Echo {fn echo(value:Self)->Self;} derive fn identity for Echo {fn echo(value:Self)->Self {value}} struct Subject where enabled:bool {} derive Echo.use(identity) for Subject<enabled> where enabled:bool; fn accept(value:Subject<true>)->bool {true} fn run()->bool {accept(Subject<true>.as(Echo).echo(Subject<true>{}))}";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let rejected = source.replace(
+        "accept(Subject<true>.as(Echo).echo(Subject<true>{}))",
+        "accept(Subject<false>.as(Echo).echo(Subject<false>{}))",
+    );
+    let error = support::compile_with_protocols(&rejected, &Default::default()).unwrap_err();
+    assert!(!error.contains("not implemented"), "{error}");
+}
+
+#[test]
+fn generic_requests_preserve_comptime_implementation_phase() {
+    let source = "trait Flag {^{comptime_phase:true} comptime fn flag()->bool;} derive fn enabled for Flag {comptime fn flag()->bool {true}} struct Subject where T {} comptime derive Flag.use(enabled) for Subject<T> where T; comptime fn run()->bool {Subject<bool>.as(Flag).flag()}";
+    let package = support::compile(source);
+    assert!(package.implementations[0].phases.comptime);
+    assert!(!package.implementations[0].phases.runtime);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

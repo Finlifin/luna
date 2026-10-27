@@ -645,8 +645,15 @@ pub(super) fn implementation_draft<'h>(
     request: &hir::item::DeriveRequest<'h>,
     strategy_trait: &'h Expr<'h>,
     members: Vec<OwnerId>,
+    definitions: &HashMap<hir::common::DefId, hir::common::DefId>,
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
+    *fuel = fuel.checked_sub(definitions.len()).ok_or_else(|| {
+        error(
+            request.self_ty.span,
+            "generated impl identity budget exhausted",
+        )
+    })?;
     let mut rebind = Rebind {
         source,
         arena,
@@ -654,10 +661,12 @@ pub(super) fn implementation_draft<'h>(
         bindings: HashMap::new(),
         budget: *fuel,
         bodies: Vec::new(),
-        definitions: HashMap::new(),
+        definitions: definitions.clone(),
         member_owner: Some(request_owner),
     };
     let result = (|| {
+        let clause_params = rebind.clauses(request.clause_params)?;
+        let clause_constraints = rebind.constraints(request.clause_constraints)?;
         let self_ty = rebind.expr(request.self_ty, 0)?;
         let trait_ref = rebind.expr(request.trait_ref, 0)?;
         let generation_trait = rebind.expr(strategy_trait, 0)?;
@@ -672,21 +681,29 @@ pub(super) fn implementation_draft<'h>(
                 phase: request.phase,
                 self_ty,
                 trait_ref: Some(trait_ref),
-                clause_params: &[],
-                clause_constraints: &[],
+                clause_params,
+                clause_constraints,
                 items: members,
             }),
         };
-        Ok((item, resolution))
+        let mut nodes = hir::OwnerNodes::new();
+        for parameter in clause_params {
+            nodes.insert(
+                parameter.hir_id.local_id,
+                hir::ItemLocalId::new(0),
+                hir::Node::ClauseParam(parameter),
+            );
+        }
+        Ok((item, resolution, nodes))
     })();
     *fuel = rebind.budget;
-    let (item, resolution) = result?;
+    let (item, resolution, nodes) = result?;
     Ok(ClonedMember {
         item,
         resolution,
         bodies: rebind.bodies,
         bindings: rebind.bindings,
-        nodes: hir::OwnerNodes::new(),
+        nodes,
         attributes: Vec::new(),
         staged_parameters: Vec::new(),
     })

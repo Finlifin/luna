@@ -450,3 +450,40 @@ git diff --check
 - Derivation: 16 passed; trait phases: 30 passed,
   `/tmp/luna-tools-2axf4n0r/result.json`.
 - Formatting: `/tmp/luna-tools-em8q313t/result.json`.
+
+## Generic derive requests
+
+Explicit requests now transfer their clause telescope and constraints into the
+fresh generated implementation. Each request binder receives a reserved
+implementation-package identity before cloning the subject, requested interface,
+parameter domains/defaults and constraints. The generated owner indexes the cloned
+clause nodes; no request binder is retained by identity after source retirement.
+The same budgeted constraint copier serves generated members and impl headers.
+
+This enables a declaration-only strategy to generate implementations for generic
+subjects, with ordinary implementation applicability controlling their use. It
+does not instantiate parameterized strategies or infer strategy inputs. The
+strategy's declared full interface still has to match the requested instance;
+normal-form identity and ordinary coherence checks remain in force.
+
+Source coverage executes independently generated generic subjects, Bool-valued
+subject parameters and comptime implementation contributions. Both trait-bound
+binder syntax and explicit `requires` accept a satisfying subject and reject an
+unsatisfied one; a mismatched scalar-indexed subject remains a type error.
+The initial source run passed 18/19 cases; its remaining fixture omitted the
+required comma before `requires` (`/tmp/luna-tools-j9le1q_9/result.json`). After
+correcting that fixture and adding comptime coverage, all 20 passed
+(`/tmp/luna-tools-bqohtl9v/result.json`).
+
+Check commands, working directory `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib member_clone
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All final checks exited 0. Member cloning: 8 passed,
+`/tmp/luna-tools-u8drqxes/result.json`. Formatting:
+`/tmp/luna-tools-t05kw8un/result.json`; `git diff --check` passed.

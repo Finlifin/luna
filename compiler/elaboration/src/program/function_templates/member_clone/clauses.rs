@@ -3,7 +3,7 @@ use super::*;
 use hir::clause::{ClauseParam, ClauseParamKind as K};
 
 impl<'h> Rebind<'_, 'h> {
-    pub(super) fn clauses(
+    pub(in crate::program::function_templates) fn clauses(
         &mut self,
         parameters: &[ClauseParam<'h>],
     ) -> Result<&'h [ClauseParam<'h>], Error> {
@@ -41,6 +41,26 @@ impl<'h> Rebind<'_, 'h> {
             result.push(parameter);
         }
         Ok(self.arena.alloc_clause_param_slice(result))
+    }
+
+    pub(in crate::program::function_templates) fn constraints(
+        &mut self,
+        constraints: &[hir::clause::ClauseConstraint<'h>],
+    ) -> Result<&'h [hir::clause::ClauseConstraint<'h>], Error> {
+        let mut result = Vec::new();
+        for constraint in constraints {
+            self.charge(constraint.span, 0)?;
+            let mut constraint = constraint.clone();
+            constraint.hir_id = self.id(constraint.hir_id);
+            constraint.kind = match constraint.kind {
+                C::Requires(value) => C::Requires(self.expr(value, 0)?),
+                C::Ensures(value) => C::Ensures(self.expr(value, 0)?),
+                C::Decreases(value) => C::Decreases(self.expr(value, 0)?),
+                C::Outcome => C::Outcome,
+            };
+            result.push(constraint);
+        }
+        Ok(self.arena.alloc_clause_slice(result))
     }
 
     fn clause_kind(

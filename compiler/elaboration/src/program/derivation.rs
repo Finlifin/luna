@@ -83,9 +83,6 @@ pub(super) fn expand<'h>(
             }) {
                 return Err(unsupported(item.span, "block-local derive requests"));
             }
-            if !request.clause_params.is_empty() || !request.clause_constraints.is_empty() {
-                return Err(unsupported(item.span, "generic derive requests"));
-            }
             let selection = request
                 .strategy
                 .ok_or_else(|| unsupported(item.span, "default strategy selection"))?;
@@ -166,6 +163,16 @@ pub(super) fn expand<'h>(
             .map_err(|e| error(span, e.to_string()))?;
         let mut mapping = HashMap::<DefId, DefId>::new();
         mapping.insert(source.owner_definition(strategy).unwrap(), impl_identity);
+        for parameter in request.clause_params {
+            charge(fuel, parameter.span)?;
+            let old = parameter
+                .definition
+                .ok_or_else(|| error(parameter.span, "derive request clause has no identity"))?;
+            let new = batch
+                .reserve_identity(pkg, fuel)
+                .map_err(|e| error(parameter.span, e.to_string()))?;
+            mapping.insert(old, new);
+        }
         let mut owners = Vec::new();
         for member in &strategies[&strategy] {
             charge(fuel, span)?;
@@ -212,6 +219,7 @@ pub(super) fn expand<'h>(
             request,
             generator.trait_ref,
             owners.iter().map(|(_, owner, _)| *owner).collect(),
+            &mapping,
             fuel,
         )?;
         let mut drafts = vec![(shell, impl_identity)];

@@ -100,20 +100,7 @@ pub(in crate::program) fn clone_member<'h>(
             cloned_parameters.push(parameter);
         }
         let parameters = arena.alloc_fn_param_slice(cloned_parameters);
-        let mut constraints = Vec::new();
-        for constraint in clause_constraints {
-            rebind.charge(constraint.span, 0)?;
-            let mut constraint = constraint.clone();
-            constraint.hir_id = rebind.id(constraint.hir_id);
-            constraint.kind = match constraint.kind {
-                C::Requires(value) => C::Requires(rebind.expr(value, 0)?),
-                C::Ensures(value) => C::Ensures(rebind.expr(value, 0)?),
-                C::Decreases(value) => C::Decreases(rebind.expr(value, 0)?),
-                C::Outcome => C::Outcome,
-            };
-            constraints.push(constraint);
-        }
-        let clause_constraints = arena.alloc_clause_slice(constraints);
+        let clause_constraints = rebind.constraints(clause_constraints)?;
         let mut item = item.clone();
         item.owner_id = owner;
         item.kind = match &item.kind {
