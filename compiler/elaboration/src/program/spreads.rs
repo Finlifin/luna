@@ -920,7 +920,10 @@ impl Checker<'_, '_> {
                 return Err(error(span, "method receiver count mismatch"));
             }
             let direct = match callee.kind {
-                K::Function(id)
+                K::ComptimeFunctionInstance {
+                    declaration: id, ..
+                }
+                | K::Function(id)
                 | K::FunctionInstance {
                     declaration: id, ..
                 } => Some(id),

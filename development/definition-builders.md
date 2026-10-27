@@ -181,6 +181,14 @@ discharged during definition checking, including defaulted Type clauses and
 unused callers. Value-dependent requirements remain attached to the declaration
 and are checked by invocation; a symbolic value is not assumed to satisfy them.
 
+Explicit inherent method instances use this same path with their selected owner
+inputs fixed as a prefix. Static methods can retain snapshots as function values;
+receiver methods first bind the receiver outside the clause preparation block.
+Spreads retain this outer order and keep the callable instance available to
+ordinary defaults after staging it in a temporary. Trait methods still use their
+interface-origin dispatch plan; this integration does not erase that origin or
+claim dynamic trait-method clause support is complete.
+
 Callable signatures and clause domains cannot depend on value-clause
 binders. Open functions, quoted bodies and more general dependent signatures
 retain their existing elaboration paths; this stage does not claim their dynamic
@@ -270,6 +278,17 @@ trait/equality/default-Type rejection and both successful and failed invocation
 of a value-indexed capability. Native O0/O3 passed
 (`/tmp/luna-host-examples-kxlburmh/summary.json`); final formatting passed
 (`/tmp/luna-tools-eboe7tw4/result.json`).
+
+Inherent-method validation in `/home/fin/luna` used the same four-suite command
+and passed 631 tests (36 + 43 + 527 + 25),
+`/tmp/luna-tools-po75vjv_/result.json`. The initial static-method reproduction
+failed by attempting to obtain a local clause input before invocation
+(`/tmp/luna-tools-xeuzwa5c/result.json`, exit 101). New tests cover generic owner
+Types, stored static-method snapshots, ordinary defaults, fixed-contract rejection
+and receiver/clause/argument side-effect order, with and without a tuple spread.
+The native example includes a receiver method with a spread and omitted default;
+O0/O3 passed (`/tmp/luna-host-examples-yfxezr7e/summary.json`). Workspace formatting
+passed (`/tmp/luna-tools-q7mcps_v/result.json`).
 
 ### Schema Type evidence
 

@@ -466,3 +466,85 @@ fn value_indexed_capabilities_are_retained_until_invocation() {
     let package = compile(&rejected).unwrap();
     assert!(luna::invocation::invoke(&package, "run", 100_000).is_err());
 }
+
+#[test]
+fn inherent_static_methods_accept_local_clause_values() {
+    assert_eq!(
+        invoke(
+            "
+        struct Factory {}
+        impl Factory {comptime fn choose()->bool where flag:bool {flag}}
+        comptime fn run()->bool {let flag=true;Factory.choose<flag>()}
+    "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn generic_inherent_methods_retain_owner_types_and_defaults() {
+    assert_eq!(
+        invoke(
+            "
+        struct Factory where T {}
+        impl Factory<T> where T {
+            comptime fn choose(.value:T=seed)->T where seed:T {value}
+        }
+        comptime fn run()->bool {let seed=true;Factory<bool>.choose<seed>()}
+    "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn stored_inherent_method_instances_keep_their_snapshot() {
+    assert_eq!(
+        invoke(
+            "
+        struct Factory {}
+        impl Factory {comptime fn choose()->bool where flag:bool {flag}}
+        comptime fn run()->bool {
+            var flag=true;let selected=Factory.choose<flag>;flag=false;selected()
+        }
+    "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn receiver_runs_before_clause_and_ordinary_argument_producers() {
+    assert_eq!(invoke("
+        struct Factory {flag:bool}
+        impl Factory {comptime fn choose(self,input:bool,.extra:bool=flag)->bool where flag:bool {self.flag and input and extra}}
+        comptime fn mark(trace:*.Integer'builtin,digit:.Integer'builtin)->bool {trace.* = trace.* * 10 + digit;true}
+        comptime fn make(trace:*.Integer'builtin)->Factory {Factory {flag:mark(trace,1)}}
+        comptime fn run()->bool {
+            var trace:.Integer'builtin=0;
+            let result=make(trace.ref).choose<mark(trace.ref,2)>(mark(trace.ref,3));
+            result and trace==123
+        }
+    "),Value::Bool(true));
+}
+
+#[test]
+fn receiver_spread_and_defaults_keep_instance_identity_and_order() {
+    assert_eq!(invoke("
+        struct Factory {flag:bool}
+        impl Factory {comptime fn choose(self,input:bool,.extra:bool=flag)->bool where flag:bool {self.flag and input and extra}}
+        comptime fn mark(trace:*.Integer'builtin,digit:.Integer'builtin)->bool {trace.* = trace.* * 10 + digit;true}
+        comptime fn make(trace:*.Integer'builtin)->Factory {Factory {flag:mark(trace,1)}}
+        comptime fn run()->bool {
+            var trace:.Integer'builtin=0;
+            let result=make(trace.ref).choose<mark(trace.ref,2)>(...do {(mark(trace.ref,3),)});
+            result and trace==123
+        }
+    "),Value::Bool(true));
+}
+
+#[test]
+fn static_method_fixed_contracts_reject_invalid_unused_calls() {
+    let source = "struct Factory {} impl Factory {comptime fn choose()->bool where T,flag:bool,requires T==bool {flag}} comptime fn unused()->bool {let flag=true;Factory.choose<.char'builtin,flag>()}";
+    assert!(compile(source).is_err());
+}

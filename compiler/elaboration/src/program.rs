@@ -6544,6 +6544,42 @@ impl Checker<'_, '_> {
     fn finish_call(
         &mut self,
         expr: &Expr<'_>,
+        callee: n::Expr,
+        args: &[Arg<'_>],
+        prefix: Vec<n::Expr>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        if prefix.is_empty() || !matches!(callee.kind, K::ComptimeFunctionInstance { .. }) {
+            return self.finish_prepared_call(expr, callee, args, prefix, expected, partial);
+        }
+        // The receiver is the leftmost source computation. Bind it outside
+        // clause preparation, also when a spread later wraps the inner call.
+        let saved_locals = self.locals.clone();
+        let result = (|| {
+            let mut statements = Vec::new();
+            let mut prepared = Vec::new();
+            for value in prefix {
+                prepared.push(self.bind_type_input(value, &mut statements, expr.span)?);
+            }
+            let call =
+                self.finish_prepared_call(expr, callee, args, prepared, expected, partial)?;
+            Ok(n::Expr {
+                source: source(expr.span),
+                ty: call.ty.clone(),
+                kind: K::Block {
+                    statements,
+                    result: Some(Box::new(call)),
+                },
+            })
+        })();
+        self.locals = saved_locals;
+        result
+    }
+
+    fn finish_prepared_call(
+        &mut self,
+        expr: &Expr<'_>,
         mut callee: n::Expr,
         args: &[Arg<'_>],
         prefix: Vec<n::Expr>,

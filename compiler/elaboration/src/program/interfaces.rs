@@ -2698,6 +2698,19 @@ impl Checker<'_, '_> {
                 "explicit instantiation requires a generic method",
             )
         })?;
+        // Trait methods must retain their interface origin and use the trait
+        // dispatch plan. An inherent method already names its selected body.
+        if matches!(method.kind, K::FunctionInstance { .. }) {
+            if let Some(value) =
+                self.comptime_function_instance(expr, owner, args, &fixed, None, allow_optional)?
+            {
+                return if allow_optional {
+                    Ok(value)
+                } else {
+                    self.callable_value_view(value, expected, expr.span)
+                };
+            }
+        }
         if allow_optional {
             if let Some(arguments) =
                 self.partial_positional_clause_prefix(owner, args, &fixed, expr.span)?

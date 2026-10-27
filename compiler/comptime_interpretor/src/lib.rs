@@ -8266,7 +8266,10 @@ impl<'a> Interpreter<'a> {
         } else {
             None
         };
-        let dynamic_defaults = matches!(callee.kind, K::ComptimeFunctionInstance { .. });
+        let dynamic_defaults = matches!(
+            callee.kind,
+            K::ComptimeFunctionInstance { .. } | K::Local(_)
+        );
         let callee_source = callee.source;
         // Static function identities carry no owned callee environment. A
         // synthesized trait-method node can share its enclosing call's source
@@ -8277,6 +8280,11 @@ impl<'a> Interpreter<'a> {
             K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
         );
         let callee = prepared_value!(this.eval_in_position(callee, environment, true));
+        // Spread preparation can retain an already-created instance in a local.
+        // Anonymous closure environments have no declaration substitution.
+        let dynamic_defaults = dynamic_defaults
+            && matches!(&callee,
+            Value::Closure(closure) if closure.declaration_instance().is_some());
         if retain_callee {
             this.retain_residual(callee_source, &callee)?;
         }

@@ -9,6 +9,13 @@ comptime fn constrained(comptime Actual:.Type'builtin, .value:bool=flag) -> bool
     where Expected, flag:bool, requires Expected == bool,
         requires Actual == Expected { value }
 
+struct Factory { enabled:bool }
+impl Factory {
+    comptime fn choose(self, input:bool, .value:bool=flag) -> bool where flag:bool {
+        self.enabled and input and value
+    }
+}
+
 comptime fn inherited() -> bool where seed:bool {
     comptime fn nested() -> bool where value:bool, .fallback:bool=seed {
         value and fallback
@@ -27,7 +34,8 @@ comptime fn configured() -> <|-bool> {
     let result = first() and not second() and from_default and not overridden
         and inherited<true>() and not inherited<false>()
         and not ordinary_default<flag>() and ordinary_default<flag>(.value=true)
-        and not constrained<bool, flag>(bool);
+        and not constrained<bool, flag>(bool)
+        and Factory { enabled:true }.choose<not flag>(...do {(true,)});
     '(result)
 }
 
