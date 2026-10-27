@@ -834,3 +834,42 @@ git diff --check
 - Closed explicit calls only: variadic/specialized parameter protocols, generic
   strategy environments, default strategy selection and conditional member
   emission remain outside this change. No compilation speedup is claimed.
+
+## Variadic and extended strategy input collection
+
+Strategy parameters may now retain the ordinary variadic parameter kind. Their
+capture annotation describes the complete collected value, including the opaque
+Tuple head, rather than a repeated element type. Nonempty signatures defer
+routing to ordinary invocation preparation so literal/dynamic spreads can be
+prepared there. Zero-input strategies without an execution group still reject
+unexpected inputs explicitly.
+
+The derive request preserves whether its selected call is ordinary or extended.
+An extended call therefore reaches ordinary property collection instead of being
+mistaken for a computed strategy identity or reconstructed as a positional call.
+Source-note lookup recognizes both call forms. Specialized parameter flags and
+generic strategy environments remain unsupported, and ordinary collector limits
+continue to apply without strategy-specific fallback behavior.
+
+Checks in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation --test dependent_list_collectors
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+python3 -B development/reproduce.py --binary /tmp/luna-dev-002/target/release/luna -- development/repros/record-property-order.fl --emit nir
+```
+
+- Derive suite: 63 passed; dependent-list collector suite: 1 passed; exit 0,
+  `/tmp/luna-tools-as3s8vg2/result.json`. New derive cases cover positional
+  collection, named whole supply, literal/dynamic spreads, anchored suffixes,
+  empty Tuple collection, property packets, invalid collection shapes and
+  source/phase diagnostics for extended calls.
+- Formatting: exit 0, `/tmp/luna-tools-4a74n75o/result.json`; diff check passed.
+- The first suite exposed a shared limitation for reordered property fields.
+  The standalone ordinary-call reproduction exits 1 with the same record-type
+  equality failure, `/tmp/luna-tools-e0c43enr/result.json`; it does not use derive.
+  The positive property-forwarding fixture now uses the declared record order.
+  This establishes forwarding of supported packets, not support for record
+  layout permutation. Keep the reproduction for follow-up in ordinary call
+  preparation; do not treat this limitation as a new language restriction.

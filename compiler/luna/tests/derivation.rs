@@ -832,3 +832,112 @@ fn omitted_strategy_defaults_execute_even_when_the_input_is_unused() {
     let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
     assert!(error.contains("step budget exhausted"), "{error}");
 }
+
+fn compile_strategy_tuple(source: &str) -> Result<nir::program::Package, String> {
+    let source = format!(
+        "trait Splice {{assoc RuntimeTarget:.Type'builtin;fn splice(comptime data:Self)->RuntimeTarget;}} impl Splice for bool {{assoc RuntimeTarget:.Type'builtin=bool;fn splice(comptime data:bool)->bool {{data}}}} {source}"
+    );
+    support::compile_with_tuple_selectors(
+        &source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            splice: Some("Splice"),
+            ..Default::default()
+        },
+    )
+}
+
+#[test]
+fn strategy_tuple_collectors_preserve_whole_packages_spreads_and_suffixes() {
+    for call in [
+        "configured(true,false,true)",
+        "configured(.values=(true,false),true)",
+        "configured(...(true,false),true)",
+        "configured(...packet(),true)",
+    ] {
+        let source = format!(
+            r#"
+            trait Flag {{fn flag()->bool;}}
+            comptime fn packet()->Tuple<bool,bool> {{(true,false)}}
+            derive fn configured(...values:Tuple<bool,bool>,last:bool) for Flag {{
+                let (first,second)=values;
+                let result=first and not second and last;
+                fn flag()->bool {{result}}
+            }}
+            struct Subject {{}}
+            derive Flag.use({call}) for Subject;
+            fn run()->bool {{Subject.as(Flag).flag()}}
+            "#,
+        );
+        let package = compile_strategy_tuple(&source).unwrap();
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn empty_strategy_collectors_still_form_the_declared_tuple() {
+    let package = compile_strategy_tuple(
+        "trait Flag {fn flag()->bool;} derive fn configured(...values:Tuple<>) for Flag {let ()=values;fn flag()->bool {true}} struct Subject {} derive Flag.use(configured()) for Subject; fn run()->bool {Subject.as(Flag).flag()}",
+    ).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn strategy_extended_collections_preserve_record_fields() {
+    let package = compile_with_strategy_bool_splice(
+        r#"
+        comptime fn schema(...fields:T)->T where T {fields}
+        const MODEL=schema {left:true,right:false};
+        typealias Config=MODEL'type;
+        trait Flag {fn flag()->bool;}
+        derive fn configured(...fields:Config) for Flag {
+            let result=fields.left and not fields.right;
+            fn flag()->bool {result}
+        }
+        struct Subject {}
+        derive Flag.use(configured {left:true,right:false}) for Subject;
+        fn run()->bool {Subject.as(Flag).flag()}
+        "#,
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn strategy_collectors_reject_duplicate_whole_supply_and_wrong_shapes() {
+    for call in [
+        "configured(.values=(true,false),true)",
+        "configured(true)",
+        "configured(.values=true)",
+    ] {
+        let source = format!(
+            "trait Flag {{}} derive fn configured(...values:Tuple<bool,bool>) for Flag {{}} struct Subject {{}} derive Flag.use({call}) for Subject;"
+        );
+        let error = compile_strategy_tuple(&source).unwrap_err();
+        assert!(!error.contains("not implemented"), "{error}");
+        assert!(error.contains("derive use site"), "{error}");
+    }
+}
+
+#[test]
+fn extended_strategy_call_failures_preserve_phase_checks_and_source_notes() {
+    let source = "comptime fn schema(...fields:T)->T where T {fields} const MODEL=schema {flag:true}; typealias Config=MODEL'type; trait Flag {} fn runtime_value()->bool {true} derive fn configured(...fields:Config) for Flag {} struct Subject {} derive Flag.use(configured {flag:runtime_value()}) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("runtime function"), "{error}");
+    assert!(
+        error.contains("derivation strategy `configured` defined here"),
+        "{error}"
+    );
+    assert!(
+        error.contains("derive use site of strategy `configured`"),
+        "{error}"
+    );
+}

@@ -219,6 +219,7 @@ pub(in crate::program) fn input_group<'h>(
     owner: OwnerId,
     execution: DefId,
     arguments: &[Arg<'h>],
+    extended: bool,
     span: rustc_span::Span,
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
@@ -247,7 +248,11 @@ pub(in crate::program) fn input_group<'h>(
     let call = arena.alloc_expr(Expr {
         hir_id: HirId::new(OwnerId::INVALID, hir::ItemLocalId::new(1)),
         span,
-        kind: E::Application(head, arena.alloc_arg_slice(arguments.to_vec())),
+        kind: if extended {
+            E::ExtendedApplication(head, arena.alloc_arg_slice(arguments.to_vec()))
+        } else {
+            E::Application(head, arena.alloc_arg_slice(arguments.to_vec()))
+        },
     });
     let result = rebind.expr(call, 0);
     *fuel = rebind.budget;
@@ -282,7 +287,7 @@ pub(in crate::program) fn input_draft<'h>(
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
     let ty = match parameter.ty.kind {
-        T::Positional(ty) | T::Optional(_, ty, _) => ty,
+        T::Positional(ty) | T::Optional(_, ty, _) | T::Varadic(_, ty) => ty,
         _ => {
             return Err(error(
                 parameter.span,

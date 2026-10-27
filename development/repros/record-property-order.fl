@@ -1,0 +1,12 @@
+{-
+    Known ordinary-call limitation: a property packet written in a different
+    field order from its declared record domain is currently rejected.
+    This reproduction does not use derive; strategy calls share this path.
+-}
+comptime fn schema(...fields: T) -> T where T { fields }
+const MODEL = schema { left: true, right: false };
+typealias Config = MODEL'type;
+comptime fn inspect(...fields: Config) -> bool {
+    fields.left and not fields.right
+}
+const answer = inspect { right: false, left: true };

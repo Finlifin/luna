@@ -118,6 +118,25 @@ derive FormatLabel<.text>.use(label_with_default(.text = "custom")) for CustomRe
 
 实参的求值顺序不因命名输入与声明顺序不同而改变。重复供参、未知参数名以及输入类型错误仍按普通调用规则诊断。
 
+变参输入交付一个完整的收集值。下面的策略先在编译时解构两个标志，只让生成方法捕获计算出的布尔结果：
+
+~~~flurry
+trait PairFlags {
+    fn enabled() -> bool;
+}
+
+derive fn from_flags(...flags: Tuple<bool, bool>) for PairFlags {
+    let (enabled, blocked) = flags;
+    let allowed = enabled and not blocked;
+    fn enabled() -> bool { allowed }
+}
+
+struct Feature {}
+derive PairFlags.use(from_flags(true, false)) for Feature;
+~~~
+
+本例也可用 `from_flags(.flags = (true, false))` 交付整包，或用 `from_flags(...(true, false))` 展开实参。收集类型保留 Tuple 的 normal-form 身份；空收集、末尾固定参数以及扩展调用中的属性收集均遵循[函数调用](../functions/calls-and-returns.md)的规则。
+
 选择另一个策略不会制造第二层方法身份：
 
 ~~~flurry

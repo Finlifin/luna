@@ -120,9 +120,10 @@ pub(super) fn expand<'h>(
             let selection = request
                 .strategy
                 .ok_or_else(|| unsupported(item.span, "default strategy selection"))?;
-            let (head, arguments) = match selection.kind {
-                E::Application(head, arguments) => (head, arguments),
-                _ => (selection, &[] as &[_]),
+            let (head, arguments, extended) = match selection.kind {
+                E::Application(head, arguments) => (head, arguments, false),
+                E::ExtendedApplication(head, arguments) => (head, arguments, true),
+                _ => (selection, &[] as &[_], false),
             };
             let E::ResolvedDef { def_id, .. } = head.kind else {
                 return Err(unsupported(selection.span, "computed strategy selection"));
@@ -156,25 +157,28 @@ pub(super) fn expand<'h>(
                     parameter.ty.kind,
                     hir::common::TyParamKind::Positional(_)
                         | hir::common::TyParamKind::Optional(..)
+                        | hir::common::TyParamKind::Varadic(..)
                 ) {
-                    return Err(unsupported(
-                        parameter.span,
-                        "variadic strategy parameter matching",
-                    ));
+                    return Err(unsupported(parameter.span, "strategy parameter shape"));
                 }
             }
             *fuel = fuel
                 .checked_sub(arguments.len().saturating_add(generator.parameters.len()))
                 .ok_or_else(|| error(selection.span, "strategy input routing budget exhausted"))?;
-            super::arguments::route_arguments(
-                arguments,
-                Some(generator.parameters),
-                generator.parameters.len(),
-                selection.span,
-            )?;
+            // Nonempty signatures use ordinary invocation preparation, including
+            // expansion and extended collections. No execution group is built
+            // for a declaration-only zero-input strategy, so check that case here.
+            if generator.parameters.is_empty() {
+                super::arguments::route_arguments(
+                    arguments,
+                    Some(generator.parameters),
+                    0,
+                    selection.span,
+                )?;
+            }
             selected.insert(strategy);
             omitted.insert(owner);
-            requests.push((owner, request, strategy, arguments));
+            requests.push((owner, request, strategy, arguments, extended));
         }
     }
     for (owner, info) in source.owners() {
@@ -223,7 +227,7 @@ pub(super) fn expand<'h>(
     let mut resolution = Vec::new();
     let mut attributes = Vec::new();
     let mut staged = Vec::new();
-    for (request_owner, request, strategy, arguments) in requests {
+    for (request_owner, request, strategy, arguments, extended) in requests {
         let ItemKind::Deriver(generator) = &source.item(strategy).unwrap().kind else {
             unreachable!()
         };
@@ -460,6 +464,7 @@ pub(super) fn expand<'h>(
                     owner,
                     execution_identity,
                     arguments,
+                    extended,
                     span,
                     fuel,
                 )?,
