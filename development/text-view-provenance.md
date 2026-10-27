@@ -126,7 +126,7 @@ composition, region liveness and invalidation checks are still required.
 
 Completed summaries are reused only inside one immutable query. Missing code,
 indirect calls, recursion, pointer transfers,
-effectful pattern observations and explicit program contracts remain
+effectful pattern observations remain
 rejected in this analysis. They are never converted into static or empty-origin
 evidence. The existing runtime resource checker still rejects unsupported text
 views; this new analysis has not replaced that gate or exported the iterator.
@@ -503,3 +503,44 @@ Earlier runs failed on fixture syntax (`+` whitespace,
 `/tmp/luna-tools-zsy6ttq2`) and an unsupported direct u8-to-u64 conversion protocol
 (`/tmp/luna-tools-4burvanw`). The corrected fixture uses the existing `bitvec`
 view conversion; neither parsing nor conversion protocols were relaxed.
+
+
+## Program-contract dependencies
+
+Entry snapshots retain their parameter's initial text origins in fresh bindings.
+Preconditions are analyzed before the body. Functions with postconditions collect
+outer parameter/snapshot environments at every explicit return and normal body
+completion, then analyze exit predicates with the joined actual result origins.
+A function with no normal return does not invent a result binding or evaluate its
+postconditions. Named calls substitute these predicate reads along with body
+reads into the caller summary.
+
+Predicates must be checkable and use supported observational expressions; writes
+to existing bindings, unsupported control transfers and unknown operations are
+still rejected. Recording predicate dependencies does not prove a predicate,
+assert that the call cannot reject, or discharge cleanup/lifetime obligations.
+Program predicates remain outside PTC.
+
+The source flow checker still rejects general text predicates with
+`unsupported-construct`; the initial source fixture demonstrated that boundary
+(`/tmp/luna-tools-3_l5wpol/result.json`, exit 101). Text predicate propagation is
+therefore tested with explicit well-typed NIR contracts. Separate source fixtures
+exercise admitted boolean predicates and actual entry-snapshot elaboration.
+This does not widen the source verifier's accepted specifications.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions contracts_observe_entry_snapshots_and_all_normal_return_origins -- --exact
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+The three suites passed all 24 tests (`/tmp/luna-tools-ngfuaqd5/result.json`,
+exit 0). The strengthened exact contract test subsequently passed
+(`/tmp/luna-tools-8xu7ef3m/result.json`, exit 0): a parameter reassignment on the
+fallthrough path joins with its original origin at an early return, whereas an
+entry snapshot retains only the original origin. Other assertions cover named
+callee preconditions, result-bound postconditions, nonreturning bodies and query
+budget failure followed by recovery.

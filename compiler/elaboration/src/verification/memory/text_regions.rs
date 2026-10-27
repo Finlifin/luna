@@ -31,6 +31,10 @@ struct LoopRegions {
     exits: Option<Locals>,
     backedges: Option<Locals>,
 }
+struct ExitRegions {
+    bindings: Vec<LocalId>,
+    locals: Option<Locals>,
+}
 
 fn join_locals(
     target: &mut Option<Locals>,
@@ -166,6 +170,7 @@ pub fn infer_text_regions(
         active: vec![],
         reads: vec![],
         loops: vec![],
+        exits: vec![],
         cache: HashMap::new(),
         metadata: Round::default(),
     }
@@ -177,11 +182,28 @@ struct Query<'a, 'f> {
     active: Vec<iir::InstanceKey>,
     reads: Vec<BTreeSet<TextRegionOrigin>>,
     loops: Vec<LoopRegions>,
+    exits: Vec<Option<ExitRegions>>,
     cache: HashMap<iir::InstanceKey, TextRegionSummary>,
     metadata: Round<'static>,
 }
 impl Query<'_, '_> {
-    fn pattern_value(
+    fn record_exit(&mut self, locals: &Locals) -> Result<(), String> {
+        if let Some(Some(exit)) = self.exits.last_mut() {
+            join_locals(&mut exit.locals, locals, &exit.bindings, self.fuel)?;
+        }
+        Ok(())
+    }
+
+    fn contract(&mut self, predicate: &Expr, locals: &Locals) -> Result<(), String> {
+        if !nir::program::checkable_predicate(predicate) {
+            return Err("invalid text region program predicate".into());
+        }
+        let mut observation = self.locals_copy(locals)?;
+        self.observe_value(predicate, &mut observation, 0)?;
+        Ok(())
+    }
+
+    fn observe_value(
         &mut self,
         value: &Expr,
         locals: &mut Locals,
@@ -191,7 +213,7 @@ impl Query<'_, '_> {
         // Private temporaries inside an observation block are still permitted.
         nir::visit::expression(value, self.fuel, |expr, _| {
             if matches!(&expr.kind, K::Assign { place, .. } if locals.contains_key(&place.root)) {
-                return Err("text pattern observation writes an existing binding".into());
+                return Err("text observation writes an existing binding".into());
             }
             Ok(())
         })?;
@@ -201,9 +223,9 @@ impl Query<'_, '_> {
         self.loops = outer_loops;
         let result = result?;
         if returned.is_some() {
-            return Err("text pattern observation has an unsupported return".into());
+            return Err("text observation has an unsupported return".into());
         }
-        result.ok_or_else(|| "text pattern observation does not complete normally".into())
+        result.ok_or_else(|| "text observation does not complete normally".into())
     }
 
     // Return success knowledge only after accounting for the checks reached in
@@ -355,7 +377,7 @@ impl Query<'_, '_> {
                 if matched == Some(false) {
                     return Ok(matched);
                 }
-                self.pattern_value(condition, locals, depth + 1)?;
+                self.observe_value(condition, locals, depth + 1)?;
                 Ok(match constant_bool(condition, 0) {
                     Some(false) => Some(false),
                     Some(true) => matched,
@@ -371,7 +393,7 @@ impl Query<'_, '_> {
                 if first == Some(false) {
                     return Ok(first);
                 }
-                let computed_regions = self.pattern_value(computed, locals, depth + 1)?;
+                let computed_regions = self.observe_value(computed, locals, depth + 1)?;
                 let next = self.bind_pattern(
                     next,
                     &computed.ty,
@@ -455,6 +477,7 @@ impl Query<'_, '_> {
             return Err("text region inference requires a concrete runtime body".into());
         }
         nir::visit::expressions(body, self.fuel, |expr, fuel| bound_type(&expr.ty, fuel))?;
+        charge(self.fuel, body.entry_snapshots.len())?;
         bound_type(&body.signature, self.fuel)?;
         let binders =
             self.metadata
@@ -484,18 +507,55 @@ impl Query<'_, '_> {
             }
             locals.insert(*id, regions);
         }
-        if !body.preconditions.is_empty() || !body.postconditions.is_empty() {
-            return Err("text region program-contract transport is not implemented".into());
+        for snapshot in &body.entry_snapshots {
+            let value = locals
+                .get(&snapshot.parameter)
+                .ok_or("text entry snapshot parameter is unavailable")?;
+            charge_regions(value, self.fuel)?;
+            if locals.insert(snapshot.binding, value.clone()).is_some() {
+                return Err("text entry snapshot binding is not fresh".into());
+            }
         }
         self.active.push(key.clone());
         self.reads.push(BTreeSet::new());
+        self.exits
+            .push((!body.postconditions.is_empty()).then(|| ExitRegions {
+                bindings: locals.keys().copied().collect(),
+                locals: None,
+            }));
         let mut returned = None;
         let caller_loops = std::mem::take(&mut self.loops);
-        let checked = self.expr(&body.body, &mut locals, &mut returned, 0);
+        let checked = (|| {
+            for predicate in &body.preconditions {
+                self.contract(predicate, &locals)?;
+            }
+            let completed = self.expr(&body.body, &mut locals, &mut returned, 0)?;
+            if completed.is_some() {
+                self.record_exit(&locals)?;
+            }
+            merge(&mut returned, completed, self.fuel)?;
+            if let Some(origins) = &returned {
+                if let Some(exit) = self.exits.last_mut().unwrap().as_mut() {
+                    let mut environment = exit
+                        .locals
+                        .take()
+                        .ok_or("text postcondition exit environment is unavailable")?;
+                    if let Some(binding) = body.result_binding {
+                        charge_regions(origins, self.fuel)?;
+                        environment.insert(binding, origins.clone());
+                    }
+                    for predicate in &body.postconditions {
+                        self.contract(predicate, &environment)?;
+                    }
+                }
+            }
+            Ok::<(), String>(())
+        })();
         self.loops = caller_loops;
+        self.exits.pop();
         self.active.pop();
         let reads = self.reads.pop().unwrap();
-        merge(&mut returned, checked?, self.fuel)?;
+        checked?;
         if let Some(returned) = &returned {
             for leaf in borrowed_input_layout(Some(self.package), result, self.fuel)? {
                 if let BorrowedInputLeaf::Text(leaf) = leaf {
@@ -890,6 +950,9 @@ impl Query<'_, '_> {
                     Some(value) => self.expr(value, locals, returned, next)?,
                     None => empty,
                 };
+                if value.is_some() {
+                    self.record_exit(locals)?;
+                }
                 merge(returned, value, self.fuel)?;
                 Ok(None)
             }

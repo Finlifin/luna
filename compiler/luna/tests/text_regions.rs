@@ -955,3 +955,159 @@ fn admitted_scalar_intrinsics_keep_input_reads_and_reject_missing_bindings() {
     );
     assert!(infer(&package, "observed", 100_000).is_ok());
 }
+
+#[test]
+fn contracts_observe_entry_snapshots_and_all_normal_return_origins() {
+    use nir::program::{EntrySnapshot, Expr, ExprKind as K, Literal, LocalId};
+    use nir::{Primitive as P, Term};
+    // The source flow checker does not yet certify text predicates. Attach
+    // well-typed NIR contracts to test dependency analysis independently.
+    let mut package = support::compile(
+        "typealias str=.str'builtin;
+        fn required(value:str)->str {value}
+        fn called(value:str)->str {required(value)}
+        fn ensured(flag:bool,a:str,b:str)->str {if flag {return a;} b}
+        fn old(flag:bool,value:str)->str {value}
+        fn changed(flag:bool,a:str,b:str)->str {if flag {return a;} b}
+        fn saved(flag:bool,a:str,b:str)->str {if flag {return a;} b}
+        fn diverged(value:str)->str {while true {}}
+        fn scalar(flag:bool)->out:bool where requires flag, ensures out {flag}
+        fn snapshot(flag:bool)->out:bool where ensures out == flag'old {flag}",
+    );
+    for function in &mut package.functions {
+        let source = function.body.source;
+        let local = |id, ty| Expr {
+            source,
+            ty: Term::Primitive(ty),
+            kind: K::Local(id),
+        };
+        let result = LocalId {
+            owner: function.parameters[0].owner,
+            index: u32::MAX - 1,
+        };
+        let saved = LocalId {
+            owner: result.owner,
+            index: u32::MAX - 2,
+        };
+        let equals_x = |id| Expr {
+            source,
+            ty: Term::Primitive(P::Bool),
+            kind: K::ScalarEqual(
+                Box::new(local(id, P::Str)),
+                Box::new(Expr {
+                    source,
+                    ty: Term::Primitive(P::Str),
+                    kind: K::Literal(Literal::String("x".into())),
+                }),
+            ),
+        };
+        match function.name.as_str() {
+            "required" => function
+                .preconditions
+                .push(equals_x(function.parameters[0])),
+            "ensured" => {
+                function.result_binding = Some(result);
+                function.postconditions.push(equals_x(result));
+            }
+            "old" => {
+                function.result_binding = Some(result);
+                function.entry_snapshots.push(EntrySnapshot {
+                    parameter: function.parameters[0],
+                    binding: saved,
+                });
+                function.postconditions.push(Expr {
+                    source,
+                    ty: Term::Primitive(P::Bool),
+                    kind: K::Or(Box::new(local(saved, P::Bool)), Box::new(equals_x(result))),
+                });
+            }
+            "changed" | "saved" => {
+                let a = function.parameters[1];
+                let b = function.parameters[2];
+                let K::Block { statements, .. } = &mut function.body.kind else {
+                    panic!("expected function block");
+                };
+                statements.push(Expr {
+                    source,
+                    ty: Term::Primitive(P::Unit),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root: a,
+                            fields: vec![],
+                        },
+                        value: Box::new(local(b, P::Str)),
+                    },
+                });
+                if function.name == "saved" {
+                    function.entry_snapshots.push(EntrySnapshot {
+                        parameter: a,
+                        binding: saved,
+                    });
+                    function.postconditions.push(equals_x(saved));
+                } else {
+                    function.postconditions.push(equals_x(a));
+                }
+            }
+            "diverged" => {
+                function.result_binding = Some(result);
+                function.postconditions.push(Expr {
+                    source,
+                    ty: Term::Primitive(P::Bool),
+                    kind: K::ScalarEqual(
+                        Box::new(local(result, P::Str)),
+                        Box::new(local(function.parameters[0], P::Str)),
+                    ),
+                });
+            }
+            _ => (),
+        }
+    }
+    for name in ["scalar", "snapshot"] {
+        let summary = infer(&package, name, 100_000).unwrap();
+        assert!(summary.reads.is_empty());
+        assert!(summary.returned.unwrap().is_empty());
+    }
+    assert!(
+        !package
+            .functions
+            .iter()
+            .find(|f| f.name == "snapshot")
+            .unwrap()
+            .entry_snapshots
+            .is_empty()
+    );
+    for name in ["required", "called"] {
+        let summary = infer(&package, name, 100_000).unwrap();
+        assert_eq!(
+            summary.reads,
+            BTreeSet::from([Origin::Static, parameter(0, &[])])
+        );
+        assert_eq!(
+            summary.returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])])
+        );
+    }
+    assert_eq!(
+        infer(&package, "ensured", 100_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(1, &[]), parameter(2, &[])])
+    );
+    assert_eq!(
+        infer(&package, "changed", 100_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(1, &[]), parameter(2, &[])])
+    );
+    assert_eq!(
+        infer(&package, "saved", 100_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
+    );
+    let old = package.functions.iter().find(|f| f.name == "old").unwrap();
+    assert!(!old.entry_snapshots.is_empty());
+    assert_eq!(
+        infer(&package, "old", 100_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
+    );
+    let diverged = infer(&package, "diverged", 100_000).unwrap();
+    assert!(diverged.returned.is_none());
+    assert!(diverged.reads.is_empty());
+    assert!(infer(&package, "ensured", 1).is_err());
+    assert!(infer(&package, "ensured", 100_000).is_ok());
+}
