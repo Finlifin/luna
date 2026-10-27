@@ -126,7 +126,7 @@ composition, region liveness and invalidation checks are still required.
 
 Completed summaries are reused only inside one immutable query. Missing code,
 indirect calls, recursion, pointer transfers,
-computed/alternative patterns, error-row repacking and explicit program contracts remain
+effectful pattern observations, error-row repacking and explicit program contracts remain
 rejected in this analysis. They are never converted into static or empty-origin
 evidence. The existing runtime resource checker still rejects unsupported text
 views; this new analysis has not replaced that gate or exported the iterator.
@@ -351,3 +351,36 @@ tests passed (`/tmp/luna-tools-4t4cbqky/result.json`, exit 0), including earlier
 and later field mismatches, matching prefixes, enum payloads and skipped guards.
 Formatting passed (`/tmp/luna-tools-q2pkpgg5/result.json`, exit 0), as did the
 diff check. Existing runtime permission restrictions remain unchanged.
+
+
+## Alternative and observational patterns
+
+Or-pattern candidates start from independent binding environments. Failed
+candidates retain their reads but export no bindings. Potentially successful
+candidates join common exported identities; a guaranteed success stops later
+alternatives. A guard outside the or-pattern runs after this choice and cannot
+restart its alternatives on failure.
+
+Nested guards, observation aliases and sequential `and ... is ...` computations
+now transport text origins. A computed pattern receives the computed expression's
+own origins and type, rather than inheriting its original subject's text fields.
+Pattern observations may use private block temporaries, but assignments to
+existing bindings are rejected. Nested observations use an isolated loop scope
+and reject nonlocal returns or paths without normal completion; they do not
+silently turn those transfers into candidate failure. These are conservative
+analysis restrictions, not new language rules. Resource observation permission
+and implicit cleanup remain independent obligations.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All eighteen tests passed (`/tmp/luna-tools-cy6uw1wd/result.json`, exit 0).
+New cases cover swapped alternative bindings, first-success short circuit,
+outer-guard failure without alternative retry, nested field guards and computed
+boolean patterns reading text. Formatting passed
+(`/tmp/luna-tools-hirfcpps/result.json`, exit 0), as did the diff check.

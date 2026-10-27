@@ -572,3 +572,60 @@ fn failed_structural_patterns_keep_only_reads_reached_before_mismatch() {
         BTreeSet::from([parameter(0, &[])])
     );
 }
+
+#[test]
+fn alternative_patterns_isolate_bindings_and_stop_after_success() {
+    let package = support::compile_with_tuple(
+        "typealias str=.str'builtin;
+        fn swapped(flag:bool,a:str,b:str)->str {
+            (a,b) match {((first,second) if flag) or (second,first)=>first,}
+        }
+        fn first(a:str,b:str)->str {(a,b) match {(picked,_) or (picked,\"x\")=>picked,}}
+        fn outer_guard(a:str,b:str,fallback:str)->str {
+            (a,b) match {((picked,_) or (picked,\"x\")) if false=>picked,_=>fallback,}
+        }",
+    );
+    assert_eq!(
+        infer(&package, "swapped", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    let first = infer(&package, "first", 100_000).unwrap();
+    assert_eq!(
+        first.returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[])])
+    );
+    assert!(first.reads.is_empty());
+    let guarded = infer(&package, "outer_guard", 100_000).unwrap();
+    assert_eq!(
+        guarded.returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(2, &[])])
+    );
+    assert!(guarded.reads.is_empty());
+}
+
+#[test]
+fn nested_pattern_observations_preserve_text_reads_and_computed_bindings() {
+    let package = support::compile_with_tuple(
+        "typealias str=.str'builtin;
+        fn guarded(a:str,b:str,fallback:str)->str {
+            (a,b) match {(first,(second if first == \"x\"))=>second,_=>fallback,}
+        }
+        fn computed(value:str,a:str,b:str)->str {
+            value match {item and (item == \"x\") is true=>a,_=>b,}
+        }",
+    );
+    for name in ["guarded", "computed"] {
+        let summary = infer(&package, name, 100_000).unwrap();
+        assert_eq!(
+            summary.reads,
+            BTreeSet::from([Origin::Static, parameter(0, &[])])
+        );
+        assert_eq!(
+            summary.returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+        );
+    }
+}

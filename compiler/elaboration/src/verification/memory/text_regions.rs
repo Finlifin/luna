@@ -181,6 +181,31 @@ struct Query<'a, 'f> {
     metadata: Round<'static>,
 }
 impl Query<'_, '_> {
+    fn pattern_value(
+        &mut self,
+        value: &Expr,
+        locals: &mut Locals,
+        depth: usize,
+    ) -> Result<Regions, String> {
+        // Candidate rollback cannot restore writes into an existing binding.
+        // Private temporaries inside an observation block are still permitted.
+        nir::visit::expression(value, self.fuel, |expr, _| {
+            if matches!(&expr.kind, K::Assign { place, .. } if locals.contains_key(&place.root)) {
+                return Err("text pattern observation writes an existing binding".into());
+            }
+            Ok(())
+        })?;
+        let outer_loops = std::mem::take(&mut self.loops);
+        let mut returned = None;
+        let result = self.expr(value, locals, &mut returned, depth);
+        self.loops = outer_loops;
+        let result = result?;
+        if returned.is_some() {
+            return Err("text pattern observation has an unsupported return".into());
+        }
+        result.ok_or_else(|| "text pattern observation does not complete normally".into())
+    }
+
     // Return success knowledge only after accounting for the checks reached in
     // source order. A later known mismatch cannot erase earlier character reads.
     fn bind_pattern(
@@ -311,9 +336,90 @@ impl Query<'_, '_> {
                 locals.extend(remapped);
                 Ok(matched)
             }
-            _ => Err(
-                "text region executable or alternative pattern transport is not implemented".into(),
-            ),
+            Pattern::Observe { binding, inner } => {
+                charge_regions(regions, self.fuel)?;
+                let saved = locals.insert(*binding, regions.clone());
+                let matched = self.bind_pattern(inner, ty, regions, value, locals, depth + 1);
+                locals.remove(binding);
+                if let Some(saved) = saved {
+                    locals.insert(*binding, saved);
+                }
+                matched
+            }
+            Pattern::Guard { pattern, condition } => {
+                let matched = self.bind_pattern(pattern, ty, regions, value, locals, depth + 1)?;
+                if matched == Some(false) {
+                    return Ok(matched);
+                }
+                self.pattern_value(condition, locals, depth + 1)?;
+                Ok(match constant_bool(condition, 0) {
+                    Some(false) => Some(false),
+                    Some(true) => matched,
+                    None => None,
+                })
+            }
+            Pattern::Then {
+                first,
+                value: computed,
+                next,
+            } => {
+                let first = self.bind_pattern(first, ty, regions, value, locals, depth + 1)?;
+                if first == Some(false) {
+                    return Ok(first);
+                }
+                let computed_regions = self.pattern_value(computed, locals, depth + 1)?;
+                let next = self.bind_pattern(
+                    next,
+                    &computed.ty,
+                    &computed_regions,
+                    Some(computed),
+                    locals,
+                    depth + 1,
+                )?;
+                Ok(match (first, next) {
+                    (_, Some(false)) => Some(false),
+                    (Some(true), Some(true)) => Some(true),
+                    _ => None,
+                })
+            }
+            Pattern::Or(alternatives) => {
+                let input = self.locals_copy(locals)?;
+                let mut successes: Option<Locals> = None;
+                let mut matched = Some(false);
+                for alternative in alternatives {
+                    let mut candidate = self.locals_copy(&input)?;
+                    let success = self.bind_pattern(
+                        alternative,
+                        ty,
+                        regions,
+                        value,
+                        &mut candidate,
+                        depth + 1,
+                    )?;
+                    if success == Some(false) {
+                        continue;
+                    }
+                    if let Some(previous) = successes.as_mut() {
+                        // Only common exported identities survive alternative
+                        // joins; failed candidate-local aliases never escape.
+                        previous.retain(|id, _| candidate.contains_key(id));
+                        let bindings: Vec<_> = previous.keys().copied().collect();
+                        join_locals(&mut successes, &candidate, &bindings, self.fuel)?;
+                    } else {
+                        successes = Some(candidate);
+                    }
+                    matched = None;
+                    if success == Some(true) {
+                        matched = Some(true);
+                        break;
+                    }
+                }
+                if let Some(successes) = successes {
+                    *locals = successes;
+                }
+                Ok(matched)
+            }
+            _ => Err("text region type-level pattern transport is not implemented".into()),
         }
     }
 
