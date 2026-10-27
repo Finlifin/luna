@@ -569,3 +569,47 @@ fn nested_newtype_freezing_rejects_depth_and_executable_payloads() {
         .is_ok()
     );
 }
+
+#[test]
+fn immutable_copy_work_preserves_nested_sibling_accounting_and_limits() {
+    let nested = Value::Tuple(vec![
+        Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
+        Value::Symbol("payload".into()),
+    ]);
+    assert_eq!(nested.immutable_copy_work(), Some(12));
+    assert!(
+        nested
+            .clone()
+            .into_normal_term(&mut Budget {
+                steps: 12,
+                ..Budget::default()
+            })
+            .is_ok()
+    );
+    assert_eq!(
+        nested.into_normal_term(&mut Budget {
+            steps: 11,
+            ..Budget::default()
+        }),
+        Err(ErrorKind::StepsExhausted)
+    );
+
+    let accepted = Value::Tuple(vec![Value::Bool(true); 99_999]);
+    assert_eq!(accepted.immutable_copy_work(), Some(100_000));
+    let rejected = Value::Tuple(vec![Value::Bool(true); 100_000]);
+    assert_eq!(rejected.immutable_copy_work(), None);
+    let siblings = Value::Tuple(vec![
+        Value::Tuple(vec![Value::Bool(true); 49_999]),
+        Value::Tuple(vec![Value::Bool(false); 49_998]),
+    ]);
+    assert_eq!(siblings.immutable_copy_work(), Some(100_000));
+    let oversized = Value::Tuple(vec![siblings, Value::Bool(true)]);
+    assert_eq!(oversized.immutable_copy_work(), None);
+
+    let mut deep = Value::Bool(true);
+    for _ in 0..127 {
+        deep = Value::Tuple(vec![deep]);
+    }
+    assert_eq!(deep.immutable_copy_work(), Some(128));
+    assert_eq!(Value::Tuple(vec![deep]).immutable_copy_work(), None);
+}

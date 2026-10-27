@@ -299,27 +299,37 @@ impl Value {
         parameters: &BTreeSet<DeclarationId>,
         value_parameters: &BTreeMap<DeclarationId, Term>,
     ) -> Option<usize> {
-        let mut pending = vec![(self, 0usize)];
-        let mut work = 0usize;
-        while let Some((value, depth)) = pending.pop() {
+        // Keep only the bounded traversal depth on the call stack. The old
+        // worklist allocated one entry per sibling on every immutable scan.
+        // Count pending siblings separately to preserve its admission bound
+        // and visit in the same reverse-child order without copying references.
+        fn visit(
+            value: &Value,
+            depth: usize,
+            work: &mut usize,
+            pending: &mut usize,
+            parameters: &BTreeSet<DeclarationId>,
+            value_parameters: &BTreeMap<DeclarationId, Term>,
+        ) -> Option<()> {
+            *pending = pending.checked_sub(1)?;
             if depth >= 128 {
                 return None;
             }
-            work = work.checked_add(1)?;
+            *work = work.checked_add(1)?;
             let extra = match value {
-                Self::Type(ty)
-                | Self::List { ty, .. }
-                | Self::Optional { ty, .. }
-                | Self::ErrorResult { ty, .. }
-                | Self::Newtype { ty, .. }
-                | Self::AbstractValue { ty, .. } => scoped_type_value_work_with_evidence(
+                Value::Type(ty)
+                | Value::List { ty, .. }
+                | Value::Optional { ty, .. }
+                | Value::ErrorResult { ty, .. }
+                | Value::Newtype { ty, .. }
+                | Value::AbstractValue { ty, .. } => scoped_type_value_work_with_evidence(
                     ty,
                     &BTreeMap::new(),
                     parameters,
                     value_parameters,
                     |_, _, _| None,
                 )?,
-                Self::TypeList(types) => {
+                Value::TypeList(types) => {
                     if types.len() > 100_000 {
                         return None;
                     }
@@ -334,14 +344,14 @@ impl Value {
                         (total <= 100_000).then_some(total)
                     })?
                 }
-                Self::Float(value) => value
+                Value::Float(value) => value
                     .digits()
                     .len()
                     .saturating_add(value.exponent().bit_len().div_ceil(32)),
-                Self::Integer(value) => value.bit_len().div_ceil(32),
-                Self::BitVec(value) => value.words().len(),
-                Self::String(value) | Self::Symbol(value) => value.len(),
-                Self::Record { arguments, .. } | Self::Variant { arguments, .. } => {
+                Value::Integer(value) => value.bit_len().div_ceil(32),
+                Value::BitVec(value) => value.words().len(),
+                Value::String(value) | Value::Symbol(value) => value.len(),
+                Value::Record { arguments, .. } | Value::Variant { arguments, .. } => {
                     if arguments.len() > 100_000 {
                         return None;
                     }
@@ -356,7 +366,7 @@ impl Value {
                         (total <= 100_000).then_some(total)
                     })?
                 }
-                Self::AnonymousRecord(fields) => {
+                Value::AnonymousRecord(fields) => {
                     if fields.len() > 100_000 {
                         return None;
                     }
@@ -365,7 +375,7 @@ impl Value {
                         (total <= 100_000).then_some(total)
                     })?
                 }
-                Self::Object(object) => {
+                Value::Object(object) => {
                     if object.entries().len() > 100_000 {
                         return None;
                     }
@@ -383,54 +393,72 @@ impl Value {
                         (total <= 100_000).then_some(total)
                     })?
                 }
-                Self::Pointer(_)
-                | Self::Storage(_)
-                | Self::Closure(_)
-                | Self::Function(_)
-                | Self::RuntimeFunction { .. }
-                | Self::RuntimeTraitMethod(_) => return None,
+                Value::Pointer(_)
+                | Value::Storage(_)
+                | Value::Closure(_)
+                | Value::Function(_)
+                | Value::RuntimeFunction { .. }
+                | Value::RuntimeTraitMethod(_) => return None,
                 _ => 0,
             };
-            work = work.checked_add(extra)?;
+            *work = work.checked_add(extra)?;
             let children = match value {
-                Self::List { values: fields, .. }
-                | Self::Record { fields, .. }
-                | Self::Variant { fields, .. }
-                | Self::Tuple(fields) => fields.len(),
-                Self::AnonymousRecord(fields) => fields.len(),
-                Self::Object(object) => object.entries().len(),
-                Self::Optional { value, .. } => usize::from(value.is_some()),
-                Self::ErrorResult { .. } | Self::Newtype { .. } => 1,
+                Value::List { values: fields, .. }
+                | Value::Record { fields, .. }
+                | Value::Variant { fields, .. }
+                | Value::Tuple(fields) => fields.len(),
+                Value::AnonymousRecord(fields) => fields.len(),
+                Value::Object(object) => object.entries().len(),
+                Value::Optional { value, .. } => usize::from(value.is_some()),
+                Value::ErrorResult { .. } | Value::Newtype { .. } => 1,
                 _ => 0,
             };
-            if work.saturating_add(pending.len()).saturating_add(children) > 100_000 {
+            if work.saturating_add(*pending).saturating_add(children) > 100_000 {
                 return None;
             }
+
+            *pending = pending.checked_add(children)?;
+            let mut child = |value: &Value| {
+                visit(
+                    value,
+                    depth + 1,
+                    work,
+                    pending,
+                    parameters,
+                    value_parameters,
+                )
+            };
             match value {
-                Self::Optional { value, .. } => {
+                Value::Optional { value, .. } => {
                     if let Some(value) = value {
-                        pending.push((value, depth + 1));
+                        child(value)?;
                     }
                 }
-                Self::ErrorResult { value, .. } | Self::Newtype { value, .. } => {
-                    pending.push((value, depth + 1))
+                Value::ErrorResult { value, .. } | Value::Newtype { value, .. } => child(value)?,
+                Value::List { values: fields, .. }
+                | Value::Record { fields, .. }
+                | Value::Variant { fields, .. }
+                | Value::Tuple(fields) => {
+                    for value in fields.iter().rev() {
+                        child(value)?;
+                    }
                 }
-                Self::List { values: fields, .. }
-                | Self::Record { fields, .. }
-                | Self::Variant { fields, .. }
-                | Self::Tuple(fields) => pending.extend(fields.iter().map(|v| (v, depth + 1))),
-                Self::AnonymousRecord(fields) => {
-                    pending.extend(fields.iter().map(|(_, v)| (v, depth + 1)))
+                Value::AnonymousRecord(fields) => {
+                    for (_, value) in fields.iter().rev() {
+                        child(value)?;
+                    }
                 }
-                Self::Object(object) => pending.extend(
-                    object
-                        .entries()
-                        .iter()
-                        .map(|entry| (&entry.value().value, depth + 1)),
-                ),
+                Value::Object(object) => {
+                    for entry in object.entries().iter().rev() {
+                        child(&entry.value().value)?;
+                    }
+                }
                 _ => {}
             }
+            Some(())
         }
+        let mut work = 0;
+        visit(self, 0, &mut work, &mut 1, parameters, value_parameters)?;
         Some(work)
     }
 

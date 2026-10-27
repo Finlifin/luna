@@ -339,3 +339,57 @@ git diff --check
 - List coverage includes empty/short-circuit behavior, callback phases,
   producer evaluation order, mutable closure state, immutable snapshots,
   optional and normal-form domains, failure recovery and budget exhaustion.
+
+## Bounded-depth immutable scan storage
+
+Immutable representation scanning no longer allocates a worklist entry for every
+sibling. It traverses the bounded value depth directly and separately counts
+pending siblings. Reverse-child visitation, exact structural work, the 128-level
+limit and the 100000-work admission bound remain unchanged. All domain checks,
+nominal admission and append rollback checks still run; this is not cached
+validation across mutable storage writes and does not make append linear-time.
+
+Validation in `/home/fin/luna`, exit 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --test normal_values --test type_list_inputs --test optional_values -p luna --test comptime_list_operations --test builder_invocations
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+129 tests passed (18 normal values, 9 optional values, 23 type-list inputs,
+53 builder invocations, 26 list operations), report
+`/tmp/luna-tools-chac19xy/result.json`. This includes exact work and depth/width
+boundaries, nested sibling accounting, freezing with just enough/insufficient
+budget, append rollback and subsequent recovery. Formatting report:
+`/tmp/luna-tools-dknmmm6k/result.json`.
+
+Both revisions used the same invocation-only benchmark command, with five
+warmups and twenty measured invocations in each of three processes:
+
+```sh
+python3 -B development/comptime_bench.py --bench list_append --iterations 20 --repeat 3
+```
+
+Medians for 256 appends (allocated bytes are cumulative allocator requests,
+not peak live memory):
+
+| Element/path | Before ns | After ns | Before bytes | After bytes | Steps, unchanged |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| bool, buffer reuse | 1167625 | 1133281 | 3662128 | 2066640 | 190112 |
+| bool, general concat | 2582305 | 2578687 | 16937840 | 14289616 | 432928 |
+| Type, buffer reuse | 2130448 | 2208069 | 1359112 | 1338632 | 281622 |
+| Type, general concat | 4630795 | 4641281 | 7584568 | 7555896 | 584854 |
+
+All eight benchmark shapes (16/256 elements, bool/Type, both paths) retained
+exactly the same VM step counts. The substantial result is about 44% less
+allocation for the 256-bool reuse path. Timing changes are small, including a
+3.6% slowdown for Type reuse in this run; these measurements do not establish
+a general throughput improvement.
+
+Before build/run reports: `/tmp/luna-tools-65lit6qd/result.json`,
+`/tmp/luna-tools-px9ehp33/result.json`, `/tmp/luna-tools-1266f24g/result.json`,
+`/tmp/luna-tools-zcmgv6uj/result.json`.
+After build/run reports: `/tmp/luna-tools-ofe5im4z/result.json`,
+`/tmp/luna-tools-inx3l6rn/result.json`, `/tmp/luna-tools-7onc1ulv/result.json`,
+`/tmp/luna-tools-4m31ffbj/result.json`. All exited 0.
