@@ -473,3 +473,23 @@ fn runtime_strategy_input_use_still_requires_splice() {
     let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
     assert!(error.contains("bound Splice protocol"), "{error}");
 }
+
+#[test]
+fn many_strategy_inputs_share_one_large_completed_input_group() {
+    let mut parameters = vec!["payload:.str'builtin".to_owned()];
+    let mut arguments = vec![format!("\"{}\"", "x".repeat(16384))];
+    for index in 0..64 {
+        parameters.push(format!("flag_{index}:bool"));
+        arguments.push(if index == 63 { "false" } else { "true" }.into());
+    }
+    let source = format!(
+        "trait Flag {{fn flag()->bool;}} derive fn configured({}) for Flag {{fn flag()->bool {{flag_0 and not flag_63}}}} struct Subject {{}} derive Flag.use(configured({})) for Subject; fn run()->bool {{Subject.as(Flag).flag()}}",
+        parameters.join(","),
+        arguments.join(",")
+    );
+    let package = compile_with_strategy_bool_splice(&source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

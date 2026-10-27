@@ -3824,6 +3824,22 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         span: Span,
     ) -> Result<n::Expr, Error> {
+        // Only completed ordinary constants are cached by owner. Associated
+        // defaults and generic residuals depend on an invocation environment.
+        if let H::ResolvedDef { def_id, .. } = object.kind
+            && let Some(owner) = self.package.definition_owner(def_id)
+            && matches!(
+                self.package.item(owner).map(|item| &item.kind),
+                Some(ItemKind::Const(..))
+            )
+            && let Some(cached) = self.constants.get(&owner)
+            && let Some(value) = cached_object_entry(cached, index, &mut self.required_steps, span)?
+        {
+            if let Some(expected) = expected {
+                self.require_expression(&value.ty, expected, span)?;
+            }
+            return Ok(value);
+        }
         let (value, _) = self.required_typed_expression(object, Some(&p(P::Object)))?;
         let Value::Object(object) = value else {
             return Err(error(
@@ -3848,5 +3864,102 @@ impl Checker<'_, '_> {
             self.require_expression(&value.ty, expected, span)?;
         }
         self.materialize_local_constant(value.value, value.ty, span)
+    }
+}
+
+/// A flat cached Object is already a checked constant expression. Snapshots with
+/// reconstruction bindings wrap the Object in a call or block; extracting a
+/// child from those wrappers would lose its environment and is not permitted.
+fn cached_object_entry(
+    object: &n::Expr,
+    index: usize,
+    steps: &mut u64,
+    span: Span,
+) -> Result<Option<n::Expr>, Error> {
+    let K::Object { fields, .. } = &object.kind else {
+        return Ok(None);
+    };
+    if object.ty != p(P::Object) {
+        return Ok(None);
+    }
+    let field = fields
+        .get(index)
+        .ok_or_else(|| error(span, "generated input index is outside its input group"))?;
+    charge_copy(field, steps, span)?;
+    Ok(Some(field.clone()))
+}
+
+#[cfg(test)]
+mod object_entry_tests {
+    use super::*;
+    use rustc_span::DUMMY_SP;
+
+    fn object() -> n::Expr {
+        n::Expr {
+            source: source(DUMMY_SP),
+            ty: p(P::Object),
+            kind: K::Object {
+                names: vec![Some("large".into()), Some("flag".into())],
+                fields: vec![
+                    n::Expr {
+                        source: source(DUMMY_SP),
+                        ty: p(P::Str),
+                        kind: K::Literal(n::Literal::String("x".repeat(65536))),
+                    },
+                    n::Expr {
+                        source: source(DUMMY_SP),
+                        ty: p(P::Bool),
+                        kind: K::Literal(n::Literal::Bool(true)),
+                    },
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn unrelated_large_entries_do_not_consume_the_selected_entry_budget() {
+        let input = object();
+        let mut steps = 32;
+        let field = cached_object_entry(&input, 1, &mut steps, DUMMY_SP)
+            .unwrap()
+            .unwrap();
+        assert_eq!(field.ty, p(P::Bool));
+        assert!(matches!(field.kind, K::Literal(n::Literal::Bool(true))));
+        assert!(steps < 32);
+        assert!(cached_object_entry(&input, 0, &mut 32, DUMMY_SP).is_err());
+        assert_eq!(input, object());
+    }
+
+    #[test]
+    fn invalid_indices_and_budget_failures_leave_the_snapshot_reusable() {
+        let input = object();
+        let error = cached_object_entry(&input, 2, &mut 32, DUMMY_SP).unwrap_err();
+        assert!(error.message.contains("outside its input group"));
+        assert!(cached_object_entry(&input, 1, &mut 0, DUMMY_SP).is_err());
+        assert!(
+            cached_object_entry(&input, 1, &mut 32, DUMMY_SP)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(input, object());
+    }
+
+    #[test]
+    fn reconstruction_wrappers_are_not_stripped_from_cached_objects() {
+        let wrapped = n::Expr {
+            source: source(DUMMY_SP),
+            ty: p(P::Object),
+            kind: K::Block {
+                statements: vec![],
+                result: Some(Box::new(object())),
+            },
+        };
+        let mut steps = 32;
+        assert!(
+            cached_object_entry(&wrapped, 1, &mut steps, DUMMY_SP)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(steps, 32);
     }
 }

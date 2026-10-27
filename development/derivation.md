@@ -592,3 +592,34 @@ git diff --check
 - Member clone: 9 passed, exit 0, `/tmp/luna-tools-21rzc0pz/result.json`.
   Explicit input substitutions retain one receiver parameter, independent
   destination identities and unchanged source captures after budget failure.
+
+## Cached input entry extraction
+
+A completed ordinary constant whose cached expression is a flat Object can now
+supply an entry by copying that entry alone. Lookup preserves the entry's original
+type, checks the requested type and charges the selected expression's copy cost.
+It does not repeatedly interpret or copy unrelated entries of the input group.
+The first evaluation still checks and materializes the whole input group.
+
+The optimization only reads an existing ordinary-constant cache entry. Associated
+values and generic residuals are not admitted through this path. A reconstruction
+call or block surrounding an Object retains its environment and uses the original
+required-invocation/materialization path. This is an extraction optimization;
+other generation and checking costs are not claimed to be linear in input count.
+
+Checks in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib object_entry_tests
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Derive: 35 passed, exit 0, `/tmp/luna-tools-wdd75ew9/result.json`, including
+  65 inputs sharing an Object with a 16 KiB string.
+- Formatting: exit 0, `/tmp/luna-tools-us8i7tul/result.json`; diff check passed.
+- Entry extraction: 3 passed, exit 0, `/tmp/luna-tools-ltvmjx_j/result.json`.
+  With a 32-step copy allowance, a Bool entry succeeds beside a 64 KiB string;
+  selecting the string correctly exhausts that allowance. Invalid indices and
+  exhausted budgets leave the source reusable, and wrapped snapshots fall back.
