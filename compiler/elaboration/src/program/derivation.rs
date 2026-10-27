@@ -1,4 +1,4 @@
-//! Instantiate explicit, declaration-only strategies before ordinary impl checking.
+//! Instantiate explicit strategies with checked immutable generation values.
 use super::{Error, error, function_templates};
 use hir::common::DefId;
 use hir::definitions::DefinitionBatch;
@@ -19,11 +19,16 @@ fn charge(fuel: &mut usize, span: rustc_span::Span) -> Result<(), Error> {
         .ok_or_else(|| error(span, "derivation expansion budget exhausted"))?;
     Ok(())
 }
-fn members(
-    source: &Package<'_>,
+struct StrategyBody<'h> {
+    members: Vec<OwnerId>,
+    locals: Vec<&'h hir::Expr<'h>>,
+}
+
+fn members<'h>(
+    source: &Package<'h>,
     strategy: OwnerId,
     fuel: &mut usize,
-) -> Result<Vec<OwnerId>, Error> {
+) -> Result<StrategyBody<'h>, Error> {
     let item = source.item(strategy).unwrap();
     let ItemKind::Deriver(def) = &item.kind else {
         return Err(error(item.span, "derive selection must name a strategy"));
@@ -41,9 +46,32 @@ fn members(
         return Err(unsupported(item.span, "strategy body evaluation"));
     };
     let mut result = Vec::new();
+    let mut locals = Vec::new();
     for statement in block.stmts.iter().chain(block.expr.into_iter()) {
         charge(fuel, statement.span)?;
+        let statement = if let E::Semi(value) = statement.kind {
+            value
+        } else {
+            statement
+        };
         match statement.kind {
+            E::Let(binding) => {
+                if binding.mutable
+                    || binding.guard.is_some()
+                    || binding.otherwise.is_some()
+                    || binding.init.is_none()
+                    || !matches!(
+                        binding.pattern.kind,
+                        hir::PatternKind::Binding(hir::common::BindingMode::ByValue, _, None)
+                    )
+                {
+                    return Err(unsupported(
+                        statement.span,
+                        "mutable or destructuring strategy bindings",
+                    ));
+                }
+                locals.push(statement);
+            }
             E::Item(owner)
                 if matches!(
                     source.item(owner).map(|item| &item.kind),
@@ -58,7 +86,10 @@ fn members(
             }
         }
     }
-    Ok(result)
+    Ok(StrategyBody {
+        members: result,
+        locals,
+    })
 }
 
 pub(super) fn expand<'h>(
@@ -107,7 +138,9 @@ pub(super) fn expand<'h>(
                     "derivation strategy input count mismatch",
                 ));
             }
-            if !arguments.is_empty() && !request.clause_params.is_empty() {
+            if (!arguments.is_empty() || !strategies[&strategy].locals.is_empty())
+                && !request.clause_params.is_empty()
+            {
                 return Err(unsupported(
                     selection.span,
                     "strategy inputs in generic request environments",
@@ -145,7 +178,7 @@ pub(super) fn expand<'h>(
                 ));
             }
             omitted.insert(owner);
-            omitted.extend(strategies[&owner].iter().copied());
+            omitted.extend(strategies[&owner].members.iter().copied());
         }
     }
     // All nested source definitions must be accounted for before pruning.
@@ -210,7 +243,8 @@ pub(super) fn expand<'h>(
         }
         let mut captures = HashMap::new();
         let mut inputs = Vec::new();
-        let group = if arguments.is_empty() {
+        let local_bindings = &strategies[&strategy].locals;
+        let group = if arguments.is_empty() && local_bindings.is_empty() {
             None
         } else {
             let owner = batch.reserve().map_err(|e| error(span, e.to_string()))?;
@@ -231,8 +265,24 @@ pub(super) fn expand<'h>(
             );
             inputs.push((parameter, owner, identity));
         }
+        let mut locals = Vec::new();
+        for expression in local_bindings {
+            charge(fuel, expression.span)?;
+            let E::Let(binding) = expression.kind else {
+                unreachable!()
+            };
+            let owner = batch.reserve().map_err(|e| error(span, e.to_string()))?;
+            let identity = batch
+                .reserve_identity(pkg, fuel)
+                .map_err(|e| error(span, e.to_string()))?;
+            captures.insert(
+                binding.pattern.hir_id,
+                function_templates::InputCapture::Definition(identity),
+            );
+            locals.push((binding, owner, identity));
+        }
         let mut owners = Vec::new();
-        for member in &strategies[&strategy] {
+        for member in &strategies[&strategy].members {
             charge(fuel, span)?;
             let new_owner = batch.reserve().map_err(|e| error(span, e.to_string()))?;
             let identity = batch
@@ -280,6 +330,7 @@ pub(super) fn expand<'h>(
                 .iter()
                 .map(|(owner, _)| *owner)
                 .chain(inputs.iter().map(|(_, owner, _)| *owner))
+                .chain(locals.iter().map(|(_, owner, _)| *owner))
                 .chain(owners.iter().map(|(_, owner, _)| *owner))
                 .collect(),
             &mapping,
@@ -295,6 +346,8 @@ pub(super) fn expand<'h>(
                     owner,
                     arguments,
                     generator.parameters,
+                    local_bindings,
+                    &mapping,
                     span,
                     fuel,
                 )?,
@@ -306,6 +359,25 @@ pub(super) fn expand<'h>(
                         source, arena, owner, parameter, identity, index, &mapping, &captures, fuel,
                     )?,
                     input_identity,
+                ));
+            }
+        }
+        if let Some((_, group_identity)) = group {
+            for (index, (binding, owner, identity)) in locals.into_iter().enumerate() {
+                drafts.push((
+                    function_templates::value_draft(
+                        source,
+                        arena,
+                        owner,
+                        binding.ty,
+                        binding.span,
+                        group_identity,
+                        generator.parameters.len() + index,
+                        &mapping,
+                        &captures,
+                        fuel,
+                    )?,
+                    identity,
                 ));
             }
         }

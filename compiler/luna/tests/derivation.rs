@@ -53,7 +53,7 @@ fn generated_implementations_still_check_members_and_overlap() {
 fn non_strategy_selections_and_generation_statements_are_not_silently_accepted() {
     for source in [
         "trait Flag {} fn enabled() {} struct Record {} derive Flag.use(enabled) for Record;",
-        "trait Flag {} derive fn enabled for Flag {let value = true;} struct Record {} derive Flag.use(enabled) for Record;",
+        "trait Flag {} derive fn enabled for Flag {var value = true;} struct Record {} derive Flag.use(enabled) for Record;",
         "trait Flag {} derive fn enabled(flag:bool) for Flag {} struct Record {} derive Flag.use(enabled) for Record;",
     ] {
         let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
@@ -492,4 +492,46 @@ fn many_strategy_inputs_share_one_large_completed_input_group() {
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
+}
+
+#[test]
+fn strategy_local_values_compute_in_order_and_are_captured_by_methods() {
+    let source = "trait Flag {fn flag()->bool;} derive fn configured(input:bool) for Flag {let inverted=not input; const result:bool=not inverted; fn flag()->bool {result}} struct First {} struct Second {} derive Flag.use(configured(true)) for First; derive Flag.use(configured(false)) for Second; fn run()->bool {First.as(Flag).flag() and not Second.as(Flag).flag()}";
+    let package = compile_with_strategy_bool_splice(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn zero_input_strategy_locals_supply_associated_types_and_attributes() {
+    let source = "typealias Type=.Type'builtin; trait Flag {assoc Item:Type;^{comptime_phase:true} comptime fn flag()->Item;} derive fn configured for Flag {const T:Type=bool; let staged=true; let result=not false; assoc Item:Type=T; ^{comptime_phase:staged} comptime fn flag()->Item {result}} struct Subject {} comptime derive Flag.use(configured) for Subject; comptime fn run()->bool {Subject.as(Flag).flag()}";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn unused_strategy_locals_are_checked_without_accepting_mutation() {
+    for (body, expected) in [
+        ("let unused:bool=();", "type mismatch"),
+        ("let unused=runtime_value();", "runtime function"),
+        (
+            "var state=true;",
+            "mutable or destructuring strategy bindings",
+        ),
+        (
+            "let state=true;state=false;",
+            "strategy statement execution",
+        ),
+    ] {
+        let source = format!(
+            "trait Flag {{fn flag()->bool;}} fn runtime_value()->bool {{true}} derive fn configured for Flag {{{body} fn flag()->bool {{true}}}} struct Subject {{}} derive Flag.use(configured) for Subject;"
+        );
+        let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
 }

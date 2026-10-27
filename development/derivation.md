@@ -623,3 +623,33 @@ git diff --check
   With a 32-step copy allowance, a Bool entry succeeds beside a 64 KiB string;
   selecting the string correctly exhausts that allowance. Invalid indices and
   exhausted budgets leave the source reusable, and wrapped snapshots fall back.
+
+## Immutable local computations in strategy bodies
+
+Declaration strategies may now contain initialized `let` or `const` bindings
+with a single by-value name. The generation input block evaluates these bindings
+in source order after explicit inputs. Generated members, associated declarations
+and prefix attributes capture each binding through its own reserved constant;
+source-local identities never become runtime method parameters.
+
+A strategy with no explicit inputs still gets an evaluation group when it has
+local computations. Explicit local annotations are preserved, and inferred local
+values retain the Object entry's checked type. Unused bindings are checked too.
+Mutability, destructuring, guards, assignment and general control-flow statements
+remain outside this path and are rejected. Generic request environments still
+require deferred generation; this step retains ordinary constant materialization
+limits and does not complete general strategy execution.
+
+Checks in `/home/fin/luna` (all exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Derive suite: 38 passed, `/tmp/luna-tools-17cds165/result.json`.
+  New cases cover ordered local computations, independent requests, zero-input
+  strategies, inferred and explicit local types, associated types, attributes,
+  unused failures and rejection of mutation.
+- Formatting: `/tmp/luna-tools-8u6mo2c3/result.json`; diff check passed.

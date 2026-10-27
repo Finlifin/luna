@@ -1,4 +1,4 @@
-//! Closed strategy inputs share one ordered, checked comptime object value.
+//! Closed strategy inputs and locals share one ordered, checked comptime Object.
 use super::*;
 use hir::common::{DefId, FnParam, Ident};
 
@@ -35,9 +35,14 @@ pub(in crate::program) fn input_group<'h>(
     owner: OwnerId,
     arguments: &[Arg<'h>],
     parameters: &[FnParam<'h>],
+    locals: &[&'h Expr<'h>],
+    definitions: &HashMap<DefId, DefId>,
     span: rustc_span::Span,
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
+    *fuel = fuel
+        .checked_sub(definitions.len())
+        .ok_or_else(|| error(span, "strategy body identity budget exhausted"))?;
     let mut rebind = Rebind {
         source,
         arena,
@@ -45,7 +50,7 @@ pub(in crate::program) fn input_group<'h>(
         bindings: HashMap::new(),
         budget: *fuel,
         bodies: Vec::new(),
-        definitions: HashMap::new(),
+        definitions: definitions.clone(),
         captures: HashMap::new(),
         member_owner: Some(OwnerId::INVALID),
     };
@@ -116,6 +121,38 @@ pub(in crate::program) fn input_group<'h>(
                 span: value.span,
             }));
         }
+        for (offset, original) in locals.iter().enumerate() {
+            let E::Let(binding) = original.kind else {
+                unreachable!()
+            };
+            let hir::PatternKind::Binding(_, name, _) = binding.pattern.kind else {
+                unreachable!()
+            };
+            let statement = rebind.expr(original, 0)?;
+            statements.push(statement.clone());
+            let binding_id = rebind.bindings[&binding.pattern.hir_id];
+            let index = parameters.len() + offset;
+            let synthetic_index = u32::try_from(index)
+                .ok()
+                .and_then(|i| i.checked_mul(4))
+                .and_then(|i| i.checked_add(13))
+                .ok_or_else(|| error(original.span, "strategy local identity overflow"))?;
+            let reference = synthetic(&mut rebind, synthetic_index);
+            rebind.charge(original.span, 0)?;
+            let value = arena.alloc_expr(Expr {
+                hir_id: reference,
+                span: original.span,
+                kind: E::ResolvedLocal(name.name, binding_id),
+            });
+            entries.push(hir::expr::ObjectEntry::Property(hir::expr::FieldExpr {
+                ident: Ident::new(
+                    hir::Symbol::intern(&format!("input_{index}")),
+                    original.span,
+                ),
+                expr: value,
+                span: original.span,
+            }));
+        }
         let ty_id = synthetic(&mut rebind, 0);
         let value_id = synthetic(&mut rebind, 1);
         let ty = arena.alloc_expr(Expr {
@@ -172,9 +209,35 @@ pub(in crate::program) fn input_draft<'h>(
             "strategy input requires positional parameter matching",
         ));
     };
+    value_draft(
+        source,
+        arena,
+        owner,
+        Some(ty),
+        parameter.span,
+        group,
+        index,
+        definitions,
+        captures,
+        fuel,
+    )
+}
+
+pub(in crate::program) fn value_draft<'h>(
+    source: &Package<'h>,
+    arena: &'h HirArena,
+    owner: OwnerId,
+    annotation: Option<&'h Expr<'h>>,
+    span: rustc_span::Span,
+    group: DefId,
+    index: usize,
+    definitions: &HashMap<DefId, DefId>,
+    captures: &HashMap<HirId, InputCapture>,
+    fuel: &mut usize,
+) -> Result<ClonedMember<'h>, Error> {
     *fuel = fuel
         .checked_sub(definitions.len().saturating_add(captures.len()))
-        .ok_or_else(|| error(parameter.span, "strategy input identity budget exhausted"))?;
+        .ok_or_else(|| error(span, "strategy input identity budget exhausted"))?;
     let mut rebind = Rebind {
         source,
         arena,
@@ -187,13 +250,23 @@ pub(in crate::program) fn input_draft<'h>(
         member_owner: Some(OwnerId::INVALID),
     };
     let result = (|| {
-        let ty = rebind.expr(ty, 0)?;
-        rebind.charge(parameter.span, 0)?;
+        let ty = match annotation {
+            Some(ty) => rebind.expr(ty, 0)?,
+            None => {
+                let id = synthetic(&mut rebind, 2);
+                arena.alloc_expr(Expr {
+                    hir_id: id,
+                    span,
+                    kind: E::TyPlaceholder,
+                })
+            }
+        };
+        rebind.charge(span, 0)?;
         let group_id = synthetic(&mut rebind, 0);
         let value_id = synthetic(&mut rebind, 1);
         let group = arena.alloc_expr(Expr {
             hir_id: group_id,
-            span: parameter.span,
+            span: span,
             kind: E::ResolvedDef {
                 name: hir::Symbol::intern("$derive_inputs"),
                 def_id: group,
@@ -202,7 +275,7 @@ pub(in crate::program) fn input_draft<'h>(
         });
         let value = arena.alloc_expr(Expr {
             hir_id: value_id,
-            span: parameter.span,
+            span: span,
             kind: E::ConstantObjectEntry(group, index),
         });
         Ok((ty, value as &_, rebind.resolution()?))
@@ -212,7 +285,7 @@ pub(in crate::program) fn input_draft<'h>(
     Ok(finish(
         rebind,
         &format!("$derive_input_{index}"),
-        parameter.span,
+        span,
         ty,
         value,
         resolution,
