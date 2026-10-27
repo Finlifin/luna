@@ -641,7 +641,11 @@ impl Checker<'_, '_> {
     /// A known callable telescope can be named before its staged body exists.
     /// This exposes identity and signature, never an executable residual body.
     pub(super) fn known_callable_signature(&self, owner: OwnerId) -> Option<Term> {
-        if let Some(signature) = self.signatures.get(&owner) {
+        if let Some(signature) = self
+            .signatures
+            .get(&owner)
+            .or_else(|| self.interface_signatures.get(&owner))
+        {
             return Some(signature.clone());
         }
         let definition = self.open_functions.get(&owner)?;

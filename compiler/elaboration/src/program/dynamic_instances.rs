@@ -50,7 +50,9 @@ impl Checker<'_, '_> {
         if self.runtime_value_context() || self.in_code_body {
             return Ok(None);
         }
-        let Some(ItemKind::Fn(sig, _)) = self.package.item(owner).map(|item| &item.kind) else {
+        let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+            self.package.item(owner).map(|item| &item.kind)
+        else {
             return Ok(None);
         };
         if !sig.modifiers.is_comptime

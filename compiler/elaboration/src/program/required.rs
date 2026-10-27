@@ -1630,6 +1630,17 @@ impl Checker<'_, '_> {
                     }
                     break;
                 };
+                if !expanded_members.contains(&id)
+                    && self.checked_traits.iter().any(|interface| {
+                        interface
+                            .methods
+                            .iter()
+                            .any(|member| member.declaration == id)
+                    })
+                {
+                    members.insert(id);
+                    continue;
+                }
                 if !seen.insert(id) {
                     continue;
                 }

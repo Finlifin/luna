@@ -2836,7 +2836,6 @@ impl Builder<'_> {
                 | K::EnumStructure { subject: value, .. }
                 | K::ObjectQuery { subject: value, .. }
                 | K::ObjectEdit { subject: value, .. }
-                | K::ComptimeFunctionInstance { subject: value, .. }
                 | K::StructFieldNames(value)
                 | K::BitVecType(value)
                 | K::IntegerNegate(value)
@@ -3038,6 +3037,100 @@ impl Builder<'_> {
             } => self
                 .queue
                 .push_back(Task::Function(*declaration, arguments.clone())),
+            K::ComptimeFunctionInstance {
+                declaration,
+                subject: packet,
+            } => {
+                self.expr(packet, depth + 1)?;
+                let Some((interface, member)) = self.package.traits.iter().find_map(|interface| {
+                    interface
+                        .methods
+                        .iter()
+                        .find(|member| member.declaration == *declaration)
+                        .map(|member| (interface, member))
+                }) else {
+                    return Ok(());
+                };
+                if self.instances.is_some() {
+                    return Err("dynamic trait clauses require comptime invocation before IIR instantiation".into());
+                }
+                let values = match &packet.kind {
+                    K::Block {
+                        result: Some(result),
+                        ..
+                    } => result.as_ref(),
+                    _ => packet.as_ref(),
+                };
+                let K::Tuple(values) = &values.kind else {
+                    return Err("dynamic trait clause packet has no input tuple".into());
+                };
+                let prefix_count = 1 + interface.type_parameters.len();
+                if values.len() != prefix_count + member.type_parameters.len() {
+                    return Err("dynamic trait clause packet arity mismatch".into());
+                }
+                let prefix = values[..prefix_count]
+                    .iter()
+                    .map(|value| match &value.kind {
+                        K::TypeValue(value) | K::ComptimeValue(value) => Ok(value.clone()),
+                        _ => Err(
+                            "dynamic trait dispatch requires known Self and interface inputs"
+                                .to_owned(),
+                        ),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let interface_id = interface.declaration;
+                let member_id = member.declaration;
+                let member_phase = member.phase;
+                let member_name = member.name.clone();
+                let default = member.default;
+                let method_arguments = self
+                    .input_binders(&member.type_parameters)
+                    .iter()
+                    .map(|parameter| Term::Rigid {
+                        declaration: parameter.declaration,
+                        sort: parameter.sort,
+                    })
+                    .collect::<Vec<_>>();
+                let slot = self.interface(
+                    n::InterfaceInstance {
+                        declaration: interface_id,
+                        arguments: prefix[1..].to_vec(),
+                    },
+                    prefix[0].clone(),
+                )?;
+                let implementation = self
+                    .package
+                    .implementations
+                    .iter()
+                    .find(|item| item.declaration == self.output[slot].implementation)
+                    .ok_or("missing dynamic method implementation")?;
+                if !implementation.phases.contains(member_phase) {
+                    return Err("selected implementation lacks required trait phase".into());
+                }
+                let body = implementation
+                    .methods
+                    .iter()
+                    .find(|(name, _)| *name == member_name)
+                    .ok_or("missing dynamic method body")?
+                    .1;
+                let mut arguments = if default == Some(body) {
+                    prefix
+                } else {
+                    self.output[slot].arguments.clone()
+                };
+                arguments.extend(method_arguments.iter().cloned());
+                if !self.output[slot].methods.iter().any(|method| {
+                    method.member == member_id && method.method_arguments == method_arguments
+                }) {
+                    self.output[slot].methods.push(n::MethodInstance {
+                        member: member_id,
+                        body,
+                        arguments: arguments.clone(),
+                        method_arguments,
+                    });
+                    self.queue.push_back(Task::Function(body, arguments));
+                }
+            }
             K::TraitMethod {
                 method_arguments,
                 interface,
@@ -3213,7 +3306,6 @@ impl Builder<'_> {
             | K::EnumStructure { subject: value, .. }
             | K::ObjectQuery { subject: value, .. }
             | K::ObjectEdit { subject: value, .. }
-            | K::ComptimeFunctionInstance { subject: value, .. }
             | K::StructFieldNames(value)
             | K::BitVecType(value)
             | K::IntegerNegate(value)

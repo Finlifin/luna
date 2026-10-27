@@ -28,6 +28,25 @@ fn remap(values: &mut [Expr], bindings: &BTreeMap<LocalId, LocalId>) -> Result<(
 /// Prepare effective body contracts, then verify every explicit weakening.
 /// Each input package is a fresh elaboration snapshot; do not apply twice.
 pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error> {
+    let domains = package
+        .declaration_parameter_domains(&mut 100_000)
+        .map_err(|_| {
+            failure(
+                SourceRange { start: 0, end: 0 },
+                "invalid contract parameter domains",
+            )
+        })?;
+    let binder = |id: &nir::DeclarationId| nir::DeclarationParameter {
+        declaration: *id,
+        sort: if domains
+            .get(id)
+            .is_some_and(|domain| *domain != Term::Primitive(Primitive::Type))
+        {
+            nir::Sort::ComptimeValue
+        } else {
+            nir::Sort::Type
+        },
+    };
     for implementation in package.implementations.clone() {
         let Some(interface) = implementation.interface else {
             continue;
@@ -93,16 +112,33 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                 .binders_with_self(&mut 100_000)
                 .map_err(|_| failure(source, "invalid trait parameter domains"))?
                 .into_iter()
-                .chain(
-                    method
-                        .type_parameters
-                        .iter()
-                        .map(|id| nir::DeclarationParameter {
-                            declaration: *id,
-                            sort: nir::Sort::Type,
-                        }),
-                )
+                .chain(method.type_parameters.iter().map(&binder))
                 .collect();
+            let prefix = actual
+                .type_parameters
+                .get(..implementation.type_parameters.len())
+                .ok_or_else(|| failure(source, "implementation method input prefix is missing"))?;
+            let prefix_inputs = prefix
+                .iter()
+                .map(|id| {
+                    let binding = binder(id);
+                    Term::Rigid {
+                        declaration: binding.declaration,
+                        sort: binding.sort,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let implementation_binders = implementation
+                .parameter_binders()
+                .map_err(|_| failure(source, "invalid implementation parameter domains"))?;
+            let arguments = arguments
+                .iter()
+                .map(|argument| {
+                    argument
+                        .instantiate_parameters(&implementation_binders, &prefix_inputs)
+                        .map_err(|_| failure(source, "trait contract owner substitution failed"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let method_arguments: Vec<_> = arguments
                 .iter()
                 .cloned()
@@ -111,9 +147,12 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                         .type_parameters
                         .iter()
                         .skip(implementation.type_parameters.len())
-                        .map(|id| nir::Term::Rigid {
-                            declaration: *id,
-                            sort: nir::Sort::Type,
+                        .map(|id| {
+                            let binding = binder(id);
+                            nir::Term::Rigid {
+                                declaration: binding.declaration,
+                                sort: binding.sort,
+                            }
                         }),
                 )
                 .collect();

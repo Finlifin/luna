@@ -157,9 +157,11 @@ callable value. Packet shape, domains, ambiguous member identities and comptime
 execution are checked before dispatch; lookup and freezing consume VM budget.
 The existing S-expression dump retains the declaration and packet explicitly.
 
-This VM path is a prerequisite, not source syntax completion. Source clause
-preparation still routes trait methods through the static path, and IIR instance
-preparation needs further integration. For direct VM calls, interface default
+Source elaboration now emits these packets for computed value clauses whose
+callable signature is fixed, retaining known Self and interface inputs. Required
+invocation expands the member's dependencies, and dispatch preparation selects
+the implementation before transporting method inputs to the VM. IIR instance
+preparation still needs further integration. For direct VM calls, interface default
 expressions are now specialized with the frozen Self/interface/member inputs.
 They retain interface-side local bindings, including references to earlier
 ordinary arguments; implementation-body binding identities are not substituted
@@ -175,9 +177,10 @@ for those locals. Explicit arguments still precede default evaluation.
 - Extend VM-facing builders beyond their current nominal descriptors and
   finish remaining protocol consumers. Builtin Eq/Hash library declarations still expose runtime
   methods; the executable cache-key fixtures explicitly declare comptime members.
-- Connect source elaboration to the dynamic trait-member packet path.
-  VM direct calls retain origin, specialized defaults and program checks;
-  source dynamic trait-method clause preparation remains unfinished.
+- Extend dynamic trait clauses beyond fixed callable signatures and known
+  Self/interface inputs. Completed IIR instances currently reject unevaluated
+  packets explicitly; source comptime invocation retains origin, specialized
+  defaults and program checks.
 
 The existing dynamic inherent-method implementation is not evidence that trait
 phase selection or dynamic trait-method clauses are complete.
@@ -368,3 +371,34 @@ arguments from later defaults, override a default explicitly, and reject
 forward reads or incorrect interface binding maps. The initial 103-test run
 (`/tmp/luna-tools-fyv40nge/result.json`, exit 0) preceded the Bool-input case.
 These remain checked-NIR VM tests; source and IIR integration are not established.
+
+Source dynamic trait-clause integration now passes the eight cases in
+`compiler/luna/tests/dynamic_trait_clauses.rs`: repeated value inputs, explicit
+default overrides, rejection of an unproven interface postcondition, named
+optional clauses with a parameterized postcondition, required constant
+invocation, generic implementation selection, a trait default body, and
+exactly-once clause evaluation before explicit arguments. Required dependency
+collection expands member declarations, including defaults whose body shares
+the member identity. Dispatch preparation keeps symbolic method inputs until
+invocation. Contract inheritance now preserves value-input sorts and translates
+canonical implementation inputs into each body's own generic environment.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna
+  -p elaboration -p comptime_interpretor --test dynamic_trait_clauses
+  --test trait_phases --test runtime_function_identities`: 70 tests passed
+  (`/tmp/luna-tools-ugvja28i/result.json`, exit 0), before adding the default-body
+  case. Earlier failures exposed a bypass in the iterative materialization
+  walker and Type-only substitution in program contracts; both are repaired.
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna
+  -p elaboration -p comptime_interpretor --test dynamic_trait_clauses`: all eight
+  source cases passed (`/tmp/luna-tools-ck589mx5/result.json`, exit 0).
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna
+  -p elaboration -p comptime_interpretor --test execution`: existing execution
+  regressions passed (`/tmp/luna-tools-ehpyro1v/result.json`, exit 0).
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+  passed (`/tmp/luna-tools-dqsokl5z/result.json`, exit 0); `git diff --check` passed.
+
+This completes the fixed-signature source-to-VM path, not value-dependent
+callable signatures or completed IIR instances containing unevaluated packets.

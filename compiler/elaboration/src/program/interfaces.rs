@@ -2822,9 +2822,11 @@ impl Checker<'_, '_> {
                 "explicit instantiation requires a generic method",
             )
         })?;
-        // Trait methods must retain their interface origin and use the trait
-        // dispatch plan. An inherent method already names its selected body.
-        if matches!(method.kind, K::FunctionInstance { .. }) {
+        // Dynamic trait packets retain the member declaration, not its body.
+        if matches!(
+            method.kind,
+            K::FunctionInstance { .. } | K::TraitMethod { .. }
+        ) {
             if let Some(value) =
                 self.comptime_function_instance(expr, owner, args, &fixed, None, allow_optional)?
             {
