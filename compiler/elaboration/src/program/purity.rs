@@ -644,6 +644,7 @@ pub(super) fn validate_runtime_promises(
                     "runtime pure function `{}` lacks P4 evidence for its calls, storage or resource behavior",
                     function.name
                 ),
+                notes: Vec::new(),
                 needs_context: false,
                 needs_tactic: false,
                 needs_capability: false,

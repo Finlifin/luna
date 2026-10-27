@@ -487,3 +487,34 @@ git diff --check
 All final checks exited 0. Member cloning: 8 passed,
 `/tmp/luna-tools-u8drqxes/result.json`. Formatting:
 `/tmp/luna-tools-t05kw8un/result.json`; `git diff --check` passed.
+
+## Derivation diagnostic sources
+
+Elaboration errors now carry structured secondary source notes. Their Display
+keeps the primary range and message and prints notes separately. Both expansion
+failures and ordinary checking failures of generated candidates can point back
+to the selected strategy and its derive use sites. When the primary location
+falls inside a source member, that member's declaration is included as well.
+
+The current checker returns source ranges rather than a failing generated owner.
+If one strategy is used repeatedly, notes therefore list its related use sites;
+they do not claim that one arbitrarily chosen instance caused the error. Errors
+outside a request or strategy range receive no inferred derivation attribution.
+The scan is bounded and ordinary error flags are preserved. Exact attribution
+through errors in external callees still needs richer checker provenance.
+
+Checks in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Final source suite: 22 passed, exit 0,
+  `/tmp/luna-tools-oql1k2z6/result.json`.
+- The first run passed 21/22; its location assertion assumed a token-exact
+  declaration start, whereas HIR spans include preceding separators. The final
+  assertion checks that each note covers its corresponding declaration. Initial
+  report: `/tmp/luna-tools-9thanjh6/result.json`.
+- Formatting: `/tmp/luna-tools-t_lqgmp9/result.json`; diff check passed.

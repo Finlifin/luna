@@ -4,6 +4,8 @@ use hir::common::DefId;
 use hir::definitions::DefinitionBatch;
 use hir::{ExprKind as E, HirArena, ItemKind, OwnerId, OwnerInfo, OwnerNode, Package};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+mod diagnostics;
+pub(super) use diagnostics::with_context;
 
 fn unsupported(span: rustc_span::Span, detail: &str) -> Error {
     error(

@@ -267,3 +267,61 @@ fn generic_requests_preserve_comptime_implementation_phase() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn generated_member_errors_preserve_strategy_and_all_use_sites() {
+    let source = "trait Flag {fn flag()->bool;} derive fn invalid for Flag {fn flag()->bool {()}} struct First {} struct Second {} derive Flag.use(invalid) for First; derive Flag.use(invalid) for Second;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("derivation strategy `invalid` defined here"),
+        "{error}"
+    );
+    assert!(
+        error.contains("generated member `flag` originates here"),
+        "{error}"
+    );
+    assert_eq!(
+        error
+            .matches("derive use site of strategy `invalid`")
+            .count(),
+        2,
+        "{error}"
+    );
+    for request in [
+        "derive Flag.use(invalid) for First",
+        "derive Flag.use(invalid) for Second",
+    ] {
+        let start = source.find(request).unwrap();
+        let end = start + request.len();
+        assert!(error.lines().any(|line| {
+            let Some(note) = line.trim().strip_prefix("note: ") else { return false };
+            let Some((range, message)) = note.split_once(": ") else { return false };
+            if !message.starts_with("derive use site") { return false; }
+            let Some((lo, hi)) = range.split_once("..") else { return false };
+            matches!((lo.parse::<usize>(), hi.parse::<usize>()), (Ok(lo), Ok(hi)) if lo <= start && end <= hi)
+        }), "{error}");
+    }
+}
+
+#[test]
+fn expansion_failures_report_sources_but_unrelated_errors_do_not() {
+    let invalid = "trait Flag {} derive fn invalid(value:bool) for Flag {} struct Subject {} derive Flag.use(invalid) for Subject;";
+    let error = support::compile_with_protocols(invalid, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("strategy input and contract instantiation"),
+        "{error}"
+    );
+    assert!(
+        error.contains("derivation strategy `invalid` defined here"),
+        "{error}"
+    );
+    assert!(
+        error.contains("derive use site of strategy `invalid`"),
+        "{error}"
+    );
+
+    let unrelated = "trait Flag {} derive fn valid for Flag {} struct Subject {} derive Flag.use(valid) for Subject; fn bad()->bool {()}";
+    let error = support::compile_with_protocols(unrelated, &Default::default()).unwrap_err();
+    assert!(!error.contains("derivation strategy"), "{error}");
+    assert!(!error.contains("derive use site"), "{error}");
+}

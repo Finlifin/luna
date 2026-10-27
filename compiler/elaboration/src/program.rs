@@ -56,9 +56,16 @@ use rustc_span::Span;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
+pub struct DiagnosticNote {
+    pub source: n::SourceRange,
+    pub message: String,
+}
+
+#[derive(Debug)]
 pub struct Error {
     pub source: n::SourceRange,
     pub message: String,
+    pub notes: Vec<DiagnosticNote>,
     needs_context: bool,
     needs_tactic: bool,
     needs_capability: bool,
@@ -70,7 +77,15 @@ impl std::fmt::Display for Error {
             f,
             "{}..{}: {}",
             self.source.start, self.source.end, self.message
-        )
+        )?;
+        for note in &self.notes {
+            write!(
+                f,
+                "\n  note: {}..{}: {}",
+                note.source.start, note.source.end, note.message
+            )?;
+        }
+        Ok(())
     }
 }
 impl std::error::Error for Error {}
@@ -84,6 +99,7 @@ fn error(span: Span, message: impl Into<String>) -> Error {
     Error {
         source: source(span),
         message: message.into(),
+        notes: Vec::new(),
         needs_context: false,
         needs_tactic: false,
         needs_capability: false,
@@ -311,7 +327,8 @@ fn elaborate_with_attributes(
         .any(|(_, feature)| feature == "derivation expansion")
     {
         let arena = hir::HirArena::new();
-        let expanded = derivation::expand(package, &arena, &mut 100_000)?;
+        let expanded = derivation::expand(package, &arena, &mut 100_000)
+            .map_err(|failure| derivation::with_context(package, failure))?;
         return elaborate_with_attributes(
             &expanded,
             package_identities,
@@ -319,7 +336,8 @@ fn elaborate_with_attributes(
             target,
             inspect_attributes,
             invocation_steps,
-        );
+        )
+        .map_err(|failure| derivation::with_context(package, failure));
     }
     if let Some((span, feature)) = package.pending_semantics.iter().find(|(_, feature)| {
         feature != "test template CMTT expansion"
@@ -1294,6 +1312,7 @@ fn elaborate_candidate<'a, 'h>(
             Error {
                 source: failure.source,
                 message: failure.to_string(),
+                notes: Vec::new(),
                 needs_context: false,
                 needs_tactic: false,
                 needs_capability: false,
@@ -1349,6 +1368,7 @@ fn elaborate_candidate<'a, 'h>(
         Error {
             source: failure.source,
             message: failure.to_string(),
+            notes: Vec::new(),
             needs_context: false,
             needs_tactic: false,
             needs_capability: false,
