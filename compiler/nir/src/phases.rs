@@ -1265,6 +1265,15 @@ pub fn machine_arithmetic_functions(
                         | K::EnumName(value)
                         | K::Not(value)
                         | K::Loop { body: value, .. } => work.push(Work::Expr(value, false, ct)),
+                        K::IntegerRepresentation(value) => {
+                            if !crate::program::integer_representation_valid(&value.ty, &expr.ty) {
+                                return Err(fail(
+                                    expr.source,
+                                    "integer representation domain mismatch",
+                                ));
+                            }
+                            work.push(Work::Expr(value, false, ct));
+                        }
                         K::TextQuery { subject, query } => {
                             if !query.validate(&subject.ty, &expr.ty) {
                                 return Err(fail(expr.source, "text query domain mismatch"));

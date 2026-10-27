@@ -834,6 +834,20 @@ impl fmt::Display for ObjectEditKind {
     }
 }
 
+/// The result width is fixed even when the input representation needs a target.
+pub fn integer_representation_valid(input: &Term, result: &Term) -> bool {
+    use crate::Primitive as P;
+    match input {
+        Term::Primitive(P::Never) => *result == Term::Primitive(P::Never),
+        Term::Primitive(p)
+            if p.fixed_integer_layout().is_some() || matches!(p, P::Usize | P::Isize) =>
+        {
+            *result == Term::Primitive(P::U128)
+        }
+        _ => false,
+    }
+}
+
 /// UTF-8 byte observations, independent of target pointer width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextQueryKind {
@@ -1254,6 +1268,8 @@ pub enum ExprKind {
     Snapshot(Box<Expr>),
     TakeBits(Box<Expr>),
     SymbolName(Box<Expr>),
+    /// Zero-extend integer representation bits to u128 using execution target facts.
+    IntegerRepresentation(Box<Expr>),
     /// UTF-8 observations; packet is (str) or (str, u64), in evaluation order.
     TextQuery {
         subject: Box<Expr>,
@@ -3324,6 +3340,7 @@ impl fmt::Display for ExprKind {
             Self::NewtypeConvert(value) => write!(f, "(newtype-convert {value})"),
             Self::BitEqual(a, b) => write!(f, "(bit-equal {a} {b})"),
             Self::EnumName(x) => write!(f, "(enum-name {x})"),
+            Self::IntegerRepresentation(x) => write!(f, "(integer-representation {x})"),
             Self::SymbolName(x) => write!(f, "(symbol-name {x})"),
             Self::TextQuery { subject, query } => write!(f, "(text-query {query} {subject})"),
             Self::Snapshot(x) => write!(f, "(snapshot {x})"),
@@ -3608,6 +3625,7 @@ impl Expr {
                     | ExprKind::Snapshot(_)
                     | ExprKind::TakeBits(_)
                     | ExprKind::TextQuery { subject: _, .. }
+                    | ExprKind::IntegerRepresentation(_)
                     | ExprKind::SymbolName(_)
                     | ExprKind::EnumName(_)
                     | ExprKind::Not(_)
@@ -3695,6 +3713,7 @@ impl Expr {
                 | ExprKind::Snapshot(value)
                 | ExprKind::TakeBits(value)
                 | ExprKind::TextQuery { subject: value, .. }
+                | ExprKind::IntegerRepresentation(value)
                 | ExprKind::SymbolName(value)
                 | ExprKind::EnumName(value)
                 | ExprKind::Not(value)
@@ -4081,6 +4100,7 @@ impl Expr {
             | ExprKind::Snapshot(value)
             | ExprKind::TakeBits(value)
             | ExprKind::TextQuery { subject: value, .. }
+            | ExprKind::IntegerRepresentation(value)
             | ExprKind::SymbolName(value)
             | ExprKind::EnumName(value)
             | ExprKind::Not(value)
@@ -4757,6 +4777,7 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
             | ExprKind::Snapshot(value)
             | ExprKind::TakeBits(value)
             | ExprKind::TextQuery { subject: value, .. }
+            | ExprKind::IntegerRepresentation(value)
             | ExprKind::SymbolName(value)
             | ExprKind::EnumName(value)
             | ExprKind::UnsafeScope(value)

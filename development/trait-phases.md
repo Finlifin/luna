@@ -598,13 +598,11 @@ sign-extending them. Targets wider than 64 bits contribute both halves. The
 implementation supports all byte-aligned widths currently admitted by
 `TargetData`, from 8 through 128 bits, without using the compiler host width.
 
-Current integration restriction: body checking eagerly resolves bit views, so
-compiling the full `traits.fl` implementation now requires explicit target data,
-even if the selected entry only uses fixed-width Hash. Previously target-free
-Hash fixtures must provide a target. This is a compiler staging limitation, not
-a new language rule or an implicit host default. Deferring representation-sensitive
-library bodies until target specialization remains unfinished. Syntax-only
-inspection does not require a target.
+The initial implementation used an exact-width bit view and consequently made
+full-library checking require target data. That restriction is now removed by
+the fixed-result integer representation operation described below. Ordinary
+source bit views retain their exact-width requirement; this does not implement
+general deferred function-body checking.
 
 Validation in `/home/fin/luna` (final commands exited 0):
 
@@ -626,3 +624,46 @@ Initial tests with absent target data failed during eager bit-view checking;
 fixtures now explicitly choose a 64-bit test target, while the native-target
 case obtains its target from the LLVM toolchain. Aggregate and general str
 Hash remain unfinished.
+
+## Target-independent checking of representation observers
+
+The internal `.integer_representation'builtin(value)` operation accepts machine
+integers and returns u128 containing zero-extended representation bits. NIR
+retains `(integer-representation operand)`, with the original operand type,
+without choosing a pointer width during declaration checking. Only usize/isize
+execution needs explicit target data; fixed-width inputs remain executable
+without it. This is not a numeric signed-to-unsigned conversion: i8 -1 yields
+255, not u128::MAX. Never operands preserve early exit.
+
+Domain validation runs at elaboration, NIR phase admission, VM evaluation and
+LLVM lowering. The VM checks the value against the operand domain and masks
+using that domain's target width. LLVM emits zero extension, or retains an
+already 128-bit value. Traversal, substitution, budgets and resource analysis
+retain the operand; required comptime materialization evaluates the operation.
+No user-facing keyword or representation reconstruction permission is added.
+
+The usize/isize Hash implementations use this fixed-result observation before
+ordinary BitVec folding. Hash results are unchanged, while full traits loading
+and unrelated entry execution no longer require target data. The previous
+explicit-64-bit workaround has been removed from the scalar/Symbol tests.
+
+Validation in `/home/fin/luna` (final commands exited 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna -p elaboration -p comptime_interpretor --test library_hash --test target_integers
+python3 -B development/check.py --timeout 900 -- test --release -p luna -p elaboration -p comptime_interpretor -p nir --test integer_representation --test phases
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+- Hash and target integer suites: 41 passed, including the VM's 6 target-integer
+  tests; report `/tmp/luna-tools-3pnmqvm2/result.json`. All 16 target widths and
+  native O0/O3 Hash checks still pass with the new operation.
+- Representation and NIR phase suites: 36 passed;
+  `/tmp/luna-tools-dpuf2pfg/result.json`. Coverage includes target-free declaration
+  and independent execution, missing-target rejection at invocation, once-only
+  operand effects, early exit, required constant evaluation, invalid source
+  domains and malformed NIR operand/result types.
+- The first new source fixtures omitted Splice and native pointer resource
+  protocols. Corrected fixtures keep the required constant evaluation in its
+  comptime phase, inspect pointer side effects in the VM and exercise native
+  early return separately; no protocol validation was relaxed.

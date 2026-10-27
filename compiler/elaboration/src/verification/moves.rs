@@ -7699,6 +7699,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             | K::Snapshot(value)
             | K::TakeBits(value)
             | K::TextQuery { subject: value, .. }
+            | K::IntegerRepresentation(value)
             | K::SymbolName(value)
             | K::BitSlice { value, .. } => self.observe_guard(value, flow, depth + 1)?,
             K::BitWindow { value, start, end } => {
@@ -15492,6 +15493,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             | K::BitConvert(value)
             | K::TakeBits(value)
             | K::TextQuery { subject: value, .. }
+            | K::IntegerRepresentation(value)
             | K::SymbolName(value)
             | K::BitSlice { value, .. } => self.expr(value, flow, depth + 1)?,
             K::BitWindow { value, start, end } => {

@@ -530,6 +530,7 @@ fn scan<'a>(
                 | K::Snapshot(value)
                 | K::TakeBits(value)
                 | K::TextQuery { subject: value, .. }
+                | K::IntegerRepresentation(value)
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::Not(value)

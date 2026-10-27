@@ -263,6 +263,7 @@ pub(super) fn check(
             | K::Snapshot(_)
             | K::TakeBits(_)
             | K::TextQuery { subject: _, .. }
+            | K::IntegerRepresentation(_)
             | K::SymbolName(_)
             | K::EnumName(_)
             | K::BitSlice { .. }

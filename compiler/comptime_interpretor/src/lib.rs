@@ -4101,6 +4101,29 @@ impl<'a> Interpreter<'a> {
                 }
                 self.eval(value, environment)
             }
+            K::IntegerRepresentation(operand) => {
+                if !nir::program::integer_representation_valid(&operand.ty, &expr.ty) {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                }
+                let value = value!(self.eval(operand, environment));
+                let Term::Primitive(primitive) = operand.ty else {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                };
+                let (_, width) = self
+                    .integer_layout(primitive)
+                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
+                if !self.has_type(&value, &operand.ty) {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                }
+                let bits = match value {
+                    Value::UnsignedInteger(value) => value,
+                    Value::SignedInteger(value) => value as u128,
+                    _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
+                };
+                Ok(Flow::Value(Value::UnsignedInteger(
+                    bits & (u128::MAX >> (128 - width)),
+                )))
+            }
             K::TakeBits(..) => self.eval_take_bits(expr, environment),
             K::Not(..) => self.eval_not(expr, environment),
             K::And(..) | K::Or(..) => self.eval_and(expr, environment),

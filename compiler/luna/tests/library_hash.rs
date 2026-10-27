@@ -15,18 +15,6 @@ fn source(body: &str) -> String {
     )
 }
 
-// Library representation-sensitive bodies require an explicit compilation
-// target. This is a test target, independent of the process pointer width.
-fn compile(text: &str) -> nir::program::Package {
-    support::compile_with_source_bindings_for_target(
-        text,
-        &Default::default(),
-        Default::default(),
-        Some(nir::target::TargetData::new(64).unwrap()),
-    )
-    .unwrap()
-}
-
 #[test]
 fn scalar_hashes_agree_across_execution_phases_and_integer_boundaries() {
     for (ty, literal, expected) in [
@@ -54,7 +42,7 @@ fn scalar_hashes_agree_across_execution_phases_and_integer_boundaries() {
         ),
         ("i128", "-1", 0),
     ] {
-        let package = compile(&source(&format!(
+        let package = support::compile(&source(&format!(
             "fn run()->u64 {{let value:{ty}={literal};value.as(Hash).hash()}}\ncomptime fn staged()->u64 {{let value:{ty}={literal};value.as(Hash).comptime_hash()}}"
         )));
         let expected = Value::UnsignedInteger(expected.into());
@@ -74,7 +62,7 @@ fn scalar_hashes_agree_across_execution_phases_and_integer_boundaries() {
 #[test]
 fn wide_hash_collisions_still_require_equality() {
     use comptime_executor::{Context, KeyProtocol};
-    let package = compile(&source(""));
+    let package = support::compile(&source(""));
     let mut items = intrinsic::LangItems::new();
     let bindings = [
         (intrinsic::LangItem::Eq, "Eq"),
@@ -112,7 +100,7 @@ fn wide_hash_collisions_still_require_equality() {
 
 #[test]
 fn scalar_hashes_lower_to_host_code_without_comptime_dispatch() {
-    let package = compile(&source(
+    let package = support::compile(&source(
         "fn verify() {\nlet wide:u128=18446744073709551616;\nlet signed:i128=-170141183460469231731687303715884105728;\nlet wide_hash=wide.as(Hash).hash();assumes wide_hash == 1;\nlet signed_hash=signed.as(Hash).hash();assumes signed_hash == 9223372036854775808;\nlet bool_hash=true.as(Hash).hash();assumes bool_hash == 1;\n}",
     ));
     let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
@@ -135,11 +123,9 @@ fn character_bit_reads_do_not_authorize_reconstruction_or_writeback() {
         "let value:u32=65;value'bitvec.as(char)",
         "var value:char='A';value'bitvec[0..32]=55296;value",
     ] {
-        let error = support::compile_with_source_bindings_for_target(
+        let error = support::compile_with_protocols(
             &source(&format!("fn invalid()->char {{{body}}}")),
             &Default::default(),
-            Default::default(),
-            Some(nir::target::TargetData::new(64).unwrap()),
         )
         .unwrap_err();
         assert!(
@@ -147,7 +133,7 @@ fn character_bit_reads_do_not_authorize_reconstruction_or_writeback() {
             "{error}"
         );
     }
-    let package = compile(&source(
+    let package = support::compile(&source(
         "fn read(value:char)->u64 {value'bitvec.as(u64)} fn verify() {let value=read('🦀');assumes value == 129408;}",
     ));
     let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
@@ -164,7 +150,7 @@ fn symbol_hashes_follow_utf8_content_in_both_phases_and_native_code() {
         ("foobar", 0x85944171f73967e8u64),
         ("é", 0x0ac21707b7181e01u64),
     ] {
-        let package = compile(&source(&format!(
+        let package = support::compile(&source(&format!(
             "fn hash(value:Symbol)->u64 {{value.as(Hash).hash()}} fn run()->u64 {{hash(.{name})}} comptime fn staged()->u64 {{let value:Symbol=.{name};value.as(Hash).comptime_hash()}} fn verify() {{let value=run();assumes value == {expected};}}"
         )));
         assert_eq!(
@@ -195,7 +181,7 @@ fn symbol_hashes_follow_utf8_content_in_both_phases_and_native_code() {
 #[test]
 fn symbol_cache_keys_compare_content_and_recover_after_budget_exhaustion() {
     use comptime_executor::{Context, KeyProtocol};
-    let package = compile(&source(""));
+    let package = support::compile(&source(""));
     let mut items = intrinsic::LangItems::new();
     let bindings = [
         (intrinsic::LangItem::Eq, "Eq"),

@@ -233,7 +233,7 @@ comptime impl Hash for .Symbol'builtin {
 -}
 impl Hash for .usize'builtin {
     fn hash(self) -> u64 {
-        let widened = self'bitvec.as(u128);
+        let widened = .integer_representation'builtin(self);
         let bits = widened'bitvec;
         let low = bits[0..64];
         let high = bits[64..128];
@@ -243,7 +243,7 @@ impl Hash for .usize'builtin {
 
 comptime impl Hash for .usize'builtin {
     comptime fn comptime_hash(self) -> u64 {
-        let widened = self'bitvec.as(u128);
+        let widened = .integer_representation'builtin(self);
         let bits = widened'bitvec;
         let low = bits[0..64];
         let high = bits[64..128];
@@ -253,7 +253,7 @@ comptime impl Hash for .usize'builtin {
 
 impl Hash for .isize'builtin {
     fn hash(self) -> u64 {
-        let widened = self'bitvec.as(u128);
+        let widened = .integer_representation'builtin(self);
         let bits = widened'bitvec;
         let low = bits[0..64];
         let high = bits[64..128];
@@ -263,7 +263,7 @@ impl Hash for .isize'builtin {
 
 comptime impl Hash for .isize'builtin {
     comptime fn comptime_hash(self) -> u64 {
-        let widened = self'bitvec.as(u128);
+        let widened = .integer_representation'builtin(self);
         let bits = widened'bitvec;
         let low = bits[0..64];
         let high = bits[64..128];

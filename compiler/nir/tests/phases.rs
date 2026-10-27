@@ -1502,3 +1502,61 @@ fn dynamic_comptime_instances_preserve_phase_and_responsibility() {
     package.functions[1].is_unsafe = true;
     assert!(nir::phases::validate(&package).is_err());
 }
+
+#[test]
+fn integer_representation_checks_domains_without_resolving_target_width() {
+    for phase in [Phase::Runtime, Phase::Comptime] {
+        for input in [
+            Primitive::I8,
+            Primitive::U128,
+            Primitive::Isize,
+            Primitive::Usize,
+        ] {
+            let mut f = function(1, phase, &[]);
+            f.signature = Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(Primitive::U128)),
+            };
+            f.body = Expr {
+                source: f.body.source,
+                ty: Term::Primitive(Primitive::U128),
+                kind: K::IntegerRepresentation(Box::new(Expr {
+                    source: f.body.source,
+                    ty: Term::Primitive(input),
+                    kind: K::Literal(if matches!(input, Primitive::I8 | Primitive::Isize) {
+                        Literal::SignedInteger(0)
+                    } else {
+                        Literal::UnsignedInteger(0)
+                    }),
+                })),
+            };
+            let package = Package {
+                functions: vec![f],
+                ..Default::default()
+            };
+            nir::phases::validate(&package).unwrap();
+            for wrong in [
+                Primitive::Bool,
+                Primitive::Char,
+                Primitive::Str,
+                Primitive::F64,
+                Primitive::BitVec(64),
+            ] {
+                let mut invalid = package.clone();
+                let K::IntegerRepresentation(value) = &mut invalid.functions[0].body.kind else {
+                    unreachable!()
+                };
+                value.ty = Term::Primitive(wrong);
+                assert!(
+                    nir::phases::validate(&invalid)
+                        .unwrap_err()
+                        .message
+                        .contains("integer representation domain mismatch")
+                );
+            }
+            let mut invalid = package;
+            invalid.functions[0].body.ty = Term::Primitive(Primitive::U64);
+            assert!(nir::phases::validate(&invalid).is_err());
+        }
+    }
+}

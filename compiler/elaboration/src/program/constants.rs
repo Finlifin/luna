@@ -2751,6 +2751,7 @@ impl Checker<'_, '_> {
                 | K::Snapshot(value)
                 | K::TakeBits(value)
                 | K::TextQuery { subject: value, .. }
+                | K::IntegerRepresentation(value)
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::BitConvert(value)

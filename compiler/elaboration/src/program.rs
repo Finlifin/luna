@@ -9439,6 +9439,35 @@ impl Checker<'_, '_> {
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "list_length" | "list_concat")) => {
                     self.list_builtin(expr, callee, args, expected)
                 }
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "integer_representation") =>
+                {
+                    let [Arg::Positional(value)] = args else {
+                        return Err(error(
+                            expr.span,
+                            "integer representation requires one positional integer",
+                        ));
+                    };
+                    let value = self.expr(value, None)?;
+                    let ty = if is_never(&value.ty) {
+                        p(P::Never)
+                    } else {
+                        p(P::U128)
+                    };
+                    if !n::integer_representation_valid(&value.ty, &ty) {
+                        return Err(error(
+                            expr.span,
+                            "integer representation requires a machine integer",
+                        ));
+                    }
+                    if let Some(expected) = expected {
+                        self.require_expression(&ty, expected, expr.span)?;
+                    }
+                    Ok(n::Expr {
+                        source: source(expr.span),
+                        ty,
+                        kind: K::IntegerRepresentation(Box::new(value)),
+                    })
+                }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "str_byte_length" | "str_byte")) => {
                     self.text_builtin(expr, callee, args, expected)
                 }
@@ -11714,6 +11743,7 @@ fn readonly_guard_operand(expr: &n::Expr, fuel: &mut u64, span: Span) -> Result<
             | K::BitConvert(value)
             | K::TakeBits(value)
             | K::TextQuery { subject: value, .. }
+            | K::IntegerRepresentation(value)
             | K::SymbolName(value)
             | K::BitSlice { value, .. } => pending.push((value, depth + 1)),
             K::IntegerBinary { left, right, .. }
@@ -12053,6 +12083,7 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::Snapshot(value)
         | K::TakeBits(value)
         | K::TextQuery { subject: value, .. }
+        | K::IntegerRepresentation(value)
         | K::SymbolName(value)
         | K::EnumName(value)
         | K::FloatNegate(value)

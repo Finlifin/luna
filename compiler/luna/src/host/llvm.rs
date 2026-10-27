@@ -1561,6 +1561,30 @@ impl Emitter<'_> {
                 }
                 Value::unit()
             }
+            K::IntegerRepresentation(e) => {
+                if !nir::program::integer_representation_valid(&e.ty, &expr.ty) {
+                    return Err("host integer representation domain mismatch".into());
+                }
+                let value = self.expr(e, depth)?;
+                if self.terminated {
+                    Value::unit()
+                } else {
+                    let Ty::Int(width, _) = value.ty else {
+                        return Err("host integer representation requires an integer".into());
+                    };
+                    if width == 128 {
+                        Value {
+                            ty: Ty::Int(128, false),
+                            text: value.text,
+                        }
+                    } else {
+                        self.instruction(
+                            Ty::Int(128, false),
+                            format!("zext {} {} to i128", value.ty.llvm(), value.text),
+                        )
+                    }
+                }
+            }
             K::TakeBits(e) => {
                 let value = self.expr(e, depth)?;
                 if self.terminated {
