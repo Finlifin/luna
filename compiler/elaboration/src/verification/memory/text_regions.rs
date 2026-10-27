@@ -379,6 +379,7 @@ pub fn infer_text_regions(
         local_callables: BTreeMap::new(),
         closed_closures: vec![],
         storage_calls: vec![],
+        readonly_default_storage: false,
         changed_callables: BTreeSet::new(),
         pending: VecDeque::new(),
         scheduled: HashSet::new(),
@@ -404,6 +405,7 @@ struct Query<'a, 'f> {
     local_callables: BTreeMap<LocalId, CodeValue>,
     closed_closures: Vec<ClosedClosure>,
     storage_calls: Vec<DeclarationId>,
+    readonly_default_storage: bool,
     changed_callables: BTreeSet<LocalId>,
     pending: VecDeque<SummaryKey>,
     scheduled: HashSet<SummaryKey>,
@@ -829,9 +831,23 @@ impl Query<'_, '_> {
         value: &Expr,
         prepared: &Locals,
         prepared_code: &BTreeMap<LocalId, CodeValue>,
+        caller_storage: &Locals,
         depth: usize,
     ) -> Result<(Option<Regions>, Option<CodeValue>), String> {
-        let mut scope = self.locals_copy(prepared)?;
+        let has_storage = prepared
+            .values()
+            .any(|value| value.places.values().any(Option::is_some));
+        let mut scope = if has_storage {
+            self.locals_copy(caller_storage)?
+        } else {
+            Locals::new()
+        };
+        for (binding, value) in prepared {
+            charge_regions(value, self.fuel)?;
+            if scope.insert(*binding, value.clone()).is_some() {
+                return Err("text default storage frame overlaps its caller".into());
+            }
+        }
         charge(
             self.fuel,
             prepared_code.len().saturating_add(prepared.len()),
@@ -847,6 +863,7 @@ impl Query<'_, '_> {
         let caller_changed = std::mem::replace(&mut self.changed_callables, changed);
         let caller_loops = std::mem::take(&mut self.loops);
         self.exits.push(None);
+        let caller_readonly = std::mem::replace(&mut self.readonly_default_storage, true);
         let mut returned = None;
         let result = (|| {
             let result = self.expr(value, &mut scope, &mut returned, depth)?;
@@ -858,8 +875,26 @@ impl Query<'_, '_> {
             if returned.is_some() {
                 return Err("text default argument cannot return from its caller".into());
             }
+            if let Some(value) = &result {
+                charge_regions(value, self.fuel)?;
+                for (root, _) in value.places.values().flatten() {
+                    if !caller_storage.contains_key(root) {
+                        return Err(
+                            "text default descriptor address escapes its preparation frame".into(),
+                        );
+                    }
+                }
+                if has_storage {
+                    for (binding, value) in caller_storage {
+                        if scope.get(binding) != Some(value) {
+                            return Err("text default argument modifies caller storage".into());
+                        }
+                    }
+                }
+            }
             Ok((result, code))
         })();
+        self.readonly_default_storage = caller_readonly;
         self.exits.pop();
         self.loops = caller_loops;
         self.local_callables = caller_code;
@@ -1400,6 +1435,9 @@ impl Query<'_, '_> {
                 Ok(Some(project(value.clone(), path, self.fuel)?))
             }
             K::WritePointer { pointer, value } => {
+                if self.readonly_default_storage {
+                    return Err("text default argument cannot write through pointers".into());
+                }
                 let Some(pointer) = self.expr(pointer, locals, returned, next)? else {
                     return Ok(None);
                 };
@@ -1881,7 +1919,13 @@ impl Query<'_, '_> {
                 let mut callbacks = Vec::new();
                 for argument in arguments {
                     let (value, callback) = if argument.is_default {
-                        self.default_input(&argument.value, &prepared, &prepared_code, next)?
+                        self.default_input(
+                            &argument.value,
+                            &prepared,
+                            &prepared_code,
+                            locals,
+                            next,
+                        )?
                     } else {
                         let value = self.expr(&argument.value, locals, returned, next)?;
                         let code = value

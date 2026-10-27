@@ -1024,3 +1024,36 @@ Recursive storage calls and callee-local addresses written through caller
 pointers are rejected; budget exhaustion followed by a fresh query recovers.
 Formatting passed (`/tmp/luna-tools-k44b57es/result.json`, exit 0), as did the
 diff check. Existing runtime resource rejection tests still pass.
+
+## Descriptor reads during default preparation
+
+A default expression whose earlier prepared parameters contain local addresses
+now receives the caller's current abstract storage alongside the prepared callee
+bindings. Direct loads and finite named helper calls can therefore resolve the
+original descriptor slots, including changes made while evaluating earlier
+explicit arguments. The preparation frame cannot export its private addresses
+or change caller storage. Pointer writes reached during default evaluation are
+rejected, including writes through named helper calls analyzed in that frame;
+the previous read-only state is restored on every exit.
+
+This follows the default-expression boundary in `docs/functions/parameters.md`:
+per-evaluation pointer observations do not authorize pointer writes or replace P3,
+Copy and memory admission. Text-valued defaults are tested at typed NIR because
+source text Copy/P3 evidence remains unfinished. An ordinary source-level bool
+pointer default additionally checks the admitted path after a text comparison.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 40 tests passed (`/tmp/luna-tools-oqu7exha/result.json`, exit 0). The new
+NIR regression covers direct and helper descriptor reads, preceding argument
+updates, direct/helper pointer-write rejection, unknown origins, restoration of
+ordinary writes after default evaluation and budget recovery. The source bool
+pointer default also passes and preserves the preceding text comparison's read
+dependencies. Formatting passed (`/tmp/luna-tools-bn46y7u3/result.json`, exit 0),
+as did the diff check. This does not establish source admission for text defaults.

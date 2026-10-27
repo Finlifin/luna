@@ -1927,3 +1927,93 @@ fn named_descriptor_calls_update_shared_storage_and_join_normal_exits() {
     assert!(infer(&package, "callback", 10).is_err());
     assert!(infer(&package, "callback", 500_000).is_ok());
 }
+
+#[test]
+fn text_defaults_read_prepared_pointer_storage_without_authorizing_writes() {
+    use nir::program::ExprKind as K;
+    // Source admission still separately needs P3 and Copy evidence for text.
+    // Typed NIR fixtures isolate prepared-frame dependency transfer.
+    let mut package = support::compile(
+        "typealias str=.str'builtin;
+        fn read(pointer:*str)->str {pointer.*}
+        fn mutate(pointer:*str)->str {pointer.* = \"changed\";pointer.*}
+        fn take(pointer:*str,ignored:bool,value:str)->str {value}
+        fn direct(value:str)->str {let pointer=value.ref;take(pointer,false,pointer.*)}
+        fn helper(value:str)->str {let pointer=value.ref;take(pointer,false,read(pointer))}
+        fn late(first:str,second:str)->str {var value=first;let pointer=value.ref;take(pointer,do {value=second;false},read(pointer))}
+        fn mutation(value:str)->str {var text=value;let pointer=text.ref;take(pointer,false,mutate(pointer))}
+        fn direct_mutation(value:str)->str {var text=value;let pointer=text.ref;take(pointer,false,do {pointer.* = \"changed\";pointer.*})}
+        fn unknown(pointer:*str)->str {take(pointer,false,pointer.*)}
+        fn resumed(first:str,second:str)->str {var text=first;let pointer=text.ref;let ignored=take(pointer,false,pointer.*);pointer.* = second;text}",
+    );
+    let target = package
+        .functions
+        .iter()
+        .find(|f| f.name == "take")
+        .unwrap()
+        .clone();
+    for function in &mut package.functions {
+        nir::visit::expression_mut(&mut function.body, &mut 100_000, |expr, _| {
+            let K::Call {
+                callee,
+                arguments,
+                parameter_bindings,
+            } = &mut expr.kind
+            else {
+                return Ok(());
+            };
+            if !matches!(callee.kind, K::Function(id) if id == target.declaration) {
+                return Ok(());
+            }
+            let K::Local(pointer) = arguments[0].value.kind else {
+                panic!("local pointer")
+            };
+            *parameter_bindings = target.parameters.clone();
+            arguments[2].is_default = true;
+            nir::visit::expression_mut(&mut arguments[2].value, &mut 100_000, |value, _| {
+                if matches!(value.kind, K::Local(id) if id == pointer) {
+                    value.kind = K::Local(target.parameters[0]);
+                }
+                Ok::<_, String>(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    for (name, index) in [("direct", 0), ("helper", 0), ("late", 1), ("resumed", 1)] {
+        assert_eq!(
+            infer(&package, name, 500_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(index, &[])]),
+            "{name}"
+        );
+    }
+    for name in ["mutation", "direct_mutation"] {
+        let error = infer(&package, name, 500_000).unwrap_err();
+        assert!(
+            error.contains("default argument cannot write through pointers"),
+            "{name}: {error}"
+        );
+    }
+    assert!(
+        infer(&package, "unknown", 500_000)
+            .unwrap_err()
+            .contains("target is unknown")
+    );
+    assert!(infer(&package, "helper", 10).is_err());
+    assert!(infer(&package, "helper", 500_000).is_ok());
+}
+
+#[test]
+fn admitted_scalar_pointer_default_preserves_text_observation_dependencies() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn take(pointer:*bool,.observed:bool=pointer.*)->bool {observed}
+        fn entry(value:str)->bool {let equal=value == \"x\";take(equal.ref)}",
+    );
+    let summary = infer(&package, "entry", 500_000).unwrap();
+    assert_eq!(
+        summary.reads,
+        BTreeSet::from([Origin::Static, parameter(0, &[])])
+    );
+    assert!(summary.returned.unwrap().is_empty());
+}
