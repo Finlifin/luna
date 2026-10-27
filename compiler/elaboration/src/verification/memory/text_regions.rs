@@ -625,6 +625,63 @@ impl Query<'_, '_> {
                 locals.insert(*binding, value);
                 Ok(empty)
             }
+            K::LetPattern {
+                pattern,
+                value,
+                guard,
+                otherwise,
+            } => {
+                let Some(regions) = self.expr(value, locals, returned, next)? else {
+                    return Ok(None);
+                };
+                let bindings: Vec<_> = locals.keys().copied().collect();
+                let mut candidate = self.locals_copy(locals)?;
+                let matched = self.bind_pattern(
+                    pattern,
+                    &value.ty,
+                    &regions,
+                    Some(value),
+                    &mut candidate,
+                    next,
+                )?;
+                let mut success = matched != Some(false);
+                let mut failure = if matched != Some(true) {
+                    Some(self.locals_copy(locals)?)
+                } else {
+                    None
+                };
+                if success {
+                    if let Some(guard) = guard {
+                        if self.expr(guard, &mut candidate, returned, next)?.is_none() {
+                            success = false;
+                        } else {
+                            let condition = constant_bool(guard, 0);
+                            if condition != Some(true) {
+                                join_locals(&mut failure, &candidate, &bindings, self.fuel)?;
+                            }
+                            success = condition != Some(false);
+                        }
+                    }
+                }
+                if let (Some(mut failure), Some(otherwise)) = (failure, otherwise) {
+                    // Failure receives only the outer environment. Candidate
+                    // names must not shadow outer bindings in the else branch.
+                    if self
+                        .expr(otherwise, &mut failure, returned, next)?
+                        .is_some()
+                    {
+                        return Err(
+                            "text let-else failure branch must not complete normally".into()
+                        );
+                    }
+                }
+                if success {
+                    *locals = candidate;
+                    Ok(empty)
+                } else {
+                    Ok(None)
+                }
+            }
             K::Assign { place, value } => {
                 let Some(value) = self.expr(value, locals, returned, next)? else {
                     return Ok(None);

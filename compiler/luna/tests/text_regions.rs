@@ -629,3 +629,64 @@ fn nested_pattern_observations_preserve_text_reads_and_computed_bindings() {
         );
     }
 }
+
+#[test]
+fn let_patterns_export_success_bindings_and_isolate_failure_scope() {
+    let package = support::compile_with_tuple(
+        "typealias str=.str'builtin;
+        fn tuple(a:str,b:str)->str {let (first,second)=(a,b);second}
+        fn optional(value:?str,fallback:str)->str {let text?=value else {return fallback;};text}
+        fn shadow(value:?str,text:str)->str {let text?=value else {return text;};text}
+        fn known(a:str,b:str)->str {let (text,true)=(a,false) else {return b;};text}
+        fn observed(a:str,b:str)->str {let (\"x\",true)=(a,false) else {return b;};a}
+        fn guarded(flag:bool,a:str,b:str)->str {let text if flag=a else {return b;};text}
+        fn alternatives(flag:bool,a:str,b:str)->str {
+            let ((first,second) if flag) or (second,first)=(a,b);first
+        }
+        fn computed(flag:bool,a:str,b:str)->str {
+            let flag and not flag is opposite=flag;if opposite {a}else{b}
+        }
+        fn looped(value:?str,fallback:str)->str {
+            while true {let text?=value else {break;};return text;}
+            fallback
+        }",
+    );
+    assert_eq!(
+        infer(&package, "tuple", 100_000).unwrap().returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[])])
+    );
+    for name in ["optional", "shadow", "looped"] {
+        let dump = infer(&package, name, 100_000).unwrap().to_string();
+        assert!(
+            dump.contains("(parameter-text-region 0 (fields (variant 1) 0))"),
+            "{dump}"
+        );
+        assert!(
+            dump.contains("(parameter-text-region 1 (fields))"),
+            "{dump}"
+        );
+    }
+    for name in ["known", "observed"] {
+        assert_eq!(
+            infer(&package, name, 100_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[])])
+        );
+    }
+    assert_eq!(
+        infer(&package, "observed", 100_000).unwrap().reads,
+        BTreeSet::from([parameter(0, &[])])
+    );
+    assert_eq!(
+        infer(&package, "guarded", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    for name in ["alternatives", "computed"] {
+        assert_eq!(
+            infer(&package, name, 100_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+        );
+    }
+}

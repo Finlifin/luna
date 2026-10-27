@@ -384,3 +384,32 @@ New cases cover swapped alternative bindings, first-success short circuit,
 outer-guard failure without alternative retry, nested field guards and computed
 boolean patterns reading text. Formatting passed
 (`/tmp/luna-tools-hirfcpps/result.json`, exit 0), as did the diff check.
+
+
+## Let-pattern success and failure
+
+Let-patterns use the same ordered dependency walk as match arms. A successful
+pattern installs its bindings in the enclosing block; a failure retains only the
+outer binding environment, so a candidate name cannot shadow an outer name used
+by the else branch. Guard reads and reachable outer updates are retained before
+failure dispatch. A let-else failure branch must not complete normally; its
+returns and lexical loop exits contribute to their ordinary destinations.
+
+Known mismatches do not invent a successful continuation, while text comparisons
+performed before the mismatch remain in the read summary. Irrefutability and
+resource observation legality remain the frontend/resource checker's contracts;
+this analysis does not replace either check.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All nineteen tests passed (`/tmp/luna-tools-d2mrb7dm/result.json`, exit 0).
+New cases cover tuple/optional bindings, outer-name shadowing in else branches,
+known failure, retained failed-pattern reads, guards, lexical break, alternatives
+and computed-pattern exports. Formatting passed
+(`/tmp/luna-tools-0x96hmiw/result.json`, exit 0), as did the diff check.
