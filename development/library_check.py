@@ -26,6 +26,7 @@ def main():
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('--timeout must be positive and finite')
     directory = Path(tempfile.mkdtemp(prefix='luna-library-'))
+    sysroot_executable = directory / 'sysroot-smoke'
     cargo = [sys.executable, '-B', str(ROOT / 'development/cargo.py')]
     stages = [
         ('declarations', ['test', '-p', 'luna', '--test', 'library_protocols']),
@@ -74,7 +75,8 @@ def main():
                         '--test-native']),
         ('sysroot', ['run', '-p', 'luna', '--',
                      str(ROOT / 'development/examples/library-smoke.fl'),
-                     '--sysroot', str(ROOT / 'library'), '--interpret', 'run']),
+                     '--sysroot', str(ROOT / 'library'), '--build', 'run',
+                     '--output', str(sysroot_executable)]),
     ]
     attribute_command = next(command for label, command in stages if label == 'attributes')
     stages.insert(2, ('merged-attributes', [*attribute_command[:-1], 'merged-attributes']))
@@ -110,7 +112,14 @@ def main():
             command = [command[0], '--release', *command[1:]]
         code, evidence = run(cargo + command, cwd=ROOT, timeout=args.timeout,
                              label=label, directory=directory / label)
-        # Interpreter success alone is insufficient: validate the result too.
+        build_report = None
+        if label == 'sysroot':
+            build_report = str(evidence / 'result.json')
+            if code == 0:
+                code, evidence = run([str(sysroot_executable)], cwd=ROOT,
+                                     timeout=args.timeout, label='sysroot-run',
+                                     directory=directory / 'sysroot-run')
+        # A successful compiler or runner is insufficient: validate the value.
         matches = None
         if code == 0:
             output = (evidence / 'stdout.log').read_text().strip()
@@ -130,7 +139,8 @@ def main():
         outcomes.append({'stage': label, 'exit_code': code,
                          'value_matches': matches,
                          'passed': code == 0 and matches is not False,
-                         'report': str(evidence / 'result.json')})
+                         'report': str(evidence / 'result.json'),
+                         **({'build_report': build_report} if build_report else {})})
         summary = {'scope': 'selected' if args.stage else 'all',
                    'selected_stages': [label for label, _ in stages],
                    'passed': len(outcomes) == len(stages)

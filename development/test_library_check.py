@@ -43,10 +43,11 @@ class LibraryCheckTests(unittest.TestCase):
                     patch('sys.argv', argv), patch('builtins.print'):
                 status = library_check.main()
             summary = json.loads((root / 'summary.json').read_text())
-            self.assertEqual(len(calls), len(set(selected)) if selected else len(library_check.STAGES))
+            cargo_calls = [(label, command) for label, command in calls if label != 'sysroot-run']
+            self.assertEqual(len(cargo_calls), len(set(selected)) if selected else len(library_check.STAGES))
             self.assertEqual(summary['scope'], 'selected' if selected else 'all')
-            self.assertEqual(summary['selected_stages'], [label for label, _ in calls])
-            for _, command in calls:
+            self.assertEqual(summary['selected_stages'], [label for label, _ in cargo_calls])
+            for _, command in cargo_calls:
                 cargo_arguments = command[3:]
                 self.assertIn(cargo_arguments[0], ('test', 'run'))
                 self.assertEqual('--release' in cargo_arguments, release)
@@ -64,8 +65,28 @@ class LibraryCheckTests(unittest.TestCase):
                 if name == 'option':
                     self.assertNotIn('--optional-type', command)
                     self.assertIn('optional', command)
+            if not selected or 'sysroot' in selected:
+                build = next(command for label, command in calls if label == 'sysroot')
+                self.assertIn('--build', build)
+                executable = build[build.index('--output') + 1]
+                executions = [command for label, command in calls if label == 'sysroot-run']
+                self.assertEqual(executions, [] if failing == 'sysroot' else [[executable]])
+                stage = next(item for item in summary['stages'] if item['stage'] == 'sysroot')
+                self.assertTrue(stage['build_report'].endswith('/sysroot/result.json'))
+                if failing != 'sysroot':
+                    self.assertTrue(stage['report'].endswith('/sysroot-run/result.json'))
             self.assertEqual(summary['passed'], status == 0)
             return status, summary
+
+    def test_sysroot_build_and_run_failures_are_distinct(self):
+        for failing in ['sysroot', 'sysroot-run']:
+            with self.subTest(failing=failing):
+                status, summary = self.check_stages(selected=['sysroot'], failing=failing)
+                self.assertEqual(status, 1)
+                stage = summary['stages'][0]
+                self.assertFalse(stage['passed'])
+                self.assertIsNone(stage['value_matches'])
+                self.assertTrue(stage['report'].endswith(f'/{failing}/result.json'))
 
     def test_inline_iteration_failure_is_reported(self):
         status, summary = self.check_stages(release=True, failing='inline-iteration', selected=['inline-iteration'])

@@ -3988,3 +3988,31 @@ math.byte_swap 与 bswap target operation 接受 usize，保留原先 u16/u32/u6
 修正测试后 `test --release -p luna --test equality_protocol` 的 5 项全部通过（`/tmp/luna-tools-fdu0h7uv/result.json`），覆盖真实 Eq 默认方法、泛型操作、解释执行及受资源检查的 LLVM O0/O3、自定义 ne 的可观察副作用、操作数顺序、左右提前返回、缺失实现／错误结果类型拒绝、CLI 重复绑定以及类型身份边界。`test --release -p luna --test library_protocols` 的 11 项通过（`/tmp/luna-tools-9slv5ovl/result.json`），共 337 项不同 Rust 测试。
 
 经 command.py 执行 `host_examples.py custom-order --release-driver --compare-optimization`，O0/O3 均输出 `(bool true)`（`/tmp/luna-tools-c8ab9l3u/result.json`），产物在 `/tmp/luna-host-examples-8rx_d_96`。test_host_examples.py 的 7 项通过（`/tmp/luna-tools-dqghh21o/result.json`）。格式检查 `/tmp/luna-tools-norzlkup/result.json` 与 git diff --check 通过；dev 未提交。
+
+## 完整 sysroot 的 host smoke 检查
+
+`development/library_check.py --stage sysroot` 现在构建并执行实际的 LLVM
+host 程序。旧入口使用无目标信息的 `--interpret`，在完整 builtin 中遇到
+`usize` 字面量时失败；不应通过猜测指针宽度或删除库代码绕过这一边界。
+新的入口使用 host pipeline 已有的目标查询，并将构建和运行的报告分别保存。
+构建失败不运行产物；执行失败或输出不是 `(bool true)` 均判为失败。
+
+`development/examples/library-smoke.fl` 使用完整库及其 language-item
+manifest，覆盖默认 prelude、平台整数算术、Clone、Tuple 解构和原生可选
+类型。此检查证明这些接口在真实 sysroot 中可以构建和运行，不代表所有库
+接口均已完成，也没有给无目标信息的解释路径补充隐式平台假设。
+
+工作目录 `/home/fin/luna`，本次验证：
+
+- `python3 -B development/library_check.py --release --stage sysroot`：退出 0，
+  构建和运行均成功，输出 `(bool true)`；报告
+  `/tmp/luna-library-lojxmvwm/summary.json`。
+- `python3 -B -m unittest discover -s development -p test_library_check.py`：
+  12 项通过，覆盖构建失败不执行、执行失败、错误返回值、独立阶段继续执行
+  与构建/运行证据区分；这些是检查器测试，不代替上述实际 host 运行。
+- `git diff --check`：通过。本次未改 Rust，无需重新构建编译器或运行全量测试。
+
+旧解释入口的失败证据为 `/tmp/luna-library-cy826anb/summary.json`，错误为
+`integer runtime proxy requires target pointer-width information`。完整库
+源码的 LLVM 生成检查 `/tmp/luna-tools-2g7mhyc3/result.json` 退出 0，帮助
+将该问题定位到检查入口缺少目标信息，而非源码无法通过 host 前端。
