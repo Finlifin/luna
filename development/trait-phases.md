@@ -175,8 +175,9 @@ for those locals. Explicit arguments still precede default evaluation.
   structure using program-level evidence; retain bounded conservative rejection
   when equality cannot be established.
 - Extend VM-facing builders beyond their current nominal descriptors and
-  finish remaining protocol consumers. Builtin Eq/Hash library declarations still expose runtime
-  methods; the executable cache-key fixtures explicitly declare comptime members.
+  finish remaining protocol consumers. Builtin Eq now supplies primitive
+  comptime comparisons alongside runtime comparisons. Hash declares both
+  operations but still needs concrete library implementations and derivation.
 - Extend dynamic trait clauses beyond fixed callable signatures and known
   Self/interface inputs. Completed IIR instances currently reject unevaluated
   packets explicitly; source comptime invocation retains origin, specialized
@@ -460,3 +461,33 @@ was needed. All ten dynamic-trait source tests passed in `/home/fin/luna` with
 -p elaboration -p comptime_interpretor --test dynamic_trait_clauses`
 (`/tmp/luna-tools-inirtfel/result.json`, exit 0). This is evidence for completed
 invocation before IIR, not for retaining dynamic packets inside IIR.
+
+Builtin comparison now declares `comptime_eq` and its `comptime_ne` default
+separately from runtime `eq`/`ne`. All existing primitive Eq subjects supply the
+comptime contribution as well. Hash declares `comptime_hash` alongside `hash`;
+concrete Hash implementations remain future library work. Key selection prefers
+the explicit comptime name and selects its implementation body by the selected
+member name. Compact comptime-only protocols using `eq`/`hash` remain supported
+when no explicit comptime name is declared. An explicit name is authoritative:
+invalid phase/signature or duplicates do not trigger another-member fallback.
+
+Validation in `/home/fin/luna`, all commands use
+`python3 -B development/check.py --timeout 900 -- test --release -p luna
+-p elaboration -p comptime_interpretor` followed by:
+
+- `--test equality_protocol --test ordering_protocol`: 9 passed
+  (`/tmp/luna-tools-costpxwq/result.json`, exit 0).
+- `--test library_comptime_comparison`: 3 passed, including Bool key comparison,
+  distinct comptime hashes, duplicate/phase rejection, and all twelve integer
+  domains on both 32-bit and 64-bit targets
+  (`/tmp/luna-tools-s2rqlftz/result.json`, exit 0). The initial run rejected
+  target-sized literals without explicit target data; the fixture now supplies
+  the target rather than relying on the host.
+- `--test execution comptime_key`: 9 passed, 1,354 unrelated tests filtered
+  (`/tmp/luna-tools-zrwxyb5k/result.json`, exit 0).
+- `--test frontend_cli shipped_clone_protocol_preserves_noncopy_sources`:
+  passed with the shipped traits/comparison files
+  (`/tmp/luna-tools-_d6ut_n_/result.json`, exit 0).
+
+`python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+passed (`/tmp/luna-tools-y0o__o5n/result.json`, exit 0); `git diff --check` passed.

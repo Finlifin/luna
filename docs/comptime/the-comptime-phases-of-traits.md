@@ -54,6 +54,14 @@ Trait 的 runtime phase 与 comptime phase 共享同一个实现世界、结构�
 
 `Eq`/`Hash` 的缓存作用不把它们等同于 PTC 逻辑相等证明。`Splice` 的有限自动派生规则见[跨阶段值传递](./quoting-and-splicing.md#有限自动派生)。
 
+内置接口用不同成员名保留两相：`Eq.eq`/`Eq.ne` 是运行时方法，
+`Eq.comptime_eq`/`Eq.comptime_ne` 是带有 `^comptime_phase` 的编译时方法；
+`Hash.hash` 与 `Hash.comptime_hash` 同样分开。实现其中一相不会补出另一相。
+缓存键选择器优先检查显式的 `comptime_eq`/`comptime_hash` 成员；仅当该成员
+未声明时，允许绑定只提供编译时 `eq`/`hash` 的协议。无论哪种成员名，都必须
+满足 comptime phase、comptime 函数签名及对应实现条件。显式入口声明错误时
+直接诊断，不因另一个同功能成员可用而绕过检查。
+
 ## 常见示例
 
 下面的 `ReadCode` 同时包含默认 runtime phase 成员、带 `^comptime_phase` 的 comptime phase 成员，以及跨相共享的只读签名关联类型 `Code`：

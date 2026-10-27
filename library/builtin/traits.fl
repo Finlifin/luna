@@ -28,6 +28,8 @@ pub use resources.{Once, Clone, Copy, Drop};
 -- #[lang = "hash"]
 pub trait Hash {
     fn hash(self) -> u64;
+    ^{comptime_phase: true}
+    comptime fn comptime_hash(self) -> u64;
 }
 
 -- ── Conversion ─────────────────────────────────────────────────────────────

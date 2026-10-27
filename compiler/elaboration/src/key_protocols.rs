@@ -30,6 +30,12 @@ impl Operation {
             Self::Hash => 1,
         }
     }
+    fn comptime_name(self) -> &'static str {
+        match self {
+            Self::Eq => "comptime_eq",
+            Self::Hash => "comptime_hash",
+        }
+    }
 }
 impl fmt::Display for Operation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -110,10 +116,19 @@ pub fn select(
     if !interface.type_parameters.is_empty() {
         return Err("comptime key protocol has explicit type parameters".into());
     }
-    let mut methods = interface
+    // Two-phase interfaces retain their ordinary runtime operation names.
+    // An explicit comptime entry is authoritative even when malformed: do not
+    // recover a different member after its phase or signature check fails.
+    let name = if interface
         .methods
         .iter()
-        .filter(|m| m.name == operation.name());
+        .any(|member| member.name == operation.comptime_name())
+    {
+        operation.comptime_name()
+    } else {
+        operation.name()
+    };
+    let mut methods = interface.methods.iter().filter(|m| m.name == name);
     let member = methods
         .next()
         .ok_or("comptime key protocol method is missing")?;
@@ -239,7 +254,7 @@ pub fn select(
     let mut bodies = definition
         .methods
         .iter()
-        .filter(|(name, _)| name == operation.name());
+        .filter(|(body_name, _)| body_name == &member.name);
     let body = bodies
         .next()
         .ok_or("comptime key method body is missing")?

@@ -6,6 +6,11 @@
 pub trait Eq {
     fn eq(self, other: Self) -> bool;
     fn ne(self, other: Self) -> bool = not self.eq(other);
+
+    ^{comptime_phase: true}
+    comptime fn comptime_eq(self, other: Self) -> bool;
+    ^{comptime_phase: true}
+    comptime fn comptime_ne(self, other: Self) -> bool = not self.comptime_eq(other);
 }
 
 -- ── Ordering ───────────────────────────────────────────────────────────────
@@ -168,4 +173,54 @@ impl Ord for .isize'builtin {
     fn cmp(self, other: Self) -> Ordering {
         if self < other { .Less } else if self == other { .Equal } else { .Greater }
     }
+}
+
+{-
+    Comptime equality shares each primitive implementation relationship with
+    runtime equality, while supplying its independently checked phase.
+-}
+comptime impl Eq for .u8'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .u16'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .u32'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .u64'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .u128'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .i8'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .i16'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .i32'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .i64'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .i128'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for bool {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .char'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .Symbol'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .usize'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
+}
+comptime impl Eq for .isize'builtin {
+    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
