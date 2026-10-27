@@ -551,3 +551,40 @@ not yet implement checked BitVec-to-char construction or validated writeback.
 Formatting check passed via `python3 -B development/command.py --timeout 120 --
 cargo fmt --all -- --check` (`/tmp/luna-tools-d2nmdkww/result.json`, exit 0);
 `git diff --check` passed.
+
+## Symbol Hash through ordinary library code
+
+Runtime `Hash.hash` and comptime `Hash.comptime_hash` now hash the Symbol name's
+UTF-8 bytes with FNV-1a. The implementation observes `self'tag_name` once and
+uses the checked byte primitives. No address, intern-table index or host hash
+seed enters the library result. Multiplication uses u128 after an explicit
+64-bit range predicate, then selects the low 64 bits with BitVec. The index
+increment is bounded by the loop's strict comparison with the u64 length.
+The absent-byte branch is unreachable for the immutable name and bounded index;
+it remains total without an unchecked optional extraction.
+
+The algorithm is an implementation choice, not a promised persisted hash format
+or collision-resistant hash. Eq still decides key equality. The cache adapter
+further digests the library's integer result into a bucket identifier; the
+bucket number is not the library hash value.
+
+Validation in `/home/fin/luna` (all final commands exited 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna -p elaboration -p comptime_interpretor --test library_hash --test library_comptime_comparison
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli shipped_library_files_use_current_syntax
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+- Hash/comparison: 9 tests passed, `/tmp/luna-tools-l35kcfv8/result.json`.
+  Fixed vectors include `a`, `foobar` and multibyte `é`, checked through runtime,
+  comptime and LLVM O0/O3. A 256-byte name exercises the real key adapter with
+  separately allocated equal names, unequal names and exhausted-budget retry.
+  Empty VM Symbol names are admitted and produce consistent buckets.
+- Shipped library syntax: 1 passed, `/tmp/luna-tools-0liqr4i3/result.json`.
+- Format: `/tmp/luna-tools-v9bb9o1b/result.json`.
+
+The first adapter test incorrectly compared its bucket with the raw FNV result;
+inspection of `comptime_keys::Protocol::hash` corrected the test boundary without
+changing production dispatch. Target-sized integer and aggregate Hash remain
+unfinished; this change does not implement general str Hash or Unicode decoding.

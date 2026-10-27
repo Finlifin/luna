@@ -172,6 +172,60 @@ comptime impl Hash for .char'builtin {
     }
 }
 
+{-
+    Symbol hashes use FNV-1a over the UTF-8 name, never the interned address.
+    Multiplication is widened to u128 and the low 64 bits are selected
+    explicitly. This deterministic hash is not collision-resistant; Eq must
+    still decide equality. Runtime and comptime use the same recurrence.
+-}
+impl Hash for .Symbol'builtin {
+    fn hash(self) -> u64 {
+        let name = self'tag_name;
+        let length = .str_byte_length'builtin(name);
+        var index: u64 = 0;
+        var state: u64 = 14695981039346656037;
+        while index < length {
+            let byte = .str_byte'builtin(name, index) match {
+                value? => value,
+                null => return state,
+            };
+            let bits = state'bitvec;
+            let widened = byte'bitvec.as(u64);
+            let input = widened'bitvec;
+            let mixed = ((bits and not input) or (not bits and input)).as(u128);
+            assumes mixed <= 18446744073709551615;
+            let product = mixed * 1099511628211;
+            state = product'bitvec[0..64].as(u64);
+            index = index + 1;
+        }
+        state
+    }
+}
+
+comptime impl Hash for .Symbol'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        let name = self'tag_name;
+        let length = .str_byte_length'builtin(name);
+        var index: u64 = 0;
+        var state: u64 = 14695981039346656037;
+        while index < length {
+            let byte = .str_byte'builtin(name, index) match {
+                value? => value,
+                null => return state,
+            };
+            let bits = state'bitvec;
+            let widened = byte'bitvec.as(u64);
+            let input = widened'bitvec;
+            let mixed = ((bits and not input) or (not bits and input)).as(u128);
+            assumes mixed <= 18446744073709551615;
+            let product = mixed * 1099511628211;
+            state = product'bitvec[0..64].as(u64);
+            index = index + 1;
+        }
+        state
+    }
+}
+
 -- ── Conversion ─────────────────────────────────────────────────────────────
 
 pub use conversion.{Into, From};

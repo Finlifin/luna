@@ -141,3 +141,92 @@ fn character_bit_reads_do_not_authorize_reconstruction_or_writeback() {
         .execute_test(&ir, std::time::Duration::from_secs(5))
         .unwrap();
 }
+
+#[test]
+fn symbol_hashes_follow_utf8_content_in_both_phases_and_native_code() {
+    // Published FNV-1a vectors, plus a separately computed UTF-8 vector.
+    for (name, expected) in [
+        ("a", 0xaf63dc4c8601ec8cu64),
+        ("foobar", 0x85944171f73967e8u64),
+        ("é", 0x0ac21707b7181e01u64),
+    ] {
+        let package = support::compile(&source(&format!(
+            "fn hash(value:Symbol)->u64 {{value.as(Hash).hash()}} fn run()->u64 {{hash(.{name})}} comptime fn staged()->u64 {{let value:Symbol=.{name};value.as(Hash).comptime_hash()}} fn verify() {{let value=run();assumes value == {expected};}}"
+        )));
+        assert_eq!(
+            luna::invocation::invoke(&package, "staged", 1_000_000).unwrap(),
+            Value::UnsignedInteger(expected.into()),
+            "{name}"
+        );
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
+            Value::UnsignedInteger(expected.into()),
+            "{name}"
+        );
+        let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
+        for optimization in [
+            luna::host::OptimizationLevel::O0,
+            luna::host::OptimizationLevel::O3,
+        ] {
+            luna::host::Toolchain {
+                optimization,
+                ..Default::default()
+            }
+            .execute_test(&ir, std::time::Duration::from_secs(5))
+            .unwrap();
+        }
+    }
+}
+
+#[test]
+fn symbol_cache_keys_compare_content_and_recover_after_budget_exhaustion() {
+    use comptime_executor::{Context, KeyProtocol};
+    let package = support::compile(&source(""));
+    let mut items = intrinsic::LangItems::new();
+    let bindings = [
+        (intrinsic::LangItem::Eq, "Eq"),
+        (intrinsic::LangItem::Hash, "Hash"),
+    ]
+    .map(|(item, name)| {
+        (
+            item,
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap()
+                .declaration,
+        )
+    });
+    items.bind_source_traits(&package, &bindings).unwrap();
+    let mut protocol = luna::comptime_keys::Protocol::prepare(
+        &package,
+        &items,
+        &nir::Term::Primitive(nir::Primitive::Symbol),
+        Default::default(),
+    )
+    .unwrap();
+    let first = Value::Symbol("é".repeat(128).into());
+    let same = Value::Symbol("é".repeat(128).into());
+    let different = Value::Symbol("e".repeat(128).into());
+    assert!(protocol.hash(&first, &mut Context::new(1)).is_err());
+    let mut context = Context::new(4_000_000);
+    let hash = protocol.hash(&first, &mut context).unwrap();
+    assert_eq!(hash, protocol.hash(&same, &mut context).unwrap());
+    assert!(protocol.equivalent(&first, &same, &mut context).unwrap());
+    assert!(
+        !protocol
+            .equivalent(&first, &different, &mut context)
+            .unwrap()
+    );
+    // The empty name is admitted by the VM Symbol domain even though a source
+    // symbol literal normally spells an identifier.
+    assert_eq!(
+        protocol
+            .hash(&Value::Symbol("".into()), &mut context)
+            .unwrap(),
+        protocol
+            .hash(&Value::Symbol(String::new().into()), &mut context)
+            .unwrap()
+    );
+}
