@@ -1298,3 +1298,205 @@ fn dynamic_trait_clause_packet_requires_every_declared_input() {
         ErrorKind::Type
     );
 }
+
+fn dynamic_trait_default_package() -> Package {
+    let mut package = dynamic_trait_package();
+    let ty = Term::Primitive(Primitive::Type);
+    let source = SourceRange {
+        start: 90,
+        end: 100,
+    };
+    let interface_bindings = vec![
+        nir::program::LocalId { owner: 5, index: 0 },
+        nir::program::LocalId { owner: 5, index: 1 },
+    ];
+    let body_bindings = vec![
+        nir::program::LocalId { owner: 2, index: 0 },
+        nir::program::LocalId { owner: 2, index: 1 },
+    ];
+    let method_signature = Term::Function {
+        parameters: vec![
+            nir::Parameter {
+                sort: Sort::Runtime,
+                ty: ty.clone()
+            };
+            2
+        ],
+        result: Box::new(ty.clone()),
+    };
+    package.traits[0].methods[0].signature =
+        method_signature.clone().with_comptime_phase(true).into();
+    package.traits[0].methods[0].parameter_bindings = interface_bindings.clone();
+    package.functions[1].signature = method_signature.clone();
+    package.functions[1].parameters = body_bindings.clone();
+    package.functions[1].body = Expr {
+        source,
+        ty: ty.clone(),
+        kind: K::Local(body_bindings[1]),
+    };
+    if let Term::Function { result, .. } = &mut package.functions[0].signature {
+        *result = Box::new(ty.clone());
+    }
+    package.functions[0].body.ty = ty.clone();
+    let K::Call {
+        callee,
+        arguments,
+        parameter_bindings,
+    } = &mut package.functions[0].body.kind
+    else {
+        unreachable!()
+    };
+    callee.ty = method_signature.with_comptime_phase(true);
+    *parameter_bindings = interface_bindings.clone();
+    *arguments = vec![
+        nir::program::CallArgument {
+            parameter: 0,
+            is_default: true,
+            value: Expr {
+                source,
+                ty: ty.clone(),
+                kind: K::TypeValue(Term::Rigid {
+                    declaration: id(3),
+                    sort: Sort::Type,
+                }),
+            },
+        },
+        nir::program::CallArgument {
+            parameter: 1,
+            is_default: true,
+            value: Expr {
+                source,
+                ty,
+                kind: K::Local(interface_bindings[0]),
+            },
+        },
+    ];
+    package
+}
+
+#[test]
+fn dynamic_trait_defaults_use_frozen_inputs_and_interface_parameter_bindings() {
+    let package = dynamic_trait_default_package();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for primitive in [Primitive::Bool, Primitive::U8, Primitive::Char] {
+        let ty = Term::Primitive(primitive);
+        assert_eq!(
+            vm.invoke(id(1), vec![Value::Type(ty.clone())]).unwrap(),
+            Value::Type(ty)
+        );
+    }
+}
+
+#[test]
+fn dynamic_trait_explicit_arguments_override_defaults_and_feed_later_defaults() {
+    let mut package = dynamic_trait_default_package();
+    let K::Call { arguments, .. } = &mut package.functions[0].body.kind else {
+        unreachable!()
+    };
+    arguments[0].is_default = false;
+    arguments[0].value.kind = K::TypeValue(Term::Primitive(Primitive::Char));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(1), vec![Value::Type(Term::Primitive(Primitive::Bool))])
+            .unwrap(),
+        Value::Type(Term::Primitive(Primitive::Char))
+    );
+}
+
+#[test]
+fn dynamic_trait_defaults_reject_later_parameter_reads_and_wrong_routing() {
+    for wrong_binding in [false, true] {
+        let mut package = dynamic_trait_default_package();
+        let K::Call {
+            arguments,
+            parameter_bindings,
+            ..
+        } = &mut package.functions[0].body.kind
+        else {
+            unreachable!()
+        };
+        if wrong_binding {
+            parameter_bindings[0] = nir::program::LocalId {
+                owner: 99,
+                index: 0,
+            };
+        } else {
+            arguments[0].value.kind = K::Local(parameter_bindings[1]);
+        }
+        if let Ok(mut vm) = Interpreter::for_comptime(&package, Budget::default()) {
+            assert!(
+                vm.invoke(id(1), vec![Value::Type(Term::Primitive(Primitive::Bool))])
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn dynamic_trait_defaults_specialize_comptime_value_inputs_per_invocation() {
+    let mut package = dynamic_trait_default_package();
+    let boolean = Term::Primitive(Primitive::Bool);
+    package.function_parameters = vec![
+        nir::function_parameters::Declaration {
+            declaration: id(2),
+            parameters: vec![id(3)],
+            domains: vec![boolean.clone()],
+        },
+        nir::function_parameters::Declaration {
+            declaration: id(5),
+            parameters: vec![id(4), id(3)],
+            domains: vec![Term::Primitive(Primitive::Type), boolean.clone()],
+        },
+    ];
+    let method_signature = Term::Function {
+        parameters: vec![
+            nir::Parameter {
+                sort: Sort::Runtime,
+                ty: boolean.clone()
+            };
+            2
+        ],
+        result: Box::new(boolean.clone()),
+    };
+    package.traits[0].methods[0].signature =
+        method_signature.clone().with_comptime_phase(true).into();
+    package.functions[1].signature = method_signature.clone();
+    package.functions[1].body.ty = boolean.clone();
+    package.functions[0].signature = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::Runtime,
+            ty: boolean.clone(),
+        }],
+        result: Box::new(boolean.clone()),
+    };
+    package.functions[0].body.ty = boolean.clone();
+    let K::Call {
+        callee, arguments, ..
+    } = &mut package.functions[0].body.kind
+    else {
+        unreachable!()
+    };
+    callee.ty = method_signature.with_comptime_phase(true);
+    let K::ComptimeFunctionInstance { subject, .. } = &mut callee.kind else {
+        unreachable!()
+    };
+    subject.ty = Term::Tuple(vec![Term::Primitive(Primitive::Type), boolean.clone()]);
+    let K::Tuple(fields) = &mut subject.kind else {
+        unreachable!()
+    };
+    fields[1].ty = boolean.clone();
+    for argument in arguments.iter_mut() {
+        argument.value.ty = boolean.clone();
+    }
+    arguments[0].value.kind = K::ComptimeValue(Term::Rigid {
+        declaration: id(3),
+        sort: Sort::ComptimeValue,
+    });
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for flag in [false, true, false] {
+        assert_eq!(
+            vm.invoke(id(1), vec![Value::Bool(flag)]).unwrap(),
+            Value::Bool(flag)
+        );
+    }
+}

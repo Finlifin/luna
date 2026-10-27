@@ -158,8 +158,12 @@ execution are checked before dispatch; lookup and freezing consume VM budget.
 The existing S-expression dump retains the declaration and packet explicitly.
 
 This VM path is a prerequisite, not source syntax completion. Source clause
-preparation still routes trait methods through the static path, and dynamic
-trait defaults and IIR instance preparation need further integration.
+preparation still routes trait methods through the static path, and IIR instance
+preparation needs further integration. For direct VM calls, interface default
+expressions are now specialized with the frozen Self/interface/member inputs.
+They retain interface-side local bindings, including references to earlier
+ordinary arguments; implementation-body binding identities are not substituted
+for those locals. Explicit arguments still precede default evaluation.
 
 ## Remaining integration
 
@@ -171,8 +175,8 @@ trait defaults and IIR instance preparation need further integration.
 - Extend VM-facing builders beyond their current nominal descriptors and
   finish remaining protocol consumers. Builtin Eq/Hash library declarations still expose runtime
   methods; the executable cache-key fixtures explicitly declare comptime members.
-- Connect source elaboration and call-default specialization to the dynamic
-  trait-member packet path. VM direct calls retain origin and program checks;
+- Connect source elaboration to the dynamic trait-member packet path.
+  VM direct calls retain origin, specialized defaults and program checks;
   source dynamic trait-method clause preparation remains unfinished.
 
 The existing dynamic inherent-method implementation is not evidence that trait
@@ -354,3 +358,13 @@ packet arity, and a failed type requirement followed by a successful invocation.
 The initial run (`/tmp/luna-tools-f1k849_z/result.json`, exit 0) passed before the
 last two boundary cases were added. Existing function-call and type tests also
 pass. This is VM-level evidence, not source dynamic-trait-clause or IIR support.
+
+Dynamic trait default specialization passed 104 tests in `/home/fin/luna` with
+`python3 -B development/check.py --timeout 900 -- test --release -p nir
+-p comptime_interpretor --test runtime_function_identities --test calls --test types`
+(`/tmp/luna-tools-0uxzcarx/result.json`, exit 0). Added cases pass different Type
+and Bool clause inputs across repeated calls, reference preceding interface
+arguments from later defaults, override a default explicitly, and reject
+forward reads or incorrect interface binding maps. The initial 103-test run
+(`/tmp/luna-tools-fyv40nge/result.json`, exit 0) preceded the Bool-input case.
+These remain checked-NIR VM tests; source and IIR integration are not established.

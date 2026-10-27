@@ -28,12 +28,31 @@ impl Interpreter<'_> {
             .copied()
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(construction)))?;
         let binders = self.input_binders(&definition.type_parameters);
+        self.evaluate_bound_default(
+            construction,
+            argument,
+            &binders,
+            arguments,
+            defaults,
+            caller,
+        )
+    }
+
+    pub(super) fn evaluate_bound_default(
+        &mut self,
+        construction: SourceRange,
+        argument: &nir::program::CallArgument,
+        binders: &[nir::DeclarationParameter],
+        arguments: &[Term],
+        defaults: &mut Environment,
+        caller: &mut Environment,
+    ) -> Result<Flow, Error> {
         self.charge_copy_work(Some(argument.value.source), |fuel| {
-            nir::copy_budget::charge_substitution(&argument.value, &binders, arguments, fuel)
+            nir::copy_budget::charge_substitution(&argument.value, binders, arguments, fuel)
         })?;
         let value = argument
             .value
-            .instantiate_parameters(&binders, arguments)
+            .instantiate_parameters(binders, arguments)
             .map_err(|_| self.failure(ErrorKind::Type, Some(argument.value.source)))?;
         let prepared = nir::program::CallArgument {
             parameter: argument.parameter,
@@ -41,6 +60,37 @@ impl Interpreter<'_> {
             is_default: true,
         };
         self.evaluate_default(construction, &prepared, defaults, caller)
+    }
+
+    pub(super) fn trait_default_inputs(
+        &mut self,
+        method: &Expr,
+    ) -> Result<(Vec<nir::DeclarationParameter>, Vec<Term>), Error> {
+        let K::TraitMethod {
+            interface,
+            member,
+            subject,
+            interface_arguments,
+            method_arguments,
+        } = &method.kind
+        else {
+            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(method.source)));
+        };
+        let (binders, _) = self
+            .method_contracts
+            .get(&(*interface, *member))
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(method.source)))?;
+        let count = binders.len();
+        if count != 1 + interface_arguments.len() + method_arguments.len() {
+            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(method.source)));
+        }
+        let binders = binders.clone();
+        self.integer_operation(Some(method.source), |budget| budget.consume(count))?;
+        let arguments = std::iter::once(subject.clone())
+            .chain(interface_arguments.iter().cloned())
+            .chain(method_arguments.iter().cloned())
+            .collect();
+        Ok((binders, arguments))
     }
 
     pub(super) fn prepare_dynamic_trait_instance(

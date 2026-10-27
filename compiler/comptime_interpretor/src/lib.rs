@@ -8234,8 +8234,12 @@ impl<'a> Interpreter<'a> {
             unreachable!("call preparation")
         };
         let prepared_trait;
+        let mut trait_default_inputs = None;
         let callee = match self.prepare_dynamic_trait_instance(callee, environment)? {
             dynamic_instances::PreparedTraitInstance::Ready(method) => {
+                if arguments.iter().any(|argument| argument.is_default) {
+                    trait_default_inputs = Some(self.trait_default_inputs(&method)?);
+                }
                 prepared_trait = method;
                 &prepared_trait
             }
@@ -8376,7 +8380,16 @@ impl<'a> Interpreter<'a> {
                 return Err(this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
             }
             let value = if argument.is_default {
-                if dynamic_defaults {
+                if let Some((binders, inputs)) = &trait_default_inputs {
+                    prepared_value!(this.evaluate_bound_default(
+                        expr.source,
+                        argument,
+                        binders,
+                        inputs,
+                        &mut default_scope,
+                        environment
+                    ))
+                } else if dynamic_defaults {
                     prepared_value!(this.evaluate_instance_default(
                         expr.source,
                         argument,
