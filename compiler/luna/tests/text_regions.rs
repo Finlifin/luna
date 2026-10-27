@@ -1766,3 +1766,85 @@ fn aggregate_callbacks_specialize_named_calls_by_parameter_and_field_path() {
     assert!(infer(&package, "recursive", 10).is_err());
     assert!(infer(&package, "recursive", 500_000).is_ok());
 }
+
+#[test]
+fn local_descriptor_pointers_preserve_backing_origins_and_replace_slots() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        struct Pair {left:str,right:str}
+        fn read(value:str)->str {let pointer=value.ref;pointer.*}
+        fn replace(first:str,second:str)->str {var value=first;let pointer=value.ref;pointer.* = second;value}
+        fn saved(first:str,second:str)->str {var value=first;let pointer=value.ref;let before=pointer.*;pointer.* = second;before}
+        fn field(first:str,second:str)->str {var pair=Pair {left:first,right:first};let pointer=pair.ref;pointer.*.left=second;pair.left}
+        fn sibling(first:str,second:str)->str {var pair=Pair {left:first,right:first};let pointer=pair.ref;pointer.*.left=second;pointer.*.right}
+        fn alias(first:str,second:str)->str {var value=first;let pointer=value.ref;let other=pointer;other.* = second;pointer.*}
+        fn conditional(flag:bool,first:str,second:str)->str {var value=first;let pointer=value.ref;if flag {pointer.* = second;};pointer.*}
+        fn rebound(first:str,second:str)->str {var left=first;var right=second;var pointer=left.ref;pointer.* = do {pointer=right.ref;second};left}
+        fn looped(flag:bool,first:str,second:str)->str {var value=first;let pointer=value.ref;while flag {pointer.* = second;};pointer.*}
+        fn nested(value:str)->str {let pair=Pair {left:value,right:\"static\"};let pointer=pair.right.ref;pointer.*}
+        fn observed(first:str,second:str)->str {var value=first;let pointer=value.ref;let equal=pointer.* == \"x\";pointer.* = second;value}
+        fn unknown(pointer:*str)->str {pointer.*}
+        fn ambiguous(flag:bool,first:str,second:str)->str {let pointer=if flag {first.ref}else{second.ref};pointer.*}
+        fn dangling(value:str)->str {let pointer=do {let local=value;local.ref};pointer.*}
+        fn external(pointer:*str)->str {pointer.*}
+        fn crossing(value:str)->str {external(value.ref)}
+        fn captured(value:str)->str {let pointer=value.ref;let action=||pointer.*;action()}",
+    );
+    for (name, index) in [
+        ("read", 0),
+        ("replace", 1),
+        ("saved", 0),
+        ("field", 1),
+        ("sibling", 0),
+        ("alias", 1),
+        ("rebound", 1),
+    ] {
+        assert_eq!(
+            infer(&package, name, 500_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(index, &[])]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "conditional", 500_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    assert_eq!(
+        infer(&package, "looped", 500_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    assert_eq!(
+        infer(&package, "nested", 500_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([Origin::Static])
+    );
+    let observed = infer(&package, "observed", 500_000).unwrap();
+    assert_eq!(
+        observed.reads,
+        BTreeSet::from([Origin::Static, parameter(0, &[])])
+    );
+    assert_eq!(
+        observed.returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[])])
+    );
+    for (name, message) in [
+        ("unknown", "target is unknown"),
+        ("ambiguous", "target is unknown"),
+        ("dangling", "escapes its local scope"),
+        ("crossing", "requires memory effects"),
+        ("captured", "cannot capture local descriptor addresses"),
+    ] {
+        let error = infer(&package, name, 500_000).unwrap_err();
+        assert!(error.contains(message), "{name}: {error}");
+    }
+    assert!(infer(&package, "alias", 10).is_err());
+    assert!(infer(&package, "alias", 500_000).is_ok());
+}

@@ -950,3 +950,40 @@ passed (`/tmp/luna-tools-7oeea0zi/result.json`, exit 0). The existing Copy/prove
 regression passed (`/tmp/luna-tools-jbthh_rh/result.json`, exit 0). Formatting
 passed (`/tmp/luna-tools-b0h_t4i4/result.json`, exit 0), as did the diff check.
 No interpreter permission or runtime resource gate was relaxed.
+
+## Local descriptor addresses in dependency analysis
+
+Text abstract values now carry local descriptor-storage addresses separately
+from backing-character origins. Address formation and field projection identify
+a local slot; reading the slot projects its current dependency value. Pointer
+writes evaluate the destination before the replacement and replace only that
+subtree, preserving sibling fields and earlier copied views. Aliases and loop
+joins carry the address alongside text and callable information.
+
+Unknown or nonuniform targets cannot be dereferenced. Lexical scope exit rejects
+known addresses into expired local storage; summaries cannot export local
+addresses. Passing local addresses to named calls or closure invocations, or
+capturing them in closures, still needs coordinated memory-effect transfer and
+is rejected. Observational patterns cannot mutate through pointers. These checks
+prevent the standalone dependency query from silently omitting caller-memory
+updates; they do not replace Copy checking or prove backing-region liveness.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 37 tests passed (`/tmp/luna-tools-xzrfd2c1/result.json`, exit 0). New cases
+cover descriptor aliases, replacement versus saved copies, field/sibling origins,
+branch and loop joins, pointer evaluation before RHS rebinding, character reads,
+unknown/ambiguous targets, local address escape, unsupported cross-frame aliases,
+and budget failure recovery. Earlier fixture-only failures
+(`/tmp/luna-tools-4bvykun_/result.json` and
+`/tmp/luna-tools-1cy8zdxi/result.json`, exit 101) were corrected to separate `.*`
+from `=` and use `do { ... }` for expression-position statement blocks, following
+`docs/grammar/syntax`. No parser rule or semantic expectation was relaxed.
+Formatting passed (`/tmp/luna-tools-6a06gke4/result.json`, exit 0), as did the
+diff check. Runtime resource permissions remain unchanged.

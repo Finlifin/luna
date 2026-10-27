@@ -25,11 +25,13 @@ impl fmt::Display for TextRegionOrigin {
 }
 type TextFields = BTreeMap<Vec<usize>, BTreeSet<TextRegionOrigin>>;
 type CodeFields = BTreeMap<Vec<usize>, Option<CallbackKey>>;
+type DescriptorPlaces = BTreeMap<Vec<usize>, Option<(LocalId, Vec<usize>)>>;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Regions {
     text: TextFields,
     // None is an unknown or nonuniform callable, not an absent variant.
     code: CodeFields,
+    places: DescriptorPlaces,
 }
 impl Regions {
     fn new() -> Self {
@@ -52,6 +54,7 @@ impl From<TextFields> for Regions {
         Self {
             text,
             code: BTreeMap::new(),
+            places: BTreeMap::new(),
         }
     }
 }
@@ -252,6 +255,12 @@ fn charge(fuel: &mut usize, amount: usize) -> Result<(), String> {
     Ok(())
 }
 fn charge_regions(regions: &Regions, fuel: &mut usize) -> Result<(), String> {
+    for (path, place) in &regions.places {
+        charge(fuel, path.len().saturating_add(1))?;
+        if let Some((_, fields)) = place {
+            charge(fuel, fields.len().saturating_add(1))?;
+        }
+    }
     for (path, code) in &regions.code {
         charge(fuel, path.len().saturating_add(1))?;
         if let Some(CallbackKey::Named(instance)) = code {
@@ -274,7 +283,10 @@ fn charge_regions(regions: &Regions, fuel: &mut usize) -> Result<(), String> {
     }
     Ok(())
 }
-fn merge_code(target: &mut CodeFields, source: CodeFields) {
+fn merge_known<T: PartialEq>(
+    target: &mut BTreeMap<Vec<usize>, Option<T>>,
+    source: BTreeMap<Vec<usize>, Option<T>>,
+) {
     for (path, code) in source {
         target
             .entry(path)
@@ -294,7 +306,8 @@ fn merge(
     if let Some(source) = source {
         charge_regions(&source, fuel)?;
         let target = target.get_or_insert_with(Regions::new);
-        merge_code(&mut target.code, source.code);
+        merge_known(&mut target.code, source.code);
+        merge_known(&mut target.places, source.places);
         for (path, origins) in source.text {
             target.text.entry(path).or_default().extend(origins);
         }
@@ -304,6 +317,13 @@ fn merge(
 fn project(regions: Regions, prefix: &[usize], fuel: &mut usize) -> Result<Regions, String> {
     charge_regions(&regions, fuel)?;
     Ok(Regions {
+        places: regions
+            .places
+            .into_iter()
+            .filter_map(|(path, value)| {
+                path.strip_prefix(prefix).map(|rest| (rest.to_vec(), value))
+            })
+            .collect(),
         text: regions
             .text
             .into_iter()
@@ -323,6 +343,12 @@ fn project(regions: Regions, prefix: &[usize], fuel: &mut usize) -> Result<Regio
 fn prefix(regions: Regions, prefix: &[usize], fuel: &mut usize) -> Result<Regions, String> {
     charge_regions(&regions, fuel)?;
     let mut output = Regions::new();
+    for (path, value) in regions.places {
+        charge(fuel, prefix.len())?;
+        output
+            .places
+            .insert(prefix.iter().copied().chain(path).collect(), value);
+    }
     for (path, value) in regions.text {
         charge(fuel, prefix.len())?;
         output
@@ -412,6 +438,9 @@ impl Query<'_, '_> {
         // Candidate rollback cannot restore writes into an existing binding.
         // Private temporaries inside an observation block are still permitted.
         nir::visit::expression(value, self.fuel, |expr, _| {
+            if matches!(&expr.kind, K::WritePointer { .. }) {
+                return Err("text observation cannot write through a pointer".into());
+            }
             if matches!(&expr.kind, K::Assign { place, .. } if locals.contains_key(&place.root)) {
                 return Err("text observation writes an existing binding".into());
             }
@@ -1025,6 +1054,9 @@ impl Query<'_, '_> {
                 regions.code.insert(path.clone(), Some(code.clone()));
             }
             for leaf in borrowed_input_layout(Some(self.package), &ty.ty, self.fuel)? {
+                if let BorrowedInputLeaf::Pointer(leaf) = &leaf {
+                    regions.places.insert(leaf.input_fields.clone(), None);
+                }
                 if let BorrowedInputLeaf::Text(leaf) = leaf {
                     regions.insert(
                         leaf.input_fields.clone(),
@@ -1085,6 +1117,9 @@ impl Query<'_, '_> {
         let reads = self.reads.pop().unwrap();
         checked?;
         if let Some(returned) = &returned {
+            if returned.places.values().any(Option::is_some) {
+                return Err("text summary cannot export local descriptor addresses".into());
+            }
             for leaf in borrowed_input_layout(Some(self.package), result, self.fuel)? {
                 if let BorrowedInputLeaf::Text(leaf) = leaf {
                     if leaf.guards.is_empty()
@@ -1195,6 +1230,84 @@ impl Query<'_, '_> {
                     }
                 }
                 Ok(Some(regions))
+            }
+            K::AddressOf(place) => {
+                let mut place = place.as_ref();
+                let mut path = Vec::new();
+                while let K::Field { value, index, .. } | K::AnonymousField { value, index, .. } =
+                    &place.kind
+                {
+                    charge(self.fuel, 1)?;
+                    path.push(*index);
+                    place = value;
+                }
+                let K::Local(root) = place.kind else {
+                    return Err("text descriptor address requires local storage".into());
+                };
+                if !locals.contains_key(&root) {
+                    return Err("text descriptor address root is unavailable".into());
+                }
+                path.reverse();
+                empty
+                    .as_mut()
+                    .unwrap()
+                    .places
+                    .insert(vec![], Some((root, path)));
+                Ok(empty)
+            }
+            K::PointerField { pointer, index, .. }
+            | K::PointerAnonymousField { pointer, index, .. } => {
+                let Some(mut value) = self.expr(pointer, locals, returned, next)? else {
+                    return Ok(None);
+                };
+                let target = value
+                    .places
+                    .get_mut(&vec![])
+                    .and_then(Option::as_mut)
+                    .ok_or("text descriptor pointer target is unknown")?;
+                charge(self.fuel, target.1.len().saturating_add(1))?;
+                target.1.push(*index);
+                Ok(Some(value))
+            }
+            K::ReadPointer(pointer) => {
+                let Some(value) = self.expr(pointer, locals, returned, next)? else {
+                    return Ok(None);
+                };
+                let (root, path) = value
+                    .places
+                    .get(&vec![])
+                    .and_then(Option::as_ref)
+                    .ok_or("text descriptor pointer target is unknown")?;
+                let value = locals
+                    .get(root)
+                    .ok_or("text descriptor storage is no longer live")?;
+                charge_regions(value, self.fuel)?;
+                Ok(Some(project(value.clone(), path, self.fuel)?))
+            }
+            K::WritePointer { pointer, value } => {
+                let Some(pointer) = self.expr(pointer, locals, returned, next)? else {
+                    return Ok(None);
+                };
+                let (root, path) = pointer
+                    .places
+                    .get(&vec![])
+                    .and_then(Option::as_ref)
+                    .ok_or("text descriptor pointer target is unknown")?;
+                let Some(value) = self.expr(value, locals, returned, next)? else {
+                    return Ok(None);
+                };
+                let replacement = prefix(value, path, self.fuel)?;
+                let target = locals
+                    .get_mut(root)
+                    .ok_or("text descriptor storage is no longer live")?;
+                charge_regions(target, self.fuel)?;
+                target.text.retain(|fields, _| !fields.starts_with(path));
+                target.code.retain(|fields, _| !fields.starts_with(path));
+                target.places.retain(|fields, _| !fields.starts_with(path));
+                target.text.extend(replacement.text);
+                target.code.extend(replacement.code);
+                target.places.extend(replacement.places);
+                Ok(empty)
             }
             K::SymbolName(value) | K::EnumName(value) => {
                 if self.expr(value, locals, returned, next)?.is_none() {
@@ -1319,6 +1432,8 @@ impl Query<'_, '_> {
                 // optional payload. Unrelated sibling dependencies survive.
                 target.retain(|fields, _| !fields.starts_with(&path));
                 target.code.retain(|fields, _| !fields.starts_with(&path));
+                target.places.retain(|fields, _| !fields.starts_with(&path));
+                target.places.extend(replacement.places);
                 target.code.extend(replacement.code);
                 target.text.extend(replacement.text);
                 Ok(empty)
@@ -1337,6 +1452,18 @@ impl Query<'_, '_> {
                 if result.is_some() {
                     // Only outer bindings escape the lexical scope. Writes
                     // made before a return have no fallthrough successor.
+                    for value in result
+                        .iter()
+                        .chain(locals.keys().filter_map(|id| scope.get(id)))
+                    {
+                        for (root, _) in value.places.values().flatten() {
+                            if !locals.contains_key(root) {
+                                return Err(
+                                    "text descriptor address escapes its local scope".into()
+                                );
+                            }
+                        }
+                    }
                     for (id, value) in locals.iter_mut() {
                         *value = scope.remove(id).ok_or("text region scope lost a local")?;
                     }
@@ -1556,6 +1683,11 @@ impl Query<'_, '_> {
                         else {
                             return Ok(None);
                         };
+                        if value.places.values().any(Option::is_some) {
+                            return Err(
+                                "text closure input requires descriptor memory effects".into()
+                            );
+                        }
                         let callable = self.result_code(&value, &argument.value)?;
                         if scope
                             .insert(parameters[argument.parameter], value)
@@ -1647,6 +1779,12 @@ impl Query<'_, '_> {
                     let Some(value) = value else {
                         return Ok(None);
                     };
+                    if value.places.values().any(Option::is_some) {
+                        return Err(
+                            "text call with local descriptor addresses requires memory effects"
+                                .into(),
+                        );
+                    }
                     if has_defaults {
                         let binding = parameter_bindings[argument.parameter];
                         charge_regions(&value, self.fuel)?;
@@ -1672,6 +1810,7 @@ impl Query<'_, '_> {
                 let Some(result) = summary.returned else {
                     return Ok(None);
                 };
+                empty.as_mut().unwrap().places = result.places;
                 empty.as_mut().unwrap().code = result.code;
                 for (path, origins) in result.text {
                     let translated = self.translate(&origins, &actual)?;
@@ -1727,9 +1866,13 @@ impl Query<'_, '_> {
                 };
                 charge_regions(&regions, self.fuel)?;
                 let mut transported = Regions::new();
+                for (mut path, place) in regions.places {
+                    remap_error_path(&mut path, &mapping, self.fuel)?;
+                    merge_known(&mut transported.places, BTreeMap::from([(path, place)]));
+                }
                 for (mut path, code) in regions.code {
                     remap_error_path(&mut path, &mapping, self.fuel)?;
-                    merge_code(&mut transported.code, BTreeMap::from([(path, code)]));
+                    merge_known(&mut transported.code, BTreeMap::from([(path, code)]));
                 }
                 for (mut path, origins) in regions.text {
                     // Repack the destination slot, not its backing origin:
@@ -1765,6 +1908,9 @@ impl Query<'_, '_> {
                         self.expr(&local, locals, returned, next)?
                             .ok_or("text capture origin is unavailable")?
                     };
+                    if value.places.values().any(Option::is_some) {
+                        return Err("text closure cannot capture local descriptor addresses".into());
+                    }
                     let code = self.result_code(
                         &value,
                         &Expr {
