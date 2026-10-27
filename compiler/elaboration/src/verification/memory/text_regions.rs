@@ -667,7 +667,9 @@ impl Query<'_, '_> {
                 Ok(None)
             }
             K::Call {
-                callee, arguments, ..
+                callee,
+                arguments,
+                parameter_bindings,
             } => {
                 let (declaration, types) = match &callee.kind {
                     K::Function(id) => (*id, &[][..]),
@@ -677,16 +679,43 @@ impl Query<'_, '_> {
                     } => (*declaration, arguments.as_slice()),
                     _ => return Err("text region call requires a named concrete callee".into()),
                 };
+                let (body, _) = self.package.runtime_body_checked(declaration, types)?;
+                charge(
+                    self.fuel,
+                    arguments.len().saturating_add(parameter_bindings.len()),
+                )?;
+                validate_argument_plan(arguments, parameter_bindings, body.parameters.len())?;
+                let has_defaults = arguments.iter().any(|argument| argument.is_default);
+                if has_defaults && parameter_bindings != &body.parameters {
+                    return Err("text default parameter frame does not match callee".into());
+                }
                 let mut actual = BTreeMap::new();
+                let mut prepared = Locals::new();
                 for argument in arguments {
-                    if argument.is_default {
-                        return Err(
-                            "text region default argument transport is not implemented".into()
-                        );
-                    }
-                    let Some(value) = self.expr(&argument.value, locals, returned, next)? else {
+                    let value = if argument.is_default {
+                        let mut scope = self.locals_copy(&prepared)?;
+                        let caller_loops = std::mem::take(&mut self.loops);
+                        let mut default_returns = None;
+                        let result =
+                            self.expr(&argument.value, &mut scope, &mut default_returns, next);
+                        self.loops = caller_loops;
+                        let result = result?;
+                        if default_returns.is_some() {
+                            return Err(
+                                "text default argument cannot return from its caller".into()
+                            );
+                        }
+                        result
+                    } else {
+                        self.expr(&argument.value, locals, returned, next)?
+                    };
+                    let Some(value) = value else {
                         return Ok(None);
                     };
+                    if has_defaults {
+                        charge_regions(&value, self.fuel)?;
+                        prepared.insert(parameter_bindings[argument.parameter], value.clone());
+                    }
                     if actual.insert(argument.parameter, value).is_some() {
                         return Err("duplicate text region call argument".into());
                     }
@@ -779,6 +808,30 @@ impl Query<'_, '_> {
             | K::Not(value) => Ok(self
                 .expr(value, locals, returned, next)?
                 .map(|_| Regions::new())),
+            K::And(left, right) | K::Or(left, right) => {
+                if self.expr(left, locals, returned, next)?.is_none() {
+                    return Ok(None);
+                }
+                let runs_when = matches!(&expr.kind, K::And(..));
+                match constant_bool(left, 0) {
+                    Some(value) if value != runs_when => Ok(empty),
+                    Some(_) => Ok(self
+                        .expr(right, locals, returned, next)?
+                        .map(|_| Regions::new())),
+                    None => {
+                        let mut taken = self.locals_copy(locals)?;
+                        if self.expr(right, &mut taken, returned, next)?.is_some() {
+                            let bindings: Vec<_> = locals.keys().copied().collect();
+                            let mut joined = Some(self.locals_copy(locals)?);
+                            join_locals(&mut joined, &taken, &bindings, self.fuel)?;
+                            *locals = joined.unwrap();
+                        }
+                        // The short-circuited path still continues even when
+                        // evaluating the right operand would return or diverge.
+                        Ok(empty)
+                    }
+                }
+            }
             K::ScalarEqual(a, b)
             | K::ScalarLess(a, b)
             | K::ScalarLessEqual(a, b)

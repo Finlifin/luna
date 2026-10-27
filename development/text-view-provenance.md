@@ -125,7 +125,7 @@ implicit destructor footprints and are not complete access permissions. Cleanup
 composition, region liveness and invalidation checks are still required.
 
 Completed summaries are reused only inside one immutable query. Missing code,
-indirect calls, recursion, pointer transfers, default-argument transport,
+indirect calls, recursion, pointer transfers,
 computed/alternative patterns, error-row repacking and explicit program contracts remain
 rejected in this analysis. They are never converted into static or empty-origin
 evidence. The existing runtime resource checker still rejects unsupported text
@@ -244,3 +244,47 @@ New source cases exercise optional/enum payload origins, record fields,
 known boolean arm selection, string-pattern reads, guard fallback and arm-local
 writes to an outer binding. Formatting passed
 (`/tmp/luna-tools-xh31geov/result.json`, exit 0), as did the diff check.
+
+
+## Default arguments and short-circuit evaluation
+
+Named calls now validate the normalized argument plan before transporting text
+origins. Explicit arguments evaluate in source order in the caller environment.
+Defaults evaluate in declaration order in a fresh frame containing prepared
+parameter values. The frame identities must match the named callee; caller
+locals and loop targets cannot leak into default evaluation. A default's reads
+remain caller obligations, while its resulting text origins enter the actual
+argument map for summary substitution. A return inside a default is rejected by
+this analysis rather than interpreted as a return from the caller.
+
+Boolean `and` and `or` evaluate their left operand first. A known short-circuit
+result skips the right operand entirely. For an unknown condition, the continuing
+right-hand environment joins the skipped path; returns and divergence on the
+right do not erase the skipped path. Reads before a transfer remain obligations.
+These rules propagate origins and do not waive argument cleanup or lifetime
+requirements.
+
+Text-valued default expressions still fail the source P3 stability/termination
+gate. The dependent text-default test therefore starts from typed explicit calls
+and constructs a normalized default argument frame in NIR; it verifies this
+analysis, not source-level certification. A separate source case exercises an
+ordinary boolean default while transporting a text argument. Neither the P3 gate
+nor resource permission checks were relaxed.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions default_arguments_use_prepared_parameter_origins -- --exact
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All fourteen tests passed (`/tmp/luna-tools-8sz_ouz7/result.json`, exit 0).
+After adding malformed default-order/frame cases, the exact default-argument test
+passed (`/tmp/luna-tools-j_suol4r/result.json`, exit 0). Short-circuit tests cover
+skipped character reads, conditional and forced writes, and right-side returns.
+Formatting passed (`/tmp/luna-tools-0ze7izq4/result.json`, exit 0), as did the diff
+check. The earlier failed run (`/tmp/luna-tools-5hye7i8m/result.json`) exposed the
+P3 source restriction and a missing static-literal read in the test expectation;
+the implementation gates were retained and those test assumptions corrected.

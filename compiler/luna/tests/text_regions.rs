@@ -379,3 +379,127 @@ fn match_payloads_keep_origins_and_select_arms_in_order() {
         );
     }
 }
+
+#[test]
+fn default_arguments_use_prepared_parameter_origins() {
+    use nir::program::ExprKind as K;
+    // Text defaults currently fail the source P3 gate. Start with typed explicit
+    // calls and construct the normalized default frame to test this analysis
+    // independently, without claiming source-level default certification.
+    let mut package = support::compile(
+        "typealias str=.str'builtin;
+        fn choose(first:str,second:str,third:str)->str {third}
+        fn forwarded(value:str)->str {choose(value,value,value)}
+        fn literal()->str {choose(\"static\",\"unused\",\"unused\")}
+        fn shadowed(value:str,second:str)->str {choose(value,second,second)}
+        fn boolean_default(value:str,.flag:bool=true)->str {value}
+        fn source_default(value:str)->str {boolean_default(value)}",
+    );
+    let choose = package
+        .functions
+        .iter()
+        .find(|f| f.name == "choose")
+        .unwrap()
+        .clone();
+    for function in &mut package.functions {
+        nir::visit::expression_mut(&mut function.body, &mut 100_000, |expr, _| {
+            if let K::Call {
+                callee,
+                arguments,
+                parameter_bindings,
+            } = &mut expr.kind
+            {
+                if matches!(callee.kind, K::Function(id) if id == choose.declaration) {
+                    *parameter_bindings = choose.parameters.clone();
+                    for index in 1..3 {
+                        arguments[index].is_default = true;
+                        arguments[index].value.kind = K::Local(choose.parameters[index - 1]);
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+    for name in ["forwarded", "shadowed", "source_default"] {
+        assert_eq!(
+            infer(&package, name, 100_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])])
+        );
+    }
+    assert_eq!(
+        infer(&package, "literal", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([Origin::Static])
+    );
+    for wrong_frame in [false, true] {
+        let mut invalid = package.clone();
+        let function = invalid
+            .functions
+            .iter_mut()
+            .find(|f| f.name == "forwarded")
+            .unwrap();
+        nir::visit::expression_mut(&mut function.body, &mut 100_000, |expr, _| {
+            if let K::Call {
+                arguments,
+                parameter_bindings,
+                ..
+            } = &mut expr.kind
+            {
+                if wrong_frame {
+                    parameter_bindings.swap(0, 1);
+                } else {
+                    arguments.swap(1, 2);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        let error = infer(&invalid, "forwarded", 100_000).unwrap_err();
+        assert!(
+            error.contains(if wrong_frame {
+                "does not match callee"
+            } else {
+                "declaration order"
+            }),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn short_circuit_reads_and_writes_follow_only_evaluated_paths() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn skipped(value:str)->bool {false and value == \"x\"}
+        fn skipped_or(value:str)->bool {true or value == \"x\"}
+        fn read(flag:bool,value:str)->bool {flag and value == \"x\"}
+        fn written(flag:bool,a:str,b:str)->str {
+            var slot=a;flag and do {slot=b;true};slot
+        }
+        fn forced(a:str,b:str)->str {var slot=a;false or do {slot=b;true};slot}
+        fn returned(flag:bool,a:str,b:str)->str {flag and do {return b;};a}",
+    );
+    for name in ["skipped", "skipped_or"] {
+        assert!(infer(&package, name, 100_000).unwrap().reads.is_empty());
+    }
+    assert_eq!(
+        infer(&package, "read", 100_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
+    );
+    for name in ["written", "returned"] {
+        assert_eq!(
+            infer(&package, name, 100_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+        );
+    }
+    assert_eq!(
+        infer(&package, "forced", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[])])
+    );
+}
