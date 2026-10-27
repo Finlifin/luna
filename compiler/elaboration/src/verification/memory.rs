@@ -2456,6 +2456,7 @@ impl<'a> Infer<'a, '_> {
                         let candidate = CallableResult::Known(key.clone());
                         validate_code_premise(
                             self.package.ok_or("prepared code requires a package")?,
+                            self.round,
                             &expected,
                             &candidate,
                             self.fuel,
@@ -7486,6 +7487,7 @@ struct Round<'cleanup> {
     // All instances in one fixed point belong to the same immutable package.
     // This is declaration metadata, independent of code inputs or call state.
     cleanup_protocol_present: Option<bool>,
+    parameter_sorts: Option<BTreeMap<DeclarationId, nir::Sort>>,
     effects: Vec<EffectInput>,
     complete_calls: bool,
     code: Vec<PreparedCode>,
@@ -7496,6 +7498,41 @@ struct Round<'cleanup> {
     scheduled: BTreeSet<usize>,
     dependents: BTreeMap<usize, BTreeSet<usize>>,
     active: Option<usize>,
+}
+
+impl Round<'_> {
+    fn binders(
+        &mut self,
+        package: Option<&Package>,
+        parameters: &[DeclarationId],
+        fuel: &mut usize,
+    ) -> Result<Vec<nir::DeclarationParameter>, String> {
+        *fuel = fuel
+            .checked_sub(parameters.len())
+            .ok_or("memory binder budget exhausted")?;
+        if parameters.is_empty() {
+            return Ok(vec![]);
+        }
+        // A round belongs to one immutable package. Cache only completed
+        // declaration evidence, never argument-derived sorts or partial scans.
+        if self.parameter_sorts.is_none() {
+            if let Some(package) = package {
+                self.parameter_sorts = Some(package.declaration_parameter_sorts(fuel)?);
+            }
+        }
+        Ok(parameters
+            .iter()
+            .map(|id| nir::DeclarationParameter {
+                declaration: *id,
+                sort: self
+                    .parameter_sorts
+                    .as_ref()
+                    .and_then(|sorts| sorts.get(id))
+                    .copied()
+                    .unwrap_or(nir::Sort::Type),
+            })
+            .collect())
+    }
 }
 
 // Binder sorts come from declarations, never from the supplied values. A
@@ -8233,7 +8270,7 @@ fn derive_with_borrowed(
     let signature = function
         .signature
         .instantiate_parameters(
-            &memory_binders(Some(package), &function.type_parameters, fuel)?,
+            &round.binders(Some(package), &function.type_parameters, fuel)?,
             body_arguments,
         )
         .map_err(|error| error.to_string())?;
@@ -8289,6 +8326,7 @@ fn derive_with_borrowed(
 }
 fn validate_code_premise(
     package: &Package,
+    round: &mut Round,
     expected: &Term,
     value: &CallableResult,
     fuel: &mut usize,
@@ -8334,7 +8372,7 @@ fn validate_code_premise(
         let signature = function
             .signature
             .instantiate_parameters(
-                &memory_binders(Some(package), &function.type_parameters, fuel)?,
+                &round.binders(Some(package), &function.type_parameters, fuel)?,
                 body_arguments,
             )
             .map_err(|error| error.to_string())?;
@@ -8363,7 +8401,7 @@ fn infer_body(
     {
         return Err("memory summary needs a concrete runtime body".into());
     }
-    let declarations = memory_binders(package, &function.type_parameters, fuel)?;
+    let declarations = round.binders(package, &function.type_parameters, fuel)?;
     let signature = function
         .signature
         .instantiate_parameters(&declarations, arguments)
@@ -8384,6 +8422,7 @@ fn infer_body(
         let expected = owned_path_type(package, &parameter.ty, &input.fields, fuel)?;
         validate_code_premise(
             package.ok_or("memory callable premise requires a package")?,
+            round,
             &expected,
             value,
             fuel,
@@ -8445,7 +8484,7 @@ fn infer_body(
         code_field_returns: BTreeMap::new(),
     };
     infer.borrowed_callable_slots =
-        borrowed_code::validate(package, parameters, borrowed, infer.fuel)?;
+        borrowed_code::validate(package, infer.round, parameters, borrowed, infer.fuel)?;
     let result_view = infer.effect_completion(result)?;
     if let Term::Computation { effects, .. } = result.as_ref() {
         infer.effect_row = effects.clone();
@@ -9559,7 +9598,7 @@ fn infer_closure_pass(
     for argument in specialization.1 {
         bound_type(argument, fuel)?;
     }
-    let declarations = memory_binders(Some(package), specialization.0, fuel)?;
+    let declarations = round.binders(Some(package), specialization.0, fuel)?;
     let closure_ty = definition
         .ty
         .instantiate_parameters(&declarations, specialization.1)
@@ -9741,7 +9780,9 @@ fn infer_closure_pass(
             let signature = function
                 .signature
                 .instantiate_parameters(
-                    &memory_binders(Some(package), &function.type_parameters, infer.fuel)?,
+                    &infer
+                        .round
+                        .binders(Some(package), &function.type_parameters, infer.fuel)?,
                     body_arguments,
                 )
                 .map_err(|error| error.to_string())?;
@@ -9850,7 +9891,7 @@ fn infer_closure_pass(
             .get(input.parameter)
             .ok_or("closure callable parameter is missing")?;
         let expected = owned_path_type(Some(package), &parameter.ty, &input.fields, infer.fuel)?;
-        validate_code_premise(package, &expected, value, infer.fuel)?;
+        validate_code_premise(package, infer.round, &expected, value, infer.fuel)?;
         infer.environment.callees.insert(
             CallablePlace {
                 binding: bindings[input.parameter],
@@ -9893,6 +9934,75 @@ fn infer_closure_pass(
         },
         infer.capture_code_writes,
     ))
+}
+
+#[cfg(test)]
+mod binder_cache_tests {
+    use super::*;
+
+    #[test]
+    fn round_reuses_complete_sort_evidence_and_charges_each_lookup() {
+        let id = |local| DeclarationId { package: 1, local };
+        let mut package = Package::default();
+        package
+            .function_parameters
+            .push(nir::function_parameters::Declaration {
+                declaration: id(0),
+                parameters: vec![id(1), id(2)],
+                domains: vec![
+                    Term::Primitive(Primitive::Type),
+                    Term::Primitive(Primitive::Bool),
+                ],
+            });
+        let parameters = [id(1), id(2)];
+        let mut round = Round::default();
+        assert!(round.binders(Some(&package), &parameters, &mut 2).is_err());
+        assert!(round.parameter_sorts.is_none());
+        let expected = memory_binders(Some(&package), &parameters, &mut 1000).unwrap();
+        assert_eq!(expected[0].sort, nir::Sort::Type);
+        assert_eq!(expected[1].sort, nir::Sort::ComptimeValue);
+        let mut fuel = 1000;
+        assert_eq!(
+            round
+                .binders(Some(&package), &parameters, &mut fuel)
+                .unwrap(),
+            expected
+        );
+        assert!(1000 - fuel > parameters.len());
+        for _ in 0..10 {
+            let mut fuel = parameters.len();
+            assert_eq!(
+                round
+                    .binders(Some(&package), &parameters, &mut fuel)
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(fuel, 0);
+        }
+        assert!(round.binders(Some(&package), &parameters, &mut 1).is_err());
+        assert_eq!(
+            round.binders(Some(&package), &parameters, &mut 2).unwrap(),
+            expected
+        );
+
+        // A new query must see changed declaration evidence and reject invalid
+        // metadata instead of borrowing a successful cache from another query.
+        package.function_parameters[0].domains[1] = Term::Primitive(Primitive::Type);
+        let fresh = Round::default()
+            .binders(Some(&package), &parameters, &mut 1000)
+            .unwrap();
+        assert_eq!(fresh[1].sort, nir::Sort::Type);
+        package
+            .function_parameters
+            .push(package.function_parameters[0].clone());
+        let mut invalid = Round::default();
+        assert!(
+            invalid
+                .binders(Some(&package), &parameters, &mut 1000)
+                .is_err()
+        );
+        assert!(invalid.parameter_sorts.is_none());
+    }
 }
 
 #[cfg(test)]

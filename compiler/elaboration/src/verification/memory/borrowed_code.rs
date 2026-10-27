@@ -132,6 +132,7 @@ pub(super) fn charge(inputs: &BorrowedCallableInputs, fuel: &mut usize) -> Resul
 
 pub(super) fn validate(
     package: Option<&Package>,
+    round: &mut Round,
     parameters: &[nir::Parameter],
     inputs: &BorrowedCallableInputs,
     fuel: &mut usize,
@@ -160,7 +161,7 @@ pub(super) fn validate(
                 BorrowedCallableValue::Named(value) => {
                     // Private fixed-point propagation may carry bottom from a
                     // validated absent branch. The public entry rejects it.
-                    validate_code_premise(package, &projection.ty, value, fuel)?;
+                    validate_code_premise(package, round, &projection.ty, value, fuel)?;
                     value.clone()
                 }
                 BorrowedCallableValue::Absent => {
