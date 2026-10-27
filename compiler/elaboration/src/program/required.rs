@@ -1139,10 +1139,10 @@ impl Checker<'_, '_> {
             identity,
             &mut self.next_definition_identity,
         )?;
-        if definitions.is_empty() {
+        if definitions.structs.is_empty() && definitions.enums.is_empty() {
             return Ok(result);
         }
-        for batch in definitions {
+        for batch in definitions.structs {
             for definition in batch.iter() {
                 let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                 let mut fuel = before;
@@ -1167,6 +1167,24 @@ impl Checker<'_, '_> {
                 self.context
                     .admit_nominal_constructor(definition.declaration);
                 self.structs
+                    .insert(definition.declaration, definition.clone());
+            }
+        }
+        for batch in definitions.enums {
+            for definition in batch.iter() {
+                let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let copied = comptime_interpretor::EnumBuildRequest::charge_descriptor(
+                    &definition.name,
+                    &definition.groups,
+                    &definition.variants,
+                    &mut fuel,
+                );
+                self.required_steps -= (before - fuel) as u64;
+                copied.map_err(|_| error(span, "generated enum registration budget exhausted"))?;
+                self.context
+                    .admit_nominal_constructor(definition.declaration);
+                self.enums
                     .insert(definition.declaration, definition.clone());
             }
         }

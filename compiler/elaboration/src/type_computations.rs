@@ -305,6 +305,19 @@ impl<'a> Session<'a> {
     ) -> Result<Self, Error> {
         Ok(Self::new(package, context, budget)?.with_struct_builder(builder))
     }
+    pub(crate) fn with_enum_builder(
+        mut self,
+        builder: &'a dyn Fn(
+            &comptime_interpretor::EnumBuildRequest,
+            &mut u64,
+        ) -> Result<
+            comptime_interpretor::PreparedEnumBuild<'a>,
+            comptime_interpretor::Error,
+        >,
+    ) -> Self {
+        self.interpreter = self.interpreter.with_enum_builder(builder);
+        self
+    }
     pub(crate) fn with_struct_builder(
         mut self,
         builder: &'a dyn Fn(

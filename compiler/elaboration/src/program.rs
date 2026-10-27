@@ -2304,19 +2304,21 @@ impl Checker<'_, '_> {
                 ));
             }
         }
-        let owner = self
-            .package
-            .owners()
-            .find_map(|(owner, _)| {
-                (matches_declaration(self.package, &self.package_identities, owner, id))
-                    .then_some(owner)
-            })
-            .unwrap();
+        let owner = self.package.owners().find_map(|(owner, _)| {
+            (matches_declaration(self.package, &self.package_identities, owner, id))
+                .then_some(owner)
+        });
         let mut fields = Vec::new();
         for (slot, ty) in variant.fields.iter().enumerate() {
             fields.push(if let Some(value) = supplied.get(&slot) {
                 self.expr(value, Some(ty))?
             } else {
+                let owner = owner.ok_or_else(|| {
+                    error(
+                        expr.span,
+                        format!("missing required enum payload field {}", names[slot]),
+                    )
+                })?;
                 self.field_default(owner, Some(index), slot)?
                     .instantiate_parameters_in_scope(
                         &self.enums[&id]
@@ -9347,6 +9349,9 @@ impl Checker<'_, '_> {
                 }
                 H::Match(value, arms) => self.match_expr(expr, value, arms, expected, partial),
                 H::When(arms) => self.when_expr(expr, arms, expected, partial),
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "build_enum") => {
+                    self.build_enum_builtin(expr, args, expected)
+                }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "build_struct") => {
                     self.build_struct_builtin(expr, args, expected)
                 }

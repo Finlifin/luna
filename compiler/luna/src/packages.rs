@@ -560,7 +560,7 @@ impl BuilderInvocation<'_> {
         } else {
             None
         };
-        let publisher = elaboration::definitions::AllocatedStructPublisher::new(
+        let publisher = elaboration::definitions::AllocatedDefinitionPublisher::new(
             &nir,
             identities[&primary],
             nir.definition_identity_cursor
@@ -580,8 +580,11 @@ impl BuilderInvocation<'_> {
         self.value = Some(value?);
         let (definitions, next_identity) = publisher.finish();
         nir.definition_identity_cursor = next_identity;
-        for batch in definitions {
+        for batch in definitions.structs {
             nir.structs.extend(batch.iter().cloned());
+        }
+        for batch in definitions.enums {
+            nir.enums.extend(batch.iter().cloned());
         }
         let completed = nir;
         crate::protocols::type_constructors::validate(&completed, protocols)?;

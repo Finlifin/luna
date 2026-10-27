@@ -78,3 +78,39 @@ fn example() -> bool {
 默认类型参数不为任意 `T: Type` 提供字段证据，泛型函数体仍须满足其声明约束。
 字段默认代码、属性、泛型子句、方法和 impl
 的构造尚未接入；这里还不是完整 SoA 示例所需的全部 builder 能力。
+
+`EnumBuilder` 构造普通具体 enum，`new(.name = ...)` 指定诊断名称，
+`add_unit`、`add_tuple`、`add_named` 分别保留无 payload、位置 payload 和具名 payload
+的形状。`Build` 返回新鲜的 nominal Type；payload Type 的身份不会被展开替换。
+
+```flurry
+comptime fn EventType() -> Type {
+    var builder = meta.EnumBuilder.new(.name = .Event);
+    builder.add_unit(.idle);
+    builder.add_tuple(.data, [bool]);
+    builder.add_named(.record, [.flag], [bool]);
+    builder.Build()
+}
+
+typealias Event = EventType();
+
+fn read(value: Event) -> bool {
+    value match {
+        .idle => false,
+        .data(flag) => flag,
+        .record { flag: flag } => flag,
+    }
+}
+
+fn example() -> bool {
+    read(Event.data(true)) and read(Event.record { flag: true })
+}
+```
+
+重名 variant、重名 payload 字段、字段名与 Type 数量不一致，以及无限大小的
+按值递归表示都会被拒绝。struct 与 enum 生成共用声明编号和检查状态，可以将前一个
+生成类型作为后一个生成类型的 payload 或字段。显式 invocation 返回的 NIR 同时保留
+这两种生成声明。`add_group` 保存 group 符号；当前源码 API 尚未提供组路径拼接工具。
+固定宽度编码、symbol 编码、泛型参数、字段默认值和属性的 enum 构造尚未接通。
+
+可运行的 native 示例见 [host-generated-enum.fl](../../development/examples/host-generated-enum.fl)。

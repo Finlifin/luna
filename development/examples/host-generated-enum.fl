@@ -1,0 +1,27 @@
+{-
+  Generate an enum through the public builder, then construct and match all
+  payload shapes at runtime. The generated descriptor reaches native lowering.
+-}
+use primitives.Type;
+
+comptime fn EventType() -> Type {
+    var builder = meta.EnumBuilder.new(.name = .Event);
+    builder.add_unit(.idle);
+    builder.add_tuple(.data, [bool]);
+    builder.add_named(.record, [.flag], [bool]);
+    builder.Build()
+}
+
+typealias Event = EventType();
+
+fn read(value: Event) -> bool {
+    value match {
+        .idle => false,
+        .data(flag) => flag,
+        .record { flag: flag } => flag,
+    }
+}
+
+fn run() -> bool {
+    read(Event.data(true)) and read(Event.record { flag: true }) and not read(Event.idle)
+}

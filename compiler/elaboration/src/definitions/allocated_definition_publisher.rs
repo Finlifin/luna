@@ -97,6 +97,13 @@ impl StructBuildService for AllocatedDefinitionPublisher<'_> {
     ) -> Result<PreparedStructBuild<'s>, Error> {
         self.prepare_struct(request, steps)
     }
+    fn prepare_enum<'s>(
+        &'s self,
+        request: &EnumBuildRequest,
+        steps: &mut u64,
+    ) -> Result<PreparedEnumBuild<'s>, Error> {
+        AllocatedDefinitionPublisher::prepare_enum(self, request, steps)
+    }
     fn last_diagnostic(&self) -> Option<String> {
         self.last_diagnostic()
     }

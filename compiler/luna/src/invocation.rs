@@ -172,8 +172,15 @@ pub(crate) fn invoke_selected_with_publisher(
             .expect("builder installed only with publisher")
             .prepare(request, remaining)
     };
+    let enum_builder = |request: &comptime_interpretor::EnumBuildRequest, remaining: &mut u64| {
+        publisher
+            .expect("builder installed only with publisher")
+            .prepare_enum(request, remaining)
+    };
     if publisher.is_some() {
-        interpreter = interpreter.with_struct_builder(&builder);
+        interpreter = interpreter
+            .with_struct_builder(&builder)
+            .with_enum_builder(&enum_builder);
     }
     let result = if graph.is_some() {
         interpreter.invoke_instance(&roots[0], vec![])

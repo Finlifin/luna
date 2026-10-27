@@ -110,10 +110,10 @@ impl PreparedRequired {
         span: Span,
         package_identity: u64,
         next_identity: &mut u32,
-    ) -> Result<((Value, Term), Vec<std::sync::Arc<[n::Struct]>>), Error> {
+    ) -> Result<((Value, Term), crate::definitions::PublishedDefinitions), Error> {
         let package = std::mem::take(&mut self.package);
         use crate::definitions::StructBuildService;
-        let publisher = crate::definitions::AllocatedStructPublisher::new(
+        let publisher = crate::definitions::AllocatedDefinitionPublisher::new(
             &package,
             package_identity,
             *next_identity,
@@ -142,6 +142,11 @@ impl PreparedRequired {
             builder
                 .expect("configured builder service")
                 .prepare(request, fuel)
+        };
+        let build_enum = |request: &comptime_interpretor::EnumBuildRequest, fuel: &mut u64| {
+            builder
+                .expect("configured builder service")
+                .prepare_enum(request, fuel)
         };
         let mut live = BTreeMap::new();
         for (binding, value) in values {
@@ -296,7 +301,9 @@ impl PreparedRequired {
                 )
             })?;
             if builder.is_some() {
-                session = session.with_struct_builder(&build);
+                session = session
+                    .with_struct_builder(&build)
+                    .with_enum_builder(&build_enum);
             }
             let output = session
                 .enqueue_prepared(
@@ -354,7 +361,9 @@ impl PreparedRequired {
         let mut interpreter = prepared
             .map_err(|e| error(span, format!("required comptime preparation failed: {e}")))?;
         if builder.is_some() {
-            interpreter = interpreter.with_struct_builder(&build);
+            interpreter = interpreter
+                .with_struct_builder(&build)
+                .with_enum_builder(&build_enum);
         }
         interpreter = interpreter.with_budgeted_type_solver(&type_solver);
         interpreter = interpreter.with_budgeted_pointer_copy_permission(&pointer_copy);

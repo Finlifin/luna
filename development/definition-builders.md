@@ -8,6 +8,39 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Source concrete EnumBuilder
+
+The private `build_enum` builtin now lowers typed requests to BuildEnum, and public
+`meta.EnumBuilder` provides `new`, `add_unit`, `add_tuple`, `add_named`, `add_group`
+and `Build`. Required invocation (including deferred sessions) and explicit driver
+invocation configure the enum callback alongside the struct callback. Both use one
+AllocatedDefinitionPublisher; registration and output collection retain both kinds
+and the complete reserved identity frontier.
+
+Generated enum aliases participate in ordinary constructors and pattern matching.
+Named payload construction no longer requires a source HIR owner when all fields
+are supplied; missing fields on generated descriptors produce diagnostics instead
+of attempting to read nonexistent source defaults. Types retain nominal identity.
+The native example is `development/examples/host-generated-enum.fl`.
+
+This entry supports ordinary concrete enums. Encoded enums, generic clauses,
+attributes and default payload expressions remain outside this builder's request
+model. Group symbols are retained, but source group-path assembly helpers are not
+yet exposed. Legacy HIR-only StructBuildService implementations explicitly reject
+enum requests; source drivers use the shared allocated service.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p luna -p elaboration --test builder_invocations
+--test source_reflection --test enum_groups --test enum_configurations
+--test encoded_enums --test allocated_definition_publisher
+--test checked_struct_publisher`, exit 0, 90 tests
+(`/tmp/luna-tools-vwdj2f3l/result.json`). The first run exposed an unconditional
+source-owner unwrap during named payload construction; the implementation fix and
+missing/unknown/duplicate field regressions are included in the passing run.
+`python3 -B development/host_examples.py generated-enum --release-driver
+--compare-optimization`, exit 0: native O0 and O3 both produce `(bool true)`
+(`/tmp/luna-host-examples-d2firinu`). Formatting and diff checks pass.
+
 ## Enum construction in NIR and the comptime VM
 
 `ExprKind::BuildEnum` is a comptime operation with an explicit S-expression dump.
@@ -28,8 +61,7 @@ The callback borrows the VM allowance and cannot replenish it. Its result identi
 must name a returned descriptor matching the requested name, groups, shapes and
 payloads; comparison work is charged before walking those trees. The VM then uses
 transactional enum installation, so a failed host commit removes the tentative
-descriptors. This adds executable IR support, not source dispatch: the frontend
-builtin and public meta.EnumBuilder still need connection.
+descriptors. The source frontend and public builder now connect to this executable IR path.
 
 Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
 test --release -p comptime_interpretor -p nir -p elaboration -p luna --lib
@@ -61,8 +93,7 @@ Both assembly and invocation work retain their consumed budgets on rejection.
 Existing checked/allocated struct publishers are adapters over this common path.
 The struct-only adapter cannot request enums, so its legacy result remains a list
 of struct batches. The mixed service returns `PublishedDefinitions` plus the final
-frontier. This is host API integration; source enum builtin dispatch and the public
-meta.EnumBuilder still need to be connected.
+frontier. The source enum builtin and public meta.EnumBuilder now use this host API.
 
 Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
 test --release -p elaboration -p luna --test allocated_definition_publisher
@@ -92,10 +123,8 @@ including forward payload references; malformed formation and infinite by-value
 storage reject the entire batch. Pointer recursion stays legal. Descriptor kinds
 and declaration identities are preserved when extracting committed additions.
 
-This completes the checked concrete enum publication service. Source EnumBuilder
-syntax/library construction and source dispatch still need connection; shared
-identity allocation is now available above. Generic/encoded enum generation needs
-additional contracts.
+This completes the checked concrete enum publication service. Source EnumBuilder construction and dispatch are now connected as described
+above. Generic/encoded enum generation needs additional contracts.
 
 Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
 test --release -p elaboration --test checked_definition_publisher
@@ -181,7 +210,7 @@ This boundary accepts ordinary concrete enums in a comptime declaration VM.
 It rejects encoded/intrinsic and generic enums, abstract invocation scope and
 runtime/IIR execution. The caller must reserve identities and perform ordinary
 semantic/representation checking first; VM admission is not a finite-layout proof.
-The source EnumBuilder and source dispatch are still to be connected. Existing encoded source enums remain supported through initial
+Source EnumBuilder and source dispatch are connected through the checked service above. Existing encoded source enums remain supported through initial
 package construction.
 
 Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --

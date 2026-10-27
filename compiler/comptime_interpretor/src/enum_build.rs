@@ -11,6 +11,15 @@ pub struct EnumBuildRequest {
     pub source: SourceRange,
 }
 impl EnumBuildRequest {
+    /// Charge a borrowed descriptor before copying it into another compiler world.
+    pub fn charge_descriptor(
+        name: &str,
+        groups: &[String],
+        variants: &[nir::program::Variant],
+        fuel: &mut usize,
+    ) -> Result<(), ()> {
+        charge_enum_parts(name, groups, variants, fuel)
+    }
     /// Charge descriptor assembly before cloning names or nested payload types.
     pub fn charge_assembly(&self, fuel: &mut usize) -> Result<(), ()> {
         charge_enum_parts(&self.name, &self.groups, &self.variants, fuel)

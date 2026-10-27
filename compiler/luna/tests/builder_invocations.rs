@@ -1521,3 +1521,169 @@ fn body_generated_types_are_available_during_quote_purity_validation() {
         1
     );
 }
+
+#[test]
+fn public_enum_builder_publishes_payload_shapes_and_runtime_matching() {
+    let fixture = Fixture::new("
+        comptime fn EventType() -> .Type'builtin {
+            var builder = meta.EnumBuilder.new(.name = .GeneratedEvent);
+            builder.add_unit(.idle);
+            builder.add_tuple(.data, [bool]);
+            builder.add_named(.record, [.flag], [bool]);
+            builder.Build()
+        }
+        typealias Event = EventType();
+        fn read(value: Event) -> bool {
+            value match {.idle => false, .data(flag) => flag, .record {flag: flag} => flag}
+        }
+        fn run() -> bool {read(Event.data(true)) and read(Event.record {flag: true}) and not read(Event.idle)}
+        comptime fn ready() -> bool {true}
+    ");
+    let (Artifact::Nir(package), _, _) = fixture.invoke_meta("ready").unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let generated = package
+        .enums
+        .iter()
+        .find(|item| item.name == "GeneratedEvent")
+        .unwrap();
+    assert_eq!(generated.declaration.package, 900);
+    assert_eq!(generated.variants.len(), 3);
+    assert_eq!(
+        generated.variants[0].shape,
+        nir::program::VariantShape::Unit
+    );
+    assert_eq!(
+        generated.variants[1].shape,
+        nir::program::VariantShape::Tuple
+    );
+    assert_eq!(
+        generated.variants[2].shape,
+        nir::program::VariantShape::Named(vec!["flag".into()])
+    );
+}
+
+#[test]
+fn explicit_invocation_returns_generated_enum_and_mixed_structs() {
+    let fixture = Fixture::new(
+        "
+        comptime fn Generate() -> .Type'builtin {
+            var inner = meta.StructBuilder.new(.name = .Inner);
+            inner.add_field(.flag, bool);
+            let payload = inner.Build();
+            var builder = meta.EnumBuilder.new(.name = .GeneratedChoice);
+            builder.add_tuple(.some, [payload]);
+            builder.add_unit(.none);
+            let choice = builder.Build();
+            var outer = meta.StructBuilder.new(.name = .Outer);
+            outer.add_field(.choice, choice);
+            outer.Build()
+        }
+    ",
+    );
+    let (Artifact::Nir(package), Value::Type(result), _) = fixture.invoke_meta("Generate").unwrap()
+    else {
+        panic!()
+    };
+    let inner = package
+        .structs
+        .iter()
+        .find(|item| item.name == "Inner")
+        .unwrap();
+    let choice = package
+        .enums
+        .iter()
+        .find(|item| item.name == "GeneratedChoice")
+        .unwrap();
+    let outer = package
+        .structs
+        .iter()
+        .find(|item| item.name == "Outer")
+        .unwrap();
+    assert_ne!(inner.declaration, choice.declaration);
+    assert_ne!(outer.declaration, choice.declaration);
+    assert_eq!(
+        choice.variants[0].fields,
+        [nir::Term::Nominal {
+            declaration: inner.declaration,
+            arguments: vec![]
+        }]
+    );
+    assert_eq!(
+        outer.fields[0].1,
+        nir::Term::Nominal {
+            declaration: choice.declaration,
+            arguments: vec![]
+        }
+    );
+    assert_eq!(
+        result,
+        nir::Term::Nominal {
+            declaration: outer.declaration,
+            arguments: vec![]
+        }
+    );
+}
+
+#[test]
+fn enum_builder_rejects_malformed_drafts_and_runtime_use() {
+    for body in [
+        "builder.add_unit(.same); builder.add_unit(.same);",
+        "builder.add_named(.item, [.flag], []);",
+        "builder.add_named(.item, [.flag, .flag], [bool, bool]);",
+        "builder.add_group(.same); builder.add_unit(.same);",
+    ] {
+        let fixture = Fixture::new(&format!(
+            "comptime fn Generate() -> .Type'builtin {{var builder = meta.EnumBuilder.new(); {body} builder.Build()}}"
+        ));
+        assert!(fixture.invoke_meta("Generate").is_err(), "accepted {body}");
+    }
+    let fixture = Fixture::new(
+        "fn bad() -> .Type'builtin {meta.EnumBuilder.new().Build()} comptime fn ready() -> bool {true}",
+    );
+    assert!(fixture.invoke_meta("ready").is_err());
+}
+
+#[test]
+fn enum_builtin_preserves_early_return_and_requires_comptime() {
+    let fixture = Fixture::new(&format!("{PREFIX}
+        comptime fn early() -> bool {{.build_enum'builtin(do {{return true;}}, [], [], [], [], []); false}}
+    "));
+    assert_eq!(
+        fixture.invoke("early", &mut 100_000, 100_000).unwrap().1,
+        Value::Bool(true)
+    );
+    for source in [
+        "fn bad() -> Type {.build_enum'builtin(.Generated, [], [], [], [], [])}",
+        "comptime fn Bad() -> Type {.build_enum'builtin(.Generated, [])}",
+        "comptime fn Bad() -> Type {.build_enum'builtin(.Generated, [], [.item], [.unit], [[]], [[true]])}",
+    ] {
+        let fixture = Fixture::new(&format!(
+            "{PREFIX}{source} comptime fn ready() -> bool {{true}}"
+        ));
+        assert!(
+            fixture.invoke("ready", &mut 100_000, 100_000).is_err(),
+            "accepted {source}"
+        );
+    }
+}
+
+#[test]
+fn generated_enum_missing_and_unknown_fields_are_diagnostics() {
+    let prefix = "comptime fn Make() -> .Type'builtin {var builder = meta.EnumBuilder.new(); builder.add_named(.record, [.flag], [bool]); builder.Build()} typealias Event = Make();";
+    for body in [
+        "Event.record {}",
+        "Event.record {other:true}",
+        "Event.record {flag:true, flag:false}",
+    ] {
+        let fixture = Fixture::new(&format!(
+            "{prefix} fn bad() -> Event {{{body}}} comptime fn ready() -> bool {{true}}"
+        ));
+        let failure = fixture.invoke_meta("ready").err().unwrap();
+        assert!(failure.contains("field"), "{failure}");
+    }
+}
