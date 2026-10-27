@@ -37,6 +37,7 @@ pub(in crate::program) fn input_group<'h>(
     arguments: &[Arg<'h>],
     parameters: &[FnParam<'h>],
     locals: &[&'h Expr<'h>],
+    computations: &[&'h Expr<'h>],
     exported: &BTreeSet<usize>,
     definitions: &HashMap<DefId, DefId>,
     span: rustc_span::Span,
@@ -128,6 +129,9 @@ pub(in crate::program) fn input_group<'h>(
                 span: value.span,
             }));
         }
+        for computation in computations {
+            statements.push(rebind.expr(computation, 0)?.clone());
+        }
         for (offset, original) in locals.iter().enumerate() {
             let E::Let(binding) = original.kind else {
                 unreachable!()
@@ -135,8 +139,6 @@ pub(in crate::program) fn input_group<'h>(
             let hir::PatternKind::Binding(_, name, _) = binding.pattern.kind else {
                 unreachable!()
             };
-            let statement = rebind.expr(original, 0)?;
-            statements.push(statement.clone());
             let binding_id = rebind.bindings[&binding.pattern.hir_id];
             let index = parameters.len() + offset;
             let synthetic_index = u32::try_from(index)

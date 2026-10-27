@@ -53,7 +53,7 @@ fn generated_implementations_still_check_members_and_overlap() {
 fn non_strategy_selections_and_generation_statements_are_not_silently_accepted() {
     for source in [
         "trait Flag {} fn enabled() {} struct Record {} derive Flag.use(enabled) for Record;",
-        "trait Flag {} derive fn enabled for Flag {var value = true;} struct Record {} derive Flag.use(enabled) for Record;",
+        "trait Flag {} derive fn enabled for Flag {return;} struct Record {} derive Flag.use(enabled) for Record;",
         "trait Flag {} derive fn enabled(flag:bool) for Flag {} struct Record {} derive Flag.use(enabled) for Record;",
     ] {
         let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
@@ -515,18 +515,15 @@ fn zero_input_strategy_locals_supply_associated_types_and_attributes() {
 }
 
 #[test]
-fn unused_strategy_locals_are_checked_without_accepting_mutation() {
+fn strategy_computations_preserve_type_mutability_and_phase_checks() {
     for (body, expected) in [
         ("let unused:bool=();", "type mismatch"),
         ("let unused=runtime_value();", "runtime function"),
         (
-            "var state=true;",
-            "mutable or destructuring strategy bindings",
-        ),
-        (
             "let state=true;state=false;",
-            "strategy statement execution",
+            "cannot reassign a let binding",
         ),
+        ("runtime_value();", "runtime function"),
     ] {
         let source = format!(
             "trait Flag {{fn flag()->bool;}} fn runtime_value()->bool {{true}} derive fn configured for Flag {{{body} fn flag()->bool {{true}}}} struct Subject {{}} derive Flag.use(configured) for Subject;"
@@ -556,4 +553,50 @@ fn captured_local_annotations_keep_transitive_type_dependencies() {
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
+}
+
+#[test]
+fn strategy_computation_statements_run_in_source_order() {
+    let package = compile_with_strategy_bool_splice(
+        "trait Flag {fn flag()->bool;} comptime fn checkpoint() {()} derive fn configured(input:bool) for Flag {var state=false; checkpoint(); if input {state=true;} let before=state; state=not state; let after=state; fn flag()->bool {before and not after}} struct First {} struct Second {} derive Flag.use(configured(true)) for First; derive Flag.use(configured(false)) for Second; fn run()->bool {First.as(Flag).flag() and not Second.as(Flag).flag()}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn strategy_loops_compute_captured_values_without_runtime_looping() {
+    let package = compile_with_strategy_bool_splice(
+        "trait Flag {fn flag()->bool;} derive fn configured for Flag {var done=false; while not done {done=true;} let result=done; fn flag()->bool {result}} struct Subject {} derive Flag.use(configured) for Subject; fn run()->bool {Subject.as(Flag).flag()}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn statement_only_strategies_still_execute_comptime_checks() {
+    let source = "trait Flag {} fn runtime_value()->bool {true} derive fn configured for Flag {runtime_value();} struct Subject {} derive Flag.use(configured) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("runtime function"), "{error}");
+}
+
+#[test]
+fn unused_strategy_call_results_do_not_skip_invocation_failures() {
+    let source = "trait Flag {} comptime fn fail() {while true {}} derive fn configured for Flag {fail();} struct Subject {} derive Flag.use(configured) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("budget") || error.contains("step limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn conditional_member_emission_is_not_published_unconditionally() {
+    let source = "trait Flag {fn flag()->bool;} derive fn configured for Flag {if false {fn flag()->bool {true}}} struct Subject {} derive Flag.use(configured) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("nested generation definitions"), "{error}");
 }

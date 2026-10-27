@@ -685,3 +685,40 @@ git diff --check
 - Member cloning: 9 passed, `/tmp/luna-tools-k4dltpl4/result.json`, including
   exact per-expansion capture identities and failed-budget recovery.
 - Formatting: `/tmp/luna-tools-dp9jn1sh/result.json`; diff check passed.
+
+## Ordered strategy computation statements
+
+Generation groups now retain computation statements in source order rather than
+collecting only immutable local initializers. Initialized single-name `var`
+bindings, assignments, calls and supported branch/loop forms enter the existing
+comptime expression checker and interpreter. Captured results are materialized
+after the generation computation finishes; temporary state stays inside that
+invocation. Independent derive requests receive independent state.
+
+A strategy containing computations but no input or local capture still gets an
+evaluation group, so unused calls cannot bypass phase checks. Assignment to an
+immutable binding uses the ordinary diagnostic. Nested definition emission,
+destructuring/guarded outer bindings, early strategy returns and generic request
+computation environments remain unsupported; this is execution of computations,
+not yet control-flow-dependent publication of generated declarations.
+
+Checks in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Final derive suite: 45 passed, exit 0,
+  `/tmp/luna-tools-wibjw7c3/result.json`. Coverage includes ordered mutations,
+  per-request isolation, while loops, computation-only strategies, immutable
+  assignment rejection, execution-budget failure for unused call results, and
+  rejection of conditional member emission before publication.
+- Initial runs exposed fixture errors: `()` as a type, the nonexistent `loop`
+  source keyword, a standalone fixture without a `void` binding, and an expected
+  diagnostic substring. Those fixtures were corrected, not compiler semantics.
+- The initial division-by-zero fixture was rejected by safety verification,
+  so it did not establish interpreter execution. The final bounded-loop fixture
+  explicitly checks exhaustion of the comptime execution budget instead.
+- Formatting: exit 0, `/tmp/luna-tools-k1l4lh29/result.json`; diff check passed.

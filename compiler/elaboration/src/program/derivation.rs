@@ -1,4 +1,4 @@
-//! Instantiate explicit strategies with checked immutable generation values.
+//! Instantiate explicit strategies with checked generation computations.
 use super::{Error, error, function_templates};
 use hir::common::DefId;
 use hir::definitions::DefinitionBatch;
@@ -23,6 +23,7 @@ fn charge(fuel: &mut usize, span: rustc_span::Span) -> Result<(), Error> {
 struct StrategyBody<'h> {
     members: Vec<OwnerId>,
     locals: Vec<&'h hir::Expr<'h>>,
+    computations: Vec<&'h hir::Expr<'h>>,
 }
 
 fn members<'h>(
@@ -48,6 +49,7 @@ fn members<'h>(
     };
     let mut result = Vec::new();
     let mut locals = Vec::new();
+    let mut computations = Vec::new();
     for statement in block.stmts.iter().chain(block.expr.into_iter()) {
         charge(fuel, statement.span)?;
         let statement = if let E::Semi(value) = statement.kind {
@@ -57,8 +59,7 @@ fn members<'h>(
         };
         match statement.kind {
             E::Let(binding) => {
-                if binding.mutable
-                    || binding.guard.is_some()
+                if binding.guard.is_some()
                     || binding.otherwise.is_some()
                     || binding.init.is_none()
                     || !matches!(
@@ -68,10 +69,11 @@ fn members<'h>(
                 {
                     return Err(unsupported(
                         statement.span,
-                        "mutable or destructuring strategy bindings",
+                        "destructuring or guarded strategy bindings",
                     ));
                 }
                 locals.push(statement);
+                computations.push(statement);
             }
             E::Item(owner)
                 if matches!(
@@ -82,6 +84,18 @@ fn members<'h>(
                 result.push(owner)
             }
             E::Unit => {}
+            E::Application(..)
+            | E::ExtendedApplication(..)
+            | E::Assign(..)
+            | E::AssignOp(..)
+            | E::If(..)
+            | E::Block(..)
+            | E::Loop(..)
+            | E::Match(..)
+            | E::When(..)
+            | E::For { .. }
+            | E::InlineFor { .. }
+            | E::InlineIf { .. } => computations.push(statement),
             _ => {
                 return Err(unsupported(statement.span, "strategy statement execution"));
             }
@@ -90,6 +104,7 @@ fn members<'h>(
     Ok(StrategyBody {
         members: result,
         locals,
+        computations,
     })
 }
 
@@ -139,7 +154,7 @@ pub(super) fn expand<'h>(
                     "derivation strategy input count mismatch",
                 ));
             }
-            if (!arguments.is_empty() || !strategies[&strategy].locals.is_empty())
+            if (!arguments.is_empty() || !strategies[&strategy].computations.is_empty())
                 && !request.clause_params.is_empty()
             {
                 return Err(unsupported(
@@ -246,7 +261,8 @@ pub(super) fn expand<'h>(
         let mut capture_slots = HashMap::new();
         let mut inputs = Vec::new();
         let local_bindings = &strategies[&strategy].locals;
-        let group = if arguments.is_empty() && local_bindings.is_empty() {
+        let computations = &strategies[&strategy].computations;
+        let group = if arguments.is_empty() && computations.is_empty() {
             None
         } else {
             let owner = batch.reserve().map_err(|e| error(span, e.to_string()))?;
@@ -393,6 +409,7 @@ pub(super) fn expand<'h>(
                     arguments,
                     generator.parameters,
                     local_bindings,
+                    computations,
                     &exported,
                     &mapping,
                     span,
