@@ -1109,3 +1109,47 @@ insertion fixed them. The next run (`/tmp/luna-tools-9t4cf6em/result.json`, exit
 101) passed closure cases but reproduced the indirect observation-write hole.
 The final run verifies the scoped read-only fix. Recursive pointer-effect calls
 still need relational fixed points; this stage does not certify text liveness.
+
+## Reachable closure storage footprint
+
+Closure invocation now starts from the known descriptor addresses in captures
+and evaluated inputs, then follows stored addresses transitively. Each reachable
+root is visited once, including cycles and shared targets. Only these roots get
+fresh frame identities and writeback mappings; unrelated lexical locals and
+outer frames remain in place. Escape checks require a returned frame root to
+belong to that invocation's mapping.
+
+The work regression compares one and 32 invocations with zero and 128 unrelated
+text locals. Initial body-scan work may grow with source size, but the extra
+invocation cost must not grow proportionally with unused caller storage. This
+measures query fuel consumption, not wall-clock compiler or runtime performance.
+Functional cases cover pointer-to-pointer reads/writes, a self-referential record,
+unchanged unrelated slots and budget failure recovery.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions closure_storage_work_scales_with_reachable_slots -- --nocapture
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 44 tests passed (`/tmp/luna-tools-yp2i7kpi/result.json`, exit 0). The measured
+work regression passed (`/tmp/luna-tools-gb1cxpml/result.json`, exit 0); its
+pre-change measurements are in `/tmp/luna-tools-jm2qyqun/result.json` (exit 0).
+
+| Unrelated locals | Calls | Before (fuel units) | After (fuel units) |
+| --- | --- | --- | --- |
+| 0 | 1 | 199 | 169 |
+| 0 | 32 | 8941 | 2525 |
+| 128 | 1 | 2887 | 1449 |
+| 128 | 32 | 55277 | 3805 |
+
+After subtracting initial work, the extra 31 calls cost 2356 units with either
+caller size. The larger 32-call query uses about 93% fewer units. These are query
+work measurements, not wall-clock speedups. The regression bounds the extra
+invocation overhead without pinning every internal accounting operation.
+Formatting passed (`/tmp/luna-tools-xc59l4tc/result.json`, exit 0), as did the
+diff check. Recursive pointer-effect fixed points and text lifetime proofs remain
+unimplemented; the optimization does not change those restrictions.

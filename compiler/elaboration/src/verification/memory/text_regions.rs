@@ -1931,18 +1931,32 @@ impl Query<'_, '_> {
                     }
                     let mut storage_map = BTreeMap::new();
                     let mut storage_restore = BTreeMap::new();
-                    let caller = self.locals_copy(locals)?;
-                    scope.frames = caller.frames;
-                    for (binding, value) in caller.bindings {
+                    // Start at pointer-bearing inputs, then follow descriptor
+                    // addresses transitively. Unrelated caller locals are not
+                    // part of the closure's storage footprint.
+                    let mut reachable = VecDeque::new();
+                    for value in scope.values() {
+                        charge_regions(value, self.fuel)?;
+                        reachable.extend(value.places.values().flatten().map(|(root, _)| *root));
+                    }
+                    while let Some(source) = reachable.pop_front() {
+                        charge(self.fuel, 1)?;
+                        if storage_map.contains_key(&source) {
+                            continue;
+                        }
+                        let value = locals
+                            .get_storage(&source)
+                            .ok_or("text closure descriptor storage is no longer live")?;
+                        charge_regions(value, self.fuel)?;
                         let id = self.next_storage_frame;
                         self.next_storage_frame = id
                             .checked_add(1)
                             .ok_or("text storage frame identity exhausted")?;
-                        let source = DescriptorRoot::Local(binding);
                         let target = DescriptorRoot::Frame(id);
                         storage_map.insert(source, target);
                         storage_restore.insert(target, source);
-                        scope.frames.insert(id, value);
+                        reachable.extend(value.places.values().flatten().map(|(root, _)| *root));
+                        scope.frames.insert(id, value.clone());
                     }
                     for value in scope.bindings.values_mut().chain(scope.frames.values_mut()) {
                         charge_regions(value, self.fuel)?;
@@ -2005,7 +2019,7 @@ impl Query<'_, '_> {
                         for value in std::iter::once(&mut *value).chain(exit.frames.values_mut()) {
                             charge_regions(value, self.fuel)?;
                             for (root, _) in value.places.values().flatten() {
-                                if !matches!(root, DescriptorRoot::Frame(_)) {
+                                if !storage_restore.contains_key(root) {
                                     return Err(
                                         "text descriptor address escapes its closure frame".into(),
                                     );
@@ -2014,18 +2028,17 @@ impl Query<'_, '_> {
                             remap_descriptor_roots(value, &storage_restore);
                         }
                         for (target, source) in &storage_restore {
-                            let (DescriptorRoot::Frame(id), DescriptorRoot::Local(binding)) =
-                                (target, source)
-                            else {
+                            let DescriptorRoot::Frame(id) = target else {
                                 unreachable!()
                             };
                             let value = exit
                                 .frames
                                 .remove(id)
                                 .ok_or("text closure lost caller storage")?;
-                            locals.insert(*binding, value);
+                            *locals
+                                .get_storage_mut(source)
+                                .ok_or("text closure caller storage is no longer live")? = value;
                         }
-                        locals.frames = exit.frames;
                     }
                     return Ok(closure_returns);
                 }

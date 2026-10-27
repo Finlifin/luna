@@ -2091,3 +2091,70 @@ fn pattern_observations_reject_indirect_descriptor_writes() {
         "{error}"
     );
 }
+
+#[test]
+fn closure_storage_work_scales_with_reachable_slots() {
+    fn work(unrelated: usize, calls: usize) -> usize {
+        let mut source = String::from("typealias str=.str'builtin;fn entry(value:str)->str {");
+        for index in 0..unrelated {
+            source.push_str(&format!("let spare{index}=\"unused\";"));
+        }
+        source.push_str("let pointer=value.ref;let action=||pointer.*;");
+        for index in 0..calls {
+            source.push_str(&format!("let result{index}=action();"));
+        }
+        source.push_str("value}");
+        let package = support::compile(&source);
+        let declaration = package
+            .functions
+            .iter()
+            .find(|f| f.name == "entry")
+            .unwrap()
+            .declaration;
+        let mut fuel = 2_000_000;
+        let summary = memory::infer_text_regions(&package, declaration, &[], &mut fuel).unwrap();
+        assert_eq!(
+            summary.returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])])
+        );
+        2_000_000 - fuel
+    }
+    let small_once = work(0, 1);
+    let small_many = work(0, 32);
+    let large_once = work(128, 1);
+    let large_many = work(128, 32);
+    println!(
+        "closure storage work: small_once={small_once}, small_many={small_many}, large_once={large_once}, large_many={large_many}"
+    );
+    // Unused locals may add initial scan cost, but must not multiply the cost
+    // of each additional invocation. Leave room for accounting refinements.
+    assert!(large_many - large_once <= small_many - small_once + 2048);
+}
+
+#[test]
+fn closure_storage_reachability_preserves_transitive_aliases_and_cycles() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        struct Node {text:str,next:?*Node}
+        fn chain(value:str)->str {let pointer=value.ref;let indirect=pointer.ref;let action=||indirect.*.*;action()}
+        fn replace(first:str,second:str)->str {var value=first;let pointer=value.ref;let indirect=pointer.ref;let action=|| {indirect.*.* = second;};action();value}
+        fn unrelated(first:str,second:str)->str {let untouched=first;var value=first;let pointer=value.ref;let action=|| {pointer.* = second;};action();untouched}
+        fn cycle(value:str)->str {
+            var node=Node {text:value,next:null};node.next=node.ref;let pointer=node.ref;
+            let action=||pointer.*.text;action()
+        }",
+    );
+    for (name, index) in [("chain", 0), ("replace", 1), ("unrelated", 0)] {
+        assert_eq!(
+            infer(&package, name, 500_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(index, &[])]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "cycle", 500_000).unwrap().returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[])])
+    );
+    assert!(infer(&package, "cycle", 10).is_err());
+    assert!(infer(&package, "cycle", 500_000).is_ok());
+}
