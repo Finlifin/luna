@@ -1056,6 +1056,24 @@ pure comptime fn typed_code() -> <|-bool> {
 
 例如 `let {word: Word} = Description {word: .u8'builtin};` 和 `let Word = Description {word: .u8'builtin}.word;` 都能交付已知 Type，前提是 Description 已声明相应 Type 字段。字段对应保留记录声明身份与字段索引，匿名记录还核对字段名。取得投影的类型信息不会跳过构造执行：其它字段的计算和契约仍在实际生成时执行并可能失败。
 
+完整已知的局部 schema 可以先保存为对象，再经别名和嵌套字段取得 Type：
+
+```flurry
+struct Description { word: Type, flag: Type }
+
+comptime fn described_code() -> <|-bool> {
+    let schema = Description { word: u8, flag: bool };
+    let alias = schema;
+    let Word = alias.word;
+    let Flag = alias.flag;
+    let value: Word = 17;
+    let enabled: Flag = true;
+    '(enabled and value == 17)
+}
+```
+
+这里取得的是已知结构证据，不是调用 schema 工厂。`let` 对象的字段仍可能被修改；当前定义检查在调用、写入或取址后保守丢弃这类结构快照，不能用旧字段值证明后续类型。独立取得的不可变 Type 绑定仍保留其身份。尚未建立精确的位置与别名失效分析，因此不能据此推断所有无关调用都能保留 schema 信息。
+
 这里保留的是语法检查已经得到的类型，不调用未知 Type 生产函数，也不猜测可变 Type 绑定经过控制流后的值。当前这些未知输入仍不能充当要求完成 Type 的局部注解。normal form 头保持原样；`Identity<Word>` 不因函数体返回 Word 而与 Word 建立相等关系。
 
 已知的不可变 `meta.List<Type>` 也能沿局部绑定和别名传递，作为 Tuple 的展开输入或完整收集输入。类型列表保留为一个输入，不把 Tuple 改成结构元组身份：

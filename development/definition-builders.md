@@ -10,6 +10,30 @@ it is not a whole-compiler or historical-version speedup claim.
 
 ## CMTT and builder integration boundary
 
+Known local schema evidence now survives immutable aliases and nested record
+projections. The previous `let schema = Types {word: u8}; let alias = schema;
+let Word = alias.word;` definition check lost the completed Type. It now retains
+statically known aggregate terms without invoking factories or unfolding heads.
+Calls, writes and address escape conservatively invalidate these aggregate
+snapshots; address checking invalidates before selecting the actual local place.
+Already extracted immutable Type identities remain available. This does not
+resolve the dynamically built local Type quote described below.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p luna --test cmtt --test cmtt_methods --test builder_invocations`,
+exit 0, 720 tests (`/tmp/luna-tools-kknwhod8/result.json`). Cases cover nested
+schemas, alias projection, direct/conditional writes, address escape, calls,
+nonexecuted unknown factories, and field-pointer writes retaining extracted Type
+identity. Targeted Rust formatting and `git diff --check` pass.
+
+A separate resource limitation surfaced during validation: copying a whole
+`struct Types {word: Type}` through a pointer fails even with a bound Copy impl
+for Types because Type itself lacks Copy-component evidence
+(`/tmp/luna-tools-komi1lr1/result.json`). The successful storage regression takes
+a boolean field's address directly; it does not establish whole-schema pointer
+transfer support. Resource semantics need separate investigation before changing
+that check.
+
 A code generator can construct a StructBuilder, publish its Type, reflect the
 result and choose runtime code using the reflected data. The source regression
 `code_generator_reflects_its_published_struct_to_select_runtime_code` passes

@@ -3014,6 +3014,7 @@ impl Checker<'_, '_> {
     ) -> Result<(), Error> {
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = fuel;
+        let mut may_change_schema = false;
         let result = (|| {
             let free = nir::free_bindings::collect(value, &mut fuel)?;
             if free.iter().any(|id| !self.generator_data.contains_key(id)) {
@@ -3024,6 +3025,10 @@ impl Checker<'_, '_> {
             let mut roots = vec![(value, true)];
             while let Some((root, comptime)) = roots.pop() {
                 nir::visit::expression_pruned(root, &mut fuel, |expr, _| {
+                    may_change_schema |= matches!(
+                        expr.kind,
+                        K::AddressOf(_) | K::Assign { .. } | K::Call { .. }
+                    );
                     if let K::Call {
                         callee, arguments, ..
                     } = &expr.kind
@@ -3061,7 +3066,36 @@ impl Checker<'_, '_> {
             Ok(())
         })();
         self.required_steps -= (before - fuel) as u64;
+        if self.checking_code_generator && may_change_schema {
+            self.forget_generator_schema_evidence(span)?;
+        }
         result.map_err(|message| error(span, message))
+    }
+
+    pub(in crate::program) fn forget_generator_schema_evidence(
+        &mut self,
+        span: Span,
+    ) -> Result<(), Error> {
+        // A let binding cannot be rebound, but its fields may still change.
+        // Until the abstract interpreter tracks places and aliases precisely,
+        // discard structural snapshots at calls, writes and address escape.
+        self.required_steps = self
+            .required_steps
+            .checked_sub(self.generator_data.len() as u64)
+            .ok_or_else(|| error(span, "generator schema invalidation budget exhausted"))?;
+        for value in self.generator_data.values_mut() {
+            if value.as_ref().is_some_and(|value| {
+                matches!(
+                    &value.kind,
+                    K::ComptimeValue(
+                        Term::RecordValue(_) | Term::TupleValue(_) | Term::NominalValue { .. }
+                    )
+                )
+            }) {
+                *value = None;
+            }
+        }
+        Ok(())
     }
 
     fn bind_live_generator_pattern(
@@ -3457,9 +3491,6 @@ impl Checker<'_, '_> {
         value: &n::Expr,
         span: Span,
     ) -> Result<Option<n::Expr>, Error> {
-        if value.ty != p(P::Type) && !self.is_type_list_type(&value.ty) {
-            return Ok(None);
-        }
         let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut budget = comptime_runtime::Budget {
             steps: before,
@@ -3472,6 +3503,13 @@ impl Checker<'_, '_> {
             Some(Term::TypeListValue(items)) if self.is_type_list_type(&value.ty) => {
                 K::TypeListValue(items)
             }
+            // An immutable schema may retain its checked structural value so
+            // later field projections and aliases can recover contained Types.
+            // known_normal_input never calls a factory or unfolds a head;
+            // the original initializer still executes during invocation.
+            Some(
+                known @ (Term::RecordValue(_) | Term::TupleValue(_) | Term::NominalValue { .. }),
+            ) => K::ComptimeValue(known),
             _ => return Ok(None),
         };
         Ok(Some(n::Expr {

@@ -607,6 +607,11 @@ impl Checker<'_, '_> {
         })();
         self.in_required_comptime = mode;
         self.generator_data = previous;
+        if self.checking_code_generator {
+            // Restoring a symbolic update frame must not resurrect schema
+            // snapshots invalidated by its calls or writes.
+            self.forget_generator_schema_evidence(value.span)?;
+        }
         // Publish only after every output is frozen successfully. Failed
         // invocation or materialization leaves the original environment intact.
         if result.is_err() {

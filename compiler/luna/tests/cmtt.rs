@@ -5709,6 +5709,80 @@ fn generator_type_evidence_projects_record_literals_and_constant_records() {
 }
 
 #[test]
+fn generator_local_schema_aliases_preserve_structural_type_evidence() {
+    let source = "struct Types {word:.Type'builtin,flag:.Type'builtin}
+        comptime fn build()-><|-bool> {
+            let schema=Types {word:.u8'builtin,flag:bool};
+            let alias=schema;
+            let Word=alias.word;
+            let Flag=alias.flag;
+            let value:Word=17;let enabled:Flag=true;
+            '(enabled and value == 17)
+        } fn run()->bool {~<build()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let nested = "struct Types {word:.Type'builtin,flag:.Type'builtin}
+        struct Schema {fields:Types}
+        comptime fn build()-><|-bool> {
+            let schema=Schema {fields:Types {word:.u8'builtin,flag:bool}};
+            let alias=schema;
+            let fields=alias.fields;
+            let Word=fields.word;
+            let value:Word=17;
+            '(value == 17)
+        } fn run()->bool {~<build()>}";
+    assert_eq!(run(nested, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_schema_addressing_preserves_storage_and_extracted_type_identity() {
+    let source = "struct Types {word:.Type'builtin,changed:bool}
+        comptime fn build()-><|-bool> {
+            let schema=Types {word:.u8'builtin,changed:false};
+            let Word=schema.word;
+            let pointer=schema.changed.ref;
+            pointer.* = true;
+            let value:Word=17;
+            let changed=schema.changed;
+            '(changed and value == 17)
+        } fn run()->bool {~<build()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_schema_evidence_does_not_execute_factories_or_survive_possible_writes() {
+    for statement in [
+        "schema.word=.char'builtin;",
+        "let pointer=schema.ref;",
+        "touch(schema.ref);",
+        "if flag {schema.word=.char'builtin;}",
+    ] {
+        let source = format!(
+            "struct Types {{word:.Type'builtin}}
+            comptime fn touch(value:*Types) {{value.*.word = .char'builtin;}}
+            comptime fn build(flag:bool)-><|-bool> {{
+                let schema=Types {{word:.u8'builtin}};
+                {statement}
+                let Word=schema.word;
+                let value:Word=17;'(value == 17)
+            }}"
+        );
+        let failure = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            failure.contains("completed Type value"),
+            "after {statement}: {failure}"
+        );
+    }
+    let source = "struct Types {word:.Type'builtin}
+        comptime fn unknown()->Types {while true {} Types {word:bool}}
+        comptime fn build()-><|-bool> {
+            let schema=unknown();let Word=schema.word;
+            let value:Word=17;'(value == 17)
+        }";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(failure.contains("completed Type value"), "{failure}");
+}
+
+#[test]
 fn generator_type_projection_does_not_skip_constructor_execution() {
     let prefix = "struct Types {word:.Type'builtin,enabled:bool}
         pure comptime fn checked(flag:bool)->bool where requires flag {flag}

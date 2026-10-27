@@ -10582,6 +10582,9 @@ impl Checker<'_, '_> {
                 (ty, K::Discard(Box::new(value)))
             }
             H::Ref(inner) => {
+                if self.checking_code_generator {
+                    self.forget_generator_schema_evidence(expr.span)?;
+                }
                 if let Some(pointer) = self.dereferenced_place(inner)? {
                     if let Some(expected) = expected {
                         self.require(&pointer.ty, expected, expr.span)?;
