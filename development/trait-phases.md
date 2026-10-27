@@ -125,6 +125,16 @@ Lexical associated references from secondary contributions resolve through the
 common relationship and substitute its inputs back into the method's original
 environment. Both source declaration orders follow the same path.
 
+## Comptime query keys
+
+The Eq/Hash key selector requires comptime trait membership independently of the
+function's comptime execution signature. After ordinary relationship resolution
+and capability qualification, it checks the selected implementation's comptime
+availability before obtaining a method body or default. A more precise runtime
+relationship blocks a broader comptime implementation; no phase-filtered retry
+occurs. Existing signature, domain, type requirement and program contract checks
+remain in force. Runtime comparison protocol selection is unchanged.
+
 ## Remaining integration
 
 - Interleave metadata queries that themselves depend on interface preparation;
@@ -132,9 +142,9 @@ environment. Both source declaration orders follow the same path.
 - Extend shared generic associated-program equality beyond identical checked
   structure using program-level evidence; retain bounded conservative rejection
   when equality cannot be established.
-- Complete phase handling in generated-definition publication and specialized
-  protocol consumers, including comptime key protocols. Expand source-level
-  non-fallback coverage beyond single-contribution relationships.
+- Complete phase handling in generated-definition publication and remaining
+  protocol consumers. Builtin Eq/Hash library declarations still expose runtime
+  methods; the executable cache-key fixtures explicitly declare comptime members.
 - Connect dynamic trait-method clause preparation without erasing interface
   origin, defaults, preconditions, postconditions, or selected instance identity.
 
@@ -274,3 +284,18 @@ with `python3 -B development/check.py --timeout 900 -- test --release -p luna
 These exercise ordinary defaults, selected overrides, cross-implementation
 and lexical dependencies, generic value initialization, callable values and
 associated signatures. Combined with the phase suites, 199 tests passed.
+
+Comptime key protocol phase enforcement passed 1,654 tests in `/home/fin/luna`
+with `python3 -B development/check.py --timeout 900 -- test --release -p luna
+--test execution --test nominal_value_parameters --test comptime_memory
+--test equality_protocol --test ordering_protocol`
+(`/tmp/luna-tools-g25hwz_6/result.json`, exit 0). All 1,363 execution tests ran
+because the cache-key fixture migration affects many invocation paths. The other
+291 tests cover nominal value parameters, memory-backed keys and ordinary
+runtime comparisons. Added key-selection cases reject runtime membership even
+for comptime functions, unavailable phase defaults, and fallback from a more
+precise runtime relationship. Positive generic/default selections, memory key
+obligations, hashing and memoization continue to pass with explicit comptime
+phase declarations. Formatting passed (`/tmp/luna-tools-z81ayc0m/result.json`,
+exit 0); `git diff --check` passed. This does not complete builtin Eq/Hash's
+library-level two-phase interface design or migrate its runtime declarations.

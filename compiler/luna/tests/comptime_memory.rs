@@ -760,14 +760,14 @@ fn memoized_type_storage_uses_snapshot_resource_authority() {
 
 #[test]
 fn memoized_keys_use_resource_evidence_in_source_eq_and_hash() {
-    let source = "trait Eq {comptime fn eq(self,other:Self)->bool;}
-        trait Hash {comptime fn hash(self)->.u8'builtin;}
+    let source = "const eq_key_phase={comptime_phase:true}; trait Eq {^eq_key_phase comptime fn eq(self,other:Self)->bool;}
+        const hash_key_phase={comptime_phase:true}; trait Hash {^hash_key_phase comptime fn hash(self)->.u8'builtin;}
         trait Duplicate {}trait Retire {fn drop(*self);}
         struct Packet {flag:bool}impl Duplicate for Packet {}
-        impl Eq for bool {comptime fn eq(self,other:bool)->bool {
+        comptime impl Eq for bool {comptime fn eq(self,other:bool)->bool {
             let packet=Packet {flag:self};let saved=packet.ref.*;saved.flag == other
         }}
-        impl Hash for bool {comptime fn hash(self)->.u8'builtin {
+        comptime impl Hash for bool {comptime fn hash(self)->.u8'builtin {
             let packet=Packet {flag:self};let saved=packet.ref.*;
             if saved.flag {0} else {0}
         }}

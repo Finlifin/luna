@@ -123,6 +123,9 @@ pub fn select(
     {
         return Err("comptime key protocol method is duplicated or generic".into());
     }
+    if member.phase != nir::program::TraitPhase::Comptime {
+        return Err("key protocol method requires comptime trait membership".into());
+    }
     let Ok(Term::ComptimeFunction(signature)) = member.signature.ordinary() else {
         return Err("key protocol requires a comptime method".into());
     };
@@ -229,6 +232,9 @@ pub fn select(
             != Some(definition)
     {
         return Err("comptime key implementation package and world disagree".into());
+    }
+    if !definition.phases.comptime {
+        return Err("selected key implementation lacks comptime trait phase".into());
     }
     let mut bodies = definition
         .methods
