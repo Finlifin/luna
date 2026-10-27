@@ -8,6 +8,38 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Segmented enum group paths
+
+EnumBuilder now retains group and variant paths as `List<List<Symbol>>`.
+`add_group(name, .parent = [...])` declares a group, and each variant method accepts
+`.group = [...]`; omitted paths retain root behavior. The compiler-private
+`build_enum_paths` entry lowers to the same BuildEnum operation with typed nested
+path lists. The existing flat-name private entry remains available to old hosts.
+
+The VM validates every segment before joining it: empty paths, empty segments and
+embedded dot separators are rejected. Allocation and joining consume invocation
+fuel before creating the canonical dot-separated path. Ordinary enum admission
+then checks parent declarations, duplicate paths and group/leaf collisions.
+No general Symbol concatenation or new source syntax is introduced. Groups remain
+metadata on the outer enum; they do not create a second type or payload layer.
+Qualified group prefixes are kept as paths during projection lookup instead of
+being evaluated as static method receivers. This also applies to aliases of
+ordinary source enums; a regression covers both source and generated aliases.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p luna --test builder_invocations --test source_reflection
+--test enum_groups --test enum_configurations --test encoded_enums
+--test nominal_value_parameters`, exit 0, 346 tests
+(`/tmp/luna-tools-ax72kmzb/result.json`). The earlier combined run passed 153 VM
+and 79 luna library tests before exposing the alias projection bug
+(`/tmp/luna-tools-91t7zygp/result.json`, overall exit 101). The final source run
+covers its correction and ordinary member projection regressions. Rejecting group
+receiver probing only at static-method lookup was insufficient; complete group
+paths now resolve before member/place probing.
+`python3 -B development/host_examples.py generated-enum --release-driver
+--compare-optimization`, exit 0, nested group payloads produce `(bool true)` at
+both O0 and O3 (`/tmp/luna-host-examples-6zgsjo7p`). Formatting/diff checks pass.
+
 ## Source concrete EnumBuilder
 
 The private `build_enum` builtin now lowers typed requests to BuildEnum, and public
@@ -25,8 +57,7 @@ The native example is `development/examples/host-generated-enum.fl`.
 
 This entry supports ordinary concrete enums. Encoded enums, generic clauses,
 attributes and default payload expressions remain outside this builder's request
-model. Group symbols are retained, but source group-path assembly helpers are not
-yet exposed. Legacy HIR-only StructBuildService implementations explicitly reject
+model. Group paths are assembled through the segmented interface above. Legacy HIR-only StructBuildService implementations explicitly reject
 enum requests; source drivers use the shared allocated service.
 
 Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --

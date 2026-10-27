@@ -1238,6 +1238,26 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
+        // Group prefixes are namespaces in an enum, not values. Resolve their
+        // complete path before member and place probes can evaluate the prefix.
+        if matches!(value.kind, H::Projection(..))
+            && let Some((ty, group)) = self.enum_member_reference(value, None)?
+            && matches!(&ty, Term::Nominal {declaration, ..}
+                if self.enums.get(declaration).is_some_and(|definition| definition.groups.contains(&group)))
+        {
+            let Some((ty, index)) = self.variant_target(expr, expected)? else {
+                return Err(error(expr.span, "unknown enum variant"));
+            };
+            let Term::Nominal { declaration, .. } = &ty else {
+                unreachable!()
+            };
+            let name = self.enums[declaration].variants[index].name.clone();
+            let variant = self.enum_variant(&ty, &name, expr.span)?;
+            if let Some(expected) = expected {
+                self.require(&variant.ty, expected, expr.span)?;
+            }
+            return Ok(variant);
+        }
         if let Some(value) = self.projected_member_expression(expr, expected)? {
             return Ok(value);
         }

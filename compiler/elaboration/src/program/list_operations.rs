@@ -94,6 +94,7 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         args: &[Arg<'_>],
         expected: Option<&Term>,
+        segmented_paths: bool,
     ) -> Result<n::Expr, Error> {
         if self.runtime_value_context() || self.in_code_body {
             return Err(error(
@@ -125,10 +126,15 @@ impl Checker<'_, '_> {
             sort: Sort::Type,
             arguments: vec![element],
         };
+        let paths = if segmented_paths {
+            list(list(p(P::Symbol)))
+        } else {
+            list(p(P::Symbol))
+        };
         let values = vec![
             self.expr(name, Some(&p(P::Symbol)))?,
-            self.expr(groups, Some(&list(p(P::Symbol))))?,
-            self.expr(names, Some(&list(p(P::Symbol))))?,
+            self.expr(groups, Some(&paths))?,
+            self.expr(names, Some(&paths))?,
             self.expr(shapes, Some(&list(p(P::Symbol))))?,
             self.expr(field_names, Some(&list(list(p(P::Symbol)))))?,
             self.expr(field_types, Some(&list(list(p(P::Type)))))?,

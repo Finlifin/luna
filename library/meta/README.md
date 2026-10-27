@@ -110,7 +110,20 @@ fn example() -> bool {
 重名 variant、重名 payload 字段、字段名与 Type 数量不一致，以及无限大小的
 按值递归表示都会被拒绝。struct 与 enum 生成共用声明编号和检查状态，可以将前一个
 生成类型作为后一个生成类型的 payload 或字段。显式 invocation 返回的 NIR 同时保留
-这两种生成声明。`add_group` 保存 group 符号；当前源码 API 尚未提供组路径拼接工具。
+这两种生成声明。`add_group` 声明分组，`.parent = [.net]` 指定父组路径；variant 方法用
+`.group = [.net, .nested]` 指定所属组。路径片段按顺序保存，不改变 nominal Type。
+父组必须声明；重复路径、group 与 variant 同名都会被拒绝。
 固定宽度编码、symbol 编码、泛型参数、字段默认值和属性的 enum 构造尚未接通。
 
 可运行的 native 示例见 [host-generated-enum.fl](../../development/examples/host-generated-enum.fl)。
+
+分组示例（在 `Build` 前添加）：
+
+```flurry
+builder.add_group(.net);
+builder.add_group(.nested, .parent = [.net]);
+builder.add_tuple(.received, [bool], .group = [.net, .nested]);
+```
+
+生成后使用 `Event.net.nested.received(true)` 构造；pattern `.net` 匹配该组的全部
+后代，但不会匹配名为 `.network` 的相邻组。空分组仍保留在描述中，不增加 variant。

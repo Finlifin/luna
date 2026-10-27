@@ -9349,8 +9349,17 @@ impl Checker<'_, '_> {
                 }
                 H::Match(value, arms) => self.match_expr(expr, value, arms, expected, partial),
                 H::When(arms) => self.when_expr(expr, arms, expected, partial),
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "build_enum") => {
-                    self.build_enum_builtin(expr, args, expected)
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "build_enum" | "build_enum_paths")) =>
+                {
+                    let H::Builtin(name) = &callee.kind else {
+                        unreachable!()
+                    };
+                    self.build_enum_builtin(
+                        expr,
+                        args,
+                        expected,
+                        name.as_str() == "build_enum_paths",
+                    )
                 }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "build_struct") => {
                     self.build_struct_builtin(expr, args, expected)

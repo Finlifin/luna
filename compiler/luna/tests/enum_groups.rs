@@ -145,3 +145,15 @@ fn unused_group_defaults_are_checked_and_paths_are_validated_in_ir() {
     }
     assert!(comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).is_err());
 }
+
+#[test]
+fn type_alias_group_prefix_is_not_evaluated_as_a_method_receiver() {
+    let source = "enum Source {net.{ready,nested.{data(bool)}},other} typealias Event=Source;
+        fn read(value:Event)->bool {value match {.net=>true,.other=>false}}
+        fn run()->bool {read(Event.net.ready) and read(Event.net.nested.data(true)) and not read(Event.other)}";
+    let package = compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

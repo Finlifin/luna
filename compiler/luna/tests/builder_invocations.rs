@@ -1687,3 +1687,63 @@ fn generated_enum_missing_and_unknown_fields_are_diagnostics() {
         assert!(failure.contains("field"), "{failure}");
     }
 }
+
+#[test]
+fn public_enum_builder_preserves_nested_group_paths_and_prefix_boundaries() {
+    let fixture = Fixture::new("
+        comptime fn EventType() -> .Type'builtin {
+            var builder = meta.EnumBuilder.new(.name = .GroupedEvent);
+            builder.add_group(.net);
+            builder.add_group(.nested, .parent = [.net]);
+            builder.add_group(.network);
+            builder.add_group(.empty);
+            builder.add_unit(.ready, .group = [.net]);
+            builder.add_tuple(.data, [bool], .group = [.net, .nested]);
+            builder.add_named(.record, [.flag], [bool], .group = [.network]);
+            builder.Build()
+        }
+        typealias Event = EventType();
+        fn inside(value: Event) -> bool {value match {.net => true, .network => false, .empty => false}}
+        fn read(value: Event) -> bool {value match {.net.ready => false, .net.nested.data(flag) => flag, .network.record {flag: flag} => flag}}
+        fn run() -> bool {inside(Event.net.ready) and inside(.net.nested.data(true))
+            and not inside(.network.record {flag:true}) and read(.net.nested.data(true)) and read(.network.record {flag:true})}
+        comptime fn ready() -> bool {true}
+    ");
+    let (Artifact::Nir(package), _, _) = fixture.invoke_meta("ready").unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let generated = package
+        .enums
+        .iter()
+        .find(|item| item.name == "GroupedEvent")
+        .unwrap();
+    assert_eq!(generated.groups, ["net", "net.nested", "network", "empty"]);
+    assert_eq!(
+        generated
+            .variants
+            .iter()
+            .map(|variant| variant.name.as_str())
+            .collect::<Vec<_>>(),
+        ["net.ready", "net.nested.data", "network.record"]
+    );
+}
+
+#[test]
+fn grouped_enum_builder_rejects_missing_parents_and_name_collisions() {
+    for body in [
+        "builder.add_unit(.leaf, .group = [.missing]);",
+        "builder.add_group(.nested, .parent = [.missing]); builder.add_unit(.leaf);",
+        "builder.add_group(.group); builder.add_group(.group); builder.add_unit(.leaf);",
+        "builder.add_group(.group); builder.add_unit(.group);",
+        "builder.add_group(.group); builder.add_unit(.leaf, .group = [.group]); builder.add_tuple(.leaf, [bool], .group = [.group]);",
+    ] {
+        let fixture = Fixture::new(&format!(
+            "comptime fn Generate() -> .Type'builtin {{var builder = meta.EnumBuilder.new(); {body} builder.Build()}}"
+        ));
+        assert!(fixture.invoke_meta("Generate").is_err(), "accepted {body}");
+    }
+}

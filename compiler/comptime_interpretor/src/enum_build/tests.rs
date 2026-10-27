@@ -221,3 +221,46 @@ fn host_cannot_refund_fuel_and_early_return_never_calls_it() {
     assert!(vm.remaining_steps() < before);
     assert_eq!(calls.get(), 1);
 }
+
+#[test]
+fn segmented_paths_reject_empty_and_embedded_separator_segments_before_host_call() {
+    let world = world();
+    let calls = Cell::new(0);
+    let builder = |request: &EnumBuildRequest, _: &mut u64| {
+        calls.set(calls.get() + 1);
+        Ok(prepared(request, Box::new(|| Ok(()))))
+    };
+    let mut vm = Interpreter::for_comptime(&world, Budget::default())
+        .unwrap()
+        .with_enum_builder(&builder);
+    for segments in [vec![], vec![""], vec!["Group.Data"], vec!["Group", ""]] {
+        let Value::Tuple(mut values) = input("named") else {
+            unreachable!()
+        };
+        values[2] = Value::List {
+            ty: list(list(p(Primitive::Symbol))),
+            values: vec![symbols(&segments)],
+        };
+        assert_eq!(
+            vm.eval(&expression(), &mut env(Value::Tuple(values)))
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+    }
+    assert_eq!(calls.get(), 0);
+    let Value::Tuple(mut values) = input("named") else {
+        unreachable!()
+    };
+    values[1] = Value::List {
+        ty: list(list(p(Primitive::Symbol))),
+        values: vec![symbols(&["Group"])],
+    };
+    values[2] = Value::List {
+        ty: list(list(p(Primitive::Symbol))),
+        values: vec![symbols(&["Group", "Data"])],
+    };
+    vm.eval(&expression(), &mut env(Value::Tuple(values)))
+        .unwrap();
+    assert_eq!(calls.get(), 1);
+}

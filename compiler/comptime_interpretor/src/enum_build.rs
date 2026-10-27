@@ -158,8 +158,8 @@ impl<'a> Interpreter<'a> {
         else {
             return Err(fail());
         };
-        let groups = self.enum_symbols(groups, expr.source)?;
-        let names = self.enum_symbols(names, expr.source)?;
+        let groups = self.enum_paths(groups, expr.source)?;
+        let names = self.enum_paths(names, expr.source)?;
         let shapes = self.enum_symbols(shapes, expr.source)?;
         let nested = |value, element| -> Result<Vec<Value>, Error> {
             let Value::List { ty, values } = value else {
@@ -268,6 +268,44 @@ impl<'a> Interpreter<'a> {
                 }
             })?;
         Ok(Flow::Value(Value::Type(result)))
+    }
+
+    fn enum_paths(&mut self, value: Value, source: SourceRange) -> Result<Vec<String>, Error> {
+        let fail = || Error {
+            kind: ErrorKind::Type,
+            source: Some(source),
+        };
+        let Value::List { ty, values } = value else {
+            return Err(fail());
+        };
+        if self.list_element(&ty) == Some(&Term::Primitive(Primitive::Symbol)) {
+            return self.enum_symbols(Value::List { ty, values }, source);
+        }
+        if self
+            .list_element(&ty)
+            .and_then(|element| self.list_element(element))
+            != Some(&Term::Primitive(Primitive::Symbol))
+        {
+            return Err(fail());
+        }
+        self.integer_operation(Some(source), |budget| budget.consume(values.len()))?;
+        let mut paths = Vec::with_capacity(values.len());
+        for value in values {
+            let segments = self.enum_symbols(value, source)?;
+            if segments.is_empty()
+                || segments
+                    .iter()
+                    .any(|segment| segment.is_empty() || segment.contains('.'))
+            {
+                return Err(fail());
+            }
+            let work = segments.iter().fold(segments.len() - 1, |work, segment| {
+                work.saturating_add(segment.len())
+            });
+            self.integer_operation(Some(source), |budget| budget.consume(work))?;
+            paths.push(segments.join("."));
+        }
+        Ok(paths)
     }
 
     fn enum_symbols(&mut self, value: Value, source: SourceRange) -> Result<Vec<String>, Error> {

@@ -7,8 +7,10 @@ use primitives.Type;
 comptime fn EventType() -> Type {
     var builder = meta.EnumBuilder.new(.name = .Event);
     builder.add_unit(.idle);
-    builder.add_tuple(.data, [bool]);
-    builder.add_named(.record, [.flag], [bool]);
+    builder.add_group(.net);
+    builder.add_group(.nested, .parent = [.net]);
+    builder.add_tuple(.data, [bool], .group = [.net]);
+    builder.add_named(.record, [.flag], [bool], .group = [.net, .nested]);
     builder.Build()
 }
 
@@ -17,11 +19,11 @@ typealias Event = EventType();
 fn read(value: Event) -> bool {
     value match {
         .idle => false,
-        .data(flag) => flag,
-        .record { flag: flag } => flag,
+        .net.data(flag) => flag,
+        .net.nested.record { flag: flag } => flag,
     }
 }
 
 fn run() -> bool {
-    read(Event.data(true)) and read(Event.record { flag: true }) and not read(Event.idle)
+    read(Event.net.data(true)) and read(Event.net.nested.record { flag: true }) and not read(Event.idle)
 }

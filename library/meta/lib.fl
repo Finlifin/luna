@@ -218,8 +218,8 @@ impl StructBuilder {
 -}
 pub struct EnumBuilder {
     name: .Symbol'builtin,
-    groups: List<.Symbol'builtin>,
-    variant_names: List<.Symbol'builtin>,
+    groups: List<List<.Symbol'builtin>>,
+    variant_names: List<List<.Symbol'builtin>>,
     shapes: List<.Symbol'builtin>,
     field_names: List<List<.Symbol'builtin>>,
     field_types: List<List<.Type'builtin>>,
@@ -230,33 +230,33 @@ impl EnumBuilder {
         Self { name: name, groups: [], variant_names: [], shapes: [], field_names: [], field_types: [] }
     }
 
-    pub comptime fn add_group(*self, name: .Symbol'builtin) {
-        append(self.groups, name);
+    pub comptime fn add_group(*self, name: .Symbol'builtin, .parent: List<.Symbol'builtin> = []) {
+        append(self.groups, concat(parent, [name]));
     }
 
-    pub comptime fn add_unit(*self, name: .Symbol'builtin) {
-        append(self.variant_names, name);
+    pub comptime fn add_unit(*self, name: .Symbol'builtin, .group: List<.Symbol'builtin> = []) {
+        append(self.variant_names, concat(group, [name]));
         append(self.shapes, .unit);
         append(self.field_names, []);
         append(self.field_types, []);
     }
 
-    pub comptime fn add_tuple(*self, name: .Symbol'builtin, fields: List<.Type'builtin>) {
-        append(self.variant_names, name);
+    pub comptime fn add_tuple(*self, name: .Symbol'builtin, fields: List<.Type'builtin>, .group: List<.Symbol'builtin> = []) {
+        append(self.variant_names, concat(group, [name]));
         append(self.shapes, .tuple);
         append(self.field_names, []);
         append(self.field_types, fields);
     }
 
-    pub comptime fn add_named(*self, name: .Symbol'builtin, names: List<.Symbol'builtin>, fields: List<.Type'builtin>) {
-        append(self.variant_names, name);
+    pub comptime fn add_named(*self, name: .Symbol'builtin, names: List<.Symbol'builtin>, fields: List<.Type'builtin>, .group: List<.Symbol'builtin> = []) {
+        append(self.variant_names, concat(group, [name]));
         append(self.shapes, .named);
         append(self.field_names, names);
         append(self.field_types, fields);
     }
 
     pub comptime fn Build(self) -> .Type'builtin {
-        .build_enum'builtin(self.name, self.groups, self.variant_names, self.shapes, self.field_names, self.field_types)
+        .build_enum_paths'builtin(self.name, self.groups, self.variant_names, self.shapes, self.field_names, self.field_types)
     }
 }
 
