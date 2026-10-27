@@ -1371,3 +1371,63 @@ fn immediate_callback_parameters_have_invocation_local_code_and_captures() {
     assert!(infer(&package, "reused", 1).is_err());
     assert!(infer(&package, "reused", 300_000).is_ok());
 }
+
+#[test]
+fn named_higher_order_summaries_separate_callback_instances() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn echo(value:str)->str {value}
+        fn literal(value:str)->str {\"static\"}
+        fn generic(value:T)->T where T {value}
+        fn equal(value:str)->bool {value == \"x\"}
+        fn apply(action:fn(str)->str,value:str)->str {action(value)}
+        fn observe(action:fn(str)->bool,value:str)->bool {action(value)}
+        fn relay(action:fn(str)->str,value:str)->str {apply(action,value)}
+        fn walk(action:fn(str)->str,flag:bool,a:str,b:str)->str {
+            if flag {return action(a);}walk(action,flag,b,a)
+        }
+        fn input(a:str,b:str)->str {let ignored=apply(literal,b);apply(echo,a)}
+        fn static_result(a:str,b:str)->str {let ignored=apply(echo,a);apply(literal,b)}
+        fn forwarded(value:str)->str {let action=echo;relay(action,value)}
+        fn specialized(value:str)->str {apply(generic<str>,value)}
+        fn reads(value:str)->bool {observe(equal,value)}
+        fn recursive(flag:bool,a:str,b:str)->str {walk(echo,flag,a,b)}
+        fn recursive_static(flag:bool,a:str,b:str)->str {walk(literal,flag,a,b)}
+        fn captured(callback:%{value:str} fn()->str)->str {callback()}
+        fn unsupported(value:str)->str {captured(||value)}",
+    );
+    for name in ["input", "forwarded", "specialized"] {
+        assert_eq!(
+            infer(&package, name, 300_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])]),
+            "{name}"
+        );
+    }
+    for name in ["static_result", "recursive_static"] {
+        assert_eq!(
+            infer(&package, name, 300_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([Origin::Static]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "reads", 300_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(0, &[])])
+    );
+    assert_eq!(
+        infer(&package, "recursive", 300_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    for name in ["apply", "unsupported"] {
+        assert!(
+            infer(&package, name, 300_000)
+                .unwrap_err()
+                .contains("stable local callable")
+        );
+    }
+    assert!(infer(&package, "recursive", 10).is_err());
+    assert!(infer(&package, "recursive", 300_000).is_ok());
+}

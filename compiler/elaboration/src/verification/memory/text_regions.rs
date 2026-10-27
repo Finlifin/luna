@@ -26,6 +26,21 @@ impl fmt::Display for TextRegionOrigin {
 type Regions = BTreeMap<Vec<usize>, BTreeSet<TextRegionOrigin>>;
 type Locals = BTreeMap<LocalId, Regions>;
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SummaryKey {
+    instance: iir::InstanceKey,
+    callbacks: Vec<(usize, iir::InstanceKey)>,
+}
+impl fmt::Display for SummaryKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(text-summary-key {} (callbacks", self.instance)?;
+        for (parameter, callback) in &self.callbacks {
+            write!(f, " (parameter {parameter} {callback})")?;
+        }
+        f.write_str("))")
+    }
+}
+
 struct LoopRegions {
     identity: LocalId,
     bindings: Vec<LocalId>,
@@ -185,16 +200,16 @@ pub fn infer_text_regions(
 struct Query<'a, 'f> {
     package: &'a Package,
     fuel: &'f mut usize,
-    current: Option<iir::InstanceKey>,
+    current: Option<SummaryKey>,
     local_callables: BTreeMap<LocalId, std::sync::Arc<Expr>>,
     changed_callables: BTreeSet<LocalId>,
-    pending: VecDeque<iir::InstanceKey>,
-    scheduled: HashSet<iir::InstanceKey>,
-    dependents: HashMap<iir::InstanceKey, Vec<iir::InstanceKey>>,
+    pending: VecDeque<SummaryKey>,
+    scheduled: HashSet<SummaryKey>,
+    dependents: HashMap<SummaryKey, Vec<SummaryKey>>,
     reads: Vec<BTreeSet<TextRegionOrigin>>,
     loops: Vec<LoopRegions>,
     exits: Vec<Option<ExitRegions>>,
-    cache: HashMap<iir::InstanceKey, TextRegionSummary>,
+    cache: HashMap<SummaryKey, TextRegionSummary>,
     metadata: Round<'static>,
 }
 impl Query<'_, '_> {
@@ -540,7 +555,7 @@ impl Query<'_, '_> {
         }
     }
 
-    fn schedule(&mut self, key: iir::InstanceKey) {
+    fn schedule(&mut self, key: SummaryKey) {
         if self.scheduled.insert(key.clone()) {
             self.pending.push_back(key);
         }
@@ -552,7 +567,7 @@ impl Query<'_, '_> {
         arguments: &[Term],
     ) -> Result<TextRegionSummary, String> {
         self.function(declaration, arguments)?;
-        let mut deferred = Vec::<(iir::InstanceKey, String)>::new();
+        let mut deferred = Vec::<(SummaryKey, String)>::new();
         while let Some(key) = self.pending.pop_front() {
             charge(self.fuel, 1)?;
             self.scheduled.remove(&key);
@@ -599,13 +614,30 @@ impl Query<'_, '_> {
         declaration: DeclarationId,
         arguments: &[Term],
     ) -> Result<TextRegionSummary, String> {
-        charge(self.fuel, 1)?;
+        self.function_with_callbacks(declaration, arguments, &[])
+    }
+
+    fn function_with_callbacks(
+        &mut self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        callbacks: &[(usize, iir::InstanceKey)],
+    ) -> Result<TextRegionSummary, String> {
+        charge(self.fuel, callbacks.len().saturating_add(1))?;
+        for (_, callback) in callbacks {
+            for argument in &callback.arguments {
+                bound_type(argument, self.fuel)?;
+            }
+        }
         for argument in arguments {
             bound_type(argument, self.fuel)?;
         }
-        let key = iir::InstanceKey {
-            declaration,
-            arguments: arguments.to_vec(),
+        let key = SummaryKey {
+            instance: iir::InstanceKey {
+                declaration,
+                arguments: arguments.to_vec(),
+            },
+            callbacks: callbacks.to_vec(),
         };
         if let Some(caller) = &self.current {
             let callers = self.dependents.entry(key.clone()).or_default();
@@ -636,9 +668,9 @@ impl Query<'_, '_> {
         Ok(summary.clone())
     }
 
-    fn analyze(&mut self, key: &iir::InstanceKey) -> Result<TextRegionSummary, String> {
-        let declaration = key.declaration;
-        let arguments = key.arguments.as_slice();
+    fn analyze(&mut self, key: &SummaryKey) -> Result<TextRegionSummary, String> {
+        let declaration = key.instance.declaration;
+        let arguments = key.instance.arguments.as_slice();
         let (body, arguments) = self.package.runtime_body_checked(declaration, arguments)?;
         if body.phase != FunctionPhase::Runtime || body.type_parameters.len() != arguments.len() {
             return Err("text region inference requires a concrete runtime body".into());
@@ -658,6 +690,30 @@ impl Query<'_, '_> {
         };
         if parameters.len() != body.parameters.len() {
             return Err("text region parameter identity mismatch".into());
+        }
+        for (parameter, callback) in &key.callbacks {
+            let binding = *body
+                .parameters
+                .get(*parameter)
+                .ok_or("text callback parameter is missing")?;
+            if !self.changed_callables.contains(&binding) {
+                let kind = if callback.arguments.is_empty() {
+                    K::Function(callback.declaration)
+                } else {
+                    K::FunctionInstance {
+                        declaration: callback.declaration,
+                        arguments: callback.arguments.clone(),
+                    }
+                };
+                self.local_callables.insert(
+                    binding,
+                    std::sync::Arc::new(Expr {
+                        source: body.body.source,
+                        ty: parameters[*parameter].ty.clone(),
+                        kind,
+                    }),
+                );
+            }
         }
         let mut locals = Locals::new();
         for (parameter, (id, ty)) in body.parameters.iter().zip(parameters).enumerate() {
@@ -737,7 +793,7 @@ impl Query<'_, '_> {
         }
         let summary = TextRegionSummary {
             declaration,
-            arguments: key.arguments.clone(),
+            arguments: key.instance.arguments.clone(),
             reads,
             returned,
         };
@@ -1220,7 +1276,39 @@ impl Query<'_, '_> {
                 }
                 let mut actual = BTreeMap::new();
                 let mut prepared = Locals::new();
+                let mut callbacks = Vec::new();
                 for argument in arguments {
+                    let callback = if argument.is_default {
+                        // A default's local identities belong to its prepared
+                        // callee frame, not the current caller's code bindings.
+                        match &argument.value.kind {
+                            K::Function(_) | K::FunctionInstance { .. } => {
+                                self.callable_input(&argument.value)?
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        self.callable_input(&argument.value)?
+                    };
+                    if let Some(callback) = callback {
+                        let instance = match &callback.kind {
+                            K::Function(declaration) => Some(iir::InstanceKey {
+                                declaration: *declaration,
+                                arguments: vec![],
+                            }),
+                            K::FunctionInstance {
+                                declaration,
+                                arguments,
+                            } => Some(iir::InstanceKey {
+                                declaration: *declaration,
+                                arguments: arguments.clone(),
+                            }),
+                            _ => None,
+                        };
+                        if let Some(instance) = instance {
+                            callbacks.push((argument.parameter, instance));
+                        }
+                    }
                     let value = if argument.is_default {
                         let mut scope = self.locals_copy(&prepared)?;
                         let caller_loops = std::mem::take(&mut self.loops);
@@ -1249,7 +1337,8 @@ impl Query<'_, '_> {
                         return Err("duplicate text region call argument".into());
                     }
                 }
-                let summary = self.function(declaration, types)?;
+                callbacks.sort_by_key(|(parameter, _)| *parameter);
+                let summary = self.function_with_callbacks(declaration, types, &callbacks)?;
                 let reads = self.translate(&summary.reads, &actual)?;
                 self.reads.last_mut().unwrap().extend(reads);
                 let Some(result) = summary.returned else {

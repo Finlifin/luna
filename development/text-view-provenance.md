@@ -687,3 +687,42 @@ local callback aliases, repeated invocation with different code identities,
 text-capturing callbacks and their reads, unknown callback rejection, and budget
 failure followed by recovery. Formatting passed
 (`/tmp/luna-tools-34h9sgv3/result.json`, exit 0); the diff check passed.
+
+## Named higher-order summary contexts
+
+The fixed-point key now includes the concrete named function instances supplied
+as callback parameters, ordered by parameter index. The same higher-order body
+with different callbacks therefore has separate pending state, dependencies and
+completed summaries. Forwarded callback parameters retain their named identity;
+recursive forwarding revisits the same specialized key instead of losing the
+call target. The internal key has an S-expression Display.
+
+Analysis installs callback code under the callee's parameter identities, while
+text origins still use the ordinary caller-parameter substitution. Assigned
+parameter identities remain excluded. Default inputs accept directly named code
+only: a default's local identity belongs to its prepared callee frame and cannot
+be resolved from the outer caller's code map.
+
+This stage specializes named function callbacks, including concrete generic
+instances. Capturing closures passed across named function boundaries still
+require closed code-environment identities; they are not treated as named code
+or as empty-effect callbacks. Unknown root callback inputs remain rejected when
+invoked. Existing closure-local callback support and runtime resource gates are
+unchanged.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 30 tests passed (`/tmp/luna-tools-yw0348eb/result.json`, exit 0). New cases
+alternate callbacks returning input versus static text within one query, forward
+callbacks through another named function, instantiate a generic callback, carry
+comparison reads, and recursively swap text arguments while retaining the
+callback identity. Unknown callback roots and capturing callbacks crossing a
+named boundary remain rejected. Budget failure followed by recovery passes.
+Formatting passed (`/tmp/luna-tools-lga54ztw/result.json`, exit 0), as did the
+diff check.
