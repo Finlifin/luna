@@ -114,6 +114,7 @@ fn byte_reads_export_region_obligations_through_discarded_results() {
     let package = support::compile(&format!(
         "{} mod text {{ {} }}
         fn reads(a:str,b:str)->?u8 {{let ignored=text.byte(a,0);text.byte(b,0)}}
+        fn overwritten(a:str,b:str)->str {{var slot=a;let old=text.byte(slot,0);slot=b;slot}}
         fn static_read()->?u8 {{text.byte(\"x\",0)}}
         fn equal(a:str,b:str)->bool {{a == b}}
         fn length(value:str)->u64 {{text.byte_length(value)}}",
@@ -133,6 +134,12 @@ fn byte_reads_export_region_obligations_through_discarded_results() {
         BTreeSet::from([parameter(0, &[]), parameter(1, &[])])
     );
     assert!(infer(&package, "length", 100_000).unwrap().reads.is_empty());
+    let overwritten = infer(&package, "overwritten", 100_000).unwrap();
+    assert_eq!(overwritten.reads, BTreeSet::from([parameter(0, &[])]));
+    assert_eq!(
+        overwritten.returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[])])
+    );
 }
 
 #[test]
@@ -141,13 +148,11 @@ fn unresolved_and_recursive_transfers_do_not_become_static_evidence() {
         "typealias str=.str'builtin;
         fn looped(value:str)->str {looped(value)}
         fn indirect(f:fn(str)->str,value:str)->str {f(value)}
-        fn mutated(value:str)->str {var slot=value;slot=\"other\";slot}
         fn good(value:str)->str {value}",
     );
     for (name, expected) in [
         ("looped", "fixed-point contract"),
         ("indirect", "named concrete callee"),
-        ("mutated", "transfer is not implemented"),
     ] {
         let error = infer(&package, name, 100_000).unwrap_err();
         assert!(error.contains(expected), "{name}: {error}");
@@ -194,4 +199,52 @@ fn returned_closure_carries_captured_text_dependency_without_invoking_it() {
         BTreeSet::from([parameter(0, &[])])
     );
     assert!(summary.reads.is_empty());
+}
+
+#[test]
+fn local_writes_replace_subtrees_and_join_only_live_successors() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        struct Packet {first:str,second:str}
+        fn replaced(a:str,b:str)->str {var slot=a;slot=b;slot}
+        fn scoped(a:str,b:str)->str {var slot=a;do {slot=b;};slot}
+        fn joined(flag:bool,a:str,b:str)->str {var slot=a;if flag {slot=b;};slot}
+        fn exited(flag:bool,a:str,b:str)->str {
+            var slot=a;if flag {slot=b;return \"static\";};slot
+        }
+        fn field(a:str,b:str,c:str)->Packet {
+            var packet=Packet {first:a,second:b};packet.first=c;packet
+        }
+        fn cleared(value:str)->?str {var slot:?str=value;slot=null;slot}",
+    );
+    for name in ["replaced", "scoped"] {
+        assert_eq!(
+            infer(&package, name, 100_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[])])
+        );
+    }
+    assert_eq!(
+        infer(&package, "joined", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    assert_eq!(
+        infer(&package, "exited", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
+    );
+    let fields = infer(&package, "field", 100_000).unwrap().returned.unwrap();
+    assert_eq!(fields[&vec![0]], BTreeSet::from([parameter(2, &[])]));
+    assert_eq!(fields[&vec![1]], BTreeSet::from([parameter(1, &[])]));
+    assert!(
+        infer(&package, "cleared", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()
+            .is_empty()
+    );
 }

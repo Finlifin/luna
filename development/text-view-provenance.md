@@ -125,7 +125,7 @@ implicit destructor footprints and are not complete access permissions. Cleanup
 composition, region liveness and invalidation checks are still required.
 
 Completed summaries are reused only inside one immutable query. Missing code,
-indirect calls, recursion, pointer transfers, mutation, default-argument transport,
+indirect calls, recursion, pointer transfers, default-argument transport,
 pattern matching, loops, error-row repacking and explicit program contracts remain
 rejected in this analysis. They are never converted into static or empty-origin
 evidence. The existing runtime resource checker still rejects unsupported text
@@ -157,3 +157,26 @@ Formatting passed (`/tmp/luna-tools-0108jmy_/result.json`, exit 0).
 
 This stage does not validate native text iteration or owner lifetime safety;
 neither is enabled by the new summary API.
+
+## Local writes and control-flow transport
+
+Local assignment now replaces the dependency subtree at its destination after
+evaluating the right-hand side. A field write preserves sibling dependencies;
+assigning an absent optional clears the old payload dependency. This describes
+view contents only, not the destructor accesses needed to replace an old value.
+Writes through pointers remain unsupported.
+
+Block scopes propagate writes to existing outer bindings without leaking new
+locals. Branches join the environments of successors that can continue: a branch
+that returns contributes its return dependencies and reads, but its local writes
+do not flow into statements after the branch. Reads observed before replacement
+remain part of the function summary.
+
+Validation from `/home/fin/luna` used the same three test targets listed above:
+`python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype`.
+All ten tests passed (`/tmp/luna-tools-y40okuuy/result.json`, exit 0). Added
+source cases check replacement, block propagation, conditional joins, an early
+return, sibling-field preservation and clearing an optional payload. A byte-read
+case checks that reads retain the old origin while the return uses the new one.
+The workspace formatting check passed (`/tmp/luna-tools-hx76gvbt/result.json`,
+exit 0), as did `git diff --check`.

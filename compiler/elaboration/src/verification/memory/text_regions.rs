@@ -352,6 +352,23 @@ impl Query<'_, '_> {
                 locals.insert(*binding, value);
                 Ok(empty)
             }
+            K::Assign { place, value } => {
+                let Some(value) = self.expr(value, locals, returned, next)? else {
+                    return Ok(None);
+                };
+                charge(self.fuel, place.fields.len())?;
+                let path: Vec<_> = place.fields.iter().map(|(_, index)| *index).collect();
+                let replacement = prefix(value, &path, self.fuel)?;
+                let target = locals
+                    .get_mut(&place.root)
+                    .ok_or("text region assignment root is unavailable")?;
+                charge_regions(target, self.fuel)?;
+                // A write replaces exactly this subtree, including an absent
+                // optional payload. Unrelated sibling dependencies survive.
+                target.retain(|fields, _| !fields.starts_with(&path));
+                target.extend(replacement);
+                Ok(empty)
+            }
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
                 let mut scope = self.locals_copy(locals)?;
                 for statement in statements {
@@ -359,10 +376,18 @@ impl Query<'_, '_> {
                         return Ok(None);
                     }
                 }
-                match result {
+                let result = match result {
                     Some(result) => self.expr(result, &mut scope, returned, next),
                     None => Ok(empty),
+                }?;
+                if result.is_some() {
+                    // Only outer bindings escape the lexical scope. Writes
+                    // made before a return have no fallthrough successor.
+                    for (id, value) in locals.iter_mut() {
+                        *value = scope.remove(id).ok_or("text region scope lost a local")?;
+                    }
                 }
+                Ok(result)
             }
             K::If {
                 condition,
@@ -379,6 +404,18 @@ impl Query<'_, '_> {
                     Some(branch) => self.expr(branch, &mut right, returned, next)?,
                     None => empty,
                 };
+                for (id, value) in locals.iter_mut() {
+                    let mut joined = None;
+                    if result.is_some() {
+                        merge(&mut joined, left.remove(id), self.fuel)?;
+                    }
+                    if otherwise.is_some() {
+                        merge(&mut joined, right.remove(id), self.fuel)?;
+                    }
+                    if let Some(joined) = joined {
+                        *value = joined;
+                    }
+                }
                 merge(&mut result, otherwise, self.fuel)?;
                 Ok(result)
             }
