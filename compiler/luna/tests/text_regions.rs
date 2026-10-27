@@ -2291,3 +2291,54 @@ fn finite_descriptor_aliases_union_reads_and_weakly_update_possible_slots() {
     assert!(infer(&package, "recursive", 10).is_err());
     assert!(infer(&package, "recursive", 2_000_000).is_ok());
 }
+
+#[test]
+fn descriptor_pointer_slot_updates_preserve_alias_and_evaluation_order() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn pick(flag:bool,first:**str,second:**str)->**str {if flag {first}else{second}}
+        fn replace(first:str,second:str)->str {
+            var pointer=first.ref;let slot=pointer.ref;slot.* = second.ref;pointer.*
+        }
+        fn weak(flag:bool,first:str,second:str,replacement:str)->str {
+            var a=first.ref;var b=second.ref;
+            let slot=pick(flag,a.ref,b.ref);slot.* = replacement.ref;a.*
+        }
+        fn targets_before_value(first:str,second:str,replacement:str)->str {
+            var a=first;var b=second;var pointer=a.ref;
+            pointer.* = do {pointer=b.ref;replacement};a
+        }
+        fn changed_pointer(first:str,second:str,replacement:str)->str {
+            var a=first;var b=second;var pointer=a.ref;
+            pointer.* = do {pointer=b.ref;replacement};pointer.*
+        }
+        fn unknown_survives(flag:bool,external:*str,value:str)->str {
+            var a=external;var b=value.ref;
+            let slot=pick(flag,a.ref,b.ref);slot.* = value.ref;a.*
+        }
+        fn strong_recovers(external:*str,value:str)->str {
+            var pointer=external;let slot=pointer.ref;slot.* = value.ref;pointer.*
+        }",
+    );
+    for (name, expected) in [
+        ("replace", BTreeSet::from([parameter(1, &[])])),
+        (
+            "weak",
+            BTreeSet::from([parameter(1, &[]), parameter(3, &[])]),
+        ),
+        ("targets_before_value", BTreeSet::from([parameter(2, &[])])),
+        ("changed_pointer", BTreeSet::from([parameter(1, &[])])),
+        ("strong_recovers", BTreeSet::from([parameter(1, &[])])),
+    ] {
+        assert_eq!(
+            infer(&package, name, 2_000_000).unwrap().returned.unwrap()[&vec![]],
+            expected,
+            "{name}"
+        );
+    }
+    assert!(
+        infer(&package, "unknown_survives", 2_000_000)
+            .unwrap_err()
+            .contains("target is unknown")
+    );
+}
