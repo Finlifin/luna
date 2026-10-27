@@ -1749,6 +1749,33 @@ fn grouped_enum_builder_rejects_missing_parents_and_name_collisions() {
 }
 
 #[test]
+fn code_generator_reflects_its_published_struct_to_select_runtime_code() {
+    let fixture = Fixture::new(
+        "
+        comptime fn generate() -> <|-bool> {
+            var builder = meta.StructBuilder.new(.name = .QuoteLocal);
+            builder.add_field(.flag, bool);
+            let T = builder.Build();
+            let fields = meta.struct_field_names(T);
+            if meta.length(fields) == 1 and fields[0] == .flag {
+                return '(true);
+            }
+            '(false)
+        }
+        fn run() -> bool {~<generate()>}
+        comptime fn ready() -> bool {true}
+    ",
+    );
+    let (Artifact::Nir(package), _, _) = fixture.invoke_meta("ready").unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
 fn struct_builder_copies_instantiated_fields_and_extends_the_draft() {
     let fixture = Fixture::new(
         "

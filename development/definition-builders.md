@@ -8,6 +8,37 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## CMTT and builder integration boundary
+
+A code generator can construct a StructBuilder, publish its Type, reflect the
+result and choose runtime code using the reflected data. The source regression
+`code_generator_reflects_its_published_struct_to_select_runtime_code` passes
+(`/tmp/luna-tools-qv203wez/result.json`, exit 0). Reproduce in `/home/fin/luna` with
+`python3 -B development/check.py --timeout 900 -- test --release -p luna
+--test builder_invocations code_generator_reflects -- --nocapture`.
+`python3 -B development/host_examples.py builder-code-generator --release-driver
+--compare-optimization` also passes at O0/O3
+(`/tmp/luna-host-examples-jjh5w6sj/summary.json`).
+
+This does not establish generated local type use inside a quote. The attempted
+`'(T {flag:true}.flag)` after `let T = builder.Build()` failed during generator
+definition checking with `required comptime input ... is not available in this
+invocation` (`/tmp/luna-tools-61rqqndc/result.json`, exit 101).
+`development/repros/builder-local-type-in-quote.fl` retains that distinct case.
+The abstract check in `bind_generator_pattern` retains only known Type evidence;
+it does not execute preceding mutable builder operations to derive T's shape.
+Resolving this requires an explicit formation/deferred-checking strategy, not
+unconditionally running generator bodies while checking their definitions.
+
+Default-code publication has a separate gap: contextual code currently lives in
+elaboration's `ExpressionCode`/`PatternCode` environments, while the VM Value and
+StructBuildRequest do not carry such witnesses. Concrete NIR struct descriptors
+contain field types, but construction defaults still use source HIR owners.
+The existing HIR default assembler tests do not bridge these interfaces. A full
+implementation must transport checked code with its context, retain its owner
+through publication, and connect omitted defaults through ordinary construction;
+copying only an expression or adding an unchecked builder argument is insufficient.
+
 ## Editable struct reflection drafts
 
 `meta.StructBuilder.from_type(subject, .name = .Generated)` copies ordered field

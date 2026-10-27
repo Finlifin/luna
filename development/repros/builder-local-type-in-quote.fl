@@ -1,0 +1,16 @@
+{-
+  Pending: the generator's definition check cannot obtain the structure of T
+  from its preceding mutable builder computation. The current diagnostic is
+  "required comptime input ... is not available in this invocation".
+  Load meta and primitives as in host-builder-code-generator.fl.
+-}
+use primitives.Type;
+
+comptime fn generate() -> <|-bool> {
+    var builder = meta.StructBuilder.new(.name = .QuoteLocal);
+    builder.add_field(.flag, bool);
+    let T = builder.Build();
+    '(T {flag:true}.flag)
+}
+
+fn run() -> bool { ~<generate()> }
