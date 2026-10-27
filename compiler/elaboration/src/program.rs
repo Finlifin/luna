@@ -390,6 +390,8 @@ fn elaborate_with_attributes(
         checked_traits: Vec::new(),
         checked_implementations: Vec::new(),
         associated_initializers: BTreeMap::new(),
+        implementation_relationships: BTreeMap::new(),
+        complementary_associated: Vec::new(),
         active_associated_values: BTreeSet::new(),
         selected_associated_implementation: None,
         active_associated_signatures: BTreeSet::new(),
@@ -1440,6 +1442,11 @@ struct Checker<'a, 'h> {
     checked_implementations: Vec<n::Implementation>,
     associated_initializers:
         BTreeMap<(DeclarationId, DeclarationId), (OwnerId, Vec<DeclarationId>, Vec<Term>)>,
+    implementation_relationships: BTreeMap<DeclarationId, DeclarationId>,
+    complementary_associated: Vec<(
+        (DeclarationId, DeclarationId),
+        (OwnerId, Vec<DeclarationId>, Vec<Term>),
+    )>,
     active_associated_values: BTreeSet<(DeclarationId, DeclarationId)>,
     selected_associated_implementation: Option<DeclarationId>,
     active_associated_signatures: BTreeSet<OwnerId>,

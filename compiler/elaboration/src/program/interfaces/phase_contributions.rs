@@ -75,19 +75,6 @@ pub(super) fn merge(
             {
                 return Err("implementation phase contributions overlap".into());
             }
-            if target
-                .interface
-                .and_then(|id| traits.get(&id))
-                .is_some_and(|interface| !interface.associated.is_empty())
-                || !target.associated.is_empty()
-                || !contribution.associated.is_empty()
-                || !target.associated_initializers.is_empty()
-                || !contribution.associated_initializers.is_empty()
-            {
-                return Err(
-                    "cross-phase associated implementation merging is not yet implemented".into(),
-                );
-            }
             if capabilities(target, fuel)? != capabilities(&contribution, fuel)? {
                 return Err("complementary implementation capability conditions differ".into());
             }

@@ -477,6 +477,7 @@ impl Checker<'_, '_> {
                 self.package.item(owner).unwrap().span,
             )?;
         }
+        self.check_complementary_associated()?;
         let members: Vec<_> = self
             .checked_traits
             .iter()
@@ -569,7 +570,12 @@ impl Checker<'_, '_> {
         let Some(parent) = self.self_containers.get(&owner) else {
             return false;
         };
-        let implementation = declaration(self.package, &self.package_identities, *parent);
+        let original = declaration(self.package, &self.package_identities, *parent);
+        let implementation = self
+            .implementation_relationships
+            .get(&original)
+            .copied()
+            .unwrap_or(original);
         let Some(interface) = self
             .checked_implementations
             .iter()
@@ -690,7 +696,12 @@ impl Checker<'_, '_> {
             }
             return result;
         }
-        let implementation = declaration(self.package, &self.package_identities, parent);
+        let original = declaration(self.package, &self.package_identities, parent);
+        let implementation = self
+            .implementation_relationships
+            .get(&original)
+            .copied()
+            .unwrap_or(original);
         let interface = self
             .checked_implementations
             .iter()
@@ -711,6 +722,35 @@ impl Checker<'_, '_> {
             .map(|a| a.declaration)
             .ok_or_else(|| error(span, "associated value has no originating interface member"))?;
         let mut value = self.selected_associated_value(implementation, member, span)?;
+        if original != implementation
+            && self.selected_associated_implementation != Some(implementation)
+        {
+            let canonical = self
+                .checked_implementations
+                .iter()
+                .find(|item| item.declaration == implementation)
+                .unwrap();
+            let binders = canonical
+                .parameter_binders()
+                .map_err(|e| error(span, e.to_string()))?;
+            let parameters = self
+                .type_parameters
+                .get(&parent)
+                .cloned()
+                .unwrap_or_default();
+            let arguments = self
+                .input_binders(&parameters)
+                .iter()
+                .map(|parameter| Term::Rigid {
+                    declaration: parameter.declaration,
+                    sort: parameter.sort,
+                })
+                .collect::<Vec<_>>();
+            constants::charge_copy(&value, &mut self.required_steps, span)?;
+            value = value
+                .instantiate_parameters(&binders, &arguments)
+                .map_err(|e| error(span, e.to_string()))?;
+        }
         value.source = source(span);
         Ok(value)
     }
@@ -865,12 +905,15 @@ impl Checker<'_, '_> {
                         (contract.declaration, true)
                     };
                     let owner = self.associated_owner(declaration).unwrap();
-                    let value =
-                        self.associated_contract(owner, true)?
-                            .default
-                            .ok_or_else(|| {
-                                error(span, "associated signature requires an initializer")
-                            })?;
+                    let Some(value) = self.associated_contract(owner, true)?.default else {
+                        /* Another phase may provide this required signature item.
+                         * Keep its equation unresolved until the merged Type world
+                         * checks the deferred signature; completeness is separate.
+                         */
+                        active.remove(&member);
+                        completed.insert(member);
+                        continue;
+                    };
                     constants::charge_copy(&value, &mut self.required_steps, span)?;
                     let K::TypeValue(mut value) = value.kind else {
                         return Err(error(

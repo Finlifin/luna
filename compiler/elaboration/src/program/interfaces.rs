@@ -6,6 +6,7 @@ mod associated;
 mod declarations;
 mod early_inherent;
 mod parents;
+mod phase_associated;
 mod phase_contributions;
 mod program_contracts;
 mod signatures;
@@ -1055,6 +1056,15 @@ impl Checker<'_, '_> {
                         (actual.declaration, vec![], vec![])
                     } else {
                         if !self.associated_has_initializer(contract.declaration) {
+                            let own = declaration(self.package, &self.package_identities, owner);
+                            if phase == n::TraitPhase::Comptime
+                                && contract.phase == n::TraitPhase::Runtime
+                                && relationships.iter().any(|(other, canonical)| {
+                                    *other != own && Some(canonical) == relationships.get(&own)
+                                })
+                            {
+                                continue;
+                            }
                             return Err(error(
                                 item.span,
                                 format!("missing required associated value `{}`", contract.name),
@@ -1103,6 +1113,7 @@ impl Checker<'_, '_> {
                 methods,
             });
         }
+        self.prepare_complementary_associated(&implementations, &relationships)?;
         let mut implementations = phase_contributions::merge(
             implementations,
             &relationships,

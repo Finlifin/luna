@@ -485,7 +485,7 @@ fn associated_phase_selection_does_not_recover_a_broader_default() {
 }
 
 #[test]
-fn complementary_associated_values_are_not_silently_discarded() {
+fn complementary_associated_values_must_agree() {
     let source = phase_source(
         r#"
         trait Code { assoc Value: Type = bool; }
@@ -496,7 +496,126 @@ fn complementary_associated_values_are_not_silently_discarded() {
     );
     let diagnostic = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
     assert!(
-        diagnostic.contains("cross-phase associated implementation merging"),
+        diagnostic.contains("complementary associated values differ"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn complementary_associated_types_share_required_data_in_either_order() {
+    for reverse in [false, true] {
+        let runtime = "impl Code<bool> for Subject<bool> {assoc Value: Type = bool; comptime fn ordinary(value:Value)->Value {value}}";
+        let staged = "comptime impl Code<bool> for Subject<bool> {assoc enabled:bool=true; comptime fn staged_value(value:bool)->bool {value}}";
+        let definitions = if reverse {
+            format!("{staged} {runtime}")
+        } else {
+            format!("{runtime} {staged}")
+        };
+        let source = phase_source(&format!(
+            r#"
+            trait Code where T {{
+                assoc Value: Type;
+                ^staged assoc enabled: bool;
+                comptime fn ordinary(value:Value)->Value;
+                ^staged comptime fn staged_value(value:Value)->Value;
+            }}
+            struct Subject where T {{}}
+            {definitions}
+            comptime fn run()->bool {{
+                Subject<bool>.as(Code<bool>).ordinary(true)
+                    and Subject<bool>.as(Code<bool>).staged_value(true)
+                    and Subject<bool>.as(Code<bool>).enabled
+            }}
+        "#
+        ));
+        let package = support::compile(&source);
+        assert_eq!(package.implementations.len(), 1);
+        assert_eq!(package.implementations[0].associated.len(), 2);
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn complementary_generic_associated_types_keep_lexical_bindings() {
+    for reverse in [false, true] {
+        let runtime = "impl Code<T> for Subject<T> where T {assoc Value: Type=T; comptime fn ordinary(value:Value)->Value {value}}";
+        let staged = "comptime impl Code<U> for Subject<U> where U {assoc Value: Type=U; comptime fn staged_value(value:Value)->Value {value}}";
+        let definitions = if reverse {
+            format!("{staged} {runtime}")
+        } else {
+            format!("{runtime} {staged}")
+        };
+        let source = phase_source(&format!(
+            r#"
+            trait Code where E {{
+                assoc Value: Type;
+                comptime fn ordinary(value:Value)->Value;
+                ^staged comptime fn staged_value(value:Value)->Value;
+            }}
+            struct Subject where T {{}}
+            {definitions}
+            comptime fn run()->bool {{
+                Subject<bool>.as(Code<bool>).ordinary(true)
+                    and not Subject<bool>.as(Code<bool>).staged_value(false)
+            }}
+        "#
+        ));
+        let package = support::compile(&source);
+        assert_eq!(package.implementations.len(), 1);
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn complementary_scalar_values_compare_results_and_reject_disagreement() {
+    let source = phase_source(
+        r#"
+        trait Code { assoc enabled: bool; }
+        struct Subject {}
+        impl Code for Subject {assoc enabled: bool = true;}
+        comptime impl Code for Subject {assoc enabled: bool = not false;}
+        comptime fn run()->bool {Subject.as(Code).enabled}
+    "#,
+    );
+    let package = support::compile(&source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let mismatch = source.replace("not false", "false");
+    let diagnostic = support::compile_with_protocols(&mismatch, &Default::default()).unwrap_err();
+    assert!(
+        diagnostic.contains("complementary associated values differ"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn complementary_generic_scalar_initializers_preserve_value_inputs() {
+    let source = phase_source(
+        r#"
+        trait Code { assoc enabled: bool; }
+        struct Subject where flag:bool {}
+        impl Code for Subject<flag> where flag:bool {assoc enabled:bool=flag;}
+        comptime impl Code for Subject<other> where other:bool {assoc enabled:bool=other;}
+        comptime fn run()->bool {Subject<true>.as(Code).enabled}
+    "#,
+    );
+    let package = support::compile(&source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let mismatch = source.replace("enabled:bool=other", "enabled:bool=not other");
+    let diagnostic = support::compile_with_protocols(&mismatch, &Default::default()).unwrap_err();
+    assert!(
+        diagnostic.contains("complementary associated values differ"),
         "{diagnostic}"
     );
 }

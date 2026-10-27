@@ -18,9 +18,10 @@ phase. General generated-definition assembly preserves the field supplied by its
 caller.
 
 Source `comptime impl Trait for Subject` contributions retain their phase through
-interface checking and invocation. Complementary method-only contributions merge
+interface checking and invocation. Complementary contributions merge
 into one implementation descriptor in either declaration order. Inherent
-comptime implementations and complementary associated merging remain unsupported.
+comptime implementations remain unsupported. Shared associated values must
+agree before the merged implementation world can be published.
 
 ## Member metadata validation
 
@@ -105,17 +106,32 @@ Selected associated-value lookup checks comptime membership before consulting
 completed values or initializers. A missing phase cannot recover a default or a
 less precise relationship. Deferred method-signature checks build their Type
 world only from available initializers rather than indexing absent phase members.
-Complementary source contributions with associated declarations still fail
-explicitly: merging method tables alone must not discard a second initializer
-or silently accept inconsistent shared values.
+Complementary associated initializers retain their original owner and a
+substitution into the common relationship's binder environment. Required readonly
+runtime data can be supplied by the runtime contribution without repeating it in
+the comptime contribution. Defaults and explicitly repeated shared values are
+checked independently. The second initializer cannot be discarded during merge.
+
+After ordinary associated completion, alternate initializers are checked in the
+same environment. Selected recipes and values are restored even on failure;
+failed checks never publish a package. Completed scalar results and Type values
+are compared structurally with diagnostic locations erased. Generic initializer
+programs currently require matching checked structure after substitution; a
+structurally different program produces an explicit unestablished-equality
+error, even when a future verifier might prove equivalence. This comparison does
+not use PTC for program equality or unfold opaque normal-form heads.
+
+Lexical associated references from secondary contributions resolve through the
+common relationship and substitute its inputs back into the method's original
+environment. Both source declaration orders follow the same path.
 
 ## Remaining integration
 
 - Interleave metadata queries that themselves depend on interface preparation;
   the current early required-evaluation path supports independent computations.
-- Extend source merging to associated items while preserving shared readonly
-  data consistency and each initializer's original generic environment. The
-  source merger still explicitly rejects complementary associated contributions.
+- Extend shared generic associated-program equality beyond identical checked
+  structure using program-level evidence; retain bounded conservative rejection
+  when equality cannot be established.
 - Complete phase handling in generated-definition publication and specialized
   protocol consumers, including comptime key protocols. Expand source-level
   non-fallback coverage beyond single-contribution relationships.
@@ -235,3 +251,26 @@ in three fixtures; the no-sysroot helper now declares the builtin alias.
 Formatting passed (`/tmp/luna-tools-guo3xq_8/result.json`, exit 0), as did
 `git diff --check`. Shared associated-value merging remains the next integration
 step; passing single-contribution tests does not establish cross-phase equality.
+
+Complementary associated merging passed 85 targeted release tests in
+`/home/fin/luna` using the preceding phase-specific command
+(`/tmp/luna-tools-ln8dvaah/result.json`, exit 0). Source cases cover both
+contribution orders, required shared types supplied only by the runtime part,
+renamed generic Type and Bool inputs, lexical references from both parts,
+computed scalar equality and conflicting Type/scalar results. The initial
+compile (`/tmp/luna-tools-sm56x07l/result.json`, exit 101) caught a diagnostic
+conversion omission. The next run (`/tmp/luna-tools-vebxed8d/result.json`,
+exit 101) exposed premature signature failure when a comptime method depended on
+required data supplied only by its runtime complement. Missing local equations
+now remain unresolved until the merged Type world checks the deferred signature;
+independent completeness checks still reject absent required data. The final
+run includes this repair. Formatting passed
+(`/tmp/luna-tools-ozbqndtr/result.json`, exit 0), as did `git diff --check`.
+
+The existing source associated-value regressions additionally passed 114 tests
+with `python3 -B development/check.py --timeout 900 -- test --release -p luna
+-p elaboration -p comptime_interpretor --test execution associated`
+(`/tmp/luna-tools-4qoapkof/result.json`, exit 0; 1,247 unrelated cases filtered).
+These exercise ordinary defaults, selected overrides, cross-implementation
+and lexical dependencies, generic value initialization, callable values and
+associated signatures. Combined with the phase suites, 199 tests passed.
