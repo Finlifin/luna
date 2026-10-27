@@ -26,13 +26,17 @@ schemas, alias projection, direct/conditional writes, address escape, calls,
 nonexecuted unknown factories, and field-pointer writes retaining extracted Type
 identity. Targeted Rust formatting and `git diff --check` pass.
 
-A separate resource limitation surfaced during validation: copying a whole
-`struct Types {word: Type}` through a pointer fails even with a bound Copy impl
-for Types because Type itself lacks Copy-component evidence
-(`/tmp/luna-tools-komi1lr1/result.json`). The successful storage regression takes
-a boolean field's address directly; it does not establish whole-schema pointer
-transfer support. Resource semantics need separate investigation before changing
-that check.
+Whole-schema pointer transfer also works when both the schema and Type have
+explicit Copy capabilities and Drop is bound. The earlier failure
+(`/tmp/luna-tools-komi1lr1/result.json`) omitted Type's capability; it was not a
+general prohibition on Type pointer copies. The regression
+`generator_schema_pointer_copy_requires_type_and_outer_capabilities` verifies
+whole-schema reads after pointer writes while preserving an already extracted
+Type identity, then separately rejects omission of either Copy implementation.
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p luna --test cmtt generator_schema_pointer_copy -- --nocapture`,
+exit 0 (`/tmp/luna-tools-evveahgk/result.json`). This does not grant automatic Copy
+to Type or permit runtime Type storage.
 
 A code generator can construct a StructBuilder, publish its Type, reflect the
 result and choose runtime code using the reflected data. The source regression

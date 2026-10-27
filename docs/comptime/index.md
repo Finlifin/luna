@@ -141,6 +141,8 @@ comptime fn count() -> Integer {
 
 聚合传送的资源证据使用独立、不可变的声明与布局快照，不把 Drop 等 runtime 方法体引入 comptime 执行包。嵌套字段逐项检查：外层声明 Copy 不能掩盖缺少 Copy 的子对象或非平凡清理责任。普通常量结果与 Type 结果的 invocation 都使用该证据，证明开销计入求值预算。未绑定协议或证据不成立时，受需的 invocation 拒绝执行传送；原始解释器也不会自行猜测协议身份。
 
+包含 Type 字段的 schema 同样逐项检查。仅为 `struct Schema {word: Type}` 声明 Copy 不够；Type 自身也须有明确的 Copy 能力。两者的证据和清理检查成立后，可以在 comptime 通过指针复制整个 schema，复制保留字段的 Type 身份。先前单独取得的 Type 值不会随 schema 字段的后续修改而改变。这不授予 Type 自动 Copy，也不允许把 Type 或该 schema 带入 runtime 存储。
+
 泛型 comptime 函数可以先形成 `p.*` 读取和写回，在 invocation 中使用实例化后的类型检查资源证据。例如 `comptime fn read(p:*T)->T where T :- Copy {p.*}` 不要求定义时就知道 T 的字段布局。类型约束不能替代具体的表示与清理检查；即使泛型外层满足 Copy，内部字段承担 Drop 责任时也不能复制。诊断保留证据失败原因，以区分协议未绑定、具体类型缺少 Copy 和清理责任不满足等情况。
 
 证据查询直接消耗当前 invocation 的剩余预算，扣除后才执行传送和后续表达式。读取还需支付实际复制表示的开销。复制包含指针字段的聚合值保留这些指针的目标身份，不会复制目标存储或延长它的寿命；目标失效后仍不可访问，含指针的聚合值也不能借助 Copy 逃逸到物化常量中。

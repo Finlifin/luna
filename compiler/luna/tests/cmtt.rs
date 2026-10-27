@@ -5749,6 +5749,49 @@ fn generator_schema_addressing_preserves_storage_and_extracted_type_identity() {
 }
 
 #[test]
+fn generator_schema_pointer_copy_requires_type_and_outer_capabilities() {
+    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for .Type'builtin {}
+        struct Types {word:.Type'builtin} impl Duplicate for Types {}
+        comptime fn build()-><|-bool> {
+            let schema=Types {word:.u8'builtin};
+            let Word=schema.word;
+            let pointer=schema.ref;
+            pointer.*.word = .char'builtin;
+            let copied=pointer.*;
+            let value:Word=17;
+            let changed=copied.word == .char'builtin;
+            '(changed and value == 17)
+        } fn run()->bool {~<build()>}";
+    let compile = |source: &str| {
+        support::compile_with_source_bindings(
+            source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                copy: Some("Duplicate"),
+                drop: Some("Retire"),
+                ..Default::default()
+            },
+        )
+    };
+    let package = compile(source).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for implementation in [
+        "impl Duplicate for .Type'builtin {}",
+        "impl Duplicate for Types {}",
+    ] {
+        let failure = compile(&source.replace(implementation, "")).unwrap_err();
+        assert!(
+            failure.contains("Copy component has no Copy capability"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
 fn generator_schema_evidence_does_not_execute_factories_or_survive_possible_writes() {
     for statement in [
         "schema.word=.char'builtin;",
