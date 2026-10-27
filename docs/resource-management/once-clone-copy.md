@@ -47,6 +47,23 @@ impl Once for !E T where E, T {}
 
 因此 `forward` 可以直接交付 `?Token`、`??Token` 或 `!Error Token`，无需库包装枚举。空值没有载荷清理；present、成功或错误分支只转移实际存在的责任，离开清理范围时执行一次清理。该实现不要求载荷先具有显式 Once 标记，也不替载荷提供 Clone／Copy。任意异构错误行的通用 Once 实现、借用载荷的通用 Clone 与条件 Copy 仍待接通。
 
+`ErrorResultOps.inspect` 与 `inspect_err` 接收整个结果的所有权，分别在成功或错误分支把载荷的指针交给回调，随后返回原分支及其完整载荷：
+
+~~~flurry
+struct Ticket { valid: bool }
+struct Failure { retryable: bool }
+
+fn check_ticket(ticket: *Ticket) { assumes ticket.valid.*; }
+fn check_failure(failure: *Failure) { assumes failure.retryable.*; }
+
+fn check(value: !Failure Ticket) -> !Failure Ticket {
+    value.as(ErrorResultOps<Ticket, Failure>).inspect(check_ticket)
+        .as(ErrorResultOps<Ticket, Failure>).inspect_err(check_failure)
+}
+~~~
+
+这里不要求 Ticket 或 Failure 具有 Copy。每次调用最多执行一次回调，另一分支跳过回调；载荷的清理责任随返回值继续传递。回调自身的捕获环境无论是否被调用都按普通资源规则清理。回调通过指针执行的操作仍须符合内存契约，不能借此把局部载荷的地址逃逸到更长的生命周期。
+
 ### Clone
 
 Clone 显式产生另一个合法值，同时保留合法源值。两值之间的共享关系、分配、效果和结果依赖由具体实现契约规定。

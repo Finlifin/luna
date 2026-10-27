@@ -1427,10 +1427,31 @@ fn repository_result_operations_preserve_both_affine_branches() {
             let bad=chained.as(ErrorResultOps<bool,Watch>).is_err();
             bad and done
         }}
+        struct Observed {{seen:*bool,done:*bool}}
+        impl Drop for Observed {{fn drop(*self) {{
+            assumes self.seen.*.* and not self.done.*.*;
+            self.done.*.* = true;
+        }}}}
+        fn observe(value:*Observed) {{
+            assumes not value.seen.*.* and not value.done.*.*;
+            value.seen.*.* = true;
+        }}
+        fn observed_case(ok:bool)->bool {{
+            var seen=false;var done=false;
+            let value:!Observed Observed = if ok {{Observed {{seen:seen.ref,done:done.ref}}}}
+                else {{error Observed {{seen:seen.ref,done:done.ref}}}};
+            let first=value.as(ErrorResultOps<Observed,Observed>).inspect(observe);
+            assumes seen == ok and not done;
+            let second=first.as(ErrorResultOps<Observed,Observed>).inspect_err(observe);
+            assumes seen and not done;
+            let retained=second.as(ErrorResultOps<Observed,Observed>).is_ok();
+            retained == ok and done
+        }}
         fn run() {{
             let a=mapped_case(true);let b=mapped_case(false);
             let c=chained_case(true);let d=chained_case(false);
-            assumes a and b and c and d;
+            let e=observed_case(true);let f=observed_case(false);
+            assumes a and b and c and d and e and f;
         }}",
         include_str!("../../../library/builtin/result.fl"),
         include_str!("../../../library/builtin/resources.fl"),
@@ -1456,7 +1477,8 @@ fn repository_result_operations_preserve_both_affine_branches() {
         .unwrap();
     assert!(matches!(reroute.body.ty, nir::Term::ErrorResult { .. }));
     assert_eq!(
-        luna::execution::interpret_with_protocols(&package, "run", "Copy", "Drop", 100000).unwrap(),
+        luna::execution::interpret_with_protocols(&package, "run", "Copy", "Drop", 1_000_000)
+            .unwrap(),
         Value::Unit
     );
     let copy = package
@@ -1471,8 +1493,9 @@ fn repository_result_operations_preserve_both_affine_branches() {
         .find(|t| t.name == "Drop")
         .unwrap()
         .declaration;
-    let prepared = luna::host::prepare_with_protocols(&package, "run", 100000, copy, drop).unwrap();
-    let ir = luna::host::llvm_ir_prepared(&prepared, 100000).unwrap();
+    let prepared =
+        luna::host::prepare_with_protocols(&package, "run", 1_000_000, copy, drop).unwrap();
+    let ir = luna::host::llvm_ir_prepared(&prepared, 1_000_000).unwrap();
     for optimization in [
         luna::host::OptimizationLevel::O0,
         luna::host::OptimizationLevel::O3,
@@ -1489,6 +1512,24 @@ fn repository_result_operations_preserve_both_affine_branches() {
 #[test]
 fn repository_value_combinators_own_callback_environments_on_both_branches() {
     for (input_type, method, parameters, returned, observe, active, inactive) in [
+        (
+            "!bool bool",
+            "as(ErrorResultOps<bool,bool>).inspect",
+            "value:*bool",
+            "assumes value.*;",
+            "mapped match {v! =>v,error v=>v}",
+            "true",
+            "error true",
+        ),
+        (
+            "!bool bool",
+            "as(ErrorResultOps<bool,bool>).inspect_err",
+            "value:*bool",
+            "assumes value.*;",
+            "mapped match {v! =>v,error v=>v}",
+            "error true",
+            "true",
+        ),
         (
             "?bool",
             "as(OptionalOps<bool>).unwrap_or_else",
