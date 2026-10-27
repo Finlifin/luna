@@ -447,6 +447,7 @@ pub mod materialization;
 pub mod program;
 
 pub mod calls;
+pub mod derivation;
 pub mod implementation;
 pub mod matching;
 pub mod obligations;

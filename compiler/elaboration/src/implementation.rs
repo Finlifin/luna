@@ -13,7 +13,10 @@ mod ownership;
 mod phases;
 pub use applicability::{HeadMatch, TypeAssessment, TypeEvidence, TypeResolution};
 use nir::{DeclarationId, Sort, Term};
-pub use ownership::{Ownership, OwnershipError, inherent as inherent_ownership};
+pub use ownership::{
+    Ownership, OwnershipError, default_strategy as default_strategy_ownership,
+    inherent as inherent_ownership,
+};
 pub use phases::PhaseSelection;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

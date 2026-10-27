@@ -48,6 +48,29 @@ impl ImplementationHead {
     }
 }
 
+/// Default strategy registration observes the trait head and its arguments;
+/// the eventual derived subject cannot grant registration ownership.
+pub fn default_strategy(
+    declaration: DeclarationId,
+    interface: DeclarationId,
+    arguments: &[Term],
+    budget: Budget,
+) -> Result<Ownership, Error> {
+    let mut fuel = budget.steps;
+    spend(&mut fuel)?;
+    if interface.package == declaration.package {
+        return Ok(Ownership::LocalInterface(interface));
+    }
+    for argument in arguments {
+        if let Some(identity) =
+            local_identity(argument, declaration.package, &mut fuel, budget.max_depth)?
+        {
+            return Ok(Ownership::LocalNominal(identity));
+        }
+    }
+    Err(Error::Ownership(OwnershipError::NoLocalIdentity))
+}
+
 /// Inherent implementations require the subject's own nominal identity; a
 /// local argument inside a foreign wrapper does not own that wrapper.
 pub fn inherent(subject: &Term, package: u64) -> Result<Ownership, Error> {
