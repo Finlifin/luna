@@ -2196,12 +2196,13 @@ impl Checker<'_, '_> {
             } else {
                 open_functions::Annotation::Known(p(P::Void))
             };
+            // Staged body work waits for inputs even when the callable itself
+            // is comptime; a closed signature does not complete those inputs.
             if result_annotation.is_pending()
                 || annotations
                     .iter()
                     .any(|(_, annotation)| annotation.is_pending())
-                || (!sig.modifiers.is_comptime
-                    && !sig.modifiers.is_normal_form_head
+                || (!sig.modifiers.is_normal_form_head
                     && parameters
                         .iter()
                         .any(|parameter| parameter.sort != Sort::Runtime)

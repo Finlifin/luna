@@ -1164,3 +1164,28 @@ fn strategy_postconditions_remain_on_generation_execution() {
         }
     }
 }
+
+#[test]
+fn strategy_inline_control_preserves_input_selection_and_source_order() {
+    let package = compile_with_strategy_bool_splice(
+        "trait Flag {fn flag()->bool;} derive fn configured(input:bool) for Flag {var state=false; inline if input {state=true;} else {state=false;} let before=state; inline if input {state=false;} else {state=true;} let after=state; fn flag()->bool {before and not after}} struct First {} struct Second {} derive Flag.use(configured(true)) for First; derive Flag.use(configured(false)) for Second; fn run()->bool {First.as(Flag).flag() and not Second.as(Flag).flag()}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn strategy_inline_control_retains_comptime_phase_checks() {
+    let source = "trait Flag {} fn runtime_value()->bool {true} derive fn configured for Flag {inline if runtime_value() {()}} struct Subject {} derive Flag.use(configured) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("runtime function"), "{error}");
+}
+
+#[test]
+fn strategy_inline_control_does_not_publish_nested_definitions() {
+    let source = "trait Flag {fn flag()->bool;} derive fn configured for Flag {inline if false {fn flag()->bool {true}}} struct Subject {} derive Flag.use(configured) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("nested generation definitions"), "{error}");
+}

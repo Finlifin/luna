@@ -946,3 +946,44 @@ git diff --check
   Boolean as a postcondition without a premise. Ordinary definition checking
   correctly rejected it; the corrected positive test supplies that premise,
   and its negative variant requires the opposite postcondition.
+
+## Inline controls in strategy computations
+
+Strategy statement classification now retains `InlineControl`, alongside the
+ordinary controls and legacy inline forms. Rebinding preserves the wrapper and
+fresh local identities; existing inline elaboration remains responsible for
+selection and stage checks. Conditional member generation remains unsupported
+and cannot publish a member from an unselected branch.
+
+The initial integration run exposed a second issue: a closed signature caused
+comptime functions with explicitly staged parameters to bypass open-body
+checking. An inline selector then attempted to read its parameter before any
+invocation supplied it. Signature registration now applies staged-body detection
+to comptime functions too, while retaining the normal-form exclusion. This uses
+the ordinary open-function path instead of substituting strategy inputs by hand.
+The initial report is `/tmp/luna-tools-kacmhtta/result.json` (76 passed, one
+failure: unavailable staged selector input).
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation --test comptime_clause_inputs --test comptime_object_contracts --test staged_aggregate_contracts --test default_calls
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Final tests: exit 0, `/tmp/luna-tools-ghffg633/result.json`; derivation 77,
+  comptime clause inputs 38, Object contracts 2, staged aggregate contracts 31,
+  default calls 43 passed.
+- Formatting: exit 0, `/tmp/luna-tools-jz3rkacp/result.json`, after applying
+  the assertion wrapping requested by the initial formatting check.
+- The intermediate `/tmp/luna-tools-qzwvgtur/result.json` stopped on a negative
+  test's diagnostic assertion: the operation was correctly rejected with
+  "function is unavailable in this execution phase". The test now checks that
+  actual diagnostic; no stage restriction was relaxed.
+- Regression cases check independent strategy inputs and assignment order,
+  selector phase rejection, nested definition rejection, direct comptime calls
+  with staged inputs and invalid operations in an unselected branch.
+- This does not implement conditional member emission, default selection or
+  general generic strategy execution. Ordinary comptime parameters without a
+  staged parameter sort are not covered by this registration change.

@@ -548,3 +548,28 @@ fn static_method_fixed_contracts_reject_invalid_unused_calls() {
     let source = "struct Factory {} impl Factory {comptime fn choose()->bool where T,flag:bool,requires T==bool {flag}} comptime fn unused()->bool {let flag=true;Factory.choose<.char'builtin,flag>()}";
     assert!(compile(source).is_err());
 }
+
+#[test]
+fn closed_comptime_signature_delays_inline_selection_until_staged_input_supply() {
+    assert_eq!(
+        invoke(
+            "comptime fn choose(comptime flag:bool)->bool {inline if flag {true} else {false}}
+             comptime fn run()->bool {choose(true) and not choose(false)}",
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn closed_comptime_staged_body_checks_unselected_operations() {
+    let error = compile(
+        "fn runtime_value()->bool {true}
+         comptime fn choose(comptime flag:bool)->bool {inline if flag {true} else {runtime_value()}}
+         const value=choose(true);",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("unavailable in this execution phase"),
+        "{error}"
+    );
+}

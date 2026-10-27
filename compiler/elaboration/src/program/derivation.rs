@@ -83,7 +83,8 @@ fn members<'h>(
             | E::When(..)
             | E::For { .. }
             | E::InlineFor { .. }
-            | E::InlineIf { .. } => computations.push(statement),
+            | E::InlineIf { .. }
+            | E::InlineControl(..) => computations.push(statement),
             _ => {
                 return Err(unsupported(statement.span, "strategy statement execution"));
             }
