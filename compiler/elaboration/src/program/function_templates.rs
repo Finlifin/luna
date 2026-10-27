@@ -350,6 +350,7 @@ impl<'h> Rebind<'_, 'h> {
             | E::TyAny
             | E::TyPlaceholder
             | E::TySelf
+            | E::SelfValue
             | E::Unit
             | E::Null
             | E::Undefined

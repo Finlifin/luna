@@ -518,3 +518,25 @@ git diff --check
   assertion checks that each note covers its corresponding declaration. Initial
   report: `/tmp/luna-tools-9thanjh6/result.json`.
 - Formatting: `/tmp/luna-tools-t_lqgmp9/result.json`; diff check passed.
+
+## Receiver expressions in generated methods
+
+The shared generated-expression copier now preserves `SelfValue` while assigning
+its fresh expression owner. Ordinary method checking resolves that owner to the
+cloned receiver parameter, including borrowed receivers. It does not capture the
+source strategy's parameter environment or fabricate a receiver for static
+methods. This closes a gap where receiver signatures cloned successfully but any
+body use of lowercase `self` reached the copier's unsupported-expression case.
+
+Checks in `/home/fin/luna` (all exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Source suite: 26 passed, `/tmp/luna-tools-m5_9omfp/result.json`.
+  Receiver cases read independent subjects, write the original borrowed subject,
+  return a receiver during comptime invocation, and reject self in static methods.
+- Formatting: `/tmp/luna-tools-2z65seio/result.json`; diff check passed.

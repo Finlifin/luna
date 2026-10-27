@@ -325,3 +325,47 @@ fn expansion_failures_report_sources_but_unrelated_errors_do_not() {
     assert!(!error.contains("derivation strategy"), "{error}");
     assert!(!error.contains("derive use site"), "{error}");
 }
+
+#[test]
+fn generated_methods_read_each_subjects_receiver_fields() {
+    let package = support::compile(
+        "trait Read {fn read(self)->bool;} derive fn reading for Read {fn read(self)->bool {self.value}} struct First {value:bool} struct Second {value:bool} derive Read.use(reading) for First; derive Read.use(reading) for Second; fn run()->bool {First{value:true}.as(Read).read() and not Second{value:false}.as(Read).read()}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn generated_borrowed_receivers_write_the_original_subject() {
+    let package = support::compile(
+        "trait Update {fn set(*self,value:bool);} derive fn updating for Update {fn set(*self,value:bool) {self.*.value = value;}} struct Subject {value:bool} derive Update.use(updating) for Subject; fn run()->bool {let subject=Subject{value:false}; Subject.as(Update).set(subject.ref,true);subject.value}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn generated_comptime_methods_can_return_their_receiver() {
+    let package = support::compile(
+        "trait Keep {^{comptime_phase:true} comptime fn keep(self)->Self;} derive fn keeping for Keep {comptime fn keep(self)->Self {self}} struct Subject {value:bool} comptime derive Keep.use(keeping) for Subject; comptime fn run()->bool {Subject{value:true}.as(Keep).keep().value}",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn generated_self_without_a_receiver_uses_the_ordinary_diagnostic() {
+    let source = "trait Flag {fn flag()->bool;} derive fn invalid for Flag {fn flag()->bool {self}} struct Subject {} derive Flag.use(invalid) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("self requires a method receiver"), "{error}");
+    assert!(
+        error.contains("generated member `flag` originates here"),
+        "{error}"
+    );
+}
