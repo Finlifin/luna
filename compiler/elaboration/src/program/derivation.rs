@@ -221,6 +221,10 @@ pub(super) fn expand<'h>(
                 identity,
             ));
         }
+        let ((shell, _), members) = drafts.split_first_mut().unwrap();
+        function_templates::relocate_generation_attributes(
+            source, arena, strategy, shell, members, &mapping, fuel,
+        )?;
         for (draft, identity) in drafts {
             for attribute in &draft.attributes {
                 if omitted.contains(&attribute.lexical_owner) {

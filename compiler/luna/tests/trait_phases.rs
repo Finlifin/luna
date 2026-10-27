@@ -619,3 +619,12 @@ fn complementary_generic_scalar_initializers_preserve_value_inputs() {
         "{diagnostic}"
     );
 }
+#[test]
+fn member_prefix_attributes_can_use_the_enclosing_impl_self() {
+    let source = "typealias Type=.Type'builtin; comptime fn metadata(T:Type)->.Object'builtin {let value={comptime_phase:T == Subject};value} trait Flag {^{comptime_phase:true} comptime fn flag()->bool;} struct Subject {} comptime impl Flag for Subject {^metadata(Self) comptime fn flag()->bool {true}} comptime fn run()->bool {Subject.as(Flag).flag()}";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}

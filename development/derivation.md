@@ -413,3 +413,40 @@ python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
 - Final source run including distinct associated Self types: 13 passed,
   `/tmp/luna-tools-v5gtx7qh/result.json`.
 - Formatting: `/tmp/luna-tools-dco3uinn/result.json`; `git diff --check` passed.
+
+## Prefix attributes on generated members
+
+Member prefix expressions whose lexical owner is the strategy now move into
+the generated impl context. They share the impl receiver/trait expression ID
+mapping, preserve resolver-selected declaration identities, and obtain the
+generated receiver's `Self`. The generated method's own parameters remain outside
+this surrounding scope. Definition-local configurations retain their existing
+member context, and prefix application order is unchanged.
+
+Attribute expressions and any nested bodies are copied into the private candidate
+before publication. The ordinary attribute evaluator and consumer checks remain
+responsible for the result: preserving an ABI attribute does not implement its
+consumer. Free generation inputs still require explicit value substitution;
+strategy input execution and attributes on strategies/requests remain unsupported.
+
+The first execution run exposed an ordinary checker gap: impl members had a
+`Self` container, but their surrounding impl scope did not. Recognizing an impl
+owner directly in `self_type` lets handwritten and generated member prefix
+attributes interpret the receiver lazily through the same path. The initial derive run passed 15 of
+16 tests and failed the new `Self` case (`/tmp/luna-tools-s_9bqxyy/result.json`);
+the earlier build also caught and corrected the relocation helper's visibility.
+An intermediate attempt to add a self-container edge from an impl to itself
+caused five capture-depth failures (`/tmp/luna-tools-wz_2itdr/result.json`). The
+final approach adds no such edge and preserves the acyclic capture hierarchy.
+
+Final checks in `/home/fin/luna` (exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation --test trait_phases
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Derivation: 16 passed; trait phases: 30 passed,
+  `/tmp/luna-tools-2axf4n0r/result.json`.
+- Formatting: `/tmp/luna-tools-em8q313t/result.json`.

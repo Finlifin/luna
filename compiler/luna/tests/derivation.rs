@@ -168,3 +168,42 @@ fn generated_associated_self_types_remain_distinct_between_subjects() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn generated_prefix_attributes_evaluate_in_the_impl_self_context() {
+    let source = format!(
+        "mod attrs {{{}}} use attrs.comptime_phase as staged; typealias Type=.Type'builtin; comptime fn metadata(T:Type)->.Object'builtin {{let value={{comptime_phase:T == Subject}};value}} trait Flag {{^staged comptime fn flag()->bool;}} derive fn enabled for Flag {{^metadata(Self) comptime fn flag()->bool {{true}}}} struct Subject {{}} comptime derive Flag.use(enabled) for Subject; comptime fn run()->bool {{Subject.as(Flag).flag()}}",
+        include_str!("../../../library/attrs/lib.fl")
+    );
+    let package = support::compile(&source);
+    assert!(package.implementations[0].phases.comptime);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn generated_prefix_attributes_preserve_override_order() {
+    let source = "const staged={comptime_phase:true}; const ordinary={comptime_phase:false}; trait Flag {comptime fn flag()->bool;} derive fn enabled for Flag {^ordinary ^staged comptime fn flag()->bool {true}} struct Subject {} derive Flag.use(enabled) for Subject; comptime fn run()->bool {Subject.as(Flag).flag()}";
+    let package = support::compile(source);
+    assert!(package.implementations[0].phases.runtime);
+    assert!(!package.implementations[0].phases.comptime);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn generated_attributes_still_require_an_implemented_consumer() {
+    let source = format!(
+        "mod attrs {{{}}} trait Flag {{fn flag()->bool;}} derive fn enabled for Flag {{^attrs.abi(.c) fn flag()->bool {{true}}}} struct Subject {{}} derive Flag.use(enabled) for Subject;",
+        include_str!("../../../library/attrs/lib.fl")
+    );
+    let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("definition attribute or modifier `abi`"),
+        "{error}"
+    );
+}

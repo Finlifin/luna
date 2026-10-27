@@ -2087,12 +2087,25 @@ impl Checker<'_, '_> {
         if let Some(ty) = self.self_types.get(&owner) {
             return Ok(ty.clone());
         }
-        let container = self.self_containers.get(&owner).copied().ok_or_else(|| {
-            error(
-                span,
-                "Self requires an enclosing nominal type, trait or implementation",
-            )
-        })?;
+        // Prefix attributes use the impl scope itself. Do not register an
+        // owner-to-itself capture edge: capture traversal follows these edges.
+        let container = self
+            .self_containers
+            .get(&owner)
+            .copied()
+            .or_else(|| {
+                matches!(
+                    self.package.item(owner).map(|item| &item.kind),
+                    Some(ItemKind::Impl(_))
+                )
+                .then_some(owner)
+            })
+            .ok_or_else(|| {
+                error(
+                    span,
+                    "Self requires an enclosing nominal type, trait or implementation",
+                )
+            })?;
         let ItemKind::Impl(def) = &self.package.item(container).unwrap().kind else {
             unreachable!()
         };
