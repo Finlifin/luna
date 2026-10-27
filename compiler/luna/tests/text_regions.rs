@@ -314,3 +314,68 @@ fn loop_fixed_points_preserve_backedges_and_labeled_exits() {
     assert!(infer(&package, "carried", 20).is_err());
     assert_eq!(infer(&package, "carried", 100_000).unwrap(), carried);
 }
+
+#[test]
+fn match_payloads_keep_origins_and_select_arms_in_order() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        struct Packet {first:str,second:str}
+        enum Choice {Empty, Text(str)}
+        fn optional(value:?str,fallback:str)->str {value match {text?=>text,null=>fallback,}}
+        fn record(value:Packet)->str {value match {{first:_,second:text}=>text,}}
+        fn variant(value:Choice,fallback:str)->str {value match {.Text(text)=>text,.Empty=>fallback,}}
+        fn ordered(value:str)->str {true match {true=>value,false=>\"dead\",}}
+        fn compared(value:str)->bool {value match {\"x\"=>true,_=>false,}}
+        fn fallback(a:str,b:str)->str {a match {_ if false=>a,_=>b,}}
+        fn guarded(flag:bool,a:str,b:str)->str {a match {text if flag=>text,_=>b,}}
+        fn selected(flag:bool,a:str,b:str)->str {
+            var slot=a;flag match {true=>do {slot=b;},false=>do {},};slot
+        }",
+    );
+    let optional = infer(&package, "optional", 100_000).unwrap();
+    let dump = optional.to_string();
+    assert!(
+        dump.contains("(parameter-text-region 0 (fields (variant 1) 0))"),
+        "{dump}"
+    );
+    assert!(
+        dump.contains("(parameter-text-region 1 (fields))"),
+        "{dump}"
+    );
+    assert_eq!(
+        infer(&package, "record", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[1])])
+    );
+    let variant = infer(&package, "variant", 100_000).unwrap().to_string();
+    assert!(
+        variant.contains("(parameter-text-region 0 (fields (variant 1) 0))"),
+        "{variant}"
+    );
+    assert_eq!(
+        infer(&package, "ordered", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[])])
+    );
+    assert_eq!(
+        infer(&package, "compared", 100_000).unwrap().reads,
+        BTreeSet::from([parameter(0, &[])])
+    );
+    assert_eq!(
+        infer(&package, "fallback", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[])])
+    );
+    for name in ["guarded", "selected"] {
+        assert_eq!(
+            infer(&package, name, 100_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+        );
+    }
+}

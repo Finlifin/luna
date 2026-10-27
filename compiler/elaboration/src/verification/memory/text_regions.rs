@@ -181,6 +181,88 @@ struct Query<'a, 'f> {
     metadata: Round<'static>,
 }
 impl Query<'_, '_> {
+    fn bind_pattern(
+        &mut self,
+        pattern: &Pattern,
+        ty: &Term,
+        regions: &Regions,
+        locals: &mut Locals,
+        depth: usize,
+    ) -> Result<(), String> {
+        if depth >= 128 {
+            return Err("text region pattern depth exhausted".into());
+        }
+        charge(self.fuel, 1)?;
+        match pattern {
+            Pattern::Wild | Pattern::Unit => Ok(()),
+            Pattern::Literal(literal) => {
+                if matches!(literal, nir::program::Literal::String(_)) {
+                    charge_regions(regions, self.fuel)?;
+                    for origins in regions.values() {
+                        self.reads
+                            .last_mut()
+                            .unwrap()
+                            .extend(origins.iter().cloned());
+                    }
+                }
+                Ok(())
+            }
+            Pattern::Binding { binding, inner } => {
+                self.bind_pattern(inner, ty, regions, locals, depth + 1)?;
+                charge_regions(regions, self.fuel)?;
+                locals.insert(*binding, regions.clone());
+                Ok(())
+            }
+            Pattern::Tuple(patterns)
+            | Pattern::Record {
+                fields: patterns, ..
+            }
+            | Pattern::AnonymousRecord {
+                fields: patterns, ..
+            } => {
+                let fields = owned_fields(Some(self.package), ty, self.fuel)?;
+                if patterns.len() != fields.len() {
+                    return Err("text pattern field arity mismatch".into());
+                }
+                for (index, (pattern, ty)) in patterns.iter().zip(fields).enumerate() {
+                    charge_regions(regions, self.fuel)?;
+                    let nested = project(regions.clone(), &[index], self.fuel)?;
+                    self.bind_pattern(pattern, &ty, &nested, locals, depth + 1)?;
+                }
+                Ok(())
+            }
+            Pattern::OptionalAbsent
+            | Pattern::OptionalPresent(_)
+            | Pattern::Variant { .. }
+            | Pattern::ErrorResult { .. } => {
+                let (tag, patterns, fields) =
+                    owned_variant_pattern(Some(self.package), pattern, ty, self.fuel)?;
+                for (index, (pattern, ty)) in patterns.iter().zip(fields).enumerate() {
+                    charge_regions(regions, self.fuel)?;
+                    let nested = project(regions.clone(), &[VARIANT_FIELD, tag, index], self.fuel)?;
+                    self.bind_pattern(pattern, &ty, &nested, locals, depth + 1)?;
+                }
+                Ok(())
+            }
+            Pattern::Remap { pattern, bindings } => {
+                self.bind_pattern(pattern, ty, regions, locals, depth + 1)?;
+                let mut remapped = Locals::new();
+                for (from, to) in bindings {
+                    let value = locals
+                        .get(from)
+                        .ok_or("text pattern remap source is unavailable")?;
+                    charge_regions(value, self.fuel)?;
+                    remapped.insert(*to, value.clone());
+                }
+                locals.extend(remapped);
+                Ok(())
+            }
+            _ => Err(
+                "text region executable or alternative pattern transport is not implemented".into(),
+            ),
+        }
+    }
+
     fn function(
         &mut self,
         declaration: DeclarationId,
@@ -455,6 +537,72 @@ impl Query<'_, '_> {
                     }
                 }
                 merge(&mut result, otherwise, self.fuel)?;
+                Ok(result)
+            }
+            K::Match { value, arms } => {
+                let Some(regions) = self.expr(value, locals, returned, next)? else {
+                    return Ok(None);
+                };
+                let bindings: Vec<_> = locals.keys().copied().collect();
+                let mut pending = Some(self.locals_copy(locals)?);
+                let mut outgoing = None;
+                let mut result = None;
+                for arm in arms {
+                    let Some(input) = pending.take() else { break };
+                    let mut pattern = &arm.pattern;
+                    let mut guards = Vec::new();
+                    while let Pattern::Guard {
+                        pattern: inner,
+                        condition,
+                    } = pattern
+                    {
+                        charge(self.fuel, 1)?;
+                        guards.push(condition.as_ref());
+                        pattern = inner;
+                    }
+                    guards.reverse();
+                    if let Some(guard) = &arm.guard {
+                        guards.push(guard);
+                    }
+                    let matches = known_pattern(pattern, value, 0);
+                    if matches == Some(false) {
+                        pending = Some(input);
+                        continue;
+                    }
+                    let mut scope = self.locals_copy(&input)?;
+                    self.bind_pattern(pattern, &value.ty, &regions, &mut scope, next)?;
+                    if matches != Some(true) {
+                        pending = Some(input);
+                    }
+                    let mut accepted = true;
+                    for guard in guards {
+                        if self.expr(guard, &mut scope, returned, next)?.is_none() {
+                            accepted = false;
+                            break;
+                        }
+                        let condition = constant_bool(guard, 0);
+                        if condition != Some(true) {
+                            // Guard effects survive candidate failure; pattern
+                            // bindings do not escape into the next candidate.
+                            join_locals(&mut pending, &scope, &bindings, self.fuel)?;
+                        }
+                        if condition == Some(false) {
+                            accepted = false;
+                            break;
+                        }
+                    }
+                    if !accepted {
+                        continue;
+                    }
+                    let body = self.expr(&arm.body, &mut scope, returned, next)?;
+                    if body.is_some() {
+                        join_locals(&mut outgoing, &scope, &bindings, self.fuel)?;
+                    }
+                    merge(&mut result, body, self.fuel)?;
+                }
+                if let Some(outgoing) = outgoing {
+                    *locals = outgoing;
+                }
                 Ok(result)
             }
             K::Loop { identity, body } => {

@@ -126,7 +126,7 @@ composition, region liveness and invalidation checks are still required.
 
 Completed summaries are reused only inside one immutable query. Missing code,
 indirect calls, recursion, pointer transfers, default-argument transport,
-pattern matching, error-row repacking and explicit program contracts remain
+computed/alternative patterns, error-row repacking and explicit program contracts remain
 rejected in this analysis. They are never converted into static or empty-origin
 evidence. The existing runtime resource checker still rejects unsupported text
 views; this new analysis has not replaced that gate or exported the iterator.
@@ -196,7 +196,7 @@ flow cannot bind to caller loops. Fuel bounds repeated traversal and dependency
 joins, and exhausted inference does not publish a provisional result.
 
 This computes a conservative origin fixed point, not termination or lifetime
-proofs. Pointer writes, pattern matching and implicit cleanup remain separate
+proofs. Pointer writes, computed patterns and implicit cleanup remain separate
 unsupported transfers or obligations as described above.
 
 Validation from `/home/fin/luna`:
@@ -213,3 +213,34 @@ multi-iteration dependencies with a named call, nested labeled break/continue,
 unreachable bodies, infinite loops, returns and budget failure/recovery.
 Formatting passed (`/tmp/luna-tools-ghrf7e0x/result.json`, exit 0), as did the
 diff check. The runtime provenance gate remains in place.
+
+
+## Ordered pattern matching
+
+Match subjects are evaluated once. Structural patterns bind text origins from
+record/tuple fields, enum payloads and native optional/error branches; binding
+remaps retain those dependencies. String literal patterns record character reads.
+Arms run in order, excluding known mismatches and stopping after a guaranteed
+match with successful guards. Top-level pattern guards and arm guards evaluate in
+order, retaining reads and outer-local updates on candidate failure. Candidate
+bindings never enter the next arm or escape the match.
+
+Continuing arm environments join separately from returned values and lexical
+loop transfers. Computed views, nested executable guards and alternative patterns
+remain rejected rather than silently dropping candidate evaluation. This remains
+an origin analysis; guard observation legality, cleanup and backing-region
+liveness are separate checks.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All twelve tests passed (`/tmp/luna-tools-zftdvm60/result.json`, exit 0).
+New source cases exercise optional/enum payload origins, record fields,
+known boolean arm selection, string-pattern reads, guard fallback and arm-local
+writes to an outer binding. Formatting passed
+(`/tmp/luna-tools-xh31geov/result.json`, exit 0), as did the diff check.
