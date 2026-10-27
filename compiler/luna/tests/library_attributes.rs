@@ -186,3 +186,74 @@ fn source_merge_preserves_application_order_and_failed_output() {
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn comptime_phase_prelude_value_preserves_boolean_metadata() {
+    let package = support::compile(&format!(
+        "mod attrs {{{ATTRS}}} use attrs.prelude.*; comptime fn metadata()->.Object'builtin {{comptime_phase}}"
+    ));
+    let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let Value::Object(object) = vm
+        .invoke(support::id(&package, "metadata"), vec![])
+        .unwrap()
+    else {
+        panic!("expected Object")
+    };
+    assert_eq!(object.entries().len(), 1);
+    assert_eq!(object.entries()[0].key(), Some("comptime_phase"));
+    assert_eq!(
+        object.entries()[0].value().ty,
+        Term::Primitive(Primitive::Bool)
+    );
+    assert_eq!(object.entries()[0].value().value, Value::Bool(true));
+}
+
+#[test]
+fn phase_attribute_alias_is_inspected_through_the_repository_package() {
+    let directory = std::env::temp_dir().join(format!("luna-library-phase-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("input.fl"),
+        "use attrs.comptime_phase as staged; trait Code {^staged comptime fn value()->bool;}",
+    )
+    .unwrap();
+    let attrs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl");
+    for emit in ["attributes", "merged-attributes"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+            .current_dir(&directory)
+            .args([
+                "--packages-v1",
+                "--package",
+                "1",
+                "101",
+                "app",
+                "input.fl",
+                "--package",
+                "2",
+                "202",
+                "attrs",
+                attrs.to_str().unwrap(),
+                "--dependency",
+                "1",
+                "attrs",
+                "2",
+                "--primary",
+                "1",
+                "--emit",
+                emit,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("comptime_phase"), "{text}");
+        if emit == "attributes" {
+            assert!(text.contains("(bool true)"), "{text}");
+        }
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}

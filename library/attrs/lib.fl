@@ -8,6 +8,12 @@ pub pure comptime fn abi(name: .Symbol'builtin) -> .Object'builtin {
     metadata
 }
 
+{-
+    Trait membership phase is independent of a function's execution keyword.
+-}
+pub const comptime_phase = {comptime_phase: true};
+
 pub mod prelude {
     pub use .abi;
+    pub use .comptime_phase;
 }

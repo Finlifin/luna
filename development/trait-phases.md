@@ -23,11 +23,26 @@ runtime selection index. The rejection also applies to generated HIR: it is not
 merely a source-parser restriction. Existing ordinary implementations keep their
 current behavior.
 
+## Member metadata validation
+
+`attrs.comptime_phase` is an ordinary Object constant exported through its
+prelude. Attribute inspection evaluates it through the ordinary package and
+alias resolution paths. The `attributes::member_phases` consumer accepts merged
+metadata and returns source-located `MemberPhase` records. It checks trait or
+trait-implementation method/associated-declaration targets, the selected Bool
+payload and its original domain. It uses the existing override order, preserves
+unrelated keys for other consumers, and charges a shared budget. Failure does
+not publish a partial plan or mutate HIR. Records have S-expression Display.
+
+This validator is not yet wired into executable elaboration. Attribute inspection
+does not by itself authorize phase selection, and the existing explicit rejection
+of comptime implementation selection remains in force.
+
 ## Remaining integration
 
-- Provide and consume `attrs.comptime_phase` as ordinary attribute metadata,
-  retaining phase on trait methods and associated members independently of their
-  function execution signature.
+- Apply validated phase metadata to trait methods and associated members
+  independently of their function execution signature, integrating its required
+  computations with interface preparation rather than eagerly running bodies.
 - Group complementary implementation contributions by the confirmed normalized
   head and applicability relation, select the relationship first, then require
   the requested phase. Preserve shared associated-item consistency.
@@ -52,3 +67,12 @@ remain accepted. The generated-implementation test was then extended to all four
 trait/inherent and runtime/comptime combinations; its suite passed separately
 (`/tmp/luna-tools-n4fvchr3/result.json`). Workspace formatting passed
 (`/tmp/luna-tools-wk9lspyk/result.json`).
+
+Member metadata validation passed 20 tests with
+`python3 -B development/check.py --timeout 900 -- test --release -p luna
+-p elaboration --test attribute_phases --test attribute_merge
+--test library_attributes --test trait_phases`
+(`/tmp/luna-tools-69fwiv54/result.json`, exit 0). These cover selected overrides,
+target and Bool-domain rejection, budget failure/retry, unrelated metadata,
+real attrs package/prelude resolution, and the existing implementation-phase
+boundary. They do not demonstrate executable two-phase selection.
