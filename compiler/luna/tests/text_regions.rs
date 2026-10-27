@@ -1323,3 +1323,51 @@ fn stable_local_callables_keep_stored_capture_origins() {
     assert!(infer(&package, "nested", 1).is_err());
     assert!(infer(&package, "nested", 200_000).is_ok());
 }
+
+#[test]
+fn immediate_callback_parameters_have_invocation_local_code_and_captures() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn echo(value:str)->str {value}
+        fn other(value:str)->str {\"static\"}
+        fn apply(value:str)->str {(|action:fn(str)->str|action(value))(echo)}
+        fn nested(value:str)->str {
+            (|action:fn(str)->str| (||action(value))())(echo)
+        }
+        fn alias(value:str)->str {
+            (|action:fn(str)->str| {let alias=action;alias(value)})(echo)
+        }
+        fn reused(value:str)->str {
+            let invoke=|action:fn(str)->str|action(value);
+            let ignored=invoke(other);invoke(echo)
+        }
+        fn captured(value:str)->str {
+            let action=||value;(|callback:%{value:str} fn()->str|callback())(action)
+        }
+        fn observed(value:str)->bool {
+            let action=||value == \"x\";
+            (|callback:%{value:str} fn()->bool|callback())(action)
+        }
+        fn unknown(action:fn(str)->str,value:str)->str {
+            (|callback:fn(str)->str|callback(value))(action)
+        }",
+    );
+    for name in ["apply", "nested", "alias", "reused", "captured"] {
+        assert_eq!(
+            infer(&package, name, 300_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "observed", 300_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(0, &[])])
+    );
+    assert!(
+        infer(&package, "unknown", 300_000)
+            .unwrap_err()
+            .contains("stable local callable")
+    );
+    assert!(infer(&package, "reused", 1).is_err());
+    assert!(infer(&package, "reused", 300_000).is_ok());
+}

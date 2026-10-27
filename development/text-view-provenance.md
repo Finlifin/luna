@@ -656,3 +656,34 @@ rejection, and budget failure followed by recovery. Formatting passed
 An initial compile failure (`/tmp/luna-tools-s1ckbo7x/result.json`, exit 101)
 identified that LocalId provides ordering rather than hashing; the local index
 uses ordered maps/sets without changing LocalId or its identity contract.
+
+## Invocation-local callback parameters
+
+Immediate or stable-local closure invocation now carries known callback code
+alongside argument text origins. Inputs can supply named functions, concrete
+instances, closure literals or stable aliases. Code identities are prepared in
+the caller environment, installed only after all arguments have been evaluated,
+and restored after body analysis on both success and failure. Captured text
+continues to come from the actual argument value, not the code definition.
+
+A callback parameter can be invoked directly, reached through a local alias, or
+captured by a nested immediate closure. Reusing the same invocation closure with
+different callbacks does not retain the earlier parameter binding. Parameters
+assigned anywhere in the concrete body are excluded from this stable-code rule;
+unknown callbacks remain unknown and fail if invoked. Named higher-order summary
+specialization and general mutable callable flow remain separate work.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 29 tests passed (`/tmp/luna-tools-yu9phub9/result.json`, exit 0). New source
+coverage exercises named callback inputs, nested captures of a callback parameter,
+local callback aliases, repeated invocation with different code identities,
+text-capturing callbacks and their reads, unknown callback rejection, and budget
+failure followed by recovery. Formatting passed
+(`/tmp/luna-tools-34h9sgv3/result.json`, exit 0); the diff check passed.

@@ -170,6 +170,7 @@ pub fn infer_text_regions(
         fuel,
         current: None,
         local_callables: BTreeMap::new(),
+        changed_callables: BTreeSet::new(),
         pending: VecDeque::new(),
         scheduled: HashSet::new(),
         dependents: HashMap::new(),
@@ -186,6 +187,7 @@ struct Query<'a, 'f> {
     fuel: &'f mut usize,
     current: Option<iir::InstanceKey>,
     local_callables: BTreeMap<LocalId, std::sync::Arc<Expr>>,
+    changed_callables: BTreeSet<LocalId>,
     pending: VecDeque<iir::InstanceKey>,
     scheduled: HashSet<iir::InstanceKey>,
     dependents: HashMap<iir::InstanceKey, Vec<iir::InstanceKey>>,
@@ -499,21 +501,42 @@ impl Query<'_, '_> {
         })?;
         definitions.retain(|binding, _| !changed.contains(binding));
         self.local_callables = definitions;
+        self.changed_callables = changed;
         Ok(())
     }
 
     fn local_callee(&mut self, binding: LocalId) -> Result<std::sync::Arc<Expr>, String> {
+        self.known_local_callee(binding)?.ok_or_else(|| {
+            "text region call requires a named concrete callee or stable local callable".into()
+        })
+    }
+
+    fn known_local_callee(
+        &mut self,
+        binding: LocalId,
+    ) -> Result<Option<std::sync::Arc<Expr>>, String> {
         let mut binding = binding;
         loop {
             charge(self.fuel, 1)?;
-            let value = self.local_callables.get(&binding).ok_or(
-                "text region call requires a named concrete callee or stable local callable",
-            )?;
+            let Some(value) = self.local_callables.get(&binding) else {
+                return Ok(None);
+            };
             if let K::Local(next) = value.kind {
                 binding = next;
             } else {
-                return Ok(value.clone());
+                return Ok(Some(value.clone()));
             }
+        }
+    }
+
+    fn callable_input(&mut self, value: &Expr) -> Result<Option<std::sync::Arc<Expr>>, String> {
+        match &value.kind {
+            K::Local(binding) => self.known_local_callee(*binding),
+            K::Function(_) | K::FunctionInstance { .. } | K::Closure { .. } => {
+                nir::visit::expression(value, self.fuel, |_, _| Ok(()))?;
+                Ok(Some(std::sync::Arc::new(value.clone())))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -1132,7 +1155,9 @@ impl Query<'_, '_> {
                             return Err("duplicate text closure capture binding".into());
                         }
                     }
+                    let mut input_code = Vec::new();
                     for argument in arguments {
+                        let callable = self.callable_input(&argument.value)?;
                         let Some(value) = self.expr(&argument.value, locals, returned, next)?
                         else {
                             return Ok(None);
@@ -1143,6 +1168,19 @@ impl Query<'_, '_> {
                         {
                             return Err("text closure parameter overlaps another binding".into());
                         }
+                        input_code.push((parameters[argument.parameter], callable));
+                    }
+                    // Install invocation-local code only after every input has
+                    // been evaluated in the caller's environment.
+                    for (binding, callable) in &mut input_code {
+                        let old = if self.changed_callables.contains(binding) {
+                            self.local_callables.remove(binding)
+                        } else if let Some(code) = callable.take() {
+                            self.local_callables.insert(*binding, code)
+                        } else {
+                            self.local_callables.remove(binding)
+                        };
+                        *callable = old;
                     }
                     let outer_loops = std::mem::take(&mut self.loops);
                     self.exits.push(None);
@@ -1150,6 +1188,12 @@ impl Query<'_, '_> {
                     let completed = self.expr(body, &mut scope, &mut closure_returns, next);
                     self.exits.pop();
                     self.loops = outer_loops;
+                    for (binding, previous) in input_code {
+                        self.local_callables.remove(&binding);
+                        if let Some(previous) = previous {
+                            self.local_callables.insert(binding, previous);
+                        }
+                    }
                     merge(&mut closure_returns, completed?, self.fuel)?;
                     return Ok(closure_returns);
                 }
