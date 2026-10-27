@@ -202,6 +202,14 @@ impl StructBuilder {
         Self { name: name, field_names: [], field_types: [] }
     }
 
+    pub comptime fn from_type(subject: .Type'builtin, .name: .Symbol'builtin = .Generated) -> Self {
+        Self {
+            name: name,
+            field_names: struct_field_names(subject),
+            field_types: struct_field_types(subject),
+        }
+    }
+
     pub comptime fn add_field(*self, name: .Symbol'builtin, field_type: .Type'builtin) {
         append(self.field_names, name);
         append(self.field_types, field_type);

@@ -8,6 +8,25 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Editable struct reflection drafts
+
+`meta.StructBuilder.from_type(subject, .name = .Generated)` copies ordered field
+names and applied Types into an ordinary editable draft. The subject is evaluated
+once, and may name a concrete generic application or a struct published earlier
+in the same invocation. Extending one draft preserves saved snapshots. Every
+`Build` publishes a fresh nominal identity; this operation does not copy field
+defaults, attributes, methods or trait evidence.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p luna --test builder_invocations --test source_reflection`,
+exit 0, 63 tests (`/tmp/luna-tools-uju2y3ze/result.json`). Added cases cover applied
+source fields, extension and runtime construction, live generated subjects,
+single subject evaluation, draft independence, fresh identity, wrong subjects,
+duplicate extensions and runtime rejection. The existing native methods/resource
+example now uses this API: `python3 -B development/host_examples.py
+generated-struct-methods --release-driver --compare-optimization`, O0 and O3 pass
+(`/tmp/luna-host-examples-i5qv7cp3/summary.json`).
+
 ## Local field access cost during builder invocation
 
 Comptime local record projections now borrow their root and copy only the selected

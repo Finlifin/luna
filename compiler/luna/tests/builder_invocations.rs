@@ -1749,6 +1749,83 @@ fn grouped_enum_builder_rejects_missing_parents_and_name_collisions() {
 }
 
 #[test]
+fn struct_builder_copies_instantiated_fields_and_extends_the_draft() {
+    let fixture = Fixture::new(
+        "
+        struct Source where T {first:T,second:bool}
+        comptime fn Mirror() -> .Type'builtin {
+            var builder = meta.StructBuilder.from_type(Source<bool>, .name = .Mirrored);
+            builder.add_field(.extra, bool);
+            builder.Build()
+        }
+        typealias Mirrored = Mirror();
+        fn run() -> bool {
+            let value = Mirrored {first:true,second:false,extra:true};
+            value.first and not value.second and value.extra
+        }
+        comptime fn ready() -> bool {true}
+    ",
+    );
+    let (Artifact::Nir(package), _, _) = fixture.invoke_meta("ready").unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let copied = package
+        .structs
+        .iter()
+        .find(|item| item.name == "Mirrored")
+        .unwrap();
+    assert!(copied.type_parameters.is_empty());
+    assert_eq!(copied.fields.len(), 3);
+}
+
+#[test]
+fn struct_builder_copies_live_types_once_and_keeps_drafts_independent() {
+    let fixture = Fixture::new(
+        "
+        comptime fn Subject(visited:*bool) -> .Type'builtin {
+            visited.* = not visited.*;
+            var builder = meta.StructBuilder.new(.name = .Source);
+            builder.add_field(.first, bool);
+            builder.Build()
+        }
+        comptime fn run() -> bool {
+            var visited = false;
+            var draft = meta.StructBuilder.from_type(Subject(visited.ref));
+            let saved = draft;
+            draft.add_field(.second, bool);
+            let extended = draft.Build();
+            let original = saved.Build();
+            let copied = meta.StructBuilder.from_type(original).Build();
+            let names = meta.struct_field_names(extended);
+            let types = meta.struct_field_types(copied);
+            visited and original != copied and original != extended
+                and meta.length(meta.struct_field_names(original)) == 1
+                and meta.length(names) == 2 and names[0] == .first and names[1] == .second
+                and types[0] == bool
+        }
+    ",
+    );
+    assert_eq!(fixture.invoke_meta("run").unwrap().1, Value::Bool(true));
+}
+
+#[test]
+fn struct_builder_copy_rejects_invalid_subjects_and_duplicate_extensions() {
+    for source in [
+        "comptime fn bad() -> .Type'builtin {meta.StructBuilder.from_type(bool).Build()}",
+        "enum E {one} comptime fn bad() -> .Type'builtin {meta.StructBuilder.from_type(E).Build()}",
+        "struct S {flag:bool} comptime fn bad() -> .Type'builtin {var b = meta.StructBuilder.from_type(S); b.add_field(.flag,bool); b.Build()}",
+        "struct S {} fn bad() -> meta.StructBuilder {meta.StructBuilder.from_type(S)}",
+    ] {
+        let fixture = Fixture::new(source);
+        assert!(fixture.invoke_meta("bad").is_err(), "accepted {source}");
+    }
+}
+
+#[test]
 fn enum_builder_copies_instantiated_source_structure_and_extends_it() {
     let fixture = Fixture::new("
         enum Source where T {net.{idle,data(T),record {value:T}},stopped,empty.{}}

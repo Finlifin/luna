@@ -25,20 +25,15 @@ Object 作为 normal-form 参数的冻结编码。
 `StructBuilder` 提供具体结构体的字段构造接口。它是 comptime 草稿，
 `new()` 默认使用名称 `.Generated`，也可以通过 `.name` 指定诊断名称。
 `add_field` 按调用顺序保存字段名与 Type；返回 Type 的方法名是 `Build`。
+`from_type(T, .name = .Generated)` 将已实例化结构体的字段复制成可编辑草稿，
+也支持当前 comptime invocation 中刚生成的结构体。复制保留字段顺序和 Type 身份，
+不复制默认值、属性、方法或协议实现；`Build` 仍创建新的名义类型。
 
 ```flurry
 struct Source { first: bool, second: bool }
 
 comptime fn Mirror() -> Type {
-    let names = meta.struct_field_names(Source);
-    let types = meta.struct_field_types(Source);
-    let count = meta.length(names);
-    var index = count - count;
-    var builder = meta.StructBuilder.new(.name = .Mirror);
-    while index < count {
-        builder.add_field(names[index], types[index]);
-        index = index + 1;
-    }
+    let builder = meta.StructBuilder.from_type(Source, .name = .Mirror);
     builder.Build()
 }
 
