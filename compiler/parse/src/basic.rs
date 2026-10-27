@@ -176,6 +176,20 @@ impl Parser<'_> {
         })
     }
 
+    /// Reserved spellings accepted only as qualified member components.
+    pub(crate) fn try_member_id(&mut self) -> ParseResult {
+        if !self.peek(TokenKind::Default.as_ref()) {
+            return self.try_id();
+        }
+        let (hi, lo) = lex::Symbol::intern("default").to_raw_parts();
+        let id = NodeBuilder::new(NodeKind::Id, self.next_token_span())
+            .add_single_child(hi)
+            .add_single_child(lo)
+            .build(&mut self.ast);
+        self.eat_tokens(1);
+        Ok(id)
+    }
+
     // symbol -> . id
     pub fn try_symbol(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Dot, TokenKind::Id], |p| {

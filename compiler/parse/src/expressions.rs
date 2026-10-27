@@ -1299,19 +1299,7 @@ impl Parser<'_> {
 
     /// 字段选择表达式
     fn try_select_expr(&mut self, left: NodeIndex) -> ParseResult {
-        // The documented attrs.derivation.default path uses a reserved word
-        // as a member name. It remains reserved outside dot projection.
-        let id = if self.peek(TokenKind::Default.as_ref()) {
-            let (hi, lo) = lex::Symbol::intern("default").to_raw_parts();
-            let id = NodeBuilder::new(NodeKind::Id, self.next_token_span())
-                .add_single_child(hi)
-                .add_single_child(lo)
-                .build(&mut self.ast);
-            self.eat_tokens(1);
-            id
-        } else {
-            self.try_id()?
-        };
+        let id = self.try_member_id()?;
         if id == 0 {
             return Err(ParseError::invalid_syntax(
                 "Expected identifier after '.' in select expression".to_string(),

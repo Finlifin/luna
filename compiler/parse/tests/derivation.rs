@@ -107,3 +107,35 @@ fn default_is_contextual_only_in_member_projection() {
     assert!(declaration("derive fn default for Hash {}").is_err());
     assert!(declaration("default").is_err());
 }
+
+#[test]
+fn reserved_default_member_is_available_in_qualified_imports() {
+    for text in [
+        "use attrs.derivation.default",
+        "use attrs.derivation.default as automatic",
+        "pub use attrs.derivation.default",
+        "use attrs.derivation.{default as automatic, other}",
+        "use attrs.{derivation.{default as automatic}, other}",
+        "use .default as automatic",
+        "use @attrs.derivation.default as automatic",
+    ] {
+        declaration(text).unwrap_or_else(|error| panic!("{text}: {error}"));
+    }
+}
+
+#[test]
+fn member_import_support_does_not_unreserve_default_bindings() {
+    for text in [
+        "use default",
+        "use attrs.derivation.default as default",
+        "use attrs.derivation.{default as}",
+        "use attrs.derivation.{default as default}",
+        "use attrs.derivation.default extra",
+        "const default = true;",
+        "fn default() {}",
+        "let default = true;",
+        "default",
+    ] {
+        assert!(declaration(text).is_err(), "accepted: {text}");
+    }
+}

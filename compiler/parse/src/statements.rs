@@ -343,13 +343,21 @@ impl Parser<'_> {
     }
 
     pub fn try_path(&mut self) -> ParseResult {
+        self.try_path_component(false)
+    }
+
+    fn try_path_component(&mut self, member: bool) -> ParseResult {
         self.scoped(|p| {
             let mut anchors = Vec::new();
             while matches!(p.peek_next_token().kind, TokenKind::At | TokenKind::Dot) {
                 anchors.push(p.peek_next_token().kind);
                 p.eat_tokens(1);
             }
-            let mut left = p.try_id()?;
+            let mut left = if member || anchors.last() == Some(&TokenKind::Dot) {
+                p.try_member_id()?
+            } else {
+                p.try_id()?
+            };
             if left == 0 {
                 return Ok(0);
             }
@@ -357,8 +365,8 @@ impl Parser<'_> {
             while p.eat_token(TokenKind::Dot) {
                 let next = p.peek_next_token();
                 match next.kind {
-                    TokenKind::Id => {
-                        let id = p.try_id()?;
+                    TokenKind::Id | TokenKind::Default => {
+                        let id = p.try_member_id()?;
                         left = NodeBuilder::new(NodeKind::ProjectionPath, p.current_span())
                             .add_single_child(left)
                             .add_single_child(id)
@@ -374,7 +382,7 @@ impl Parser<'_> {
                         p.eat_tokens(1);
                         let mut items = vec![];
                         while !p.peek(TokenKind::RBrace.as_ref()) {
-                            let item = p.try_path()?;
+                            let item = p.try_path_component(true)?;
                             if item == 0 {
                                 return Err(ParseError::invalid_syntax(
                                     "Expected pathes inside `{}`".to_string(),

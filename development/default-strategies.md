@@ -158,3 +158,29 @@ Attribute merge: 5 passed; attribute consumers: 6 passed; exit 0,
 `/tmp/luna-tools-wtbzo0q5/result.json`. The direct consumer test rejects forged
 Bool domains, non-Boolean payloads and member targets, preserves diagnostic
 source, and retries successfully after budget exhaustion.
+
+## Reserved member imports
+
+Qualified import paths now use the same reserved `default` member spelling as
+expression projections. This includes nested grouped imports, relative member
+paths and ordinary aliases such as `automatic`. Bare `default` declarations
+and aliases remain reserved; this does not introduce escaped identifiers or a
+new declaration syntax.
+
+The public library declaration is still pending a language decision: permit the
+reserved spelling in module member declarations, or introduce a general escaped
+identifier syntax. Import parsing can be completed independently, but does not
+by itself provide `attrs.derivation.default` or executable default selection.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p parse --tests
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Parser suites: exit 0, `/tmp/luna-tools-1sg41sr1/result.json`. Includes
+  accepted qualified/grouped paths and rejected reserved bindings, aliases and
+  malformed imports; parsed declarations also validate AST layout and EOF.
+- Formatting: exit 0, `/tmp/luna-tools-u_l2nkue/result.json`.
