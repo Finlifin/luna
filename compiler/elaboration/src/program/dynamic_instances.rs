@@ -222,6 +222,15 @@ impl Checker<'_, '_> {
         self.context = saved_context;
         self.in_required_comptime = saved_mode;
         let (operands, symbols, statements) = prepared?;
+        self.check_formation_application(
+            owner,
+            FormationInputs {
+                terms: symbols.clone(),
+                deferred: value_parameters.into_iter().collect(),
+                environment: BTreeMap::new(),
+            },
+            expr.span,
+        )?;
         // Named Type inputs may occur after their value inputs. Once routing
         // completes, validate every retained value against the completed domain
         // even if this function is never invoked.

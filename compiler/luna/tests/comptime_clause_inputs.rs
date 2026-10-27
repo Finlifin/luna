@@ -418,3 +418,51 @@ fn inherited_types_are_retained_for_ordinary_type_requirements() {
         comptime fn run()->bool {outer<bool>()}
     "),Value::Bool(true));
 }
+
+#[test]
+fn fixed_clause_requirements_reject_unused_invalid_instances() {
+    let declarations = "trait Mark {} impl Mark for bool {} comptime fn choose()->bool where T:-Mark,flag:bool {flag}";
+    assert_eq!(
+        invoke(&format!(
+            "{declarations} comptime fn run()->bool {{let flag=true;choose<bool,flag>()}}"
+        )),
+        Value::Bool(true)
+    );
+    let invalid = format!(
+        "{declarations} comptime fn unused()->bool {{let flag=true;choose<.char'builtin,flag>()}}"
+    );
+    assert!(
+        compile(&invalid).is_err(),
+        "invalid fixed Type clause accepted in unused function"
+    );
+}
+
+#[test]
+fn fixed_type_equalities_and_defaults_are_checked_without_invocation() {
+    for clauses in [
+        "T,flag:bool,requires T==bool",
+        ".T:.Type'builtin=.char'builtin,flag:bool,requires T==bool",
+    ] {
+        let inputs = if clauses.starts_with('.') {
+            "flag"
+        } else {
+            ".char'builtin,flag"
+        };
+        let source = format!(
+            "comptime fn choose()->bool where {clauses} {{flag}} comptime fn unused()->bool {{let flag=true;choose<{inputs}>()}}"
+        );
+        assert!(compile(&source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn value_indexed_capabilities_are_retained_until_invocation() {
+    let declarations = "trait Enabled where flag:bool {} impl Enabled<true> for bool {} comptime fn choose()->bool where flag:bool,requires bool:-Enabled<flag> {flag}";
+    let accepted =
+        format!("{declarations} comptime fn run()->bool {{let flag=true;choose<flag>()}}");
+    assert_eq!(invoke(&accepted), Value::Bool(true));
+    let rejected =
+        format!("{declarations} comptime fn run()->bool {{let flag=false;choose<flag>()}}");
+    let package = compile(&rejected).unwrap();
+    assert!(luna::invocation::invoke(&package, "run", 100_000).is_err());
+}

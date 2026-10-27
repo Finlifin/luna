@@ -2291,6 +2291,9 @@ impl Checker<'_, '_> {
                 if (matches!(
                     self.package.item(owner).map(|item| &item.kind),
                     Some(ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(..))
+                ) || matches!(
+                    self.package.item(owner).map(|item| &item.kind),
+                    Some(ItemKind::Fn(signature, _)) if signature.modifiers.is_comptime
                 ) || self.normal_parameters.contains_key(&owner)
                     || self.alias_contracts.contains_key(&declaration(
                         self.package,
@@ -2301,8 +2304,8 @@ impl Checker<'_, '_> {
                         .iter()
                         .any(|parameter| requirement.mentions_rigid(*parameter))
                 {
-                    // NominalType, normal-form heads and registered alias
-                    // guards retain the contract and check it after Type inputs.
+                    // Constructors, registered alias guards and comptime
+                    // function instances retain these contracts for invocation.
                     continue;
                 }
 

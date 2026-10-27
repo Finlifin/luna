@@ -175,6 +175,11 @@ value inputs remain declaration rigids. The actual invocation packet still owns
 their values. This prevents an explicit comptime instance from being checked as
 though it had an empty clause telescope when a requirement also references an
 ordinary comptime Type parameter. It does not assert unknown value equalities.
+The instance formation path also registers declaration requirements through the
+shared formation checker. Requirements independent of deferred value clauses are
+discharged during definition checking, including defaulted Type clauses and
+unused callers. Value-dependent requirements remain attached to the declaration
+and are checked by invocation; a symbolic value is not assumed to satisfy them.
 
 Callable signatures and clause domains cannot depend on value-clause
 binders. Open functions, quoted bodies and more general dependent signatures
@@ -252,6 +257,19 @@ and trait requirements, rejected mismatches in unused callers, and inherited
 Type/default combinations. Native O0/O3 passed
 (`/tmp/luna-host-examples-a7vlld69/summary.json`), and workspace formatting passed
 (`/tmp/luna-tools-465xaxac/result.json`).
+
+Declaration formation-contract validation in `/home/fin/luna` used the same
+four-suite command and passed 625 tests (30 + 43 + 527 + 25),
+`/tmp/luna-tools-40cp5s36/result.json`. The initial reproduction accepted an
+invalid fixed trait clause in an unused caller
+(`/tmp/luna-tools-6e_v8u64/result.json`, exit 101). Connecting formation checks
+then exposed a constructor-only deferral guard for trait capabilities; extending
+that guard to comptime functions retained the invocation check instead of trying
+to prove unknown value indices during definition checking. Tests cover fixed
+trait/equality/default-Type rejection and both successful and failed invocation
+of a value-indexed capability. Native O0/O3 passed
+(`/tmp/luna-host-examples-kxlburmh/summary.json`); final formatting passed
+(`/tmp/luna-tools-eboe7tw4/result.json`).
 
 ### Schema Type evidence
 
