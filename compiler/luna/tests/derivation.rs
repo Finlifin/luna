@@ -535,3 +535,25 @@ fn unused_strategy_locals_are_checked_without_accepting_mutation() {
         assert!(error.contains(expected), "{error}");
     }
 }
+
+#[test]
+fn strategy_temporary_references_do_not_escape_into_generated_members() {
+    let package = compile_with_strategy_bool_splice(
+        "trait Flag {fn flag()->bool;} derive fn configured for Flag {let storage=true; let pointer=storage.ref; let result=pointer.*; fn flag()->bool {result}} struct Subject {} derive Flag.use(configured) for Subject; fn run()->bool {Subject.as(Flag).flag()}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn captured_local_annotations_keep_transitive_type_dependencies() {
+    let package = compile_with_strategy_bool_splice(
+        "typealias Type=.Type'builtin; trait Flag {fn flag()->bool;} derive fn configured for Flag {const T:Type=bool; let result:T=true; fn flag()->bool {result}} struct Subject {} derive Flag.use(configured) for Subject; fn run()->bool {Subject.as(Flag).flag()}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

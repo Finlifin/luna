@@ -4,6 +4,7 @@ use hir::common::DefId;
 use hir::definitions::DefinitionBatch;
 use hir::{ExprKind as E, HirArena, ItemKind, OwnerId, OwnerInfo, OwnerNode, Package};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+mod captures;
 mod diagnostics;
 pub(super) use diagnostics::with_context;
 
@@ -242,6 +243,7 @@ pub(super) fn expand<'h>(
             mapping.insert(old, new);
         }
         let mut captures = HashMap::new();
+        let mut capture_slots = HashMap::new();
         let mut inputs = Vec::new();
         let local_bindings = &strategies[&strategy].locals;
         let group = if arguments.is_empty() && local_bindings.is_empty() {
@@ -263,6 +265,7 @@ pub(super) fn expand<'h>(
                 parameter.hir_id,
                 function_templates::InputCapture::Definition(identity),
             );
+            capture_slots.insert(identity, inputs.len());
             inputs.push((parameter, owner, identity));
         }
         let mut locals = Vec::new();
@@ -279,6 +282,7 @@ pub(super) fn expand<'h>(
                 binding.pattern.hir_id,
                 function_templates::InputCapture::Definition(identity),
             );
+            capture_slots.insert(identity, generator.parameters.len() + locals.len());
             locals.push((binding, owner, identity));
         }
         let mut owners = Vec::new();
@@ -338,21 +342,7 @@ pub(super) fn expand<'h>(
             fuel,
         )?;
         let mut drafts = vec![(shell, impl_identity)];
-        if let Some((owner, identity)) = group {
-            drafts.push((
-                function_templates::input_group(
-                    source,
-                    arena,
-                    owner,
-                    arguments,
-                    generator.parameters,
-                    local_bindings,
-                    &mapping,
-                    span,
-                    fuel,
-                )?,
-                identity,
-            ));
+        if let Some((_, identity)) = group {
             for (index, (parameter, owner, input_identity)) in inputs.into_iter().enumerate() {
                 drafts.push((
                     function_templates::input_draft(
@@ -393,6 +383,24 @@ pub(super) fn expand<'h>(
         function_templates::relocate_generation_attributes(
             source, arena, strategy, shell, members, &mapping, &captures, fuel,
         )?;
+        let exported = captures::retain_used(&mut drafts, &capture_slots, arena, fuel)?;
+        if let Some((owner, identity)) = group {
+            drafts.push((
+                function_templates::input_group(
+                    source,
+                    arena,
+                    owner,
+                    arguments,
+                    generator.parameters,
+                    local_bindings,
+                    &exported,
+                    &mapping,
+                    span,
+                    fuel,
+                )?,
+                identity,
+            ));
+        }
         for (draft, identity) in drafts {
             for attribute in &draft.attributes {
                 if omitted.contains(&attribute.lexical_owner) {

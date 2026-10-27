@@ -4,7 +4,7 @@ use super::{Error, error};
 use hir::clause::ClauseConstraintKind as C;
 use hir::common::{Arg, TyParam, TyParamKind as T};
 use hir::{Expr, ExprKind as E, HirArena, HirId, ItemKind, OwnerId, Package};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 mod generation_attributes;
 mod generation_inputs;
 pub(super) use generation_inputs::{input_draft, input_group, value_draft};
@@ -83,6 +83,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             definitions: HashMap::new(),
             member_owner: None,
             captures: HashMap::new(),
+            capture_uses: BTreeSet::new(),
         };
         let mut sig = formal.clone();
         let params = formal
@@ -170,6 +171,7 @@ struct Rebind<'s, 'h> {
     definitions: HashMap<hir::common::DefId, hir::common::DefId>,
     member_owner: Option<OwnerId>,
     captures: HashMap<HirId, InputCapture>,
+    capture_uses: BTreeSet<hir::common::DefId>,
 }
 impl<'h> Rebind<'_, 'h> {
     fn charge(&mut self, span: rustc_span::Span, depth: usize) -> Result<(), Error> {
@@ -300,11 +302,14 @@ impl<'h> Rebind<'_, 'h> {
                     hir_id,
                     span: expr.span,
                     kind: match capture {
-                        InputCapture::Definition(def_id) => E::ResolvedDef {
-                            name: *name,
-                            def_id,
-                            has_clause_param: false,
-                        },
+                        InputCapture::Definition(def_id) => {
+                            self.capture_uses.insert(def_id);
+                            E::ResolvedDef {
+                                name: *name,
+                                def_id,
+                                has_clause_param: false,
+                            }
+                        }
                         InputCapture::Local(id) => E::ResolvedLocal(*name, id),
                     },
                 }));
@@ -696,6 +701,7 @@ pub(super) fn implementation_draft<'h>(
         definitions: definitions.clone(),
         member_owner: Some(request_owner),
         captures: captures.clone(),
+        capture_uses: BTreeSet::new(),
     };
     let result = (|| {
         let clause_params = rebind.clauses(request.clause_params)?;
@@ -735,6 +741,7 @@ pub(super) fn implementation_draft<'h>(
         item,
         resolution,
         bodies: rebind.bodies,
+        capture_uses: rebind.capture_uses,
         bindings: rebind.bindings,
         nodes,
         attributes: Vec::new(),

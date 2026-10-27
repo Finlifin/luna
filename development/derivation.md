@@ -653,3 +653,35 @@ git diff --check
   strategies, inferred and explicit local types, associated types, attributes,
   unused failures and rejection of mutation.
 - Formatting: `/tmp/luna-tools-8u6mo2c3/result.json`; diff check passed.
+
+## Export only demanded generation captures
+
+Cloning records the substituted generation values used by members, interface
+heads and relocated attributes. Capture analysis follows dependencies in the
+annotations of those values before constructing the evaluation group's output.
+Only this transitive set crosses the constant materialization boundary; unused
+slots carry unit placeholders to preserve reserved identities and ordinal entry
+indices. The source computations still execute in order, with their original
+types and comptime checks, even when none of their results are exported.
+
+This permits local references used only to compute a captured result to remain
+inside the generation invocation. It does not make references legal persistent
+captures or relax ordinary runtime Splice requirements. General strategy control
+flow and generic generation environments remain unfinished.
+
+Checks in `/home/fin/luna` (exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib member_clone
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Derive suite: 40 passed, `/tmp/luna-tools-ifu09g23/result.json`.
+  New cases exercise a temporary reference used to compute an exported Boolean
+  and a local type needed only by an exported value's annotation. Existing cases
+  check unused invalid inputs/locals, interface heads, attributes and Splice.
+- Member cloning: 9 passed, `/tmp/luna-tools-k4dltpl4/result.json`, including
+  exact per-expansion capture identities and failed-budget recovery.
+- Formatting: `/tmp/luna-tools-dp9jn1sh/result.json`; diff check passed.

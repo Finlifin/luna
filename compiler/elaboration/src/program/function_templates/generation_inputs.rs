@@ -21,6 +21,7 @@ fn finish<'h>(
             kind: ItemKind::Const(ty, value),
         },
         bodies: rebind.bodies,
+        capture_uses: rebind.capture_uses,
         bindings: rebind.bindings,
         nodes: hir::OwnerNodes::new(),
         attributes: Vec::new(),
@@ -36,6 +37,7 @@ pub(in crate::program) fn input_group<'h>(
     arguments: &[Arg<'h>],
     parameters: &[FnParam<'h>],
     locals: &[&'h Expr<'h>],
+    exported: &BTreeSet<usize>,
     definitions: &HashMap<DefId, DefId>,
     span: rustc_span::Span,
     fuel: &mut usize,
@@ -52,6 +54,7 @@ pub(in crate::program) fn input_group<'h>(
         bodies: Vec::new(),
         definitions: definitions.clone(),
         captures: HashMap::new(),
+        capture_uses: BTreeSet::new(),
         member_owner: Some(OwnerId::INVALID),
     };
     let result = (|| {
@@ -113,7 +116,11 @@ pub(in crate::program) fn input_group<'h>(
             let value = arena.alloc_expr(Expr {
                 hir_id: reference,
                 span: value.span,
-                kind: E::ResolvedLocal(name.name, binding),
+                kind: if exported.contains(&index) {
+                    E::ResolvedLocal(name.name, binding)
+                } else {
+                    E::Unit
+                },
             });
             entries.push(hir::expr::ObjectEntry::Property(hir::expr::FieldExpr {
                 ident: Ident::new(hir::Symbol::intern(&format!("input_{index}")), value.span),
@@ -142,7 +149,11 @@ pub(in crate::program) fn input_group<'h>(
             let value = arena.alloc_expr(Expr {
                 hir_id: reference,
                 span: original.span,
-                kind: E::ResolvedLocal(name.name, binding_id),
+                kind: if exported.contains(&index) {
+                    E::ResolvedLocal(name.name, binding_id)
+                } else {
+                    E::Unit
+                },
             });
             entries.push(hir::expr::ObjectEntry::Property(hir::expr::FieldExpr {
                 ident: Ident::new(
@@ -247,6 +258,7 @@ pub(in crate::program) fn value_draft<'h>(
         bodies: Vec::new(),
         definitions: definitions.clone(),
         captures: captures.clone(),
+        capture_uses: BTreeSet::new(),
         member_owner: Some(OwnerId::INVALID),
     };
     let result = (|| {

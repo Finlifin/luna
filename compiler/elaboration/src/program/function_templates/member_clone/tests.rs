@@ -135,6 +135,7 @@ fn remaps_generated_definition_references_without_rewriting_external_ones() {
         bodies: Vec::new(),
         definitions: HashMap::from([(old, new)]),
         captures: HashMap::new(),
+        capture_uses: BTreeSet::new(),
         member_owner: Some(owner),
     };
     for (input, expected) in [(old, new), (external, external)] {
@@ -601,6 +602,7 @@ fn explicit_generation_inputs_do_not_become_method_parameters() {
         assert!(matches!(body.value.kind, E::ResolvedDef { def_id, .. } if def_id == definition));
         assert_eq!(body.value.hir_id.owner, owner);
         assert!(!draft.bindings.contains_key(&capture));
+        assert_eq!(draft.capture_uses, BTreeSet::from([definition]));
         assert!(
             clone_member_with_inputs(
                 &source,

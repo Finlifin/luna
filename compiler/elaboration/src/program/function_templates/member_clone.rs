@@ -8,6 +8,7 @@ mod clauses;
 /// `bindings`, publish bodies and run ordinary implementation checks. Resolver
 /// evidence must be staged using DefinitionBatch::set_resolution.
 pub(in crate::program) struct ClonedMember<'h> {
+    pub capture_uses: BTreeSet<DefId>,
     pub item: hir::Item<'h>,
     pub bodies: Vec<(hir::BodyId, hir::Body<'h>)>,
     pub bindings: HashMap<HirId, HirId>,
@@ -86,6 +87,7 @@ pub(in crate::program) fn clone_member_with_inputs<'h>(
         definitions: definitions.clone(),
         member_owner: Some(member),
         captures: captures.clone(),
+        capture_uses: BTreeSet::new(),
     };
     let result = (|| {
         rebind.charge(item.span, 0)?;
@@ -180,6 +182,7 @@ pub(in crate::program) fn clone_member_with_inputs<'h>(
     Ok(ClonedMember {
         item,
         bodies: rebind.bodies,
+        capture_uses: rebind.capture_uses,
         bindings: rebind.bindings,
         resolution,
         attributes,

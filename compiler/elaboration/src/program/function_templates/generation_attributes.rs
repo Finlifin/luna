@@ -32,6 +32,7 @@ pub(in crate::program) fn relocate<'h>(
         // Free generation inputs require value substitution, not fresh locals.
         member_owner: Some(OwnerId::INVALID),
         captures: captures.clone(),
+        capture_uses: BTreeSet::new(),
     };
     let result = (|| {
         for (member, _) in members {
@@ -50,5 +51,6 @@ pub(in crate::program) fn relocate<'h>(
     let resolution = result?;
     shell.resolution = resolution;
     shell.bodies.extend(rebind.bodies);
+    shell.capture_uses.extend(rebind.capture_uses);
     Ok(())
 }
