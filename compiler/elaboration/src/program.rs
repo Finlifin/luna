@@ -225,6 +225,7 @@ pub struct Protocols {
     pub drop: Option<DeclarationId>,
     pub index: Option<DeclarationId>,
     pub iterator: Option<DeclarationId>,
+    pub into_iterator: Option<DeclarationId>,
     pub ordering: Option<DeclarationId>,
     pub equality: Option<DeclarationId>,
     pub list_pattern: Option<DeclarationId>,
@@ -903,6 +904,9 @@ fn elaborate_candidate<'a, 'h>(
     }
     if let Some(id) = checker.protocols.iterator {
         checker.validate_iterator_protocol(id)?;
+    }
+    if let Some(id) = checker.protocols.into_iterator {
+        checker.validate_into_iterator_protocol(id)?;
     }
     checker.finish_signature_refinements()?;
     checker.associated_signature_values.clear();

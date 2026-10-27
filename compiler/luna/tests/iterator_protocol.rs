@@ -167,3 +167,86 @@ fn iterator_delivery_does_not_capture_an_outer_resume() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
+#[test]
+fn conversion_binding_checks_identity_receiver_and_associated_result() {
+    let valid = "trait Source {assoc Iter:(.Type'builtin);fn into_iter(self)->Iter;}";
+    let check = |source: &str| {
+        support::compile_with_source_bindings(
+            source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                into_iterator: Some("input.Source"),
+                ..Default::default()
+            },
+        )
+    };
+    check(valid).unwrap();
+    for (from, to, expected) in [
+        (
+            "into_iter(self)",
+            "into_iter(*self)",
+            "runtime fn into_iter(self)",
+        ),
+        ("->Iter", "->bool", "associated Iter"),
+        ("assoc Iter", "assoc Other", "Unresolved identifier"),
+        (
+            "fn into_iter",
+            "comptime fn into_iter",
+            "runtime fn into_iter(self)",
+        ),
+    ] {
+        let error = check(&valid.replace(from, to)).unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
+    let parse = |args: &[&str]| luna::cli::parse(args.iter().map(std::ffi::OsString::from));
+    let luna::cli::Command::Compile(options) = parse(&[
+        "input.fl",
+        "--emit",
+        "nir",
+        "--into-iterator-protocol",
+        "input.Source",
+    ])
+    .unwrap() else {
+        panic!("expected compilation")
+    };
+    assert_eq!(
+        options.into_iterator_protocol.as_deref(),
+        Some("input.Source")
+    );
+    assert!(parse(&["input.fl", "--into-iterator-protocol"]).is_err());
+    assert!(
+        parse(&[
+            "input.fl",
+            "--into-iterator-protocol",
+            "input.Source",
+            "--into-iterator-protocol",
+            "input.Source"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn conversion_result_must_establish_the_selected_iterator_protocol() {
+    let source = format!(
+        "{VALID}
+        trait Source {{assoc Iter:(.Type'builtin);fn into_iter(self)->Iter;}}
+        impl Source for bool {{assoc Iter:(.Type'builtin)=bool;fn into_iter(self)->bool {{self}}}}
+        fn run() {{for item in true {{}}}}"
+    );
+    let error = support::compile_with_source_bindings(
+        &source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            iterator: Some("input.Stream"),
+            into_iterator: Some("input.Source"),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("method implementation is not uniquely established"),
+        "{error}"
+    );
+}

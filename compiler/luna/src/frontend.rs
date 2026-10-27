@@ -501,6 +501,7 @@ pub(crate) fn source_protocols(
         host_intrinsics: &[],
         list_pattern: options.list_pattern_protocol.as_deref(),
         iterator: options.iterator_protocol.as_deref(),
+        into_iterator: options.into_iterator_protocol.as_deref(),
         copy: None,
         drop: None,
         index: options.index_protocol.as_deref(),

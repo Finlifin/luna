@@ -357,3 +357,9 @@ impl Iterator for SkipIterator<I> where I :- Iterator {
         }
     }
 }
+
+{- Container conversion transfers ownership to the returned iterator. -}
+pub trait IntoIterator {
+    assoc Iter: (.Type'builtin);
+    fn into_iter(self) -> Iter;
+}

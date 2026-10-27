@@ -101,6 +101,11 @@ fn complete_shipped_sysroot_runs_tuple_optional_math_and_iteration() {
     input.write(
         "input.fl",
         "
+        struct Container {value:?bool}
+        impl IntoIterator for Container {
+            assoc Iter:Type=?bool;
+            fn into_iter(self)->?bool {self.value}
+        }
         fn run()->bool {
             let pair:Tuple<bool,bool> = (true,false);
             let (yes,no)=pair;
@@ -109,7 +114,7 @@ fn complete_shipped_sysroot_runs_tuple_optional_math_and_iteration() {
             let value:?bool=yes;
             let number:f64=4.0;
             let root=math.sqrt(number);
-            for item in value {return item and not no and present and root == 2.0;}
+            for item in (Container {value:value}) {return item and not no and present and root == 2.0;}
             false
         }
         test {let passed=run();assumes passed;}

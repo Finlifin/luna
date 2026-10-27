@@ -442,6 +442,7 @@ fn compile_iteration(source: &str) -> nir::program::Package {
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
             iterator: Some("input.Iterator"),
+            into_iterator: Some("input.IntoIterator"),
             copy: Some("input.Copy"),
             drop: Some("input.Drop"),
             ..Default::default()
@@ -1331,4 +1332,69 @@ fn check_iteration_with_budget(source: &str, original_limit: Option<&str>, budge
         .execute_test(&ir, std::time::Duration::from_secs(5))
         .unwrap();
     }
+}
+
+#[test]
+fn ordinary_for_converts_containers_once_and_keeps_conversion_outside_handler() {
+    let source = format!(
+        "{}\n{}\n
+        struct Receipt {{done:*bool}}
+        impl Drop for Receipt {{fn drop(*self) {{assumes not self.done.*.*;self.done.*.* = true;}}}}
+        struct Container {{value:?bool,converted:*bool,receipt:Receipt}}
+        impl IntoIterator for Container {{
+            assoc Iter:(.Type'builtin)=?bool;
+            inline fn into_iter(self)->?bool {{
+                assumes not self.converted.*;
+                self.converted.* = true;
+                self.value
+            }}
+        }}
+        fn run()->bool {{
+            var converted=false;var constructed=false;var visited=false;var retired=false;
+            for item in (do {{
+                assumes not constructed;constructed=true;
+                Container {{value:true,converted:converted.ref,receipt:Receipt {{done:retired.ref}}}}
+            }}) {{assumes constructed and converted and retired;visited=item;break;}}
+            constructed and converted and visited and retired
+        }}
+        fn verify() {{let passed=run();assumes passed;}}",
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    check_iteration(&source);
+}
+
+#[test]
+fn ordinary_for_prefers_direct_iteration_and_converts_generic_inputs() {
+    let source = format!(
+        "{}\n{}\n
+        struct Both {{}}
+        impl Iterator for Both {{
+            assoc Item:(.Type'builtin)=bool;
+            inline fn iterate(self)->#emit_item<bool> IterationUnit {{emit_item<bool>(true)#;}}
+        }}
+        impl IntoIterator for Both {{
+            assoc Iter:(.Type'builtin)=?bool;
+            inline fn into_iter(self)->?bool {{null}}
+        }}
+        struct Container {{value:?bool}}
+        impl IntoIterator for Container {{
+            assoc Iter:(.Type'builtin)=?bool;
+            inline fn into_iter(self)->?bool {{self.value}}
+        }}
+        inline fn visit(items:I)->bool where I:-IntoIterator,
+            requires I.as(IntoIterator).Iter :- Iterator {{
+            for item in items {{return true;}}
+            false
+        }}
+        fn run()->bool {{
+            var direct=false;
+            for item in (Both {{}}) {{direct=item;}}
+            direct and not visit(Both {{}}) and visit(Container {{value:true}}) and not visit(Container {{value:null}})
+        }}
+        fn verify() {{let passed=run();assumes passed;}}",
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    check_iteration(&source);
 }

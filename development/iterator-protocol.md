@@ -34,7 +34,7 @@ an exit from that scope, while `break` targets the enclosing producer scope and
 transfers pass execution tests. Generated control/cleanup sites receive distinct
 source identities with provenance; existing NIR Display handles the result.
 
-IntoIterator container conversion is still unimplemented. Also, NIR resume does
+IntoIterator container conversion is now implemented as described below. NIR resume does
 not yet encode an explicit lexical target: an outer handler's resume is rejected
 inside a generated delivery handler rather than accidentally resuming delivery.
 A nested explicit source handler inside the loop can still resume itself.
@@ -125,3 +125,51 @@ Subsequent [sysroot integration](sysroot-integration.md) moved unfinished
 prototypes out of the compiled tree and repaired coherence budget allocation.
 The same repro now passes against the complete repository sysroot through
 `--test-native`, which also supplies the required target layout facts.
+
+## IntoIterator conversion
+
+The source-bound `IntoIterator` contract has one Type-valued `Iter` and a runtime,
+by-value `into_iter(self) -> Iter`. Its driver identity is selected with
+`--into-iterator-protocol`; the shipped configuration binds
+`builtin.iterator.IntoIterator`, exported by builtin and its prelude.
+
+Loop lowering checks declared Iterator evidence first, then declared IntoIterator
+evidence. This fixes the operation in a generic body rather than changing it
+when a concrete instantiation also implements Iterator. Without declared evidence,
+a concrete Iterator query must select an implementation or establish absence;
+conflict/deferred results are not silently retried as conversions. Absence permits
+one ordinary IntoIterator call. Its result must independently satisfy Iterator.
+Generic container loops explicitly require both the conversion and Iterator
+membership of their associated Iter.
+
+The source expression and conversion execute once before the generated receiver,
+loop target and delivery handler. The existing ordinary-call path checks method
+contracts and transfers ownership. Container residuals retire normally; the
+converted iterator then uses the existing delivery and loop cleanup machinery.
+No new NIR node or alternate effect ABI is introduced.
+
+### Conversion validation
+
+Working directory: `/home/fin/luna`.
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test iterator_protocol --test library_iteration --test sysroot_preludes
+python3 -B development/check.py --timeout 900 -- check --release -p luna --tests
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+The execution command passed all 54 tests (8 protocol, 41 iteration, 5 sysroot),
+report `/tmp/luna-tools-_sptv96s/result.json`, exit 0. Conversion cases cover
+single evaluation, cleanup of container residuals before consumption, empty
+iterators, direct-implementation precedence, and stable generic conversion when
+the actual input also implements Iterator. The library harness checks interpreted
+execution and LLVM O0/O3; the full-sysroot native fixture also uses a non-inline
+conversion method. Rejection cases cover malformed protocol shape and a converted
+value without Iterator evidence. No recursive conversion is attempted.
+
+Formatting passed with report `/tmp/luna-tools-73pbu4r_/result.json`, exit 0;
+`git diff --check` also passed.
+All luna test targets compile successfully; check report
+`/tmp/luna-tools-fedzux28/result.json`, exit 0. This compiles the updated public
+Options consumers without executing the entire workspace test suite.

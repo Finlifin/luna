@@ -27,6 +27,7 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         eq_protocol: None,
         list_pattern_protocol: None,
         iterator_protocol: None,
+        into_iterator_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
     });

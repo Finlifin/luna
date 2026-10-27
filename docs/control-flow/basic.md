@@ -86,8 +86,34 @@ computation，其唯一操作是接收一个 `Item`、返回 `void` 的 direct i
 computation 本身也返回 `void`。操作身份从方法签名取得，不要求命名为
 `emit_item`。泛型循环需要对应 trait evidence，不能仅凭同名方法获得迭代能力。
 
-当前接通的是 iterable 本身实现 Iterator 的路径；容器的 `IntoIterator` 转换
-仍待实现。普通 `for` 不因此成为 comptime effect 执行入口；有界 `Integer` 范围
+容器通过 `IntoIterator` 提供默认转换：
+
+```flurry
+struct Container { value: ?bool }
+impl IntoIterator for Container {
+    assoc Iter: Type = ?bool;
+    fn into_iter(self) -> ?bool { self.value }
+}
+
+fn visit(container: Container) {
+    for value in container { assumes value; }
+}
+```
+
+驱动以 `--into-iterator-protocol` 或 `into-iterator-protocol` 配置项选择这个
+接口，默认身份为 `builtin.iterator.IntoIterator`。接口声明 `Iter: Type` 和按值
+接收 `self`、返回 `Iter` 的 runtime `into_iter`；返回类型还须在循环处具有
+Iterator evidence。泛型容器循环因此需要 `I :- IntoIterator` 以及
+`I.as(IntoIterator).Iter :- Iterator` 两项约束。
+
+泛型定义先使用已声明的 Iterator evidence；只有 IntoIterator evidence 时使用转换，
+不因未来实参又实现 Iterator 而改变该泛型正文的选择。没有这些已声明的证据时，
+具体类型先查询 Iterator，实现不存在时才查询 IntoIterator。
+未决或冲突的具体 Iterator 查询仍报错，不通过转换掩盖它。源表达式与转换各执行一次，
+均发生在循环目标和交付 handler 安装之前；转换中的资源按普通调用规则转移或清理。
+转换返回的迭代器只安装一次 handler，不递归尝试更多转换。
+
+普通 `for` 不因此成为 comptime effect 执行入口；有界 `Integer` 范围
 的 `inline for` 及 comptime invocation 循环见[inline 控制流](../comptime/inlining-comptime-code.md)。
 Guard 保留模式观察阶段的限制，不能把外部状态修改或未证明的失败清理偷偷移入
 成功后的循环主体。需要记录交付次数时，可在生产者的 `inspect` adapter 或循环

@@ -11,6 +11,7 @@ pub struct Selectors<'a> {
     pub drop: Option<&'a str>,
     pub index: Option<&'a str>,
     pub iterator: Option<&'a str>,
+    pub into_iterator: Option<&'a str>,
     pub ordering: Option<&'a str>,
     pub equality: Option<&'a str>,
     pub list_pattern: Option<&'a str>,
@@ -41,6 +42,7 @@ impl Selectors<'_> {
                 self.drop,
                 self.index,
                 self.iterator,
+                self.into_iterator,
                 self.ordering,
                 self.equality,
                 self.list_pattern,
@@ -178,6 +180,11 @@ pub(crate) fn resolve_source(
         .chain([
             ("Index".into(), selectors.index, &mut result.index),
             ("Iterator".into(), selectors.iterator, &mut result.iterator),
+            (
+                "IntoIterator".into(),
+                selectors.into_iterator,
+                &mut result.into_iterator,
+            ),
             ("Ord".into(), selectors.ordering, &mut result.ordering),
             ("Eq".into(), selectors.equality, &mut result.equality),
             (
@@ -417,6 +424,7 @@ pub(crate) struct SysrootBindings {
     equality: Option<String>,
     list_pattern: Option<String>,
     iterator: Option<String>,
+    into_iterator: Option<String>,
     literal_into: Option<String>,
     arithmetic: [Option<String>; 7],
     splice: Option<String>,
@@ -499,6 +507,7 @@ impl SysrootBindings {
                 "eq-protocol" => &mut result.equality,
                 "list-pattern-protocol" => &mut result.list_pattern,
                 "iterator-protocol" => &mut result.iterator,
+                "into-iterator-protocol" => &mut result.into_iterator,
                 "literal-into-protocol" => &mut result.literal_into,
                 "copy-protocol" => &mut result.copy,
                 "drop-protocol" => &mut result.drop,
@@ -622,6 +631,13 @@ impl SysrootBindings {
                     .iterator
                     .is_none()
                     .then_some(self.iterator.as_deref())
+                    .flatten()
+            }),
+            into_iterator: explicit.into_iterator.or_else(|| {
+                identities
+                    .into_iterator
+                    .is_none()
+                    .then_some(self.into_iterator.as_deref())
                     .flatten()
             }),
             literal_into: explicit.literal_into.or_else(|| {
@@ -907,6 +923,7 @@ mod stage_tests {
             eq_protocol: None,
             list_pattern_protocol: None,
             iterator_protocol: None,
+            into_iterator_protocol: None,
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             splice_protocol: None,
