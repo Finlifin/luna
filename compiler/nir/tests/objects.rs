@@ -68,3 +68,41 @@ fn object_copy_budget_includes_property_names_and_recovers() {
     nir::copy_budget::charge_expression(&value, &mut enough).unwrap();
     assert!(enough < 5904);
 }
+
+#[test]
+fn frozen_objects_have_typed_ordered_identity_and_escaped_display() {
+    use nir::{DeclarationId, Sort};
+    let parameter = DeclarationId {
+        package: 7,
+        local: 1,
+    };
+    let domain = Term::Rigid {
+        declaration: parameter,
+        sort: Sort::Type,
+    };
+    let frozen = nir::objects::value(vec![
+        nir::objects::entry(Some("key\"\\\n"), Term::Primitive(P::Type), domain),
+        nir::objects::entry(None, Term::Primitive(P::Bool), Term::Bool(true)),
+    ]);
+    let replaced = frozen
+        .instantiate_rigids(&[parameter], &[Term::Primitive(P::Char)])
+        .unwrap();
+    assert!(replaced.check_scope(&[]).is_ok());
+    let dump = replaced.to_string();
+    assert!(dump.starts_with("(object-value"), "{dump}");
+    assert!(dump.contains("key\\\"\\\\\\n"), "{dump}");
+    assert!(dump.contains("(key none)"), "{dump}");
+    let mut low = 2;
+    assert!(nir::type_computations::charge_term(&replaced, &mut low).is_err());
+    let positional = nir::objects::value(vec![nir::objects::entry(
+        None,
+        Term::Primitive(P::Bool),
+        Term::Bool(true),
+    )]);
+    let empty_key = nir::objects::value(vec![nir::objects::entry(
+        Some(""),
+        Term::Primitive(P::Bool),
+        Term::Bool(true),
+    )]);
+    assert_ne!(positional, empty_key);
+}

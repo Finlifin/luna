@@ -1,0 +1,11 @@
+{-
+  Pending: ordinary comptime locals cannot yet supply clause inputs to a
+  generic function during invocation. This reproduces independently of Object.
+  Current diagnostic: required comptime input (local ...) is not available.
+  Command: luna comptime-local-clause-input.fl --emit nir
+-}
+comptime fn first() -> bool where flag:bool { flag }
+comptime fn run() -> bool {
+    let flag = true;
+    first<flag>()
+}

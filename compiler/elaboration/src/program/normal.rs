@@ -1445,6 +1445,21 @@ impl Checker<'_, '_> {
                     .map(|value| self.known_normal_input_in(value, depth + 1, budget, bindings))
                     .collect::<Option<Vec<_>>>()?,
             )),
+            K::Object { names, fields }
+                if expr.ty == p(P::Object) && names.len() == fields.len() =>
+            {
+                budget.consume(fields.len().saturating_mul(4)).ok()?;
+                let mut entries = Vec::with_capacity(fields.len());
+                for (key, field) in names.iter().zip(fields) {
+                    if let Some(key) = key {
+                        budget.consume(key.len()).ok()?;
+                    }
+                    let domain = clone_known_term(&field.ty, budget)?;
+                    let value = self.known_normal_input_in(field, depth + 1, budget, bindings)?;
+                    entries.push(nir::objects::entry(key.as_deref(), domain, value));
+                }
+                Some(nir::objects::value(entries))
+            }
             K::AnonymousRecord { fields } => {
                 let Term::Record(types) = &expr.ty else {
                     return None;

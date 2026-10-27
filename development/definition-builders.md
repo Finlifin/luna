@@ -23,7 +23,7 @@ copy/visit/type-rewrite/phase/materialization coverage. Runtime queries reject.
 CMTT data reconstruction now uses the existing typed Object constant path rather
 than attempting unsupported normal-term encoding. Nested entries retain their
 types; active pointer payloads still reject. Functional editing is described
-below; normal-form input encoding and a cheap borrowed query path remain unfinished.
+below, together with stable input encoding. A cheap borrowed query path remains unfinished.
 
 Validation in `/home/fin/luna`:
 
@@ -53,7 +53,7 @@ The VM checks bounds and replacement domains, charges container movement, key
 allocation and type description copying, and leaves input snapshots unchanged.
 ObjectEdit has S-expression display and the same traversal, substitution,
 materialization and phase coverage as ObjectQuery. These APIs do not imply
-constant-time editing, normal-term encoding, or arbitrary definition publication.
+constant-time editing or arbitrary definition publication.
 
 The native example exposed a contextual literal bug: `.enabled` passed to
 `?Symbol` was treated as an enum path. Symbol literal checking now recognizes
@@ -79,6 +79,54 @@ Validation in `/home/fin/luna`:
 Targeted rustfmt and `git diff --check` pass. The first source run failed because
 the fixture lacked a char binding; the first native run exposed the optional
 Symbol issue above. Both are corrected in the passing evidence.
+
+### Stable Object inputs
+
+Immutable Objects now freeze into tagged aggregate terms. Each ordered entry
+packet retains its optional key, original domain and value; this is an internal
+encoding, not a language Tuple or a record with merged keys. Scope checking,
+substitution, copy accounting and iterative disposal reuse stable term traversal.
+Display renders `(object-value (entry (key ...) (type ...) (value ...)) ...)`.
+Reconstruction validates payloads against their domains and remains comptime-only.
+Keys, type descriptions and entry width are charged before allocation; active
+pointers and excessive nesting still reject.
+
+Normal-form admission, ordinary function clause admission and nominal value
+admission recognize the encoding. The ordinary function path retains trusted
+List metadata for nested values. Known Object literals can provide structural
+input evidence without executing calls or normal-form bodies. Typed normal-form
+results retain their heads. Distinct representations are tested as representations;
+this change does not infer semantic inequality or injectivity of opaque heads.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna -p nir
+  -p comptime_interpretor --lib --test library_meta_objects --test normal_inputs
+  --test nominal_parameters --test objects --test type_rewrite --test phases`:
+  exit 0, 346 tests (`/tmp/luna-tools-cos00wjq/result.json`).
+- `python3 -B development/host_examples.py object-inputs --release-driver
+  --compare-optimization`: O0/O3 pass
+  (`/tmp/luna-host-examples-mvm5gkee/summary.json`).
+
+Additional staging regression: `python3 -B development/check.py --timeout 900
+-- test --release -p luna --test cmtt --test library_protocols`: exit 0,
+527 CMTT and 25 library protocol tests
+(`/tmp/luna-tools-eceatj1d/result.json`).
+
+A separate, pre-existing invocation gap remains: ordinary comptime locals cannot
+supply generic function clause inputs. Even Boolean input reproduces it in
+[comptime-local-clause-input.fl](repros/comptime-local-clause-input.fl).
+The current driver rejected that reproduction with “required comptime input
+(local ...) is not available” (`/tmp/luna-tools-qwozxuxv/result.json`, exit 1).
+Constant clause inputs and local Object arguments to normal-form heads are covered
+by the passing tests. Neither the tests nor documentation treats the general
+local-clause path as complete.
+
+Initial source fixtures needed clause syntax corrections. Later failures exposed
+an obsolete “Object inputs unsupported” assertion and the separate ordinary
+function admission path, both corrected. An attempted negative Type comparison
+was replaced with representation assertions: unresolved equality must not be
+reported as false. Targeted formatting and `git diff --check` pass.
 
 ### Schema Type evidence
 

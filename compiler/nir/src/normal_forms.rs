@@ -173,6 +173,7 @@ pub fn supported_input_type_with_collections_in(
                 | Primitive::Char
                 | Primitive::Str
                 | Primitive::Symbol
+                | Primitive::Object
                 | Primitive::F32
                 | Primitive::F64
                 | Primitive::BitVec(_),
@@ -815,6 +816,26 @@ impl Head {
                                     crate::type_computations::charge_term(&ty, &mut remaining)
                                         .map_err(|_| ApplicationError::InputType { index })?;
                                     work.push((ty, value, depth + 1));
+                                }
+                                true
+                            }
+                            (
+                                Term::Primitive(Primitive::Object),
+                                Term::NominalValue {
+                                    ty,
+                                    variant: None,
+                                    fields,
+                                },
+                            ) if ty.as_ref() == &expected => {
+                                if fields.len() > remaining {
+                                    return Err(ApplicationError::InputType { index });
+                                }
+                                for entry in fields {
+                                    let (_, domain, value) = crate::objects::entry_parts(entry)
+                                        .ok_or(ApplicationError::InputType { index })?;
+                                    crate::type_computations::charge_term(domain, &mut remaining)
+                                        .map_err(|_| ApplicationError::InputType { index })?;
+                                    work.push((domain.clone(), value, depth + 1));
                                 }
                                 true
                             }

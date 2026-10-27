@@ -342,3 +342,107 @@ fn literal_keys_receive_optional_symbol_context_without_enum_resolution() {
     .unwrap();
     assert_eq!(value, Value::Bool(true));
 }
+
+#[test]
+fn objects_are_frozen_normal_form_inputs_with_ordered_typed_identity() {
+    let value = invoke(
+        "
+        pure comptime fn Tagged<metadata:meta.Object>->.Type'builtin {bool}
+        comptime fn read()->bool where metadata:meta.Object {
+            meta.object_length(metadata)==3
+                and (meta.object_value<bool>(metadata,0) match {v?=>v,null=>false})
+                and meta.ObjectEntryType(metadata,1)==.Type'builtin
+                and (meta.object_value<.Type'builtin>(metadata,1) match {T?=>T==bool,null=>false})
+                and (meta.object_key(metadata,2) match {v?=>v==.flag,null=>false})
+        }
+        const checked=read<{flag:true, kind:bool, flag:false}>();
+        comptime fn run()->bool {
+            let left={flag:true, kind:bool, flag:false};
+            let same={flag:true, kind:bool, flag:false};
+            Tagged<left> == Tagged<same>
+                and checked
+        }
+    ",
+    )
+    .unwrap();
+    assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn frozen_object_identity_keeps_domains_and_nested_optional_layers() {
+    let value = invoke(
+        "
+        pure comptime fn Tagged<metadata:meta.Object>->.Type'builtin {bool}
+        pure comptime fn Identity<T>->.Type'builtin {T}
+        comptime fn run()->meta.Object {
+            let small:.u8'builtin=1;
+            let wide:.Integer'builtin=1;
+            let a={value:small};
+            let b={value:wide};
+            let x:?bool=null;
+            let y:??bool=x;
+            let inner={flag:true};
+            let first={inner:inner, value:x, kind:Identity<bool>};
+            let same={inner:{flag:true}, value:x, kind:Identity<bool>};
+            let other={inner:inner, value:y, kind:bool};
+            let reordered={value:x, inner:inner, kind:Identity<bool>};
+            let result={Tagged<a>, Tagged<b>, Tagged<first>, Tagged<same>, Tagged<other>, bool, Tagged<reordered>};
+            result
+        }
+    ",
+    )
+    .unwrap();
+    let Value::Object(values) = value else {
+        panic!()
+    };
+    let entries = values.entries();
+    assert_ne!(entries[0].value().value, entries[1].value().value);
+    assert_eq!(entries[2].value().value, entries[3].value().value);
+    assert_ne!(entries[2].value().value, entries[4].value().value);
+    assert_ne!(entries[0].value().value, entries[5].value().value);
+    assert_ne!(entries[2].value().value, entries[6].value().value);
+    let Value::Type(Term::NormalForm { .. }) = &entries[0].value().value else {
+        panic!()
+    };
+}
+
+#[test]
+fn object_normal_inputs_do_not_freeze_active_pointers() {
+    let error = invoke(
+        "
+        pure comptime fn Tagged<metadata:meta.Object>->.Type'builtin {bool}
+        comptime fn run()->bool {
+            var flag=true;
+            let metadata={pointer:flag.ref};
+            Tagged<metadata> == bool
+        }
+    ",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("Unsupported")
+            || error.contains("freeze")
+            || error.contains("comptime input"),
+        "{error}"
+    );
+}
+
+#[test]
+fn object_clause_inputs_reconstruct_nested_trusted_lists() {
+    let value = invoke(
+        "
+        const FLAGS:meta.List<bool> = [true,false];
+        const METADATA={flags:FLAGS};
+        comptime fn read()->bool where metadata:meta.Object {
+            meta.object_value<meta.List<bool>>(metadata,0) match {
+                values?=>meta.length(values)==2 and values[0] and not values[1],
+                null=>false,
+            }
+        }
+        const CHECKED=read<METADATA>();
+        comptime fn run()->bool {CHECKED}
+    ",
+    )
+    .unwrap();
+    assert_eq!(value, Value::Bool(true));
+}

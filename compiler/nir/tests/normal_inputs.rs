@@ -887,3 +887,63 @@ fn optional_normal_inputs_preserve_layer_and_validate_payload_domain() {
         }])
         .unwrap();
 }
+
+#[test]
+fn frozen_objects_check_every_stored_domain_and_preserve_duplicate_keys() {
+    let object = primitive(P::Object);
+    assert!(supported_input_type(&object, &[]));
+    let descriptor = head(object.clone());
+    let make =
+        |domain, value| nir::objects::value(vec![nir::objects::entry(Some("flag"), domain, value)]);
+    let good = nir::objects::value(vec![
+        nir::objects::entry(Some("flag"), primitive(P::Bool), Term::Bool(true)),
+        nir::objects::entry(
+            Some("flag"),
+            object.clone(),
+            make(primitive(P::Char), Term::Char('x')),
+        ),
+        nir::objects::entry(None, primitive(P::Type), primitive(P::Bool)),
+    ]);
+    assert!(good.check_scope(&[]).is_ok());
+    assert!(
+        descriptor
+            .check_closed_arguments(std::slice::from_ref(&good))
+            .is_ok()
+    );
+    for bad in [
+        make(primitive(P::Bool), Term::Char('x')),
+        make(primitive(P::Type), Term::Bool(true)),
+        make(object.clone(), Term::TupleValue(vec![])),
+        nir::objects::value(vec![Term::TupleValue(vec![
+            Term::Bool(true),
+            primitive(P::Bool),
+            Term::Bool(true),
+        ])]),
+        Term::NominalValue {
+            ty: Box::new(object),
+            variant: Some(0),
+            fields: vec![],
+        },
+    ] {
+        assert!(descriptor.check_closed_arguments(&[bad]).is_err());
+        assert!(
+            descriptor
+                .check_closed_arguments(std::slice::from_ref(&good))
+                .is_ok()
+        );
+    }
+    assert!(
+        descriptor
+            .check_arguments_in_scope_with_collections_budgeted_in(
+                &[good],
+                |_| false,
+                |_| false,
+                |_, _, _| None,
+                |_, _| false,
+                &[],
+                &mut 1,
+                None,
+            )
+            .is_err()
+    );
+}

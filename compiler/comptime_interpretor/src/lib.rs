@@ -622,6 +622,40 @@ impl Value {
                     charge(budget, work)?;
                     ty.clone()
                 }
+                Value::Object(object) => {
+                    charge(budget, object.entries().len().saturating_mul(4))?;
+                    let mut entries = Vec::with_capacity(object.entries().len());
+                    for entry in object.entries() {
+                        if let Some(key) = entry.key() {
+                            charge(budget, key.len())?;
+                        }
+                        let ObjectValue { ty, value } = entry.value();
+                        let work = if invocation {
+                            scoped_type_value_work_with_evidence(
+                                ty,
+                                &BTreeMap::new(),
+                                parameters,
+                                value_parameters,
+                                |_, _, _| None,
+                            )
+                        } else {
+                            scoped_type_value_work(ty, &BTreeMap::new(), parameters)
+                        }
+                        .ok_or(ErrorKind::Type)?;
+                        charge(budget, work)?;
+                        let domain = ty.clone();
+                        let value = visit(
+                            value,
+                            depth + 1,
+                            budget,
+                            parameters,
+                            value_parameters,
+                            invocation,
+                        )?;
+                        entries.push(nir::objects::entry(entry.key(), domain, value));
+                    }
+                    nir::objects::value(entries)
+                }
                 Value::List { ty, values } => {
                     let Term::NormalForm {
                         sort: nir::Sort::Type,
@@ -6372,7 +6406,8 @@ impl<'a> Interpreter<'a> {
                 }
                 continue;
             }
-            if self.list_element(&domain).is_some() {
+            if domain == Term::Primitive(Primitive::Object) || self.list_element(&domain).is_some()
+            {
                 nir::type_computations::charge_term(&domain, fuel)
                     .map_err(|_| ErrorKind::StepsExhausted)?;
                 // Ordinary function clauses have the same value-domain contract
@@ -9550,6 +9585,42 @@ impl Interpreter<'_> {
                         error,
                         value: Box::new(self.normal_pattern_value_at(value, payload, depth + 1)?),
                     }
+                }
+                (
+                    Term::NominalValue {
+                        ty: actual,
+                        variant: None,
+                        fields,
+                    },
+                    Term::Primitive(Primitive::Object),
+                ) if actual.as_ref() == ty => {
+                    if !self.comptime_only {
+                        return Err(self.failure(ErrorKind::PhaseMismatch, None));
+                    }
+                    self.integer_operation(None, |budget| budget.consume(fields.len()))?;
+                    let mut entries = Vec::with_capacity(fields.len());
+                    for entry in fields {
+                        let (key, domain, value) = nir::objects::entry_parts(entry)
+                            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                        let work = self
+                            .type_description_work(domain)
+                            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                        self.integer_operation(None, |budget| {
+                            budget.consume(work.saturating_add(key.map_or(0, str::len)))
+                        })?;
+                        let value = ObjectValue {
+                            ty: domain.clone(),
+                            value: self.normal_pattern_value_at(value, domain, depth + 1)?,
+                        };
+                        entries.push(match key {
+                            Some(key) => ObjectEntry::Property {
+                                key: key.to_owned(),
+                                value,
+                            },
+                            None => ObjectEntry::Value(value),
+                        });
+                    }
+                    Value::Object(Object::from_entries(entries))
                 }
                 (
                     Term::NominalValue {

@@ -42,7 +42,7 @@ typed read 匹配条目保存的声明域身份，不作为一般子类型或类
 无键条目混为一谈。读取 `?bool` 条目时，返回类型是 `??bool`，存在但为空的
 payload 保留其独立层。输入按普通调用顺序各求值一次，查询仍受 invocation
 预算限制。当前查询沿用普通值复制路径，不承诺常数时间访问大型对象。
-Object 作为 normal-form 参数的冻结编码尚未完成。
+由可冻结条目构成的 Object 也能作为 normal-form 和普通函数的 clause 参数。
 
 CMTT 生成器也可以保存和查询局部 Object，再据此选择 quoted code。其物化
 保留每个条目的类型、顺序与键，不把对象伪装成 normal term；嵌套 Object
@@ -75,6 +75,25 @@ comptime fn configured() -> bool {
 求值及复制规则，容器搬移、类型标签复制和动态 key 分配计入预算。
 CMTT 与原生 O0/O3 示例见
 [host-object-edits.fl](../../development/examples/host-object-edits.fl)。
+
+Object 的稳定输入编码保留每一项的 key、原始 Type 和值，因此普通项、空 key、
+重复 key、条目顺序及嵌套 optional 层都不会丢失。指针和活动存储不能进入此编码；
+冻结与重建都受预算约束，重建会检查每一项的 payload 域。
+
+```flurry
+pure comptime fn Tagged<metadata: meta.Object> -> Type { bool }
+
+comptime fn enabled() -> bool where metadata: meta.Object {
+    meta.object_value<bool>(metadata, 0) match { value? => value, null => false }
+}
+```
+
+`Tagged<metadata>` 保留 normal-form 的头和完整参数，不因函数体返回 bool 而
+展开为 bool。编码的表示相等不是通用类型判定：不同输入的表示不自行证明
+normal-form 结果不等，也不赋予 head 单射性质。当前普通函数 clause 调用支持
+已完成的常量输入；将普通 comptime 局部变量传给 clause 的通用接线仍未完成，
+见 [复现](../../development/repros/comptime-local-clause-input.fl)。完整使用示例见
+[host-object-inputs.fl](../../development/examples/host-object-inputs.fl)。
 
 `StructBuilder` 提供具体结构体的字段构造接口。它是 comptime 草稿，
 `new()` 默认使用名称 `.Generated`，也可以通过 `.name` 指定诊断名称。

@@ -166,14 +166,14 @@ fn budget_and_runtime_rejections_preserve_original_storage() {
 }
 
 #[test]
-fn unsupported_freezing_drops_deep_objects_iteratively() {
+fn depth_limited_freezing_drops_deep_objects_iteratively() {
     let mut value = Value::Bool(true);
     for _ in 0..20_000 {
         value = object(vec![value]);
     }
     assert_eq!(
         value.into_normal_term(&mut Default::default()),
-        Err(ErrorKind::Unsupported)
+        Err(ErrorKind::DepthExhausted)
     );
 }
 
@@ -292,8 +292,8 @@ fn forged_entry_tags_and_runtime_object_signatures_are_rejected() {
     let mut runtime = package.clone();
     runtime.functions[0].phase = nir::program::FunctionPhase::Runtime;
     assert!(nir::phases::validate(&runtime).is_err());
-    // Object values cannot become frozen normal-form arguments yet.
-    assert!(!nir::normal_forms::supported_input_type(
+    // Frozen Object inputs do not grant runtime transport.
+    assert!(nir::normal_forms::supported_input_type(
         &Term::Primitive(Primitive::Object),
         &[]
     ));
@@ -525,4 +525,65 @@ fn property_lookup_does_not_copy_or_extend_pointer_storage_lifetime() {
     );
     drop(storage);
     assert_eq!(vm.observe_pointer_scalar(pointer).unwrap(), None);
+}
+
+#[test]
+fn frozen_object_round_trip_checks_domains_keys_and_phase() {
+    let package = Package::default();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let original = object(vec![
+        Value::Bool(true),
+        Value::Type(Term::Primitive(Primitive::Char)),
+        object(vec![Value::Bool(false)]),
+    ]);
+    let term = original
+        .clone()
+        .into_normal_term(&mut Default::default())
+        .unwrap();
+    let domain = Term::Primitive(Primitive::Object);
+    assert_eq!(vm.normal_pattern_value(&term, &domain).unwrap(), original);
+    let bad = nir::objects::value(vec![nir::objects::entry(
+        Some("bad"),
+        Term::Primitive(Primitive::Bool),
+        Term::Char('x'),
+    )]);
+    assert_eq!(
+        vm.normal_pattern_value(&bad, &domain).unwrap_err().kind,
+        ErrorKind::Type
+    );
+    assert_eq!(vm.normal_pattern_value(&term, &domain).unwrap(), original);
+    vm.comptime_only = false;
+    assert_eq!(
+        vm.normal_pattern_value(&term, &domain).unwrap_err().kind,
+        ErrorKind::PhaseMismatch
+    );
+}
+
+#[test]
+fn freezing_objects_rejects_pointer_payloads_and_charges_keys() {
+    let storage = Storage::new(Value::Bool(true));
+    let pointer = Value::Pointer(storage.pointer(Term::Primitive(Primitive::Bool), vec![]));
+    let value = Value::Object(Object::from_entries(vec![ObjectEntry::Value(
+        ObjectValue {
+            ty: Term::Pointer(Box::new(Term::Primitive(Primitive::Bool))),
+            value: pointer,
+        },
+    )]));
+    assert_eq!(
+        value.into_normal_term(&mut Default::default()),
+        Err(ErrorKind::Unsupported)
+    );
+    let value = Value::Object(Object::from_entries(vec![ObjectEntry::Property {
+        key: "x".repeat(4096),
+        value: ObjectValue {
+            ty: Term::Primitive(Primitive::Bool),
+            value: Value::Bool(true),
+        },
+    }]));
+    let mut budget = comptime_runtime::Budget::default();
+    budget.steps = 100;
+    assert_eq!(
+        value.into_normal_term(&mut budget),
+        Err(ErrorKind::StepsExhausted)
+    );
 }

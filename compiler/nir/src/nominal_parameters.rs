@@ -292,6 +292,18 @@ fn validate_value(
         fields,
     } = argument
     {
+        if *domain == Term::Primitive(Primitive::Object)
+            && ty.as_ref() == domain
+            && variant.is_none()
+        {
+            for entry in fields {
+                let (_, domain, value) = crate::objects::entry_parts(entry)
+                    .ok_or_else(|| AdmissionError::from("invalid Object entry encoding"))?;
+                crate::type_computations::charge_term(domain, fuel)?;
+                validate_value(value, domain, fuel, layout, declared, depth + 1, target)?;
+            }
+            return Ok(());
+        }
         if !matches!(domain, Term::Nominal { .. }) || ty.as_ref() != domain {
             return Err("nominal value index has a different nominal identity".into());
         }

@@ -727,3 +727,35 @@ fn platform_index_admission_preserves_recursive_target_and_budget() {
         nir::validate_declaration_arguments(&parameters, &domains, &arguments, &mut 1000).is_err()
     );
 }
+
+#[test]
+fn object_indices_validate_nested_domains_without_nominal_layout_guessing() {
+    let domain = Term::Primitive(P::Object);
+    let good = nir::objects::value(vec![nir::objects::entry(
+        Some("flag"),
+        Term::Primitive(P::Bool),
+        Term::Bool(true),
+    )]);
+    nir::validate_declaration_arguments(
+        &[id(1)],
+        std::slice::from_ref(&domain),
+        std::slice::from_ref(&good),
+        &mut 10000,
+    )
+    .unwrap();
+    let bad = nir::objects::value(vec![nir::objects::entry(
+        Some("flag"),
+        Term::Primitive(P::Bool),
+        Term::Char('x'),
+    )]);
+    assert!(
+        nir::validate_declaration_arguments(
+            &[id(1)],
+            std::slice::from_ref(&domain),
+            &[bad],
+            &mut 10000
+        )
+        .is_err()
+    );
+    assert!(nir::validate_declaration_arguments(&[id(1)], &[domain], &[good], &mut 1).is_err());
+}

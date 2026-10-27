@@ -229,6 +229,7 @@ pub enum Term {
     /// declaration order; trusted normal-form collections retain element order.
     /// Some(index) distinguishes nominal enum variants. A normal-form head
     /// carries no layout authority here: admission must check its contract.
+    /// Builtin Object uses ordered typed entry packets (see `crate::objects`).
     NominalValue {
         ty: Box<Term>,
         variant: Option<u32>,
@@ -1959,15 +1960,23 @@ fn validate(
                 && !(variant.is_none()
                     && matches!(
                         ty.as_ref(),
-                        Term::NormalForm {
-                            sort: Sort::Type,
-                            ..
-                        }
+                        Term::Primitive(Primitive::Object)
+                            | Term::NormalForm {
+                                sort: Sort::Type,
+                                ..
+                            }
                     ))
             {
                 return Err(TypeError::InvalidNominalValueType);
             }
             validate(ty, holes, frames, allow_free, core)?;
+            if **ty == Term::Primitive(Primitive::Object)
+                && fields
+                    .iter()
+                    .any(|field| crate::objects::entry_parts(field).is_none())
+            {
+                return Err(TypeError::InvalidNominalValueType);
+            }
             for field in fields {
                 if field.sort() == Sort::Runtime {
                     return Err(TypeError::WrongSort {
@@ -2203,6 +2212,24 @@ impl fmt::Display for Term {
                 variant,
                 fields,
             } => {
+                if **ty == Term::Primitive(Primitive::Object)
+                    && variant.is_none()
+                    && fields
+                        .iter()
+                        .all(|entry| crate::objects::entry_parts(entry).is_some())
+                {
+                    f.write_str("(object-value")?;
+                    for entry in fields {
+                        let (key, domain, value) = crate::objects::entry_parts(entry).unwrap();
+                        f.write_str(" (entry (key ")?;
+                        match key {
+                            Some(key) => crate::display::string(f, key)?,
+                            None => f.write_str("none")?,
+                        }
+                        write!(f, ") (type {domain}) (value {value}))")?;
+                    }
+                    return f.write_str(")");
+                }
                 write!(f, "(nominal-value (type {ty}) (variant ")?;
                 match variant {
                     Some(index) => write!(f, "{index}")?,
