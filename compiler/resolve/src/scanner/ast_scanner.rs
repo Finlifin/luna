@@ -95,6 +95,7 @@ impl<'a> AstScanner<'a> {
                 | NodeKind::FunctionTemplateInstance
                 | NodeKind::FunctionTemplateInstanceWithParams
                 | NodeKind::Function
+                | NodeKind::DeriverDef
                 | NodeKind::AssocDecl
                 | NodeKind::NormalFormHeadDef
                 | NodeKind::AlgebraicEffect => {
@@ -105,6 +106,9 @@ impl<'a> AstScanner<'a> {
                 }
                 NodeKind::ImplTraitDef => {
                     self.scan_impl_def(parent_scope, inner, ImplKind::TraitImpl)?;
+                }
+                NodeKind::DeriveDef => {
+                    self.scan_impl_def(parent_scope, inner, ImplKind::Derivation)?;
                 }
                 NodeKind::UseStatement => {
                     self.collect_import(parent_scope, inner, vis)?;
@@ -348,7 +352,10 @@ impl<'a> AstScanner<'a> {
             def_id,
             true, // ordered
         );
-        if self.ast.get_node_kind(item) == Some(NodeKind::Function) {
+        if matches!(
+            self.ast.get_node_kind(item),
+            Some(NodeKind::Function | NodeKind::DeriverDef)
+        ) {
             let entries = self.ast.get_children(item)[1];
             let mut parameters = Vec::new();
             let mut known = true;
@@ -486,14 +493,17 @@ impl<'a> AstScanner<'a> {
             self.scan_clauses(scope_id, def_id, item, 3)?;
         } else if matches!(
             self.ast.get_node_kind(item),
-            Some(NodeKind::Function | NodeKind::AlgebraicEffect)
+            Some(NodeKind::Function | NodeKind::DeriverDef | NodeKind::AlgebraicEffect)
         ) {
             self.scan_clauses(scope_id, def_id, item, 3)?;
         } else {
             self.scan_clauses(scope_id, def_id, item, 4)?;
         }
 
-        if self.ast.get_node_kind(item) == Some(NodeKind::Function) {
+        if matches!(
+            self.ast.get_node_kind(item),
+            Some(NodeKind::Function | NodeKind::DeriverDef)
+        ) {
             self.scan_runtime_blocks(scope_id, self.ast.get_children(item)[4])?;
         }
         Ok(())
@@ -596,8 +606,9 @@ impl<'a> AstScanner<'a> {
 
         // Body index and clauses index differ by kind.
         let (clauses_child, body_child) = match kind {
-            ImplKind::Inherent => (1, 2),  // a, N, b
-            ImplKind::TraitImpl => (2, 3), // a, b, N, c
+            ImplKind::Inherent => (1, Some(2)),  // a, N, b
+            ImplKind::TraitImpl => (2, Some(3)), // a, b, N, c
+            ImplKind::Derivation => (2, None),   // trait, subject, clauses
         };
 
         let scope = Scope::new(
@@ -616,7 +627,7 @@ impl<'a> AstScanner<'a> {
 
         // Scan body items into the impl scope.
         let children = self.ast.get_children(item);
-        if body_child < children.len() {
+        if let Some(body_child) = body_child {
             let body_index = children[body_child];
             let body_items_index = self.ast.get_children(body_index)[0];
             if let Some(body_items) = self.ast.get_multi_child_slice(body_items_index) {

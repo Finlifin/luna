@@ -179,6 +179,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             NodeKind::StructDef => self.lower_struct_def(node),
             NodeKind::EnumDef => self.lower_enum_def(node),
             NodeKind::TraitDef => self.lower_trait_def(node),
+            NodeKind::DeriverDef => self.lower_callable(node, FnModifiers::default(), None),
+            NodeKind::DeriveDef => self.lower_derive_request(node, ImplementationPhase::Runtime),
             NodeKind::ImplDef => self.lower_impl_def(node, ImplementationPhase::Runtime),
             NodeKind::ImplTraitDef => self.lower_impl_trait_def(node, ImplementationPhase::Runtime),
             NodeKind::TypealiasDef | NodeKind::NewtypeDef => self.lower_named_type(node),
@@ -273,6 +275,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     && !effect_modifiers.is_direct_passing
                 {
                     match self.ast.get_node_kind(cursor) {
+                        Some(NodeKind::DeriveDef) => {
+                            return self
+                                .lower_derive_request(cursor, ImplementationPhase::Comptime);
+                        }
                         Some(NodeKind::ImplDef) => {
                             return self.lower_impl_def(cursor, ImplementationPhase::Comptime);
                         }
@@ -632,6 +638,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         debug_assert!(matches!(
             kind,
             NodeKind::Function
+                | NodeKind::DeriverDef
                 | NodeKind::AlgebraicEffect
                 | NodeKind::TestDef
                 | NodeKind::TestTemplateDef
@@ -741,8 +748,18 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let clause_params = self.arena.alloc_clause_param_slice(lowered.params);
         let clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
 
+        // A strategy's third slot is its trait target, not a callable result.
+        let strategy_target = if kind == NodeKind::DeriverDef {
+            self.package
+                .pending_semantics
+                .push((span, "derivation expansion".into()));
+            let target = self.lower_expr(ExprContext::Trait, return_type_node);
+            Some(self.arena.alloc_expr(target) as &_)
+        } else {
+            None
+        };
         // Return type
-        let return_ty = if return_type_node != 0 {
+        let return_ty = if return_type_node != 0 && strategy_target.is_none() {
             let ty_expr = self.lower_expr(ExprContext::Type, return_type_node);
             Some(self.arena.alloc_expr(ty_expr) as &_)
         } else {
@@ -830,7 +847,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         }
         // Body
         let body_expr = self.lower_expr(
-            if modifiers.is_comptime {
+            if modifiers.is_comptime || kind == NodeKind::DeriverDef {
                 ExprContext::ComptimeFunctionBody
             } else {
                 ExprContext::RuntimeFunctionBody
@@ -857,7 +874,17 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let item = Item {
             owner_id,
             ident,
-            kind: ItemKind::Fn(fn_sig, body_id),
+            kind: if let Some(trait_ref) = strategy_target {
+                ItemKind::Deriver(hir::item::DeriverDef {
+                    parameters: fn_sig.params,
+                    trait_ref,
+                    clause_params: fn_sig.clause_params,
+                    clause_constraints: fn_sig.clause_constraints,
+                    body: body_id,
+                })
+            } else {
+                ItemKind::Fn(fn_sig, body_id)
+            },
             span,
         };
         let item_ref = self.arena.alloc_item(item);
@@ -2000,6 +2027,54 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         self.file_scope = previous_scope;
         self.current_owner = prev_owner;
+        owner_id
+    }
+
+    fn lower_derive_request(&mut self, node: NodeIndex, phase: ImplementationPhase) -> OwnerId {
+        let (_, span, children) = self.ast.get_node(node).expect("derive node");
+        let owner_id = self.package.alloc_owner_id();
+        let previous_owner = self.current_owner;
+        let previous_scope = self.file_scope;
+        self.current_owner = owner_id;
+        self.ensure_owner_counter();
+        self.enter_implementation_scope(node, owner_id);
+        self.package
+            .pending_semantics
+            .push((span, "derivation expansion".into()));
+        let (trait_node, strategy) =
+            if self.ast.get_node_kind(children[0]) == Some(NodeKind::HandlerApplication) {
+                let selection = self.ast.get_children(children[0]);
+                let strategy = self.lower_expr(ExprContext::ComptimeArgument, selection[1]);
+                (selection[0], Some(self.arena.alloc_expr(strategy) as &_))
+            } else {
+                (children[0], None)
+            };
+        let trait_ref = self.lower_expr(ExprContext::Trait, trait_node);
+        let self_ty = self.lower_expr(ExprContext::Type, children[1]);
+        let clauses = self.ast.get_multi_child_slice(children[2]).unwrap_or(&[]);
+        let lowered = self.lower_clauses(clauses);
+        let item = self.arena.alloc_item(Item {
+            owner_id,
+            ident: Ident::new(Symbol::intern("<derive>"), span),
+            span,
+            kind: ItemKind::Derive(hir::item::DeriveRequest {
+                phase,
+                strategy,
+                trait_ref: self.arena.alloc_expr(trait_ref),
+                self_ty: self.arena.alloc_expr(self_ty),
+                clause_params: self.arena.alloc_clause_param_slice(lowered.params),
+                clause_constraints: self.arena.alloc_clause_slice(lowered.constraints),
+            }),
+        });
+        self.package.insert_owner(
+            owner_id,
+            OwnerInfo {
+                node: OwnerNode::Item(item),
+                nodes: OwnerNodes::new(),
+            },
+        );
+        self.file_scope = previous_scope;
+        self.current_owner = previous_owner;
         owner_id
     }
 

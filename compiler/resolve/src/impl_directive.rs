@@ -7,13 +7,15 @@
 
 use crate::ids::{DefId, ScopeId};
 
-/// The kind of an impl block.
+/// The kind of an implementation declaration or generation request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImplKind {
     /// `impl Type { … }` — inherent implementation.
     Inherent,
     /// `impl Trait for Type { … }` — trait implementation.
     TraitImpl,
+    /// `derive Trait for Type` request; no implementation is registered yet.
+    Derivation,
 }
 
 /// An `impl` block discovered during the scan phase.

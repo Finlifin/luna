@@ -1308,6 +1308,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 | NodeKind::StructDef
                 | NodeKind::EnumDef
                 | NodeKind::TraitDef
+                | NodeKind::DeriverDef
+                | NodeKind::DeriveDef
+                | NodeKind::AssocDecl
                 | NodeKind::ImplDef
                 | NodeKind::ImplTraitDef
                 | NodeKind::TypealiasDef
@@ -1388,6 +1391,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                 | NodeKind::StructDef
                                 | NodeKind::EnumDef
                                 | NodeKind::TraitDef
+                                | NodeKind::DeriverDef
+                                | NodeKind::DeriveDef
+                                | NodeKind::AssocDecl
                                 | NodeKind::ImplDef
                                 | NodeKind::ImplTraitDef
                                 | NodeKind::TypealiasDef

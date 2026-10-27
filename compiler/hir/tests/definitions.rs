@@ -794,3 +794,39 @@ fn checked_output_transfer_unwind_leaves_the_draft_repairable() {
         .commit();
     assert_eq!(batch.published().num_defs(), 1);
 }
+
+#[test]
+fn deriver_bodies_must_exist_before_publication() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    let trait_ref = arena.alloc_expr(Expr {
+        hir_id: HirId::new(owner, ItemLocalId::new(1)),
+        kind: ExprKind::TyVoid,
+        span: DUMMY_SP,
+    });
+    let body = BodyId::new(HirId::make_owner(owner));
+    batch
+        .define(
+            info(
+                &arena,
+                owner,
+                ItemKind::Deriver(hir::item::DeriverDef {
+                    parameters: &[],
+                    trait_ref,
+                    clause_params: &[],
+                    clause_constraints: &[],
+                    body,
+                }),
+            ),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        batch.publish(&mut 100).unwrap_err().kind,
+        "definition body is missing or has a different owner"
+    );
+    assert_eq!(batch.published().num_defs(), 0);
+}

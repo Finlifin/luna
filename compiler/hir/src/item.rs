@@ -64,6 +64,8 @@ pub enum ItemKind<'hir> {
     Mod(ModDef),
     Impl(ImplDef<'hir>),
     Trait(TraitDef<'hir>),
+    Deriver(DeriverDef<'hir>),
+    Derive(DeriveRequest<'hir>),
     TypeAlias(
         &'hir Expr<'hir>,
         &'hir [ClauseParam<'hir>],
@@ -181,6 +183,27 @@ pub struct NFSig<'hir> {
     pub clause_params: &'hir [ClauseParam<'hir>],
     pub clause_constraints: &'hir [ClauseConstraint<'hir>],
     pub span: Span,
+}
+
+/// A named compile-time implementation generator, not a callable function.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeriverDef<'hir> {
+    pub parameters: &'hir [FnParam<'hir>],
+    pub trait_ref: &'hir Expr<'hir>,
+    pub clause_params: &'hir [ClauseParam<'hir>],
+    pub clause_constraints: &'hir [ClauseConstraint<'hir>],
+    pub body: BodyId,
+}
+
+/// An unevaluated generation request; it supplies no implementation evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeriveRequest<'hir> {
+    pub phase: ImplementationPhase,
+    pub trait_ref: &'hir Expr<'hir>,
+    pub self_ty: &'hir Expr<'hir>,
+    pub strategy: Option<&'hir Expr<'hir>>,
+    pub clause_params: &'hir [ClauseParam<'hir>],
+    pub clause_constraints: &'hir [ClauseConstraint<'hir>],
 }
 
 /// Definition body of a `struct` item.
@@ -319,6 +342,8 @@ pub enum DefKind {
     Mod,
     Impl,
     Trait,
+    Deriver,
+    Derive,
     Associated,
     TypeAlias,
     Newtype,
@@ -340,6 +365,8 @@ impl DefKind {
             ItemKind::Mod(..) => DefKind::Mod,
             ItemKind::Impl(..) => DefKind::Impl,
             ItemKind::Trait(..) => DefKind::Trait,
+            ItemKind::Deriver(..) => DefKind::Deriver,
+            ItemKind::Derive(..) => DefKind::Derive,
             ItemKind::Associated(..) => DefKind::Associated,
             ItemKind::TypeAlias(..) => DefKind::TypeAlias,
             ItemKind::Newtype(..) => DefKind::Newtype,

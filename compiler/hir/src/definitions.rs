@@ -473,6 +473,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
                 ItemKind::Fn(_, id)
                 | ItemKind::FunctionTemplateInstance { body: id, .. }
                 | ItemKind::TestTemplateInstance { body: id, .. } => Some(*id),
+                ItemKind::Deriver(definition) => Some(definition.body),
                 ItemKind::Invalid => return Err(error("invalid definition payload", owner)),
                 _ => None,
             };

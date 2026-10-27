@@ -16,6 +16,57 @@ const VALID: &str = "fn requested_entry() {}\n";
 const OLD_OUTPUT: &[u8] = b"previous output: preserve these bytes\n\0";
 
 #[test]
+fn derivation_strategy_hir_preserves_generation_inputs_and_members() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "trait Label {fn label(self)->bool;} derive fn configured(flag:bool) for Label where T {assoc Input:.Type'builtin = T; fn label(self)->bool {flag}} fn run() {}");
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    assert!(dump.contains("(deriver "), "{dump}");
+    assert!(dump.contains("(name \"configured\")"), "{dump}");
+    assert!(dump.contains("(resolved-fn-param (name \"flag\")"), "{dump}");
+    assert!(dump.contains("(associated "), "{dump}");
+    let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+    failure(&output, 1);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("derivation expansion"));
+}
+
+#[test]
+fn derivation_requests_preserve_phase_strategy_and_subject_without_impl_evidence() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "trait Label {} struct Record {} derive fn configured for Label {} derive Label.use(configured) for Record; comptime derive Label for Record where T;");
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    assert_eq!(dump.matches("(derive-request ").count(), 2, "{dump}");
+    assert!(dump.contains("(phase runtime)"), "{dump}");
+    assert!(dump.contains("(phase comptime)"), "{dump}");
+    assert!(dump.contains("(strategy (some "), "{dump}");
+    assert!(!dump.contains("(impl (definition"), "{dump}");
+    let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+    failure(&output, 1);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("derivation expansion"));
+}
+
+#[test]
+fn derivation_strategy_bindings_do_not_escape_or_alias() {
+    for source in [
+        "trait Label {} derive fn configured(flag:bool,flag:bool) for Label {}",
+        "trait Label {} derive fn configured(flag:bool) for Label {} fn leak()->bool {flag}",
+        "trait Label {} derive fn configured for Label {} derive fn configured for Label {}",
+        "derive fn configured for Missing {}",
+        "trait Label {} derive Label.use(missing) for Missing;",
+    ] {
+        let sandbox = Sandbox::new();
+        sandbox.write("input.fl", source);
+        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        failure(&output, 1);
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("panicked"),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn pattern_code_hir_preserves_interface_quote_and_fresh_success_outputs() {
     let sandbox = Sandbox::new();
     sandbox.write(

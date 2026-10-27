@@ -15,6 +15,8 @@ pub fn clauses<'hir>(item: &Item<'hir>) -> &'hir [ClauseParam<'hir>] {
         ItemKind::Associated(def) => def.clause_params,
         ItemKind::Impl(def) => def.clause_params,
         ItemKind::Trait(def) => def.clause_params,
+        ItemKind::Deriver(def) => def.clause_params,
+        ItemKind::Derive(def) => def.clause_params,
         ItemKind::EffectGroup(def) => def.clause_params,
         ItemKind::TypeAlias(_, params, _) | ItemKind::Newtype(_, params, _) => params,
         ItemKind::FunctionTemplateInstance { .. }
@@ -68,6 +70,11 @@ pub(super) fn validate(item: &Item<'_>, fuel: &mut usize) -> Result<(), Error> {
         }
         ItemKind::Impl(def) => (def.clause_params, def.clause_constraints),
         ItemKind::Trait(def) => (def.clause_params, def.clause_constraints),
+        ItemKind::Derive(def) => (def.clause_params, def.clause_constraints),
+        ItemKind::Deriver(def) => {
+            members.parameters(def.parameters)?;
+            (def.clause_params, def.clause_constraints)
+        }
         ItemKind::EffectGroup(def) => (def.clause_params, def.clause_constraints),
         ItemKind::TypeAlias(_, params, constraints) | ItemKind::Newtype(_, params, constraints) => {
             (*params, *constraints)
