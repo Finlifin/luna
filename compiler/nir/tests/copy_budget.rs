@@ -428,6 +428,10 @@ fn nested_shared_closure_rewrite_uses_a_small_worker_stack() {
 fn struct_reflection_charges_subject_copy_before_allocation() {
     check(&expr(K::BuildStruct(Box::new(large()))));
     check(&expr(K::BuildEnum(Box::new(large()))));
+    check(&expr(K::EnumStructure {
+        subject: Box::new(large()),
+        query: nir::program::EnumStructureQuery::FieldTypes,
+    }));
     check(&expr(K::StructFieldTypes(Box::new(large()))));
     check(&expr(K::StructFieldNames(Box::new(large()))));
 }

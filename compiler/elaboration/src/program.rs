@@ -9349,6 +9349,9 @@ impl Checker<'_, '_> {
                 }
                 H::Match(value, arms) => self.match_expr(expr, value, arms, expected, partial),
                 H::When(arms) => self.when_expr(expr, arms, expected, partial),
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "enum_group_paths" | "enum_variant_paths" | "enum_variant_shapes" | "enum_variant_field_names" | "enum_variant_field_types")) => {
+                    self.enum_reflection_builtin(expr, callee, args, expected)
+                }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "build_enum" | "build_enum_paths")) =>
                 {
                     let H::Builtin(name) = &callee.kind else {
@@ -12024,6 +12027,7 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::StructFieldTypes(_)
         | K::BuildStruct(_)
         | K::BuildEnum(_)
+        | K::EnumStructure { .. }
         | K::StructFieldNames(_)
         | K::ListConcat(..)
         | K::TypeListIndex(..)

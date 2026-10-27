@@ -815,6 +815,27 @@ impl fmt::Display for EffectHandler {
     }
 }
 
+/// Logical enum structure; declaration order never implies a discriminant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnumStructureQuery {
+    GroupPaths,
+    VariantPaths,
+    Shapes,
+    FieldNames,
+    FieldTypes,
+}
+impl fmt::Display for EnumStructureQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::GroupPaths => "group-paths",
+            Self::VariantPaths => "variant-paths",
+            Self::Shapes => "shapes",
+            Self::FieldNames => "field-names",
+            Self::FieldTypes => "field-types",
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExprKind {
     /// Preserve the entire operand as the payload of one new optional layer.
@@ -876,6 +897,10 @@ pub enum ExprKind {
     /// Compiler-private packet: definition name, field names, field Types.
     BuildStruct(Box<Expr>),
     BuildEnum(Box<Expr>),
+    EnumStructure {
+        subject: Box<Expr>,
+        query: EnumStructureQuery,
+    },
     /// Ordered concatenation preserving the complete List<T> identity.
     ListConcat(Box<Expr>, Box<Expr>),
     /// A value selected by an interface member. Its declaration identity remains
@@ -3041,6 +3066,9 @@ impl fmt::Display for ExprKind {
             Self::StructFieldTypes(subject) => write!(f, "(struct-field-types {subject})"),
             Self::BuildStruct(request) => write!(f, "(build-struct {request})"),
             Self::BuildEnum(request) => write!(f, "(build-enum {request})"),
+            Self::EnumStructure { subject, query } => {
+                write!(f, "(enum-structure (query {query}) {subject})")
+            }
             Self::StructFieldNames(subject) => write!(f, "(struct-field-names {subject})"),
             Self::ListConcat(left, right) => write!(f, "(list-concat {left} {right})"),
             Self::TypeListIndex(values, index) => {
@@ -3396,6 +3424,7 @@ impl Expr {
                     | ExprKind::StructFieldTypes(_)
                     | ExprKind::BuildStruct(_)
                     | ExprKind::BuildEnum(_)
+                    | ExprKind::EnumStructure { .. }
                     | ExprKind::StructFieldNames(_)
                     | ExprKind::BitVecType(_)
                     | ExprKind::IntegerNegate(_)
@@ -3478,6 +3507,7 @@ impl Expr {
                 | ExprKind::StructFieldTypes(value)
                 | ExprKind::BuildStruct(value)
                 | ExprKind::BuildEnum(value)
+                | ExprKind::EnumStructure { subject: value, .. }
                 | ExprKind::StructFieldNames(value)
                 | ExprKind::BitVecType(value)
                 | ExprKind::IntegerNegate(value)
@@ -3859,6 +3889,7 @@ impl Expr {
             | ExprKind::StructFieldTypes(value)
             | ExprKind::BuildStruct(value)
             | ExprKind::BuildEnum(value)
+            | ExprKind::EnumStructure { subject: value, .. }
             | ExprKind::StructFieldNames(value)
             | ExprKind::BitVecType(value)
             | ExprKind::IntegerNegate(value)

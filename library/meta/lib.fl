@@ -213,6 +213,30 @@ impl StructBuilder {
 }
 
 {-
+  Logical enum structure in declaration order. Paths are lists of Symbol
+  segments; indices do not describe discriminant values or storage encoding.
+-}
+pub pure comptime fn enum_group_paths(subject: .Type'builtin) -> List<List<.Symbol'builtin>> {
+    .enum_group_paths'builtin(subject)
+}
+
+pub pure comptime fn enum_variant_paths(subject: .Type'builtin) -> List<List<.Symbol'builtin>> {
+    .enum_variant_paths'builtin(subject)
+}
+
+pub pure comptime fn enum_variant_shapes(subject: .Type'builtin) -> List<.Symbol'builtin> {
+    .enum_variant_shapes'builtin(subject)
+}
+
+pub pure comptime fn enum_variant_field_names(subject: .Type'builtin) -> List<List<.Symbol'builtin>> {
+    .enum_variant_field_names'builtin(subject)
+}
+
+pub pure comptime fn enum_variant_field_types(subject: .Type'builtin) -> List<List<.Type'builtin>> {
+    .enum_variant_field_types'builtin(subject)
+}
+
+{-
   A concrete enum draft. Variant paths and groups retain declaration order;
   Build checks payload Types and publishes one fresh nominal identity.
 -}
@@ -228,6 +252,17 @@ pub struct EnumBuilder {
 impl EnumBuilder {
     pub comptime fn new(.name: .Symbol'builtin = .Generated) -> Self {
         Self { name: name, groups: [], variant_names: [], shapes: [], field_names: [], field_types: [] }
+    }
+
+    pub comptime fn from_type(subject: .Type'builtin, .name: .Symbol'builtin = .Generated) -> Self {
+        Self {
+            name: name,
+            groups: enum_group_paths(subject),
+            variant_names: enum_variant_paths(subject),
+            shapes: enum_variant_shapes(subject),
+            field_names: enum_variant_field_names(subject),
+            field_types: enum_variant_field_types(subject),
+        }
     }
 
     pub comptime fn add_group(*self, name: .Symbol'builtin, .parent: List<.Symbol'builtin> = []) {

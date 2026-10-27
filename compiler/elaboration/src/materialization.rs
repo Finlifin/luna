@@ -2833,6 +2833,7 @@ impl Builder<'_> {
                 | K::StructFieldTypes(value)
                 | K::BuildStruct(value)
                 | K::BuildEnum(value)
+                | K::EnumStructure { subject: value, .. }
                 | K::StructFieldNames(value)
                 | K::BitVecType(value)
                 | K::IntegerNegate(value)
@@ -3206,6 +3207,7 @@ impl Builder<'_> {
             | K::StructFieldTypes(value)
             | K::BuildStruct(value)
             | K::BuildEnum(value)
+            | K::EnumStructure { subject: value, .. }
             | K::StructFieldNames(value)
             | K::BitVecType(value)
             | K::IntegerNegate(value)

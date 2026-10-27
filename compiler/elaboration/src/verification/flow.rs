@@ -5460,7 +5460,10 @@ impl Walker<'_> {
             K::StructFieldTypes(subject)
             | K::StructFieldNames(subject)
             | K::BuildStruct(subject)
-            | K::BuildEnum(subject) => {
+            | K::BuildEnum(subject)
+            | K::EnumStructure {
+                subject: subject, ..
+            } => {
                 self.child(subject, state, depth)?;
                 result = self.unknown_value(&expr.ty)?;
             }

@@ -1352,7 +1352,7 @@ fn declaration_responsibility_survives_specialization_without_wrapping_its_teles
 
 #[test]
 fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annotation() {
-    for operation in 0..4 {
+    for operation in 0..9 {
         let mut f = function(1, Phase::Runtime, &[]);
         let subject = Box::new(Expr {
             source: f.body.source,
@@ -1363,7 +1363,17 @@ fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annot
             0 => K::StructFieldNames(subject),
             1 => K::StructFieldTypes(subject),
             2 => K::BuildStruct(subject),
-            _ => K::BuildEnum(subject),
+            3 => K::BuildEnum(subject),
+            _ => K::EnumStructure {
+                subject,
+                query: [
+                    nir::program::EnumStructureQuery::GroupPaths,
+                    nir::program::EnumStructureQuery::VariantPaths,
+                    nir::program::EnumStructureQuery::Shapes,
+                    nir::program::EnumStructureQuery::FieldNames,
+                    nir::program::EnumStructureQuery::FieldTypes,
+                ][operation - 4],
+            },
         };
         let mut package = Package {
             functions: vec![f],

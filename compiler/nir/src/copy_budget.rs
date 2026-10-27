@@ -487,6 +487,7 @@ fn charge_node(
                     | K::StructFieldTypes(value)
                     | K::BuildStruct(value)
                     | K::BuildEnum(value)
+                    | K::EnumStructure { subject: value, .. }
                     | K::StructFieldNames(value)
                     | K::BitVecType(value)
                     | K::FloatNegate(value)

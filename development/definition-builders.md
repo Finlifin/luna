@@ -8,6 +8,34 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Source enum structural reflection
+
+The public meta wrappers expose ordered group paths, variant paths, shapes, named
+payload field names and instantiated payload Types. `EnumStructure` carries a
+closed query selector and one Type subject, with a stable S-expression dump and
+ordinary visitor/copy/type-rewrite integration. Runtime placement is rejected.
+The subject evaluates once, early control flow propagates, and the VM checks the
+result List domains before returning the reflected structure.
+
+`EnumBuilder.from_type` uses these queries to create an editable concrete draft.
+It supports instantiated source enums and enums already published in the current
+invocation, preserving paths, shapes and payload identities. Building the draft
+produces a fresh nominal identity. It copies logical structure, not encodings,
+attributes, default code or implementations; declaration order never implies a
+storage discriminant. The native example is `host-mirrored-enum.fl`.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
+test --release -p luna -p nir -p comptime_interpretor --test builder_invocations
+--test source_reflection --test enum_groups --test phases --test type_rewrite
+--test copy_budget --lib`, exit 0, 356 tests
+(`/tmp/luna-tools-qjdw0lnl/result.json`). Source cases cover instantiated generic
+subjects, current-invocation generated subjects, editable copies, nominal identity,
+wrong subject/runtime rejection, early return and single subject evaluation.
+All five queries are included in phase and type-rewrite coverage.
+`python3 -B development/host_examples.py mirrored-enum generated-enum
+--release-driver --compare-optimization`, exit 0, both examples pass at O0 and O3
+(`/tmp/luna-host-examples-cnf9bory`). Targeted formatting and diff checks pass.
+
 ## Segmented enum group paths
 
 EnumBuilder now retains group and variant paths as `List<List<Symbol>>`.

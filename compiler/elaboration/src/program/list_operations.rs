@@ -89,6 +89,73 @@ impl Checker<'_, '_> {
         })
     }
 
+    pub(super) fn enum_reflection_builtin(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        if self.runtime_value_context() || self.in_code_body {
+            return Err(error(
+                expr.span,
+                "enum reflection requires comptime invocation",
+            ));
+        }
+        let [Arg::Positional(subject)] = args else {
+            return Err(error(
+                expr.span,
+                "enum reflection requires one positional Type input",
+            ));
+        };
+        let H::Builtin(name) = &callee.kind else {
+            unreachable!()
+        };
+        use n::EnumStructureQuery as Q;
+        let query = match name.as_str() {
+            "enum_group_paths" => Q::GroupPaths,
+            "enum_variant_paths" => Q::VariantPaths,
+            "enum_variant_shapes" => Q::Shapes,
+            "enum_variant_field_names" => Q::FieldNames,
+            "enum_variant_field_types" => Q::FieldTypes,
+            _ => unreachable!(),
+        };
+        let head = self
+            .protocols
+            .meta_list
+            .ok_or_else(|| error(expr.span, "enum reflection requires a bound meta.List<T>"))?;
+        self.ensure_meta_list_metadata(head, expr.span)?;
+        let subject = self.expr(subject, Some(&p(P::Type)))?;
+        let list = |element| Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments: vec![element],
+        };
+        let element = p(if query == Q::FieldTypes {
+            P::Type
+        } else {
+            P::Symbol
+        });
+        let ty = if is_never(&subject.ty) {
+            p(P::Never)
+        } else if query == Q::Shapes {
+            list(element)
+        } else {
+            list(list(element))
+        };
+        if let Some(expected) = expected {
+            self.require_expression(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            source: source(expr.span),
+            ty,
+            kind: K::EnumStructure {
+                subject: Box::new(subject),
+                query,
+            },
+        })
+    }
+
     pub(super) fn build_enum_builtin(
         &mut self,
         expr: &Expr<'_>,

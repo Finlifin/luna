@@ -460,13 +460,23 @@ fn capture_failure_does_not_rewrite_later_captures_or_clone_shared_body() {
 
 #[test]
 fn struct_reflection_rewrites_and_visits_its_subject() {
-    for operation in 0..4 {
+    for operation in 0..9 {
         let subject = Box::new(expr(K::TypeValue(rigid())));
         let mut query = expr(match operation {
             0 => K::StructFieldNames(subject),
             1 => K::StructFieldTypes(subject),
             2 => K::BuildStruct(subject),
-            _ => K::BuildEnum(subject),
+            3 => K::BuildEnum(subject),
+            _ => K::EnumStructure {
+                subject,
+                query: [
+                    nir::program::EnumStructureQuery::GroupPaths,
+                    nir::program::EnumStructureQuery::VariantPaths,
+                    nir::program::EnumStructureQuery::Shapes,
+                    nir::program::EnumStructureQuery::FieldNames,
+                    nir::program::EnumStructureQuery::FieldTypes,
+                ][operation - 4],
+            },
         });
         let original = query.clone();
         let mut visits = 0;

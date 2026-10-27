@@ -127,3 +127,31 @@ builder.add_tuple(.received, [bool], .group = [.net, .nested]);
 
 生成后使用 `Event.net.nested.received(true)` 构造；pattern `.net` 匹配该组的全部
 后代，但不会匹配名为 `.network` 的相邻组。空分组仍保留在描述中，不增加 variant。
+
+Enum 的逻辑结构可以在 comptime 反射，结果保持声明顺序：
+
+| 接口 | 返回值 |
+| --- | --- |
+| `enum_group_paths(T)` | `List<List<Symbol>>`，每组的路径片段 |
+| `enum_variant_paths(T)` | `List<List<Symbol>>`，每个 variant 的路径片段 |
+| `enum_variant_shapes(T)` | `List<Symbol>`，`.unit`、`.tuple` 或 `.named` |
+| `enum_variant_field_names(T)` | `List<List<Symbol>>`，具名 payload 的字段名；其他形状为空列表 |
+| `enum_variant_field_types(T)` | `List<List<Type>>`，实例化后的 payload Type |
+
+`EnumBuilder.from_type(T, .name = .Generated)` 将这些逻辑信息复制为可编辑草稿。
+它接受具体泛型应用和本轮 invocation 刚生成的 enum，`Build` 产生独立的 nominal
+身份。该操作不复制编码 ABI、属性、默认表达式或 trait 实现，反射顺序也不表示判别值。
+
+```flurry
+enum Source where T { data(T), stopped }
+
+comptime fn Mirror() -> Type {
+    var builder = meta.EnumBuilder.from_type(Source<bool>, .name = .Mirrored);
+    builder.add_unit(.extra);
+    builder.Build()
+}
+
+typealias Mirrored = Mirror();
+```
+
+完整 native 示例见 [host-mirrored-enum.fl](../../development/examples/host-mirrored-enum.fl)。

@@ -1747,3 +1747,110 @@ fn grouped_enum_builder_rejects_missing_parents_and_name_collisions() {
         assert!(fixture.invoke_meta("Generate").is_err(), "accepted {body}");
     }
 }
+
+#[test]
+fn enum_builder_copies_instantiated_source_structure_and_extends_it() {
+    let fixture = Fixture::new("
+        enum Source where T {net.{idle,data(T),record {value:T}},stopped,empty.{}}
+        comptime fn Mirror() -> .Type'builtin {
+            var builder = meta.EnumBuilder.from_type(Source<bool>, .name = .Mirrored);
+            builder.add_unit(.extra);
+            builder.Build()
+        }
+        typealias Mirrored = Mirror();
+        fn read(value:Mirrored) -> bool {value match {
+            .net.idle => false, .net.data(value) => value, .net.record {value:value} => value,
+            .stopped => false, .extra => true,
+        }}
+        fn run() -> bool {read(Mirrored.net.data(true)) and read(Mirrored.net.record {value:true}) and read(.extra) and not read(.stopped)}
+        comptime fn ready() -> bool {true}
+    ");
+    let (Artifact::Nir(package), _, _) = fixture.invoke_meta("ready").unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let copied = package
+        .enums
+        .iter()
+        .find(|item| item.name == "Mirrored")
+        .unwrap();
+    assert_eq!(copied.groups, ["net", "empty"]);
+    assert_eq!(
+        copied.variants[1].fields,
+        [nir::Term::Primitive(nir::Primitive::Bool)]
+    );
+    assert!(copied.type_parameters.is_empty());
+}
+
+#[test]
+fn enum_reflection_observes_live_generated_types_and_preserves_nominal_identity() {
+    let fixture = Fixture::new("
+        comptime fn run() -> bool {
+            var builder = meta.EnumBuilder.new(.name = .First);
+            builder.add_group(.net);
+            builder.add_named(.data, [.flag], [bool], .group = [.net]);
+            let first = builder.Build();
+            let paths = meta.enum_variant_paths(first);
+            let groups = meta.enum_group_paths(first);
+            let shapes = meta.enum_variant_shapes(first);
+            let names = meta.enum_variant_field_names(first);
+            let types = meta.enum_variant_field_types(first);
+            let copy = meta.EnumBuilder.from_type(first, .name = .Copied).Build();
+            first != copy and paths[0][0] == .net and paths[0][1] == .data
+                and groups[0][0] == .net and shapes[0] == .named and names[0][0] == .flag and types[0][0] == bool
+        }
+    ");
+    assert_eq!(fixture.invoke_meta("run").unwrap().1, Value::Bool(true));
+}
+
+#[test]
+fn enum_reflection_rejects_wrong_subjects_and_runtime_calls_but_propagates_return() {
+    for call in [
+        "meta.enum_group_paths",
+        "meta.enum_variant_paths",
+        "meta.enum_variant_shapes",
+        "meta.enum_variant_field_names",
+        "meta.enum_variant_field_types",
+    ] {
+        let fixture = Fixture::new(&format!(
+            "comptime fn bad() -> bool {{let ignored = {call}(bool); true}}"
+        ));
+        assert!(fixture.invoke_meta("bad").is_err(), "accepted {call}(bool)");
+        let fixture = Fixture::new(&format!(
+            "enum E {{one}} fn bad() -> bool {{let ignored = {call}(E); true}} comptime fn ready() -> bool {{true}}"
+        ));
+        assert!(fixture.invoke_meta("ready").is_err(), "runtime {call}");
+    }
+    let fixture = Fixture::new(&format!(
+        "{PREFIX} comptime fn early() -> bool {{.enum_group_paths'builtin(do {{return true;}}); false}}"
+    ));
+    assert_eq!(
+        fixture.invoke("early", &mut 100_000, 100_000).unwrap().1,
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn enum_reflection_evaluates_each_subject_once() {
+    for call in [
+        "meta.enum_group_paths",
+        "meta.enum_variant_paths",
+        "meta.enum_variant_shapes",
+        "meta.enum_variant_field_names",
+        "meta.enum_variant_field_types",
+    ] {
+        let fixture = Fixture::new(&format!("
+            enum Source {{one}}
+            comptime fn Subject(flag:*bool) -> .Type'builtin {{flag.* = not flag.*; Source}}
+            comptime fn run() -> bool {{var visited = false; let observed = {call}(Subject(visited.ref)); visited}}
+        "));
+        assert_eq!(
+            fixture.invoke_meta("run").unwrap().1,
+            Value::Bool(true),
+            "{call}"
+        );
+    }
+}

@@ -3841,6 +3841,7 @@ impl<'a> Interpreter<'a> {
             K::ListLength(_) | K::ListConcat(..) => self.eval_list_operation(expr, environment),
             K::BuildStruct(request) => self.eval_struct_build(expr, request, environment),
             K::BuildEnum(request) => self.eval_enum_build(expr, request, environment),
+            K::EnumStructure { .. } => self.eval_enum_structure(expr, environment),
             K::StructFieldTypes(_) | K::StructFieldNames(_) => {
                 self.eval_struct_fields(expr, environment)
             }

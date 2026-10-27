@@ -280,6 +280,7 @@ fn visit(
         | K::StructFieldTypes(value)
         | K::BuildStruct(value)
         | K::BuildEnum(value)
+        | K::EnumStructure { subject: value, .. }
         | K::StructFieldNames(value)
         | K::BitVecType(value)
         | K::IntegerNegate(value)
