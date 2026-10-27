@@ -11429,7 +11429,7 @@ impl Checker<'_, '_> {
                         .and_then(|definition|definition.encoding.as_ref()).map(|encoding|encoding.width())
                         .ok_or_else(||error(expr.span,"enum bit view requires a checked fixed-width encoding"))?,
                     Term::Primitive(primitive) => primitive
-                        .unrestricted_scalar_width_in(self.target)
+                        .readable_scalar_width_in(self.target)
                         .map(|width| width as usize)
                         .ok_or_else(|| {
                             error(

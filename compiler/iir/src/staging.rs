@@ -939,7 +939,7 @@ fn total_bit_representation_in(expr: &Expr, target: Option<nir::target::TargetDa
             (Term::Primitive(source), Term::Primitive(Primitive::BitVec(width))) => {
                 *source == Primitive::BitVec(*width)
                     || source
-                        .unrestricted_scalar_width_in(target)
+                        .readable_scalar_width_in(target)
                         .map(|value| value as usize)
                         == Some(*width)
             }
@@ -1008,6 +1008,7 @@ fn fold_bit_representation<'layout>(
                         K::Literal(Literal::UnsignedInteger(value)) => value,
                         K::Literal(Literal::Float32(value)) => u128::from(value),
                         K::Literal(Literal::Float64(value)) => u128::from(value),
+                        K::Literal(Literal::Char(value)) => u128::from(u32::from(value)),
                         _ => {
                             return Err(
                                 "staged bit representation requires a scalar literal".into()
@@ -4177,6 +4178,30 @@ mod tests {
         );
         assert!(!total_bit_representation(&boolean));
         assert!(fold_value(&boolean, &mut 1000).is_err());
+    }
+
+    #[test]
+    fn staged_character_bits_are_readable_but_not_constructible() {
+        for value in ['\0', '\u{d7ff}', '\u{e000}', '🦀', '\u{10ffff}'] {
+            let read = expr(
+                K::TakeBits(Box::new(expr(
+                    K::Literal(Literal::Char(value)),
+                    Primitive::Char,
+                ))),
+                Primitive::BitVec(32),
+            );
+            let folded = fold_value(&read, &mut 1000).unwrap();
+            assert_eq!(
+                folded.kind,
+                K::Literal(Literal::BitVec {
+                    width: 32,
+                    words: vec![u32::from(value)]
+                })
+            );
+            let reconstruct = expr(K::BitConvert(Box::new(folded)), Primitive::Char);
+            assert!(!total_bit_representation(&reconstruct));
+            assert!(fold_value(&reconstruct, &mut 1000).is_err());
+        }
     }
 
     #[test]

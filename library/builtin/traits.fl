@@ -160,6 +160,18 @@ comptime impl Hash for .i128'builtin {
     }
 }
 
+impl Hash for .char'builtin {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+
+comptime impl Hash for .char'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+
 -- ── Conversion ─────────────────────────────────────────────────────────────
 
 pub use conversion.{Into, From};

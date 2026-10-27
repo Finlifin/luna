@@ -69,6 +69,18 @@ pub enum Primitive {
 }
 
 impl Primitive {
+    /// Width of a readable initialized scalar value. This does not authorize
+    /// reconstruction or bit writeback: Char excludes non-Unicode bit patterns.
+    pub fn readable_scalar_width_in(
+        self,
+        target: Option<crate::target::TargetData>,
+    ) -> Option<u32> {
+        match self {
+            Self::Char => Some(32),
+            _ => self.unrestricted_scalar_width_in(target),
+        }
+    }
+
     /// Supported initialized scalar representations with no invalid bit patterns.
     /// This describes values only; access, initialization and write permissions
     /// must be established separately. Pointer-sized types need target data.

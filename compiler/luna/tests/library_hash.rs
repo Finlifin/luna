@@ -20,6 +20,11 @@ fn scalar_hashes_agree_across_execution_phases_and_integer_boundaries() {
     for (ty, literal, expected) in [
         ("bool", "false", 0),
         ("bool", "true", 1),
+        ("char", "'A'", 65),
+        ("char", "'\u{d7ff}'", 0xd7ff),
+        ("char", "'\u{e000}'", 0xe000),
+        ("char", "'🦀'", 0x1f980),
+        ("char", "'\u{10ffff}'", 0x10ffff),
         ("u8", "255", 255),
         ("u16", "65535", 65535),
         ("u32", "4294967295", 4294967295),
@@ -110,4 +115,29 @@ fn scalar_hashes_lower_to_host_code_without_comptime_dispatch() {
         .execute_test(&ir, std::time::Duration::from_secs(5))
         .unwrap();
     }
+}
+
+#[test]
+fn character_bit_reads_do_not_authorize_reconstruction_or_writeback() {
+    for body in [
+        "let value:u32=65;value'bitvec.as(char)",
+        "var value:char='A';value'bitvec[0..32]=55296;value",
+    ] {
+        let error = support::compile_with_protocols(
+            &source(&format!("fn invalid()->char {{{body}}}")),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("representation") || error.contains("unrestricted"),
+            "{error}"
+        );
+    }
+    let package = support::compile(&source(
+        "fn read(value:char)->u64 {value'bitvec.as(u64)} fn verify() {let value=read('🦀');assumes value == 129408;}",
+    ));
+    let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
+    luna::host::Toolchain::default()
+        .execute_test(&ir, std::time::Duration::from_secs(5))
+        .unwrap();
 }

@@ -177,8 +177,9 @@ for those locals. Explicit arguments still precede default evaluation.
 - Extend VM-facing builders beyond their current nominal descriptors and
   finish remaining protocol consumers. Builtin Eq now supplies primitive
   comptime comparisons alongside runtime comparisons. Hash supplies Bool and
-  fixed-width integer implementations in both phases; target-sized integers,
-  other scalar/aggregate domains and derivation remain unfinished.
+  fixed-width integer and character implementations in both phases;
+  target-sized integers, other scalar/aggregate domains and derivation remain
+  unfinished.
 - Extend dynamic trait clauses beyond fixed callable signatures and known
   Self/interface inputs. Completed IIR instances currently reject unevaluated
   packets explicitly; source comptime invocation retains origin, specialized
@@ -518,3 +519,35 @@ Formatting check passed via `python3 -B development/command.py --timeout 120 --
 cargo fmt --all -- --check` (`/tmp/luna-tools-ex7mg0ab/result.json`, exit 0).
 `git diff --check` passed. Target-sized integers, characters, symbols, compound
 keys and derivation are not covered by these new Hash implementations.
+
+Character Hash now uses the Unicode scalar's 32-bit representation in both
+phases. NIR distinguishes a readable initialized scalar representation from
+one admitting every possible bit pattern. Elaboration, VM bit reads and IIR
+constant folding use the readable width; conversion and writeback retain their
+unrestricted-representation checks. This permits reading a valid char without
+admitting surrogate codepoints or arbitrary 32-bit reconstruction. LLVM already
+represents chars as i32 and uses the existing bit-view lowering.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p iir
+  --lib staged_character_bits`: 1 passed
+  (`/tmp/luna-tools-jipgupxu/result.json`, exit 0).
+- The same command with `staged_bit`: 2 passed
+  (`/tmp/luna-tools-dbz5339v/result.json`, exit 0).
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna
+  -p elaboration -p comptime_interpretor --test library_hash
+  --test library_comptime_comparison`: 7 passed
+  (`/tmp/luna-tools-kxs3ow6y/result.json`, exit 0). Covers Unicode scalar
+  boundaries, both Hash phases, rejection of reconstruction and writable char
+  bit updates, and native execution. The initial negative writeback case used
+  an immutable let binding; it now uses var to reach the representation check.
+- The same package selection with `--test pure_bitvec`: 29 passed
+  (`/tmp/luna-tools-hl2mvh1s/result.json`, exit 0).
+
+Target-sized integer and Symbol hashing remain unfinished. Reading a char does
+not yet implement checked BitVec-to-char construction or validated writeback.
+
+Formatting check passed via `python3 -B development/command.py --timeout 120 --
+cargo fmt --all -- --check` (`/tmp/luna-tools-d2nmdkww/result.json`, exit 0);
+`git diff --check` passed.

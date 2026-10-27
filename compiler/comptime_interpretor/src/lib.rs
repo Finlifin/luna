@@ -8072,12 +8072,13 @@ impl<'a> Interpreter<'a> {
                     Value::SignedInteger(_)
                     | Value::UnsignedInteger(_)
                     | Value::Float32(_)
-                    | Value::Float64(_) => {
+                    | Value::Float64(_)
+                    | Value::Char(_) => {
                         let Term::Primitive(primitive) = operand.ty else {
                             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                         };
                         if primitive
-                            .unrestricted_scalar_width_in(self.target)
+                            .readable_scalar_width_in(self.target)
                             .map(|w| w as usize)
                             != Some(width)
                             || !self.has_type(&value, &operand.ty)
@@ -8089,6 +8090,7 @@ impl<'a> Interpreter<'a> {
                             Value::UnsignedInteger(v) => v,
                             Value::Float32(bits) => u128::from(bits),
                             Value::Float64(bits) => u128::from(bits),
+                            Value::Char(value) => u128::from(u32::from(value)),
                             _ => unreachable!(),
                         };
                         let raw = if width == 128 {
