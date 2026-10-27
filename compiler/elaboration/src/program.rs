@@ -321,10 +321,11 @@ fn elaborate_with_attributes(
             invocation_steps,
         );
     }
-    if package
-        .pending_semantics
-        .iter()
-        .any(|(_, feature)| feature == "derivation expansion")
+    if !inspect_attributes
+        && package
+            .pending_semantics
+            .iter()
+            .any(|(_, feature)| feature == "derivation expansion")
     {
         let arena = hir::HirArena::new();
         let expanded = derivation::expand(package, &arena, &mut 100_000)
@@ -341,6 +342,7 @@ fn elaborate_with_attributes(
     }
     if let Some((span, feature)) = package.pending_semantics.iter().find(|(_, feature)| {
         feature != "test template CMTT expansion"
+            && !(inspect_attributes && feature == "derivation expansion")
             && !matches!(
                 feature.as_str(),
                 "definition attribute" | "definition configuration"
@@ -815,6 +817,23 @@ fn elaborate_candidate<'a, 'h>(
     checker.signature_owner = None;
     checker.context = checker.nominal_context();
     let prepared_attributes = checker.prepare_phase_attributes(inspect_attributes)?;
+    if inspect_attributes
+        && package
+            .pending_semantics
+            .iter()
+            .any(|(_, feature)| feature == "derivation expansion")
+    {
+        // Registration must observe the original strategy targets before any
+        // strategy is selected. This inspection path publishes no executable
+        // package or evidence that generated implementations are valid.
+        return Ok((
+            n::Package {
+                target,
+                ..Default::default()
+            },
+            prepared_attributes,
+        ));
+    }
     let (traits, implementations) = checker.check_interfaces()?;
     checker.checked_traits = traits.clone();
     checker.checked_implementations = implementations.clone();

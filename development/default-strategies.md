@@ -76,3 +76,38 @@ python3 -B development/check.py --timeout 900 -- test --release -p elaboration -
 ```
 
 6 passed, exit 0; `/tmp/luna-tools-5mymo_lr/result.json`.
+
+## Inspecting attributes before expansion
+
+The attribute-only frontend now retains unexpanded strategy and derive-request
+identities. It evaluates metadata through the ordinary comptime path before
+strategy selection, then returns only the inspected attributes. The executable
+compiler still expands derivation and cannot obtain an executable package from
+this inspection path. Existing inspection for programs without derivation keeps
+its previous flow.
+
+This makes metadata on an unused strategy available without executing its body,
+and one strategy's metadata is not multiplied by its explicit use sites. Raw
+and merged inspection preserve original target identities and prefix merge
+order. Required attribute helpers still discharge their own invocation contracts.
+The result is not evidence that strategy bodies, defaults, or generated impls
+have been validated. Generic/runtime-dependent attributes and attributes that
+require a generated impl are not solved by this change.
+
+This is the metadata-reading prerequisite for the registry above, not yet the
+connection between evaluated default markers and default request selection.
+
+Inspection validation in `/home/fin/luna` (all exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation_attributes --test library_attributes --test derivation
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Derivation attributes: 6 passed; existing library attributes: 6 passed;
+  derivation: 74 passed. Report: `/tmp/luna-tools-3kfrnew4/result.json`.
+- Formatting: `/tmp/luna-tools-0tt8454b/result.json`.
+- The new suite uses the real frontend inspection entries and checks unchanged
+  original targets, duplicate use sites, merging order, required helper contract
+  rejection, unused divergent strategy bodies and executable-mode rejection.
