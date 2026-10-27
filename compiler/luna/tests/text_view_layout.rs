@@ -52,3 +52,76 @@ fn nominal_wrappers_and_tuple_heads_keep_conditional_text_slots() {
         layout
     );
 }
+
+#[test]
+fn text_descriptor_storage_operations_form_without_granting_resource_safety() {
+    for copy_impl in ["", "impl Duplicate for str {}"] {
+        let package = support::compile_with_tuple(&format!(
+            "typealias str=.str'builtin;
+            trait Duplicate {{}}
+            trait Retire {{fn drop(*self);}}
+            {copy_impl}
+            struct Box {{text:str}}
+            fn read(pointer:*str)->str {{pointer.*}}
+            fn field(pointer:*Box)->str {{pointer.*.text}}
+            fn aggregate(pointer:*Box)->Box {{pointer.*}}
+            fn tuple(pointer:*Tuple<bool,str>)->Tuple<bool,str> {{pointer.*}}
+            fn replace(pointer:*str,value:str) {{pointer.* = value;}}
+            fn direct()->bool {{let text=\"aé\";read(text.ref) == \"aé\"}}
+            fn projected()->bool {{let box=Box {{text:\"stored\"}};field(box.ref) == \"stored\"}}
+            fn copied()->bool {{let box=Box {{text:\"record\"}};aggregate(box.ref).text == \"record\"}}
+            fn tupled()->bool {{let value=(true,\"tuple\");let (flag,text)=tuple(value.ref);flag and text == \"tuple\"}}
+            fn written()->bool {{var text=\"old\";replace(text.ref,\"new\");text == \"new\"}}"
+        ));
+        for name in ["read", "field", "aggregate", "tuple"] {
+            let function = package.functions.iter().find(|f| f.name == name).unwrap();
+            let mut reads = 0;
+            nir::visit::expressions(function, &mut 100_000, |expr, _| {
+                if matches!(expr.kind, nir::program::ExprKind::ReadPointer(_)) {
+                    reads += 1;
+                }
+                Ok::<_, String>(())
+            })
+            .unwrap();
+            assert_eq!(reads, 1, "{name}");
+        }
+        for name in ["direct", "projected", "copied", "tupled", "written"] {
+            let error = luna::execution::interpret(&package, name, 1_000_000).unwrap_err();
+            assert!(error.contains("Unsupported"), "{name}: {error}");
+            let declaration = package
+                .functions
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .declaration;
+            // This isolated representation test supplies permission explicitly.
+            // Neither ordinary execution nor the resource verifier inherits it.
+            let mut vm = comptime_interpretor::Interpreter::new(
+                &package,
+                comptime_interpretor::Budget {
+                    steps: 1_000_000,
+                    depth: 128,
+                },
+            )
+            .unwrap()
+            .with_pointer_copy_permission(&|_| true);
+            assert_eq!(
+                vm.invoke(declaration, vec![]).unwrap(),
+                comptime_interpretor::Value::Bool(true),
+                "{name}"
+            );
+            let error = luna::execution::interpret_with_protocols(
+                &package,
+                name,
+                "Duplicate",
+                "Retire",
+                1_000_000,
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("string-view memory provenance") || error.contains("Copy"),
+                "{name}: {error}"
+            );
+        }
+    }
+}

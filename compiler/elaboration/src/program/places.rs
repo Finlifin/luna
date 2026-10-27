@@ -62,7 +62,10 @@ impl Checker<'_, '_> {
             }
             return Ok(true);
         }
-        if matches!(ty, Term::Function { .. }) {
+        if matches!(ty, Term::Function { .. } | Term::Primitive(P::Str)) {
+            // Form a descriptor transfer without granting Copy or proving the
+            // lifetime of the separate backing character region. Resource
+            // verification must retain those obligations for text views.
             return Ok(true);
         }
         let fields = match ty {

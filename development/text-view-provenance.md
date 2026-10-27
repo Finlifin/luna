@@ -7,9 +7,10 @@ execution; this does not prove a valid lifetime for the text view.
 
 ## Actual blocking paths
 
-- `program/places.rs::readable_storage_input` does not form a runtime `str`
-  pointer load. A proposed `Clone` implementation using `self.*` therefore fails
-  during elaboration. No `str` resource implementation was added to the library.
+- `program/places.rs::readable_storage_input` now forms runtime `str` descriptor
+  loads and replacements, including descriptors nested in records and tuples.
+  Formation does not authorize Copy or prove backing-region liveness. No `str`
+  resource implementation was added to the library.
 - `verification/memory.rs::owned_fields` explicitly rejects `str` because its
   backing character storage has no represented provenance. This also rejects
   passing a text view inside the proposed Bytes iterator, even when the fixture
@@ -913,3 +914,39 @@ recursive aggregate forwarding, unknown callbacks and budget failure recovery.
 Formatting passed (`/tmp/luna-tools-r16cccsz/result.json`, exit 0), as did the
 diff check. Optional input variants remain conservatively joined, so the test
 expects both the payload dependency and the absent-branch static result.
+
+## Text descriptor storage formation
+
+The frontend now forms typed `ReadPointer` and `WritePointer` operations for a
+text descriptor and supported aggregates containing text. This removes the early
+representation rejection for expressions such as `pointer.*` where the pointee
+is `str`, without treating text as an intrinsic pointer-free value. Descriptor
+storage and backing character storage remain separate obligations.
+
+The regression checks direct and projected descriptor reads, whole record and
+Tuple reads, and descriptor replacement through a pointer. It also checks that
+resource-checked execution rejects the same programs both without a Copy
+implementation and with explicit Copy evidence for `str`. An isolated interpreter fixture
+with explicit pointer-copy permission establishes descriptor operation behavior;
+the default interpreter still rejects these operations. The fixture does not certify the
+backing storage lifetime or enable public text resource protocols.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_view_layout --test text_regions --test text_iteration_prototype
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_view_layout
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test resources borrowed_string_views_do_not_gain_pointer_free_layout_from_copy
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+The initial combined run (`/tmp/luna-tools-95u_6nuf/result.json`, exit 101)
+passed all 32 dependency tests and both iteration tests, but the new descriptor
+fixture hit the interpreter's deliberate non-intrinsic pointer permission check.
+The fixture was corrected to assert this rejection, then exercise representation
+behavior with explicit test-only pointer-copy permission. Both layout tests then
+passed (`/tmp/luna-tools-7oeea0zi/result.json`, exit 0). The existing Copy/provenance
+regression passed (`/tmp/luna-tools-jbthh_rh/result.json`, exit 0). Formatting
+passed (`/tmp/luna-tools-b0h_t4i4/result.json`, exit 0), as did the diff check.
+No interpreter permission or runtime resource gate was relaxed.
