@@ -579,6 +579,7 @@ impl Checker<'_, '_> {
             value,
             Value::Record { .. }
                 | Value::Variant { .. }
+                | Value::Object(_)
                 | Value::Newtype { .. }
                 | Value::Optional { .. }
                 | Value::ErrorResult { .. }

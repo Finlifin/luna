@@ -7,6 +7,27 @@
 -- Heterogeneous ordered metadata, available only during comptime invocation.
 pub typealias Object = .Object'builtin;
 
+{-
+  Observe ordered Object entries without merging duplicate keys. Indices are
+  checked; an out-of-range index fails the invocation. A positional entry has
+  no key. Typed reads return an absent optional only for a domain mismatch.
+-}
+pub pure comptime fn object_length(value: Object) -> .Integer'builtin {
+    .object_length'builtin(value)
+}
+
+pub pure comptime fn object_key(value: Object, index: .Integer'builtin) -> ?.Symbol'builtin {
+    .object_key'builtin(value, index)
+}
+
+pub pure comptime fn ObjectEntryType(value: Object, index: .Integer'builtin) -> .Type'builtin {
+    .object_entry_type'builtin(value, index)
+}
+
+pub pure comptime fn object_value(value: Object, index: .Integer'builtin) -> ?T where T {
+    .object_value'builtin(T, value, index)
+}
+
 pub pure comptime fn List<T> -> .Type'builtin {
     List<T>
 }

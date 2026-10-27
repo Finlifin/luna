@@ -9352,6 +9352,9 @@ impl Checker<'_, '_> {
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "enum_group_paths" | "enum_variant_paths" | "enum_variant_shapes" | "enum_variant_field_names" | "enum_variant_field_types")) => {
                     self.enum_reflection_builtin(expr, callee, args, expected)
                 }
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "object_length" | "object_key" | "object_entry_type" | "object_value")) => {
+                    self.object_query_builtin(expr, callee, args, expected)
+                }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "build_enum" | "build_enum_paths")) =>
                 {
                     let H::Builtin(name) = &callee.kind else {
@@ -12031,6 +12034,7 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::BuildStruct(_)
         | K::BuildEnum(_)
         | K::EnumStructure { .. }
+        | K::ObjectQuery { .. }
         | K::StructFieldNames(_)
         | K::ListConcat(..)
         | K::TypeListIndex(..)

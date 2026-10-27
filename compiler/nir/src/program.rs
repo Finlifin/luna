@@ -815,6 +815,25 @@ impl fmt::Display for EffectHandler {
     }
 }
 
+/// Ordered Object observations. Indexed queries use a checked argument packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectQueryKind {
+    Length,
+    Key,
+    EntryType,
+    Value,
+}
+impl fmt::Display for ObjectQueryKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Length => "length",
+            Self::Key => "key",
+            Self::EntryType => "entry-type",
+            Self::Value => "value",
+        })
+    }
+}
+
 /// Logical enum structure; declaration order never implies a discriminant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnumStructureQuery {
@@ -900,6 +919,10 @@ pub enum ExprKind {
     EnumStructure {
         subject: Box<Expr>,
         query: EnumStructureQuery,
+    },
+    ObjectQuery {
+        subject: Box<Expr>,
+        query: ObjectQueryKind,
     },
     /// Ordered concatenation preserving the complete List<T> identity.
     ListConcat(Box<Expr>, Box<Expr>),
@@ -3069,6 +3092,9 @@ impl fmt::Display for ExprKind {
             Self::EnumStructure { subject, query } => {
                 write!(f, "(enum-structure (query {query}) {subject})")
             }
+            Self::ObjectQuery { subject, query } => {
+                write!(f, "(object-query (query {query}) {subject})")
+            }
             Self::StructFieldNames(subject) => write!(f, "(struct-field-names {subject})"),
             Self::ListConcat(left, right) => write!(f, "(list-concat {left} {right})"),
             Self::TypeListIndex(values, index) => {
@@ -3425,6 +3451,7 @@ impl Expr {
                     | ExprKind::BuildStruct(_)
                     | ExprKind::BuildEnum(_)
                     | ExprKind::EnumStructure { .. }
+                    | ExprKind::ObjectQuery { .. }
                     | ExprKind::StructFieldNames(_)
                     | ExprKind::BitVecType(_)
                     | ExprKind::IntegerNegate(_)
@@ -3508,6 +3535,7 @@ impl Expr {
                 | ExprKind::BuildStruct(value)
                 | ExprKind::BuildEnum(value)
                 | ExprKind::EnumStructure { subject: value, .. }
+                | ExprKind::ObjectQuery { subject: value, .. }
                 | ExprKind::StructFieldNames(value)
                 | ExprKind::BitVecType(value)
                 | ExprKind::IntegerNegate(value)
@@ -3890,6 +3918,7 @@ impl Expr {
             | ExprKind::BuildStruct(value)
             | ExprKind::BuildEnum(value)
             | ExprKind::EnumStructure { subject: value, .. }
+            | ExprKind::ObjectQuery { subject: value, .. }
             | ExprKind::StructFieldNames(value)
             | ExprKind::BitVecType(value)
             | ExprKind::IntegerNegate(value)

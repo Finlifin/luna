@@ -2,6 +2,88 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    pub(super) fn object_query_builtin(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        use n::ObjectQueryKind as Q;
+        if self.runtime_value_context() || self.in_code_body {
+            return Err(error(
+                expr.span,
+                "Object queries require comptime invocation",
+            ));
+        }
+        let H::Builtin(name) = &callee.kind else {
+            unreachable!()
+        };
+        let query = match name.as_str() {
+            "object_length" => Q::Length,
+            "object_key" => Q::Key,
+            "object_entry_type" => Q::EntryType,
+            "object_value" => Q::Value,
+            _ => unreachable!(),
+        };
+        let count = match query {
+            Q::Length => 1,
+            Q::Value => 3,
+            _ => 2,
+        };
+        if args.len() != count || args.iter().any(|arg| !matches!(arg, Arg::Positional(_))) {
+            return Err(error(
+                expr.span,
+                "Object query requires positional inputs: optional target Type, Object, and index",
+            ));
+        }
+        let (target, args) = if query == Q::Value {
+            let Arg::Positional(target) = &args[0] else {
+                unreachable!()
+            };
+            (Some(self.type_expr(target)?), &args[1..])
+        } else {
+            (None, args)
+        };
+        let mut fields = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            let Arg::Positional(value) = arg else {
+                unreachable!()
+            };
+            fields.push(self.expr(
+                value,
+                Some(&p(if index == 0 { P::Object } else { P::Integer })),
+            )?);
+        }
+        let result = match query {
+            Q::Length => p(P::Integer),
+            Q::Key => Term::Optional(Box::new(p(P::Symbol))),
+            Q::EntryType => p(P::Type),
+            Q::Value => Term::Optional(Box::new(target.unwrap())),
+        };
+        let ty = if fields.iter().any(|field| is_never(&field.ty)) {
+            p(P::Never)
+        } else {
+            result
+        };
+        if let Some(expected) = expected {
+            self.require_expression(&ty, expected, expr.span)?;
+        }
+        let packet = n::Expr {
+            source: source(expr.span),
+            ty: Term::Tuple(fields.iter().map(|field| field.ty.clone()).collect()),
+            kind: K::Tuple(fields),
+        };
+        Ok(n::Expr {
+            source: source(expr.span),
+            ty,
+            kind: K::ObjectQuery {
+                subject: Box::new(packet),
+                query,
+            },
+        })
+    }
+
     fn ensure_meta_list_metadata(&mut self, head: DeclarationId, span: Span) -> Result<(), Error> {
         let owner = self
             .package

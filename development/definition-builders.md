@@ -10,6 +10,41 @@ it is not a whole-compiler or historical-version speedup claim.
 
 ## CMTT and builder integration boundary
 
+### Ordered Object observation from source
+
+The public meta API now exposes `object_length`, `object_key`, `ObjectEntryType`
+and `object_value<T>`. Reads preserve ordered entries, duplicate keys and nested
+optional layers. Negative/out-of-range indices fail invocation; an absent key
+means a positional entry, while an absent typed read means the stored domain tag
+does not match T. Tag matching does not introduce type-predicate proofs or perform
+implicit conversion. The new ObjectQuery NIR node has an S-expression dump and
+copy/visit/type-rewrite/phase/materialization coverage. Runtime queries reject.
+
+CMTT data reconstruction now uses the existing typed Object constant path rather
+than attempting unsupported normal-term encoding. Nested entries retain their
+types; active pointer payloads still reject. Mutation APIs, normal-form input
+encoding and a cheap borrowed query path remain unfinished.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna -p nir
+  -p comptime_interpretor --lib --test library_meta_objects --test builder_invocations
+  --test copy_budget --test type_rewrite --test phases`: exit 0, 356 tests
+  (`/tmp/luna-tools-2n037409/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna
+  --test cmtt --test library_meta_objects`: exit 0, 527 CMTT and 8 Object tests
+  (`/tmp/luna-tools-c70s3ycr/result.json`).
+- `python3 -B development/host_examples.py object-queries --release-driver
+  --compare-optimization`: O0/O3 pass
+  (`/tmp/luna-host-examples-ub10tjwn/summary.json`).
+
+Targeted formatting and `git diff --check` pass. Initial source failures exposed
+missing target context for the private typed query and an ambiguous test Object
+literal; the private entry now takes an explicit Type operand. The first native
+attempt exposed the generator Object reconstruction gap, fixed above.
+
+### Schema Type evidence
+
 Known local schema evidence now survives immutable aliases and nested record
 projections. The previous `let schema = Types {word: u8}; let alias = schema;
 let Word = alias.word;` definition check lost the completed Type. It now retains

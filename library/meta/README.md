@@ -19,8 +19,35 @@ fn example() {}
 构造对象不会自动合并重复键。它可以作为 comptime 函数的参数和结果，不能通过这个别名进入 runtime 接口。
 
 `--emit attributes` 可以检查上述元数据；任意属性键的执行语义仍需要对应消费者，
-不能由对象构造器自行赋予。当前尚未提供源码层的通用对象查询、修改接口，也未完成
-Object 作为 normal-form 参数的冻结编码。
+不能由对象构造器自行赋予。按条目位置读取的接口如下，索引使用 Integer：
+
+| 接口 | 结果 |
+| --- | --- |
+| `object_length(object)` | 条目总数，包括重复键和普通项 |
+| `object_key(object, index)` | 命名项返回 `?Symbol` 的存在值，普通项返回 null |
+| `ObjectEntryType(object, index)` | 条目原始 Type 身份 |
+| `object_value<T>(object, index)` | 类型与 T 相同时返回存在的值，否则返回 null |
+
+```flurry
+comptime fn enabled() -> bool {
+    let config = { flag: true, 'x', flag: false };
+    let first = meta.object_value<bool>(config, 0);
+    first match { value? => value, null => false }
+}
+```
+
+返回 true。查询不会合并两个 flag，也不会根据条目值进行隐式类型转换。
+typed read 匹配条目保存的声明域身份，不作为一般子类型或类型命题查询。
+所有索引查询都检查边界；负数或越界索引导致 invocation 失败，不与类型不符或
+无键条目混为一谈。读取 `?bool` 条目时，返回类型是 `??bool`，存在但为空的
+payload 保留其独立层。输入按普通调用顺序各求值一次，查询仍受 invocation
+预算限制。当前查询沿用普通值复制路径，不承诺常数时间访问大型对象。
+对象修改接口和 Object 作为 normal-form 参数的冻结编码尚未完成。
+
+CMTT 生成器也可以保存和查询局部 Object，再据此选择 quoted code。其物化
+保留每个条目的类型、顺序与键，不把对象伪装成 normal term；嵌套 Object
+使用同一路径。对象中的活动存储指针不能借此成为可物化的数据快照。
+原生示例见 [host-object-queries.fl](../../development/examples/host-object-queries.fl)。
 
 `StructBuilder` 提供具体结构体的字段构造接口。它是 comptime 草稿，
 `new()` 默认使用名称 `.Generated`，也可以通过 `.name` 指定诊断名称。

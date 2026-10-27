@@ -17,6 +17,7 @@ mod list_index;
 mod list_operations;
 mod memory;
 mod normal_inputs;
+mod object_queries;
 #[cfg(test)]
 mod object_values;
 mod objects;
@@ -3843,6 +3844,7 @@ impl<'a> Interpreter<'a> {
             K::BuildStruct(request) => self.eval_struct_build(expr, request, environment),
             K::BuildEnum(request) => self.eval_enum_build(expr, request, environment),
             K::EnumStructure { .. } => self.eval_enum_structure(expr, environment),
+            K::ObjectQuery { .. } => self.eval_object_query(expr, environment),
             K::StructFieldTypes(_) | K::StructFieldNames(_) => {
                 self.eval_struct_fields(expr, environment)
             }

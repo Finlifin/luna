@@ -1137,6 +1137,7 @@ pub fn machine_arithmetic_functions(
                         K::BuildStruct(value)
                         | K::BuildEnum(value)
                         | K::EnumStructure { subject: value, .. }
+                        | K::ObjectQuery { subject: value, .. }
                         | K::StructFieldTypes(value)
                         | K::StructFieldNames(value) => {
                             if !ct {

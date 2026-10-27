@@ -426,6 +426,23 @@ fn nested_shared_closure_rewrite_uses_a_small_worker_stack() {
 
 #[test]
 fn struct_reflection_charges_subject_copy_before_allocation() {
+    for query in [
+        nir::program::ObjectQueryKind::Length,
+        nir::program::ObjectQueryKind::Key,
+        nir::program::ObjectQueryKind::EntryType,
+        nir::program::ObjectQueryKind::Value,
+    ] {
+        let expression = expr(K::ObjectQuery {
+            subject: Box::new(large()),
+            query,
+        });
+        check(&expression);
+        assert!(
+            expression
+                .to_string()
+                .contains(&format!("(object-query (query {query})"))
+        );
+    }
     check(&expr(K::BuildStruct(Box::new(large()))));
     check(&expr(K::BuildEnum(Box::new(large()))));
     check(&expr(K::EnumStructure {
