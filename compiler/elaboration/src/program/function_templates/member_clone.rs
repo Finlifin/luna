@@ -1,4 +1,4 @@
-//! Rebind a method draft before installing it into a generated implementation.
+//! Rebind a method or associated member draft before installing it into a generated implementation.
 use super::*;
 use hir::common::DefId;
 mod attributes;
@@ -34,13 +34,21 @@ pub(in crate::program) fn clone_member<'h>(
             "generated member needs an unoccupied fresh owner",
         ));
     }
-    let (signature, body) = match &item.kind {
-        ItemKind::Fn(signature, body) => (signature, Some(*body)),
-        ItemKind::FnDeclaration(signature) => (signature, None),
+    let (parameters, clause_params, clause_constraints) = match &item.kind {
+        ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature) => (
+            signature.params,
+            signature.clause_params,
+            signature.clause_constraints,
+        ),
+        ItemKind::Associated(definition) => (
+            definition.parameters,
+            definition.clause_params,
+            definition.clause_constraints,
+        ),
         _ => {
             return Err(error(
                 item.span,
-                "generated method draft requires a function member",
+                "generated member draft requires a function or associated member",
             ));
         }
     };
@@ -59,11 +67,10 @@ pub(in crate::program) fn clone_member<'h>(
     };
     let result = (|| {
         rebind.charge(item.span, 0)?;
-        let mut signature = signature.clone();
-        signature.clause_params = rebind.clauses(signature.clause_params)?;
-        let mut parameters = Vec::new();
+        let clause_params = rebind.clauses(clause_params)?;
+        let mut cloned_parameters = Vec::new();
         let mut staged_parameters = Vec::new();
-        for parameter in signature.params {
+        for parameter in parameters {
             rebind.charge(parameter.span, 0)?;
             if parameter.ty.is_comptime() {
                 let old = source
@@ -90,16 +97,11 @@ pub(in crate::program) fn clone_member<'h>(
             let mut parameter = parameter.clone();
             parameter.hir_id = rebind.id(parameter.hir_id);
             parameter.ty = rebind.ty(&parameter.ty, 0)?;
-            parameters.push(parameter);
+            cloned_parameters.push(parameter);
         }
-        signature.params = arena.alloc_fn_param_slice(parameters);
-        signature.return_ty = signature
-            .return_ty
-            .map(|value| rebind.expr(value, 0))
-            .transpose()?;
-        signature.return_binding = signature.return_binding.map(|id| rebind.id(id));
+        let parameters = arena.alloc_fn_param_slice(cloned_parameters);
         let mut constraints = Vec::new();
-        for constraint in signature.clause_constraints {
+        for constraint in clause_constraints {
             rebind.charge(constraint.span, 0)?;
             let mut constraint = constraint.clone();
             constraint.hir_id = rebind.id(constraint.hir_id);
@@ -111,24 +113,43 @@ pub(in crate::program) fn clone_member<'h>(
             };
             constraints.push(constraint);
         }
-        signature.clause_constraints = arena.alloc_clause_slice(constraints);
-        let body = body
-            .map(|body| rebind.body(body, item.span, 0))
-            .transpose()?;
+        let clause_constraints = arena.alloc_clause_slice(constraints);
         let mut item = item.clone();
         item.owner_id = owner;
-        item.kind = match body {
-            Some(body) => ItemKind::Fn(signature, body),
-            None => ItemKind::FnDeclaration(signature),
+        item.kind = match &item.kind {
+            ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature) => {
+                let mut signature = signature.clone();
+                signature.params = parameters;
+                signature.clause_params = clause_params;
+                signature.clause_constraints = clause_constraints;
+                signature.return_ty = signature
+                    .return_ty
+                    .map(|value| rebind.expr(value, 0))
+                    .transpose()?;
+                signature.return_binding = signature.return_binding.map(|id| rebind.id(id));
+                match &item.kind {
+                    ItemKind::Fn(_, body) => {
+                        ItemKind::Fn(signature, rebind.body(*body, item.span, 0)?)
+                    }
+                    _ => ItemKind::FnDeclaration(signature),
+                }
+            }
+            ItemKind::Associated(definition) => ItemKind::Associated(hir::item::AssociatedDecl {
+                parameters,
+                clause_params,
+                clause_constraints,
+                ty: rebind.expr(definition.ty, 0)?,
+                default: definition
+                    .default
+                    .map(|value| rebind.expr(value, 0))
+                    .transpose()?,
+            }),
+            _ => unreachable!(),
         };
         let attributes = rebind.attributes(member)?;
         let resolution = rebind.resolution()?;
         let mut nodes = hir::OwnerNodes::new();
-        let signature = match &item.kind {
-            ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature) => signature,
-            _ => unreachable!(),
-        };
-        for parameter in signature.params {
+        for parameter in parameters {
             let parameter = arena.alloc_param(hir::body::BodyParam::from_fn_param(parameter));
             nodes.insert(
                 parameter.hir_id.local_id,
@@ -136,7 +157,7 @@ pub(in crate::program) fn clone_member<'h>(
                 hir::Node::Param(parameter),
             );
         }
-        for parameter in signature.clause_params {
+        for parameter in clause_params {
             nodes.insert(
                 parameter.hir_id.local_id,
                 hir::ItemLocalId::new(0),

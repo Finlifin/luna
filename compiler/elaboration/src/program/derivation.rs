@@ -48,17 +48,14 @@ fn members(
             E::Item(owner)
                 if matches!(
                     source.item(owner).map(|item| &item.kind),
-                    Some(ItemKind::Fn(..) | ItemKind::FnDeclaration(_))
+                    Some(ItemKind::Fn(..) | ItemKind::FnDeclaration(_) | ItemKind::Associated(_))
                 ) =>
             {
                 result.push(owner)
             }
             E::Unit => {}
             _ => {
-                return Err(unsupported(
-                    statement.span,
-                    "strategy statements and associated member construction",
-                ));
+                return Err(unsupported(statement.span, "strategy statement execution"));
             }
         }
     }
@@ -178,7 +175,7 @@ pub(super) fn expand<'h>(
                 .map_err(|e| error(span, e.to_string()))?;
             mapping.insert(
                 source.owner_definition(*member).ok_or_else(|| {
-                    error(span, "generated method source has no definition identity")
+                    error(span, "generated member source has no definition identity")
                 })?,
                 identity,
             );
@@ -192,11 +189,12 @@ pub(super) fn expand<'h>(
                     .map_err(|e| error(span, e.to_string()))?;
                 mapping.insert(old, new);
             }
-            let signature = match &item.kind {
-                ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => sig,
+            let parameters = match &item.kind {
+                ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => sig.params,
+                ItemKind::Associated(definition) => definition.parameters,
                 _ => unreachable!(),
             };
-            for parameter in signature.params {
+            for parameter in parameters {
                 if let Some(old) = source.staged_parameter_definitions.get(&parameter.hir_id) {
                     let new = batch
                         .reserve_identity(pkg, fuel)

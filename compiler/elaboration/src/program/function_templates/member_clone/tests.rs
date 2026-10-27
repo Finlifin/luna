@@ -508,3 +508,67 @@ fn staged_method_inputs_keep_independent_published_identities() {
         .unwrap();
     assert_eq!(source.staged_parameter_definitions.len(), 1);
 }
+
+#[test]
+fn associated_members_rebind_generic_defaults_without_creating_function_bodies() {
+    let arena = HirArena::new();
+    let (mut source, member, first, second) = generic_fixture(&arena);
+    let mut item = source.item(member).unwrap().clone();
+    let ItemKind::Fn(signature, _) = &item.kind else {
+        panic!()
+    };
+    let ty = arena.alloc_expr(Expr {
+        hir_id: HirId::new(member, ItemLocalId::new(7)),
+        kind: E::TyType,
+        span: DUMMY_SP,
+    });
+    item.kind = ItemKind::Associated(hir::item::AssociatedDecl {
+        parameters: &[],
+        ty,
+        default: signature.return_ty,
+        clause_params: signature.clause_params,
+        clause_constraints: signature.clause_constraints,
+    });
+    source.insert_owner(
+        member,
+        OwnerInfo {
+            node: OwnerNode::Item(arena.alloc_item(item)),
+            nodes: OwnerNodes::new(),
+        },
+    );
+    let mut destination = source.clone();
+    let mut batch = hir::definitions::DefinitionBatch::new(&mut destination);
+    let owner = batch.reserve().unwrap();
+    let first_new = batch.reserve_identity(0, &mut 1000).unwrap();
+    let second_new = batch.reserve_identity(0, &mut 1000).unwrap();
+    let draft = clone_member(
+        &source,
+        &arena,
+        member,
+        owner,
+        &HashMap::from([(first, first_new), (second, second_new)]),
+        &mut 1000,
+    )
+    .unwrap();
+    assert!(draft.bodies.is_empty());
+    let ItemKind::Associated(definition) = &draft.item.kind else {
+        panic!()
+    };
+    assert_eq!(definition.clause_params[0].definition, Some(first_new));
+    assert!(
+        matches!(definition.default.unwrap().kind, E::ResolvedClauseParam(_, id) if id == first_new)
+    );
+    assert_eq!(definition.ty.hir_id.owner, owner);
+    batch
+        .define(
+            OwnerInfo {
+                node: OwnerNode::Item(arena.alloc_item(draft.item)),
+                nodes: draft.nodes,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    batch.publish(&mut 1000).unwrap();
+    assert_eq!(source.num_defs(), 1);
+}

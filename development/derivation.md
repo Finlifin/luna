@@ -374,3 +374,42 @@ python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
   references can be rewritten. Prefix method attributes whose lexical owner is
   the retired strategy also remain unsupported, even when their expression is
   otherwise constant. No strategy input/statement execution is claimed here.
+
+## Associated declarations in explicit strategies
+
+Declaration-only strategies may now supply associated types and values alongside
+methods. All member identities are reserved before copying, so generated methods
+and associated initializers can refer forward to other generated members. The
+clone preserves an AssociatedDecl descriptor, its parameters, clauses,
+constraints, type and optional initializer; it does not synthesize a function
+body for an associated member. Parameters/clauses share the existing identity,
+attribute and resolver-evidence machinery with methods.
+
+These definitions enter ordinary associated contract, default and phase checking.
+The source tests put the method before its associated declarations and compute an
+associated Bool from `Self == First`, proving that two uses of one strategy keep
+independent receiver contexts. Another execution test returns `Item = Self` into
+differently typed consumers. Comptime contributions and incompatible/missing
+associated contracts are checked through the ordinary paths.
+
+This supersedes the associated-declaration restriction of the initial explicit
+strategy slice. Executing arbitrary strategy statements, constructing members
+from computed inputs and default strategy selection remain unfinished. Cloning
+preserves associated telescopes; this does not add independent execution support
+for associated forms that the ordinary checker cannot yet handle.
+
+Checks in `/home/fin/luna` (all exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib member_clone
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation --test trait_phases
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+- Member clone: 8 passed, `/tmp/luna-tools-cm7znmbl/result.json`.
+- Initial source/phase run: 12 + 29 passed,
+  `/tmp/luna-tools-zp6o5v9n/result.json`.
+- Final source run including distinct associated Self types: 13 passed,
+  `/tmp/luna-tools-v5gtx7qh/result.json`.
+- Formatting: `/tmp/luna-tools-dco3uinn/result.json`; `git diff --check` passed.

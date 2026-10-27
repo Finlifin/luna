@@ -117,3 +117,54 @@ fn block_local_requests_do_not_leave_retired_item_references() {
     let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
     assert!(error.contains("block-local derive requests"), "{error}");
 }
+
+#[test]
+fn generated_associated_types_and_values_feed_method_signatures_and_bodies() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin; trait Source {assoc Item:Type;assoc initial:Item;fn make()->Item;} derive fn booleans for Source {fn make()->Item {initial} assoc initial:Item=Self == First;assoc Item:Type=bool;} struct First {} struct Second {} derive Source.use(booleans) for First; derive Source.use(booleans) for Second; fn run()->bool {First.as(Source).make() and not Second.as(Source).make()}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(package.implementations.len(), 2);
+}
+
+#[test]
+fn generated_associated_values_follow_comptime_membership() {
+    let source = format!(
+        "mod attrs {{{}}} use attrs.comptime_phase as staged; typealias Type=.Type'builtin; trait Source {{assoc Item:Type=bool; ^staged assoc initial:bool; ^staged comptime fn make()->Item;}} derive fn booleans for Source {{assoc initial:bool=true; comptime fn make()->bool {{initial}}}} struct Subject {{}} comptime derive Source.use(booleans) for Subject; comptime fn run()->bool {{Subject.as(Source).make()}}",
+        include_str!("../../../library/attrs/lib.fl")
+    );
+    let package = support::compile(&source);
+    assert!(package.implementations[0].phases.comptime);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn generated_associated_contract_failures_use_ordinary_checks() {
+    for source in [
+        "typealias Type=.Type'builtin;trait Source {assoc Item:Type;} derive fn invalid for Source {assoc Item:bool=true;} struct Subject {} derive Source.use(invalid) for Subject;",
+        "typealias Type=.Type'builtin;trait Source {assoc Item:Type;assoc initial:Item;} derive fn invalid for Source {assoc Item:Type=bool;} struct Subject {} derive Source.use(invalid) for Subject;",
+    ] {
+        let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("associated") && !error.contains("not implemented"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn generated_associated_self_types_remain_distinct_between_subjects() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin; trait IdentityView {assoc Item:Type;fn echo(value:Item)->Item;} derive fn identity_view for IdentityView {assoc Item:Type=Self;fn echo(value:Item)->Item {value}} struct First {} struct Second {} derive IdentityView.use(identity_view) for First; derive IdentityView.use(identity_view) for Second; fn first(value:First)->bool {true} fn second(value:Second)->bool {true} fn run()->bool {first(First.as(IdentityView).echo(First{})) and second(Second.as(IdentityView).echo(Second{}))}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
