@@ -25,6 +25,7 @@ mod cmtt;
 mod constants;
 mod defaults;
 mod dependent_inputs;
+mod derivation;
 mod dynamic_instances;
 mod enum_groups;
 mod interfaces;
@@ -295,6 +296,22 @@ fn elaborate_with_attributes(
     {
         let arena = hir::HirArena::new();
         let expanded = function_templates::expand(package, &arena)?;
+        return elaborate_with_attributes(
+            &expanded,
+            package_identities,
+            protocols,
+            target,
+            inspect_attributes,
+            invocation_steps,
+        );
+    }
+    if package
+        .pending_semantics
+        .iter()
+        .any(|(_, feature)| feature == "derivation expansion")
+    {
+        let arena = hir::HirArena::new();
+        let expanded = derivation::expand(package, &arena, &mut 100_000)?;
         return elaborate_with_attributes(
             &expanded,
             package_identities,

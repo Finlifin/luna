@@ -485,7 +485,7 @@ impl Display for ImplementationPhase {
 
 impl Display for ImplDef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        form!(f, "impl-definition", "phase" => self.phase, "self-type" => self.self_ty, "trait" => Maybe(self.trait_ref),
+        form!(f, "impl-definition", "phase" => self.phase, "generation-trait" => Maybe(self.generation_trait), "self-type" => self.self_ty, "trait" => Maybe(self.trait_ref),
             "clause-params" => List(self.clause_params), "constraints" => List(self.clause_constraints), "items" => Owners(&self.items))
     }
 }

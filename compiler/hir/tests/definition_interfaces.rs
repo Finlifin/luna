@@ -216,6 +216,7 @@ fn implementation_assembly_preserves_receiver_and_optional_trait_reference() {
                     None
                 };
                 Ok(ImplDef {
+                    generation_trait: None,
                     phase,
                     self_ty,
                     trait_ref,

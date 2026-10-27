@@ -343,6 +343,18 @@ impl Checker<'_, '_> {
                         .trait_ref
                         .map(|expr| self.interface_expr_for(expr, &subject))
                         .transpose()?;
+                    if let Some(expected) = def.generation_trait {
+                        let expected = self.interface_expr_for(expected, &subject)?;
+                        if instance.as_ref().is_none_or(|actual| {
+                            actual.declaration != expected.declaration
+                                || actual.arguments != expected.arguments
+                        }) {
+                            return Err(error(
+                                def.generation_trait.unwrap().span,
+                                "derivation strategy does not match the requested interface instance",
+                            ));
+                        }
+                    }
                     (subject, instance, def.items.clone())
                 }
                 ItemKind::Struct(_) | ItemKind::Enum(_) => {

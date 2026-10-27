@@ -131,6 +131,7 @@ fn generated_phase_publication_after_repair(phase: ImplementationPhase) {
             )?;
             let target = expr(&arena, nodes, root, reference(protocol), fuel)?;
             Ok(ImplDef {
+                generation_trait: None,
                 phase,
                 self_ty: subject,
                 trait_ref: Some(target),
@@ -260,6 +261,7 @@ fn generated_phase_publication_after_repair(phase: ImplementationPhase) {
                 )?;
                 let target = expr(&arena, nodes, root, reference(protocol), fuel)?;
                 Ok(ImplDef {
+                    generation_trait: None,
                     phase: ImplementationPhase::Runtime,
                     self_ty: subject,
                     trait_ref: Some(target),
@@ -484,6 +486,7 @@ fn check_associated_publication(comptime: bool) {
                 )?;
                 let trait_ref = Some(expr(&arena, nodes, root, reference(protocol), fuel)?);
                 Ok(ImplDef {
+                    generation_trait: None,
                     phase: hir::ImplementationPhase::Runtime,
                     self_ty,
                     trait_ref,

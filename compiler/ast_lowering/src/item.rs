@@ -1937,6 +1937,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let body_items = self.lower_impl_body(body_node);
 
         let impl_def = ImplDef {
+            generation_trait: None,
             phase,
             self_ty: self_ty_ref,
             trait_ref: None,
@@ -2002,6 +2003,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let body_items = self.lower_impl_body(body_node);
 
         let impl_def = ImplDef {
+            generation_trait: None,
             phase,
             self_ty: self_ty_ref,
             trait_ref: Some(trait_ref),

@@ -301,3 +301,76 @@ python3 -B development/check.py --timeout 900 -- test --release -p luna --test g
 
 The final HIR rerun also passed (74 tests, exit 0),
 `/tmp/luna-tools-57szjqrg/result.json`. `git diff --check` passed.
+
+## Executable explicit declaration strategies
+
+NIR elaboration now expands explicit `.use(strategy)` requests whose strategies
+contain method declarations/definitions only. Each request reserves a fresh impl,
+method, generic-clause and staged-parameter identity set, clones the methods and
+publishes them into an isolated HIR candidate. The candidate then re-enters the
+ordinary elaboration pipeline: method signatures and bodies, ownership, overlap,
+contracts and implementation phases use the existing checks.
+
+ImplDef retains a `generation_trait` expression (also in its S-expression dump).
+Interface checking forms both the requested and strategy interface instances in
+the generated receiver context and compares their complete identities/arguments.
+This does not unfold normal-form heads. Generated definition identities belong to
+the derive request's package, never the strategy provider's package. A public
+elaboration regression admits an external strategy for a local subject but
+rejects an external trait plus external subject with NoLocalIdentity.
+
+Source strategies, their copied members and consumed requests are omitted from
+the candidate so template methods are not checked as independent ordinary
+functions. The source package stays intact. Omission preserves owner/definition
+allocation frontiers, updates module/container edges and root node indices, and
+removes retired bodies and resolver metadata. Expansion budgets cover source
+scanning, member copying, publication and container reconstruction. Allocation
+and budget failures discard the private candidate.
+
+Current limits are explicit diagnostics: default/computed strategy selection,
+strategy parameters/clauses/contracts, request clauses/contracts, executable
+strategy statements, associated-member construction, nested generation,
+strategy/request attributes, captured attribute environments and independently
+checking unused strategies. Generated methods may have their own generic and
+staged parameters. Completing general strategies still requires executing their
+inputs and body and substituting captured values; this slice does not stand in
+for that work.
+
+The first source test run executed the two-subject method example successfully,
+but the interface-mismatch fixture failed in lowering because it omitted the
+ordinary u32 alias. The fixture now declares the alias explicitly, and rejected
+method/overlap cases assert the specific ordinary impl diagnostic. Before the
+final ownership adjustment, six source tests and 29 phase regressions passed:
+`/tmp/luna-tools-fsfa7rzw/result.json`. The ownership integration and four existing
+generated-trait tests passed after that adjustment:
+`/tmp/luna-tools-_j1r7_s8/result.json`.
+
+Commands (cwd `/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation --test trait_phases
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test derivation --test generated_traits
+```
+
+Final checks in `/home/fin/luna` (all exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/check.py --timeout 900 -- test --release -p hir --tests
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli derivation_
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+- Derive source execution/rejections: 9 passed,
+  `/tmp/luna-tools-v75tn50u/result.json`.
+- HIR: 75 passed, `/tmp/luna-tools-bidbezuy/result.json`.
+- Existing derivation CLI: 3 passed, `/tmp/luna-tools-w9aablxw/result.json`.
+- Formatting: `/tmp/luna-tools-icsgpse_/result.json`; `git diff --check` passed.
+- The final source suite executes runtime and comptime generated methods,
+  independent subject instances and generic methods. It rejects mismatched full
+  trait instances, normal-form head erasure, missing/incompatible methods and
+  overlapping requests through the expected ordinary checks.
+- Block-local requests are explicitly rejected until their enclosing Item
+  references can be rewritten. Prefix method attributes whose lexical owner is
+  the retired strategy also remain unsupported, even when their expression is
+  otherwise constant. No strategy input/statement execution is claimed here.

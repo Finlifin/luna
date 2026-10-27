@@ -211,6 +211,7 @@ fn forward_containers_and_different_definition_kinds_publish_together() {
         }),
         ItemKind::FnDeclaration(signature()),
         ItemKind::Impl(ImplDef {
+            generation_trait: None,
             phase: hir::ImplementationPhase::Runtime,
             self_ty: ty,
             trait_ref: None,
@@ -1069,4 +1070,84 @@ fn staged_parameter_publication_rejects_bad_targets_and_identity_collisions() {
     batch.set_staged_parameters(vec![(new_binding, DefId::new(0, 30))]);
     batch.publish(&mut 1000).unwrap();
     assert_eq!(batch.published().staged_parameter_definitions.len(), 2);
+}
+
+#[test]
+fn omitting_generation_sources_preserves_the_source_and_owner_frontier() {
+    use std::collections::BTreeSet;
+    let arena = HirArena::new();
+    let mut source = Package::new();
+    let root = source.alloc_owner_id();
+    let removed = source.alloc_owner_id();
+    let retained = source.alloc_owner_id();
+    source.root_mod = root;
+    let mut root_info = module(&arena, root, vec![removed, retained]);
+    root_info.nodes.insert(
+        ItemLocalId::new(0),
+        ItemLocalId::new(0),
+        Node::Item(root_info.node.expect_item()),
+    );
+    source.insert_owner(root, root_info);
+    source.insert_owner(removed, module(&arena, removed, vec![]));
+    source.insert_owner(retained, module(&arena, retained, vec![]));
+    let identity = DefId::new(0, 40);
+    source.bind_definition(identity, removed);
+    source.lexical_parents.insert(removed, root);
+    let site = HirId::new(removed, ItemLocalId::new(1));
+    let body = BodyId::new(HirId::make_owner(removed));
+    source.insert_body(
+        body,
+        Body {
+            params: &[],
+            value: arena.alloc_expr(Expr {
+                hir_id: site,
+                kind: ExprKind::Unit,
+                span: DUMMY_SP,
+            }),
+        },
+    );
+    source.member_projections.insert(site, identity);
+    source
+        .member_access
+        .insert(site, vec![(identity, identity)].into());
+    source
+        .deferred_member_projections
+        .insert(site, vec![(identity, identity)].into());
+    let omitted = BTreeSet::from([removed]);
+    assert!(hir::definitions::omit_generation_sources(&source, &arena, &omitted, &mut 0).is_err());
+    assert!(
+        hir::definitions::omit_generation_sources(
+            &source,
+            &arena,
+            &BTreeSet::from([root]),
+            &mut 1000
+        )
+        .is_err()
+    );
+    let mut candidate =
+        hir::definitions::omit_generation_sources(&source, &arena, &omitted, &mut 1000).unwrap();
+    assert!(candidate.item(removed).is_none());
+    assert!(candidate.definition_owner(identity).is_none());
+    assert!(candidate.body(body).is_none());
+    assert!(!candidate.member_projections.contains_key(&site));
+    assert!(!candidate.member_access.contains_key(&site));
+    assert!(!candidate.deferred_member_projections.contains_key(&site));
+    assert!(!candidate.lexical_parents.contains_key(&removed));
+    let ItemKind::Mod(root_module) = &candidate.item(root).unwrap().kind else {
+        panic!()
+    };
+    assert_eq!(root_module.items, vec![retained]);
+    let Node::Item(indexed_root) = candidate.node(HirId::make_owner(root)).unwrap() else {
+        panic!()
+    };
+    assert!(std::ptr::eq(*indexed_root, candidate.item(root).unwrap()));
+    assert_eq!(candidate.num_defs(), source.num_defs());
+    assert!(candidate.alloc_owner_id().def_id.index() >= source.num_defs());
+    assert_eq!(
+        candidate.next_definition_index(),
+        source.next_definition_index()
+    );
+    assert!(source.item(removed).is_some());
+    assert!(source.body(body).is_some());
+    assert_eq!(source.definition_owner(identity), Some(removed));
 }

@@ -282,6 +282,8 @@ pub enum ImplementationPhase {
 /// Definition body of an `impl` block (inherent or trait implementation).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplDef<'hir> {
+    /// Strategy applicability is checked against the full requested interface.
+    pub generation_trait: Option<&'hir Expr<'hir>>,
     pub phase: ImplementationPhase,
     pub self_ty: &'hir Expr<'hir>,
     pub trait_ref: Option<&'hir Expr<'hir>>,

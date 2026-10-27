@@ -634,3 +634,58 @@ impl<'h> Rebind<'_, 'h> {
         }))
     }
 }
+
+pub(super) fn implementation_draft<'h>(
+    source: &Package<'h>,
+    arena: &'h HirArena,
+    request_owner: OwnerId,
+    owner: OwnerId,
+    request: &hir::item::DeriveRequest<'h>,
+    strategy_trait: &'h Expr<'h>,
+    members: Vec<OwnerId>,
+    fuel: &mut usize,
+) -> Result<ClonedMember<'h>, Error> {
+    let mut rebind = Rebind {
+        source,
+        arena,
+        namespace: owner,
+        bindings: HashMap::new(),
+        budget: *fuel,
+        bodies: Vec::new(),
+        definitions: HashMap::new(),
+        member_owner: Some(request_owner),
+    };
+    let result = (|| {
+        let self_ty = rebind.expr(request.self_ty, 0)?;
+        let trait_ref = rebind.expr(request.trait_ref, 0)?;
+        let generation_trait = rebind.expr(strategy_trait, 0)?;
+        let resolution = rebind.resolution()?;
+        let original = source.item(request_owner).unwrap();
+        let item = hir::Item {
+            owner_id: owner,
+            ident: original.ident,
+            span: original.span,
+            kind: ItemKind::Impl(hir::ImplDef {
+                generation_trait: Some(generation_trait),
+                phase: request.phase,
+                self_ty,
+                trait_ref: Some(trait_ref),
+                clause_params: &[],
+                clause_constraints: &[],
+                items: members,
+            }),
+        };
+        Ok((item, resolution))
+    })();
+    *fuel = rebind.budget;
+    let (item, resolution) = result?;
+    Ok(ClonedMember {
+        item,
+        resolution,
+        bodies: rebind.bodies,
+        bindings: rebind.bindings,
+        nodes: hir::OwnerNodes::new(),
+        attributes: Vec::new(),
+        staged_parameters: Vec::new(),
+    })
+}
