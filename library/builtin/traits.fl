@@ -226,6 +226,51 @@ comptime impl Hash for .Symbol'builtin {
     }
 }
 
+{-
+    Target-sized integers retain their target representation width. Widening
+    to u128 zero-extends those bits; folding handles every supported width,
+    including targets wider than 64 bits, without assuming host pointer size.
+-}
+impl Hash for .usize'builtin {
+    fn hash(self) -> u64 {
+        let widened = self'bitvec.as(u128);
+        let bits = widened'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+
+comptime impl Hash for .usize'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        let widened = self'bitvec.as(u128);
+        let bits = widened'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+
+impl Hash for .isize'builtin {
+    fn hash(self) -> u64 {
+        let widened = self'bitvec.as(u128);
+        let bits = widened'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+
+comptime impl Hash for .isize'builtin {
+    comptime fn comptime_hash(self) -> u64 {
+        let widened = self'bitvec.as(u128);
+        let bits = widened'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+
 -- ── Conversion ─────────────────────────────────────────────────────────────
 
 pub use conversion.{Into, From};

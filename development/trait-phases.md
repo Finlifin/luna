@@ -588,3 +588,41 @@ The first adapter test incorrectly compared its bucket with the raw FNV result;
 inspection of `comptime_keys::Protocol::hash` corrected the test boundary without
 changing production dispatch. Target-sized integer and aggregate Hash remain
 unfinished; this change does not implement general str Hash or Unicode decoding.
+
+## Target-sized integer Hash
+
+`usize` and `isize` now implement both Hash phases. Each reads its target-sized
+representation, zero-extends those bits to u128, then xors the low and high
+64-bit halves. This preserves narrow signed representation bits rather than
+sign-extending them. Targets wider than 64 bits contribute both halves. The
+implementation supports all byte-aligned widths currently admitted by
+`TargetData`, from 8 through 128 bits, without using the compiler host width.
+
+Current integration restriction: body checking eagerly resolves bit views, so
+compiling the full `traits.fl` implementation now requires explicit target data,
+even if the selected entry only uses fixed-width Hash. Previously target-free
+Hash fixtures must provide a target. This is a compiler staging limitation, not
+a new language rule or an implicit host default. Deferring representation-sensitive
+library bodies until target specialization remains unfinished. Syntax-only
+inspection does not require a target.
+
+Validation in `/home/fin/luna` (final commands exited 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna -p elaboration -p comptime_interpretor --test library_hash --test library_comptime_comparison
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli shipped_library_files_use_current_syntax
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+- Hash/comparison: 11 tests passed, `/tmp/luna-tools-963g79lz/result.json`.
+  Target checks exercise unsigned maxima, signed -1, signed minima and zero
+  for all 16 supported widths in both execution phases (64 input cases).
+  Native target Hash assertions run at LLVM O0 and O3. Existing scalar,
+  Symbol, key-budget recovery and character restrictions still pass.
+- Shipped library syntax: 1 passed, `/tmp/luna-tools-lcf5x2l0/result.json`.
+- Format: `/tmp/luna-tools-0yb2ucf1/result.json`.
+
+Initial tests with absent target data failed during eager bit-view checking;
+fixtures now explicitly choose a 64-bit test target, while the native-target
+case obtains its target from the LLVM toolchain. Aggregate and general str
+Hash remain unfinished.

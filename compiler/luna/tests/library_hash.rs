@@ -15,6 +15,18 @@ fn source(body: &str) -> String {
     )
 }
 
+// Library representation-sensitive bodies require an explicit compilation
+// target. This is a test target, independent of the process pointer width.
+fn compile(text: &str) -> nir::program::Package {
+    support::compile_with_source_bindings_for_target(
+        text,
+        &Default::default(),
+        Default::default(),
+        Some(nir::target::TargetData::new(64).unwrap()),
+    )
+    .unwrap()
+}
+
 #[test]
 fn scalar_hashes_agree_across_execution_phases_and_integer_boundaries() {
     for (ty, literal, expected) in [
@@ -42,7 +54,7 @@ fn scalar_hashes_agree_across_execution_phases_and_integer_boundaries() {
         ),
         ("i128", "-1", 0),
     ] {
-        let package = support::compile(&source(&format!(
+        let package = compile(&source(&format!(
             "fn run()->u64 {{let value:{ty}={literal};value.as(Hash).hash()}}\ncomptime fn staged()->u64 {{let value:{ty}={literal};value.as(Hash).comptime_hash()}}"
         )));
         let expected = Value::UnsignedInteger(expected.into());
@@ -62,7 +74,7 @@ fn scalar_hashes_agree_across_execution_phases_and_integer_boundaries() {
 #[test]
 fn wide_hash_collisions_still_require_equality() {
     use comptime_executor::{Context, KeyProtocol};
-    let package = support::compile(&source(""));
+    let package = compile(&source(""));
     let mut items = intrinsic::LangItems::new();
     let bindings = [
         (intrinsic::LangItem::Eq, "Eq"),
@@ -100,7 +112,7 @@ fn wide_hash_collisions_still_require_equality() {
 
 #[test]
 fn scalar_hashes_lower_to_host_code_without_comptime_dispatch() {
-    let package = support::compile(&source(
+    let package = compile(&source(
         "fn verify() {\nlet wide:u128=18446744073709551616;\nlet signed:i128=-170141183460469231731687303715884105728;\nlet wide_hash=wide.as(Hash).hash();assumes wide_hash == 1;\nlet signed_hash=signed.as(Hash).hash();assumes signed_hash == 9223372036854775808;\nlet bool_hash=true.as(Hash).hash();assumes bool_hash == 1;\n}",
     ));
     let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
@@ -123,9 +135,11 @@ fn character_bit_reads_do_not_authorize_reconstruction_or_writeback() {
         "let value:u32=65;value'bitvec.as(char)",
         "var value:char='A';value'bitvec[0..32]=55296;value",
     ] {
-        let error = support::compile_with_protocols(
+        let error = support::compile_with_source_bindings_for_target(
             &source(&format!("fn invalid()->char {{{body}}}")),
             &Default::default(),
+            Default::default(),
+            Some(nir::target::TargetData::new(64).unwrap()),
         )
         .unwrap_err();
         assert!(
@@ -133,7 +147,7 @@ fn character_bit_reads_do_not_authorize_reconstruction_or_writeback() {
             "{error}"
         );
     }
-    let package = support::compile(&source(
+    let package = compile(&source(
         "fn read(value:char)->u64 {value'bitvec.as(u64)} fn verify() {let value=read('🦀');assumes value == 129408;}",
     ));
     let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
@@ -150,7 +164,7 @@ fn symbol_hashes_follow_utf8_content_in_both_phases_and_native_code() {
         ("foobar", 0x85944171f73967e8u64),
         ("é", 0x0ac21707b7181e01u64),
     ] {
-        let package = support::compile(&source(&format!(
+        let package = compile(&source(&format!(
             "fn hash(value:Symbol)->u64 {{value.as(Hash).hash()}} fn run()->u64 {{hash(.{name})}} comptime fn staged()->u64 {{let value:Symbol=.{name};value.as(Hash).comptime_hash()}} fn verify() {{let value=run();assumes value == {expected};}}"
         )));
         assert_eq!(
@@ -181,7 +195,7 @@ fn symbol_hashes_follow_utf8_content_in_both_phases_and_native_code() {
 #[test]
 fn symbol_cache_keys_compare_content_and_recover_after_budget_exhaustion() {
     use comptime_executor::{Context, KeyProtocol};
-    let package = support::compile(&source(""));
+    let package = compile(&source(""));
     let mut items = intrinsic::LangItems::new();
     let bindings = [
         (intrinsic::LangItem::Eq, "Eq"),
@@ -229,4 +243,71 @@ fn symbol_cache_keys_compare_content_and_recover_after_budget_exhaustion() {
             .hash(&Value::Symbol(String::new().into()), &mut context)
             .unwrap()
     );
+}
+
+#[test]
+fn target_sized_hashes_use_the_selected_target_width() {
+    for width in (8u32..=128).step_by(8) {
+        let mask = u128::MAX >> (128 - width);
+        let sign = 1u128 << (width - 1);
+        for (ty, literal, representation) in [
+            ("usize", mask.to_string(), mask),
+            ("isize", "-1".to_owned(), mask),
+            ("isize", format!("-{sign}"), sign),
+            ("isize", "0".to_owned(), 0),
+        ] {
+            let text = source(&format!(
+                "fn run()->u64 {{let value:{ty}={literal};value.as(Hash).hash()}} comptime fn staged()->u64 {{let value:{ty}={literal};value.as(Hash).comptime_hash()}}"
+            ));
+            let package = support::compile_with_source_bindings_for_target(
+                &text,
+                &Default::default(),
+                Default::default(),
+                Some(nir::target::TargetData::new(width).unwrap()),
+            )
+            .unwrap();
+            let expected = Value::UnsignedInteger(
+                ((representation as u64) ^ ((representation >> 64) as u64)).into(),
+            );
+            assert_eq!(
+                luna::invocation::invoke(&package, "staged", 1_000_000).unwrap(),
+                expected,
+                "{ty} {width}"
+            );
+            assert_eq!(
+                luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
+                expected,
+                "{ty} {width}"
+            );
+        }
+    }
+}
+
+#[test]
+fn target_sized_hashes_execute_on_the_native_target() {
+    let target = luna::host::Toolchain::default().target_layout().unwrap();
+    let mask = u128::MAX >> (128 - target.pointer_bits);
+    let expected = (mask as u64) ^ ((mask >> 64) as u64);
+    let text = source(&format!(
+        "fn verify() {{let signed:isize=-1;let unsigned:usize={mask};let first=signed.as(Hash).hash();let second=unsigned.as(Hash).hash();assumes first == {expected} and second == {expected};}}"
+    ));
+    let package = support::compile_with_source_bindings_for_target(
+        &text,
+        &Default::default(),
+        Default::default(),
+        Some(nir::target::TargetData::new(target.pointer_bits).unwrap()),
+    )
+    .unwrap();
+    let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
+    for optimization in [
+        luna::host::OptimizationLevel::O0,
+        luna::host::OptimizationLevel::O3,
+    ] {
+        luna::host::Toolchain {
+            optimization,
+            ..Default::default()
+        }
+        .execute_test(&ir, std::time::Duration::from_secs(5))
+        .unwrap();
+    }
 }
