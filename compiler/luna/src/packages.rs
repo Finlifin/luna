@@ -915,7 +915,7 @@ fn compile_with_expansion(
             elaboration::program::attributes::inspect(package, &identities, &protocols, target)
                 .map_err(|error| format!("multi-package attribute inspection failed: {error}"))?;
         return Ok((
-            crate::frontend::attribute_artifact(attributes, emit)?,
+            crate::frontend::attribute_artifact(package, attributes, emit)?,
             protocols,
         ));
     }

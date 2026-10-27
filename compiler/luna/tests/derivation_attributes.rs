@@ -126,3 +126,106 @@ fn missing_strategy_metadata_does_not_produce_an_executable_artifact() {
     assert!(attributes.is_empty());
     assert!(compile(source, Emit::Nir).is_err());
 }
+
+#[test]
+fn merged_default_marker_consumes_values_not_helper_names() {
+    let source = "const arbitrary_name={derivation_default:true};trait Flag {} ^arbitrary_name derive fn configured for Flag {} struct Subject {} derive Flag for Subject;";
+    let report = compile(source, Emit::MergedAttributes).unwrap().to_string();
+    assert!(
+        report.contains("(default-strategy-marker") && report.contains("(enabled true)"),
+        "{report}"
+    );
+    let disabled = source.replace(
+        "^arbitrary_name",
+        "^{derivation_default:false} ^arbitrary_name",
+    );
+    let report = compile(&disabled, Emit::MergedAttributes)
+        .unwrap()
+        .to_string();
+    assert!(
+        report.contains("(enabled false)") && !report.contains("(enabled true)"),
+        "{report}"
+    );
+    assert!(compile(source, Emit::Nir).is_err());
+}
+
+#[test]
+fn default_marker_rejects_wrong_targets_and_non_boolean_values() {
+    for source in [
+        "^{derivation_default:true} fn ordinary() {}",
+        "trait Flag {} struct Subject {} ^{derivation_default:true} derive Flag for Subject;",
+        "trait Flag {} ^{derivation_default:7} derive fn configured for Flag {}",
+    ] {
+        assert!(matches!(
+            compile(source, Emit::Attributes).unwrap(),
+            Artifact::Attributes(_)
+        ));
+        let error = compile(source, Emit::MergedAttributes)
+            .err()
+            .expect("invalid marker");
+        assert!(error.contains("derivation_default requires"), "{error}");
+    }
+}
+
+#[test]
+fn selected_default_marker_overrides_a_non_boolean_inner_value() {
+    let source = "trait Flag {} ^{derivation_default:true} ^{derivation_default:7} derive fn configured for Flag {}";
+    let report = compile(source, Emit::MergedAttributes).unwrap().to_string();
+    assert!(report.contains("(enabled true)"), "{report}");
+}
+
+#[test]
+fn imported_default_metadata_uses_the_same_multi_package_consumer() {
+    let directory = std::env::temp_dir().join(format!(
+        "luna-default-marker-packages-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("marks.fl"),
+        "pub const marker={derivation_default:true};",
+    )
+    .unwrap();
+    std::fs::write(directory.join("app.fl"),"use marks.marker as selected; trait Flag {} ^selected derive fn configured for Flag {} struct Subject {} derive Flag for Subject;").unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .current_dir(&directory)
+        .args([
+            "--packages-v1",
+            "--package",
+            "1",
+            "101",
+            "app",
+            "app.fl",
+            "--package",
+            "2",
+            "202",
+            "marks",
+            "marks.fl",
+            "--dependency",
+            "1",
+            "marks",
+            "2",
+            "--primary",
+            "1",
+            "--emit",
+            "merged-attributes",
+        ])
+        .output()
+        .unwrap();
+    std::fs::remove_file(directory.join("app.fl")).unwrap();
+    std::fs::remove_file(directory.join("marks.fl")).unwrap();
+    std::fs::remove_dir(&directory).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        report.matches("(default-strategy-marker ").count(),
+        1,
+        "{report}"
+    );
+    assert!(report.contains("(enabled true)"), "{report}");
+}

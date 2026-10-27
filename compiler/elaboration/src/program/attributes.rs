@@ -1,7 +1,9 @@
 //! Evaluate metadata once and apply supported phase properties before interfaces.
 use super::*;
+mod derivation;
 mod merge;
 mod phases;
+pub use derivation::{DefaultStrategyMarker, default_strategy_markers};
 pub use merge::{MergeFailure, MergedTarget, SelectedValue, merge};
 pub use phases::{MemberPhase, member_phases};
 

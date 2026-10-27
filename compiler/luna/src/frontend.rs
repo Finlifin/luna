@@ -29,6 +29,7 @@ impl std::fmt::Display for Artifact {
 }
 /// Produce a diagnostic report only; selection does not authorize a consumer.
 pub(crate) fn attribute_artifact(
+    package: &hir::Package<'_>,
     attributes: Vec<elaboration::program::attributes::EvaluatedAttribute>,
     emit: Emit,
 ) -> Result<Artifact, String> {
@@ -39,6 +40,12 @@ pub(crate) fn attribute_artifact(
     let selected =
         elaboration::program::attributes::merge(&attributes, 1024, &mut Default::default())
             .map_err(|error| error.to_string())?;
+    let markers = elaboration::program::attributes::default_strategy_markers(
+        package,
+        &selected,
+        &mut Default::default(),
+    )
+    .map_err(|error| error.to_string())?;
     let mut report = String::from("(attribute-inspection (evaluated");
     for attribute in &attributes {
         write!(&mut report, " {attribute}").unwrap();
@@ -47,7 +54,15 @@ pub(crate) fn attribute_artifact(
     for target in selected {
         write!(&mut report, " {target}").unwrap();
     }
-    report.push_str("))");
+    report.push(')');
+    if !markers.is_empty() {
+        report.push_str(" (default-strategies");
+        for marker in markers {
+            write!(&mut report, " {marker}").unwrap();
+        }
+        report.push(')');
+    }
+    report.push(')');
     Ok(Artifact::MergedAttributes(report))
 }
 
@@ -442,7 +457,10 @@ fn compile_bound_for_target_with_invocation(
                 target,
             )
             .map_err(|error| format!("attribute inspection failed: {error}"))?;
-            return Ok((attribute_artifact(attributes, options.emit)?, protocols));
+            return Ok((
+                attribute_artifact(package.package(), attributes, options.emit)?,
+                protocols,
+            ));
         }
         let program = elaboration::program::elaborate_packages_for_target(
             package.package(),

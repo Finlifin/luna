@@ -111,3 +111,50 @@ git diff --check
 - The new suite uses the real frontend inspection entries and checks unchanged
   original targets, duplicate use sites, merging order, required helper contract
   rejection, unused divergent strategy bodies and executable-mode rejection.
+
+## Consuming default marker metadata
+
+`attributes::default_strategy_markers` reads the selected `derivation_default`
+property after ordinary attribute merging. The target must still be an original
+deriver definition and the selected value must have both the Bool domain and a
+completed Boolean payload. False is retained explicitly, so an outer disabling
+marker cannot accidentally leave an inner registration active. Diagnostics and
+dumps preserve the selected property's source range.
+
+The single-package and multi-package merged-attribute inspection entries invoke
+this consumer and include its S-expression markers when present. Raw attribute
+inspection continues to expose unvalidated metadata for diagnostics. Unknown
+properties are left to their own consumers; malformed inner values that have
+been overridden are not selected or validated as active default markers.
+
+These markers are registration requests, not registered/applicable strategies.
+They do not replace registry ownership checks, visibility, trait instantiation,
+program requirements or generated implementation validation. The standard
+`attrs.derivation.default` library entry and executable selection remain to be
+connected; tests here use ordinary metadata values to exercise the consumer.
+
+Marker validation commands in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation_attributes --test library_attributes
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Derivation attributes: 10 passed; library attributes: 6 passed; exit 0,
+  `/tmp/luna-tools-rfne90no/result.json`.
+- Formatting: exit 0, `/tmp/luna-tools-rrv_vf_g/result.json`.
+- The added source tests cover aliases, false overrides, overridden malformed
+  metadata, wrong targets/domains, raw-versus-merged inspection and the real
+  multi-package CLI path. Executable default requests remain rejected.
+
+Consumer/merge validation:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test attribute_phases --test attribute_merge
+```
+
+Attribute merge: 5 passed; attribute consumers: 6 passed; exit 0,
+`/tmp/luna-tools-wtbzo0q5/result.json`. The direct consumer test rejects forged
+Bool domains, non-Boolean payloads and member targets, preserves diagnostic
+source, and retries successfully after budget exhaustion.

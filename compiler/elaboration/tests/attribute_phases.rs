@@ -161,3 +161,57 @@ fn unrelated_metadata_is_left_for_its_own_consumer() {
     );
     assert!(merged[0].get("abi").is_some());
 }
+
+#[test]
+fn default_markers_validate_both_payload_and_domain_without_partial_results() {
+    use elaboration::program::attributes::default_strategy_markers;
+    let arena = HirArena::new();
+    let mut package = package(&arena);
+    let mut item = package.item(owner(3)).unwrap().clone();
+    let expression = arena.alloc_expr(Expr {
+        hir_id: HirId::new(owner(3), ItemLocalId::new(1)),
+        span: DUMMY_SP,
+        kind: ExprKind::TyVoid,
+    });
+    item.kind = ItemKind::Deriver(hir::item::DeriverDef {
+        parameters: &[],
+        trait_ref: expression,
+        clause_params: &[],
+        clause_constraints: &[],
+        body: BodyId::new(HirId::make_owner(owner(3))),
+    });
+    package.insert_owner(
+        owner(3),
+        OwnerInfo {
+            node: OwnerNode::Item(arena.alloc_item(item)),
+            nodes: OwnerNodes::new(),
+        },
+    );
+    let mut valid = metadata(3, true, 40);
+    valid.configuration_key = Some("derivation_default".into());
+    for invalid in 0..3 {
+        let mut bad = valid.clone();
+        match invalid {
+            0 => bad.value.ty = Term::Primitive(Primitive::Char),
+            1 => bad.value.kind = K::Literal(Literal::Char('x')),
+            _ => bad.target = AttributeTarget::Member(HirId::new(owner(3), ItemLocalId::new(1))),
+        }
+        let values = [bad];
+        let merged = merge(&values, 4, &mut Budget::default()).unwrap();
+        let error =
+            default_strategy_markers(&package, &merged, &mut Budget::default()).unwrap_err();
+        assert_eq!(error.source.start, 40);
+    }
+    let values = [valid];
+    let merged = merge(&values, 4, &mut Budget::default()).unwrap();
+    let mut exhausted = Budget {
+        steps: 0,
+        ..Budget::default()
+    };
+    assert!(default_strategy_markers(&package, &merged, &mut exhausted).is_err());
+    let markers = default_strategy_markers(&package, &merged, &mut Budget::default()).unwrap();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].owner, owner(3));
+    assert!(markers[0].enabled);
+    assert!(markers[0].to_string().contains("(source 40 41)"));
+}
