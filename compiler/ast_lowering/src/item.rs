@@ -179,8 +179,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             NodeKind::StructDef => self.lower_struct_def(node),
             NodeKind::EnumDef => self.lower_enum_def(node),
             NodeKind::TraitDef => self.lower_trait_def(node),
-            NodeKind::ImplDef => self.lower_impl_def(node),
-            NodeKind::ImplTraitDef => self.lower_impl_trait_def(node),
+            NodeKind::ImplDef => self.lower_impl_def(node, ImplementationPhase::Runtime),
+            NodeKind::ImplTraitDef => self.lower_impl_trait_def(node, ImplementationPhase::Runtime),
             NodeKind::TypealiasDef | NodeKind::NewtypeDef => self.lower_named_type(node),
             NodeKind::ModuleDef => self.lower_module_def(node),
             NodeKind::UseStatement => self.lower_use_statement(node),
@@ -263,6 +263,25 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         _ => break,
                     }
                     cursor = parts[1];
+                }
+                if modifiers.is_comptime
+                    && !modifiers.is_quote
+                    && !modifiers.is_pure
+                    && !modifiers.is_unsafe
+                    && !effect_modifiers.is_async
+                    && !effect_modifiers.is_inline
+                    && !effect_modifiers.is_direct_passing
+                {
+                    match self.ast.get_node_kind(cursor) {
+                        Some(NodeKind::ImplDef) => {
+                            return self.lower_impl_def(cursor, ImplementationPhase::Comptime);
+                        }
+                        Some(NodeKind::ImplTraitDef) => {
+                            return self
+                                .lower_impl_trait_def(cursor, ImplementationPhase::Comptime);
+                        }
+                        _ => {}
+                    }
                 }
                 if self.ast.get_node_kind(cursor) == Some(NodeKind::AlgebraicEffect)
                     && !modifiers.is_comptime
@@ -1861,7 +1880,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         }
     }
 
-    fn lower_impl_def(&mut self, node: NodeIndex) -> OwnerId {
+    fn lower_impl_def(&mut self, node: NodeIndex, phase: ImplementationPhase) -> OwnerId {
         let Some((NodeKind::ImplDef, span, children)) = self.ast.get_node(node) else {
             unreachable!("invalid impl def node or no such node index {:?}", node);
         };
@@ -1891,6 +1910,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let body_items = self.lower_impl_body(body_node);
 
         let impl_def = ImplDef {
+            phase,
             self_ty: self_ty_ref,
             trait_ref: None,
             clause_params,
@@ -1919,7 +1939,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     }
 
     /// Lower `ImplTraitDef`: a, b, N, c  (trait, type, clauses, body)
-    fn lower_impl_trait_def(&mut self, node: NodeIndex) -> OwnerId {
+    fn lower_impl_trait_def(&mut self, node: NodeIndex, phase: ImplementationPhase) -> OwnerId {
         let Some((NodeKind::ImplTraitDef, span, children)) = self.ast.get_node(node) else {
             unreachable!(
                 "invalid impl trait def node or no such node index {:?}",
@@ -1955,6 +1975,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let body_items = self.lower_impl_body(body_node);
 
         let impl_def = ImplDef {
+            phase,
             self_ty: self_ty_ref,
             trait_ref: Some(trait_ref),
             clause_params,

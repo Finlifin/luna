@@ -47,6 +47,7 @@ pub fn assemble_inherent_impl<'hir>(
         ident: name,
         span,
         kind: ItemKind::Impl(ImplDef {
+            phase: ImplementationPhase::Runtime,
             self_ty,
             trait_ref: None,
             clause_params: &[],

@@ -183,7 +183,12 @@ fn assembly_budget_and_unfinished_nodes_reject_without_publishing_a_descriptor()
 #[test]
 fn implementation_assembly_preserves_receiver_and_optional_trait_reference() {
     let arena = HirArena::new();
-    for is_trait in [false, true] {
+    for (is_trait, phase) in [
+        (false, hir::ImplementationPhase::Runtime),
+        (true, hir::ImplementationPhase::Runtime),
+        (false, hir::ImplementationPhase::Comptime),
+        (true, hir::ImplementationPhase::Comptime),
+    ] {
         let info = assemble_impl(
             &arena,
             owner(1),
@@ -211,6 +216,7 @@ fn implementation_assembly_preserves_receiver_and_optional_trait_reference() {
                     None
                 };
                 Ok(ImplDef {
+                    phase,
                     self_ty,
                     trait_ref,
                     clause_params: &[],
@@ -223,6 +229,7 @@ fn implementation_assembly_preserves_receiver_and_optional_trait_reference() {
         let ItemKind::Impl(definition) = &info.node.expect_item().kind else {
             unreachable!()
         };
+        assert_eq!(definition.phase, phase);
         assert_eq!(definition.trait_ref.is_some(), is_trait);
         assert_eq!(definition.items, [owner(2)]);
         assert!(info.nodes.get(definition.self_ty.hir_id.local_id).is_some());

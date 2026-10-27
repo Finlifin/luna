@@ -40,8 +40,8 @@ pub use expr::{Block, CondictionArm, Expr, ExprKind, FieldExpr};
 pub use hir_id::{BodyId, HirId, ItemLocalId, LocalDefId, OwnerId};
 pub use idx::{Idx, IndexVec};
 pub use item::{
-    Configuration, DefKind, EnumDef, FieldDef, FnSig, ImplDef, Item, ItemKind, ModDef, NFSig,
-    StructDef, TraitDef, Variant, VariantKind,
+    Configuration, DefKind, EnumDef, FieldDef, FnSig, ImplDef, ImplementationPhase, Item, ItemKind,
+    ModDef, NFSig, StructDef, TraitDef, Variant, VariantKind,
 };
 pub use node::Node;
 pub use owner::{OwnerInfo, OwnerNode, OwnerNodes, ParentedNode};

@@ -211,6 +211,7 @@ fn forward_containers_and_different_definition_kinds_publish_together() {
         }),
         ItemKind::FnDeclaration(signature()),
         ItemKind::Impl(ImplDef {
+            phase: hir::ImplementationPhase::Runtime,
             self_ty: ty,
             trait_ref: None,
             clause_params: &[],

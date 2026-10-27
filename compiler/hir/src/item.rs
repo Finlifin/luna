@@ -248,9 +248,18 @@ pub struct ModDef {
     pub items: Vec<OwnerId>,
 }
 
+/// The phase of an implementation contribution, independent of member keywords.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImplementationPhase {
+    #[default]
+    Runtime,
+    Comptime,
+}
+
 /// Definition body of an `impl` block (inherent or trait implementation).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplDef<'hir> {
+    pub phase: ImplementationPhase,
     pub self_ty: &'hir Expr<'hir>,
     pub trait_ref: Option<&'hir Expr<'hir>>,
     pub clause_params: &'hir [ClauseParam<'hir>],

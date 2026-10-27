@@ -328,6 +328,12 @@ impl Checker<'_, '_> {
             self.signature_owner = Some(owner);
             let (subject, instance, members) = match &item.kind {
                 ItemKind::Impl(def) => {
+                    if def.phase == hir::ImplementationPhase::Comptime {
+                        return Err(error(
+                            item.span,
+                            "comptime implementation phase selection is not yet implemented",
+                        ));
+                    }
                     let subject = self.type_expr(def.self_ty)?;
                     let instance = def
                         .trait_ref

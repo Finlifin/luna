@@ -125,6 +125,7 @@ fn generated_trait_contract_impl_and_dispatch_publish_together_after_repair() {
             )?;
             let target = expr(&arena, nodes, root, reference(protocol), fuel)?;
             Ok(ImplDef {
+                phase: hir::ImplementationPhase::Runtime,
                 self_ty: subject,
                 trait_ref: Some(target),
                 clause_params: &[],
@@ -402,6 +403,7 @@ fn check_associated_publication(comptime: bool) {
                 )?;
                 let trait_ref = Some(expr(&arena, nodes, root, reference(protocol), fuel)?);
                 Ok(ImplDef {
+                    phase: hir::ImplementationPhase::Runtime,
                     self_ty,
                     trait_ref,
                     clause_params: &[],

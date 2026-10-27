@@ -1346,6 +1346,7 @@ fn item_definitions_include_fields_variants_nested_owners_and_import_styles() {
         ),
         (
             ItemKind::Impl(ImplDef {
+                phase: hir::ImplementationPhase::Runtime,
                 self_ty: &ty,
                 trait_ref: Some(&value),
                 clause_params: &clauses,
