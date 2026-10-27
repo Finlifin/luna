@@ -73,6 +73,7 @@ pub(crate) fn compile_with_source_bindings_for_target(
             ord_protocol: selectors.ordering.map(str::to_owned),
             eq_protocol: selectors.equality.map(str::to_owned),
             list_pattern_protocol: selectors.list_pattern.map(str::to_owned),
+            iterator_protocol: selectors.iterator.map(str::to_owned),
             literal_into_protocol: selectors.literal_into.map(str::to_owned),
             arithmetic_protocols: selectors.arithmetic.map(|value| value.map(str::to_owned)),
         },

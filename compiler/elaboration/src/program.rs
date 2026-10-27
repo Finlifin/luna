@@ -29,6 +29,7 @@ mod derivation;
 mod dynamic_instances;
 mod enum_groups;
 mod interfaces;
+mod iteration;
 mod lexical_inputs;
 mod list_operations;
 mod list_patterns;
@@ -223,6 +224,7 @@ pub struct Protocols {
     pub copy: Option<DeclarationId>,
     pub drop: Option<DeclarationId>,
     pub index: Option<DeclarationId>,
+    pub iterator: Option<DeclarationId>,
     pub ordering: Option<DeclarationId>,
     pub equality: Option<DeclarationId>,
     pub list_pattern: Option<DeclarationId>,
@@ -898,6 +900,9 @@ fn elaborate_candidate<'a, 'h>(
     if let Some(id) = checker.protocols.literal_into {
         crate::literal_conversion::protocol(&checker.checked_traits, id)
             .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.iterator {
+        checker.validate_iterator_protocol(id)?;
     }
     checker.finish_signature_refinements()?;
     checker.associated_signature_values.clear();

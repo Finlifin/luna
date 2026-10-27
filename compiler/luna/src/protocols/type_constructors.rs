@@ -10,6 +10,7 @@ pub struct Selectors<'a> {
     pub copy: Option<&'a str>,
     pub drop: Option<&'a str>,
     pub index: Option<&'a str>,
+    pub iterator: Option<&'a str>,
     pub ordering: Option<&'a str>,
     pub equality: Option<&'a str>,
     pub list_pattern: Option<&'a str>,
@@ -39,6 +40,7 @@ impl Selectors<'_> {
                 self.copy,
                 self.drop,
                 self.index,
+                self.iterator,
                 self.ordering,
                 self.equality,
                 self.list_pattern,
@@ -175,6 +177,7 @@ pub(crate) fn resolve_source(
         })
         .chain([
             ("Index".into(), selectors.index, &mut result.index),
+            ("Iterator".into(), selectors.iterator, &mut result.iterator),
             ("Ord".into(), selectors.ordering, &mut result.ordering),
             ("Eq".into(), selectors.equality, &mut result.equality),
             (
@@ -413,6 +416,7 @@ pub(crate) struct SysrootBindings {
     ordering: Option<String>,
     equality: Option<String>,
     list_pattern: Option<String>,
+    iterator: Option<String>,
     literal_into: Option<String>,
     arithmetic: [Option<String>; 7],
     splice: Option<String>,
@@ -494,6 +498,7 @@ impl SysrootBindings {
                 "ord-protocol" => &mut result.ordering,
                 "eq-protocol" => &mut result.equality,
                 "list-pattern-protocol" => &mut result.list_pattern,
+                "iterator-protocol" => &mut result.iterator,
                 "literal-into-protocol" => &mut result.literal_into,
                 "copy-protocol" => &mut result.copy,
                 "drop-protocol" => &mut result.drop,
@@ -612,6 +617,13 @@ impl SysrootBindings {
                     .then_some(self.list_pattern.as_deref())
                     .flatten()
             }),
+            iterator: explicit.iterator.or_else(|| {
+                identities
+                    .iterator
+                    .is_none()
+                    .then_some(self.iterator.as_deref())
+                    .flatten()
+            }),
             literal_into: explicit.literal_into.or_else(|| {
                 identities
                     .literal_into
@@ -686,6 +698,39 @@ mod literal_binding_tests {
             None
         );
         assert!(SysrootBindings::parse("version = 1\nlist-pattern-protocol = input.One\nlist-pattern-protocol = input.Two\n").is_err());
+    }
+    #[test]
+    fn iterator_binding_configuration_preserves_driver_authority() {
+        let config =
+            SysrootBindings::parse("version = 1\niterator-protocol = builtin.Stream\n").unwrap();
+        assert_eq!(
+            config
+                .apply(Selectors::default(), &Protocols::default())
+                .iterator,
+            Some("builtin.Stream")
+        );
+        let explicit = Selectors {
+            iterator: Some("input.View"),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.apply(explicit, &Protocols::default()).iterator,
+            explicit.iterator
+        );
+        let bound = Protocols {
+            iterator: Some(nir::DeclarationId {
+                package: 1,
+                local: 7,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(config.apply(Selectors::default(), &bound).iterator, None);
+        assert!(
+            SysrootBindings::parse(
+                "version = 1\niterator-protocol = input.One\niterator-protocol = input.Two\n"
+            )
+            .is_err()
+        );
     }
     #[test]
     fn literal_binding_configuration_preserves_explicit_authority() {
@@ -861,6 +906,7 @@ mod stage_tests {
             ord_protocol: None,
             eq_protocol: None,
             list_pattern_protocol: None,
+            iterator_protocol: None,
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             splice_protocol: None,

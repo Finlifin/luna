@@ -102,6 +102,7 @@ fn nested_expression_child() {
         ord_protocol: None,
         eq_protocol: None,
         list_pattern_protocol: None,
+        iterator_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,

@@ -595,6 +595,7 @@ impl Request {
                 meta_list: options.meta_list_type.as_deref(),
                 tuple: options.tuple_type.as_deref(),
                 list_pattern: options.list_pattern_protocol.as_deref(),
+                iterator: options.iterator_protocol.as_deref(),
                 index: options.index_protocol.as_deref(),
                 ordering: options.ord_protocol.as_deref(),
                 equality: options.eq_protocol.as_deref(),

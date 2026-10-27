@@ -512,7 +512,7 @@ impl Checker<'_, '_> {
 }
 
 impl Checker<'_, '_> {
-    fn effect_metadata(
+    pub(super) fn effect_metadata(
         &self,
         operation: &nir::effects::Operation,
         span: Span,
@@ -593,7 +593,7 @@ impl Checker<'_, '_> {
         })
     }
 
-    fn formed_effect_signature(
+    pub(super) fn formed_effect_signature(
         &self,
         metadata: &nir::effects::Declaration,
         operation: &nir::effects::Operation,

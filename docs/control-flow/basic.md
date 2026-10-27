@@ -54,12 +54,20 @@ continue_stmt -> continue id? (while expr)?
 
 ### `for` / `while`
 
-- `for pattern in expr block`：迭代 `expr`；每次将当前元素匹配到 `pattern`。容器可实现 `IntoIterator` 以提供默认迭代方式；迭代器实现 `Iter`。
+- `for pattern in expr block`：迭代 `expr`；每次将当前元素匹配到 `pattern`。容器可实现 `IntoIterator` 以提供默认迭代方式；迭代器实现 `Iterator`。
 - `while expr block`：条件为真则重复执行块。
 - 二者为**语句**。
 - **标签**：`for:name` / `while:name`。`break name` / `continue name` 作用到该标签；无标签则作用到最内层循环。label 与普通名称共用[命名空间](../code-organization/scope-and-paths.md)，同名局部绑定可以遮蔽它；选中非标签绑定时静态拒绝，不跳过该绑定重新寻找标签。
 
 当前实现中，普通 `for` 在 HIR 中保留 iterable、模式、守卫、循环身份及主体，尚未展开为可执行 NIR。有界 `Integer` 范围的 `inline for` 已接通展开及 comptime guard，参见[inline 控制流](../comptime/inlining-comptime-code.md)。主语在元素绑定作用域之外解析；元素绑定只进入守卫和循环体，标签按上述名称规则解析。AST lowering 不再生成 `__into_iter__`／`__next__` 等约定方法调用；迭代协议 evidence 与 inline effect 的展开仍待接通，NIR 入口对此明确报错。
+
+驱动可通过 `--iterator-protocol package.module.Trait`（或 sysroot 的
+`iterator-protocol` 配置项）绑定并检查源码中的迭代协议声明。该声明具有
+`Item: Type` 和按值接收 `self` 的 runtime `iterate` 方法；后者返回交付元素的
+computation，其唯一操作是接收一个 `Item`、返回 `void` 的 direct inline effect，
+computation 本身也返回 `void`。操作身份从方法签名取得，不要求命名为
+`emit_item`。绑定检查是普通 `for` 降码的前置工作，尚不代表循环已经可执行，
+也不引入 `next` 或可选值拉取 ABI。
 
 当循环没有可达的正常出口时，其内部类型为 `never`；这不为 `while` 增加结果值或带值 `break`。例如，下面两个函数都不需要在循环之后补一个 `bool` 值：前者不终止，后者通过 `return` 返回。
 
