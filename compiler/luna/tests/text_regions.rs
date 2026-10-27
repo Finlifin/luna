@@ -383,7 +383,7 @@ fn match_payloads_keep_origins_and_select_arms_in_order() {
 #[test]
 fn default_arguments_use_prepared_parameter_origins() {
     use nir::program::ExprKind as K;
-    // Text defaults currently fail the source P3 gate. Start with typed explicit
+    // Input-derived text defaults still fail the P3 gate. Start with typed explicit
     // calls and construct the normalized default frame to test this analysis
     // independently, without claiming source-level default certification.
     let mut package = support::compile(
@@ -502,4 +502,44 @@ fn short_circuit_reads_and_writes_follow_only_evaluated_paths() {
             .unwrap()[&vec![]],
         BTreeSet::from([parameter(1, &[])])
     );
+}
+
+#[test]
+fn static_text_defaults_have_construction_evidence_without_copying_inputs() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        struct Message {text:str}
+        fn literal(.text:str=\"static\")->str {text}
+        fn message(.value:Message=Message {text:\"nested\"})->str {value.text}
+        fn conditional(flag:bool,.text:str=if flag {\"yes\"} else {\"no\"})->str {text}
+        fn plain()->str {literal()}
+        fn nested()->str {message()}
+        fn branched(flag:bool)->str {conditional(flag)}
+        fn overridden(value:str)->str {literal(.text=value)}",
+    );
+    for name in ["plain", "nested", "branched"] {
+        let summary = infer(&package, name, 100_000).unwrap();
+        assert_eq!(
+            summary.returned.unwrap()[&vec![]],
+            BTreeSet::from([Origin::Static])
+        );
+        assert!(summary.reads.is_empty());
+    }
+    assert_eq!(
+        infer(&package, "overridden", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[])])
+    );
+    for source in [
+        "typealias str=.str'builtin;fn copy(value:str,.other:str=value)->str {other}",
+        "typealias str=.str'builtin;fn temporary(.other:str=do {let text=\"x\";text})->str {other}",
+    ] {
+        let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("P3 stability/termination evidence"),
+            "{error}"
+        );
+    }
 }

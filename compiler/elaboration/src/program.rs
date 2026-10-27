@@ -12035,6 +12035,9 @@ fn stable_observation(expr: &n::Expr) -> bool {
 // general totality prover supplies evidence, use this finite infallible subset.
 fn total_default_field(expr: &n::Expr) -> bool {
     match &expr.kind {
+        // Forming a static text view is infallible and does not acquire an
+        // external owner. This is construction evidence, not Str Copy evidence.
+        K::Literal(n::Literal::String(_)) => expr.ty == p(P::Str),
         K::OptionalAbsent => true,
         K::OptionalPresent(value) => total_default_field(value),
         K::Function(_) | K::FunctionInstance { .. } => true,
@@ -12086,6 +12089,7 @@ fn total_default_field(expr: &n::Expr) -> bool {
 }
 fn stable_default(expr: &n::Expr) -> bool {
     match &expr.kind {
+        K::Literal(n::Literal::String(_)) => return expr.ty == p(P::Str),
         K::OptionalAbsent => return true,
         K::OptionalPresent(value) => {
             return if copy_scalar(&value.ty) {

@@ -264,8 +264,8 @@ right do not erase the skipped path. Reads before a transfer remain obligations.
 These rules propagate origins and do not waive argument cleanup or lifetime
 requirements.
 
-Text-valued default expressions still fail the source P3 stability/termination
-gate. The dependent text-default test therefore starts from typed explicit calls
+Input-derived text default expressions still fail the source P3
+stability/termination gate. The dependent text-default test therefore starts from typed explicit calls
 and constructs a normalized default argument frame in NIR; it verifies this
 analysis, not source-level certification. A separate source case exercises an
 ordinary boolean default while transporting a text argument. Neither the P3 gate
@@ -288,3 +288,35 @@ Formatting passed (`/tmp/luna-tools-0ze7izq4/result.json`, exit 0), as did the d
 check. The earlier failed run (`/tmp/luna-tools-5hye7i8m/result.json`) exposed the
 P3 source restriction and a missing static-literal read in the test expectation;
 the implementation gates were retained and those test assumptions corrected.
+
+
+## Static text default construction
+
+P3 default validation now distinguishes a direct string-literal constructor from
+copying an existing text input. A correctly typed string literal creates a view
+of immutable static storage, completes without failure and does not acquire an
+external owner. The same construction evidence applies when a literal is a field
+of a directly delivered record. Conditional literal results remain finite when
+their condition has ordinary P3 evidence.
+
+This does not add Str to the scalar-Copy whitelist. Input-derived defaults and
+local text temporaries still need resource evidence; runtime backing-region
+permission checks are unchanged. The origin analyzer can now consume source
+calls using literal text defaults and distinguish explicit parameter-backed
+overrides from static default origins.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test default_calls --test runtime_purity
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All fifteen text tests passed (`/tmp/luna-tools-ghwc52em/result.json`, exit 0),
+including source static-default construction and the continued rejection of
+input copies and local text temporaries. The existing default-call and runtime
+purity suites passed 43 and 64 tests respectively
+(`/tmp/luna-tools-pa79jaft/result.json`, exit 0). Formatting passed
+(`/tmp/luna-tools-ayhlzsuw/result.json`, exit 0), as did the diff check.
