@@ -4016,3 +4016,46 @@ manifest，覆盖默认 prelude、平台整数算术、Clone、Tuple 解构和�
 `integer runtime proxy requires target pointer-width information`。完整库
 源码的 LLVM 生成检查 `/tmp/luna-tools-2g7mhyc3/result.json` 退出 0，帮助
 将该问题定位到检查入口缺少目标信息，而非源码无法通过 host 前端。
+
+## 完整 sysroot 迭代与内存查询复用
+
+内存依赖固定点现在在一轮、同一不可变包内复用成功的 trait 方法选择和已完成
+关联类型视图。方法缓存沿用完整签名、接口、subject 与类型实参作为键，并按
+调用位置恢复 source；失败选择和调用时存储不进入缓存。类型视图缓存只保存
+由包级分派完成的结果，不将局部推断假设作为全局证据。查询命中仍计费。
+
+新增 `development/examples/sysroot-iteration.fl`，通过普通 prelude 使用
+Iterator、Drop 和 usize，验证拒绝前缀不截断 chain 尾部、提前匹配清理未产出
+元素、空迭代清理回调捕获。检查入口为：
+
+```sh
+python3 -B development/library_check.py --release --stage sysroot-iteration
+```
+
+该阶段显式使用 200,000 预算，要求三个实际 native 测试均通过，不能以零测试
+或部分成功充数。默认预算没有提高：优化前默认 100,000 下三个用例均失败
+(`/tmp/luna-tools-vg_zwpu1/result.json`，退出 1)，200,000 下通过
+(`/tmp/luna-tools-e81j8jyz/result.json`，退出 0)。优化后默认预算下两个资源
+清理用例通过；较长组合链已通过分派/内存分析，但在后续 cleanup planning
+耗尽预算 (`/tmp/luna-tools-_kr194tg/result.json`，退出 1)。仍需优化该路径。
+
+在 `/home/fin/luna` 的验证：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test library_iteration`：
+  41 项通过 (`/tmp/luna-tools-begeury5/result.json`)。
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test method_memory_contracts -- --nocapture`：
+  10 项通过 (`/tmp/luna-tools-paedsmx1/result.json`)，包含低预算失败后恢复。
+  方法查询工作量：0 个无关声明、1/16 次调用为 525/4305；128 个无关声明为
+  1165/4945。追加 15 次调用均消耗 3780，避免无关声明反复放大调用成本。
+  这是预算工作量，不是 wall-clock 加速测量。
+- 上述 `sysroot-iteration` 阶段在 O0 通过三个用例
+  (`/tmp/luna-library-hcdl4488/summary.json`)。
+- `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-iteration.fl --sysroot library --test-native --inline-functions --fuel 200000 --opt-level 3`：
+  O3 同样通过三个用例 (`/tmp/luna-tools-qjvjo0md/result.json`)。
+- `python3 -B -m unittest discover -s development -p test_library_check.py`：
+  13 项检查器测试通过。
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test effect_memory_transfers --test captured_memory`：
+  捕获内存 94 项、效应内存传递 99 项通过
+  (`/tmp/luna-tools-acl2ss8y/result.json`，退出 0)。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  退出 0 (`/tmp/luna-tools-019x59q3/result.json`)；`git diff --check` 通过。

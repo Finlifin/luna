@@ -418,3 +418,55 @@ fn expanding_recursive_memory_failure_identifies_instance_and_does_not_publish_a
     assert!(baseline.accesses[0].read_value);
     assert!(!baseline.accesses[0].write);
 }
+
+#[test]
+fn repeated_method_queries_share_dispatch_evidence_within_the_memory_round() {
+    fn work(unrelated: usize, calls: usize) -> usize {
+        let mut source = String::from(
+            "trait Read {fn read(pointer:*bool)->bool;}\n\
+             struct Host {}\n\
+             impl Read for Host {fn read(pointer:*bool)->bool {pointer.*}}\n",
+        );
+        for index in 0..unrelated {
+            source.push_str(&format!(
+                "fn unrelated_{index}(value:T)->T where T {{value}}\n"
+            ));
+        }
+        source.push_str("fn run(pointer:*bool)->bool {\n");
+        for _ in 0..calls {
+            source.push_str("let observed=Host.as(Read).read(pointer);\n");
+        }
+        source.push_str("true}");
+        let package = support::compile(&source);
+        let declaration = package
+            .functions
+            .iter()
+            .find(|f| f.name == "run")
+            .unwrap()
+            .declaration;
+        let mut fuel = 2_000_000;
+        let summary = memory::infer_in_package(&package, declaration, &[], &mut fuel).unwrap();
+        assert!(
+            summary
+                .accesses
+                .iter()
+                .any(|access| access.target.parameter == 0 && access.read_value && !access.write)
+        );
+        assert!(memory::infer_in_package(&package, declaration, &[], &mut 1).is_err());
+        assert_eq!(
+            memory::infer_in_package(&package, declaration, &[], &mut 2_000_000).unwrap(),
+            summary
+        );
+        2_000_000 - fuel
+    }
+    let small_once = work(0, 1);
+    let small_many = work(0, 16);
+    let large_once = work(128, 1);
+    let large_many = work(128, 16);
+    println!(
+        "method query work: small_once={small_once}, small_many={small_many}, large_once={large_once}, large_many={large_many}"
+    );
+    // Unrelated declaration metadata may cost initial work, but must not be
+    // rescanned for each repeated call in one immutable package query.
+    assert!(large_many - large_once <= small_many - small_once + 2048);
+}

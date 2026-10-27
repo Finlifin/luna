@@ -1,0 +1,52 @@
+{-
+  Run against the complete sysroot with joint inline expansion and native
+  resource checking. All types and protocols use ordinary public imports.
+-}
+struct Watch {seen: *bool, value: bool}
+impl Drop for Watch {
+    fn drop(*self) {
+        assumes not self.seen.*.*;
+        self.seen.*.* = true;
+    }
+}
+
+test rejected_prefix_keeps_chain_tail {
+    var calls: usize = 0;
+    var outputs: usize = 0;
+    let counter = calls.ref;
+    let output = outputs.ref;
+    let first: ?bool = true;
+    let stop: ?bool = false;
+    let skipped: ?bool = true;
+    let tail: ?bool = false;
+    first.as(Iterator).chain(stop).as(Iterator).chain(skipped).as(Iterator)
+        .take_while(|value| {
+            assumes counter.* == if value.* {0} else {1};
+            counter.* = counter.* + 1;
+            value.*
+        }).as(Iterator).chain(tail).as(Iterator).foreach(|value| {
+            assumes output.* == if value {0} else {1};
+            output.* = output.* + 1;
+        });
+    assumes calls == 2 and outputs == 2;
+}
+
+test early_match_retires_unproduced_items {
+    var first_retired = false;
+    var second_retired = false;
+    let first: ?Watch = Watch {seen: first_retired.ref, value: true};
+    let second: ?Watch = Watch {seen: second_retired.ref, value: false};
+    let found = first.as(Iterator).chain(second).as(Iterator).any(|value| value.value.*);
+    assumes found and first_retired and second_retired;
+}
+
+test empty_source_retires_callback_capture {
+    var retired = false;
+    let captured = Watch {seen: retired.ref, value: true};
+    let source: ?bool = null;
+    source.as(Iterator).map(|value| {
+        assumes false;
+        value and captured.value
+    }).as(Iterator).foreach(|value| {assumes false;});
+    assumes retired;
+}

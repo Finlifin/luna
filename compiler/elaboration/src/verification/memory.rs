@@ -2664,6 +2664,11 @@ impl<'a> Infer<'a, '_> {
             bound_type(value, self.fuel)?;
             return Ok(value.clone());
         }
+        bound_type(ty, self.fuel)?;
+        if let Some(value) = self.round.completed_types.get(ty) {
+            bound_type(value, self.fuel)?;
+            return Ok(value.clone());
+        }
         let package = self
             .package
             .ok_or("completed type view requires a package")?;
@@ -2675,6 +2680,10 @@ impl<'a> Infer<'a, '_> {
         let value = crate::materialization::normalize_concrete_type(package, ty, &mut remaining);
         *self.fuel += remaining;
         let value = value?;
+        // This evidence comes only from immutable package dispatch, without
+        // invocation-local assumptions or storage. Reuse successful results
+        // across the fixed point; never publish a failed normalization.
+        self.round.completed_types.insert(ty.clone(), value.clone());
         self.type_views.insert(ty.clone(), value.clone());
         Ok(value)
     }
@@ -3683,7 +3692,7 @@ impl<'a> Infer<'a, '_> {
                             .collect::<Result<_, _>>()?,
                     },
                 };
-                let selected = method_callee(package, &concrete, self.fuel)?;
+                let selected = self.round.methods.select(package, &concrete, self.fuel)?;
                 let K::FunctionInstance {
                     declaration,
                     arguments,
@@ -7565,6 +7574,8 @@ struct Round<'cleanup> {
     // This is declaration metadata, independent of code inputs or call state.
     cleanup_protocol_present: Option<bool>,
     parameter_sorts: Option<BTreeMap<DeclarationId, nir::Sort>>,
+    methods: MethodCallees,
+    completed_types: HashMap<Term, Term>,
     effects: Vec<EffectInput>,
     complete_calls: bool,
     code: Vec<PreparedCode>,
