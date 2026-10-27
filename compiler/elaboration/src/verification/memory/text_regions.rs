@@ -1,6 +1,7 @@
 //! Text backing-region dependencies. This analysis does not grant memory access
 //! or prove that a caller-supplied region is live; it preserves that obligation.
 use super::*;
+use std::collections::{HashSet, VecDeque};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TextRegionOrigin {
@@ -156,8 +157,8 @@ fn prefix(regions: Regions, prefix: &[usize], fuel: &mut usize) -> Result<Region
     Ok(output)
 }
 
-/// Derive conditional return dependencies for a concrete, non-recursive named
-/// body. Unsupported transfers fail closed, never become empty/static evidence.
+/// Derive conditional return dependencies by a bounded fixed point over concrete
+/// named instances. Unsupported transfers fail closed, never become evidence.
 pub fn infer_text_regions(
     package: &Package,
     declaration: DeclarationId,
@@ -167,19 +168,25 @@ pub fn infer_text_regions(
     Query {
         package,
         fuel,
-        active: vec![],
+        current: None,
+        pending: VecDeque::new(),
+        scheduled: HashSet::new(),
+        dependents: HashMap::new(),
         reads: vec![],
         loops: vec![],
         exits: vec![],
         cache: HashMap::new(),
         metadata: Round::default(),
     }
-    .function(declaration, arguments)
+    .solve(declaration, arguments)
 }
 struct Query<'a, 'f> {
     package: &'a Package,
     fuel: &'f mut usize,
-    active: Vec<iir::InstanceKey>,
+    current: Option<iir::InstanceKey>,
+    pending: VecDeque<iir::InstanceKey>,
+    scheduled: HashSet<iir::InstanceKey>,
+    dependents: HashMap<iir::InstanceKey, Vec<iir::InstanceKey>>,
     reads: Vec<BTreeSet<TextRegionOrigin>>,
     loops: Vec<LoopRegions>,
     exits: Vec<Option<ExitRegions>>,
@@ -449,6 +456,60 @@ impl Query<'_, '_> {
         }
     }
 
+    fn schedule(&mut self, key: iir::InstanceKey) {
+        if self.scheduled.insert(key.clone()) {
+            self.pending.push_back(key);
+        }
+    }
+
+    fn solve(
+        &mut self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+    ) -> Result<TextRegionSummary, String> {
+        self.function(declaration, arguments)?;
+        let mut deferred = Vec::<(iir::InstanceKey, String)>::new();
+        while let Some(key) = self.pending.pop_front() {
+            charge(self.fuel, 1)?;
+            self.scheduled.remove(&key);
+            self.current = Some(key.clone());
+            let result = self.analyze(&key);
+            self.current = None;
+            deferred.retain(|(instance, _)| instance != &key);
+            let mut summary = match result {
+                Ok(summary) => summary,
+                Err(error) => {
+                    // Observations require normal completion. A newly discovered
+                    // callee can still be bottom until its own work item runs.
+                    // Retry on dependency growth, but never export a failed body.
+                    deferred.push((key, error));
+                    continue;
+                }
+            };
+            let previous = &self.cache[&key];
+            charge(self.fuel, previous.reads.len())?;
+            summary.reads.extend(previous.reads.iter().cloned());
+            if let Some(regions) = &previous.returned {
+                charge_regions(regions, self.fuel)?;
+            }
+            merge(&mut summary.returned, previous.returned.clone(), self.fuel)?;
+            if &summary != previous {
+                self.cache.insert(key.clone(), summary);
+                if let Some(callers) = self.dependents.get(&key) {
+                    charge(self.fuel, callers.len())?;
+                    let callers: Vec<_> = callers.iter().cloned().collect();
+                    for caller in callers {
+                        self.schedule(caller);
+                    }
+                }
+            }
+        }
+        if let Some((_, error)) = deferred.into_iter().next() {
+            return Err(error);
+        }
+        self.function(declaration, arguments)
+    }
+
     fn function(
         &mut self,
         declaration: DeclarationId,
@@ -462,16 +523,38 @@ impl Query<'_, '_> {
             declaration,
             arguments: arguments.to_vec(),
         };
-        if let Some(summary) = self.cache.get(&key) {
-            if let Some(returned) = &summary.returned {
-                charge_regions(returned, self.fuel)?;
+        if let Some(caller) = &self.current {
+            let callers = self.dependents.entry(key.clone()).or_default();
+            charge(self.fuel, callers.len().saturating_add(1))?;
+            if !callers.contains(caller) {
+                callers.push(caller.clone());
             }
-            charge(self.fuel, summary.reads.len())?;
-            return Ok(summary.clone());
         }
-        if self.active.len() >= 64 || self.active.contains(&key) {
-            return Err("recursive text region inference requires a fixed-point contract".into());
+        if !self.cache.contains_key(&key) {
+            // Bottom means no observed normal return yet, not static storage.
+            // Every discovered instance is analyzed before a result escapes.
+            self.cache.insert(
+                key.clone(),
+                TextRegionSummary {
+                    declaration,
+                    arguments: arguments.to_vec(),
+                    reads: BTreeSet::new(),
+                    returned: None,
+                },
+            );
+            self.schedule(key.clone());
         }
+        let summary = &self.cache[&key];
+        if let Some(returned) = &summary.returned {
+            charge_regions(returned, self.fuel)?;
+        }
+        charge(self.fuel, summary.reads.len())?;
+        Ok(summary.clone())
+    }
+
+    fn analyze(&mut self, key: &iir::InstanceKey) -> Result<TextRegionSummary, String> {
+        let declaration = key.declaration;
+        let arguments = key.arguments.as_slice();
         let (body, arguments) = self.package.runtime_body_checked(declaration, arguments)?;
         if body.phase != FunctionPhase::Runtime || body.type_parameters.len() != arguments.len() {
             return Err("text region inference requires a concrete runtime body".into());
@@ -516,7 +599,6 @@ impl Query<'_, '_> {
                 return Err("text entry snapshot binding is not fresh".into());
             }
         }
-        self.active.push(key.clone());
         self.reads.push(BTreeSet::new());
         self.exits
             .push((!body.postconditions.is_empty()).then(|| ExitRegions {
@@ -553,7 +635,6 @@ impl Query<'_, '_> {
         })();
         self.loops = caller_loops;
         self.exits.pop();
-        self.active.pop();
         let reads = self.reads.pop().unwrap();
         checked?;
         if let Some(returned) = &returned {
@@ -575,7 +656,6 @@ impl Query<'_, '_> {
             reads,
             returned,
         };
-        self.cache.insert(key, summary.clone());
         Ok(summary)
     }
 

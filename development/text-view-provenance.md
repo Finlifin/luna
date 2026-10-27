@@ -124,8 +124,8 @@ the descriptor without reading character bytes. These read sets do not include
 implicit destructor footprints and are not complete access permissions. Cleanup
 composition, region liveness and invalidation checks are still required.
 
-Completed summaries are reused only inside one immutable query. Missing code,
-indirect calls, recursion, pointer transfers,
+Summaries are reused only inside one immutable query. Missing code,
+indirect calls, pointer transfers,
 effectful pattern observations remain
 rejected in this analysis. They are never converted into static or empty-origin
 evidence. The existing runtime resource checker still rejects unsupported text
@@ -544,3 +544,45 @@ fallthrough path joins with its original origin at an early return, whereas an
 entry snapshot retains only the original origin. Other assertions cover named
 callee preconditions, result-bound postconditions, nonreturning bodies and query
 budget failure followed by recovery.
+
+
+## Recursive instance fixed points
+
+Named calls now register dependencies between concrete function instances instead
+of recursively traversing Rust stack frames. A deterministic work queue starts
+each discovered instance with no observed normal return and no reads. An instance
+that gains reads or result origins schedules its callers again; joins preserve
+all previously discovered dependencies. Self-recursion, mutual recursion and
+concrete generic recursion use the same argument-origin substitution as ordinary
+calls. An unproductive recursive cycle can have reads without a returned value.
+
+The initial approximation is internal solver state, never a completed summary.
+Every discovered instance must finish analysis before any result is exported.
+Observations requiring normal completion may temporarily fail while a callee is
+pending; dependency growth retries them. Any failure left when the queue drains
+rejects the whole query, including unsupported operations in nested callees.
+Fuel bounds both instance discovery and iteration. Failed queries retain no state
+for a later invocation. This is dependency inference, not a termination proof or
+an extension of text access permissions.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 26 tests passed (`/tmp/luna-tools-5tzocjpc/result.json`, exit 0). New cases
+cover self/mutual recursion, parameter permutation, concrete generic instances,
+reads in nonreturning recursion, budget failure and query recovery. Nested
+computed-pattern observations exercise retry after a pending callee gains a
+normal-return summary. An unsupported indirect call inside a recursive callee
+still rejects both direct and transitive queries.
+
+Two earlier fixture attempts failed before validating that observation path:
+`/tmp/luna-tools-z62tsqft/result.json` used the reserved name `predicate`, and
+`/tmp/luna-tools-5_bumkkd/result.json` attached a function call as a program
+predicate. The latter remains outside `checkable_predicate` admission. The final
+fixture uses the supported computed-pattern observation path; neither keyword
+rules nor contract admission was relaxed.

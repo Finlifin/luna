@@ -143,17 +143,20 @@ fn byte_reads_export_region_obligations_through_discarded_results() {
 }
 
 #[test]
-fn unresolved_and_recursive_transfers_do_not_become_static_evidence() {
+fn unresolved_calls_fail_and_unproductive_recursion_has_no_return() {
     let package = support::compile(
         "typealias str=.str'builtin;
         fn looped(value:str)->str {looped(value)}
         fn indirect(f:fn(str)->str,value:str)->str {f(value)}
         fn good(value:str)->str {value}",
     );
-    for (name, expected) in [
-        ("looped", "fixed-point contract"),
-        ("indirect", "named concrete callee"),
-    ] {
+    assert!(
+        infer(&package, "looped", 100_000)
+            .unwrap()
+            .returned
+            .is_none()
+    );
+    for (name, expected) in [("indirect", "named concrete callee")] {
         let error = infer(&package, name, 100_000).unwrap_err();
         assert!(error.contains(expected), "{name}: {error}");
     }
@@ -1110,4 +1113,82 @@ fn contracts_observe_entry_snapshots_and_all_normal_return_origins() {
     assert!(diverged.reads.is_empty());
     assert!(infer(&package, "ensured", 1).is_err());
     assert!(infer(&package, "ensured", 100_000).is_ok());
+}
+
+#[test]
+fn recursive_text_summaries_reach_a_fixed_point_across_instances() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn rotate(flag:bool,a:str,b:str)->str {
+            if flag {return a;} rotate(flag,b,a)
+        }
+        fn left(flag:bool,a:str,b:str)->str {
+            if flag {return a;} right(flag,b,a)
+        }
+        fn right(flag:bool,a:str,b:str)->str {left(flag,a,b)}
+        fn generic(flag:bool,a:T,b:T)->T where T {
+            if flag {return a;} generic<T>(flag,b,a)
+        }
+        fn concrete(flag:bool,a:str,b:str)->str {generic<str>(flag,a,b)}
+        fn reading(flag:bool,a:str,b:str)->str {
+            let observed=a == \"x\";
+            if flag {return b;} reading(flag,b,a)
+        }
+        fn endless(a:str,b:str)->str {
+            let observed=a == \"x\";
+            endless(b,a)
+        }
+        fn wrapper(flag:bool,a:str,b:str)->str {left(flag,b,a)}",
+    );
+    let origins = BTreeSet::from([parameter(1, &[]), parameter(2, &[])]);
+    for name in ["rotate", "left", "right", "concrete", "reading", "wrapper"] {
+        let summary = infer(&package, name, 200_000).unwrap();
+        assert_eq!(summary.returned.unwrap()[&vec![]], origins, "{name}");
+    }
+    assert_eq!(
+        infer(&package, "reading", 200_000).unwrap().reads,
+        BTreeSet::from([Origin::Static, parameter(1, &[]), parameter(2, &[])])
+    );
+    let endless = infer(&package, "endless", 200_000).unwrap();
+    assert!(endless.returned.is_none());
+    assert_eq!(
+        endless.reads,
+        BTreeSet::from([Origin::Static, parameter(0, &[]), parameter(1, &[])])
+    );
+    assert!(infer(&package, "left", 10).is_err());
+    assert_eq!(
+        infer(&package, "left", 200_000).unwrap().returned.unwrap()[&vec![]],
+        origins
+    );
+}
+
+#[test]
+fn recursive_observations_retry_pending_summaries_and_reject_failed_callees() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn matches_text(flag:bool,value:str)->bool {
+            if flag {return value == \"x\";} matches_text(flag,value)
+        }
+        fn observed(flag:bool,value:str)->bool {
+            value match {item and matches_text(flag,item) is true=>true,_=>false,}
+        }
+        fn bad(flag:bool,f:fn(str)->str,value:str)->str {
+            if flag {return f(value);} bad(flag,f,value)
+        }
+        fn caller(flag:bool,f:fn(str)->str,value:str)->str {bad(flag,f,value)}",
+    );
+    let summary = infer(&package, "observed", 200_000).unwrap();
+    assert_eq!(
+        summary.reads,
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
+    );
+    assert_eq!(summary.returned, Some(Default::default()));
+    for name in ["bad", "caller"] {
+        assert!(
+            infer(&package, name, 200_000)
+                .unwrap_err()
+                .contains("named concrete callee")
+        );
+    }
+    assert_eq!(infer(&package, "observed", 200_000).unwrap(), summary);
 }
