@@ -56,3 +56,48 @@ provenance. Expected bytes are specified independently for ASCII, two-/three-/
 four-byte UTF-8 characters and NUL. Empty input, filter composition, continue,
 break and lexical return are exercised. These are algorithm and rejection
 checks, not successful safe-mode or native execution of this feature.
+
+## Implemented layout stage
+
+`memory::borrowed_input_layout` now describes text-view slots separately from
+ordinary pointer leaves. Text leaves retain a logical input path, physical
+storage path, and enclosing variant guards. A pointer to a text slot remains an
+ordinary pointer with Str pointee; it is not the view's backing character region.
+Tuple heads use admitted layout metadata; arbitrary normal-form heads remain
+opaque. Records, newtypes, enums, native optional/error payloads and captured
+closure environments preserve their existing layout identities.
+
+The existing `pointer_input_layout` API consumes this shared traversal but
+rejects any text leaf, including its S-expression path in the diagnostic. Other
+legacy Str rejection points remain in place. This refactors real layout consumers
+without granting them missing provenance evidence. Unknown layouts, exhausted
+budgets and excessive depth remain errors; failed queries leave no partial result
+that can be used as a successful layout.
+
+This stage does not supply backing-region origins, transport through function
+summaries, or lifetime verification. Those remain required before the prototype
+can be exported. Layout discovery is the input to that implementation, not a
+replacement for it.
+
+### Layout validation
+
+Working directory: `/home/fin/luna`.
+
+```sh
+python3 -B development/check.py --timeout 900 -- check --release -p elaboration --tests -p luna --test text_view_layout
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib -p luna --test text_view_layout --test text_iteration_prototype --test library_protocols
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test resources borrowed_string_views_do_not_gain_pointer_free_layout_from_copy -- --exact
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+The compile check passed (`/tmp/luna-tools-4y5h7yti/result.json`, exit 0).
+The combined execution passed 286 elaboration unit tests, 80 luna unit tests,
+25 library protocol tests, 2 prototype tests, and 1 source layout test
+(`/tmp/luna-tools-gukf1ysj/result.json`, exit 0). The source test retains a real
+Tuple normal-form head and checks nested enum/newtype text slots and guards.
+Formatting passed (`/tmp/luna-tools-rhi0lfot/result.json`, exit 0), as did the
+diff check. Runtime text-region transport is still not implemented.
+The existing str/Copy regression also passed (one test, three source shapes;
+`/tmp/luna-tools-578yimc5/result.json`, exit 0). Explicit Copy evidence still does
+not authorize dropping the backing-storage dependency.

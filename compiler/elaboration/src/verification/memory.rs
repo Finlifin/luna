@@ -660,20 +660,77 @@ impl fmt::Display for PointerInputLeaf {
     }
 }
 
-/// Enumerate conditional pointer inputs without discarding variant guards.
-/// This is layout evidence, not a proof that any pointee is live or accessible.
+/// An immutable text view's logical identity and physical value slot. Neither
+/// path identifies the backing character region: that requires origin evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextInputLeaf {
+    pub input_fields: Vec<usize>,
+    pub storage_fields: Vec<usize>,
+    pub guards: Vec<(Vec<usize>, usize)>,
+}
+impl fmt::Display for TextInputLeaf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(text-input (input-fields")?;
+        display_owned_path(&self.input_fields, f)?;
+        f.write_str(") (storage-fields")?;
+        for field in &self.storage_fields {
+            write!(f, " {field}")?;
+        }
+        f.write_str(") (guards")?;
+        for (path, tag) in &self.guards {
+            f.write_str(" (guard (path")?;
+            for field in path {
+                write!(f, " {field}")?;
+            }
+            write!(f, ") (tag {tag}))")?;
+        }
+        f.write_str("))")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BorrowedInputLeaf {
+    Pointer(PointerInputLeaf),
+    Text(TextInputLeaf),
+}
+impl fmt::Display for BorrowedInputLeaf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pointer(leaf) => leaf.fmt(f),
+            Self::Text(leaf) => leaf.fmt(f),
+        }
+    }
+}
+
+/// Existing pointer-only consumers must reject text leaves explicitly until
+/// they can transport and validate backing-region evidence at call boundaries.
 pub fn pointer_input_layout(
     package: Option<&Package>,
     ty: &Term,
     fuel: &mut usize,
 ) -> Result<Vec<PointerInputLeaf>, String> {
+    borrowed_input_layout(package, ty, fuel)?.into_iter().map(|leaf| match leaf {
+        BorrowedInputLeaf::Pointer(leaf) => Ok(leaf),
+        BorrowedInputLeaf::Text(leaf) => Err(format!(
+            "string-view memory provenance is not implemented; str requires its backing character storage to remain valid; {leaf}"
+        )),
+    }).collect()
+}
+
+/// Enumerate borrowed inputs without conflating a text region with a pointer
+/// slot. Layout evidence does not establish any region's origin or lifetime.
+pub fn borrowed_input_layout(
+    package: Option<&Package>,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<Vec<BorrowedInputLeaf>, String> {
     fn walk(
         package: Option<&Package>,
         ty: &Term,
         input: &mut Vec<usize>,
         storage: &mut Vec<usize>,
         guards: &mut Vec<(Vec<usize>, usize)>,
-        output: &mut Vec<PointerInputLeaf>,
+        output: &mut Vec<BorrowedInputLeaf>,
         fuel: &mut usize,
     ) -> Result<(), String> {
         if input.len() >= 128 {
@@ -682,6 +739,24 @@ pub fn pointer_input_layout(
         *fuel = fuel
             .checked_sub(1)
             .ok_or("input pointer layout budget exhausted")?;
+        if *ty == Term::Primitive(Primitive::Str) {
+            let cost = guards
+                .iter()
+                .try_fold(
+                    input.len().saturating_add(storage.len()).saturating_add(1),
+                    |cost, (path, _)| cost.checked_add(path.len().saturating_add(1)),
+                )
+                .ok_or("text view layout budget exhausted")?;
+            *fuel = fuel
+                .checked_sub(cost)
+                .ok_or("text view layout budget exhausted")?;
+            output.push(BorrowedInputLeaf::Text(TextInputLeaf {
+                input_fields: input.clone(),
+                storage_fields: storage.clone(),
+                guards: guards.clone(),
+            }));
+            return Ok(());
+        }
         if let Some((wrappers, pointee)) = pointer_representation(package, ty, fuel)? {
             let guard_cost = guards
                 .iter()
@@ -698,12 +773,12 @@ pub fn pointer_input_layout(
                 .ok_or("input pointer path budget exhausted")?;
             let mut physical = storage.clone();
             physical.extend(std::iter::repeat_n(0, wrappers));
-            output.push(PointerInputLeaf {
+            output.push(BorrowedInputLeaf::Pointer(PointerInputLeaf {
                 input_fields: input.clone(),
                 storage_fields: physical,
                 guards: guards.clone(),
                 pointee,
-            });
+            }));
             return Ok(());
         }
         if intrinsic_pointer_value(ty)
@@ -9934,6 +10009,111 @@ fn infer_closure_pass(
         },
         infer.capture_code_writes,
     ))
+}
+
+#[cfg(test)]
+mod text_input_layout_tests {
+    use super::*;
+
+    #[test]
+    fn text_views_remain_distinct_from_pointer_slots_and_guarded_payloads() {
+        let text = Term::Primitive(Primitive::Str);
+        let ty = Term::Tuple(vec![
+            Term::Pointer(Box::new(text.clone())),
+            text.clone(),
+            Term::Optional(Box::new(text.clone())),
+            Term::ErrorResult {
+                errors: vec![text.clone()],
+                result: Box::new(text),
+            },
+        ]);
+        let leaves = borrowed_input_layout(None, &ty, &mut 10_000).unwrap();
+        assert_eq!(leaves.len(), 5);
+        let BorrowedInputLeaf::Pointer(pointer) = &leaves[0] else {
+            panic!("pointer to a view is its own slot")
+        };
+        assert_eq!(pointer.input_fields, [0]);
+        assert_eq!(pointer.pointee, Term::Primitive(Primitive::Str));
+        for (leaf, logical, physical, guards) in [
+            (&leaves[1], vec![1], vec![1], vec![]),
+            (
+                &leaves[2],
+                vec![2, VARIANT_FIELD, 1, 0],
+                vec![2, 0],
+                vec![(vec![2], 1)],
+            ),
+            (
+                &leaves[3],
+                vec![3, VARIANT_FIELD, 0, 0],
+                vec![3, 0],
+                vec![(vec![3], 0)],
+            ),
+            (
+                &leaves[4],
+                vec![3, VARIANT_FIELD, 1, 0],
+                vec![3, 0],
+                vec![(vec![3], 1)],
+            ),
+        ] {
+            let BorrowedInputLeaf::Text(leaf) = leaf else {
+                panic!("expected text dependency")
+            };
+            assert_eq!(leaf.input_fields, logical);
+            assert_eq!(leaf.storage_fields, physical);
+            assert_eq!(leaf.guards, guards);
+        }
+        assert_eq!(
+            leaves[2].to_string(),
+            "(text-input (input-fields 2 (variant 1) 0) (storage-fields 2 0) (guards (guard (path 2) (tag 1))))"
+        );
+        assert!(
+            pointer_input_layout(None, &ty, &mut 10_000)
+                .unwrap_err()
+                .contains("string-view memory provenance")
+        );
+    }
+
+    #[test]
+    fn text_layouts_handle_nested_records_and_closures_without_unfolding_heads() {
+        let ty = Term::Closure {
+            environment: vec![Term::Record(vec![(
+                "name".into(),
+                Term::Primitive(Primitive::Str),
+            )])],
+            signature: Box::new(Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(Primitive::Void)),
+            }),
+        };
+        let expected = vec![BorrowedInputLeaf::Text(TextInputLeaf {
+            input_fields: vec![0, 0],
+            storage_fields: vec![0, 0],
+            guards: vec![],
+        })];
+        assert_eq!(
+            borrowed_input_layout(None, &ty, &mut 1000).unwrap(),
+            expected
+        );
+        assert!(borrowed_input_layout(None, &ty, &mut 1).is_err());
+        assert_eq!(
+            borrowed_input_layout(None, &ty, &mut 1000).unwrap(),
+            expected
+        );
+        let opaque = Term::NormalForm {
+            sort: nir::Sort::Type,
+            head: DeclarationId {
+                package: 1,
+                local: 1,
+            },
+            arguments: vec![Term::Primitive(Primitive::Str)],
+        };
+        assert!(borrowed_input_layout(None, &opaque, &mut 1000).is_err());
+        let mut deep = Term::Primitive(Primitive::Str);
+        for _ in 0..130 {
+            deep = Term::Optional(Box::new(deep));
+        }
+        assert!(borrowed_input_layout(None, &deep, &mut 100_000).is_err());
+    }
 }
 
 #[cfg(test)]
