@@ -378,6 +378,7 @@ pub fn infer_text_regions(
         current: None,
         local_callables: BTreeMap::new(),
         closed_closures: vec![],
+        storage_calls: vec![],
         changed_callables: BTreeSet::new(),
         pending: VecDeque::new(),
         scheduled: HashSet::new(),
@@ -402,6 +403,7 @@ struct Query<'a, 'f> {
     current: Option<SummaryKey>,
     local_callables: BTreeMap<LocalId, CodeValue>,
     closed_closures: Vec<ClosedClosure>,
+    storage_calls: Vec<DeclarationId>,
     changed_callables: BTreeSet<LocalId>,
     pending: VecDeque<SummaryKey>,
     scheduled: HashSet<SummaryKey>,
@@ -1141,6 +1143,119 @@ impl Query<'_, '_> {
         Ok(summary)
     }
 
+    // Analyze pointer-bearing calls in the caller's storage context. Ordinary
+    // value calls still use reusable symbolic summaries. Recursive storage
+    // effects need a relational fixed point and must not reuse value summaries.
+    fn call_with_storage(
+        &mut self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        actual: BTreeMap<usize, Regions>,
+        locals: &mut Locals,
+        depth: usize,
+    ) -> Result<Option<Regions>, String> {
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|key| key.instance.declaration == declaration)
+            || self.storage_calls.contains(&declaration)
+        {
+            return Err("recursive text descriptor calls require relational memory effects".into());
+        }
+        let (body, arguments) = self.package.runtime_body_checked(declaration, arguments)?;
+        if body.phase != FunctionPhase::Runtime || body.type_parameters.len() != arguments.len() {
+            return Err("text descriptor call requires a concrete runtime body".into());
+        }
+        nir::visit::expressions(body, self.fuel, |expr, fuel| bound_type(&expr.ty, fuel))?;
+        let binders =
+            self.metadata
+                .binders(Some(self.package), &body.type_parameters, self.fuel)?;
+        let body = body
+            .instantiate_parameters(&binders, arguments)
+            .map_err(|e| e.to_string())?;
+        let mut scope = self.locals_copy(locals)?;
+        for (parameter, value) in actual {
+            let binding = *body
+                .parameters
+                .get(parameter)
+                .ok_or("text descriptor parameter is missing")?;
+            if scope.insert(binding, value).is_some() {
+                return Err("text descriptor call storage frame overlaps its caller".into());
+            }
+        }
+        for snapshot in &body.entry_snapshots {
+            let value = scope
+                .get(&snapshot.parameter)
+                .ok_or("text descriptor snapshot parameter is missing")?;
+            charge_regions(value, self.fuel)?;
+            if scope.insert(snapshot.binding, value.clone()).is_some() {
+                return Err("text descriptor snapshot binding is not fresh".into());
+            }
+        }
+        let definitions = std::mem::take(&mut self.local_callables);
+        let changed = std::mem::take(&mut self.changed_callables);
+        let loops = std::mem::take(&mut self.loops);
+        self.storage_calls.push(declaration);
+        self.exits.push(Some(ExitRegions {
+            bindings: scope.keys().copied().collect(),
+            locals: None,
+        }));
+        let checked = (|| {
+            self.index_local_callables(&body)?;
+            for predicate in &body.preconditions {
+                self.contract(predicate, &scope)?;
+            }
+            let mut returned = None;
+            let completed = self.expr(&body.body, &mut scope, &mut returned, depth)?;
+            if completed.is_some() {
+                self.record_exit(&scope)?;
+            }
+            merge(&mut returned, completed, self.fuel)?;
+            if let Some(value) = &returned {
+                let mut exit = self
+                    .exits
+                    .last_mut()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .locals
+                    .take()
+                    .ok_or("text descriptor call has no normal exit state")?;
+                // Only caller storage may survive a callee's frame. Check
+                // indirect writes too: a callee must not stash its local address.
+                for value in
+                    std::iter::once(value).chain(locals.keys().filter_map(|id| exit.get(id)))
+                {
+                    charge_regions(value, self.fuel)?;
+                    for (root, _) in value.places.values().flatten() {
+                        if !locals.contains_key(root) {
+                            return Err("text descriptor address escapes its callee frame".into());
+                        }
+                    }
+                }
+                if let Some(binding) = body.result_binding {
+                    charge_regions(value, self.fuel)?;
+                    exit.insert(binding, value.clone());
+                }
+                for predicate in &body.postconditions {
+                    self.contract(predicate, &exit)?;
+                }
+                for (binding, value) in locals.iter_mut() {
+                    *value = exit
+                        .remove(binding)
+                        .ok_or("text descriptor call lost caller storage")?;
+                }
+            }
+            Ok(returned)
+        })();
+        self.exits.pop();
+        self.storage_calls.pop();
+        self.local_callables = definitions;
+        self.changed_callables = changed;
+        self.loops = loops;
+        checked
+    }
+
     fn translate(
         &mut self,
         origins: &BTreeSet<TextRegionOrigin>,
@@ -1779,12 +1894,6 @@ impl Query<'_, '_> {
                     let Some(value) = value else {
                         return Ok(None);
                     };
-                    if value.places.values().any(Option::is_some) {
-                        return Err(
-                            "text call with local descriptor addresses requires memory effects"
-                                .into(),
-                        );
-                    }
                     if has_defaults {
                         let binding = parameter_bindings[argument.parameter];
                         charge_regions(&value, self.fuel)?;
@@ -1802,6 +1911,12 @@ impl Query<'_, '_> {
                     if actual.insert(argument.parameter, value).is_some() {
                         return Err("duplicate text region call argument".into());
                     }
+                }
+                if actual
+                    .values()
+                    .any(|value| value.places.values().any(Option::is_some))
+                {
+                    return self.call_with_storage(declaration, types, actual, locals, next);
                 }
                 callbacks.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
                 let summary = self.function_with_callbacks(declaration, types, &callbacks)?;

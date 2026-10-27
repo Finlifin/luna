@@ -1792,6 +1792,7 @@ fn local_descriptor_pointers_preserve_backing_origins_and_replace_slots() {
     );
     for (name, index) in [
         ("read", 0),
+        ("crossing", 0),
         ("replace", 1),
         ("saved", 0),
         ("field", 1),
@@ -1839,7 +1840,6 @@ fn local_descriptor_pointers_preserve_backing_origins_and_replace_slots() {
         ("unknown", "target is unknown"),
         ("ambiguous", "target is unknown"),
         ("dangling", "escapes its local scope"),
-        ("crossing", "requires memory effects"),
         ("captured", "cannot capture local descriptor addresses"),
     ] {
         let error = infer(&package, name, 500_000).unwrap_err();
@@ -1847,4 +1847,83 @@ fn local_descriptor_pointers_preserve_backing_origins_and_replace_slots() {
     }
     assert!(infer(&package, "alias", 10).is_err());
     assert!(infer(&package, "alias", 500_000).is_ok());
+}
+
+#[test]
+fn named_descriptor_calls_update_shared_storage_and_join_normal_exits() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        struct Pair {left:str,right:str}
+        fn replace(pointer:*str,value:str) {pointer.* = value;}
+        fn relay(pointer:*str,value:str) {replace(pointer,value)}
+        fn swap(left:*str,right:*str) {let before=left.*;left.* = right.*;right.* = before;}
+        fn identity(pointer:*str)->*str {pointer}
+        fn generic(pointer:*T)->*T where T {pointer}
+        fn apply(action:fn(*str,str),pointer:*str,value:str) {action(pointer,value)}
+        fn old(pointer:*str,value:str)->str {let before=pointer.*;pointer.* = value;return before;}
+        fn branch(flag:bool,pointer:*str,value:str) {if flag {pointer.* = value;return;};}
+        fn observed(pointer:*str,value:str)->bool {let equal=pointer.* == \"x\";pointer.* = value;equal}
+        fn written(first:str,second:str)->str {var value=first;relay(value.ref,second);value}
+        fn saved(first:str,second:str)->str {var value=first;old(value.ref,second)}
+        fn swapped(first:str,second:str)->str {var left=first;var right=second;swap(left.ref,right.ref);left}
+        fn aliased(value:str)->str {var text=value;swap(text.ref,text.ref);text}
+        fn forwarded(value:str)->str {identity(value.ref).*}
+        fn specialized(value:str)->str {generic(value.ref).*}
+        fn ordered(first:str,second:str)->str {var value=first;replace(value.ref,do {value=second;first});value}
+        fn field(first:str,second:str)->str {var pair=Pair {left:first,right:first};replace(pair.left.ref,second);pair.left}
+        fn sibling(first:str,second:str)->str {var pair=Pair {left:first,right:first};replace(pair.left.ref,second);pair.right}
+        fn callback(first:str,second:str)->str {var value=first;apply(replace,value.ref,second);value}
+        fn joined(flag:bool,first:str,second:str)->str {var value=first;branch(flag,value.ref,second);value}
+        fn reading(first:str,second:str)->str {var value=first;let equal=observed(value.ref,second);value}
+        fn recursive(pointer:*str,value:str) {replace(pointer,value);recursive(pointer,value)}
+        fn recursion(value:str)->str {var text=value;recursive(text.ref,\"static\");text}
+        fn leak(pointer:**str,value:str) {let local=value;pointer.* = local.ref;}
+        fn escaping(value:str)->str {var pointer=value.ref;leak(pointer.ref,value);pointer.*}",
+    );
+    for (name, index) in [
+        ("written", 1),
+        ("saved", 0),
+        ("swapped", 1),
+        ("aliased", 0),
+        ("forwarded", 0),
+        ("specialized", 0),
+        ("ordered", 0),
+        ("field", 1),
+        ("sibling", 0),
+        ("callback", 1),
+    ] {
+        assert_eq!(
+            infer(&package, name, 500_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(index, &[])]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        infer(&package, "joined", 500_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    let reading = infer(&package, "reading", 500_000).unwrap();
+    assert_eq!(
+        reading.reads,
+        BTreeSet::from([Origin::Static, parameter(0, &[])])
+    );
+    assert_eq!(
+        reading.returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[])])
+    );
+    assert!(
+        infer(&package, "recursion", 500_000)
+            .unwrap_err()
+            .contains("recursive text descriptor calls")
+    );
+    assert!(
+        infer(&package, "escaping", 500_000)
+            .unwrap_err()
+            .contains("escapes")
+    );
+    assert!(infer(&package, "callback", 10).is_err());
+    assert!(infer(&package, "callback", 500_000).is_ok());
 }

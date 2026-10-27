@@ -987,3 +987,40 @@ from `=` and use `do { ... }` for expression-position statement blocks, followin
 `docs/grammar/syntax`. No parser rule or semantic expectation was relaxed.
 Formatting passed (`/tmp/luna-tools-6a06gke4/result.json`, exit 0), as did the
 diff check. Runtime resource permissions remain unchanged.
+
+## Named calls with caller descriptor storage
+
+Calls carrying known local descriptor addresses now analyze the instantiated
+callee body against an isolated binding frame sharing the caller's abstract
+storage values. Explicit inputs are evaluated once before body analysis. Reads
+observe current caller origins, writes update caller slots, and all normal exits
+(including explicit returns) join before propagating state back. Entry snapshots
+and pre/postcondition observations use the callee frame; caller code bindings,
+loop state and return tracking are restored after success or failure.
+
+This preserves alias relationships when two parameters address the same slot,
+supports nested named forwarding and callback calls, and allows returned pointers
+to caller-owned descriptor slots. Both returned values and writes to caller
+storage are checked for callee-local address escapes. Ordinary value-only calls
+retain symbolic cached summaries. Recursive pointer-effect calls are rejected
+until a relational storage fixed point is available; value-only recursion still
+uses its existing fixed point. Closure pointer captures and default expressions
+that dereference caller storage remain separate work. No runtime Copy or backing
+region lifetime permission is granted by this dependency transfer.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 38 tests passed (`/tmp/luna-tools-_h3qj2wg/result.json`, exit 0). New cases
+cover nested replacement, saved pre-write views, distinct and identical pointer
+arguments, generic pointer returns, field/sibling preservation, callbacks,
+argument effects before body execution, early-return joins and character reads.
+Recursive storage calls and callee-local addresses written through caller
+pointers are rejected; budget exhaustion followed by a fresh query recovers.
+Formatting passed (`/tmp/luna-tools-k44b57es/result.json`, exit 0), as did the
+diff check. Existing runtime resource rejection tests still pass.
