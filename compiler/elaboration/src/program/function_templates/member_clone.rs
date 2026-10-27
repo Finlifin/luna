@@ -17,12 +17,33 @@ pub(in crate::program) struct ClonedMember<'h> {
     pub resolution: Vec<(HirId, hir::definitions::ResolutionEvidence)>,
 }
 
+#[cfg(test)]
 pub(in crate::program) fn clone_member<'h>(
     source: &Package<'h>,
     arena: &'h HirArena,
     member: OwnerId,
     owner: OwnerId,
     definitions: &HashMap<DefId, DefId>,
+    fuel: &mut usize,
+) -> Result<ClonedMember<'h>, Error> {
+    clone_member_with_inputs(
+        source,
+        arena,
+        member,
+        owner,
+        definitions,
+        &HashMap::new(),
+        fuel,
+    )
+}
+
+pub(in crate::program) fn clone_member_with_inputs<'h>(
+    source: &Package<'h>,
+    arena: &'h HirArena,
+    member: OwnerId,
+    owner: OwnerId,
+    definitions: &HashMap<DefId, DefId>,
+    captures: &HashMap<HirId, InputCapture>,
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
     let item = source
@@ -53,7 +74,7 @@ pub(in crate::program) fn clone_member<'h>(
         }
     };
     *fuel = fuel
-        .checked_sub(definitions.len())
+        .checked_sub(definitions.len().saturating_add(captures.len()))
         .ok_or_else(|| error(item.span, "generated member identity budget exhausted"))?;
     let mut rebind = Rebind {
         source,
@@ -64,6 +85,7 @@ pub(in crate::program) fn clone_member<'h>(
         bodies: Vec::new(),
         definitions: definitions.clone(),
         member_owner: Some(member),
+        captures: captures.clone(),
     };
     let result = (|| {
         rebind.charge(item.span, 0)?;

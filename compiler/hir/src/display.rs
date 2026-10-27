@@ -844,6 +844,9 @@ impl Display for ExprKind<'_> {
             Self::TyNoReturn => form!(f, "ty-no-return"),
             Self::TyVoid => form!(f, "ty-void"),
             Self::DeliveredType(ty) => form!(f, "delivered-type", "type" => ty),
+            Self::ConstantObjectEntry(value, index) => {
+                form!(f, "constant-object-entry", "value" => value, "index" => index)
+            }
             Self::TyAny => form!(f, "ty-any"),
             Self::TyType => form!(f, "ty-type"),
             Self::TySelf => form!(f, "ty-self"),

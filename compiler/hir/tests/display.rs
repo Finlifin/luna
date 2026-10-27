@@ -1724,3 +1724,17 @@ fn delivered_type_dump_preserves_stable_description_and_escaping() {
     assert!(dump.starts_with("(delivered-type (type "), "{dump}");
     assert!(dump.contains("field\\n\\\""), "{dump}");
 }
+
+#[test]
+fn constant_object_entry_dump_preserves_input_and_index() {
+    let input = Expr {
+        hir_id: HirId::make_owner(owner(3)),
+        span: DUMMY_SP,
+        kind: ExprKind::Object(Vec::new()),
+    };
+    let entry = ExprKind::ConstantObjectEntry(&input, 2);
+    let dump = entry.to_string();
+    assert_eq!(parsed(&entry).tag(), "constant-object-entry");
+    assert!(dump.contains("(index 2)"), "{dump}");
+    assert!(dump.contains("(object"), "{dump}");
+}

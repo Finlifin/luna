@@ -95,6 +95,14 @@ derive fn label_from_text(text: str) for FormatLabel<.text> {
 
 text 是生成器的编译时输入，生成方法仍是 runtime 方法；不会要求 record.label() 每次再传一份 text。参数的合法取得遵循 comptime fn 规则，产物仍须通过普通实现检查。
 
+例如，将前面 `.text` 的派生请求替换为：
+
+~~~flurry
+derive FormatLabel<.text>.use(label_from_text("record")) for Record;
+~~~
+
+这里的字符串在派生时交付给策略。生成方法使用编译时值时，仍遵循普通的跨阶段 Splice 规则；策略输入不会赋予绕过转换协议的权限。
+
 选择另一个策略不会制造第二层方法身份：
 
 ~~~flurry

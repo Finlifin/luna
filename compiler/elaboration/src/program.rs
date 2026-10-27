@@ -9566,6 +9566,9 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
+        if let H::ConstantObjectEntry(value, index) = expr.kind {
+            return self.constant_object_entry(value, index, expected, expr.span);
+        }
         if self.describing_open_spread && matches!(expr.kind, H::InlineControl(_)) {
             return self.describe_contextual_inline_input(expr, expected, partial);
         }

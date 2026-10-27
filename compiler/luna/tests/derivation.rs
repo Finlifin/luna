@@ -308,7 +308,7 @@ fn expansion_failures_report_sources_but_unrelated_errors_do_not() {
     let invalid = "trait Flag {} derive fn invalid(value:bool) for Flag {} struct Subject {} derive Flag.use(invalid) for Subject;";
     let error = support::compile_with_protocols(invalid, &Default::default()).unwrap_err();
     assert!(
-        error.contains("strategy input and contract instantiation"),
+        error.contains("derivation strategy input count mismatch"),
         "{error}"
     );
     assert!(
@@ -368,4 +368,108 @@ fn generated_self_without_a_receiver_uses_the_ordinary_diagnostic() {
         error.contains("generated member `flag` originates here"),
         "{error}"
     );
+}
+
+#[test]
+fn strategy_inputs_are_independent_comptime_values_for_runtime_methods() {
+    let package = compile_with_strategy_bool_splice(
+        "trait Flag {fn flag()->bool;} comptime fn invert(value:bool)->bool {not value} derive fn configured(value:bool) for Flag {fn flag()->bool {value}} struct First {} struct Second {} derive Flag.use(configured(invert(false))) for First; derive Flag.use(configured(false)) for Second; fn run()->bool {First.as(Flag).flag() and not Second.as(Flag).flag()}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn strategy_input_types_contextualize_literals_and_feed_associated_members() {
+    let package = support::compile(
+        "typealias u32=.u32'builtin;trait Code {assoc code:u32;fn get()->u32;} derive fn configured(input:u32) for Code {assoc code:u32=input;fn get()->u32 {code}} struct Subject {} derive Code.use(configured(7)) for Subject; fn run()->bool {Subject.as(Code).get() == 7}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn unused_strategy_inputs_are_still_checked_and_invoked_at_comptime() {
+    for argument in ["()", "runtime_value()"] {
+        let source = format!(
+            "trait Flag {{fn flag()->bool;}} fn runtime_value()->bool {{true}} derive fn configured(ignored:bool) for Flag {{fn flag()->bool {{true}}}} struct Subject {{}} derive Flag.use(configured({argument})) for Subject;"
+        );
+        let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(!error.contains("not implemented"), "{error}");
+        assert!(
+            error.contains("type mismatch") || error.contains("runtime function"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn strategy_input_parameters_can_depend_on_preceding_type_inputs() {
+    let package = compile_with_strategy_bool_splice(
+        "typealias Type=.Type'builtin;trait Source {assoc Item:Type;fn make()->Item;} derive fn configured(T:Type,value:T) for Source {assoc Item:Type=T;fn make()->Item {value}} struct Subject {} derive Source.use(configured(bool,true)) for Subject; fn run()->bool {Subject.as(Source).make()}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn strategy_inputs_are_available_to_prefix_attributes_and_comptime_methods() {
+    let source = "trait Flag {^{comptime_phase:true} comptime fn flag()->bool;} derive fn configured(staged:bool,value:bool) for Flag {^{comptime_phase:staged} comptime fn flag()->bool {value}} struct Subject {} comptime derive Flag.use(configured(true,true)) for Subject; comptime fn run()->bool {Subject.as(Flag).flag()}";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn strategy_inputs_participate_in_complete_interface_matching() {
+    let source = "trait Flag where enabled:bool {fn flag()->bool;} derive fn configured(enabled:bool) for Flag<enabled> {fn flag()->bool {enabled}} struct Subject {} derive Flag<true>.use(configured(true)) for Subject; fn run()->bool {Subject.as(Flag<true>).flag()}";
+    let package = compile_with_strategy_bool_splice(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let invalid = source.replace(".use(configured(true))", ".use(configured(false))");
+    let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("does not match the requested interface instance"),
+        "{error}"
+    );
+}
+
+#[test]
+fn strategy_input_call_shapes_are_not_silently_discarded() {
+    for source in [
+        "trait Flag {} derive fn configured(value:bool) for Flag {} struct Subject {} derive Flag.use(configured(true,false)) for Subject;",
+        "trait Flag {} derive fn configured(value:bool) for Flag {} struct Subject {} derive Flag.use(configured(.value=true)) for Subject;",
+        "trait Flag {} derive fn configured(lambda value:fn()->bool) for Flag {} struct Subject {} derive Flag.use(configured(||true)) for Subject;",
+    ] {
+        let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("strategy input") || error.contains("strategy parameter"),
+            "{error}"
+        );
+        assert!(!error.contains("parsing failed"), "{error}");
+    }
+}
+
+fn compile_with_strategy_bool_splice(source: &str) -> nir::program::Package {
+    let source = format!(
+        "trait Splice {{assoc RuntimeTarget:.Type'builtin;fn splice(comptime data:Self)->RuntimeTarget;}} impl Splice for bool {{assoc RuntimeTarget:.Type'builtin=bool;fn splice(comptime data:bool)->bool {{data}}}} {source}"
+    );
+    support::compile_with_bindings(&source, &Default::default(), Some("Splice")).unwrap()
+}
+
+#[test]
+fn runtime_strategy_input_use_still_requires_splice() {
+    let source = "trait Flag {fn flag()->bool;} derive fn configured(value:bool) for Flag {fn flag()->bool {value}} struct Subject {} derive Flag.use(configured(true)) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("bound Splice protocol"), "{error}");
 }

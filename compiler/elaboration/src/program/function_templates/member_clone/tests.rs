@@ -134,6 +134,7 @@ fn remaps_generated_definition_references_without_rewriting_external_ones() {
         budget: 100,
         bodies: Vec::new(),
         definitions: HashMap::from([(old, new)]),
+        captures: HashMap::new(),
         member_owner: Some(owner),
     };
     for (input, expected) in [(old, new), (external, external)] {
@@ -571,4 +572,48 @@ fn associated_members_rebind_generic_defaults_without_creating_function_bodies()
         .unwrap();
     batch.publish(&mut 1000).unwrap();
     assert_eq!(source.num_defs(), 1);
+}
+
+#[test]
+fn explicit_generation_inputs_do_not_become_method_parameters() {
+    let arena = HirArena::new();
+    let (source, member) = fixture(&arena, true);
+    let capture = HirId::make_owner(OwnerId::new(hir::LocalDefId::new(99)));
+    for index in [1, 2] {
+        let owner = OwnerId::new(hir::LocalDefId::new(index));
+        let definition = DefId::new(0, 100 + index);
+        let captures = HashMap::from([(capture, InputCapture::Definition(definition))]);
+        let draft = clone_member_with_inputs(
+            &source,
+            &arena,
+            member,
+            owner,
+            &HashMap::new(),
+            &captures,
+            &mut 1000,
+        )
+        .unwrap();
+        let ItemKind::Fn(signature, body) = &draft.item.kind else {
+            panic!()
+        };
+        assert_eq!(signature.params.len(), 1);
+        let (_, body) = draft.bodies.iter().find(|(id, _)| id == body).unwrap();
+        assert!(matches!(body.value.kind, E::ResolvedDef { def_id, .. } if def_id == definition));
+        assert_eq!(body.value.hir_id.owner, owner);
+        assert!(!draft.bindings.contains_key(&capture));
+        assert!(
+            clone_member_with_inputs(
+                &source,
+                &arena,
+                member,
+                owner,
+                &HashMap::new(),
+                &captures,
+                &mut 1
+            )
+            .is_err()
+        );
+    }
+    let original = source.body(BodyId::new(HirId::make_owner(member))).unwrap();
+    assert!(matches!(original.value.kind, E::ResolvedFnParam(_, id) if id == capture));
 }

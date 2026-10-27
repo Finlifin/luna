@@ -3815,3 +3815,38 @@ mod tests {
         charge_copy(&value, &mut 2048, span).unwrap();
     }
 }
+
+impl Checker<'_, '_> {
+    pub(super) fn constant_object_entry(
+        &mut self,
+        object: &hir::Expr<'_>,
+        index: usize,
+        expected: Option<&Term>,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let (value, _) = self.required_typed_expression(object, Some(&p(P::Object)))?;
+        let Value::Object(object) = value else {
+            return Err(error(
+                span,
+                "generated input group did not produce an Object",
+            ));
+        };
+        let entries = object.into_entries();
+        self.required_steps = self
+            .required_steps
+            .checked_sub(entries.len() as u64)
+            .ok_or_else(|| error(span, "generated input extraction budget exhausted"))?;
+        let entry = entries
+            .into_iter()
+            .nth(index)
+            .ok_or_else(|| error(span, "generated input index is outside its input group"))?;
+        let value = match entry {
+            comptime_interpretor::ObjectEntry::Value(value)
+            | comptime_interpretor::ObjectEntry::Property { value, .. } => value,
+        };
+        if let Some(expected) = expected {
+            self.require_expression(&value.ty, expected, span)?;
+        }
+        self.materialize_local_constant(value.value, value.ty, span)
+    }
+}

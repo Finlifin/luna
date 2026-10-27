@@ -40,6 +40,9 @@ pub enum ExprKind<'hir> {
     /// syntax or an inference variable. Candidate elaboration must admit it in
     /// the destination declaration world before publication.
     DeliveredType(std::sync::Arc<nir::Term>),
+    /// Compiler-generated extraction from a completed heterogeneous input group.
+    /// There is no source-level field or indexing syntax for this operation.
+    ConstantObjectEntry(&'hir Expr<'hir>, usize),
     Lit(Lit),
     /// A comptime code value; its body is checked as runtime code.
     CodeQuote(&'hir Expr<'hir>, Vec<CodeSubstitution<'hir>>),

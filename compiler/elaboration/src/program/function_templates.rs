@@ -6,11 +6,13 @@ use hir::common::{Arg, TyParam, TyParamKind as T};
 use hir::{Expr, ExprKind as E, HirArena, HirId, ItemKind, OwnerId, Package};
 use std::collections::HashMap;
 mod generation_attributes;
+mod generation_inputs;
+pub(super) use generation_inputs::{input_draft, input_group};
 mod member_clone;
 pub(super) use generation_attributes::relocate as relocate_generation_attributes;
 mod patterns;
 mod resolution;
-pub(super) use member_clone::{ClonedMember, clone_member};
+pub(super) use member_clone::{ClonedMember, clone_member_with_inputs};
 
 pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Package<'h>, Error> {
     let mut package = source.clone();
@@ -80,6 +82,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             bodies: Vec::new(),
             definitions: HashMap::new(),
             member_owner: None,
+            captures: HashMap::new(),
         };
         let mut sig = formal.clone();
         let params = formal
@@ -151,6 +154,12 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
     Ok(package)
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum InputCapture {
+    Definition(hir::common::DefId),
+    Local(HirId),
+}
+
 struct Rebind<'s, 'h> {
     source: &'s Package<'h>,
     arena: &'h HirArena,
@@ -160,6 +169,7 @@ struct Rebind<'s, 'h> {
     bodies: Vec<(hir::BodyId, hir::body::Body<'h>)>,
     definitions: HashMap<hir::common::DefId, hir::common::DefId>,
     member_owner: Option<OwnerId>,
+    captures: HashMap<HirId, InputCapture>,
 }
 impl<'h> Rebind<'_, 'h> {
     fn charge(&mut self, span: rustc_span::Span, depth: usize) -> Result<(), Error> {
@@ -283,7 +293,22 @@ impl<'h> Rebind<'_, 'h> {
     fn expr(&mut self, expr: &Expr<'h>, depth: usize) -> Result<&'h Expr<'h>, Error> {
         self.charge(expr.span, depth)?;
         let depth = depth + 1;
-        if let E::ResolvedFnParam(_, id) | E::ResolvedLocal(_, id) = &expr.kind {
+        if let E::ResolvedFnParam(name, id) | E::ResolvedLocal(name, id) = &expr.kind {
+            if let Some(capture) = self.captures.get(id).copied() {
+                let hir_id = self.id(expr.hir_id);
+                return Ok(self.arena.alloc_expr(Expr {
+                    hir_id,
+                    span: expr.span,
+                    kind: match capture {
+                        InputCapture::Definition(def_id) => E::ResolvedDef {
+                            name: *name,
+                            def_id,
+                            has_clause_param: false,
+                        },
+                        InputCapture::Local(id) => E::ResolvedLocal(*name, id),
+                    },
+                }));
+            }
             if self.member_owner.is_some_and(|owner| id.owner != owner)
                 && !self.bindings.contains_key(id)
             {
@@ -481,6 +506,9 @@ impl<'h> Rebind<'_, 'h> {
                 }
             }
             E::Return(e) => E::Return(e.map(|e| self.expr(e, depth)).transpose()?),
+            E::ConstantObjectEntry(value, index) => {
+                E::ConstantObjectEntry(self.expr(value, depth)?, *index)
+            }
             E::Projection(a, field) => E::Projection(self.expr(a, depth)?, *field),
             E::TyPtr(a) => E::TyPtr(self.expr(a, depth)?),
             E::TyOptional(a) => E::TyOptional(self.expr(a, depth)?),
@@ -647,14 +675,17 @@ pub(super) fn implementation_draft<'h>(
     strategy_trait: &'h Expr<'h>,
     members: Vec<OwnerId>,
     definitions: &HashMap<hir::common::DefId, hir::common::DefId>,
+    captures: &HashMap<HirId, InputCapture>,
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
-    *fuel = fuel.checked_sub(definitions.len()).ok_or_else(|| {
-        error(
-            request.self_ty.span,
-            "generated impl identity budget exhausted",
-        )
-    })?;
+    *fuel = fuel
+        .checked_sub(definitions.len().saturating_add(captures.len()))
+        .ok_or_else(|| {
+            error(
+                request.self_ty.span,
+                "generated impl identity budget exhausted",
+            )
+        })?;
     let mut rebind = Rebind {
         source,
         arena,
@@ -664,6 +695,7 @@ pub(super) fn implementation_draft<'h>(
         bodies: Vec::new(),
         definitions: definitions.clone(),
         member_owner: Some(request_owner),
+        captures: captures.clone(),
     };
     let result = (|| {
         let clause_params = rebind.clauses(request.clause_params)?;

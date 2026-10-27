@@ -540,3 +540,55 @@ git diff --check
   Receiver cases read independent subjects, write the original borrowed subject,
   return a receiver during comptime invocation, and reject self in static methods.
 - Formatting: `/tmp/luna-tools-2z65seio/result.json`; diff check passed.
+
+## Closed positional strategy inputs
+
+An explicit selection may now carry an argument list, such as
+`derive Flag.use(configured(true)) for Subject`. Each expansion reserves a private
+input-group constant and a typed constant for each strategy parameter. The input
+group checks bindings in source argument order before producing its Object;
+member references resolve to the per-expansion parameter constants, never to
+runtime parameters added to generated methods. Ordinary constant admission also
+checks inputs that no generated method uses.
+
+Input type expressions are copied with preceding input bindings available, so
+literal contextual types and dependencies such as `(T: Type, value: T)` survive.
+Members, associated declarations and member prefix attributes use explicit
+capture substitutions. Source generation scopes remain separate from destination
+method-local binding identities.
+
+This path covers closed positional inputs. Generic request environments, strategy
+clauses/contracts, default/named/variadic and specialized parameter matching still
+need the general call-instantiation path. General strategy statements and default
+strategy registration remain unfinished. Input values inherit ordinary constant
+materialization limits rather than bypassing resource or runtime identity checks.
+
+The first source run passed 27/30 tests and exposed that Object entries cannot
+use struct field projection (`/tmp/luna-tools-xk55a4bd/result.json`). The internal
+`ConstantObjectEntry` HIR node now performs required Object evaluation, bounds
+checking, preserved-type checking and ordinary constant materialization. Its dump
+is an S-expression with the input expression and ordinal index.
+
+The next run passed 30/33; three runtime-use fixtures lacked a bound Splice
+protocol (`/tmp/luna-tools-v9fzqvdt/result.json`). Corrected positive fixtures bind
+an explicit bool Splice, and a separate rejection test preserves that boundary.
+The final derive suite passed all 34 tests, including independent values,
+contextual numeric literals, preceding Type inputs, associated members, prefix
+attributes, complete interface matching and unused-input rejection.
+
+Checks in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation
+python3 -B development/check.py --timeout 900 -- test --release -p hir --test display
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib member_clone
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Derive: 34 passed, exit 0, `/tmp/luna-tools-lhj4ar6o/result.json`.
+- HIR display: 19 passed, exit 0, `/tmp/luna-tools-fpmr2wrg/result.json`.
+- Formatting: exit 0, `/tmp/luna-tools-lx7sdedh/result.json`; diff check passed.
+- Member clone: 9 passed, exit 0, `/tmp/luna-tools-21rzc0pz/result.json`.
+  Explicit input substitutions retain one receiver parameter, independent
+  destination identities and unchanged source captures after budget failure.

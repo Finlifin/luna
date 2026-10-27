@@ -9,14 +9,17 @@ pub(in crate::program) fn relocate<'h>(
     shell: &mut ClonedMember<'h>,
     members: &mut [(ClonedMember<'h>, DefId)],
     definitions: &HashMap<DefId, DefId>,
+    captures: &HashMap<HirId, InputCapture>,
     fuel: &mut usize,
 ) -> Result<(), Error> {
-    *fuel = fuel.checked_sub(definitions.len()).ok_or_else(|| {
-        error(
-            shell.item.span,
-            "generated attribute identity budget exhausted",
-        )
-    })?;
+    *fuel = fuel
+        .checked_sub(definitions.len().saturating_add(captures.len()))
+        .ok_or_else(|| {
+            error(
+                shell.item.span,
+                "generated attribute identity budget exhausted",
+            )
+        })?;
     let mut rebind = Rebind {
         source,
         arena,
@@ -28,6 +31,7 @@ pub(in crate::program) fn relocate<'h>(
         // Only bindings introduced inside the copied expression may be read.
         // Free generation inputs require value substitution, not fresh locals.
         member_owner: Some(OwnerId::INVALID),
+        captures: captures.clone(),
     };
     let result = (|| {
         for (member, _) in members {
