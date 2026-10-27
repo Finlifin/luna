@@ -8,6 +8,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use symbol::DefId;
 mod copy_budget;
+mod resolution;
+pub use resolution::ResolutionEvidence;
 pub(crate) mod members;
 pub use members::clauses as declared_clause_parameters;
 mod nodes;
@@ -120,6 +122,7 @@ pub struct DefinitionBatch<'package, 'hir> {
     bodies: Vec<(BodyId, Body<'hir>)>,
     body_slots: HashMap<BodyId, usize>,
     attributes: Vec<crate::DeferredDefinitionAttribute<'hir>>,
+    resolution: Vec<(crate::HirId, ResolutionEvidence)>,
 }
 /// An immutable checked candidate holding exclusive access to its original draft.
 /// Dropping it abandons preparation without changing published tables or drafts.
@@ -164,6 +167,7 @@ impl<'batch, 'package, 'hir, T> PreparedPublication<'batch, 'package, 'hir, T> {
         self.batch.bodies.clear();
         self.batch.body_slots.clear();
         self.batch.attributes.clear();
+        self.batch.resolution.clear();
         self.batch.base = self.batch.package.num_defs();
         (self.owners, self.checked)
     }
@@ -193,6 +197,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
             bodies: Vec::new(),
             body_slots: HashMap::new(),
             attributes: Vec::new(),
+            resolution: Vec::new(),
         }
     }
     /// Read-only access to previously published definitions, never draft entries.
@@ -321,6 +326,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
             bodies: self.bodies.clone(),
             body_slots: self.body_slots.clone(),
             attributes: self.attributes.clone(),
+            resolution: self.resolution.clone(),
         };
         let owners = batch.publish(fuel).map_err(PublicationError::Structure)?;
         let result = check(&candidate).map_err(PublicationError::Check)?;
@@ -335,6 +341,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
     /// transactional; a caller can supply fresh fuel and retry the same draft.
     pub fn publish(&mut self, fuel: &mut usize) -> Result<Vec<OwnerId>, Error> {
         charge(fuel)?;
+        self.validate_resolution(fuel)?;
         let mut identities = BTreeSet::new();
         let mut checked_containers = BTreeSet::new();
         let mut checked_lexical_parents = BTreeSet::new();
@@ -540,6 +547,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
             .definition_attributes
             .append(&mut self.attributes);
         self.body_slots.clear();
+        self.publish_resolution();
         self.package.reserve_definition_prefix(self.identity_next);
         self.base = self.package.num_defs();
         Ok(owners)
@@ -608,6 +616,12 @@ impl fmt::Display for DefinitionBatch<'_, '_> {
         f.write_str(") (attributes")?;
         for attribute in &self.attributes {
             write!(f, " {attribute}")?;
+        }
+        f.write_str(") (resolution")?;
+        let mut evidence: Vec<_> = self.resolution.iter().collect();
+        evidence.sort_by_key(|(id, _)| (id.owner, id.local_id));
+        for (id, value) in evidence {
+            write!(f, " (use-site (id {id}) {value})")?;
         }
         f.write_str("))")
     }

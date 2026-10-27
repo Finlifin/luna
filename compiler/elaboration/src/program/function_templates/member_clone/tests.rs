@@ -150,3 +150,70 @@ fn remaps_generated_definition_references_without_rewriting_external_ones() {
             E::ResolvedDef { def_id, .. } if def_id == expected));
     }
 }
+
+#[test]
+fn cloned_resolution_remaps_both_candidate_roles_and_publishes_atomically() {
+    let arena = HirArena::new();
+    let (mut source, member) = fixture(&arena, false);
+    let site = HirId::new(member, ItemLocalId::new(2));
+    let original_container = DefId::new(0, 8);
+    let original_member = DefId::new(0, 9);
+    let generated_container = DefId::new(0, 18);
+    let generated_member = DefId::new(0, 19);
+    let external = DefId::new(1, 9);
+    source.member_projections.insert(site, original_member);
+    source.deferred_member_projections.insert(
+        site,
+        vec![(original_container, original_member), (external, external)].into(),
+    );
+    source.member_access.insert(site, Vec::new().into());
+    let mut destination = source.clone();
+    let mut batch = hir::definitions::DefinitionBatch::new(&mut destination);
+    let owner = batch.reserve().unwrap();
+    let draft = clone_member(
+        &source,
+        &arena,
+        member,
+        owner,
+        &HashMap::from([
+            (original_container, generated_container),
+            (original_member, generated_member),
+        ]),
+        &mut 1000,
+    )
+    .unwrap();
+    let generated_site = draft.bindings[&site];
+    batch
+        .define(
+            OwnerInfo {
+                node: OwnerNode::Item(arena.alloc_item(draft.item)),
+                nodes: OwnerNodes::new(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    for (id, body) in draft.bodies {
+        batch.body(id, body).unwrap();
+    }
+    batch.set_resolution(draft.resolution);
+    batch
+        .publish_checked(&mut 1000, |candidate| {
+            assert_eq!(
+                candidate.member_projections[&generated_site],
+                generated_member
+            );
+            assert_eq!(
+                &*candidate.deferred_member_projections[&generated_site],
+                &[
+                    (generated_container, generated_member),
+                    (external, external)
+                ]
+            );
+            assert!(candidate.member_access[&generated_site].is_empty());
+            assert_eq!(candidate.member_projections[&site], original_member);
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+    assert_eq!(source.member_projections.len(), 1);
+}

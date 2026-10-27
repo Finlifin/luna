@@ -7,6 +7,7 @@ use hir::{Expr, ExprKind as E, HirArena, HirId, ItemKind, OwnerId, Package};
 use std::collections::HashMap;
 mod member_clone;
 mod patterns;
+mod resolution;
 pub(super) use member_clone::{ClonedMember, clone_member};
 
 pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Package<'h>, Error> {
@@ -118,17 +119,15 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
         for (id, body) in rebind.bodies.drain(..) {
             package.insert_body(id, body);
         }
-        for (old, new) in &rebind.bindings {
-            if let Some(value) = source.member_projections.get(old) {
-                package.member_projections.insert(*new, *value);
+        for (id, evidence) in rebind.resolution()? {
+            if let Some(value) = evidence.projection {
+                package.member_projections.insert(id, value);
             }
-            if let Some(value) = source.deferred_member_projections.get(old) {
-                package
-                    .deferred_member_projections
-                    .insert(*new, value.clone());
+            if let Some(value) = evidence.deferred {
+                package.deferred_member_projections.insert(id, value);
             }
-            if let Some(value) = source.member_access.get(old) {
-                package.member_access.insert(*new, value.clone());
+            if let Some(value) = evidence.access {
+                package.member_access.insert(id, value);
             }
         }
         let mut body_value = package

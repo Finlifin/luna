@@ -145,3 +145,52 @@ python3 -B development/check.py --timeout 900 -- test --release -p luna --test t
 ```
 
 Report: `/tmp/luna-tools-ngy1qj9z/result.json`. `git diff --check` passed.
+
+## Transactional resolver evidence
+
+Generated method drafts now carry member projections, deferred static-member
+candidates and receiver access candidates. Both container and member identities
+inside each candidate are remapped through the generation identity map; external
+identities and candidate order are preserved. Missing evidence stays distinct
+from an explicitly empty candidate list. Copying candidates consumes the same
+rebind fuel as the generated method, and does not mutate source metadata.
+
+DefinitionBatch accepts the complete evidence collection with `set_resolution`.
+It validates draft ownership, duplicate keys, invalid definition identities and
+collisions with published metadata before making changes. `prepare_checked` and
+`publish_checked` expose this evidence in the candidate package before the
+ordinary checking callback executes. Rejection, budget exhaustion, or dropping a
+prepared candidate leaves published tables unchanged. Successful commit consumes
+the evidence with the definitions, bodies and attributes. Publication dumps show
+resolution evidence in S-expression form, sorted by use-site identity.
+
+Signature-template expansion now uses the same evidence-copying helper with an
+empty definition mapping. This retains existing resolver behavior while making
+candidate copying resource-bounded.
+
+This does not yet implement generation-input substitution, staged parameter
+identity allocation, attribute cloning, strategy selection or derive execution.
+Those remain necessary before the method draft can replace a derive request.
+
+Checks in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir --test definitions
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib member_clone
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+- Definition publication: 20 passed, exit 0, `/tmp/luna-tools-_xpiaiax/result.json`.
+- Member cloning: 4 passed, exit 0, `/tmp/luna-tools-lzelifas/result.json`.
+- Formatting: exit 0, `/tmp/luna-tools-ykjmb3ds/result.json`.
+- Initial compilation required sorting HirId by its owner/local components and
+  exposing the evidence helper to its parent module; both were fixed before the
+  successful runs.
+
+Signature-template regressions also passed (18 tests, exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test test_templates signature_template
+```
+
+Report: `/tmp/luna-tools-ncpdebmu/result.json`. `git diff --check` passed.

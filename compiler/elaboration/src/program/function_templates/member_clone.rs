@@ -3,11 +3,13 @@ use super::*;
 use hir::common::DefId;
 
 /// This is an unpublished draft. Callers must transfer resolver metadata using
-/// `bindings`, publish bodies and run ordinary implementation checks.
+/// `bindings`, publish bodies and run ordinary implementation checks. Resolver
+/// evidence must be staged using DefinitionBatch::set_resolution.
 pub(in crate::program) struct ClonedMember<'h> {
     pub item: hir::Item<'h>,
     pub bodies: Vec<(hir::BodyId, hir::Body<'h>)>,
     pub bindings: HashMap<HirId, HirId>,
+    pub resolution: Vec<(HirId, hir::definitions::ResolutionEvidence)>,
 }
 
 pub(in crate::program) fn clone_member<'h>(
@@ -96,14 +98,16 @@ pub(in crate::program) fn clone_member<'h>(
             Some(body) => ItemKind::Fn(signature, body),
             None => ItemKind::FnDeclaration(signature),
         };
-        Ok(item)
+        let resolution = rebind.resolution()?;
+        Ok((item, resolution))
     })();
     *fuel = rebind.budget;
-    let item = result?;
+    let (item, resolution) = result?;
     Ok(ClonedMember {
         item,
         bodies: rebind.bodies,
         bindings: rebind.bindings,
+        resolution,
     })
 }
 

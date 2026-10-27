@@ -830,3 +830,106 @@ fn deriver_bodies_must_exist_before_publication() {
     );
     assert_eq!(batch.published().num_defs(), 0);
 }
+
+#[test]
+fn resolution_evidence_is_checked_before_atomic_publication() {
+    use hir::definitions::{PublicationError, ResolutionEvidence};
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(module(&arena, owner, vec![]), None, None)
+        .unwrap();
+    let site = HirId::new(owner, ItemLocalId::new(1));
+    let member = DefId::new(2, 9);
+    let container = DefId::new(2, 8);
+    let evidence = ResolutionEvidence {
+        projection: Some(member),
+        deferred: Some(vec![(container, member)].into()),
+        access: Some(Vec::new().into()),
+    };
+    batch.set_resolution(vec![(site, evidence)]);
+    assert!(batch.to_string().contains("(access (candidates))"));
+    assert!(batch.publish(&mut 0).is_err());
+    assert!(batch.published().member_projections.is_empty());
+    let result = batch.publish_checked(&mut 1000, |candidate| {
+        assert_eq!(candidate.member_projections[&site], member);
+        assert_eq!(
+            &*candidate.deferred_member_projections[&site],
+            &[(container, member)]
+        );
+        assert!(candidate.member_access[&site].is_empty());
+        Err::<(), _>("reject generated implementation")
+    });
+    assert!(matches!(result, Err(PublicationError::Check(_))));
+    assert_eq!(batch.published().num_defs(), 0);
+    assert!(batch.published().member_access.is_empty());
+    let prepared = batch
+        .prepare_checked(&mut 1000, |_| Ok::<_, ()>(()))
+        .unwrap();
+    assert_eq!(prepared.candidate().member_projections[&site], member);
+    drop(prepared);
+    assert!(batch.published().member_projections.is_empty());
+    batch
+        .publish_checked(&mut 1000, |_| Ok::<_, ()>(()))
+        .unwrap();
+    assert_eq!(batch.published().member_projections[&site], member);
+    assert!(batch.published().member_access[&site].is_empty());
+    // Committing consumes evidence, so an empty later transaction cannot replay it.
+    batch.publish(&mut 1000).unwrap();
+}
+
+#[test]
+fn resolution_evidence_rejects_foreign_duplicate_and_invalid_entries() {
+    use hir::definitions::ResolutionEvidence;
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(module(&arena, owner, vec![]), None, None)
+        .unwrap();
+    let site = HirId::new(owner, ItemLocalId::new(1));
+    let foreign = HirId::make_owner(OwnerId::new(LocalDefId::new(99)));
+    for (entries, message) in [
+        (
+            vec![(foreign, ResolutionEvidence::default())],
+            "resolution target not defined in this batch",
+        ),
+        (
+            vec![
+                (site, ResolutionEvidence::default()),
+                (site, ResolutionEvidence::default()),
+            ],
+            "duplicate resolution target",
+        ),
+        (
+            vec![(
+                site,
+                ResolutionEvidence {
+                    projection: Some(DefId::INVALID),
+                    ..Default::default()
+                },
+            )],
+            "invalid resolution definition",
+        ),
+        (
+            vec![(
+                site,
+                ResolutionEvidence {
+                    access: Some(vec![(DefId::new(0, 1), DefId::INVALID)].into()),
+                    ..Default::default()
+                },
+            )],
+            "invalid resolution candidate",
+        ),
+    ] {
+        batch.set_resolution(entries);
+        assert_eq!(batch.publish(&mut 1000).unwrap_err().kind, message);
+        assert_eq!(batch.published().num_defs(), 0);
+        assert!(batch.published().member_projections.is_empty());
+    }
+    batch.set_resolution(Vec::new());
+    batch.publish(&mut 1000).unwrap();
+}
