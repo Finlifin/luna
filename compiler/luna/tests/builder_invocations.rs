@@ -1958,3 +1958,52 @@ fn enum_reflection_evaluates_each_subject_once() {
         );
     }
 }
+
+#[test]
+fn public_builder_uses_invocation_ranges_for_distinct_reflected_subjects() {
+    let fixture = Fixture::new(
+        r#"
+        typealias Type=.Type'builtin;
+        struct First {flag:bool,letter:.char'builtin}
+        struct Second {letter:.char'builtin}
+        comptime fn Columns(subject:Type,name:.Symbol'builtin)->Type {
+            let names=meta.struct_field_names(subject);
+            let types=meta.struct_field_types(subject);
+            var builder=meta.StructBuilder.new(.name=name);
+            inline for index in 0..meta.length(names) {
+                builder.add_field(names[index],types[index]);
+            }
+            builder.Build()
+        }
+        typealias FirstColumns=Columns(First,.FirstColumns);
+        typealias SecondColumns=Columns(Second,.SecondColumns);
+        comptime fn inspect()->bool {
+            let first=meta.struct_field_types(FirstColumns);
+            let second=meta.struct_field_types(SecondColumns);
+            meta.length(first)==2 and first[0]==bool and first[1]==.char'builtin
+                and meta.length(second)==1 and second[0]==.char'builtin
+        }
+        fn run()->bool {
+            let first=FirstColumns {flag:true,letter:'x'};
+            let second=SecondColumns {letter:'y'};
+            first.flag and first.letter=='x' and second.letter=='y'
+        }
+    "#,
+    );
+    let (Artifact::Nir(package), observed, _) = fixture.invoke_meta("inspect").unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(observed, Value::Bool(true));
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let generated: Vec<_> = package
+        .structs
+        .iter()
+        .filter(|item| item.name == "FirstColumns" || item.name == "SecondColumns")
+        .collect();
+    assert_eq!(generated.len(), 2);
+    assert_ne!(generated[0].declaration, generated[1].declaration);
+    assert!(generated.iter().all(|item| item.declaration.package == 900));
+}

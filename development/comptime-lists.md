@@ -308,3 +308,34 @@ variadic 类型函数的输入。
 或隐式 List-to-runtime 转换。内部 append_range 只在边界检查后调用。
 当前 append 仍检查累计结果，因此这些操作尚不承诺线性时间；它们也不
 自动注册列表模式协议或提供具名 rest 的切片语义。
+
+## Library traversal through invocation-time inline ranges
+
+`foreach`, `fold`, `map`, `any`, `all`, `find`, `filter` and the private
+`append_range` helper now use inline Integer ranges instead of manually
+incrementing mutable cursors. Each operation still caches the input length,
+reads the original immutable snapshot, preserves callback state/order and
+retains the existing output-slot append behavior. This is not a complexity or
+performance claim: immutable result validation remains unchanged.
+
+An end-to-end public StructBuilder regression supplies two distinct reflected
+subjects to one ordinary-parameter `Columns` function. Its inline range reads
+field names and Types, builds two independent nominal declarations in the
+requesting package, and delivers aliases usable by runtime construction and
+field access. The range suite also checks return from either endpoint (skipping
+later producers/body) and return from the iteration guard.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_list_operations --test builder_invocations --test comptime_inline_loops
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- 90 tests passed: list operations 26, builder invocations 53, comptime ranges
+  11; exit 0, `/tmp/luna-tools-_ga8gp0i/result.json`.
+- Formatting: `/tmp/luna-tools-y365frgq/result.json`.
+- List coverage includes empty/short-circuit behavior, callback phases,
+  producer evaluation order, mutable closure state, immutable snapshots,
+  optional and normal-form domains, failure recovery and budget exhaustion.

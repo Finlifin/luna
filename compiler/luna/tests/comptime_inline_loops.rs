@@ -194,3 +194,33 @@ fn exact_integer_ranges_do_not_require_machine_sized_boundaries() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn range_boundary_returns_skip_remaining_producers_and_body() {
+    for range in ["do {return true;0}..fail()", "0..do {return true;0}"] {
+        assert_eq!(
+            invoke(&format!(
+                "comptime fn fail()->.Integer'builtin {{while true {{}}}}
+             comptime fn run()->bool {{inline for i in {range} {{fail();}} false}}"
+            )),
+            Value::Bool(true),
+            "{range}"
+        );
+    }
+}
+
+#[test]
+fn range_guard_return_keeps_the_function_return_target() {
+    assert_eq!(
+        invoke(
+            r#"
+        comptime fn scan(count:.Integer'builtin)->bool {
+            inline for i if do {if i==2 {return true;} true} in 0..count {()}
+            false
+        }
+        comptime fn run()->bool {scan(4) and not scan(2)}
+    "#
+        ),
+        Value::Bool(true)
+    );
+}

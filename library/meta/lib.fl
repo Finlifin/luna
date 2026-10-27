@@ -81,10 +81,8 @@ pub comptime fn append(target: *List<T>, value: T) where T {
 pub comptime fn foreach(values: List<T>, visit: %c comptime fn(T))
 where T, c: (.Type'builtin).vars.Closure {
     let count = length(values);
-    var index: .Integer'builtin = 0;
-    while index < count {
+    inline for index in 0..count {
         visit(values[index]);
-        index = index + 1;
     }
 }
 
@@ -92,10 +90,8 @@ pub comptime fn fold(values: List<T>, initial: A, combine: %c comptime fn(A, T) 
 where T, A, c: (.Type'builtin).vars.Closure {
     let count = length(values);
     var accumulator = initial;
-    var index: .Integer'builtin = 0;
-    while index < count {
+    inline for index in 0..count {
         accumulator = combine(accumulator, values[index]);
-        index = index + 1;
     }
     accumulator
 }
@@ -109,10 +105,8 @@ pub comptime fn map(values: List<T>, transform: %c comptime fn(T) -> U) -> List<
 where T, U, c: (.Type'builtin).vars.Closure {
     let count = length(values);
     var output: List<U> = [];
-    var index: .Integer'builtin = 0;
-    while index < count {
+    inline for index in 0..count {
         append(output.ref, transform(values[index]));
-        index = index + 1;
     }
     output
 }
@@ -125,10 +119,8 @@ where T, U, c: (.Type'builtin).vars.Closure {
 pub comptime fn any(values: List<T>, pred: %c comptime fn(T) -> bool) -> bool
 where T, c: (.Type'builtin).vars.Closure {
     let count = length(values);
-    var index: .Integer'builtin = 0;
-    while index < count {
+    inline for index in 0..count {
         if pred(values[index]) { return true; }
-        index = index + 1;
     }
     false
 }
@@ -136,10 +128,8 @@ where T, c: (.Type'builtin).vars.Closure {
 pub comptime fn all(values: List<T>, pred: %c comptime fn(T) -> bool) -> bool
 where T, c: (.Type'builtin).vars.Closure {
     let count = length(values);
-    var index: .Integer'builtin = 0;
-    while index < count {
+    inline for index in 0..count {
         if not pred(values[index]) { return false; }
-        index = index + 1;
     }
     true
 }
@@ -147,11 +137,9 @@ where T, c: (.Type'builtin).vars.Closure {
 pub comptime fn find(values: List<T>, pred: %c comptime fn(T) -> bool) -> ?T
 where T, c: (.Type'builtin).vars.Closure {
     let count = length(values);
-    var index: .Integer'builtin = 0;
-    while index < count {
+    inline for index in 0..count {
         let value = values[index];
         if pred(value) { return value; }
-        index = index + 1;
     }
     null
 }
@@ -164,13 +152,11 @@ pub comptime fn filter(values: List<T>, pred: %c comptime fn(T) -> bool) -> List
 where T, c: (.Type'builtin).vars.Closure {
     let count = length(values);
     var output: List<T> = [];
-    var index: .Integer'builtin = 0;
-    while index < count {
+    inline for index in 0..count {
         let value = values[index];
         if pred(value) {
             append(output.ref, value);
         }
-        index = index + 1;
     }
     output
 }
@@ -208,10 +194,8 @@ pub comptime fn replace_range(values: List<T>, start: .Integer'builtin,
 -- Internal traversal; callers establish the half-open interval bounds first.
 comptime fn append_range(target: *List<T>, values: List<T>,
     start: .Integer'builtin, end: .Integer'builtin) where T {
-    var index = start;
-    while index < end {
+    inline for index in start..end {
         append(target, values[index]);
-        index = index + 1;
     }
 }
 
