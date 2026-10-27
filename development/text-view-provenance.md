@@ -101,3 +101,59 @@ diff check. Runtime text-region transport is still not implemented.
 The existing str/Copy regression also passed (one test, three source shapes;
 `/tmp/luna-tools-578yimc5/result.json`, exit 0). Explicit Copy evidence still does
 not authorize dropping the backing-storage dependency.
+
+## Named-body region dependency analysis
+
+`memory::infer_text_regions` now derives a separate `TextRegionSummary` for a
+concrete named runtime body. Origins are either immutable static storage (literal
+or Symbol/enum name views) or a caller parameter plus its logical text-leaf path.
+They never refer to the local slot holding a copy of the view. The summary has a
+stable S-expression Display and retains the concrete instance arguments.
+
+The analysis transports dependencies through local bindings, branches and
+returns, ordinary named calls, record/tuple fields, optional and error payloads,
+newtype conversion edges and captured closure environments. Calls substitute
+callee parameter origins with the actual argument origins; swapping arguments
+therefore swaps their dependencies. Generic instances use declaration binder
+sorts and their complete concrete arguments. A closure construction transports
+its captured views without pretending to invoke the closure.
+
+Explicit byte reads and text comparisons collect character-region read
+obligations, including reads in discarded call results. Length queries observe
+the descriptor without reading character bytes. These read sets do not include
+implicit destructor footprints and are not complete access permissions. Cleanup
+composition, region liveness and invalidation checks are still required.
+
+Completed summaries are reused only inside one immutable query. Missing code,
+indirect calls, recursion, pointer transfers, mutation, default-argument transport,
+pattern matching, loops, error-row repacking and explicit program contracts remain
+rejected in this analysis. They are never converted into static or empty-origin
+evidence. The existing runtime resource checker still rejects unsupported text
+views; this new analysis has not replaced that gate or exported the iterator.
+
+The distinction matters: returning an input region describes a dependency, not a
+proof that its backing owner survives. A subsequent integration must bind those
+origins to live caller regions and compose cleanup before granting any operation.
+
+### Region dependency validation
+
+Working directory: `/home/fin/luna`.
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All nine tests passed (`/tmp/luna-tools-gjzc4pmf/result.json`, exit 0): six
+region-summary tests, one source layout test and two iteration prototype tests.
+The summary tests exercise named-call substitution, discarded reads, text
+comparison reads, descriptor-only length queries, optional absence, error
+payloads, nested newtype conversions, generic instances and closure captures.
+They also check budget failure/recovery, immutable package input and rejection
+of recursive, indirect and mutation transfers. The prototype still verifies
+unchecked execution separately from the required resource-checker rejection.
+Formatting passed (`/tmp/luna-tools-0108jmy_/result.json`, exit 0).
+
+This stage does not validate native text iteration or owner lifetime safety;
+neither is enabled by the new summary API.

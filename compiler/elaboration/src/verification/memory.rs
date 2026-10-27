@@ -3,6 +3,7 @@
 //! not a certificate for termination, functional specifications, or escape safety.
 mod cleanup;
 mod method_contracts;
+mod text_regions;
 use super::pattern_facts::{constant_bool, known_pattern, outer_guards};
 pub use method_contracts::{
     MethodInvocation, MethodSummary, infer_method_in_package, infer_method_with_code_inputs,
@@ -18,6 +19,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
 };
+pub use text_regions::{TextRegionOrigin, TextRegionSummary, infer_text_regions};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParameterPlace {

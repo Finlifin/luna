@@ -1,0 +1,197 @@
+//! Backing-region return/read dependencies, separate from runtime permission.
+#[path = "support/execution.rs"]
+#[allow(dead_code)]
+mod support;
+use elaboration::verification::memory::{self, TextRegionOrigin as Origin};
+use std::collections::BTreeSet;
+
+fn infer(
+    package: &nir::program::Package,
+    name: &str,
+    fuel: usize,
+) -> Result<memory::TextRegionSummary, String> {
+    let id = package
+        .functions
+        .iter()
+        .find(|function| function.name == name)
+        .unwrap()
+        .declaration;
+    memory::infer_text_regions(package, id, &[], &mut { fuel })
+}
+fn parameter(parameter: usize, fields: &[usize]) -> Origin {
+    Origin::Parameter {
+        parameter,
+        fields: fields.to_vec(),
+    }
+}
+
+#[test]
+fn named_calls_substitute_view_dependencies_instead_of_local_slot_identity() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn echo(value:str)->str {value}
+        fn pick(flag:bool,a:str,b:str)->str {if flag {return a;} b}
+        fn reordered(first:str,second:str,flag:bool)->str {pick(flag,second,echo(first))}
+        fn literal()->str {echo(\"literal\")}
+        fn symbol(tag:.Symbol'builtin)->str {tag'tag_name}
+        fn observed(flag:bool,value:str)->str {let local=echo(value); if flag {local} else {\"static\"}}"
+    );
+    let before = package.clone();
+    let summary = infer(&package, "reordered", 100_000).unwrap();
+    assert_eq!(
+        summary.returned.as_ref().unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[]), parameter(1, &[])])
+    );
+    for name in ["literal", "symbol"] {
+        assert_eq!(
+            infer(&package, name, 100_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([Origin::Static])
+        );
+    }
+    assert_eq!(
+        infer(&package, "observed", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
+    );
+    assert!(
+        summary
+            .to_string()
+            .contains("(parameter-text-region 0 (fields))")
+    );
+    assert_eq!(package, before);
+    assert!(infer(&package, "reordered", 1).is_err());
+    assert_eq!(infer(&package, "reordered", 100_000).unwrap(), summary);
+}
+
+#[test]
+fn aggregate_and_optional_results_keep_region_paths_and_absence() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        struct Packet {first:str,second:str}
+        fn field(packet:Packet)->str {packet.second}
+        fn pair(a:str,b:str)->Packet {Packet {first:b,second:a}}
+        fn selected(a:str,b:str)->str {field(pair(a,b))}
+        fn maybe(flag:bool,value:str)->?str {if flag {value} else {null}}
+        fn absent()->?str {null}
+        fn error_view(value:str)->!str bool {error value}",
+    );
+    assert_eq!(
+        infer(&package, "field", 100_000).unwrap().returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[1])])
+    );
+    assert_eq!(
+        infer(&package, "selected", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[])])
+    );
+    let maybe = infer(&package, "maybe", 100_000).unwrap();
+    assert!(
+        maybe
+            .to_string()
+            .contains("(view (fields (variant 1) 0) (origins (parameter-text-region 1 (fields))))"),
+        "{maybe}"
+    );
+    assert!(
+        infer(&package, "absent", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()
+            .is_empty()
+    );
+    let failure = infer(&package, "error_view", 100_000).unwrap();
+    assert!(
+        failure.to_string().contains("(view (fields (variant 1) 0)"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn byte_reads_export_region_obligations_through_discarded_results() {
+    let package = support::compile(&format!(
+        "{} mod text {{ {} }}
+        fn reads(a:str,b:str)->?u8 {{let ignored=text.byte(a,0);text.byte(b,0)}}
+        fn static_read()->?u8 {{text.byte(\"x\",0)}}
+        fn equal(a:str,b:str)->bool {{a == b}}
+        fn length(value:str)->u64 {{text.byte_length(value)}}",
+        include_str!("../../../library/builtin/primitives.fl"),
+        include_str!("../../../library/builtin/text_bytes.fl")
+    ));
+    assert_eq!(
+        infer(&package, "reads", 100_000).unwrap().reads,
+        BTreeSet::from([parameter(0, &[]), parameter(1, &[])])
+    );
+    assert_eq!(
+        infer(&package, "static_read", 100_000).unwrap().reads,
+        BTreeSet::from([Origin::Static])
+    );
+    assert_eq!(
+        infer(&package, "equal", 100_000).unwrap().reads,
+        BTreeSet::from([parameter(0, &[]), parameter(1, &[])])
+    );
+    assert!(infer(&package, "length", 100_000).unwrap().reads.is_empty());
+}
+
+#[test]
+fn unresolved_and_recursive_transfers_do_not_become_static_evidence() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn looped(value:str)->str {looped(value)}
+        fn indirect(f:fn(str)->str,value:str)->str {f(value)}
+        fn mutated(value:str)->str {var slot=value;slot=\"other\";slot}
+        fn good(value:str)->str {value}",
+    );
+    for (name, expected) in [
+        ("looped", "fixed-point contract"),
+        ("indirect", "named concrete callee"),
+        ("mutated", "transfer is not implemented"),
+    ] {
+        let error = infer(&package, name, 100_000).unwrap_err();
+        assert!(error.contains(expected), "{name}: {error}");
+    }
+    assert_eq!(
+        infer(&package, "good", 100_000).unwrap().returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[])])
+    );
+}
+
+#[test]
+fn generic_and_newtype_transport_preserve_the_original_region() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        newtype Inner = str; newtype Outer = Inner;
+        fn echo(value:T)->T where T {value}
+        fn wrapped(value:str)->Outer {value.as(Inner).as(Outer)}
+        fn unwrapped(value:Outer)->str {value.as(Inner).as(str)}
+        fn roundtrip(value:str)->str {echo<str>(unwrapped(wrapped(value)))}
+        fn generic(value:str)->str {echo<str>(value)}",
+    );
+    for name in ["roundtrip", "generic"] {
+        assert_eq!(
+            infer(&package, name, 100_000).unwrap().returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(0, &[])])
+        );
+    }
+    let wrapped = infer(&package, "wrapped", 100_000).unwrap();
+    assert_eq!(
+        wrapped.returned.unwrap()[&vec![0, 0]],
+        BTreeSet::from([parameter(0, &[])])
+    );
+}
+
+#[test]
+fn returned_closure_carries_captured_text_dependency_without_invoking_it() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn capture(value:str)->%{value:str} fn()->str {|| value}",
+    );
+    let summary = infer(&package, "capture", 100_000).unwrap();
+    assert_eq!(
+        summary.returned.unwrap()[&vec![0]],
+        BTreeSet::from([parameter(0, &[])])
+    );
+    assert!(summary.reads.is_empty());
+}
