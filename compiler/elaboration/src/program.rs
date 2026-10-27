@@ -6747,7 +6747,16 @@ impl Checker<'_, '_> {
                     value
                         .rewrite_types(&mut |ty| call_binding.substitute(ty))
                         .map_err(|e| error(expr.span, e.to_string()))?;
-                    value.rewrite_types(&mut |ty| self.callable_input_view(ty, expr.span))?;
+                    value.rewrite_types(&mut |ty| {
+                        // The traversal includes clause value terms as well as
+                        // annotations. A pending value is not a Type projection;
+                        // the selected comptime instance supplies it at invocation.
+                        if ty.sort() == Sort::Type {
+                            self.callable_input_view(ty, expr.span)
+                        } else {
+                            self.copy_alias_type(ty, expr.span)
+                        }
+                    })?;
                     value
                 };
                 arguments.push(n::CallArgument {

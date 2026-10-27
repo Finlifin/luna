@@ -2,6 +2,41 @@
 use super::*;
 
 impl Interpreter<'_> {
+    pub(super) fn evaluate_instance_default(
+        &mut self,
+        construction: SourceRange,
+        argument: &nir::program::CallArgument,
+        callee: &Value,
+        defaults: &mut Environment,
+        caller: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let Value::Closure(closure) = callee else {
+            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(construction)));
+        };
+        let (declaration, arguments) = closure
+            .declaration_instance()
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(construction)))?;
+        let definition = self
+            .functions
+            .get(&declaration)
+            .copied()
+            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(construction)))?;
+        let binders = self.input_binders(&definition.type_parameters);
+        self.charge_copy_work(Some(argument.value.source), |fuel| {
+            nir::copy_budget::charge_substitution(&argument.value, &binders, arguments, fuel)
+        })?;
+        let value = argument
+            .value
+            .instantiate_parameters(&binders, arguments)
+            .map_err(|_| self.failure(ErrorKind::Type, Some(argument.value.source)))?;
+        let prepared = nir::program::CallArgument {
+            parameter: argument.parameter,
+            value,
+            is_default: true,
+        };
+        self.evaluate_default(construction, &prepared, defaults, caller)
+    }
+
     pub(super) fn eval_comptime_function_instance(
         &mut self,
         expr: &Expr,

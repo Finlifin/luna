@@ -35,10 +35,6 @@ impl Checker<'_, '_> {
             || !args
                 .iter()
                 .all(|arg| matches!(arg, Arg::Positional(_) | Arg::Named(..) | Arg::Expand(_)))
-            || sig
-                .params
-                .iter()
-                .any(|param| matches!(param.ty.kind, TyParamKind::Optional(..)))
         {
             return Ok(None);
         }

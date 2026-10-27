@@ -333,3 +333,54 @@ fn inherited_clause_slots_cannot_be_supplied_by_the_caller() {
         assert!(error.contains("argument"), "{inputs}: {error}");
     }
 }
+
+#[test]
+fn ordinary_defaults_use_the_selected_comptime_clause_snapshot() {
+    assert_eq!(
+        invoke(
+            "
+        comptime fn choose(.value:bool=flag)->bool where flag:bool {value}
+        comptime fn run()->bool {
+            var flag=true;
+            let first=choose<flag>();
+            flag=false;
+            first and not choose<flag>() and choose<flag>(.value=true)
+        }
+    "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn ordinary_defaults_specialize_type_and_value_clauses() {
+    assert_eq!(
+        invoke(
+            "
+        comptime fn choose(.value:T=seed)->T where T,seed:T {value}
+        comptime fn run()->bool {let flag=true;choose<bool,flag>()}
+    "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn ordinary_defaults_see_prepared_arguments_and_inherited_clauses() {
+    assert_eq!(invoke("
+        comptime fn outer()->bool where inherited:bool {
+            comptime fn inner(value:bool,.result:bool=value and flag and inherited)->bool where flag:bool {result}
+            let local=true;inner<local>(true)
+        }
+        comptime fn run()->bool {outer<true>() and not outer<false>()}
+    "),Value::Bool(true));
+}
+
+#[test]
+fn explicit_ordinary_input_runs_after_clause_snapshot() {
+    assert_eq!(invoke("
+        comptime fn change(flag:*bool)->bool {flag.* = false;true}
+        comptime fn choose(input:bool,.value:bool=flag and input)->bool where flag:bool {value}
+        comptime fn run()->bool {var flag=true;let result=choose<flag>(change(flag.ref));result and not flag}
+    "),Value::Bool(true));
+}

@@ -160,8 +160,16 @@ outer instance, while different outer instances produce independent snapshots.
 This uses the existing lexical staged-input representation; it does not add an
 invocation environment for capturing ordinary comptime function parameters.
 
-The route still excludes optional ordinary parameters. Callable signatures and
-clause domains cannot depend on value-clause
+Ordinary parameter defaults are prepared using the selected callable instance.
+Definition-side preparation substitutes known Type clauses; remaining clause
+values stay symbolic. At invocation the VM substitutes the frozen instance
+arguments into the default, charging copy/substitution work before evaluating it
+in the existing prepared-parameter scope. Explicit inputs still execute first;
+changing a source local during an ordinary argument does not change its already
+frozen clause snapshot. Explicit overrides skip default evaluation. The existing
+default stability, phase, ordering and cleanup checks remain in place.
+
+Callable signatures and clause domains cannot depend on value-clause
 binders. Open functions, quoted bodies and more general dependent signatures
 retain their existing elaboration paths; this stage does not claim their dynamic
 local-value support is complete.
@@ -209,6 +217,22 @@ After aligning the default-cycle key with the local clause slot, the final
 at O0/O3 (`/tmp/luna-host-examples-b3uvnywp/summary.json`), and workspace
 formatting passed (`/tmp/luna-tools-l07eqbqk/result.json`). Commands use the same
 check, host example and formatting entrypoints described above; all exited 0.
+
+Ordinary-default integration validation in `/home/fin/luna`:
+`python3 -B development/check.py --timeout 900 -- test --release -p luna
+--test comptime_clause_inputs --test default_calls` passed 67 tests (24 + 43),
+`/tmp/luna-tools-dkrerx2l/result.json`. The first combined run exposed value
+rigids incorrectly entering associated Type normalization. Default traversal now
+preserves value terms for instance substitution while normalizing Type terms.
+Before that final frontend correction, 166 VM unit tests, 79 luna unit tests and
+527 CMTT tests passed in `/tmp/luna-tools-xu6i8wj2/result.json`; that combined
+command exited 101 because the four new source cases failed, and is not recorded
+as an overall pass. Native defaults/overrides passed O0/O3
+(`/tmp/luna-host-examples-2r0hwxjx/summary.json`) and final workspace formatting
+passed (`/tmp/luna-tools-7nm09mi_/result.json`).
+Final CMTT regression also passed all 527 tests using `python3 -B
+development/check.py --timeout 900 -- test --release -p luna --test cmtt`
+(`/tmp/luna-tools-3gz17vq3/result.json`, exit 0).
 
 ### Schema Type evidence
 

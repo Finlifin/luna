@@ -8266,6 +8266,7 @@ impl<'a> Interpreter<'a> {
         } else {
             None
         };
+        let dynamic_defaults = matches!(callee.kind, K::ComptimeFunctionInstance { .. });
         let callee_source = callee.source;
         // Static function identities carry no owned callee environment. A
         // synthesized trait-method node can share its enclosing call's source
@@ -8319,12 +8320,22 @@ impl<'a> Interpreter<'a> {
                 return Err(this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
             }
             let value = if argument.is_default {
-                prepared_value!(this.evaluate_default(
-                    expr.source,
-                    argument,
-                    &mut default_scope,
-                    environment
-                ))
+                if dynamic_defaults {
+                    prepared_value!(this.evaluate_instance_default(
+                        expr.source,
+                        argument,
+                        &callee,
+                        &mut default_scope,
+                        environment
+                    ))
+                } else {
+                    prepared_value!(this.evaluate_default(
+                        expr.source,
+                        argument,
+                        &mut default_scope,
+                        environment
+                    ))
+                }
             } else {
                 prepared_value!(this.eval(&argument.value, environment))
             };
