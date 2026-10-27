@@ -2835,6 +2835,7 @@ impl Builder<'_> {
                 | K::BuildEnum(value)
                 | K::EnumStructure { subject: value, .. }
                 | K::ObjectQuery { subject: value, .. }
+                | K::ObjectEdit { subject: value, .. }
                 | K::StructFieldNames(value)
                 | K::BitVecType(value)
                 | K::IntegerNegate(value)
@@ -3210,6 +3211,7 @@ impl Builder<'_> {
             | K::BuildEnum(value)
             | K::EnumStructure { subject: value, .. }
             | K::ObjectQuery { subject: value, .. }
+            | K::ObjectEdit { subject: value, .. }
             | K::StructFieldNames(value)
             | K::BitVecType(value)
             | K::IntegerNegate(value)

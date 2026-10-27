@@ -22,8 +22,8 @@ copy/visit/type-rewrite/phase/materialization coverage. Runtime queries reject.
 
 CMTT data reconstruction now uses the existing typed Object constant path rather
 than attempting unsupported normal-term encoding. Nested entries retain their
-types; active pointer payloads still reject. Mutation APIs, normal-form input
-encoding and a cheap borrowed query path remain unfinished.
+types; active pointer payloads still reject. Functional editing is described
+below; normal-form input encoding and a cheap borrowed query path remain unfinished.
 
 Validation in `/home/fin/luna`:
 
@@ -42,6 +42,43 @@ Targeted formatting and `git diff --check` pass. Initial source failures exposed
 missing target context for the private typed query and an ambiguous test Object
 literal; the private entry now takes an explicit Type operand. The first native
 attempt exposed the generator Object reconstruction gap, fixed above.
+
+### Functional Object editing from source
+
+`meta.object_concat`, `object_append`, `object_replace` and `object_remove`
+return new ordered Objects. Concatenation preserves duplicate keys; append
+accepts a dynamic optional Symbol key; replacement keeps the key and position
+but stores the new value's actual domain. Removal shifts the remaining entries.
+The VM checks bounds and replacement domains, charges container movement, key
+allocation and type description copying, and leaves input snapshots unchanged.
+ObjectEdit has S-expression display and the same traversal, substitution,
+materialization and phase coverage as ObjectQuery. These APIs do not imply
+constant-time editing, normal-term encoding, or arbitrary definition publication.
+
+The native example exposed a contextual literal bug: `.enabled` passed to
+`?Symbol` was treated as an enum path. Symbol literal checking now recognizes
+optional Symbol destinations and preserves nested optional layers; nominal enum
+path resolution remains separate. Tests cover dynamic and literal keys, changed
+payload domains, nested optionals, bounds, evaluation order, early return,
+malformed VM inputs, failure recovery and runtime rejection.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna -p nir
+  -p comptime_interpretor --lib --test library_meta_objects --test copy_budget
+  --test phases --test type_rewrite`: exit 0, 310 tests
+  (`/tmp/luna-tools-kkp_af2p/result.json`).
+- After the optional Symbol fix, `python3 -B development/check.py --timeout 900
+  -- test --release -p luna --test library_meta_objects --test native_optional
+  --test enum_groups`: exit 0, 30 tests
+  (`/tmp/luna-tools-g4gvsipt/result.json`).
+- `python3 -B development/host_examples.py object-edits --release-driver
+  --compare-optimization`: O0/O3 pass
+  (`/tmp/luna-host-examples-kbtmly9u/summary.json`).
+
+Targeted rustfmt and `git diff --check` pass. The first source run failed because
+the fixture lacked a char binding; the first native run exposed the optional
+Symbol issue above. Both are corrected in the passing evidence.
 
 ### Schema Type evidence
 

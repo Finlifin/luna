@@ -426,6 +426,23 @@ fn nested_shared_closure_rewrite_uses_a_small_worker_stack() {
 
 #[test]
 fn struct_reflection_charges_subject_copy_before_allocation() {
+    for operation in [
+        nir::program::ObjectEditKind::Concat,
+        nir::program::ObjectEditKind::Append,
+        nir::program::ObjectEditKind::Replace,
+        nir::program::ObjectEditKind::Remove,
+    ] {
+        let expression = expr(K::ObjectEdit {
+            subject: Box::new(large()),
+            operation,
+        });
+        check(&expression);
+        assert!(
+            expression
+                .to_string()
+                .contains(&format!("(object-edit (operation {operation})"))
+        );
+    }
     for query in [
         nir::program::ObjectQueryKind::Length,
         nir::program::ObjectQueryKind::Key,

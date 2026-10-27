@@ -489,6 +489,7 @@ fn charge_node(
                     | K::BuildEnum(value)
                     | K::EnumStructure { subject: value, .. }
                     | K::ObjectQuery { subject: value, .. }
+                    | K::ObjectEdit { subject: value, .. }
                     | K::StructFieldNames(value)
                     | K::BitVecType(value)
                     | K::FloatNegate(value)

@@ -815,6 +815,25 @@ impl fmt::Display for EffectHandler {
     }
 }
 
+/// Functional editing of ordered heterogeneous Objects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectEditKind {
+    Concat,
+    Append,
+    Replace,
+    Remove,
+}
+impl fmt::Display for ObjectEditKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Concat => "concat",
+            Self::Append => "append",
+            Self::Replace => "replace",
+            Self::Remove => "remove",
+        })
+    }
+}
+
 /// Ordered Object observations. Indexed queries use a checked argument packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObjectQueryKind {
@@ -919,6 +938,10 @@ pub enum ExprKind {
     EnumStructure {
         subject: Box<Expr>,
         query: EnumStructureQuery,
+    },
+    ObjectEdit {
+        subject: Box<Expr>,
+        operation: ObjectEditKind,
     },
     ObjectQuery {
         subject: Box<Expr>,
@@ -3092,6 +3115,9 @@ impl fmt::Display for ExprKind {
             Self::EnumStructure { subject, query } => {
                 write!(f, "(enum-structure (query {query}) {subject})")
             }
+            Self::ObjectEdit { subject, operation } => {
+                write!(f, "(object-edit (operation {operation}) {subject})")
+            }
             Self::ObjectQuery { subject, query } => {
                 write!(f, "(object-query (query {query}) {subject})")
             }
@@ -3452,6 +3478,7 @@ impl Expr {
                     | ExprKind::BuildEnum(_)
                     | ExprKind::EnumStructure { .. }
                     | ExprKind::ObjectQuery { .. }
+                    | ExprKind::ObjectEdit { .. }
                     | ExprKind::StructFieldNames(_)
                     | ExprKind::BitVecType(_)
                     | ExprKind::IntegerNegate(_)
@@ -3536,6 +3563,7 @@ impl Expr {
                 | ExprKind::BuildEnum(value)
                 | ExprKind::EnumStructure { subject: value, .. }
                 | ExprKind::ObjectQuery { subject: value, .. }
+                | ExprKind::ObjectEdit { subject: value, .. }
                 | ExprKind::StructFieldNames(value)
                 | ExprKind::BitVecType(value)
                 | ExprKind::IntegerNegate(value)
@@ -3919,6 +3947,7 @@ impl Expr {
             | ExprKind::BuildEnum(value)
             | ExprKind::EnumStructure { subject: value, .. }
             | ExprKind::ObjectQuery { subject: value, .. }
+            | ExprKind::ObjectEdit { subject: value, .. }
             | ExprKind::StructFieldNames(value)
             | ExprKind::BitVecType(value)
             | ExprKind::IntegerNegate(value)

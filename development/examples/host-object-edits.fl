@@ -1,0 +1,23 @@
+{-
+  Assemble metadata from independent fragments, then replace a domain and
+  remove an entry before selecting runtime code. Earlier snapshots stay intact.
+-}
+use primitives.Type;
+use primitives.Symbol;
+use primitives.u8;
+
+comptime fn configured() -> <|-bool> {
+    let original = {enabled:true, .example};
+    let appended = meta.object_append(original, false, .key = .enabled);
+    let replaced = meta.object_replace(appended, 1, u8);
+    let removed = meta.object_remove(replaced, 2);
+    let combined = meta.object_concat(removed, original);
+    let result = meta.object_length(combined) == 4
+        and meta.ObjectEntryType(original, 1) == Symbol
+        and meta.ObjectEntryType(combined, 1) == Type
+        and (meta.object_value<Type>(combined, 1) match {T? => T == u8, null => false})
+        and (meta.object_value<bool>(combined, 2) match {v? => v, null => false});
+    '(result)
+}
+
+fn run() -> bool { ~<configured()> }

@@ -42,12 +42,39 @@ typed read 匹配条目保存的声明域身份，不作为一般子类型或类
 无键条目混为一谈。读取 `?bool` 条目时，返回类型是 `??bool`，存在但为空的
 payload 保留其独立层。输入按普通调用顺序各求值一次，查询仍受 invocation
 预算限制。当前查询沿用普通值复制路径，不承诺常数时间访问大型对象。
-对象修改接口和 Object 作为 normal-form 参数的冻结编码尚未完成。
+Object 作为 normal-form 参数的冻结编码尚未完成。
 
 CMTT 生成器也可以保存和查询局部 Object，再据此选择 quoted code。其物化
 保留每个条目的类型、顺序与键，不把对象伪装成 normal term；嵌套 Object
 使用同一路径。对象中的活动存储指针不能借此成为可物化的数据快照。
 原生示例见 [host-object-queries.fl](../../development/examples/host-object-queries.fl)。
+
+编辑接口返回新的 Object，保留源对象快照：
+
+| 接口 | 行为 |
+| --- | --- |
+| `object_concat(left, right)` | 按左、右顺序拼接，保留重复键 |
+| `object_append(object, value, .key = null)` | 追加普通项；提供 Symbol key 时追加命名项 |
+| `object_replace(object, index, value)` | 保留原位置和 key，改用新值及其类型 |
+| `object_remove(object, index)` | 删除指定项，后续条目向前移动 |
+
+```flurry
+comptime fn configured() -> bool {
+    let source = { flag: true, 'x' };
+    let extended = meta.object_append(source, false, .key = .flag);
+    let replaced = meta.object_replace(extended, 1, true);
+    let result = meta.object_remove(replaced, 2);
+    meta.object_length(result) == 2
+        and meta.ObjectEntryType(source, 1) == char
+        and meta.ObjectEntryType(result, 1) == bool
+}
+```
+
+替换和删除的负数、越界索引使 invocation 失败。替换可改变条目类型，
+不会将新值转换到旧类型；后续 typed read 使用新类型。编辑沿用普通参数
+求值及复制规则，容器搬移、类型标签复制和动态 key 分配计入预算。
+CMTT 与原生 O0/O3 示例见
+[host-object-edits.fl](../../development/examples/host-object-edits.fl)。
 
 `StructBuilder` 提供具体结构体的字段构造接口。它是 comptime 草稿，
 `new()` 默认使用名称 `.Generated`，也可以通过 `.name` 指定诊断名称。

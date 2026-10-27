@@ -255,3 +255,90 @@ fn public_alias_does_not_allow_runtime_transport_or_wrong_values() {
         assert!(compile(&source).is_err(), "{body}");
     }
 }
+
+#[test]
+fn object_edits_preserve_snapshots_order_keys_and_replacement_domains() {
+    let value = invoke("
+        comptime fn run()->bool {
+            let original={flag:true, 'x', flag:false};
+            let key:.Symbol'builtin=.flag;
+            let appended=meta.object_append(original,.u8'builtin,.key = key);
+            let positional=meta.object_append(appended,false);
+            let replaced=meta.object_replace(positional,0,'z');
+            let removed=meta.object_remove(replaced,1);
+            let joined=meta.object_concat(removed,original);
+            meta.object_length(original)==3
+                and meta.object_length(joined)==7
+                and meta.ObjectEntryType(original,0)==bool
+                and meta.ObjectEntryType(replaced,0)==.char'builtin
+                and meta.ObjectEntryType(joined,2)==.Type'builtin
+                and (meta.object_key(joined,0) match {v?=>v==.flag,null=>false})
+                and (meta.object_key(joined,2) match {v?=>v==.flag,null=>false})
+                and (meta.object_key(joined,3) match {_?=>false,null=>true})
+                and (meta.object_value<.char'builtin>(joined,0) match {v?=>v=='z',null=>false})
+                and (meta.object_value<.Type'builtin>(joined,2) match {T?=>T==.u8'builtin,null=>false})
+                and (meta.object_value<bool>(joined,4) match {v?=>v,null=>false})
+                and (meta.object_value<bool>(replaced,0) match {_?=>false,null=>true})
+        }
+    ").unwrap();
+    assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn object_edits_check_indices_and_runtime_phase() {
+    for index in ["-1", "1", "9999999999999999999999999999999999"] {
+        for operation in [
+            format!("meta.object_remove(object,{index})"),
+            format!("meta.object_replace(object,{index},false)"),
+        ] {
+            let error = invoke(&format!(
+                "comptime fn run()->meta.Object {{let object={{flag:true}}; {operation}}}"
+            ))
+            .unwrap_err();
+            assert!(error.contains("IndexOutOfBounds"), "{error}");
+        }
+    }
+    let error=compile(&format!("mod meta {{{META}}} fn run()->meta.Object {{let object={{flag:true}};meta.object_remove(object,0)}}")).unwrap_err();
+    assert!(error.contains("comptime"), "{error}");
+}
+
+#[test]
+fn object_edits_evaluate_once_in_order_and_keep_optional_payloads() {
+    let value=invoke("
+        comptime fn make(state:*bool)->meta.Object {state.* = not state.*; let object={flag:true}; object}
+        comptime fn index(state:*bool)->.Integer'builtin {if state.* {state.* = false; return 0;} 9}
+        comptime fn run()->bool {
+            var state=false;
+            let absent:?bool=null;
+            let replaced=meta.object_replace(make(state.ref),index(state.ref),absent);
+            let empty=meta.object_remove(replaced,0);
+            let combined=meta.object_concat(empty,replaced);
+            not state and meta.object_length(empty)==0
+                and (meta.object_value<?bool>(combined,0) match {v?=>v match {_?=>false,null=>true},null=>false})
+        }
+    ").unwrap();
+    assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn object_edit_return_skips_later_inputs() {
+    assert_eq!(invoke("comptime fn run()->bool {meta.object_replace(do {return true;},do {while true {} 0},false);false}").unwrap(),Value::Bool(true));
+}
+
+#[test]
+fn literal_keys_receive_optional_symbol_context_without_enum_resolution() {
+    let value = invoke(
+        "
+        comptime fn nested(key:??.Symbol'builtin)->bool {
+            key match {inner?=>inner match {v?=>v==.flag,null=>false},null=>false}
+        }
+        comptime fn run()->bool {
+            let base={true};
+            let object=meta.object_append(base,false,.key = .flag);
+            nested(.flag) and (meta.object_key(object,1) match {v?=>v==.flag,null=>false})
+        }
+    ",
+    )
+    .unwrap();
+    assert_eq!(value, Value::Bool(true));
+}

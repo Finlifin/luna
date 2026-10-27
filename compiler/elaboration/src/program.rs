@@ -9352,6 +9352,9 @@ impl Checker<'_, '_> {
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "enum_group_paths" | "enum_variant_paths" | "enum_variant_shapes" | "enum_variant_field_names" | "enum_variant_field_types")) => {
                     self.enum_reflection_builtin(expr, callee, args, expected)
                 }
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "object_concat" | "object_append" | "object_replace" | "object_remove")) => {
+                    self.object_edit_builtin(expr, callee, args, expected)
+                }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "object_length" | "object_key" | "object_entry_type" | "object_value")) => {
                     self.object_query_builtin(expr, callee, args, expected)
                 }
@@ -10248,6 +10251,22 @@ impl Checker<'_, '_> {
                             "symbol awaits a contextual target before literal defaulting"));
                     }
                     let shape = expected.map(|ty| self.structural_type(ty, expr.span)).transpose()?;
+                    // A bare symbol can inhabit optional Symbol without being
+                    // interpreted as an enum path. Preserve every optional layer.
+                    if let Some(Term::Optional(_)) = &shape {
+                        let mut leaf = shape.as_ref().unwrap().clone();
+                        for _ in 0..128 {
+                            let Term::Optional(payload) = leaf else { break };
+                            leaf = self.structural_type(&payload, expr.span)?;
+                        }
+                        if leaf == p(P::Symbol) {
+                            let value = n::Expr {
+                                source: source(expr.span), ty: p(P::Symbol),
+                                kind: K::Literal(n::Literal::Symbol(name.as_str().to_owned())),
+                            };
+                            return self.inject_optional_value(value, expected.unwrap(), expr.span);
+                        }
+                    }
                     if expected.is_none() || shape.as_ref() == Some(&p(P::Symbol)) {
                         (p(P::Symbol), K::Literal(n::Literal::Symbol(name.as_str().to_owned())))
                     } else {
@@ -12035,6 +12054,7 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::BuildEnum(_)
         | K::EnumStructure { .. }
         | K::ObjectQuery { .. }
+        | K::ObjectEdit { .. }
         | K::StructFieldNames(_)
         | K::ListConcat(..)
         | K::TypeListIndex(..)

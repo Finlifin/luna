@@ -2,6 +2,76 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    pub(super) fn object_edit_builtin(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        use n::ObjectEditKind as O;
+        if self.runtime_value_context() || self.in_code_body {
+            return Err(error(expr.span, "Object edits require comptime invocation"));
+        }
+        let H::Builtin(name) = &callee.kind else {
+            unreachable!()
+        };
+        let operation = match name.as_str() {
+            "object_concat" => O::Concat,
+            "object_append" => O::Append,
+            "object_replace" => O::Replace,
+            "object_remove" => O::Remove,
+            _ => unreachable!(),
+        };
+        let count = if matches!(operation, O::Append | O::Replace) {
+            3
+        } else {
+            2
+        };
+        if args.len() != count || args.iter().any(|arg| !matches!(arg, Arg::Positional(_))) {
+            return Err(error(
+                expr.span,
+                "Object edit requires positional Object and edit operands",
+            ));
+        }
+        let mut fields = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            let Arg::Positional(value) = arg else {
+                unreachable!()
+            };
+            let domain = match index {
+                0 => Some(p(P::Object)),
+                1 => Some(match operation {
+                    O::Concat => p(P::Object),
+                    O::Append => Term::Optional(Box::new(p(P::Symbol))),
+                    _ => p(P::Integer),
+                }),
+                _ => None,
+            };
+            fields.push(self.expr(value, domain.as_ref())?);
+        }
+        let ty = if fields.iter().any(|field| is_never(&field.ty)) {
+            p(P::Never)
+        } else {
+            p(P::Object)
+        };
+        if let Some(expected) = expected {
+            self.require_expression(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            source: source(expr.span),
+            ty,
+            kind: K::ObjectEdit {
+                operation,
+                subject: Box::new(n::Expr {
+                    source: source(expr.span),
+                    ty: Term::Tuple(fields.iter().map(|field| field.ty.clone()).collect()),
+                    kind: K::Tuple(fields),
+                }),
+            },
+        })
+    }
+
     pub(super) fn object_query_builtin(
         &mut self,
         expr: &Expr<'_>,

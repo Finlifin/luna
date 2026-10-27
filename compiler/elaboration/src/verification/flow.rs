@@ -5462,6 +5462,7 @@ impl Walker<'_> {
             | K::BuildStruct(subject)
             | K::BuildEnum(subject)
             | K::ObjectQuery { subject, .. }
+            | K::ObjectEdit { subject, .. }
             | K::EnumStructure {
                 subject: subject, ..
             } => {

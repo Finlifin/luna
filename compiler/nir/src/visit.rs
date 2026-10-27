@@ -415,6 +415,7 @@ fn walk_roots<'a>(
                     | K::BuildEnum(value)
                     | K::EnumStructure { subject: value, .. }
                     | K::ObjectQuery { subject: value, .. }
+                    | K::ObjectEdit { subject: value, .. }
                     | K::StructFieldNames(value)
                     | K::BitVecType(value)
                     | K::IntegerNegate(value)
@@ -822,6 +823,7 @@ fn walk_mut(
                     | K::BuildEnum(value)
                     | K::EnumStructure { subject: value, .. }
                     | K::ObjectQuery { subject: value, .. }
+                    | K::ObjectEdit { subject: value, .. }
                     | K::StructFieldNames(value)
                     | K::BitVecType(value)
                     | K::IntegerNegate(value)

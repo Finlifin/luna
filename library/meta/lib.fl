@@ -28,6 +28,26 @@ pub pure comptime fn object_value(value: Object, index: .Integer'builtin) -> ?T 
     .object_value'builtin(T, value, index)
 }
 
+{-
+  Editing returns a new ordered Object. Duplicate keys remain distinct entries.
+  Replacement preserves the entry key and position, and records the new domain.
+-}
+pub pure comptime fn object_concat(left: Object, right: Object) -> Object {
+    .object_concat'builtin(left, right)
+}
+
+pub pure comptime fn object_append(object: Object, value: T, .key: ?.Symbol'builtin = null) -> Object where T {
+    .object_append'builtin(object, key, value)
+}
+
+pub pure comptime fn object_replace(object: Object, index: .Integer'builtin, value: T) -> Object where T {
+    .object_replace'builtin(object, index, value)
+}
+
+pub pure comptime fn object_remove(object: Object, index: .Integer'builtin) -> Object {
+    .object_remove'builtin(object, index)
+}
+
 pub pure comptime fn List<T> -> .Type'builtin {
     List<T>
 }
