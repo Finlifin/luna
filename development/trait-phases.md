@@ -42,7 +42,7 @@ of comptime implementation selection remains in force.
 
 The implementation index now has `insert_phase` and `select_phase`. Complementary
 contributions with identical alpha-bound normalized heads, ordered parameter
-domains, interface inputs and requirements share one relationship entry. Each
+domains and interface inputs, and equivalent requirements share one relationship entry. Each
 contribution retains its declaration identity. Ordinary `insert` keeps runtime
 behavior. Same-phase duplicates still participate in ordinary coherence; open
 interface identities cannot be paired. Insertion failure leaves the index and
@@ -54,8 +54,13 @@ without searching less precise candidates. Index and phase-result dumps include
 both relationship and contribution identities. This remains index-level work:
 source attribute application, phase-specific member completeness, shared
 associated-item checking, and executable dispatch are still unconnected. The
-pairing API expects already-normalized applicability predicates; it does not
-prove arbitrary logical equivalence between differently represented conditions.
+pairing API compares applicability conditions by bounded PTC proofs of both
+implications, with only the declaration binder scope and no caller assumptions.
+This accepts reordered/grouped conditions, redundant truths and equivalent
+logical forms without asserting that either condition holds at a call site.
+Head identity remains structural: this does not unfold normal-form bodies or
+infer equality from their implementations. Exhaustion or an undetermined proof
+leaves the index unchanged rather than publishing a separate competing relation.
 
 ## Remaining integration
 
@@ -108,3 +113,15 @@ open interfaces, stale queries and atomic budget retry. The preceding run
 capture against the library compiled before the scope fix; the final run includes
 that fix and passes its rejection regression. Workspace formatting passed
 (`/tmp/luna-tools-l2puwhb9/result.json`); `git diff --check` also passed.
+
+Condition-equivalence integration passed 90 tests (73 implementation and 17 phase
+tests) with the same targeted release command above
+(`/tmp/luna-tools-48ase5hb/result.json`, exit 0). Added checks distinguish
+bidirectional implication, one-way implication with a validated countermodel,
+and unvalidated type countermodels. The latter preserve the previous index and
+return an undetermined result. The earlier run
+(`/tmp/luna-tools-hzisjmlj/result.json`, exit 101) revealed two test expectations
+that incorrectly treated unvalidated countermodels as proved inequivalence;
+tests now explicitly require conservative rejection and unchanged query state.
+Budget exhaustion is checked across insufficient allowances and successful retry.
+Workspace format check passed (`/tmp/luna-tools-xrsyzwq0/result.json`).

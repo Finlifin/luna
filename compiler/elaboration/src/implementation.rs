@@ -42,6 +42,7 @@ pub enum Error {
     Ownership(OwnershipError),
     InvalidPhaseHead(String),
     AmbiguousPhaseRelationship,
+    UndeterminedPhaseRelationship(String),
 }
 fn spend(fuel: &mut usize) -> Result<(), Error> {
     *fuel = fuel.checked_sub(1).ok_or(Error::BudgetExhausted)?;

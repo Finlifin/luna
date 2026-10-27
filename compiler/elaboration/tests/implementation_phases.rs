@@ -182,12 +182,12 @@ fn requirement_binders_are_alpha_bound_without_capturing_free_identities() {
     separate
         .insert_phase(make(200, 1, 2), Runtime, Budget::default())
         .unwrap();
-    assert_eq!(
-        separate
-            .insert_phase(make(201, 2, 1), Comptime, Budget::default())
-            .unwrap(),
-        id(201)
-    );
+    let revision = separate.revision();
+    assert!(matches!(
+        separate.insert_phase(make(201, 2, 1), Comptime, Budget::default()),
+        Err(Error::UndeterminedPhaseRelationship(_))
+    ));
+    assert_eq!(separate.revision(), revision);
 }
 
 #[test]
@@ -369,4 +369,159 @@ fn unbound_requirement_slots_cannot_capture_the_relationship_binders() {
         Err(Error::InvalidPhaseHead(_))
     ));
     assert_eq!(index.revision(), revision);
+}
+
+#[test]
+fn logically_equivalent_conditions_share_a_relationship() {
+    use nir::program::TypePredicate as Q;
+    let mut index = Index::default();
+    let mut runtime = head(200, Some(1));
+    runtime.requirements = vec![Q::Equal(var(1), boolean()), Q::Bool(true)];
+    index
+        .insert_phase(runtime, Runtime, Budget::default())
+        .unwrap();
+    let mut comptime = head(201, Some(2));
+    comptime.requirements = vec![Q::And(vec![
+        Q::Bool(true),
+        Q::Equal(boolean(), var(2)),
+        Q::Equal(var(2), boolean()),
+    ])];
+    assert_eq!(
+        index
+            .insert_phase(comptime, Comptime, Budget::default())
+            .unwrap(),
+        id(200)
+    );
+    assert!(
+        matches!(index.select_phase(&resolve(&index), Comptime), PhaseSelection::Selected { contribution, .. } if contribution == id(201))
+    );
+}
+
+#[test]
+fn implication_in_only_one_direction_does_not_merge_conditions() {
+    use nir::program::TypePredicate as Q;
+    for reverse in [false, true] {
+        let mut index = Index::default();
+        let mut weak = head(200, Some(1));
+        weak.requirements = vec![Q::Bool(true)];
+        let mut strong = head(201, Some(2));
+        strong.requirements = vec![Q::Bool(false)];
+        let (first, second) = if reverse {
+            (strong, weak)
+        } else {
+            (weak, strong)
+        };
+        let second_id = second.declaration;
+        index
+            .insert_phase(first, Runtime, Budget::default())
+            .unwrap();
+        assert_eq!(
+            index
+                .insert_phase(second, Comptime, Budget::default())
+                .unwrap(),
+            second_id
+        );
+        assert_eq!(resolve(&index).selection, Selection::Selected(id(200)));
+    }
+}
+
+#[test]
+fn equivalence_solver_exhaustion_does_not_publish_a_separate_relationship() {
+    use nir::program::TypePredicate as Q;
+    let mut succeeded = false;
+    for steps in 0..1500 {
+        let mut index = Index::default();
+        let mut first = head(200, Some(1));
+        first.requirements = vec![Q::Equal(var(1), boolean())];
+        index
+            .insert_phase(first, Runtime, Budget::default())
+            .unwrap();
+        let revision = index.revision();
+        let mut second = head(201, Some(2));
+        second.requirements = vec![Q::Equal(boolean(), var(2))];
+        match index.insert_phase(
+            second.clone(),
+            Comptime,
+            Budget {
+                steps,
+                ..Budget::default()
+            },
+        ) {
+            Ok(relationship) => {
+                assert_eq!(relationship, id(200));
+                succeeded = true;
+                break;
+            }
+            Err(Error::BudgetExhausted) => {
+                assert_eq!(index.revision(), revision);
+                assert_eq!(
+                    index
+                        .insert_phase(second, Comptime, Budget::default())
+                        .unwrap(),
+                    id(200)
+                );
+            }
+            result => panic!("unexpected result: {result:?}"),
+        }
+    }
+    assert!(succeeded);
+}
+
+#[test]
+fn trait_conditions_allow_boolean_reordering_without_assuming_satisfaction() {
+    use nir::program::{TraitRequirement, TypePredicate as Q};
+    let requirement = |binder| {
+        Q::Trait(TraitRequirement {
+            subject: var(binder),
+            interface: id(400),
+            interface_arguments: vec![],
+        })
+    };
+    let mut index = Index::default();
+    let mut first = head(200, Some(1));
+    first.requirements = vec![requirement(1)];
+    index
+        .insert_phase(first, Runtime, Budget::default())
+        .unwrap();
+    let mut second = head(201, Some(2));
+    second.requirements = vec![Q::Not(Box::new(Q::Not(Box::new(requirement(2)))))];
+    assert_eq!(
+        index
+            .insert_phase(second, Comptime, Budget::default())
+            .unwrap(),
+        id(200)
+    );
+    assert!(matches!(
+        resolve(&index).selection,
+        Selection::Deferred { .. }
+    ));
+}
+
+#[test]
+fn unvalidated_countermodels_preserve_the_previous_relationship_world() {
+    use nir::program::TypePredicate as Q;
+    for reverse in [false, true] {
+        let mut index = Index::default();
+        let weak = head(200, Some(1));
+        let mut strong = head(201, Some(2));
+        strong.requirements = vec![Q::Equal(var(2), boolean())];
+        let (first, second) = if reverse {
+            (strong, weak)
+        } else {
+            (weak, strong)
+        };
+        index
+            .insert_phase(first, Runtime, Budget::default())
+            .unwrap();
+        let previous = resolve(&index);
+        assert!(matches!(
+            index.insert_phase(second, Comptime, Budget::default()),
+            Err(Error::UndeterminedPhaseRelationship(_))
+        ));
+        assert!(index.type_resolution_is_current(&previous));
+        assert!(matches!(
+            index.select_phase(&previous, Comptime),
+            PhaseSelection::Missing { .. }
+        ));
+    }
 }

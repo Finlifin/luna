@@ -47,7 +47,8 @@ impl fmt::Display for PhaseSelection {
 }
 
 /// Alpha-bound head identity. Normal-form bodies are never unfolded and free
-/// declaration identities are retained. This is identity, not type entailment.
+/// declaration identities are retained. Only applicability conditions use
+/// logical equivalence; heads themselves retain structural identity.
 #[derive(PartialEq, Eq)]
 struct Relationship {
     interface: Option<DeclarationId>,
@@ -55,6 +56,7 @@ struct Relationship {
     subject: Term,
     arguments: Vec<Term>,
     requirements: Vec<TypePredicate>,
+    sorts: Vec<Sort>,
 }
 
 fn predicate_scope(predicate: &TypePredicate) -> Result<(), nir::TypeError> {
@@ -134,7 +136,58 @@ impl Relationship {
                 .map(bind)
                 .collect::<Result<_, _>>()?,
             requirements,
+            sorts: parameters.iter().map(|parameter| parameter.sort).collect(),
         })
+    }
+
+    fn equivalent(&self, other: &Self, budget: &mut Budget) -> Result<bool, Error> {
+        if self.interface != other.interface
+            || self.domains != other.domains
+            || self.subject != other.subject
+            || self.arguments != other.arguments
+            || self.sorts != other.sorts
+        {
+            return Ok(false);
+        }
+        if self.requirements == other.requirements {
+            return Ok(true);
+        }
+        // Only the applicability conditions enter PTC. Head identity remains
+        // structural, and no caller premises may make two declarations appear
+        // equivalent in just one use site.
+        use crate::ptc::{Context, Formula, Outcome, UnknownReason};
+        let context = Context::with_scope(vec![self.sorts.clone()]);
+        for (premise, conclusion) in [
+            (&self.requirements, &other.requirements),
+            (&other.requirements, &self.requirements),
+        ] {
+            for predicate in premise.iter().chain(conclusion) {
+                nir::copy_budget::charge_predicate_substitution(
+                    predicate,
+                    &[],
+                    &[],
+                    &mut budget.steps,
+                )
+                .map_err(|_| Error::BudgetExhausted)?;
+            }
+            let premise = Formula::And(premise.iter().map(Formula::from_predicate).collect());
+            let conclusion = Formula::And(conclusion.iter().map(Formula::from_predicate).collect());
+            match context.prove_metered(premise.implies(conclusion), budget) {
+                Outcome::Entailed(_) => {}
+                Outcome::NotEntailed(_) => return Ok(false),
+                Outcome::Unknown {
+                    reason: UnknownReason::BudgetExhausted,
+                    ..
+                } => {
+                    return Err(Error::BudgetExhausted);
+                }
+                Outcome::Unknown { reason, .. } => {
+                    return Err(Error::UndeterminedPhaseRelationship(format!("{reason:?}")));
+                }
+                Outcome::IllFormed(message) => return Err(Error::InvalidPhaseHead(message)),
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -167,7 +220,7 @@ impl Index {
                 continue;
             }
             let other = Relationship::new(&entry.head, &mut budget)?;
-            if identity == other {
+            if identity.equivalent(&other, &mut budget)? {
                 if complement.replace(*id).is_some() {
                     return Err(Error::AmbiguousPhaseRelationship);
                 }
