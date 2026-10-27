@@ -292,7 +292,11 @@ impl Query<'_, '_> {
                             K::Variant { .. }
                                 | K::OptionalAbsent
                                 | K::OptionalPresent(_)
-                                | K::ErrorConvert { .. }
+                                | K::ErrorConvert {
+                                    conversion: nir::error_results::Conversion::Success
+                                        | nir::error_results::Conversion::Failure,
+                                    ..
+                                }
                         ) =>
                     {
                         Some(owned_constructor(value, self.fuel)?)
@@ -991,6 +995,25 @@ impl Query<'_, '_> {
                 } else {
                     project(regions, &[0], self.fuel)?
                 }))
+            }
+            K::ErrorConvert {
+                conversion:
+                    nir::error_results::Conversion::Embed | nir::error_results::Conversion::Product,
+                value,
+            } => {
+                let mapping = error_tag_mapping(expr, Some(self.package), self.fuel)?;
+                let Some(regions) = self.expr(value, locals, returned, next)? else {
+                    return Ok(None);
+                };
+                charge_regions(&regions, self.fuel)?;
+                let mut transported = Regions::new();
+                for (mut path, origins) in regions {
+                    // Repack the destination slot, not its backing origin:
+                    // caller parameter paths still identify the original input.
+                    remap_error_path(&mut path, &mapping, self.fuel)?;
+                    transported.entry(path).or_default().extend(origins);
+                }
+                Ok(Some(transported))
             }
             K::ErrorConvert { .. } => {
                 let (fields, tag) = owned_constructor(expr, self.fuel)?;

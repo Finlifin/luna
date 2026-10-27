@@ -690,3 +690,130 @@ fn let_patterns_export_success_bindings_and_isolate_failure_scope() {
         );
     }
 }
+
+#[test]
+fn error_row_transport_moves_view_slots_without_rewriting_origins() {
+    let package = support::compile_with_tuple(
+        "typealias str=.str'builtin;
+        fn widen(value:!str bool)->![bool,str] bool {value}
+        fn reordered(value:![bool,str] bool)->![str,bool] bool {value}
+        fn failed(text:str)->![bool,str] bool {widen(error text)}
+        enum Failure where T {Bad(T)} enum Other {Bad}
+        fn forward(value:Tuple<![Failure<T>,Other] bool,str>)->Tuple<![Failure<T>,Other] bool,str> where T {value}
+        fn product_slots(value:Tuple<![Other,Failure<str>] bool,str>)->Tuple<![Failure<str>,Other] bool,str> {forward(value)}
+        fn sample(text:str)->![Other,Failure<str>] bool {error Failure<str>.Bad(text)}
+        fn packet(text:str)->Tuple<Tuple<![Other,Failure<str>] bool,str>,str> {((sample(text),text),text)}
+        fn take(value:Tuple<Tuple<![Failure<T>,Other] bool,str>,str>)->str where T {let ((result,text),last)=value;text}
+        fn product(text:str)->str {take(packet(text))}",
+    );
+    let widening = package
+        .functions
+        .iter()
+        .find(|f| f.name == "widen")
+        .unwrap();
+    let nir::Term::Function { result, .. } = widening.signature.callable_signature() else {
+        panic!("signature")
+    };
+    let nir::Term::ErrorResult { errors, .. } = result.as_ref() else {
+        panic!("error result")
+    };
+    let tag = errors
+        .iter()
+        .position(|ty| *ty == nir::Term::Primitive(nir::Primitive::Str))
+        .unwrap()
+        + 1;
+    assert_ne!(tag, 1, "widening must relocate the text payload tag");
+    let summary = infer(&package, "widen", 100_000).unwrap();
+    assert_eq!(
+        summary.returned.unwrap()[&vec![usize::MAX, tag, 0]],
+        BTreeSet::from([parameter(0, &[usize::MAX, 1, 0])])
+    );
+    let failed = infer(&package, "failed", 100_000).unwrap();
+    assert_eq!(
+        failed.returned.unwrap()[&vec![usize::MAX, tag, 0]],
+        BTreeSet::from([parameter(0, &[])])
+    );
+    for name in ["reordered", "product_slots"] {
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        let nir::Term::Function { parameters, result } = function.signature.callable_signature()
+        else {
+            panic!("signature")
+        };
+        let input =
+            memory::borrowed_input_layout(Some(&package), &parameters[0].ty, &mut 100_000).unwrap();
+        let output = memory::borrowed_input_layout(Some(&package), result, &mut 100_000).unwrap();
+        let summary = infer(&package, name, 100_000).unwrap();
+        let returned = summary.returned.unwrap();
+        if name == "product_slots" {
+            assert_eq!(returned[&vec![1]], BTreeSet::from([parameter(0, &[1])]));
+        }
+        let origins: BTreeSet<_> = returned.values().flatten().cloned().collect();
+        let expected: BTreeSet<_> = input
+            .into_iter()
+            .map(|leaf| {
+                let memory::BorrowedInputLeaf::Text(leaf) = leaf else {
+                    panic!("text")
+                };
+                parameter(0, &leaf.input_fields)
+            })
+            .collect();
+        assert_eq!(origins, expected);
+        for leaf in output {
+            let memory::BorrowedInputLeaf::Text(leaf) = leaf else {
+                panic!("text")
+            };
+            assert!(returned.contains_key(&leaf.input_fields));
+        }
+        assert!(summary.reads.is_empty());
+    }
+    assert_eq!(
+        infer(&package, "product", 100_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[])])
+    );
+    // Source and concrete-body instantiation both canonicalize these rows.
+    // Retain an explicit Product node to exercise its identity plan without
+    // asserting that noncanonical concrete tag order survives instantiation.
+    let original = infer(&package, "product_slots", 100_000)
+        .unwrap()
+        .returned
+        .unwrap();
+    let mut transported = package.clone();
+    let function = transported
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "product_slots")
+        .unwrap();
+    let nir::Term::Function { result, .. } = &mut function.signature else {
+        panic!("function")
+    };
+    let nir::Term::NormalForm { arguments, .. } = result.as_mut() else {
+        panic!("Tuple")
+    };
+    let nir::Term::TypeListValue(fields) = &mut arguments[0] else {
+        panic!("fields")
+    };
+    let nir::Term::ErrorResult { errors, .. } = &mut fields[0] else {
+        panic!("row")
+    };
+    assert_eq!(errors.len(), 2);
+    errors.reverse();
+    let body = function.body.clone();
+    function.body = nir::program::Expr {
+        source: body.source,
+        ty: result.as_ref().clone(),
+        kind: nir::program::ExprKind::ErrorConvert {
+            conversion: nir::error_results::Conversion::Product,
+            value: Box::new(body),
+        },
+    };
+    let remapped = infer(&transported, "product_slots", 100_000)
+        .unwrap()
+        .returned
+        .unwrap();
+    assert_eq!(remapped, original);
+    assert!(infer(&package, "product", 1).is_err());
+    assert!(infer(&package, "product", 100_000).is_ok());
+}

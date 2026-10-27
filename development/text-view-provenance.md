@@ -126,7 +126,7 @@ composition, region liveness and invalidation checks are still required.
 
 Completed summaries are reused only inside one immutable query. Missing code,
 indirect calls, recursion, pointer transfers,
-effectful pattern observations, error-row repacking and explicit program contracts remain
+effectful pattern observations and explicit program contracts remain
 rejected in this analysis. They are never converted into static or empty-origin
 evidence. The existing runtime resource checker still rejects unsupported text
 views; this new analysis has not replaced that gate or exported the iterator.
@@ -413,3 +413,43 @@ New cases cover tuple/optional bindings, outer-name shadowing in else branches,
 known failure, retained failed-pattern reads, guards, lexical break, alternatives
 and computed-pattern exports. Formatting passed
 (`/tmp/luna-tools-0x96hmiw/result.json`, exit 0), as did the diff check.
+
+
+## Error-result representation transport
+
+Text dependencies now use the existing checked representation-transport plan for
+error-row embedding and product conversion. Destination paths follow the new
+error tags, including conversions nested in tuple/record products. Each leaf's
+origin continues to name its original caller input path; moving the view's slot
+never changes the identity of its backing storage. Colliding destination entries
+join origin sets rather than discarding evidence.
+
+This handles error-result representation changes, not the algebraic-effect ABI.
+It does not read characters or grant new lifetime permissions. Matching a
+transported value does not treat repacking as a constructor with a known tag.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_regions --test text_view_layout --test text_iteration_prototype
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test error_surface inferred_error
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All twenty text tests passed (`/tmp/luna-tools-f2g8lbwo/result.json`, exit 0).
+The widening fixture explicitly checks that the text tag changes while its
+parameter origin does not. Generic tuple transport, sibling fields and budget
+failure/recovery are also checked. An explicit NIR Product fixture exercises the
+identity plan after concrete-body instantiation canonicalizes its rows; it is
+not evidence of a nonidentity Product plan at that stage. Earlier fixture runs
+failed because they incorrectly expected noncanonical row order to survive
+source normalization or concrete instantiation (`/tmp/luna-tools-qwd2c5vs`,
+`/tmp/luna-tools-7surs1bb`, `/tmp/luna-tools-niax6xmk`, and
+`/tmp/luna-tools-uqwbm9_l`). Those assumptions were corrected without changing
+normalization or the transport implementation.
+
+The existing inferred-error regression group passed sixteen tests
+(`/tmp/luna-tools-lg74csqc/result.json`, exit 0), including nested product
+conversion and retained Tuple heads. Formatting passed
+(`/tmp/luna-tools-_6bm5tmh/result.json`, exit 0), as did the diff check.
