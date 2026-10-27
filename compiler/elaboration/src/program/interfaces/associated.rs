@@ -42,7 +42,7 @@ impl Checker<'_, '_> {
                 None
             };
             Ok(n::AssociatedContract {
-                phase: Default::default(),
+                phase: self.member_phases.get(&owner).copied().unwrap_or_default(),
                 declaration: declaration(self.package, &self.package_identities, owner),
                 name: item.ident.name.to_string(),
                 ty,

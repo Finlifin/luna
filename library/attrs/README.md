@@ -42,6 +42,21 @@ trait Code {
 }
 ```
 
-该例目前支持属性求值与合并检查。成员 phase 校验器会检查最终选中条目的
-目标和 Bool 域，并保留来源位置；将这些记录应用到两相实现选择尚未接线。
-属性的 trait phase 含义与函数的 `comptime` 关键字仍分别处理。
+成员 phase 校验器检查最终选中条目的目标和 Bool 域，并在接口构造前应用。
+属性的 trait phase 含义与函数的 `comptime` 关键字分别处理。例如：
+
+```flurry
+struct Subject {}
+
+comptime impl Code for Subject {
+    comptime fn value() -> bool { true }
+}
+
+comptime fn run() -> bool {
+    Subject.as(Code).value()
+}
+```
+
+单个 comptime 实现、泛型主体及该相可用的默认方法已有源码调用路径。
+同一关系的互补源码实现合并、跨相关联项检查，以及依赖尚未完成接口的
+属性计算仍待接通。ABI 等其他属性的正常编译仍会明确拒绝。

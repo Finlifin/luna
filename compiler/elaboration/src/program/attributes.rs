@@ -1,4 +1,4 @@
-//! Evaluate metadata for inspection without authorizing attribute consumers.
+//! Evaluate metadata once and apply supported phase properties before interfaces.
 use super::*;
 mod merge;
 mod phases;
@@ -53,6 +53,68 @@ pub fn inspect(
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn prepare_phase_attributes(
+        &mut self,
+        inspect_only: bool,
+    ) -> Result<Vec<EvaluatedAttribute>, Error> {
+        if self.package.definition_attributes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let attributes = self.evaluate_attributes()?;
+        let mut budget = comptime_runtime::Budget {
+            steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+            ..Default::default()
+        };
+        let before = budget.steps;
+        let result = (|| {
+            let selected = merge(&attributes, 1024, &mut budget)?;
+            let phases = member_phases(self.package, &selected, &mut budget)?;
+            for target in &selected {
+                for (key, value) in target.iter() {
+                    if !inspect_only && key != "comptime_phase" {
+                        return Err(MergeFailure {
+                            source: value.origin.source,
+                            message: format!(
+                                "elaboration is not implemented for definition attribute or modifier `{key}`"
+                            ),
+                        });
+                    }
+                }
+            }
+            Ok(phases)
+        })();
+        self.required_steps = self
+            .required_steps
+            .saturating_sub((before - budget.steps) as u64);
+        /*
+         * Raw inspection may expose Objects which are not legal merge inputs.
+         * It returns no executable package; only a complete valid phase plan
+         * influences its interface checks. Executable compilation never takes
+         * this diagnostic-only path.
+         */
+        if inspect_only && result.is_err() {
+            return Ok(attributes);
+        }
+        let phases = result.map_err(|failure| {
+            let mut diagnostic = error(Span::default(), failure.message);
+            diagnostic.source = failure.source;
+            diagnostic
+        })?;
+        self.member_phases = phases
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry.owner,
+                    match entry.phase {
+                        hir::ImplementationPhase::Runtime => n::TraitPhase::Runtime,
+                        hir::ImplementationPhase::Comptime => n::TraitPhase::Comptime,
+                    },
+                )
+            })
+            .collect();
+        Ok(attributes)
+    }
+
     pub(super) fn evaluate_attributes(&mut self) -> Result<Vec<EvaluatedAttribute>, Error> {
         let mut output = Vec::new();
         for attribute in &self.package.definition_attributes {

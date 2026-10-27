@@ -305,11 +305,10 @@ fn elaborate_with_attributes(
     }
     if let Some((span, feature)) = package.pending_semantics.iter().find(|(_, feature)| {
         feature != "test template CMTT expansion"
-            && !(inspect_attributes
-                && matches!(
-                    feature.as_str(),
-                    "definition attribute" | "definition configuration"
-                ))
+            && !matches!(
+                feature.as_str(),
+                "definition attribute" | "definition configuration"
+            )
     }) {
         return Err(error(
             *span,
@@ -323,22 +322,18 @@ fn elaborate_with_attributes(
             ),
         ));
     }
-    // Generated HIR need not have gone through source lowering, which normally
-    // supplies pending_semantics markers. Never silently ignore deferred
-    // attributes when a builder supplies their structured representation.
-    if let Some(attribute) = package
-        .definition_attributes
-        .first()
-        .filter(|_| !inspect_attributes)
-    {
-        return Err(error(
-            attribute.span,
-            if attribute.configuration_key.is_some() {
-                "elaboration is not implemented for definition configuration"
-            } else {
-                "elaboration is not implemented for definition attribute or modifier"
-            },
-        ));
+    if !inspect_attributes && package.definition_attributes.is_empty() {
+        if let Some((span, feature)) = package.pending_semantics.iter().find(|(_, feature)| {
+            matches!(
+                feature.as_str(),
+                "definition attribute" | "definition configuration"
+            )
+        }) {
+            return Err(error(
+                *span,
+                format!("elaboration is not implemented for {feature} without structured metadata"),
+            ));
+        }
     }
     let mut checker = Checker {
         next_definition_identity: package
@@ -388,6 +383,7 @@ fn elaborate_with_attributes(
         self_types: BTreeMap::new(),
         self_containers: BTreeMap::new(),
         interfaces_ready: false,
+        member_phases: BTreeMap::new(),
         active_early_inherent: BTreeSet::new(),
         checking_method_contract: false,
         pending_contract_projections: Vec::new(),
@@ -780,6 +776,7 @@ fn elaborate_candidate<'a, 'h>(
     }
     checker.signature_owner = None;
     checker.context = checker.nominal_context();
+    let prepared_attributes = checker.prepare_phase_attributes(inspect_attributes)?;
     let (traits, implementations) = checker.check_interfaces()?;
     checker.checked_traits = traits.clone();
     checker.checked_implementations = implementations.clone();
@@ -1218,11 +1215,7 @@ fn elaborate_candidate<'a, 'h>(
                 .collect(),
         });
     }
-    let attributes = if inspect_attributes {
-        checker.evaluate_attributes()?
-    } else {
-        Vec::new()
-    };
+    let attributes = prepared_attributes;
     checker.expand_test_templates(&mut output)?;
     // Required invocations in bodies, defaults and templates can publish types
     // after the initial layout snapshot. Consumers below need their complete
@@ -1439,6 +1432,7 @@ struct Checker<'a, 'h> {
     self_types: BTreeMap<OwnerId, Term>,
     self_containers: BTreeMap<OwnerId, OwnerId>,
     interfaces_ready: bool,
+    member_phases: BTreeMap<OwnerId, n::TraitPhase>,
     active_early_inherent: BTreeSet<String>,
     checking_method_contract: bool,
     pending_contract_projections: Vec<interfaces::PendingProjection>,

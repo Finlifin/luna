@@ -156,7 +156,7 @@ impl Checker<'_, '_> {
         self.locals = saved_locals;
         let program = program?;
         Ok(n::MethodContract {
-            phase: Default::default(),
+            phase: self.member_phases.get(&owner).copied().unwrap_or_default(),
             is_quote: signature.modifiers.is_quote,
             pure: signature.modifiers.is_pure,
             is_unsafe: signature.modifiers.is_unsafe,
@@ -329,7 +329,7 @@ impl Checker<'_, '_> {
             self.signature_owner = Some(owner);
             let (subject, instance, members) = match &item.kind {
                 ItemKind::Impl(def) => {
-                    if def.phase == hir::ImplementationPhase::Comptime {
+                    if def.phase == hir::ImplementationPhase::Comptime && def.trait_ref.is_none() {
                         return Err(error(
                             item.span,
                             "comptime implementation phase selection is not yet implemented",
@@ -425,26 +425,38 @@ impl Checker<'_, '_> {
                         "implementation subject eligibility is not established",
                     ));
                 }
-                index
-                    .insert(
-                        crate::implementation::ImplementationHead {
-                            parameter_types: self
-                                .trait_parameter_types
-                                .get(&owner)
-                                .cloned()
-                                .unwrap_or_default(),
-                            declaration: declaration(self.package, &self.package_identities, owner),
-                            interface: Some(interface),
-                            subject: subject.clone(),
-                            type_parameters: parameters.clone(),
-                            interface_arguments: interface_arguments.clone(),
-                            requirements: requirements.clone(),
-                        },
-                        Budget::default(),
-                    )
-                    .map_err(|e| {
+                let head = crate::implementation::ImplementationHead {
+                    parameter_types: self
+                        .trait_parameter_types
+                        .get(&owner)
+                        .cloned()
+                        .unwrap_or_default(),
+                    declaration: declaration(self.package, &self.package_identities, owner),
+                    interface: Some(interface),
+                    subject: subject.clone(),
+                    type_parameters: parameters.clone(),
+                    interface_arguments: interface_arguments.clone(),
+                    requirements: requirements.clone(),
+                };
+                let comptime = matches!(&item.kind, ItemKind::Impl(def) if def.phase == hir::ImplementationPhase::Comptime);
+                if comptime {
+                    let own = head.declaration;
+                    let relationship = index
+                        .insert_phase(head, hir::ImplementationPhase::Comptime, Budget::default())
+                        .map_err(|e| {
+                            error(item.span, format!("implementation admission failed: {e:?}"))
+                        })?;
+                    if relationship != own {
+                        return Err(error(
+                            item.span,
+                            "complementary source implementation merging is not yet implemented",
+                        ));
+                    }
+                } else {
+                    index.insert(head, Budget::default()).map_err(|e| {
                         error(item.span, format!("implementation admission failed: {e:?}"))
                     })?;
+                }
             } else {
                 crate::implementation::inherent_ownership(
                     &subject,
@@ -515,6 +527,12 @@ impl Checker<'_, '_> {
         {
             self.signature_owner = Some(owner);
             let item = self.package.item(owner).unwrap();
+            let phase = match &item.kind {
+                ItemKind::Impl(def) if def.phase == hir::ImplementationPhase::Comptime => {
+                    n::TraitPhase::Comptime
+                }
+                _ => n::TraitPhase::Runtime,
+            };
             let mut supplied = BTreeMap::new();
             let mut supplied_associated = BTreeMap::new();
             let mut supplied_names = BTreeSet::new();
@@ -556,7 +574,31 @@ impl Checker<'_, '_> {
             let mut methods = Vec::new();
             if let Some(interface) = interface {
                 for contract in &traits[&interface].methods {
+                    if contract.phase != phase {
+                        if supplied.contains_key(&contract.name) {
+                            return Err(error(
+                                item.span,
+                                format!(
+                                    "method `{}` belongs to the {} trait phase",
+                                    contract.name, contract.phase
+                                ),
+                            ));
+                        }
+                        continue;
+                    }
                     if let Some(actual) = supplied.get(&contract.name) {
+                        if members.iter().any(|owner| {
+                            self.member_phases
+                                .get(owner)
+                                .is_some_and(|declared| *declared != phase)
+                                && declaration(self.package, &self.package_identities, *owner)
+                                    == actual.declaration
+                        }) {
+                            return Err(error(
+                                item.span,
+                                "implementation member phase does not match its trait contract",
+                            ));
+                        }
                         if contract.is_quote && !actual.is_quote {
                             return Err(error(
                                 item.span,
@@ -939,6 +981,17 @@ impl Checker<'_, '_> {
             let associated = Vec::new();
             if let Some(interface) = interface {
                 let trait_definition = &traits[&interface];
+                if (phase == n::TraitPhase::Comptime && !trait_definition.associated.is_empty())
+                    || trait_definition
+                        .associated
+                        .iter()
+                        .any(|member| member.phase == n::TraitPhase::Comptime)
+                {
+                    return Err(error(
+                        item.span,
+                        "phase-specific associated implementation checking is not yet implemented",
+                    ));
+                }
                 let arguments: Vec<_> = std::iter::once(subject.clone())
                     .chain(interface_arguments.iter().cloned())
                     .collect();
@@ -1020,7 +1073,10 @@ impl Checker<'_, '_> {
                 ));
             }
             implementations.push(n::Implementation {
-                phases: Default::default(),
+                phases: n::ImplementationPhases {
+                    runtime: phase == n::TraitPhase::Runtime,
+                    comptime: phase == n::TraitPhase::Comptime,
+                },
                 associated_initializers: vec![],
                 parameter_types: parameters
                     .iter()
@@ -1592,6 +1648,24 @@ impl Checker<'_, '_> {
             .iter()
             .find(|i| i.declaration == selected)
             .unwrap();
+        if let Some(interface) = interface.as_ref() {
+            if let Some(contract) = self
+                .checked_traits
+                .iter()
+                .find(|t| t.declaration == interface.declaration)
+                .and_then(|t| t.methods.iter().find(|method| method.name == name))
+            {
+                if !implementation.phases.contains(contract.phase) {
+                    return Err(error(
+                        span,
+                        format!(
+                            "selected implementation lacks {} trait phase",
+                            contract.phase
+                        ),
+                    ));
+                }
+            }
+        }
         let body = implementation
             .methods
             .iter()
