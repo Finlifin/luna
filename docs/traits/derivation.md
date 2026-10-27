@@ -29,6 +29,27 @@ Deriver 可以声明参数，参数规则与 comptime fn 相同。参数依赖�
 
 生成物先完成普通实现检查，再成为可依赖的事实。检查包括归属、重叠、关联项、方法契约、phase 和依赖交付。策略不能以生成代码的名义跳过它们。
 
+策略自身的子句约束检查本次构造是否允许进行。例如：
+
+~~~flurry
+trait EnabledFlag {
+    fn enabled() -> bool;
+}
+
+derive fn enabled_only(allowed: bool) for EnabledFlag
+where requires allowed {
+    fn enabled() -> bool { true }
+}
+
+struct Enabled {}
+derive EnabledFlag.use(enabled_only(true)) for Enabled;
+-- enabled_only(false) 在构造阶段拒绝，不能发布生成实现。
+~~~
+
+输入完成供应后，前置条件先于策略体的计算检查；后置条件在本次构造计算完成时检查。即使策略没有普通参数或计算语句，也不能省略其条件。条件中的 `Self` 指向本次派生主体，因此 `requires Self :- Bound` 使用该主体的普通类型证据。
+
+这些是策略执行的条件，不会自动复制成每个生成方法的调用前置条件。生成方法仍分别声明并检查自己的契约。类型命题使用类型求解路径，布尔程序条件使用普通 comptime invocation 的契约检查；不能把后者转交给 PTC。
+
 ### 显式与默认选择
 
 显式 `.use(strategy)` 只选择指明的策略，并检查它是否适用于指定完整接口与主体；失败直接诊断，不暗中改用默认策略。

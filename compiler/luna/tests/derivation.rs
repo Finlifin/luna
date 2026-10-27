@@ -1044,3 +1044,123 @@ fn unused_strategy_callbacks_are_checked_but_not_invoked() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn strategy_requirements_validate_each_closed_invocation() {
+    let source = "trait Flag {fn flag()->bool;}
+        derive fn checked(value:bool) for Flag where requires value {fn flag()->bool {value}}
+        struct Subject {} derive Flag.use(checked(true)) for Subject;
+        fn run()->bool {Subject.as(Flag).flag()}";
+    let package = compile_with_strategy_bool_splice(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let bad = source.replace("checked(true)", "checked(false)");
+    let error = support::compile_with_protocols(&bad, &Default::default()).unwrap_err();
+    assert!(!error.contains("not implemented"), "{error}");
+    assert!(
+        error.contains("contract")
+            || error.contains("precondition")
+            || error.contains("requirement"),
+        "{error}"
+    );
+}
+
+#[test]
+fn zero_input_strategy_requirements_are_not_skipped() {
+    for condition in ["true", "false"] {
+        let source = format!(
+            "trait Flag {{}} derive fn checked for Flag where requires {condition} {{}} struct Subject {{}} derive Flag.use(checked) for Subject;"
+        );
+        let result = support::compile_with_protocols(&source, &Default::default());
+        if condition == "true" {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err();
+            assert!(!error.contains("not implemented"), "{error}");
+            assert!(
+                error.contains("contract")
+                    || error.contains("precondition")
+                    || error.contains("requirement"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn strategy_type_requirements_observe_the_requested_subject() {
+    let source = "trait Bound {} trait Flag {fn flag()->bool;}
+        derive fn checked for Flag where requires Self:-Bound {fn flag()->bool {true}}
+        struct Subject {} impl Bound for Subject {}
+        derive Flag.use(checked) for Subject;
+        fn run()->bool {Subject.as(Flag).flag()}";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let bad = source.replace("impl Bound for Subject {}", "");
+    assert!(support::compile_with_protocols(&bad, &Default::default()).is_err());
+}
+
+#[test]
+fn strategy_preconditions_run_before_generation_computations() {
+    let source = "trait Flag {} derive fn checked(value:bool) for Flag where requires value {while true {}} struct Subject {} derive Flag.use(checked(false)) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(
+        !error.contains("step budget exhausted") && !error.contains("not implemented"),
+        "{error}"
+    );
+    assert!(
+        error.contains("contract")
+            || error.contains("precondition")
+            || error.contains("requirement"),
+        "{error}"
+    );
+}
+
+#[test]
+fn strategy_requirements_keep_defaulted_and_named_input_bindings() {
+    let source = "trait Flag {fn flag()->bool;}
+        derive fn checked(implicit allowed:bool,.value:bool=allowed) for Flag
+        where requires allowed and value {fn flag()->bool {value}}
+        struct Subject {} derive Flag.use(checked(.allowed=true)) for Subject;
+        fn run()->bool {Subject.as(Flag).flag()}";
+    let package = compile_with_strategy_bool_splice(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for input in [".allowed=false", ".value=false,.allowed=true"] {
+        let bad = source.replace(".allowed=true)", &format!("{input})"));
+        let error = support::compile_with_protocols(&bad, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("contract")
+                || error.contains("precondition")
+                || error.contains("requirement"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn strategy_postconditions_remain_on_generation_execution() {
+    for condition in ["value", "not value"] {
+        let source = format!(
+            "trait Flag {{}} derive fn checked(value:bool) for Flag where requires value, ensures {condition} {{}} struct Subject {{}} derive Flag.use(checked(true)) for Subject;"
+        );
+        let result = support::compile_with_protocols(&source, &Default::default());
+        if condition == "value" {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err();
+            assert!(!error.contains("not implemented"), "{error}");
+            assert!(
+                error.contains("postcondition") || error.contains("contract"),
+                "{error}"
+            );
+        }
+    }
+}

@@ -904,3 +904,45 @@ git diff --check
   divergent callbacks; and missing/duplicate/ambiguous/wrong-stage rejection.
 - The former lambda-specific unsupported test now checks an unsupported quote
   flag, retaining a guard against silently dropping unimplemented protocols.
+
+## Closed strategy contracts
+
+Strategy clause constraints are cloned into the ordinary private comptime
+execution function, using fresh parameter identities and the cached subject
+binding for Self. Resolution evidence is collected after cloning constraints.
+A constraint-bearing strategy always receives an execution group, including
+zero-input, declaration-only bodies. Generic strategy clauses and generic
+request environments needing execution remain explicitly unsupported.
+
+Generation conditions are not copied to the generated methods. Type predicates
+continue through ordinary type requirements, and Boolean pre/postconditions
+remain program contracts. No program predicate is sent to PTC.
+
+Initial integration passed zero-input predicates and Self trait requirements,
+but failed input-dependent contracts with flow unsupported-construct errors.
+The private executor returns an Object of captures; mandatory contract checking
+exposed the missing Object construction case in flow analysis. Object producers
+are now checked in order while the resulting metadata remains abstract: no
+scalar, field or alias proof is invented for the Object itself. Unsupported
+Object observations keep their existing limits. Temporary diagnostic output
+used during investigation was removed.
+
+Validation in `/home/fin/luna` (final commands exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test derivation --test comptime_object_contracts --test staged_aggregate_contracts
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+- Derivation: 74 passed; Object contracts: 2 passed; existing staged aggregate
+  contracts: 31 passed. Report: `/tmp/luna-tools-bhowkj9o/result.json`.
+- Formatting: `/tmp/luna-tools-p2a_1n3r/result.json`.
+- Cases include per-invocation predicates, zero-input constraints, subject
+  trait evidence, implicit/default bindings, rejection before a divergent
+  strategy body, and postcondition proof/rejection. Ordinary Object tests
+  separately verify field producer ordering and retained postconditions.
+- After the Object fix, one test still incorrectly required an arbitrary input
+  Boolean as a postcondition without a premise. Ordinary definition checking
+  correctly rejected it; the corrected positive test supplies that premise,
+  and its negative variant requires the opposite postcondition.

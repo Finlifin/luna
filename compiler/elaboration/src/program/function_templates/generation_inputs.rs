@@ -45,6 +45,7 @@ pub(in crate::program) fn execution_draft<'h>(
     strategy: OwnerId,
     subject: &'h Expr<'h>,
     parameters: &[FnParam<'h>],
+    constraints: &[hir::clause::ClauseConstraint<'h>],
     input_stages: &HashMap<HirId, DefId>,
     locals: &[GenerationBinding<'h>],
     computations: &[&'h Expr<'h>],
@@ -164,16 +165,18 @@ pub(in crate::program) fn execution_draft<'h>(
             span,
             kind: E::Block(block),
         });
+        let constraints = rebind.constraints(constraints)?;
         Ok((
             ty as &_,
             value as &_,
             rebind.resolution()?,
             cloned_parameters,
             staged_parameters,
+            constraints,
         ))
     })();
     *fuel = rebind.budget;
-    let (ty, value, resolution, parameters, staged_parameters) = result?;
+    let (ty, value, resolution, parameters, staged_parameters, constraints) = result?;
     let body_id = hir::BodyId::new(synthetic(&mut rebind, 4));
     let parameters = arena.alloc_fn_param_slice(parameters);
     let mut draft = finish(rebind, "$derive_execute", span, ty, value, resolution);
@@ -188,7 +191,7 @@ pub(in crate::program) fn execution_draft<'h>(
                 ..Default::default()
             },
             clause_params: &[],
-            clause_constraints: &[],
+            clause_constraints: constraints,
             span,
         },
         body_id,

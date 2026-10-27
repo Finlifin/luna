@@ -36,7 +36,7 @@ fn members<'h>(
     let ItemKind::Deriver(def) = &item.kind else {
         return Err(error(item.span, "derive selection must name a strategy"));
     };
-    if !def.clause_params.is_empty() || !def.clause_constraints.is_empty() {
+    if !def.clause_params.is_empty() {
         return Err(unsupported(
             item.span,
             "strategy input and contract instantiation",
@@ -137,7 +137,9 @@ pub(super) fn expand<'h>(
             let ItemKind::Deriver(generator) = &source.item(strategy).unwrap().kind else {
                 unreachable!()
             };
-            if (!generator.parameters.is_empty() || !strategies[&strategy].computations.is_empty())
+            if (!generator.parameters.is_empty()
+                || !generator.clause_constraints.is_empty()
+                || !strategies[&strategy].computations.is_empty())
                 && !request.clause_params.is_empty()
             {
                 return Err(unsupported(
@@ -263,7 +265,10 @@ pub(super) fn expand<'h>(
         let mut input_stages = HashMap::new();
         let local_bindings = &strategies[&strategy].locals;
         let computations = &strategies[&strategy].computations;
-        let group = if generator.parameters.is_empty() && computations.is_empty() {
+        let group = if generator.parameters.is_empty()
+            && generator.clause_constraints.is_empty()
+            && computations.is_empty()
+        {
             None
         } else {
             let owner = batch.reserve().map_err(|e| error(span, e.to_string()))?;
@@ -450,6 +455,7 @@ pub(super) fn expand<'h>(
                     strategy,
                     subject,
                     generator.parameters,
+                    generator.clause_constraints,
                     &input_stages,
                     local_bindings,
                     computations,

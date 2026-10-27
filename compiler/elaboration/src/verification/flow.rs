@@ -5912,6 +5912,13 @@ impl Walker<'_> {
                 )));
                 result = self.materialize_aggregate(result, &expr.ty, state)?;
             }
+            K::Object { fields, .. } => {
+                // Metadata retains no scalar proof here. Its producers still
+                // run in order and must satisfy their own program contracts.
+                for field in fields {
+                    self.child(field, state, depth)?;
+                }
+            }
             K::Tuple(values)
             | K::AnonymousRecord { fields: values }
             | K::Record { fields: values, .. }
