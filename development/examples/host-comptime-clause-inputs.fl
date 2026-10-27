@@ -3,13 +3,16 @@
   callable keeps that snapshot after the caller changes its local variable.
 -}
 comptime fn select() -> bool where flag:bool { flag }
+comptime fn defaulted() -> bool where flag:bool, .inverse:bool=not flag { inverse }
 
 comptime fn configured() -> <|-bool> {
     var flag = true;
     let first = select<flag>;
     flag = false;
     let second = select<flag>;
-    let result = first() and not second();
+    let from_default = defaulted<flag>();
+    let overridden = defaulted<flag, .inverse=flag>();
+    let result = first() and not second() and from_default and not overridden;
     '(result)
 }
 

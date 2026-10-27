@@ -142,12 +142,20 @@ unfold normal-form heads. Runtime use remains rejected. NIR phase validation,
 dependency collection, substitution, copy accounting and Display traverse the
 new operands.
 
-The current frontend route requires all positional clause inputs explicitly,
-without inherited lexical inputs or optional ordinary parameters. Callable
-signatures and clause domains cannot depend on value-clause binders. Named and
-defaulted clauses, open functions, quoted bodies and more general dependent
-signatures retain their existing elaboration paths; this stage does not claim
-their dynamic local-value support is complete.
+The frontend route also accepts named optional clauses and tuple spreads using
+the existing nominal input preparation logic. Explicit inputs are bound once
+in source order, then omitted defaults are prepared in declaration order and
+declaration scope. Defaults reuse the saved preceding inputs; explicit overrides
+skip their default computation. The instance packet reads these bindings in
+parameter order. Returning while preparing any input skips later inputs,
+defaults and the call. Completed Type clauses trigger a final domain check even
+when a named Type input follows its value input or the caller is never invoked.
+
+The route still excludes inherited lexical inputs and optional ordinary
+parameters. Callable signatures and clause domains cannot depend on value-clause
+binders. Open functions, quoted bodies and more general dependent signatures
+retain their existing elaboration paths; this stage does not claim their dynamic
+local-value support is complete.
 
 Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 900 --
 test --release -p luna -p nir -p comptime_interpretor --lib --test
@@ -168,6 +176,19 @@ The existing CMTT and library protocol regression suites also pass (527 + 25
 tests, `/tmp/luna-tools-t6jiyu4l/result.json`), using `python3 -B
 development/check.py --timeout 900 -- test --release -p luna --test cmtt
 --test library_protocols`.
+
+Named/defaulted/spread clause routing validation in `/home/fin/luna`:
+`python3 -B development/check.py --timeout 900 -- test --release -p luna
+--test comptime_clause_inputs --test cmtt --test library_protocols` passed
+568 tests (16 + 527 + 25), `/tmp/luna-tools-8w2c01tg/result.json`.
+Coverage includes default declaration scope, saved input reuse, explicit override
+of a nonterminating default, spread producer cardinality, early return before
+defaults, duplicate/unknown names and unused-body rejection with a later Type
+input. The expanded native example passed O0/O3 using the same host command above
+(`/tmp/luna-host-examples-xjze21ce/summary.json`). The initial added fixtures had
+an undeclared Type alias and an omitted function return type; both were corrected
+before the final run. Final workspace formatting check passed at
+`/tmp/luna-tools-zh7a833z/result.json`.
 
 ### Schema Type evidence
 

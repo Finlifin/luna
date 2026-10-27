@@ -684,7 +684,7 @@ impl<'h> Checker<'_, 'h> {
         result
     }
 
-    fn bind_type_input(
+    pub(super) fn bind_type_input(
         &mut self,
         value: n::Expr,
         statements: &mut Vec<n::Expr>,

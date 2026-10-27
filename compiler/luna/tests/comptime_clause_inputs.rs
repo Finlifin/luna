@@ -149,3 +149,122 @@ fn pure_comptime_call_keeps_the_selected_declaration_behavior() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn named_clause_values_keep_source_order_before_ordinary_arguments() {
+    assert_eq!(invoke("
+        comptime fn mark(state:*.Integer'builtin,digit:.Integer'builtin)->bool {
+            state.* = state.* * 10 + digit; true
+        }
+        comptime fn choose(value:bool)->bool where .first:bool=false,.second:bool=false {
+            first and second and value
+        }
+        comptime fn run()->bool {
+            var trace:.Integer'builtin=0;
+            let result=choose<.second=mark(trace.ref,1),.first=mark(trace.ref,2)>(mark(trace.ref,3));
+            result and trace==123
+        }
+    "),Value::Bool(true));
+}
+
+#[test]
+fn missing_clause_defaults_reuse_prior_snapshots_in_declaration_scope() {
+    assert_eq!(invoke("
+        comptime fn choose()->bool where seed:bool,.inverse:bool=not seed,.answer:bool=not inverse {answer}
+        comptime fn run()->bool {
+            var seed=true;
+            let inverse=true;
+            let first=choose<seed>;
+            seed=false;
+            let second=choose<seed>;
+            first() and not second() and choose<seed,.answer=true>()
+        }
+    "),Value::Bool(true));
+}
+
+#[test]
+fn explicit_override_does_not_evaluate_omitted_clause_default() {
+    assert_eq!(
+        invoke(
+            "
+        comptime fn missing()->bool {while true {} false}
+        comptime fn choose()->bool where .flag:bool=missing() {flag}
+        comptime fn run()->bool {let value=true;choose<.flag=value>()}
+    "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn clause_spread_producer_executes_once_and_defaults_see_its_fields() {
+    assert_eq!(invoke("
+        comptime fn choose()->bool where first:bool,second:bool,.answer:bool=first and not second {answer}
+        comptime fn run()->bool {
+            var trace:.Integer'builtin=0;
+            let result=choose<...do {trace = trace + 1;(true,false)}>();
+            result and trace==1
+        }
+    "),Value::Bool(true));
+}
+
+#[test]
+fn invalid_named_clause_routing_is_rejected() {
+    for inputs in [
+        ".flag=true,.flag=false",
+        ".missing=true",
+        "true",
+        ".flag='x'",
+    ] {
+        let source = format!(
+            "comptime fn choose()->bool where .flag:bool=false {{flag}} comptime fn run()->bool {{choose<{inputs}>()}}"
+        );
+        assert!(compile(&source).is_err(), "{inputs}");
+    }
+}
+
+#[test]
+fn default_type_clause_specializes_a_local_value_and_callable_result() {
+    assert_eq!(
+        invoke(
+            "
+        comptime fn choose()->T where .T:.Type'builtin=bool,value:T {value}
+        comptime fn run()->bool {let flag=false;not choose<flag>()}
+    "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn returning_named_input_skips_later_inputs_defaults_and_call() {
+    assert_eq!(
+        invoke(
+            "
+        comptime fn missing()->bool {while true {} false}
+        comptime fn choose(value:bool)->bool where .first:bool=missing(),.second:bool=false {value}
+        comptime fn run()->bool {
+            choose<.second=do {return true;}>(missing());false
+        }
+    "
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn later_named_type_inputs_still_check_unused_function_bodies() {
+    for inputs in ["true,.T=.char'builtin", ".T=.char'builtin,true"] {
+        let source = format!(
+            "comptime fn choose()->T where .T:.Type'builtin=bool,value:T {{value}} comptime fn unused()->bool {{choose<{inputs}>();true}}"
+        );
+        let error = compile(&source).unwrap_err();
+        assert!(error.contains("type mismatch"), "{inputs}: {error}");
+    }
+    assert_eq!(
+        invoke(
+            "comptime fn choose()->T where .T:.Type'builtin=bool,value:T {value} comptime fn run()->bool {let flag=true;choose<flag,.T=bool>()}"
+        ),
+        Value::Bool(true)
+    );
+}
