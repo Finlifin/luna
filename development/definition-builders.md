@@ -8,6 +8,40 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Local field access cost during builder invocation
+
+Comptime local record projections now borrow their root and copy only the selected
+field, instead of checkpointing the entire record first. This applies to plain
+locals and addressable Storage, with the original local-read tick and lock errors.
+The selected value still consumes representation budget and retains snapshot/shared
+identity behavior. Anonymous field names and domains, nominal declaration identity,
+and field bounds remain checked. Nonlocal receivers, runtime execution and cleanup
+schedules retain the general evaluator; no user code executes while storage is held.
+
+This addresses repeated reads of wide builder state without dropping payload
+formation checks from enum reflection. Each structural reflection query still uses
+the complete checked reflection path; `from_type` continues to make five queries.
+
+A controlled bool-field projection with unrelated tuples of 1, 1,024 and 65,536
+values consumes `[3, 3, 3]` VM steps on the local path, versus
+`[26, 2072, 131096]` on the unchanged general path. Both addressable and plain local
+cases return the same value. This measures charged work for this operation, not a
+whole-compiler or wall-clock speedup. Reproduce in `/home/fin/luna` with
+`python3 -B development/check.py --timeout 900 -- test --release
+-p comptime_interpretor --lib field_access -- --nocapture`; 5 tests pass, exit 0
+(`/tmp/luna-tools-ts1wdva9/result.json`). Coverage includes missing bindings,
+locked storage, invalid selectors, snapshots after mutation, selected-data budget
+exhaustion, nominal identities and early-return fallback.
+
+Regression validation in `/home/fin/luna`: `python3 -B development/check.py
+--timeout 900 -- test --release -p comptime_interpretor -p luna --lib
+--test builder_invocations --test source_reflection --test nominal_value_parameters`,
+exit 0, 562 tests (`/tmp/luna-tools-mdylbiuz/result.json`). Native validation:
+`python3 -B development/host_examples.py mirrored-enum generated-enum
+generated-struct-methods --release-driver --compare-optimization`; all three
+examples build and run successfully at O0 and O3
+(`/tmp/luna-host-examples-9cdhc2ni/summary.json`).
+
 ## Source enum structural reflection
 
 The public meta wrappers expose ordered group paths, variant paths, shapes, named

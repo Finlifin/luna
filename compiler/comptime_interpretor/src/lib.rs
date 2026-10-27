@@ -10,6 +10,7 @@
 mod admission;
 mod cleanup;
 mod environment;
+mod field_access;
 mod iir_execution;
 mod invocation_contracts;
 mod list_index;
@@ -6038,6 +6039,9 @@ impl<'a> Interpreter<'a> {
 
     #[inline(never)]
     fn eval_field(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
+        if let Some(value) = self.eval_local_field(expr, environment) {
+            return value;
+        }
         let result = match &expr.kind {
             K::AnonymousField { value, name, index } => {
                 let representation = value!(self.eval(value, environment));
