@@ -30,6 +30,9 @@ pub enum DefinitionBuildError {
     SymbolEncoding {
         reason: String,
     },
+    FixedEncoding {
+        reason: String,
+    },
     InvalidPath,
 }
 
@@ -67,6 +70,7 @@ impl fmt::Display for DefinitionBuildError {
             Self::SymbolEncoding { reason } => {
                 write!(f, "(symbol-encoding (reason {}))", Q(reason))?
             }
+            Self::FixedEncoding { reason } => write!(f, "(fixed-encoding (reason {}))", Q(reason))?,
             Self::InvalidPath => {
                 f.write_str("(invalid-path (expected nonempty-symbol-segments-without-dots))")?
             }

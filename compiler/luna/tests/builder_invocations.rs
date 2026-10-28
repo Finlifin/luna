@@ -2376,3 +2376,137 @@ fn symbol_enum_builder_accepts_empty_definition() {
             .is_empty()
     );
 }
+
+#[test]
+fn fixed_enum_builder_preserves_layout_base_and_field_order() {
+    let fixture=Fixture::new("comptime fn Make()->.Type'builtin {
+        var builder=meta.EnumBuilder.new(.name=.Instruction);
+        builder.add_group(.arithmetic);
+        builder.add_named(.add,[.rs2,.rs1,.rd],[.BitVec'builtin<5>,.BitVec'builtin<5>,.BitVec'builtin<5>],.group=[.arithmetic]);
+        builder.add_named(.sub,[.rs2,.rs1,.rd],[.BitVec'builtin<5>,.BitVec'builtin<5>,.BitVec'builtin<5>],.group=[.arithmetic]);
+        builder.BuildBits(32,[0xfe00707f,0xfe00707f],[0x33,0x40000033],[[20,15,7],[20,15,7]],.base_type=.u32'builtin)
+    }");
+    let (Artifact::Nir(package), Value::Type(nir::Term::Nominal { declaration, .. }), _) =
+        fixture.invoke_meta("Make").unwrap()
+    else {
+        panic!("expected generated Type")
+    };
+    let generated = package
+        .enums
+        .iter()
+        .find(|item| item.declaration == declaration)
+        .unwrap();
+    let encoding = generated.encoding.as_ref().unwrap();
+    assert_eq!(encoding.base_type, Some(nir::Primitive::U32));
+    assert_eq!(encoding.width(), 32);
+    assert_eq!(encoding.variants()[0].name(), "arithmetic.add");
+    assert_eq!(encoding.variants()[1].fixed_value().words(), &[0x40000033]);
+    assert_eq!(
+        encoding.variants()[0]
+            .fields()
+            .iter()
+            .map(|field| (field.name.as_str(), field.start, field.width))
+            .collect::<Vec<_>>(),
+        vec![("rs2", 20, 5), ("rs1", 15, 5), ("rd", 7, 5)]
+    );
+}
+
+#[test]
+fn fixed_enum_builder_accepts_width_only_and_empty_representations() {
+    for (members, masks, values, offsets, width) in [
+        ("builder.add_unit(.one);", "[255]", "[42]", "[[]]", 8),
+        ("", "[]", "[]", "[]", 256),
+        (
+            "builder.add_named(.pair,[.lo,.hi],[.u128'builtin,.u128'builtin]);",
+            "[0]",
+            "[0]",
+            "[[0,128]]",
+            256,
+        ),
+    ] {
+        let fixture = Fixture::new(&format!(
+            "comptime fn Make()->.Type'builtin {{var builder=meta.EnumBuilder.new();{members}builder.BuildBits({width},{masks},{values},{offsets})}}"
+        ));
+        let (Artifact::Nir(package), Value::Type(nir::Term::Nominal { declaration, .. }), _) =
+            fixture.invoke_meta("Make").unwrap()
+        else {
+            panic!("expected generated Type")
+        };
+        let encoding = package
+            .enums
+            .iter()
+            .find(|item| item.declaration == declaration)
+            .unwrap()
+            .encoding
+            .as_ref()
+            .unwrap();
+        assert_eq!(encoding.base_type, None);
+        assert_eq!(encoding.width(), width);
+    }
+}
+
+#[test]
+fn fixed_enum_builder_rejects_invalid_partitions_and_domains() {
+    for (members, encoding) in [
+        ("builder.add_unit(.one);", "0,[0],[0],[[]]"),
+        ("builder.add_unit(.one);", "-1,[0],[0],[[]]"),
+        (
+            "builder.add_unit(.one);",
+            "8,[255],[1],[[]],.base_type=.u16'builtin",
+        ),
+        (
+            "builder.add_unit(.one);",
+            "8,[255],[1],[[]],.base_type=.i8'builtin",
+        ),
+        (
+            "builder.add_unit(.one);",
+            "8,[255],[1],[[]],.base_type=bool",
+        ),
+        ("builder.add_unit(.one);", "8,[],[1],[[]]"),
+        ("builder.add_unit(.one);", "8,[-1],[0],[[]]"),
+        ("builder.add_unit(.one);", "8,[255],[256],[[]]"),
+        ("builder.add_unit(.one);", "8,[254],[1],[[]]"),
+        ("builder.add_unit(.one);", "8,[254],[0],[[]]"),
+        (
+            "builder.add_unit(.one);builder.add_unit(.two);",
+            "8,[255,255],[1,1],[[],[]]",
+        ),
+        (
+            "builder.add_named(.one,[.payload],[.BitVec'builtin<4>]);",
+            "8,[240],[16],[[1]]",
+        ),
+        (
+            "builder.add_named(.one,[.payload],[.BitVec'builtin<4>]);",
+            "8,[240],[16],[[]]",
+        ),
+        (
+            "builder.add_named(.one,[.payload],[.BitVec'builtin<4>]);",
+            "8,[240],[16],[[-1]]",
+        ),
+        (
+            "builder.add_named(.one,[.payload],[bool]);",
+            "8,[254],[0],[[0]]",
+        ),
+        (
+            "builder.add_named(.one,[.a,.b],[.BitVec'builtin<4>,.BitVec'builtin<4>]);",
+            "8,[0],[0],[[0,0]]",
+        ),
+        ("builder.add_tuple(.one,[.u8'builtin]);", "8,[0],[0],[[0]]"),
+    ] {
+        let fixture = Fixture::new(&format!(
+            "comptime fn Make()->.Type'builtin {{var builder=meta.EnumBuilder.new();{members}builder.BuildBits({encoding})}}"
+        ));
+        let error = fixture
+            .invoke_meta("Make")
+            .err()
+            .expect("invalid encoding accepted");
+        assert!(
+            !error.contains("HIR lowering failed"),
+            "fixture did not reach encoding checks: {error}"
+        );
+        assert!(
+            error.contains("FixedEncoding") || error.contains("fixed-encoding"),
+            "unexpected rejection for {members} {encoding}: {error}"
+        );
+    }
+}

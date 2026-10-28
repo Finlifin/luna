@@ -1002,7 +1002,7 @@ pub enum ExprKind {
     /// Compiler-private packet: definition name, field names, field Types.
     BuildStruct(Box<Expr>),
     /// Private packet: name, groups, variants, shapes, field names, field Types,
-    /// and optionally a Symbol encoding list in leaf declaration order.
+    /// and optionally a Symbol encoding list or fixed-bit encoding packet.
     BuildEnum(Box<Expr>),
     EnumStructure {
         subject: Box<Expr>,

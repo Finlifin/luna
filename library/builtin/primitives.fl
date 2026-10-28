@@ -5,6 +5,7 @@
 pub typealias Type = .Type'builtin;
 pub typealias Integer = .Integer'builtin;
 pub typealias Float = .Float'builtin;
+pub typealias BitVec<n: Integer> = .BitVec'builtin<n>;
 pub typealias Bool = bool;
 pub typealias char = .char'builtin;
 pub typealias str = .str'builtin;

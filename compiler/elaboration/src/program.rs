@@ -9498,7 +9498,7 @@ impl Checker<'_, '_> {
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "object_length" | "object_key" | "object_entry_type" | "object_value")) => {
                     self.object_query_builtin(expr, callee, args, expected)
                 }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "build_enum" | "build_enum_paths" | "build_symbol_enum_paths")) =>
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "build_enum" | "build_enum_paths" | "build_symbol_enum_paths" | "build_bits_enum_paths")) =>
                 {
                     let H::Builtin(name) = &callee.kind else {
                         unreachable!()
@@ -9509,6 +9509,7 @@ impl Checker<'_, '_> {
                         expected,
                         name.as_str() != "build_enum",
                         name.as_str() == "build_symbol_enum_paths",
+                        name.as_str() == "build_bits_enum_paths",
                     )
                 }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "build_struct") => {

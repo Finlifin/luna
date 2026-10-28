@@ -315,6 +315,7 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         segmented_paths: bool,
         symbol_encoding: bool,
+        fixed_encoding: bool,
     ) -> Result<n::Expr, Error> {
         if self.runtime_value_context() || self.in_code_body {
             return Err(error(
@@ -322,6 +323,18 @@ impl Checker<'_, '_> {
                 "enum construction requires comptime invocation",
             ));
         }
+        let (args, bit_args) = if fixed_encoding {
+            if args.len() != 11 {
+                return Err(error(
+                    expr.span,
+                    "bit enum construction requires descriptor, width, base type, masks, values and offsets",
+                ));
+            }
+            let (descriptor, encoding) = args.split_at(6);
+            (descriptor, Some(encoding))
+        } else {
+            (args, None)
+        };
         let (args, codes) = if symbol_encoding {
             let Some((Arg::Positional(codes), args)) = args.split_last() else {
                 return Err(error(
@@ -372,6 +385,37 @@ impl Checker<'_, '_> {
         ];
         if let Some(codes) = codes {
             values.push(self.expr(codes, Some(&list(p(P::Symbol))))?);
+        }
+        if let Some(bit_args) = bit_args {
+            let [
+                Arg::Positional(width),
+                Arg::Positional(base),
+                Arg::Positional(masks),
+                Arg::Positional(fixed),
+                Arg::Positional(offsets),
+            ] = bit_args
+            else {
+                return Err(error(
+                    expr.span,
+                    "bit enum construction requires positional encoding inputs",
+                ));
+            };
+            let parts = vec![
+                self.expr(width, Some(&p(P::Integer)))?,
+                self.expr(base, Some(&Term::Optional(Box::new(p(P::Type)))))?,
+                self.expr(masks, Some(&list(p(P::Integer))))?,
+                self.expr(fixed, Some(&list(p(P::Integer))))?,
+                self.expr(offsets, Some(&list(list(p(P::Integer)))))?,
+            ];
+            values.push(n::Expr {
+                source: source(expr.span),
+                ty: if parts.iter().any(|part| is_never(&part.ty)) {
+                    p(P::Never)
+                } else {
+                    Term::Tuple(parts.iter().map(|part| part.ty.clone()).collect())
+                },
+                kind: K::Tuple(parts),
+            });
         }
         let ty = p(if values.iter().any(|value| is_never(&value.ty)) {
             P::Never

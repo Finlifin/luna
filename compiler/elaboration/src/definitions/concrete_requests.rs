@@ -69,7 +69,7 @@ impl CheckedDefinitionPublisher<'_> {
                 capabilities: vec![],
                 groups: request.groups.clone(),
                 variants: request.variants.clone(),
-                encoding: None,
+                encoding: request.encoding.clone(),
                 symbol_encoding: request.symbol_encoding.clone(),
             }]
             .into();

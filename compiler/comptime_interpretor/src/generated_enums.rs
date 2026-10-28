@@ -188,7 +188,6 @@ impl<'world> Interpreter<'world> {
         let mut identities = BTreeSet::new();
         for definition in definitions.iter() {
             if definition.is_intrinsic
-                || definition.encoding.is_some()
                 || !definition.type_parameters.is_empty()
                 || !definition.parameter_types.is_empty()
                 || !identities.insert(definition.declaration)
@@ -207,10 +206,14 @@ impl<'world> Interpreter<'world> {
             })?;
             let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
             let mut fuel = before;
-            let charged = crate::enum_build::charge_symbol_encoding(
-                definition.symbol_encoding.as_ref(),
-                &mut fuel,
-            );
+            let charged =
+                crate::enum_build::charge_fixed_encoding(definition.encoding.as_ref(), &mut fuel)
+                    .and_then(|()| {
+                        crate::enum_build::charge_symbol_encoding(
+                            definition.symbol_encoding.as_ref(),
+                            &mut fuel,
+                        )
+                    });
             self.budget.steps -= (before - fuel) as u64;
             charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, None))?;
             for requirement in &definition.requirements {

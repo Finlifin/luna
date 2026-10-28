@@ -227,7 +227,7 @@ fn example() -> bool {
 这两种生成声明。`add_group` 声明分组，`.parent = [.net]` 指定父组路径；variant 方法用
 `.group = [.net, .nested]` 指定所属组。路径片段按顺序保存，不改变 nominal Type。
 父组必须声明；重复路径、group 与 variant 同名都会被拒绝。
-固定宽度编码、泛型参数、字段默认值和属性的 enum 构造尚未接通。
+泛型参数、字段默认值和属性的 enum 构造尚未接通。固定宽度构造支持下文的固定掩码布局，不包含一般 guard。
 
 可运行的 native 示例见 [host-generated-enum.fl](../../development/examples/host-generated-enum.fl)。
 
@@ -383,3 +383,38 @@ fn is_ready(message: Message) -> bool {
 真实 sysroot 示例：
 [sysroot-symbol-enum.fl](../../development/examples/sysroot-symbol-enum.fl)。
 运行 `python3 -B development/library_check.py --release --stage sysroot-symbol-enum`。
+
+### 生成固定宽度 enum
+
+`EnumBuilder.BuildBits(width, masks, values, offsets, .base_type = null)` 按叶变体
+顺序指定表示。`width` 是正 Integer；`masks` 与 `values` 是 `List<Integer>`，
+每个非负整数必须能完整放入 width 位，不能靠截断消去高位。mask 中的 1 表示固定位，
+value 只能在这些位置取 1。`offsets` 是 `List<List<Integer>>`，每个内层列表按该
+变体字段声明顺序给出最低有效位偏移。
+
+变体可以是 unit 或具名 payload。payload 宽度由无非法位模式的定宽标量或 BitVec
+字段类型确定，不能借 offsets 指定不同宽度。固定位与 payload 必须恰好覆盖整个
+表示，不能重叠或遗留无来源的位；各变体的编码必须互斥。tuple payload、一般 guard
+和任意类型的自定义位表示不在当前入口的范围内。
+
+```flurry
+comptime fn Packet() -> Type {
+    var builder = meta.EnumBuilder.new();
+    builder.add_unit(.idle);
+    builder.add_named(.data, [.byte], [u8]);
+    builder.BuildBits(16, [0xffff, 0xff00], [0, 0x0100], [[], [0]], .base_type = u16)
+}
+```
+
+不指定 base type 时只保留整体宽度，不暗示标量对齐或 base 类型身份。指定时必须是
+与 width 一致的无符号整数类型。两种表示都保留新鲜 nominal 身份，复用固定宽度
+源码 enum 的构造、匹配与只读 `'bitvec` 视图；`Build()` 和 `BuildSymbol()` 不从该
+次调用继承编码。空 enum 仍检查整体宽度和表示预算。
+
+[生成 ADD/SUB 指令的完整示例](../../development/examples/sysroot-fixed-enum.fl)
+通过 `python3 -B development/library_check.py --release --stage sysroot-fixed-enum`
+运行，检查原始指令值、具名 payload、函数传参与返回。
+
+该示例通过 builtin.prelude 导出的透明别名 `BitVec<n>` 使用 5 位寄存器字段，
+不需要用户直接调用编译器 builtin。任意宽度整数 `u5` 尚未实现；这里没有将
+BitVec 字段声称为 `u5`，也不改变两者的类型身份或运算规则。

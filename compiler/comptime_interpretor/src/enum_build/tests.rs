@@ -95,7 +95,7 @@ fn prepared<'a>(
             capabilities: vec![],
             groups: request.groups.clone(),
             variants: request.variants.clone(),
-            encoding: None,
+            encoding: request.encoding.clone(),
             symbol_encoding: request.symbol_encoding.clone(),
         }]
         .into(),
@@ -599,6 +599,122 @@ fn symbol_enum_builder_rejects_code_count_before_calling_host() {
         assert_eq!(calls.get(), 0);
     }
     vm.eval(&symbol_expression(), &mut env(symbol_input(&["wire"])))
+        .unwrap();
+    assert_eq!(calls.get(), 1);
+}
+
+fn integers(values: &[u128]) -> Value {
+    Value::List {
+        ty: list(p(Primitive::Integer)),
+        values: values
+            .iter()
+            .map(|value| Value::Integer(comptime_runtime::Integer::from_u128(*value)))
+            .collect(),
+    }
+}
+fn fixed_input(width: u128, base: Option<Primitive>) -> Value {
+    let Value::Tuple(mut values) = symbol_input(&[]) else {
+        unreachable!()
+    };
+    values[6] = Value::Tuple(vec![
+        Value::Integer(comptime_runtime::Integer::from_u128(width)),
+        Value::Optional {
+            ty: Term::Optional(Box::new(p(Primitive::Type))),
+            value: base.map(|base| Box::new(Value::Type(p(base)))),
+        },
+        integers(&[255]),
+        integers(&[42]),
+        Value::List {
+            ty: list(list(p(Primitive::Integer))),
+            values: vec![integers(&[])],
+        },
+    ]);
+    Value::Tuple(values)
+}
+fn fixed_expression() -> Expr {
+    let mut expr = symbol_expression();
+    let K::BuildEnum(inner) = &mut expr.kind else {
+        unreachable!()
+    };
+    let Term::Tuple(types) = &mut inner.ty else {
+        unreachable!()
+    };
+    types[6] = Term::Tuple(vec![
+        p(Primitive::Integer),
+        Term::Optional(Box::new(p(Primitive::Type))),
+        list(p(Primitive::Integer)),
+        list(p(Primitive::Integer)),
+        list(list(p(Primitive::Integer))),
+    ]);
+    expr
+}
+#[test]
+fn fixed_enum_builder_preserves_base_identity_and_rejects_host_changes() {
+    let world = world();
+    let commits = Cell::new(0);
+    let tamper = Cell::new(true);
+    let builder = |request: &EnumBuildRequest, _: &mut u64| {
+        assert!(request.to_string().contains("(enum-representation"));
+        let mut result = prepared(
+            request,
+            Box::new(|| {
+                commits.set(commits.get() + 1);
+                Ok(())
+            }),
+        );
+        if tamper.get() {
+            Arc::make_mut(&mut result.definitions)[0]
+                .encoding
+                .as_mut()
+                .unwrap()
+                .base_type = None;
+        }
+        Ok(result)
+    };
+    let mut vm = Interpreter::for_comptime(&world, Budget::default())
+        .unwrap()
+        .with_enum_builder(&builder);
+    let error = vm
+        .eval(
+            &fixed_expression(),
+            &mut env(fixed_input(8, Some(Primitive::U8))),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Type);
+    assert_eq!(commits.get(), 0);
+    assert!(!vm.enums.contains_key(&id(10)));
+    tamper.set(false);
+    vm.eval(
+        &fixed_expression(),
+        &mut env(fixed_input(8, Some(Primitive::U8))),
+    )
+    .unwrap();
+    assert_eq!(commits.get(), 1);
+    let encoding = vm.enums[&id(10)].encoding.as_ref().unwrap();
+    assert_eq!(encoding.base_type, Some(Primitive::U8));
+    assert_eq!(encoding.variants()[0].fixed_value().words(), &[42]);
+}
+#[test]
+fn fixed_enum_builder_checks_size_limits_before_host_publication() {
+    let world = world();
+    let calls = Cell::new(0);
+    let builder = |request: &EnumBuildRequest, _: &mut u64| {
+        calls.set(calls.get() + 1);
+        Ok(prepared(request, Box::new(|| Ok(()))))
+    };
+    let mut vm = Interpreter::for_comptime(&world, Budget::default())
+        .unwrap()
+        .with_enum_builder(&builder);
+    let error = vm
+        .eval(
+            &fixed_expression(),
+            &mut env(fixed_input(1_000_000_000, None)),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::RepresentationSizeLimit);
+    assert_eq!(error.source, Some(fixed_expression().source));
+    assert_eq!(calls.get(), 0);
+    vm.eval(&fixed_expression(), &mut env(fixed_input(8, None)))
         .unwrap();
     assert_eq!(calls.get(), 1);
 }

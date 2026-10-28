@@ -2,12 +2,13 @@
 use super::*;
 
 /// Ordinary concrete variants preserve their source shape and payload order.
-/// Symbol encoding is explicit; fixed-width and generic construction remain separate.
+/// Symbol and fixed-width encodings are explicit; generic construction remains separate.
 #[derive(Debug)]
 pub struct EnumBuildRequest {
     pub name: String,
     pub groups: Vec<String>,
     pub variants: Vec<nir::program::Variant>,
+    pub encoding: Option<nir::enum_encoding::Representation>,
     pub symbol_encoding: Option<nir::enum_encoding::SymbolRepresentation>,
     pub source: SourceRange,
 }
@@ -17,17 +18,44 @@ impl EnumBuildRequest {
         name: &str,
         groups: &[String],
         variants: &[nir::program::Variant],
+        encoding: Option<&nir::enum_encoding::Representation>,
         symbol_encoding: Option<&nir::enum_encoding::SymbolRepresentation>,
         fuel: &mut usize,
     ) -> Result<(), ()> {
         charge_enum_parts(name, groups, variants, fuel)?;
+        charge_fixed_encoding(encoding, fuel)?;
         charge_symbol_encoding(symbol_encoding, fuel)
     }
     /// Charge descriptor assembly before cloning names or nested payload types.
     pub fn charge_assembly(&self, fuel: &mut usize) -> Result<(), ()> {
         charge_enum_parts(&self.name, &self.groups, &self.variants, fuel)?;
+        charge_fixed_encoding(self.encoding.as_ref(), fuel)?;
         charge_symbol_encoding(self.symbol_encoding.as_ref(), fuel)
     }
+}
+pub(super) fn charge_fixed_encoding(
+    encoding: Option<&nir::enum_encoding::Representation>,
+    fuel: &mut usize,
+) -> Result<(), ()> {
+    if let Some(encoding) = encoding {
+        *fuel = fuel.checked_sub(encoding.variants().len()).ok_or(())?;
+        for variant in encoding.variants() {
+            *fuel = fuel
+                .checked_sub(
+                    variant
+                        .name()
+                        .len()
+                        .saturating_add(variant.fixed_mask().words().len())
+                        .saturating_add(variant.fixed_value().words().len())
+                        .saturating_add(variant.fields().len()),
+                )
+                .ok_or(())?;
+            for field in variant.fields() {
+                *fuel = fuel.checked_sub(field.name.len()).ok_or(())?;
+            }
+        }
+    }
+    Ok(())
 }
 pub(super) fn charge_symbol_encoding(
     encoding: Option<&nir::enum_encoding::SymbolRepresentation>,
@@ -106,6 +134,9 @@ impl fmt::Display for EnumBuildRequest {
             f.write_str("))")?;
         }
         f.write_str(")")?;
+        if let Some(encoding) = &self.encoding {
+            write!(f, " {encoding}")?;
+        }
         if let Some(encoding) = &self.symbol_encoding {
             write!(f, " {encoding}")?;
         }
@@ -266,6 +297,13 @@ impl<'a> Interpreter<'a> {
                 fields,
             });
         }
+        let (encoding, codes) = match codes {
+            Some(Value::Tuple(parts)) => (
+                Some(self.fixed_enum_encoding(parts, &variants, expr.source)?),
+                None,
+            ),
+            other => (None, other),
+        };
         let symbol_encoding = if let Some(codes) = codes {
             let codes = self.enum_symbols(codes, expr.source)?;
             if codes.len() != variants.len() {
@@ -318,6 +356,7 @@ impl<'a> Interpreter<'a> {
             name: name.to_string(),
             groups,
             variants,
+            encoding,
             symbol_encoding,
             source: expr.source,
         };
@@ -346,6 +385,7 @@ impl<'a> Interpreter<'a> {
             &mut fuel,
         );
         let charged = charged
+            .and_then(|()| charge_fixed_encoding(definition.encoding.as_ref(), &mut fuel))
             .and_then(|()| charge_symbol_encoding(definition.symbol_encoding.as_ref(), &mut fuel));
         self.budget.steps -= (before - fuel) as u64;
         charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(expr.source)))?;
@@ -357,7 +397,7 @@ impl<'a> Interpreter<'a> {
             || !definition.parameter_types.is_empty()
             || !definition.requirements.is_empty()
             || !definition.capabilities.is_empty()
-            || definition.encoding.is_some()
+            || definition.encoding != request.encoding
             || definition.symbol_encoding != request.symbol_encoding
             || definition.groups != request.groups
             || definition.variants != request.variants
@@ -447,3 +487,5 @@ impl<'a> Interpreter<'a> {
 
 #[cfg(test)]
 mod tests;
+
+mod fixed;

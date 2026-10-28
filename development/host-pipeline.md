@@ -4597,3 +4597,50 @@ Validation (working directory `/home/fin/luna`):
 - `python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test allocated_definition_publisher`:
   four passed, `/tmp/luna-tools-sb2jgs_8/result.json`; allocation, abandoned/stale
   publication, budget exhaustion and request dump regressions remain intact.
+
+
+### Fixed-width enum construction through meta builders
+
+`meta.EnumBuilder.BuildBits(width, masks, values, offsets, .base_type = null)`
+constructs fixed-mask unit/named-payload enums. Integer masks and values are
+checked without truncation. Payload widths follow their unrestricted scalar or
+BitVec types, offsets count from the least bit, and the existing encoding kernel
+checks exact partition and disjointness. Explicit base types preserve unsigned
+integer identity and alignment; width-only definitions retain no implied base.
+Encoding data is charged across publication, descriptor comparison and copied
+registration. Generic builders and general guards remain unsupported.
+
+`builtin.primitives.BitVec<n>` is now a transparent public alias, exported through
+the normal builtin prelude. The native ADD/SUB generator uses BitVec<5> register
+fields; arbitrary-width `u5` integers remain a separate missing capability.
+
+Validation (working directory `/home/fin/luna`):
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations`:
+  68 passed, `/tmp/luna-tools-cla37uca/result.json`. Layout/base/field identity,
+  width-only and 256-bit descriptors, empty enum and 17 invalid encoding cases.
+  Rejection tests require encoding diagnostics, not unresolved fixture names.
+- `python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib`:
+  175 passed, `/tmp/luna-tools-_rq6dyu5/result.json`. Includes base replacement
+  rejection before commit and representation size limits followed by retry.
+- `python3 -B development/library_check.py --release --timeout 900 --stage sysroot-fixed-enum --stage sysroot-symbol-enum --stage sysroot-enum-builder`:
+  all selected stages passed, two native tests each;
+  `/tmp/luna-library-hx3_4ibm/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-fixed-enum.fl --sysroot library --test-native --opt-level 3`:
+  two passed, `/tmp/luna-tools-3udt2n9f/result.json`. Checks exact ADD/SUB words,
+  named payload extraction and parameter/return transport through generated types.
+- `python3 -B -m unittest discover -s development -p test_library_check.py`:
+  13 passed, including native case-count enforcement for the new stage.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed, `/tmp/luna-tools-1hpe41b_/result.json`.
+
+The first integration attempt failed because the small meta-only fixture lacked
+integer aliases and u5 is not implemented (`/tmp/luna-tools-sto0duen/result.json`).
+Tests now use explicit primitive identities and BitVec widths; the real sysroot
+example uses public aliases. An invalid record-pattern fixture was also corrected
+to explicit fields before native validation. These were fixture failures, not
+passing encoding evidence.
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test allocated_definition_publisher`:
+  four passed, `/tmp/luna-tools-800zs5rl/result.json`; allocation and publication
+  transaction regressions remain intact with the extended descriptor.
