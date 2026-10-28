@@ -22,7 +22,7 @@ fn actual_eq_defaults_support_nominal_and_generic_operators() {
         fn distinct(a:T,b:T)->bool where T :- comparison.Eq {{a!=b}}
         fn run()->bool {{same(Key {{value:7}},Key {{value:7}}) and distinct(Key {{value:7}},Key {{value:9}})
             and not (Key {{value:1}} != Key {{value:1}}) and not (Key {{value:1}} == Key {{value:2}})}}
-        fn verify() {{let valid=run();assumes valid;}}",support::with_attrs(include_str!("../../../library/builtin/comparison.fl")),include_str!("../../../library/builtin/resources.fl"));
+        fn verify() {{let valid=run();assumes valid;}}",support::with_attrs(include_str!("../../../library/builtin/numeric/comparison.fl")),include_str!("../../../library/builtin/protocols/resources.fl"));
     assert!(compile(&source, None).is_err());
     let package = compile(&source, Some("input.comparison.Eq")).unwrap();
     assert_eq!(

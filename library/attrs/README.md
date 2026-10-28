@@ -1,5 +1,7 @@
 # attrs
 
+源码目录与待实现领域见 [六包结构](../STRUCTURE.md)。
+
 `abi(name: Symbol) -> Object` 是普通的 `pure comptime fn`，返回含 `abi`
 属性的 Object，并保留 Symbol 值及其类型。`comptime_phase` 是包含
 `comptime_phase: true` 的 Object 常量，条目保留 Bool 类型。

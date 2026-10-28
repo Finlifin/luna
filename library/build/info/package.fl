@@ -1,0 +1,21 @@
+pub struct PackageMetadata {
+    features: MetadataFeatures,
+}
+
+pub struct MetadataFeatures {
+    entries: .Object'builtin,
+}
+
+impl MetadataFeatures {
+    -- Missing fields and mismatched domains return null.
+    pub pure comptime fn get(self, name: .Symbol'builtin, comptime T: .Type'builtin) -> ?T {
+        .object_get'builtin(T, self.entries, name)
+    }
+}
+
+{-
+    The callable captures its source definition's direct dependency mapping.
+    Saving or forwarding it does not change the package that owns the lookup.
+-}
+pub const package_metadata: comptime fn(.str'builtin) -> PackageMetadata =
+    .build_package_metadata'builtin;

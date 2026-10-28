@@ -7,7 +7,7 @@ use comptime_interpretor::{Budget, ErrorKind, Interpreter, Value};
 use nir::{Primitive, Term};
 
 fn compile(width: u32, legacy: bool) -> nir::program::Package {
-    let contribution = include_str!("../../../library/builtin/meta_list_patterns.fl");
+    let contribution = include_str!("../../../library/builtin/protocols/meta_list_patterns.fl");
     let contribution = if legacy {
         let previous = contribution.replace(
             "let position = meta.from_usize(index);\n        self[position]",
@@ -29,7 +29,7 @@ fn compile(width: u32, legacy: bool) -> nir::program::Package {
              comptime fn Read(values:meta.List<.Type'builtin>, index:.usize'builtin)
                  ->.Type'builtin {{values.as(ListPatternView).list_pattern_view_get_element_comptime(index)}}",
             include!("support/meta_source.rs"),
-            support::with_attrs(include_str!("../../../library/builtin/patterns.fl")),
+            support::with_attrs(include_str!("../../../library/builtin/protocols/patterns.fl")),
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {

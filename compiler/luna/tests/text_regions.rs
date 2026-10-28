@@ -119,7 +119,7 @@ fn byte_reads_export_region_obligations_through_discarded_results() {
         fn equal(a:str,b:str)->bool {{a == b}}
         fn length(value:str)->u64 {{text.byte_length(value)}}",
         include_str!("../../../library/builtin/primitives.fl"),
-        include_str!("../../../library/builtin/text_bytes.fl")
+        include_str!("../../../library/builtin/text_impl/bytes.fl")
     ));
     assert_eq!(
         infer(&package, "reads", 100_000).unwrap().reads,
@@ -897,7 +897,7 @@ fn scalar_index_operations_preserve_text_scan_dependencies() {
         }}
         fn run()->bool {{contains(\"Aé\",169) and not contains(\"Aé\",0) and not contains(\"\",65)}}",
         include_str!("../../../library/builtin/primitives.fl"),
-        include_str!("../../../library/builtin/text_bytes.fl")
+        include_str!("../../../library/builtin/text_impl/bytes.fl")
     ));
     let scan = infer(&package, "contains", 100_000).unwrap();
     assert_eq!(scan.reads, BTreeSet::from([parameter(0, &[])]));

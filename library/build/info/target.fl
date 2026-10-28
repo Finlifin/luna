@@ -1,0 +1,23 @@
+{-
+    An immutable snapshot of the source package's host pipeline target. These
+    values describe compilation, not the machine running the compiler.
+-}
+pub struct Target {
+    arch: .Symbol'builtin,
+    os: .Symbol'builtin,
+    pointer_bits: .Integer'builtin,
+    features: TargetFeatures,
+}
+
+pub struct TargetFeatures {
+    entries: .Object'builtin,
+}
+
+impl TargetFeatures {
+    -- Missing is null; an explicitly disabled feature is false?.
+    pub pure comptime fn get(self, name: .Symbol'builtin) -> ?bool {
+        .object_get'builtin(bool, self.entries, name)
+    }
+}
+
+pub const target: Target = .build_target'builtin;

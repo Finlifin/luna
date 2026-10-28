@@ -57,8 +57,8 @@ class LibraryCheckTests(unittest.TestCase):
                 if selected and f'native-{name}' not in selected:
                     continue
                 command = next(command for label, command in calls if label == f'native-{name}')
-                self.assertIn(str(library_check.ROOT / f'library/builtin/{name}.fl'), command)
-                self.assertIn(str(library_check.ROOT / 'library/builtin/resources.fl'), command)
+                self.assertIn(str(library_check.ROOT / f'library/builtin/types/{name}.fl'), command)
+                self.assertIn(str(library_check.ROOT / 'library/builtin/protocols/resources.fl'), command)
                 self.assertIn('--test-native', command)
                 self.assertIn('resources.Copy', command)
                 self.assertIn('resources.Drop', command)

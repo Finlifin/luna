@@ -461,7 +461,7 @@ fn repository_optional_methods_preserve_nested_absence_and_lazy_callbacks() {
             chained.as(OptionalOps<bool>).is_none()
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/option.fl")
+        include_str!("../../../library/builtin/types/option.fl")
     );
     let package = compile_with_protocols(&source, &Default::default()).unwrap();
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();

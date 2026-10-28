@@ -534,8 +534,8 @@ fn repository_platform_comparison_protocols_follow_the_selected_target() {
                 let greater = maximum.as(Ord).cmp(zero) matches .greater; assumes greater;
                 let same = maximum.as(Ord).cmp(maximum) matches .equal; assumes same;
             }}",
-            library::with_attrs(include_str!("../../../library/builtin/comparison.fl")),
-            include_str!("../../../library/builtin/resources.fl"));
+            library::with_attrs(include_str!("../../../library/builtin/numeric/comparison.fl")),
+            include_str!("../../../library/builtin/protocols/resources.fl"));
         let package = compile(&source, Some(width)).unwrap();
         assert_eq!(
             luna::execution::interpret_with_protocols(&package, "run", "Copy", "Drop", 100_000)
@@ -946,7 +946,7 @@ fn platform_bit_counts_reversal_and_funnels_use_target_layout() {
                 let l=math.funnel_shift_left<Word>(1,{high},{width} + 1)==3;assumes l;
                 let m=math.funnel_shift_right<Word>(1,2,{width} + 1)=={high} + 1;assumes m;
             }}",
-            include_str!("../../../library/builtin/math_intrinsics.fl")
+            include_str!("../../../library/builtin/numeric/math_intrinsics.fl")
         );
         assert!(compile_with_intrinsics(&source, None, &bindings).is_err());
         let package = compile_with_intrinsics(&source, Some(width), &bindings).unwrap();
@@ -1022,7 +1022,7 @@ fn platform_saturation_extrema_and_absolute_value_follow_selected_bounds() {
                 let m=cap({maximum},1)==1;assumes m;
                 let n=floor({low},{high})=={high};assumes n;
             }}",
-            include_str!("../../../library/builtin/math_intrinsics.fl")
+            include_str!("../../../library/builtin/numeric/math_intrinsics.fl")
         );
         assert!(compile_with_intrinsics(&source, None, &bindings).is_err());
         let package = compile_with_intrinsics(&source, Some(width), &bindings).unwrap();

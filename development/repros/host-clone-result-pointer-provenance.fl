@@ -1,5 +1,5 @@
 -- Regression: returned field provenance after a Clone that mutates a pointee.
--- Supply library/builtin/resources.fl as package resources.
+-- Supply library/builtin/protocols/resources.fl as package resources.
 -- --test-native --copy-protocol resources.Copy --drop-protocol resources.Drop
 use resources.{Once, Clone, Copy, Drop};
 

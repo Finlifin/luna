@@ -10456,7 +10456,7 @@ fn native_integer_math_wrappers_cover_widths_bits_and_once_only_inputs() {
         impl Duplicate for .u32'builtin {{}} impl Duplicate for .u64'builtin {{}}
         impl Duplicate for .u128'builtin {{}}
         fn run()->bool {{{body} true}}",
-        include_str!("../../../library/builtin/math_intrinsics.fl")
+        include_str!("../../../library/builtin/numeric/math_intrinsics.fl")
     );
     let w = Work::new(&source);
     let mut dump = w.command();
@@ -14192,7 +14192,7 @@ fn native_funnel_shifts_and_rotations_cover_modulo_width_and_argument_order() {
         impl Duplicate for .u32'builtin {{}} impl Duplicate for .u64'builtin {{}}
         impl Duplicate for .u128'builtin {{}}
         fn run()->bool {{{body} true}}",
-        include_str!("../../../library/builtin/math_intrinsics.fl")
+        include_str!("../../../library/builtin/numeric/math_intrinsics.fl")
     );
     let w = Work::new(&source);
     let mut dump = w.command();
@@ -15319,7 +15319,7 @@ fn native_float_classification_generic_library_preserves_ieee_classes() {
 {}
 }} typealias F=.f{width}'builtin;impl Duplicate for F {{}}impl Duplicate for .BitVec'builtin<{width}> {{}}
             fn verify(value:F,n:bool,i:bool,f:bool,normal:bool,subnormal:bool,sign:bool)->bool {{math.isnan(value)==n and math.isinf(value)==i and math.isfinite(value)==f and math.isnormal(value)==normal and math.issubnormal(value)==subnormal and math.signbit(value)==sign}}
-            fn run()->bool {{{checks}true}}", include_str!("../../../library/builtin/math_intrinsics.fl"));
+            fn run()->bool {{{checks}true}}", include_str!("../../../library/builtin/numeric/math_intrinsics.fl"));
         let w = Work::new(&source);
         for level in ["0", "3"] {
             let mut command = w.command();
@@ -15766,7 +15766,7 @@ fn native_saturating_integer_math_covers_all_widths_and_signs() {
             let source = format!("{RESOURCE_HEADER}mod math {{\n{}\n}}
                 typealias Number=.{prefix}{width}'builtin;impl Duplicate for Number {{}}
                 fn verify(a:Number,b:Number,added:Number,subtracted:Number)->bool {{math.saturating_add(a,b)==added and math.saturating_sub(a,b)==subtracted}}
-                fn run()->bool {{{}}}",include_str!("../../../library/builtin/math_intrinsics.fl"),cases.join(" and "));
+                fn run()->bool {{{}}}",include_str!("../../../library/builtin/numeric/math_intrinsics.fl"),cases.join(" and "));
             let w = Work::new(&source);
             for level in ["0", "3"] {
                 let mut command = w.command();
@@ -15968,7 +15968,7 @@ fn native_integer_minmax_math_covers_all_widths_and_signs() {
             let source = format!("{RESOURCE_HEADER}mod math {{\n{}\n}}
                 typealias Number=.{prefix}{width}'builtin;impl Duplicate for Number {{}}
                 fn verify(a:Number,b:Number,smaller:Number,larger:Number)->bool {{math.min(a,b)==smaller and math.max(a,b)==larger}}
-                fn run()->bool {{{}}}",include_str!("../../../library/builtin/math_intrinsics.fl"),cases.join(" and "));
+                fn run()->bool {{{}}}",include_str!("../../../library/builtin/numeric/math_intrinsics.fl"),cases.join(" and "));
             let w = Work::new(&source);
             for level in ["0", "3"] {
                 let mut command = w.command();
@@ -19647,7 +19647,7 @@ fn native_wrapping_absolute_value_all_widths_and_argument_once() {
                 seen and actual==expected
             }}
             fn run()->bool {{{cases}true}}",
-            include_str!("../../../library/builtin/math_intrinsics.fl")
+            include_str!("../../../library/builtin/numeric/math_intrinsics.fl")
         ));
         for level in ["0", "3"] {
             let mut command = work.command();
@@ -20204,7 +20204,7 @@ fn generic_native_negation_survives_protocol_binding() {
         fn bits(value:Bits)->Bits {{not value}}
         ",
         include_str!("../../../library/builtin/primitives.fl"),
-        include_str!("../../../library/builtin/ops.fl")
+        include_str!("../../../library/builtin/protocols/ops.fl")
     );
     for primitive in ["i8", "i16", "i32", "i64", "i128"] {
         let work = Work::new(&format!(
@@ -20305,7 +20305,7 @@ fn generic_float_operators_preserve_ieee_values_and_evaluation() {
         pure fn early(a:T)->T where T, requires T == f32 or T == f64 {{a * do {{return a;}}}}
         ",
         include_str!("../../../library/builtin/primitives.fl"),
-        include_str!("../../../library/builtin/ops.fl")
+        include_str!("../../../library/builtin/protocols/ops.fl")
     );
     let bindings = [
         "--add-protocol",
@@ -20964,7 +20964,7 @@ fn comparison_nonreturning_right_keeps_left_evaluation() {
 
 #[test]
 fn native_bitwise_library_operations_preserve_width_sign_and_operand_order() {
-    let library = include_str!("../../../library/builtin/math_intrinsics.fl");
+    let library = include_str!("../../../library/builtin/numeric/math_intrinsics.fl");
     for width in [8, 16, 32, 64, 128] {
         for signed in [false, true] {
             let primitive = format!("{}{}", if signed { 'i' } else { 'u' }, width);
@@ -23446,13 +23446,13 @@ fn quoted_tuple_contract_requires_explicit_copy_and_preserves_caller() {
         let w = Work::new(&source);
         fs::write(
             w.0.join("tuple.fl"),
-            include_str!("../../../library/builtin/tuple.fl"),
+            include_str!("../../../library/builtin/types/tuple.fl"),
         )
         .unwrap();
         fs::write(w.0.join("meta.fl"), include!("support/meta_source.rs")).unwrap();
         fs::write(
             w.0.join("resources.fl"),
-            include_str!("../../../library/builtin/resources.fl"),
+            include_str!("../../../library/builtin/protocols/resources.fl"),
         )
         .unwrap();
         for level in ["0", "3"] {

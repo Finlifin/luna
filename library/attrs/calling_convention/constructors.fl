@@ -1,0 +1,9 @@
+{-
+    Attribute constructors produce ordinary comptime Objects. Consumers check
+    the target and supported values before applying metadata to generated code.
+-}
+
+pub pure comptime fn abi(name: .Symbol'builtin) -> .Object'builtin {
+    let metadata = {abi: name};
+    metadata
+}

@@ -1,6 +1,6 @@
 # LLVM host pipeline（首个可执行子集）
 
-当前 math 源码位于 `library/builtin/math_intrinsics.fl`，由 builtin.prelude 导出模块入口；
+当前 math 源码位于 `library/builtin/numeric/math_intrinsics.fl`，由 builtin.prelude 导出模块入口；
 sysroot 绑定为 `builtin.math_intrinsics.target.Scalar`，不再加载独立 math 包。
 下文历史检查记录中的旧路径与命令保留原貌；当前使用方法见 library/README.md。
 
@@ -185,7 +185,7 @@ quoted 计算模式另存为 repros/host-quote-contract-patterns.fl，未登记�
 
 ## 联合返回值／内存后置条件的原生示例（2026-10-25）
 
-完整 memory-result-contracts 示例已登记，包含返回值与写入地址的关系、名义字段更新、默认指针别名及多次调用后的检查。依赖实际 library/builtin/resources.fl 的 Copy／Drop；源码没有删减，原 repro 路径保留相对软链接。目录现有 57 个示例。
+完整 memory-result-contracts 示例已登记，包含返回值与写入地址的关系、名义字段更新、默认指针别名及多次调用后的检查。依赖实际 library/builtin/protocols/resources.fl 的 Copy／Drop；源码没有删减，原 repro 路径保留相对软链接。目录现有 57 个示例。
 
 ```sh
 python3 -B development/host_examples.py memory-result-contracts --release-driver --compare-optimization
@@ -743,7 +743,7 @@ python3 -B development/host_examples.py floating --compare-optimization
 
 新增端到端回归覆盖五种有符号位宽、负数／零／正数、实参只求值一次，以及无范围约束的未调用泛型定义仍拒绝。原故障报告 `/tmp/luna-tools-l2n55dfy/result.json`；测试初版遗漏名义 Flag 所需的 Copy/Drop 验证（`/tmp/luna-tools-u_pq5lg1/result.json`），补齐后又触及资源与残余契约共享预算（`/tmp/luna-tools-zsymkdl9/result.json`）。最终混合测试显式使用 `--fuel 1000000`；默认值未改，预算成本仍是后续工作。`python3 -B development/check.py --timeout 900 -- test -p luna --test host negation -- --nocapture` 三项通过（`/tmp/luna-tools-jqhi7f0r/result.json`），包含 LLVM O0/O3 和原有 bit pattern 回归。
 
-`library/builtin/ops.fl` 的 Type 注解改为 `.Type'builtin`，消除对父模块导入的依赖，可以独立加载为协议包。generic-integers 示例现显式加载这个实际库文件并绑定七个算术协议，新增有合法范围约束的泛型取负；GCD、无符号差值与取负均保持可执行。通过 `python3 -B development/command.py --timeout 600 -- python3 -B development/host_examples.py generic-integers --compare-optimization` 验证，O0/O3 均通过（`/tmp/luna-tools-nq3sy4sf/result.json`）。这个示例没有额外增大 fuel。
+`library/builtin/protocols/ops.fl` 的 Type 注解改为 `.Type'builtin`，消除对父模块导入的依赖，可以独立加载为协议包。generic-integers 示例现显式加载这个实际库文件并绑定七个算术协议，新增有合法范围约束的泛型取负；GCD、无符号差值与取负均保持可执行。通过 `python3 -B development/command.py --timeout 600 -- python3 -B development/host_examples.py generic-integers --compare-optimization` 验证，O0/O3 均通过（`/tmp/luna-tools-nq3sy4sf/result.json`）。这个示例没有额外增大 fuel。
 
 曾尝试直接加载完整 sysroot，实际失败于 panic、String 和 std 中未实现的占位入口（`/tmp/luna-tools-clxt_ot1/result.json`，具体诊断 `/tmp/luna-host-examples-xv84g73d/0-generic-integers-O0/build/stderr.log`）。独立协议包不代表完整 sysroot 可运行；未为满足示例伪造这些 API。工作目录均为 `/home/fin/luna`，改动保留在 dev，不提交。
 
@@ -3051,7 +3051,7 @@ Once/Clone/Copy/Drop 从 builtin/traits.fl 拆到独立的 builtin/resources.fl�
 
 上一节 Clone 返回结构体后丢失指针来源的问题已修复。根因并非 Clone 修改 pointee，而是 moves 的聚合返回分析显式排除了 TraitMethod 调用，退回普通 expr 路径后只检查调用效果，没有交付返回字段映射。现在对静态方法先做完整 method selection，再通过已有 named aggregate 路径传递返回 origins、guards 和返回值元数据。不克隆/重放 receiver 或实参，也不使用 behavior-only 选择绕过接口义务。
 
-examples/host-library-resources.fl 已恢复对 cloned.counter 的读取断言。真实 resources 包在 O0/O3 下验证整个 self.* 返回及重新构造 Self 字段两种 Clone；额外 native 测试验证嵌套泛型结构体中的指针来源、局部逃逸拒绝、移动 owner 后访问拒绝、失败保留旧产物。保存的 repro 也通过实际多包 CLI 运行：`python3 -B development/check.py --timeout 300 -- run -p luna -- --packages-v1 --package 1 101 app development/repros/host-clone-result-pointer-provenance.fl --package 2 202 resources library/builtin/resources.fl --dependency 1 resources 2 --primary 1 --copy-protocol resources.Copy --drop-protocol resources.Drop --test-native --opt-level 3` 退出 0，4 项通过（`/tmp/luna-tools-2ph7ns10/result.json`）。其后只将首行注释从 Known rejection 更新为 Regression。
+examples/host-library-resources.fl 已恢复对 cloned.counter 的读取断言。真实 resources 包在 O0/O3 下验证整个 self.* 返回及重新构造 Self 字段两种 Clone；额外 native 测试验证嵌套泛型结构体中的指针来源、局部逃逸拒绝、移动 owner 后访问拒绝、失败保留旧产物。保存的 repro 也通过实际多包 CLI 运行：`python3 -B development/check.py --timeout 300 -- run -p luna -- --packages-v1 --package 1 101 app development/repros/host-clone-result-pointer-provenance.fl --package 2 202 resources library/builtin/protocols/resources.fl --dependency 1 resources 2 --primary 1 --copy-protocol resources.Copy --drop-protocol resources.Drop --test-native --opt-level 3` 退出 0，4 项通过（`/tmp/luna-tools-2ph7ns10/result.json`）。其后只将首行注释从 Known rejection 更新为 Regression。
 
 完整 selection 仍拒绝带 program pre/postconditions、尚未组合内存契约的接口。补充验收确认：不满足前置条件时报 program precondition；满足前置条件后仍明确报 interface predicates require a composed memory contract，不悄悄丢弃接口。该独立限制尚未解决。
 
@@ -3496,7 +3496,7 @@ host::intrinsic::bind 先前对所有签名直接运行 concrete check，因此�
 
 执行 `python3 -B development/library_check.py --timeout 300`：实际声明 9 项、manifest 1 项、native-resources 4 项、native-math 2 项通过；完整 sysroot 阶段失败，总退出 1（`/tmp/luna-library-6ik6ytbu/summary.json`）。失败为实际库中未解析的 panic、String、格式化 Any、allocation/collection/I/O __builtin_* 与 map-storage 等引用，符合 library README 已记录的未实现依赖；没有替换库文件或用占位函数绕过。
 
-随后加强真实数学验收：library_check 的 native-math 同时加载 library/builtin/resources.fl，显式绑定其 Copy/Drop；host-math-tests.fl 的两种精度各检查 sqrt 参数 do 块恰好求值一次。直接以三个显式 package 执行，O3（`/tmp/luna-tools-u4n11hr_/result.json`）和 O0（`/tmp/luna-tools-f0uusnuq/result.json`）均两项通过。命令通过 `python3 -B development/check.py --timeout 300 -- run -p luna -- --packages-v1`，指定 app/math/resources，两个依赖、Copy/Drop、host-fma/host-sqrt 和 --test-native；完整命令保存在上述 result.json。未因这项测试入口更新重跑已知失败的全 sysroot；git diff --check 通过，dev 未提交。
+随后加强真实数学验收：library_check 的 native-math 同时加载 library/builtin/protocols/resources.fl，显式绑定其 Copy/Drop；host-math-tests.fl 的两种精度各检查 sqrt 参数 do 块恰好求值一次。直接以三个显式 package 执行，O3（`/tmp/luna-tools-u4n11hr_/result.json`）和 O0（`/tmp/luna-tools-f0uusnuq/result.json`）均两项通过。命令通过 `python3 -B development/check.py --timeout 300 -- run -p luna -- --packages-v1`，指定 app/math/resources，两个依赖、Copy/Drop、host-fma/host-sqrt 和 --test-native；完整命令保存在上述 result.json。未因这项测试入口更新重跑已知失败的全 sysroot；git diff --check 通过，dev 未提交。
 
 ### Symbol 编码 enum 与 runtime tag_name
 
@@ -3652,7 +3652,7 @@ math 包现在需绑定全部七个操作（包括未调用的泛型正文）；
 
 ### 独立比较协议与 coherence 预算分配
 
-将现有 Eq/Ord/Ordering 声明迁入 library/builtin/comparison.fl，traits.fl 重导出这些真实声明，保持经 traits/builtin 根访问的路径。独立模块无 String、panic 或分配依赖；补充 bool 与 u8/u16/u32/u64/u128、i8/i16/i32/i64/i128 的 Eq/Ord 实现。bool 使用 false < true；没有假设浮点满足全序，也没有补上未经验证的平台宽度实现。
+将现有 Eq/Ord/Ordering 声明迁入 library/builtin/numeric/comparison.fl，traits.fl 重导出这些真实声明，保持经 traits/builtin 根访问的路径。独立模块无 String、panic 或分配依赖；补充 bool 与 u8/u16/u32/u64/u128、i8/i16/i32/i64/i128 的 Eq/Ord 实现。bool 使用 false < true；没有假设浮点满足全序，也没有补上未经验证的平台宽度实现。
 
 组合真实 comparison/resources 源码时发现 coherence 的总预算被平均分给所有实现对，包括不同接口的廉价排除项；合法资源实现因此报无法证明不重叠（`/tmp/luna-tools-0uz9dqqa/result.json`）。现在先为完整成对遍历/报告保留预算，只给同接口、同 precision 的真实证明义务分配求解预算。不同接口与不同 precision 使用 Index 已验证缓存信息，check/replay 共用相同分配；仍检查完整报告、世界 freshness 和每棵 disjointness 证明。新增 30 个无关接口的回归确认合法证明不再被稀释；低预算、真实重叠和旧世界报告继续拒绝。
 
@@ -3672,7 +3672,7 @@ comparison/resources 的 11 种标量边界检查增加单函数 check_all，保
 
 ### 字符与 Symbol 比较协议
 
-library/builtin/comparison.fl 新增 char 的 Eq/Ord 和 Symbol 的 Eq。字符按现有 Unicode scalar 比较语义排序；Symbol 按名字相等，不增加没有定义的 Symbol 排序协议。真实库测试覆盖零字符、ASCII、汉字、补充平面字符、cmp 三种结果、默认比较方法，以及跨函数的 Symbol 相等/不等；checked 参考执行与 LLVM O0/O3 通过。
+library/builtin/numeric/comparison.fl 新增 char 的 Eq/Ord 和 Symbol 的 Eq。字符按现有 Unicode scalar 比较语义排序；Symbol 按名字相等，不增加没有定义的 Symbol 排序协议。真实库测试覆盖零字符、ASCII、汉字、补充平面字符、cmp 三种结果、默认比较方法，以及跨函数的 Symbol 相等/不等；checked 参考执行与 LLVM O0/O3 通过。
 
 工作目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 300 -- test -p luna --test library_protocols --test frontend_cli` 退出 0，11 + 196 项通过（`/tmp/luna-tools-ouylyutk/result.json`）。host-library-comparison.fl 增加 unicode_characters 和 symbolic_names；实际 app/comparison/resources 三包 CLI 的 O3 原生测试共 5 项通过（`/tmp/luna-tools-ivdo0qqq/result.json`，完整命令见报告）。library_check 的预期计数与 README 已同步；脚本语法检查、格式化与 git diff --check 通过。未重跑全 sysroot。
 

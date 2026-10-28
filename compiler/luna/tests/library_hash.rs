@@ -8,10 +8,12 @@ fn source(body: &str) -> String {
     format!(
         "{}\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\npub use traits.*;\n{body}",
         include_str!("../../../library/builtin/primitives.fl"),
-        support::with_attrs(include_str!("../../../library/builtin/comparison.fl")),
-        include_str!("../../../library/builtin/resources.fl"),
-        include_str!("../../../library/builtin/conversion.fl"),
-        support::with_attrs(include_str!("../../../library/builtin/traits.fl")),
+        support::with_attrs(include_str!(
+            "../../../library/builtin/numeric/comparison.fl"
+        )),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
+        include_str!("../../../library/builtin/protocols/conversion.fl"),
+        support::with_attrs(include_str!("../../../library/builtin/protocols/traits.fl")),
     )
 }
 

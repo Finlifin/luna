@@ -1,53 +1,6 @@
-{-
-    Contextual constant: each resolved read observes the build input of its
-    source definition. The driver must supply a configuration for that package.
--}
-pub const mode: .Symbol'builtin = .build_mode'builtin;
-
-{-
-    An immutable snapshot of the source package's host pipeline target. These
-    values describe compilation, not the machine running the compiler.
--}
-pub struct Target {
-    arch: .Symbol'builtin,
-    os: .Symbol'builtin,
-    pointer_bits: .Integer'builtin,
-    features: TargetFeatures,
-}
-
-pub struct TargetFeatures {
-    entries: .Object'builtin,
-}
-
-impl TargetFeatures {
-    -- Missing is null; an explicitly disabled feature is false?.
-    pub pure comptime fn get(self, name: .Symbol'builtin) -> ?bool {
-        .object_get'builtin(bool, self.entries, name)
-    }
-}
-
-pub const target: Target = .build_target'builtin;
-
-pub struct PackageMetadata {
-    features: MetadataFeatures,
-}
-
-pub struct MetadataFeatures {
-    entries: .Object'builtin,
-}
-
-impl MetadataFeatures {
-    -- Missing fields and mismatched domains return null.
-    pub pure comptime fn get(self, name: .Symbol'builtin, comptime T: .Type'builtin) -> ?T {
-        .object_get'builtin(T, self.entries, name)
-    }
-}
-
-{-
-    The callable captures its source definition's direct dependency mapping.
-    Saving or forwarding it does not change the package that owns the lookup.
--}
-pub const package_metadata: comptime fn(.str'builtin) -> PackageMetadata =
-    .build_package_metadata'builtin;
+{- Build inputs are observed through source-owned contextual bindings. -}
+pub use info.mode.mode;
+pub use info.target.{Target, TargetFeatures, target};
+pub use info.package.{PackageMetadata, MetadataFeatures, package_metadata};
 
 pub mod prelude {}

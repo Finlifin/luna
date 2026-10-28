@@ -1,6 +1,6 @@
 # Native wrapper resource protocols
 
-`library/builtin/native_resources.fl` adds conditional `Clone` and `Copy` for
+`library/builtin/protocols/native_resources.fl` adds conditional `Clone` and `Copy` for
 native optional and single-error result types. The builtin module loader loads
 these implementations alongside the resource trait definitions; users need no
 special import beyond the normal builtin prelude.

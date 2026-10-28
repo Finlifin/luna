@@ -7,9 +7,9 @@ use elaboration::arithmetic::Operator;
 use support::compile_with_source_bindings;
 
 const PRIMITIVES: &str = include_str!("../../../library/builtin/primitives.fl");
-const OPERATORS: &str = include_str!("../../../library/builtin/ops.fl");
-const TUPLE: &str = include_str!("../../../library/builtin/tuple.fl");
-const RESOURCES: &str = include_str!("../../../library/builtin/resources.fl");
+const OPERATORS: &str = include_str!("../../../library/builtin/protocols/ops.fl");
+const TUPLE: &str = include_str!("../../../library/builtin/types/tuple.fl");
+const RESOURCES: &str = include_str!("../../../library/builtin/protocols/resources.fl");
 
 #[test]
 fn repository_list_pattern_protocol_retains_observation_write_checks() {
@@ -22,7 +22,9 @@ fn repository_list_pattern_protocol_retains_observation_write_checks() {
         mod patterns {{ {} }} use patterns.*;
         {fixture}
         fn run()->bool {{exact(Repeated {{length:2,value:false}})}}",
-        support::with_attrs(include_str!("../../../library/builtin/patterns.fl")),
+        support::with_attrs(include_str!(
+            "../../../library/builtin/protocols/patterns.fl"
+        )),
     );
     let target = luna::host::Toolchain::default()
         .target_layout()
@@ -347,7 +349,7 @@ fn repository_meta_dependent_collectors_share_defaulted_argument_plans() {
 fn optional_combinators_preserve_affine_payloads_and_conditional_callbacks() {
     let source = format!(
         "mod resources {{ {RESOURCES} }} mod optional {{ {} }}\n{}",
-        include_str!("../../../library/builtin/option.fl"),
+        include_str!("../../../library/builtin/types/option.fl"),
         include_str!("../../../development/examples/host-library-optional-combinators.fl"),
     );
     let package = compile_with_source_bindings(
@@ -444,7 +446,7 @@ fn native_wrapper_once_preserves_affine_payloads_without_granting_copy() {
 fn native_wrapper_copy_requires_every_payload_and_preserves_pointer_lifetime() {
     let resources = format!(
         "mod resources {{ {RESOURCES} }}\nmod native_resources {{ {} }}\nuse resources.*;",
-        include_str!("../../../library/builtin/native_resources.fl")
+        include_str!("../../../library/builtin/protocols/native_resources.fl")
     );
     let selectors = || luna::protocols::type_constructors::Selectors {
         copy: Some("input.resources.Copy"),
@@ -558,7 +560,7 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
         "mod meta {{ {meta} }}\nmod resources {{ {} }}\n{TUPLE}\ntrait TupleMarker {{}} impl TupleMarker for Tuple<.Es = Es> where Es:meta.List<.Type'builtin> {{}}\n
         fn forward(value:T)->T where T:-TupleMarker {{value}}
         fn run()->bool {{let (a,(b,),())=forward((true,(false,),()));a and not b}}",
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     let selectors = luna::protocols::type_constructors::Selectors {
         meta_list: Some("input.meta.List"),
@@ -749,8 +751,8 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
 fn repository_conversion_protocols_select_full_interfaces_and_transfer_ownership() {
     let source = format!(
         "mod conversion {{ {} }}\nmod resources {{ {} }}\n{}",
-        include_str!("../../../library/builtin/conversion.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/conversion.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
         include_str!("../../../development/examples/host-library-conversion.fl"),
     );
     let compile = |source: &str| {
@@ -999,7 +1001,7 @@ fn repository_tuple_head_preserves_type_identity_and_value_layout() {
         }}
         comptime fn PairType()->Type {{Tuple<bool,bool>}}",
         include!("support/meta_source.rs"),
-        include_str!("../../../library/builtin/tuple.fl"),
+        include_str!("../../../library/builtin/types/tuple.fl"),
     );
     let package = compile_with_source_bindings(
         &source,
@@ -1174,7 +1176,7 @@ fn repository_resource_protocols_clone_scalars_and_preserve_pointer_targets() {
             assumes flag and copy and integer == duplicate and same == float and target;
         }}",
         PRIMITIVES,
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     let package = compile_with_source_bindings(
         &source,
@@ -1258,8 +1260,10 @@ fn repository_comparison_protocols_execute_integer_boundaries_and_defaults() {
     entries.push("check_all".into());
     let source = format!(
         "{}\n{}\n{checks}",
-        support::with_attrs(include_str!("../../../library/builtin/comparison.fl")),
-        include_str!("../../../library/builtin/resources.fl")
+        support::with_attrs(include_str!(
+            "../../../library/builtin/numeric/comparison.fl"
+        )),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     let package = compile_with_source_bindings(
         &source,
@@ -1337,8 +1341,10 @@ fn run() {{
     let lt = 'a'.as(Ord).lt(character); assumes lt;
 }}
 "#,
-        support::with_attrs(include_str!("../../../library/builtin/comparison.fl")),
-        include_str!("../../../library/builtin/resources.fl")
+        support::with_attrs(include_str!(
+            "../../../library/builtin/numeric/comparison.fl"
+        )),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     let package = compile_with_source_bindings(
         &source,
@@ -1448,8 +1454,8 @@ fn repository_option_operations_preserve_affine_payloads_and_cleanup() {
             let c=map_case(true);let d=map_case(false);let e=chain_case();
             assumes a and b and c and d and e;
         }}",
-        include_str!("../../../library/builtin/option.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/types/option.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     let package = compile_with_source_bindings(
         &source,
@@ -1544,8 +1550,8 @@ fn repository_result_operations_preserve_both_affine_branches() {
             let e=observed_case(true);let f=observed_case(false);
             assumes a and b and c and d and e and f;
         }}",
-        include_str!("../../../library/builtin/result.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/types/result.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     let package = compile_with_source_bindings(
         &source,
@@ -1706,9 +1712,9 @@ fn repository_value_combinators_own_callback_environments_on_both_branches() {
                         let observed={observe};
                         assumes observed and called == {invoked} and retired;
                     }}",
-                    include_str!("../../../library/builtin/option.fl"),
-                    include_str!("../../../library/builtin/result.fl"),
-                    include_str!("../../../library/builtin/resources.fl"));
+                    include_str!("../../../library/builtin/types/option.fl"),
+                    include_str!("../../../library/builtin/types/result.fl"),
+                    include_str!("../../../library/builtin/protocols/resources.fl"));
                 let package = compile_with_source_bindings(
                     &source,
                     &Default::default(),
@@ -1778,8 +1784,8 @@ fn repository_error_operations_preserve_rows_when_callbacks_add_errors() {
             (retried() match {{error ComputeErr.Rejected=>true,error InputErr.Missing=>false,_! =>false}})
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/result.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/types/result.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     let package = compile_with_source_bindings(
         &source,

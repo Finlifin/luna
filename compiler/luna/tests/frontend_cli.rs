@@ -3200,27 +3200,30 @@ fn effect_signature_formation_does_not_assume_missing_group_contracts() {
 
 #[test]
 fn shipped_library_files_use_current_syntax() {
+    fn sources(directory: &Path, files: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                sources(&path, files);
+            } else if path.extension().is_some_and(|extension| extension == "fl") {
+                files.push(path);
+            }
+        }
+    }
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for relative in [
-        "library/builtin/lib.fl",
-        "library/std/lib.fl",
-        "library/builtin/traits.fl",
-        "library/builtin/comparison.fl",
-        "library/builtin/resources.fl",
-        "library/builtin/ops.fl",
-        "library/builtin/iterator.fl",
-        "library/builtin/option.fl",
-        "library/builtin/result.fl",
-        "library/builtin/primitives.fl",
-    ] {
-        let output = run_command(
-            sandbox
-                .command()
-                .arg(repository.join(relative))
-                .args(["--emit", "ast"]),
+    let mut files = Vec::new();
+    sources(&repository.join("library"), &mut files);
+    files.sort();
+    assert!(!files.is_empty());
+    for path in files {
+        let output = run_command(sandbox.command().arg(&path).args(["--emit", "ast"]));
+        assert!(
+            output.status.success(),
+            "{}: {}",
+            path.display(),
+            details(&output)
         );
-        assert!(output.status.success(), "{relative}: {}", details(&output));
     }
 }
 
@@ -3904,30 +3907,33 @@ fn field_pointer_reads_require_a_target_and_copy_payload() {
 #[test]
 fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     let sandbox = Sandbox::new();
-    for name in ["builtin", "std", "meta"] {
+    for name in [
+        "builtin/protocols",
+        "builtin/types",
+        "builtin/numeric",
+        "std",
+        "meta",
+    ] {
         fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();
     }
-    sandbox.write("library/builtin/lib.fl","pub typealias Type=.Type'builtin;pub use tuple.Tuple;pub use ops.*;pub use comparison.*;pub mod math {pub use math_intrinsics.*;} pub mod prelude {pub use tuple.Tuple;}");
+    sandbox.write("library/builtin/lib.fl","use protocols.ops; use types.tuple; use numeric.{comparison,math_intrinsics}; pub typealias Type=.Type'builtin;pub use tuple.Tuple;pub use ops.*;pub use comparison.*;pub mod math {pub use math_intrinsics.*;} pub mod prelude {pub use tuple.Tuple;}");
     sandbox.write(
-        "library/builtin/resources.fl",
-        include_str!("../../../library/builtin/resources.fl"),
+        "library/builtin/protocols/resources.fl",
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     sandbox.write(
-        "library/builtin/tuple.fl",
-        include_str!("../../../library/builtin/tuple.fl"),
+        "library/builtin/types/tuple.fl",
+        include_str!("../../../library/builtin/types/tuple.fl"),
     );
     fs::create_dir_all(sandbox.path("library/attrs")).unwrap();
+    sandbox.write("library/attrs/lib.fl", include!("support/attrs_source.rs"));
     sandbox.write(
-        "library/attrs/lib.fl",
-        include_str!("../../../library/attrs/lib.fl"),
+        "library/builtin/numeric/comparison.fl",
+        include_str!("../../../library/builtin/numeric/comparison.fl"),
     );
     sandbox.write(
-        "library/builtin/comparison.fl",
-        include_str!("../../../library/builtin/comparison.fl"),
-    );
-    sandbox.write(
-        "library/builtin/ops.fl",
-        include_str!("../../../library/builtin/ops.fl"),
+        "library/builtin/protocols/ops.fl",
+        include_str!("../../../library/builtin/protocols/ops.fl"),
     );
     sandbox.write("library/meta/lib.fl", include!("support/meta_source.rs"));
     sandbox.write("library/std/lib.fl", "pub mod prelude {}");
@@ -3938,7 +3944,8 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
         include_str!("../../../library/language-items.conf")
             .lines()
             .filter(|line| {
-                !line.starts_with("iterator-protocol =")
+                !line.starts_with("comptime-intrinsic.")
+                    && !line.starts_with("iterator-protocol =")
                     && !line.starts_with("into-iterator-protocol =")
                     && !line.starts_with("list-pattern-protocol =")
             })
@@ -3946,8 +3953,8 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
             .join("\n"),
     );
     sandbox.write(
-        "library/builtin/math_intrinsics.fl",
-        include_str!("../../../library/builtin/math_intrinsics.fl"),
+        "library/builtin/numeric/math_intrinsics.fl",
+        include_str!("../../../library/builtin/numeric/math_intrinsics.fl"),
     );
     sandbox.write("input.fl","fn pair()->Tuple<bool,.u8'builtin> {(true,9)} fn present()->?bool {true} fn run()->bool {let (flag,byte)=pair();flag and byte==9 and (present() match {value?=>value,null=>false})}");
     assert_eq!(
@@ -4013,7 +4020,7 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
             "--interpret",
             "run",
             "--tuple-type",
-            "builtin.tuple.Tuple"
+            "builtin.types.tuple.Tuple"
         ]))
         .trim(),
         "(bool true)"
@@ -4023,7 +4030,8 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
         include_str!("../../../library/language-items.conf")
             .lines()
             .filter(|line| {
-                !line.starts_with("iterator-protocol =")
+                !line.starts_with("comptime-intrinsic.")
+                    && !line.starts_with("iterator-protocol =")
                     && !line.starts_with("into-iterator-protocol =")
                     && !line.starts_with("list-pattern-protocol =")
             })
@@ -4031,8 +4039,8 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
             .join("\n"),
     );
     sandbox.write(
-        "library/builtin/math_intrinsics.fl",
-        include_str!("../../../library/builtin/math_intrinsics.fl"),
+        "library/builtin/numeric/math_intrinsics.fl",
+        include_str!("../../../library/builtin/numeric/math_intrinsics.fl"),
     );
     sandbox.write("input.fl","typealias Type=.Type'builtin;pure comptime fn Tuple<...Es:meta.List<Type>>->Type {Tuple<...Es>} fn run()->Tuple<bool> {(true,)}");
     let shadow = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]);
@@ -4367,7 +4375,7 @@ fn index_protocol_sysroot_defaults_preserve_explicit_pointer_access() {
     );
     sandbox.write(
         "library/builtin/ops.fl",
-        include_str!("../../../library/builtin/ops.fl"),
+        include_str!("../../../library/builtin/protocols/ops.fl"),
     );
     sandbox.write("library/std/lib.fl", "pub mod prelude {}");
     sandbox.write(
@@ -7791,8 +7799,8 @@ fn host_fma_binding_preserves_resources_purity_and_unsafe_responsibility() {
 #[test]
 fn repository_math_package_runs_generic_fma_and_rejects_nonfloat_inputs() {
     let sandbox = Sandbox::new();
-    let math =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/builtin/math_intrinsics.fl");
+    let math = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../library/builtin/numeric/math_intrinsics.fl");
     let math = math.to_str().unwrap();
     sandbox.write(
         "app.fl",
@@ -7997,8 +8005,8 @@ fn native_tests_bind_host_fma_for_single_source_and_real_math_package() {
         "input.machine.Scalar.missing",
     ]);
     failure(&output, 1);
-    let math =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/builtin/math_intrinsics.fl");
+    let math = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../library/builtin/numeric/math_intrinsics.fl");
     sandbox.write(
         "app.fl",
         &format!(
@@ -8152,7 +8160,7 @@ fn repository_resource_package_executes_native_clone_and_cleanup() {
         include_str!("../../../development/examples/host-library-resources.fl"),
     );
     let resources =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/builtin/resources.fl");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/builtin/protocols/resources.fl");
     for body in ["self.*", "Self { counter: self.counter.* }"] {
         let source = include_str!("../../../development/examples/host-library-resources.fl")
             .replace("\n        self.*\n", &format!("\n        {body}\n"));
@@ -8568,16 +8576,16 @@ fn generic_host_intrinsic_cli_rejects_invalid_bindings_without_replacing_output(
 #[test]
 fn sysroot_repository_resource_defaults_execute_cleanup_and_reject_double_move() {
     let sandbox = Sandbox::new();
-    fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
+    fs::create_dir_all(sandbox.path("library/builtin/protocols")).unwrap();
     fs::create_dir_all(sandbox.path("library/std")).unwrap();
     sandbox.write(
         "library/builtin/lib.fl",
-        "pub use resources.Drop; pub mod prelude {}",
+        "pub use protocols.resources.Drop; pub mod prelude {}",
     );
     sandbox.write("library/std/lib.fl", "pub mod prelude {}");
     sandbox.write(
-        "library/builtin/resources.fl",
-        include_str!("../../../library/builtin/resources.fl"),
+        "library/builtin/protocols/resources.fl",
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     // Isolate the real resource module and manifest bindings from unfinished
     // String/panic modules. This is not the full-library smoke test.
@@ -8740,34 +8748,31 @@ fn sysroot_incomplete_resource_defaults_never_fall_back_to_unchecked_execution()
 #[test]
 fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override() {
     let sandbox = Sandbox::new();
-    for name in ["builtin", "std"] {
+    for name in ["builtin/protocols", "builtin/numeric", "std"] {
         fs::create_dir_all(sandbox.path(format!("library/{name}"))).unwrap();
     }
     sandbox.write(
         "library/builtin/lib.fl",
-        "pub mod math {pub use comparison.{Eq,Ord,Order};pub use math_intrinsics.*;} pub mod prelude {pub use math;pub use primitives.*;pub use math.{Eq,Ord,Order};}",
+        "use numeric.{comparison,math_intrinsics}; pub mod math {pub use comparison.{Eq,Ord,Order};pub use math_intrinsics.*;} pub mod prelude {pub use math;pub use primitives.*;pub use math.{Eq,Ord,Order};}",
     );
     sandbox.write(
-        "library/builtin/resources.fl",
-        include_str!("../../../library/builtin/resources.fl"),
+        "library/builtin/protocols/resources.fl",
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     sandbox.write(
         "library/builtin/primitives.fl",
         include_str!("../../../library/builtin/primitives.fl"),
     );
     fs::create_dir_all(sandbox.path("library/attrs")).unwrap();
+    sandbox.write("library/attrs/lib.fl", include!("support/attrs_source.rs"));
     sandbox.write(
-        "library/attrs/lib.fl",
-        include_str!("../../../library/attrs/lib.fl"),
-    );
-    sandbox.write(
-        "library/builtin/comparison.fl",
-        include_str!("../../../library/builtin/comparison.fl"),
+        "library/builtin/numeric/comparison.fl",
+        include_str!("../../../library/builtin/numeric/comparison.fl"),
     );
     sandbox.write("library/std/lib.fl", "pub mod prelude {}");
     sandbox.write(
-        "library/builtin/math_intrinsics.fl",
-        include_str!("../../../library/builtin/math_intrinsics.fl"),
+        "library/builtin/numeric/math_intrinsics.fl",
+        include_str!("../../../library/builtin/numeric/math_intrinsics.fl"),
     );
     let config = include_str!("../../../library/language-items.conf")
         .lines()
@@ -8808,7 +8813,7 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
         assert_eq!(success(&output).trim(), "(bool true)");
     }
     let bad = config.replace(
-        "host-intrinsic.sqrt = builtin.math_intrinsics.target.Scalar.sqrt",
+        "host-intrinsic.sqrt = builtin.numeric.math_intrinsics.target.Scalar.sqrt",
         "host-intrinsic.sqrt = missing.Ops.sqrt",
     );
     sandbox.write("library/language-items.conf", &bad);
@@ -8831,10 +8836,13 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
     );
     assert_eq!(fs::read(sandbox.path("native")).unwrap(), previous);
     for override_args in [
-        ["--host-sqrt", "builtin.math_intrinsics.target.Scalar.sqrt"],
+        [
+            "--host-sqrt",
+            "builtin.numeric.math_intrinsics.target.Scalar.sqrt",
+        ],
         [
             "--host-intrinsic",
-            "sqrt=builtin.math_intrinsics.target.Scalar.sqrt",
+            "sqrt=builtin.numeric.math_intrinsics.target.Scalar.sqrt",
         ],
     ] {
         let mut args = vec![

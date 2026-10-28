@@ -7,7 +7,7 @@ use comptime_interpretor::Value;
 fn source(body: &str) -> String {
     format!(
         "typealias str=.str'builtin;typealias u64=.u64'builtin;typealias u8=.u8'builtin;mod text {{{}}}{body}",
-        include_str!("../../../library/builtin/text_bytes.fl")
+        include_str!("../../../library/builtin/text_impl/bytes.fl")
     )
 }
 

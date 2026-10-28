@@ -316,7 +316,11 @@ fn repository_package_exports_object_for_user_attribute_constructors() {
         .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
             [
                 "--comptime-intrinsic".to_owned(),
-                format!("{}=meta.scalar_math.target.Scalar.{}", op.name(), op.name()),
+                format!(
+                    "{}=meta.numeric.scalar_math.target.Scalar.{}",
+                    op.name(),
+                    op.name()
+                ),
             ]
         }))
         .args([

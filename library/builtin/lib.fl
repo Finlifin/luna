@@ -1,8 +1,12 @@
 {-
-  builtin package root. Sibling .fl files are discovered as modules.
+  builtin package root. Files and directories are discovered as modules.
   Public root re-exports also supply names to builtin's own child modules.
   The prelude supplies default imports to other packages.
 -}
+
+use protocols.{resources, native_resources, conversion, patterns, meta_list_patterns, ops, iterator, traits};
+use types.{tuple, option, result};
+use numeric.{comparison, math_intrinsics};
 
 pub use primitives.*;
 pub use tuple.Tuple;
@@ -14,7 +18,7 @@ pub use iterator.{Iterator, IntoIterator, FromIterator, emit_item, MapIterator, 
 pub use ops.*;
 
 pub mod text {
-    pub use text_bytes.*;
+    pub use text_impl.bytes.*;
 }
 
 pub mod math {

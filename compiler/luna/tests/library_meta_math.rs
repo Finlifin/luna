@@ -14,7 +14,7 @@ fn compile(body: &str, width: u32) -> Result<nir::program::Package, String> {
         &format!(
             "mod builtin {{pub mod primitives {{ {} }} pub use primitives.*; }} use builtin.primitives.*; mod math {{ {} }} {body}",
             include_str!("../../../library/builtin/primitives.fl"),
-            include_str!("../../../library/meta/scalar_math.fl")
+            include_str!("../../../library/meta/numeric/scalar_math.fl")
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {

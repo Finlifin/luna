@@ -55,6 +55,6 @@ An unbound or runtime tag cannot execute at comptime, and a comptime tag cannot
 remain in runtime code. Ordinary arguments are evaluated once in source order.
 
 Explicit package-set drivers can supply each binding with
-`--comptime-intrinsic sqrt=meta.scalar_math.target.Scalar.sqrt` (and the
+`--comptime-intrinsic sqrt=meta.numeric.scalar_math.target.Scalar.sqrt` (and the
 corresponding flag for every other operation). They must also provide meta
 with a `builtin` dependency. Sysroot users receive these bindings automatically.

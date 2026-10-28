@@ -1,17 +1,6 @@
-{-
-    Attribute constructors produce ordinary comptime Objects. Consumers check
-    the target and supported values before applying metadata to generated code.
--}
-
-pub pure comptime fn abi(name: .Symbol'builtin) -> .Object'builtin {
-    let metadata = {abi: name};
-    metadata
-}
-
-{-
-    Trait membership phase is independent of a function's execution keyword.
--}
-pub const comptime_phase = {comptime_phase: true};
+{- Attribute values are ordinary comptime data checked by their consumers. -}
+pub use calling_convention.constructors.abi;
+pub use staging.phase.comptime_phase;
 
 pub mod prelude {
     pub use .abi;

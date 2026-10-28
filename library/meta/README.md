@@ -1,12 +1,14 @@
 # meta
 
+源码目录与待实现领域见 [六包结构](../STRUCTURE.md)。
+
 [`meta.math`](math.md) 提供 `builtin.math` 的编译期对应接口，由 VM 执行；
 普通 `math` 名称仍指向 runtime 数学库。
 
 包入口只保留 `List` 类型工厂和公开导出；保持 `meta.List` 的 normal-form
-声明身份。列表算法位于 `list.fl` 的 `impl List<T> where T`，Object 操作、
-整数运算、struct builder 与 enum builder 分别位于 `object.fl`、`integer.fl`、
-`structs.fl`、`enums.fl`。
+声明身份。列表算法位于 `data/list.fl` 的 `impl List<T> where T`，Object 操作、
+整数运算、struct builder 与 enum builder 分别位于 `data/object.fl`、`data/integer.fl`、
+`definitions/structs.fl`、`definitions/enums.fl`。
 
 列表操作使用接收者调用，例如 `values.length()`、`values.map(transform)`、
 `values.fold(initial, combine)`。`append` 使用 `*self`，通过 `values.append(value)`

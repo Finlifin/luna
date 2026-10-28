@@ -917,20 +917,38 @@ mod repository_bindings_tests {
         for &operation in nir::intrinsics::Operation::ALL {
             assert!(bindings.host_intrinsics.contains(&(
                 operation,
-                format!("builtin.math_intrinsics.target.Scalar.{}", operation.name())
+                format!(
+                    "builtin.numeric.math_intrinsics.target.Scalar.{}",
+                    operation.name()
+                )
             )));
         }
 
-        assert_eq!(bindings.copy.as_deref(), Some("builtin.resources.Copy"));
-        assert_eq!(bindings.drop.as_deref(), Some("builtin.resources.Drop"));
+        assert_eq!(
+            bindings.copy.as_deref(),
+            Some("builtin.protocols.resources.Copy")
+        );
+        assert_eq!(
+            bindings.drop.as_deref(),
+            Some("builtin.protocols.resources.Drop")
+        );
         assert!(
             SysrootBindings::parse("version = 1\noptional-type = builtin.option.Option\n").is_err()
         );
         assert_eq!(bindings.meta_list.as_deref(), Some("meta.List"));
-        assert_eq!(bindings.tuple.as_deref(), Some("builtin.tuple.Tuple"));
-        assert_eq!(bindings.index.as_deref(), Some("builtin.ops.Index"));
-        assert_eq!(bindings.ordering.as_deref(), Some("builtin.comparison.Ord"));
-        assert_eq!(bindings.equality.as_deref(), Some("builtin.comparison.Eq"));
+        assert_eq!(bindings.tuple.as_deref(), Some("builtin.types.tuple.Tuple"));
+        assert_eq!(
+            bindings.index.as_deref(),
+            Some("builtin.protocols.ops.Index")
+        );
+        assert_eq!(
+            bindings.ordering.as_deref(),
+            Some("builtin.numeric.comparison.Ord")
+        );
+        assert_eq!(
+            bindings.equality.as_deref(),
+            Some("builtin.numeric.comparison.Eq")
+        );
         for (operator, declaration) in [
             (elaboration::arithmetic::Operator::Add, "Add"),
             (elaboration::arithmetic::Operator::Subtract, "Sub"),
@@ -940,7 +958,7 @@ mod repository_bindings_tests {
         ] {
             assert_eq!(
                 bindings.arithmetic[operator as usize].as_deref(),
-                Some(format!("builtin.ops.{declaration}").as_str())
+                Some(format!("builtin.protocols.ops.{declaration}").as_str())
             );
         }
     }

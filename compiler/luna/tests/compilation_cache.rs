@@ -198,7 +198,7 @@ fn dependency_contents_and_edges_participate_in_reuse() {
 fn merged_attributes_track_constructor_changes_and_recover_from_invalid_objects() {
     let files = Files::new();
     files.write("client.fl", "^attrs.abi(.c) fn run() {}");
-    let constructor = include_str!("../../../library/attrs/lib.fl");
+    let constructor = include!("support/attrs_source.rs");
     files.write("attrs.fl", constructor);
     let mut request = files.request("client.fl");
     request.options.emit = luna::cli::Emit::MergedAttributes;

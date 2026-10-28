@@ -94,7 +94,7 @@ fn ordinary_implementations_continue_to_elaborate() {
 fn phase_source(body: &str) -> String {
     format!(
         "mod attrs {{{}}} use attrs.comptime_phase as staged; typealias Type=.Type'builtin; {body}",
-        include_str!("../../../library/attrs/lib.fl")
+        include!("support/attrs_source.rs")
     )
 }
 

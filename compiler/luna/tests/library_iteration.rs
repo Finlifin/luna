@@ -28,8 +28,8 @@ fn ordinary_for_retires_rejected_current_and_unproduced_items_once() {
             first and second and third and calls == 2
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration_with_budget(
         &source,
@@ -61,8 +61,8 @@ fn ordinary_for_evaluates_input_once_before_installing_delivery_handler() {
             inputs == 1 and outputs == 1
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -81,8 +81,8 @@ fn ordinary_for_uses_symbolic_iterator_evidence_in_generic_bodies() {
             visits(first.as(Iterator).chain(second)) == 2
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -101,8 +101,8 @@ fn ordinary_for_consumes_optional_chain_and_skips_failed_patterns() {
             count == 1
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -130,8 +130,8 @@ fn ordinary_for_guards_continue_break_and_return_keep_lexical_targets() {
             seen == 2 and delivered == 1 and stop()
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -158,15 +158,18 @@ fn ordinary_for_nested_labelled_transfers_leave_only_the_target_iteration() {
             count == 2
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
 
 #[test]
 fn repository_iterator_declarations_form_without_resource_implementations() {
-    compile_iteration_unbound(include_str!("../../../library/builtin/iterator.fl")).unwrap();
+    compile_iteration_unbound(include_str!(
+        "../../../library/builtin/protocols/iterator.fl"
+    ))
+    .unwrap();
 }
 
 #[test]
@@ -221,8 +224,8 @@ fn repository_inline_iterator_maps_filters_and_consumes_in_order() {
             observed and count == 2
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -277,8 +280,8 @@ fn repository_inline_iterator_drops_filtered_and_unproduced_items() {
         }}
         fn run()->bool {{filtered() and short_circuit(true) and short_circuit(false)}}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -309,8 +312,8 @@ fn repository_iterator_rejects_repeated_consumption_of_callback_capture() {
             let ticket=Ticket {{}};
             Flags {{}}.as(Iterator).{adapter};
         }}",
-            include_str!("../../../library/builtin/iterator.fl"),
-            include_str!("../../../library/builtin/resources.fl"),
+            include_str!("../../../library/builtin/protocols/iterator.fl"),
+            include_str!("../../../library/builtin/protocols/resources.fl"),
         );
         let package = compile_iteration(&source);
         let mut expanded = package.clone();
@@ -360,8 +363,8 @@ fn optional_iteration_preserves_layers_and_chain_order() {
             count == 3 and not none and every
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -388,8 +391,8 @@ fn optional_chain_cleans_owned_items_on_short_circuit() {
             found and called and first and second
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -421,8 +424,8 @@ fn collect_selects_the_requested_from_iterator_implementation() {
             result.value == 1 and zero.value == 0
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -432,7 +435,7 @@ fn chain_rejects_different_item_types() {
     let source = format!(
         "{}\nfn run() {{let left:?bool=true;let right:?.u8'builtin=1;
         left.as(Iterator).chain(right);}}",
-        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
     );
     assert!(compile_iteration_unbound(&source).is_err());
 }
@@ -488,8 +491,8 @@ fn inspection_observes_items_before_filtering_without_changing_them() {
             count == 2 and delivered
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -519,8 +522,8 @@ fn inspection_borrows_affine_items_and_stops_with_the_consumer() {
             found and inspected and first and second
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -559,8 +562,8 @@ fn fold_moves_and_reinitializes_affine_accumulator_in_source_order() {
             valid and empty_valid and dropped and empty_dropped
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_contract_limit(
         &source,
@@ -596,8 +599,8 @@ fn handler_borrows_pointer_bearing_affine_capture_without_copy() {
             valid and dropped
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -619,8 +622,8 @@ fn borrowed_pointer_capture_retains_owner_and_storage_restrictions() {
                 let item:?bool=true;
                 item.as(Iterator).iterate()# {{emit_item<bool>(value)=>{{{body}}},}};
             }}",
-            include_str!("../../../library/builtin/iterator.fl"),
-            include_str!("../../../library/builtin/resources.fl"),
+            include_str!("../../../library/builtin/protocols/iterator.fl"),
+            include_str!("../../../library/builtin/protocols/resources.fl"),
         );
         let package = compile_iteration(&source);
         let error =
@@ -680,8 +683,8 @@ fn borrowed_affine_capture_cleanup_follows_lexical_return_and_loop_exit() {
             early and full and exited and one == 1 and two == 2 and three == 1
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -718,8 +721,8 @@ fn find_transfers_the_match_and_cleans_rejected_and_unproduced_items() {
             valid and second and none
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     // Three owned optional sources and their cleanup guards share this budget.
     // Unexpanded lexical delivery of pointer-bearing results still lacks a
@@ -756,8 +759,8 @@ fn find_map_preserves_present_null_and_stops_mapping() {
             present_null and calls == 2 and none
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -776,8 +779,8 @@ fn find_scalar_handles_match_and_exhaustion_without_expansion() {
             matched and exhausted
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -807,8 +810,8 @@ fn filter_map_preserves_nested_optionals_and_maps_in_order() {
             calls == 2 and outputs == 1
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -846,8 +849,8 @@ fn filter_map_cleans_rejected_items_and_unused_callback_environment() {
             accepted and first and second and environment
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -878,8 +881,8 @@ fn filter_map_short_circuit_cleans_remaining_inputs_without_mapping_them() {
             found and first and second and third and calls == 2
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -914,8 +917,8 @@ fn flat_map_finishes_inner_sources_before_advancing_outer_source() {
             count == 4
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -954,8 +957,8 @@ fn flat_map_short_circuit_cleans_inner_and_outer_remainders() {
             found and mapped and a and b and c and d
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -964,7 +967,7 @@ fn flat_map_short_circuit_cleans_inner_and_outer_remainders() {
 fn flat_map_rejects_mapper_results_without_iterator_protocol() {
     let source = format!(
         "{}\nfn run() {{let value:?bool=true;value.as(Iterator).flat_map(|item| item);}}",
-        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
     );
     assert!(compile_iteration_unbound(&source).is_err());
 }
@@ -990,8 +993,8 @@ fn take_while_stops_its_source_but_not_the_enclosing_chain() {
             calls == 2 and outputs == 2
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1025,8 +1028,8 @@ fn take_while_rejection_cleans_current_remaining_and_predicate_resources() {
             first and second and third and environment and delivered and calls == 2
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1057,8 +1060,8 @@ fn take_while_handles_empty_sources_and_downstream_early_exit() {
             found and called and first and second and environment
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1087,8 +1090,8 @@ fn skip_while_stops_testing_after_the_first_forwarded_item() {
             calls == 2 and outputs == 2
         }}
         fn verify() {{ let passed = run(); assumes passed; }}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1123,8 +1126,8 @@ fn skip_while_cleans_prefix_tail_and_environment_on_consumer_exit() {
             found and first and second and third and environment and calls == 2
         }}
         fn verify() {{ let passed = run(); assumes passed; }}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1158,8 +1161,8 @@ fn skip_while_handles_empty_and_fully_skipped_sources() {
             retired and calls == 2 and found
         }}
         fn verify() {{ let passed = run(); assumes passed; }}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1183,8 +1186,8 @@ fn counted_adapters_preserve_order_and_do_not_overproduce() {
             result and calls == 2
         }}
         fn verify() {{ let passed = run(); assumes passed; }}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1219,8 +1222,8 @@ fn counted_adapters_handle_zero_and_exhausted_limits() {
             retired and not skipped and forwarded
         }}
         fn verify() {{ let passed = run(); assumes passed; }}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1248,8 +1251,8 @@ fn counted_adapters_retire_skipped_delivered_and_remaining_items_once() {
             found and first and second and third
         }}
         fn verify() {{ let passed = run(); assumes passed; }}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1359,8 +1362,8 @@ fn ordinary_for_converts_containers_once_and_keeps_conversion_outside_handler() 
             constructed and converted and visited and retired
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -1394,8 +1397,8 @@ fn ordinary_for_prefers_direct_iteration_and_converts_generic_inputs() {
             direct and not visit(Both {{}}) and visit(Container {{value:true}}) and not visit(Container {{value:null}})
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -1427,8 +1430,8 @@ fn reduce_seeds_from_first_item_and_calls_combiner_in_order() {
         }}
         fn verify() {{let passed=run();assumes passed;}}
     "#,
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration_with_contract_limit(
         &source,
@@ -1449,8 +1452,8 @@ fn reduce_preserves_a_present_null_item() {
         }}
         fn verify() {{let passed=run();assumes passed;}}
     "#,
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration_with_contract_limit(
         &source,
@@ -1487,8 +1490,8 @@ fn selection_stops_nth_and_preserves_last_and_optional_layers() {
         }}
         fn verify() {{let passed=run();assumes passed;}}
         "#,
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1517,8 +1520,8 @@ fn selection_retires_affine_prefix_and_remainder_without_copying_result() {
             }}
             fn verify() {{let passed=run();assumes passed;}}
             "#,
-            include_str!("../../../library/builtin/iterator.fl"),
-            include_str!("../../../library/builtin/resources.fl")
+            include_str!("../../../library/builtin/protocols/iterator.fl"),
+            include_str!("../../../library/builtin/protocols/resources.fl")
         );
         check_iteration_with_contract_limit(
             &source,
@@ -1552,8 +1555,8 @@ fn reduce_moves_affine_items_and_retires_only_replaced_accumulators() {
         }}
         fn verify() {{let passed=run();assumes passed;}}
     "#,
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl")
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration_with_contract_limit(
         &source,
@@ -1589,8 +1592,8 @@ fn flatten_short_circuit_cleans_inner_and_outer_remainders() {
             found and a and b and c and d
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1599,7 +1602,7 @@ fn flatten_short_circuit_cleans_inner_and_outer_remainders() {
 fn flatten_rejects_noniterable_items() {
     let source = format!(
         "{}\nfn run() {{let value:?bool=true;value.as(Iterator).flatten();}}",
-        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
     );
     assert!(compile_iteration_unbound(&source).is_err());
 }
@@ -1629,8 +1632,8 @@ fn flatten_preserves_order_empty_sources_and_one_optional_layer() {
         }}
         fn verify() {{let passed=run();assumes passed;}}
         "#,
-        include_str!("../../../library/builtin/iterator.fl"),
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }

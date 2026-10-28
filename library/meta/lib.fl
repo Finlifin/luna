@@ -4,6 +4,10 @@ pub pure comptime fn List<T> -> .Type'builtin {
 }
 
 {- Comptime data, arithmetic, reflection, and checked definition builders. -}
+use data.{object, integer, list};
+use definitions.{structs, enums};
+use numeric.scalar_math;
+
 pub use object.*;
 pub use integer.*;
 pub use structs.*;

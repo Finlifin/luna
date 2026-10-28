@@ -437,7 +437,11 @@ fn ordinary_package_uses_public_list_operations_without_builtin_access() {
         .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
             [
                 "--comptime-intrinsic".to_owned(),
-                format!("{}=meta.scalar_math.target.Scalar.{}", op.name(), op.name()),
+                format!(
+                    "{}=meta.numeric.scalar_math.target.Scalar.{}",
+                    op.name(),
+                    op.name()
+                ),
             ]
         }))
         .args([

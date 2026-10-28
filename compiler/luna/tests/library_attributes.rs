@@ -6,7 +6,7 @@ mod support;
 use comptime_interpretor::{Interpreter, Value};
 use nir::{Primitive, Term};
 
-const ATTRS: &str = include_str!("../../../library/attrs/lib.fl");
+const ATTRS: &str = include!("support/attrs_source.rs");
 
 #[test]
 fn abi_constructor_preserves_symbol_and_object_entry_type() {

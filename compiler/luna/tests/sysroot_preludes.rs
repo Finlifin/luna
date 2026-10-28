@@ -58,11 +58,11 @@ fn source_configured_iterator_runs_ordinary_for_from_prelude() {
     );
     input.write(
         "library/builtin/iterator.fl",
-        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/protocols/iterator.fl"),
     );
     input.write(
         "library/builtin/resources.fl",
-        include_str!("../../../library/builtin/resources.fl"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     input.write("library/language-items.conf", "version = 1\niterator-protocol = builtin.iterator.Iterator\ncopy-protocol = builtin.resources.Copy\ndrop-protocol = builtin.resources.Drop\n");
     for package in ["meta", "build", "attrs", "verification", "std"] {
@@ -129,9 +129,9 @@ fn complete_shipped_sysroot_runs_tuple_optional_math_and_iteration() {
             "--test-native",
             "--inline-functions",
             "--copy-protocol",
-            "builtin.resources.Copy",
+            "builtin.protocols.resources.Copy",
             "--drop-protocol",
-            "builtin.resources.Drop",
+            "builtin.protocols.resources.Drop",
             "--fuel",
             "4000000",
         ])
@@ -159,7 +159,7 @@ fn shipped_text_module_exposes_checked_utf8_byte_reads() {
     );
     input.write(
         "library/builtin/text_bytes.fl",
-        include_str!("../../../library/builtin/text_bytes.fl"),
+        include_str!("../../../library/builtin/text_impl/bytes.fl"),
     );
     for package in ["meta", "build", "attrs", "verification", "std"] {
         input.write(&format!("library/{package}/lib.fl"), "pub mod prelude {}");

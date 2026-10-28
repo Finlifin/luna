@@ -1,0 +1,4 @@
+{-
+    Trait membership phase is independent of a function's execution keyword.
+-}
+pub const comptime_phase = {comptime_phase: true};

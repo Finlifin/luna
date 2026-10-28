@@ -81,7 +81,7 @@ fn matching_parameterized_strategy_executes_without_unfolding_trait_identity() {
 fn comptime_derivation_preserves_membership_and_function_phases() {
     let source = format!(
         "mod attrs {{{}}} use attrs.comptime_phase as staged; typealias Type=.Type'builtin; trait Flag {{^staged comptime fn flag()->bool;}} derive fn enabled for Flag {{comptime fn flag()->bool {{true}}}} struct Record {{}} comptime derive Flag.use(enabled) for Record; comptime fn run()->bool {{Record.as(Flag).flag()}}",
-        include_str!("../../../library/attrs/lib.fl")
+        include!("support/attrs_source.rs")
     );
     let package = support::compile(&source);
     assert!(package.implementations[0].phases.comptime);
@@ -136,7 +136,7 @@ fn generated_associated_types_and_values_feed_method_signatures_and_bodies() {
 fn generated_associated_values_follow_comptime_membership() {
     let source = format!(
         "mod attrs {{{}}} use attrs.comptime_phase as staged; typealias Type=.Type'builtin; trait Source {{assoc Item:Type=bool; ^staged assoc initial:bool; ^staged comptime fn make()->Item;}} derive fn booleans for Source {{assoc initial:bool=true; comptime fn make()->bool {{initial}}}} struct Subject {{}} comptime derive Source.use(booleans) for Subject; comptime fn run()->bool {{Subject.as(Source).make()}}",
-        include_str!("../../../library/attrs/lib.fl")
+        include!("support/attrs_source.rs")
     );
     let package = support::compile(&source);
     assert!(package.implementations[0].phases.comptime);
@@ -175,7 +175,7 @@ fn generated_associated_self_types_remain_distinct_between_subjects() {
 fn generated_prefix_attributes_evaluate_in_the_impl_self_context() {
     let source = format!(
         "mod attrs {{{}}} use attrs.comptime_phase as staged; typealias Type=.Type'builtin; comptime fn metadata(T:Type)->.Object'builtin {{let value={{comptime_phase:T == Subject}};value}} trait Flag {{^staged comptime fn flag()->bool;}} derive fn enabled for Flag {{^metadata(Self) comptime fn flag()->bool {{true}}}} struct Subject {{}} comptime derive Flag.use(enabled) for Subject; comptime fn run()->bool {{Subject.as(Flag).flag()}}",
-        include_str!("../../../library/attrs/lib.fl")
+        include!("support/attrs_source.rs")
     );
     let package = support::compile(&source);
     assert!(package.implementations[0].phases.comptime);
@@ -201,7 +201,7 @@ fn generated_prefix_attributes_preserve_override_order() {
 fn generated_attributes_still_require_an_implemented_consumer() {
     let source = format!(
         "mod attrs {{{}}} trait Flag {{fn flag()->bool;}} derive fn enabled for Flag {{^attrs.abi(.c) fn flag()->bool {{true}}}} struct Subject {{}} derive Flag.use(enabled) for Subject;",
-        include_str!("../../../library/attrs/lib.fl")
+        include!("support/attrs_source.rs")
     );
     let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
     assert!(

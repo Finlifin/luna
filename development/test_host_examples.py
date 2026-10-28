@@ -18,7 +18,7 @@ class NativeExampleOutputTests(unittest.TestCase):
         self.assertEqual(edges, [('1', 'tuples', '2'), ('1', 'meta', '3'),
                                  ('1', 'resources', '4'), ('2', 'meta', '3'), ('3', 'builtin', '5')])
         self.assertEqual(arguments[-2:], ['--primary', '1'])
-        self.assertIn(str(host_examples.ROOT / 'library/builtin/tuple.fl'), arguments)
+        self.assertIn(str(host_examples.ROOT / 'library/builtin/types/tuple.fl'), arguments)
         self.assertIn(str(host_examples.ROOT / 'library/meta/lib.fl'), arguments)
 
     def test_private_driver_is_released_but_artifacts_survive(self):

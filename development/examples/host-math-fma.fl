@@ -1,5 +1,5 @@
 {-
-  Load library/builtin/math_intrinsics.fl as an isolated math test package
+  Load library/builtin/numeric/math_intrinsics.fl as an isolated math test package
   with a direct dependency. Bind all Scalar operations listed in
   library/README.md, including those in unused generic bodies.
 -}
