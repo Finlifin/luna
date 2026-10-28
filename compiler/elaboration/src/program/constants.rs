@@ -2,6 +2,7 @@
 //! graphs; active inference, caller premises and interpreter storage do not enter.
 use super::*;
 use comptime_interpretor::Value;
+mod observations;
 
 #[derive(Default)]
 struct Materialization {
@@ -36,7 +37,7 @@ enum PartialStagedData {
     Known(Term),
     Aggregate(PartialStagedShape, Vec<std::sync::Arc<PartialStagedValue>>),
 }
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum PartialStagedShape {
     Tuple,
     Record(DeclarationId),
@@ -1396,6 +1397,32 @@ impl Checker<'_, '_> {
         *fuel = budget.steps;
         if let Some(symbol) = symbol {
             return Ok(PartialStagedValue::known(symbol));
+        }
+        match &value.kind {
+            K::If {
+                then_branch,
+                else_branch: Some(other),
+                ..
+            } => {
+                let left = self.partial_staged_value(then_branch, depth + 1, fuel)?;
+                let right = self.partial_staged_value(other, depth + 1, fuel)?;
+                return PartialStagedValue::common(&left, &right, depth + 1, fuel);
+            }
+            K::Match { arms, .. } if !arms.is_empty() => {
+                let mut common = self.partial_staged_value(&arms[0].body, depth + 1, fuel)?;
+                for arm in &arms[1..] {
+                    let next = self.partial_staged_value(&arm.body, depth + 1, fuel)?;
+                    common = PartialStagedValue::common(&common, &next, depth + 1, fuel)?;
+                }
+                return Ok(common);
+            }
+            K::Block {
+                statements,
+                result: Some(result),
+            } if statements.is_empty() => {
+                return self.partial_staged_value(result, depth + 1, fuel);
+            }
+            _ => {}
         }
         let (shape, fields) = match (&value.kind, &value.ty) {
             (K::Tuple(fields), _) => (PartialStagedShape::Tuple, fields),

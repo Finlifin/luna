@@ -82,3 +82,86 @@ fn type_observation_does_not_freeze_mutable_or_runtime_bindings() {
         assert!(compile(source).is_err(), "unexpectedly accepted {source}");
     }
 }
+
+#[test]
+fn unknown_control_flow_retains_only_common_type_evidence() {
+    for body in [
+        "let T=if flag {bool} else {bool}; let value:T=flag; value",
+        "let T=flag match {true=>bool,false=>bool}; let value:T=flag; value",
+        "let (T,value)=if flag {(bool,true)} else {(bool,false)}; let result:T=value; result",
+        "let descriptor=if flag {Descriptor {ty:bool,flag:true}} else {Descriptor {ty:bool,flag:observe(false)}}; let result:descriptor.ty=descriptor.flag; result",
+        "let descriptor=flag match {true=>Descriptor {ty:bool,flag:observe(true)},false=>Descriptor {ty:bool,flag:observe(false)}}; let T=descriptor.ty; let result:T=descriptor.flag; result",
+        "let .item(T,value)=if flag {Choice.item(bool,true)} else {Choice.item(bool,observe(false))}; let result:T=value; result",
+        "let T=if true {bool} else {Byte}; let result:T=flag; result",
+    ] {
+        let source = format!(
+            "struct Descriptor {{ty:Type,flag:bool}} enum Choice {{item(Type,bool)}} comptime fn observe(value:bool)->bool {{value}} comptime fn choose(flag:bool)->bool {{{body}}} comptime fn run()->bool {{choose(true) and not choose(false)}}"
+        );
+        let package = compile(&source).unwrap_or_else(|e| panic!("{source}: {e}"));
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            Value::Bool(true),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn branch_observation_keeps_condition_and_selected_calls() {
+    let package = compile("comptime fn condition(flag:bool)->bool {flag} comptime fn left()->bool {true} comptime fn right()->bool {false}
+        comptime fn choose(flag:bool)->bool {let (T,value)=if condition(flag) {(bool,left())} else {(bool,right())}; let result:T=value;result}
+        comptime fn run()->bool {choose(true) and not choose(false)}").unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let names = ["condition", "left", "right"];
+    let ids = names.map(|name| support::id(&package, name));
+    let calls = vm
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            Event::EnterFunction(id) => ids.iter().position(|expected| id == expected),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls, [0, 1, 0, 2]);
+}
+
+#[test]
+fn divergent_branch_types_do_not_become_fixed_annotations() {
+    for value in [
+        "if flag {bool} else {Byte}",
+        "flag match {true=>bool,false=>Byte}",
+    ] {
+        let source = format!(
+            "comptime fn choose(flag:bool)->bool {{let T={value};let result:T=true;result}}"
+        );
+        assert!(compile(&source).is_err(), "{source}");
+    }
+    assert!(compile("struct Descriptor {ty:Type,flag:bool} comptime fn choose(flag:bool)->bool {let d=if flag {Descriptor {ty:bool,flag:true}} else {Descriptor {ty:Byte,flag:false}};let result:d.ty=true;result}").is_err());
+}
+
+#[test]
+fn match_common_evidence_does_not_execute_guards_during_observation() {
+    let source = "comptime fn guard(flag:bool)->bool {flag} comptime fn choose(flag:bool)->bool {let T=flag match {value if guard(value)=>bool,_=>bool}; let result:T=flag; result} comptime fn run()->bool {choose(true) and not choose(false)}";
+    for binding in ["let", "const"] {
+        let package = compile(&source.replace("let T=", &format!("{binding} T="))).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let guard = support::id(&package, "guard");
+        assert_eq!(
+            vm.events()
+                .iter()
+                .filter(|event| matches!(event, Event::EnterFunction(id) if *id == guard))
+                .count(),
+            2,
+            "{binding}"
+        );
+    }
+    assert!(compile("fn choose(flag:bool)->bool {const T=if flag {bool} else {bool}; let result:T=true; result}").is_err());
+}
