@@ -8780,6 +8780,8 @@ impl Checker<'_, '_> {
             self.establish_type_requirement(
                 &n::TypePredicate::Or(vec![
                     n::TypePredicate::Equal(target.clone(), p(P::Float)),
+                    n::TypePredicate::Equal(target.clone(), p(P::F16)),
+                    n::TypePredicate::Equal(target.clone(), p(P::Bf16)),
                     n::TypePredicate::Equal(target.clone(), p(P::F32)),
                     n::TypePredicate::Equal(target.clone(), p(P::F64)),
                 ]),
@@ -8800,10 +8802,13 @@ impl Checker<'_, '_> {
                 }),
             });
         }
-        if !matches!(target, Term::Primitive(P::Float | P::F32 | P::F64)) {
+        if !matches!(
+            target,
+            Term::Primitive(P::Float | P::F16 | P::Bf16 | P::F32 | P::F64)
+        ) {
             return Err(error(
                 span,
-                "float literal requires a Float, f32 or f64 target",
+                "float literal requires a Float, f16, bf16, f32 or f64 target",
             ));
         }
         let mut budget = comptime_runtime::Budget::default();

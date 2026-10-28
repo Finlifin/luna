@@ -1073,6 +1073,8 @@ impl Checker<'_, '_> {
             | Value::UnsignedInteger(_)
             | Value::SignedInteger(_)
             | Value::Float(_)
+            | Value::Float16(_)
+            | Value::BFloat16(_)
             | Value::Float32(_)
             | Value::Float64(_)
             | Value::BitVec(_) => {
@@ -3278,6 +3280,8 @@ impl Checker<'_, '_> {
             }
             Value::SignedInteger(value) => K::Literal(n::Literal::SignedInteger(value)),
             Value::UnsignedInteger(value) => K::Literal(n::Literal::UnsignedInteger(value)),
+            Value::Float16(value) => K::Literal(n::Literal::Float16(value)),
+            Value::BFloat16(value) => K::Literal(n::Literal::BFloat16(value)),
             Value::Float32(value) => K::Literal(n::Literal::Float32(value)),
             Value::Float64(value) => K::Literal(n::Literal::Float64(value)),
             Value::Float(value) => {

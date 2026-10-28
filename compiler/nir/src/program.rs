@@ -123,6 +123,8 @@ pub enum Literal {
         width: usize,
         words: Vec<u32>,
     },
+    Float16(u16),
+    BFloat16(u16),
     Float32(u32),
     Float64(u64),
     SignedInteger(i128),
@@ -164,6 +166,8 @@ impl Literal {
             Self::Symbol(_) => *domain == P::Symbol,
             Self::Integer(_) => *domain == P::Integer,
             Self::Float(_) => *domain == P::Float,
+            Self::Float16(_) => *domain == P::F16,
+            Self::BFloat16(_) => *domain == P::Bf16,
             Self::Float32(_) => *domain == P::F32,
             Self::Float64(_) => *domain == P::F64,
             Self::BitVec { width, .. } => *domain == P::BitVec(*width),
@@ -2796,6 +2800,8 @@ impl fmt::Display for Literal {
                 string(f, spelling)?;
                 f.write_str("))")
             }
+            Self::Float16(bits) => write!(f, "(float16 (bits \"{bits:04x}\"))"),
+            Self::BFloat16(bits) => write!(f, "(bfloat16 (bits \"{bits:04x}\"))"),
             Self::Float32(bits) => write!(f, "(float32 (bits \"{bits:08x}\"))"),
             Self::Float64(bits) => write!(f, "(float64 (bits \"{bits:016x}\"))"),
             Self::SignedInteger(value) => write!(f, "(signed-integer {value})"),
@@ -5198,6 +5204,8 @@ pub fn intrinsic_pointer_value(ty: &Term) -> bool {
                     | crate::Primitive::Symbol
                     | crate::Primitive::Char
                     | crate::Primitive::BitVec(_)
+                    | crate::Primitive::F16
+                    | crate::Primitive::Bf16
                     | crate::Primitive::F32
                     | crate::Primitive::F64
             )

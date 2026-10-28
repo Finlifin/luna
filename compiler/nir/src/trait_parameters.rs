@@ -307,6 +307,8 @@ impl Term {
             Self::Bool(_) => Primitive::Bool,
             Self::Integer(_) => Primitive::Integer,
             Self::Float(_) => Primitive::Float,
+            Self::Float16(_) => Primitive::F16,
+            Self::BFloat16(_) => Primitive::Bf16,
             Self::Float32(_) => Primitive::F32,
             Self::Float64(_) => Primitive::F64,
             Self::BitVec(value) => Primitive::BitVec(value.width()),

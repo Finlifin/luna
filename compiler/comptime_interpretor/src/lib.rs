@@ -126,6 +126,8 @@ pub enum Value {
     Integer(comptime_runtime::Integer),
     BitVec(comptime_runtime::bitvec::BitVec),
     Float(comptime_runtime::decimal::DecimalValue),
+    Float16(u16),
+    BFloat16(u16),
     Float32(u32),
     Float64(u64),
     SignedInteger(i128),
@@ -759,6 +761,8 @@ impl Value {
                 Value::Unit => Term::Unit,
                 Value::Bool(value) => Term::Bool(*value),
                 Value::Char(value) => Term::Char(*value),
+                Value::Float16(bits) => Term::Float16(*bits),
+                Value::BFloat16(bits) => Term::BFloat16(*bits),
                 Value::Float32(bits) => Term::Float32(*bits),
                 Value::Float64(bits) => Term::Float64(*bits),
                 Value::BitVec(value) => {
@@ -3358,6 +3362,8 @@ impl<'a> Interpreter<'a> {
             }
             (Value::Float(_), Term::Primitive(Primitive::Float))
             | (Value::Integer(_), Term::Primitive(Primitive::Integer))
+            | (Value::Float16(_), Term::Primitive(Primitive::F16))
+            | (Value::BFloat16(_), Term::Primitive(Primitive::Bf16))
             | (Value::Float32(_), Term::Primitive(Primitive::F32))
             | (Value::Float64(_), Term::Primitive(Primitive::F64))
             | (Value::Unit, Term::Primitive(Primitive::Void))
@@ -4576,6 +4582,8 @@ impl<'a> Interpreter<'a> {
                 | Value::SignedInteger(_)
                 | Value::Float(_)
                 | Value::Integer(_)
+                | Value::Float16(_)
+                | Value::BFloat16(_)
                 | Value::Float32(_)
                 | Value::Float64(_)
                 | Value::BitVec(_)
@@ -6188,6 +6196,8 @@ impl<'a> Interpreter<'a> {
                         comptime_runtime::decimal::DecimalValue::parse_literal(spelling, budget)
                     })?)
                 }
+                Literal::Float16(bits) => Value::Float16(*bits),
+                Literal::BFloat16(bits) => Value::BFloat16(*bits),
                 Literal::Float32(bits) => Value::Float32(*bits),
                 Literal::Float64(bits) => Value::Float64(*bits),
                 Literal::SignedInteger(v) => {
@@ -8794,6 +8804,8 @@ impl fmt::Display for Value {
             Self::Integer(value) => value.fmt(f),
             Self::BitVec(value) => value.fmt(f),
             Self::Float(value) => write!(f, "(comptime-float {value})"),
+            Self::Float16(bits) => Literal::Float16(*bits).fmt(f),
+            Self::BFloat16(bits) => Literal::BFloat16(*bits).fmt(f),
             Self::Float32(bits) => Literal::Float32(*bits).fmt(f),
             Self::Float64(bits) => Literal::Float64(*bits).fmt(f),
             Self::SignedInteger(value) => write!(f, "(signed-integer {value})"),
@@ -9846,6 +9858,8 @@ impl Interpreter<'_> {
                 (Term::Float(value), Term::Primitive(Primitive::Float)) => {
                     Value::Float(value.clone())
                 }
+                (Term::Float16(bits), Term::Primitive(Primitive::F16)) => Value::Float16(*bits),
+                (Term::BFloat16(bits), Term::Primitive(Primitive::Bf16)) => Value::BFloat16(*bits),
                 (Term::Float32(bits), Term::Primitive(Primitive::F32)) => Value::Float32(*bits),
                 (Term::Float64(bits), Term::Primitive(Primitive::F64)) => Value::Float64(*bits),
                 (Term::Unit, _) => Value::Unit,

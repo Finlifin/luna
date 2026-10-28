@@ -17,6 +17,8 @@ fn pending(ty: Term) -> Expr {
 #[test]
 fn folding_forms_float_before_canonical_input_admission() {
     for (domain, expected) in [
+        (P::F16, Literal::Float16(1 << 15)),
+        (P::Bf16, Literal::BFloat16(1 << 15)),
         (P::F32, Literal::Float32(1 << 31)),
         (P::F64, Literal::Float64(1 << 63)),
     ] {

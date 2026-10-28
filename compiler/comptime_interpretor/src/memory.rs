@@ -754,6 +754,8 @@ impl super::Interpreter<'_> {
             .inspect(|value| match value {
                 Value::SignedInteger(_)
                 | Value::UnsignedInteger(_)
+                | Value::Float16(_)
+                | Value::BFloat16(_)
                 | Value::Float32(_)
                 | Value::Float64(_)
                 | Value::Bool(_)

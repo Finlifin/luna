@@ -295,6 +295,8 @@ pub enum Term {
     Char(char),
     BitVec(comptime_runtime::bitvec::BitVec),
     /// Completed floating values preserve IEEE bits, not numerical equality.
+    Float16(u16),
+    BFloat16(u16),
     Float32(u32),
     Float64(u64),
     /// Immutable UTF-8 contents, compared by value rather than allocation identity.
@@ -563,6 +565,8 @@ impl Term {
                 | Self::Bool(_)
                 | Self::Char(_)
                 | Self::BitVec(_)
+                | Self::Float16(_)
+                | Self::BFloat16(_)
                 | Self::Float32(_)
                 | Self::Float64(_)
                 | Self::String(_)
@@ -813,6 +817,8 @@ impl Term {
             | Self::Unit
             | Self::Bool(_)
             | Self::BitVec(_)
+            | Self::Float16(_)
+            | Self::BFloat16(_)
             | Self::Float32(_)
             | Self::Float64(_)
             | Self::Char(_)
@@ -1738,6 +1744,8 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
         | Term::Float(_)
         | Term::Integer(_)
         | Term::BitVec(_)
+        | Term::Float16(_)
+        | Term::BFloat16(_)
         | Term::Float32(_)
         | Term::Float64(_)
         | Term::Char(_)
@@ -2304,6 +2312,8 @@ impl fmt::Display for Term {
             Self::Bool(value) => write!(f, "(bool {value})"),
             Self::Unit => f.write_str("(unit-value)"),
             Self::BitVec(value) => write!(f, "{value}"),
+            Self::Float16(bits) => write!(f, "(float16-bits 0x{bits:04x})"),
+            Self::BFloat16(bits) => write!(f, "(bfloat16-bits 0x{bits:04x})"),
             Self::Float32(bits) => write!(f, "(float32-bits 0x{bits:08x})"),
             Self::Float64(bits) => write!(f, "(float64-bits 0x{bits:016x})"),
             Self::Integer(value) => write!(f, "{value}"),

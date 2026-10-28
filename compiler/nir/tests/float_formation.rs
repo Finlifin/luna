@@ -99,3 +99,28 @@ fn failed_completion_reports_float_domain_and_keeps_the_pending_node() {
         ExprKind::Literal(Literal::Float64(1e40f64.to_bits()))
     );
 }
+
+#[test]
+fn half_literals_keep_distinct_domains_and_exact_rounding() {
+    let formation = FloatFormation::parse(
+        "1.00390625000000000000000000000001",
+        false,
+        &mut Budget::default(),
+    )
+    .unwrap();
+    for domain in [P::F16, P::Bf16] {
+        let ty = nir::Term::Primitive(domain);
+        assert!(nir::normal_forms::supported_input_type(&ty, &[]));
+        assert!(nir::program::intrinsic_pointer_value(&ty));
+    }
+    let half = formation.form(P::F16, &mut Budget::default()).unwrap();
+    let brain = formation.form(P::Bf16, &mut Budget::default()).unwrap();
+    assert_eq!(half, Literal::Float16(0x3c04));
+    assert_eq!(brain, Literal::BFloat16(0x3f81));
+    assert!(half.has_primitive_type(&nir::Term::Primitive(P::F16)));
+    assert!(!half.has_primitive_type(&nir::Term::Primitive(P::Bf16)));
+    assert!(brain.has_primitive_type(&nir::Term::Primitive(P::Bf16)));
+    assert!(!brain.has_primitive_type(&nir::Term::Primitive(P::F16)));
+    assert_eq!(half.to_string(), "(float16 (bits \"3c04\"))");
+    assert_eq!(brain.to_string(), "(bfloat16 (bits \"3f81\"))");
+}

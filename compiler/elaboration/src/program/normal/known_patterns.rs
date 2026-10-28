@@ -314,6 +314,8 @@ where
                     Term::Integer(_) => p(P::Integer),
                     Term::BitVec(bits) => p(P::BitVec(bits.width())),
                     Term::Float(_) => p(P::Float),
+                    Term::Float16(_) => p(P::F16),
+                    Term::BFloat16(_) => p(P::Bf16),
                     Term::Float32(_) => p(P::F32),
                     Term::Float64(_) => p(P::F64),
                     _ => return None,

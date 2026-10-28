@@ -299,6 +299,8 @@ fn normalize(
         | Term::Bool(_)
         | Term::Char(_)
         | Term::BitVec(_)
+        | Term::Float16(_)
+        | Term::BFloat16(_)
         | Term::Float32(_)
         | Term::Float64(_)
         | Term::String(_)

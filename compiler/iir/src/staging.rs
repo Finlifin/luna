@@ -2226,8 +2226,13 @@ fn fold_pending_literal(
             return Err("staged expression depth exceeded".into());
         }
         charge(fuel, 1)?;
-        let Term::Primitive(domain @ (Primitive::Float | Primitive::F32 | Primitive::F64)) =
-            expr.ty
+        let Term::Primitive(
+            domain @ (Primitive::Float
+            | Primitive::F16
+            | Primitive::Bf16
+            | Primitive::F32
+            | Primitive::F64),
+        ) = expr.ty
         else {
             return Err("staged float formation requires a concrete float domain".into());
         };
@@ -3067,6 +3072,12 @@ fn constant<'layout>(
                 comptime_runtime::decimal::DecimalValue::parse_literal(spelling, &mut budget);
             *fuel = budget.steps;
             Term::Float(value.map_err(|e| e.to_string())?)
+        }
+        (K::Literal(Literal::Float16(bits)), Term::Primitive(Primitive::F16)) => {
+            Term::Float16(*bits)
+        }
+        (K::Literal(Literal::BFloat16(bits)), Term::Primitive(Primitive::Bf16)) => {
+            Term::BFloat16(*bits)
         }
         (K::Literal(Literal::Float32(bits)), Term::Primitive(Primitive::F32)) => {
             Term::Float32(*bits)

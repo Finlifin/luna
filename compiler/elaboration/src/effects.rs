@@ -127,6 +127,8 @@ fn relation(a: &Operation, b: &Operation, context: &Context, budget: Budget) -> 
                     | (Term::Integer(_), Term::Integer(_))
                     | (Term::Float(_), Term::Float(_))
                     | (Term::BitVec(_), Term::BitVec(_))
+                    | (Term::Float16(_), Term::Float16(_))
+                    | (Term::BFloat16(_), Term::BFloat16(_))
                     | (Term::Float32(_), Term::Float32(_))
                     | (Term::Float64(_), Term::Float64(_))
             ) {
@@ -202,6 +204,8 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
         | Term::Unit
         | Term::Bool(_)
         | Term::Char(_)
+        | Term::Float16(_)
+        | Term::BFloat16(_)
         | Term::Float32(_)
         | Term::Float64(_)
         | Term::Value { .. } => Ok(()),

@@ -174,6 +174,8 @@ pub fn supported_input_type_with_collections_in(
                 | Primitive::Str
                 | Primitive::Symbol
                 | Primitive::Object
+                | Primitive::F16
+                | Primitive::Bf16
                 | Primitive::F32
                 | Primitive::F64
                 | Primitive::BitVec(_),
@@ -895,6 +897,8 @@ impl Head {
                             }
                             (Term::Primitive(Primitive::Void), Term::Unit) => true,
                             (Term::Primitive(Primitive::Bool), Term::Bool(_)) => true,
+                            (Term::Primitive(Primitive::F16), Term::Float16(_)) => true,
+                            (Term::Primitive(Primitive::Bf16), Term::BFloat16(_)) => true,
                             (Term::Primitive(Primitive::F32), Term::Float32(_)) => true,
                             (Term::Primitive(Primitive::F64), Term::Float64(_)) => true,
                             (Term::Primitive(Primitive::Integer), Term::Integer(_)) => true,

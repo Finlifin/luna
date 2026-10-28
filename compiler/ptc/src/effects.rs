@@ -236,6 +236,8 @@ impl<'a> Search<'a> {
                         | (Term::Symbol(_), Term::Symbol(_))
                         | (Term::Integer(_), Term::Integer(_))
                         | (Term::BitVec(_), Term::BitVec(_))
+                        | (Term::Float16(_), Term::Float16(_))
+                        | (Term::BFloat16(_), Term::BFloat16(_))
                         | (Term::Float32(_), Term::Float32(_))
                         | (Term::Float64(_), Term::Float64(_))
                 ) {

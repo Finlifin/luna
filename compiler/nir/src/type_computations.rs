@@ -354,6 +354,8 @@ fn capture_value(
         K::Unit => Term::Unit,
         K::Literal(Literal::Bool(value)) => Term::Bool(*value),
         K::Literal(Literal::Char(value)) => Term::Char(*value),
+        K::Literal(Literal::Float16(value)) => Term::Float16(*value),
+        K::Literal(Literal::BFloat16(value)) => Term::BFloat16(*value),
         K::Literal(Literal::Float32(value)) => Term::Float32(*value),
         K::Literal(Literal::Float64(value)) => Term::Float64(*value),
         K::Literal(Literal::SignedInteger(value)) => {

@@ -305,6 +305,17 @@ impl Printer<'_> {
                 }
                 .into()
             }
+            Ty::Float16 | Ty::BFloat16 => {
+                let bits = self.instruction(format!("bitcast {} {value} to i16", physical.llvm()));
+                let wide = self.instruction(format!("zext i16 {bits} to i32"));
+                self.args.push(format!("i32 {wide}"));
+                if *physical == Ty::Float16 {
+                    "(float16 (bits %04x))"
+                } else {
+                    "(bfloat16 (bits %04x))"
+                }
+                .into()
+            }
             Ty::Float32 | Ty::Float64 => {
                 let width = if *physical == Ty::Float32 { 32 } else { 64 };
                 let bits =

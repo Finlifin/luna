@@ -72,6 +72,8 @@ impl Key {
                 | Term::Integer(_)
                 | Term::Float(_)
                 | Term::BitVec(_)
+                | Term::Float16(_)
+                | Term::BFloat16(_)
                 | Term::Float32(_)
                 | Term::Float64(_)
                 | Term::Char(_)

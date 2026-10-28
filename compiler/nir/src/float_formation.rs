@@ -53,6 +53,8 @@ impl FloatFormation {
             Primitive::Float => Ok(Literal::Float(
                 self.exact.exact_value(budget)?.to_literal(budget)?,
             )),
+            Primitive::F16 => Ok(Literal::Float16(self.exact.to_f16_bits(budget)?)),
+            Primitive::Bf16 => Ok(Literal::BFloat16(self.exact.to_bf16_bits(budget)?)),
             Primitive::F32 => Ok(Literal::Float32(self.exact.to_f32_bits(budget)?)),
             Primitive::F64 => Ok(Literal::Float64(self.exact.to_f64_bits(budget)?)),
             _ => Err(Error::InvalidLiteral),

@@ -9525,3 +9525,67 @@ fn sysroot_half_float_types_have_distinct_public_identities() {
         );
     }
 }
+
+#[test]
+fn sysroot_half_float_literals_keep_direct_rounding_through_vm_and_llvm() {
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let root = root.to_str().unwrap();
+    for (ty, llvm_ty, tag, literal, bits) in [
+        (
+            "f16",
+            "half",
+            "float16",
+            "1.00048828125000000000000000000001",
+            "3c01",
+        ),
+        (
+            "bf16",
+            "bfloat",
+            "bfloat16",
+            "1.00390625000000000000000000000001",
+            "3f81",
+        ),
+        ("f16", "half", "float16", "-0.0", "8000"),
+        ("bf16", "bfloat", "bfloat16", "-1.0e-1000", "8000"),
+    ] {
+        sandbox.write("input.fl", format!("comptime fn staged()->{ty} {{ {literal} }}\nfn runtime()->{ty} {{ {literal} }}\nfn identity(value:{ty})->{ty} {{value}}\nfn folded()->{ty} {{const value: {ty} = staged(); identity(value)}}\nfn generic()->T\nwhere T, requires T == f16 or T == bf16\n{{ {literal} }}\nfn specialized()->{ty} {{generic<{ty}>()}}"));
+        let base = [
+            "input.fl",
+            "--sysroot",
+            root,
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+        ];
+        let output = sandbox.run(&[base.as_slice(), &["--invoke-comptime", "staged"]].concat());
+        assert_eq!(
+            success(&output).trim(),
+            format!("({tag} (bits \"{bits}\"))")
+        );
+        let output = sandbox.run(&[base.as_slice(), &["--interpret", "runtime"]].concat());
+        assert_eq!(
+            success(&output).trim(),
+            format!("({tag} (bits \"{bits}\"))")
+        );
+        for entry in ["runtime", "folded", "specialized"] {
+            let output = sandbox.run(&[base.as_slice(), &["--emit-llvm", entry]].concat());
+            let ir = success(&output);
+            assert!(ir.contains(llvm_ty), "{ir}");
+            for level in ["0", "3"] {
+                success(
+                    &sandbox.run(
+                        &[
+                            base.as_slice(),
+                            &["--build", entry, "--opt-level", level, "--output", "native"],
+                        ]
+                        .concat(),
+                    ),
+                );
+                let output = Command::new(sandbox.path("native")).output().unwrap();
+                assert_eq!(success(&output).trim(), format!("({tag} (bits {bits}))"));
+            }
+        }
+    }
+}

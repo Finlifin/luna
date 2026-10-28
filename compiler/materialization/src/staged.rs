@@ -340,6 +340,12 @@ impl Builder<'_> {
             Value::Unit => K::Unit,
             Value::Bool(v) => K::Literal(n::Literal::Bool(v)),
             Value::Char(v) => K::Literal(n::Literal::Char(v)),
+            Value::Float16(bits) if *ty == Term::Primitive(nir::Primitive::F16) => {
+                K::Literal(n::Literal::Float16(bits))
+            }
+            Value::BFloat16(bits) if *ty == Term::Primitive(nir::Primitive::Bf16) => {
+                K::Literal(n::Literal::BFloat16(bits))
+            }
             Value::Float32(bits) if *ty == Term::Primitive(nir::Primitive::F32) => {
                 K::Literal(n::Literal::Float32(bits))
             }

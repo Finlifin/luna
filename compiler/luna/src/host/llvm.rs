@@ -30,6 +30,8 @@ enum Ty {
     String,
     Symbol,
     Int(u32, bool),
+    Float16,
+    BFloat16,
     Float32,
     Float64,
     // A target representation only: IIR validation retains full function types.
@@ -102,6 +104,8 @@ impl Ty {
             ),
             Self::Pointer | Self::FunctionPointer => "ptr".into(),
             Self::TemplateIdentity(_) => "i64".into(),
+            Self::Float16 => "half".into(),
+            Self::BFloat16 => "bfloat".into(),
             Self::Float32 => "float".into(),
             Self::Float64 => "double".into(),
             Self::Unit => "void".into(),
@@ -258,6 +262,8 @@ fn repr_at(
         Term::Primitive(P::Bool) => Ok(Ty::Bool),
         Term::Primitive(P::Str) => Ok(Ty::String),
         Term::Primitive(P::Symbol) => Ok(Ty::Symbol),
+        Term::Primitive(P::F16) => Ok(Ty::Float16),
+        Term::Primitive(P::Bf16) => Ok(Ty::BFloat16),
         Term::Primitive(P::F32) => Ok(Ty::Float32),
         Term::Primitive(P::F64) => Ok(Ty::Float64),
         Term::Primitive(P::Char) => Ok(Ty::Int(32, false)),
@@ -2138,6 +2144,21 @@ pub(super) fn emit(
                 ),
             )
         }
+        Ty::Float16 | Ty::BFloat16 => {
+            let format = if result == Ty::Float16 {
+                "(float16 (bits %04x))\n"
+            } else {
+                "(bfloat16 (bits %04x))\n"
+            };
+            (
+                format,
+                format!(
+                    "  %value = call {} @flurry_{root}()\n  %bits = bitcast {} %value to i16\n  %wide = zext i16 %bits to i32\n  %output_write = call i32 (ptr, ...) @printf(ptr @result_format, i32 %wide)\n",
+                    result.llvm(),
+                    result.llvm()
+                ),
+            )
+        }
         Ty::Float32 | Ty::Float64 => {
             let (bits, format) = if result == Ty::Float32 {
                 (32, "(float32 (bits %08x))\n")
@@ -2246,6 +2267,8 @@ pub(super) fn emit(
 
 fn literal_value(literal: &Literal, ty: Ty) -> Result<Value, String> {
     let text = match literal {
+        Literal::Float16(bits) => format!("bitcast (i16 {bits} to half)"),
+        Literal::BFloat16(bits) => format!("bitcast (i16 {bits} to bfloat)"),
         Literal::Float32(bits) => format!("bitcast (i32 {bits} to float)"),
         Literal::Float64(bits) => format!("bitcast (i64 {bits} to double)"),
         Literal::BitVec { width: 0, .. } => "zeroinitializer".into(),
