@@ -9,6 +9,7 @@ mod entry;
 mod enums;
 mod errors;
 mod frames;
+mod half_fma;
 mod named_calls;
 mod optional;
 use bits::bit_width;
@@ -1205,6 +1206,11 @@ impl Emitter<'_> {
                 }
                 if values.iter().any(|value| value.ty != ty) {
                     return Err("host intrinsic operand representation mismatch".into());
+                }
+                if checked.operation() == nir::intrinsics::Operation::FusedMultiplyAdd
+                    && matches!(ty, Ty::Float16 | Ty::BFloat16)
+                {
+                    return Ok(self.half_fma(&values));
                 }
                 if ty == Ty::BFloat16 {
                     return self.bfloat_intrinsic(checked.operation(), &values);

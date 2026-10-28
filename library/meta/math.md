@@ -87,5 +87,12 @@ minimum and maximum values. It rounds subnormal results to nearest-even,
 returns signed infinity on overflow and signed zero on complete underflow,
 and preserves zeros and infinities for any exponent. NaNs remain NaNs.
 The VM adjusts exponents with bounded integer work and rounds only at the
-final subnormal boundary. Other floating math wrappers do not yet admit
+final subnormal boundary.
+
+`fma` also accepts f16/bf16 and rounds the exact product plus addend only
+once. The VM uses budgeted exact integer arithmetic, including cases where
+the intermediate product would overflow the target format but the fused
+result is finite. Opposite infinite terms and zero times infinity produce
+NaN. Signed zeros follow nearest-even fused arithmetic; NaN payloads are
+not an interface promise. Other floating math wrappers do not yet admit
 half precision.

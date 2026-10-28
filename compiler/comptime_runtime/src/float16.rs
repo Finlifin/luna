@@ -4,6 +4,7 @@ use crate::{Budget, Error, Integer, decimal::DecimalValue};
 use std::{cmp::Ordering, fmt};
 
 mod arithmetic;
+mod fma;
 mod integral;
 mod scale;
 mod sqrt;

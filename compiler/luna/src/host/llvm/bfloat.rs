@@ -4,7 +4,7 @@
 use super::*;
 
 impl Emitter<'_> {
-    fn widen_bfloat(&mut self, value: &Value) -> Value {
+    pub(super) fn widen_bfloat(&mut self, value: &Value) -> Value {
         let bits = self.instruction(
             Ty::Int(32, false),
             format!("zext i16 {} to i32", value.text),

@@ -120,7 +120,7 @@ impl Float16Format {
         }
     }
 
-    fn round_ratio(
+    pub(super) fn round_ratio(
         self,
         numerator: &Integer,
         denominator: u32,
@@ -157,7 +157,11 @@ impl Float16Format {
     }
 }
 
-fn scale(value: &Integer, mut shift: u32, budget: &mut Budget) -> Result<Integer, Error> {
+pub(super) fn scale(
+    value: &Integer,
+    mut shift: u32,
+    budget: &mut Budget,
+) -> Result<Integer, Error> {
     let chunk = shift.min(127);
     let mut value = value.multiply(&Integer::from_u128(1u128 << chunk), budget)?;
     shift -= chunk;

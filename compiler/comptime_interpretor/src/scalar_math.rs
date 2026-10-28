@@ -30,6 +30,28 @@ impl Interpreter<'_> {
                 flow => return Ok(flow),
             }
         }
+        if binding.operation() == Op::FusedMultiplyAdd {
+            use comptime_runtime::float16::Float16Format as F;
+            let half = match values.as_slice() {
+                [Value::Float16(a), Value::Float16(b), Value::Float16(c)] => {
+                    Some((F::Binary16, *a, *b, *c))
+                }
+                [Value::BFloat16(a), Value::BFloat16(b), Value::BFloat16(c)] => {
+                    Some((F::BFloat16, *a, *b, *c))
+                }
+                _ => None,
+            };
+            if let Some((format, a, b, c)) = half {
+                let bits = self.integer_operation(Some(expr.source), |budget| {
+                    format.fused_multiply_add(a, b, c, budget)
+                })?;
+                return Ok(Flow::Value(if format == F::Binary16 {
+                    Value::Float16(bits)
+                } else {
+                    Value::BFloat16(bits)
+                }));
+            }
+        }
         let result = scalar(
             binding.operation(),
             &values,

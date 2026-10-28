@@ -2175,6 +2175,7 @@ fn half_math_bindings_preserve_format_identity() {
     let package = support::compile("^intrinsic_enum enum Ops {operation}");
     let tag = tag(&package, "Ops", 0);
     for op in [
+        Operation::FusedMultiplyAdd,
         Operation::SquareRoot,
         Operation::Floor,
         Operation::Ceiling,
@@ -2202,15 +2203,14 @@ fn half_math_bindings_preserve_format_identity() {
             assert!(registry.check(tag, &inputs, &ty).is_err());
         }
     }
-    for op in [Operation::FusedMultiplyAdd] {
+    for op in [Operation::Power, Operation::IntegerPower] {
         let registry = Registry::new(&package, &[(tag, op)]).unwrap();
         for primitive in [P::F16, P::Bf16] {
             let ty = Term::Primitive(primitive);
-            assert!(
-                registry
-                    .check(tag, &vec![ty.clone(); op.operand_count()], &ty)
-                    .is_err()
-            );
+            let inputs = (0..op.operand_count())
+                .map(|i| op.operand_type(&ty, i))
+                .collect::<Vec<_>>();
+            assert!(registry.check(tag, &inputs, &ty).is_err());
         }
     }
 }

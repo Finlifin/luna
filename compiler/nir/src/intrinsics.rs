@@ -254,8 +254,7 @@ impl Operation {
             | Self::TrailingZeros
             | Self::FunnelShiftLeft
             | Self::FunnelShiftRight => &[U8, U16, U32, U64, U128, Usize],
-            Self::FusedMultiplyAdd
-            | Self::Sine
+            Self::Sine
             | Self::Cosine
             | Self::Exponential
             | Self::Exponential2
@@ -264,7 +263,8 @@ impl Operation {
             | Self::Log10
             | Self::Power
             | Self::IntegerPower => &[F32, F64],
-            Self::SquareRoot
+            Self::FusedMultiplyAdd
+            | Self::SquareRoot
             | Self::ScaleByPowerOfTwo
             | Self::Floor
             | Self::Ceiling
