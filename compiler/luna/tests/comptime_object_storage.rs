@@ -10,7 +10,7 @@ fn compile(source: &str) -> nir::program::Package {
             "mod meta {{ {} }}
             trait Duplicate {{}} trait Retire {{fn drop(*self);}}
             {source}",
-            include_str!("../../../library/meta/lib.fl")
+            include!("support/meta_source.rs")
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -97,9 +97,9 @@ fn list_storage_cannot_bypass_object_payload_permissions() {
         "var values:meta.List<Item> = [Item {flag:true}]; let copied=values.ref.*;",
         "var values:meta.List<Item> = [Item {flag:true}]; values.ref.* = [];",
         "var values:meta.List<Item> = []; values.ref.* = [Item {flag:true}];",
-        "var values:meta.List<Item> = []; meta.append(values.ref,Item {flag:true});",
+        "var values:meta.List<Item> = []; values.append(Item {flag:true});",
         "var values:meta.List<meta.Object> = [{item:Item {flag:true}}]; let copied=values.ref.*;",
-        "var values:meta.List<meta.Object> = []; let item={item:Item {flag:true}}; meta.append(values.ref,item);",
+        "var values:meta.List<meta.Object> = []; let item={item:Item {flag:true}}; values.append(item);",
         "let absent:?Item=null; var values:meta.List<?Item> = [absent]; let copied=values.ref.*;",
     ] {
         let package = compile(&format!(
@@ -117,11 +117,11 @@ fn list_storage_copy_payloads_preserve_snapshots_and_reject_drop() {
             var items:meta.List<Item> = [Item {flag:true}];
             let pointer=items.ref;
             let saved=pointer.*;
-            meta.append(pointer,Item {flag:false});
+            pointer.*.append(Item {flag:false});
             let extended=pointer.*;
             pointer.* = [];
-            meta.length(items)==0 and meta.length(saved)==1 and saved[0].flag
-                and meta.length(extended)==2 and not extended[1].flag
+            items.length()==0 and saved.length()==1 and saved[0].flag
+                and extended.length()==2 and not extended[1].flag
         }";
     assert_eq!(
         invoke(&compile(&source.replace("DROP", ""))).unwrap(),

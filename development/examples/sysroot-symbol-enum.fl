@@ -30,7 +30,7 @@ test generated_symbol_enum_values {
 comptime fn inspect() -> bool {
     let paths = meta.enum_variant_paths(Message);
     let shapes = meta.enum_variant_shapes(Message);
-    meta.length(paths) == 3 and paths[0][0] == .net and paths[0][1] == .ready
+    paths.length() == 3 and paths[0][0] == .net and paths[0][1] == .ready
         and paths[2][0] == .closed and shapes[0] == .unit
 }
 

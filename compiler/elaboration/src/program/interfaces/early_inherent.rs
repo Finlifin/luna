@@ -148,6 +148,12 @@ impl Checker<'_, '_> {
             self.newtypes.values(),
         );
         index.set_normal_form_metadata(self.normal_form_metadata());
+        // Preparing a candidate may discover List after the caller's context
+        // was saved. Refresh its checked head metadata without importing the
+        // candidate's binder assumptions into the caller's proof context.
+        self.context = context;
+        self.refresh_list_inference_metadata();
+        let context = self.context.clone();
         index
             .check_coherence(&self.nominal_context(), Budget::default())
             .map_err(|message| error(span, message))?;

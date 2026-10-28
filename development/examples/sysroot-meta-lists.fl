@@ -12,7 +12,7 @@ comptime fn expand(value: Integer) -> meta.List<Integer> {
 
 comptime fn optional(flag: bool) -> ??Integer {
     let values: meta.List<?Integer> = [null];
-    meta.find(values, |value| flag)
+    values.find(|value| flag)
 }
 
 comptime fn run() -> bool {
@@ -21,30 +21,30 @@ comptime fn run() -> bool {
     var visits: Integer = 0;
     let counter = visits.ref;
     let source = original.ref;
-    let selected = meta.filter_map(saved, |value| {
+    let selected = saved.filter_map(|value| {
         counter.* = counter.* * 10 + value;
         source.* = [];
         select(value)
     });
-    let flattened = meta.flat_map(saved, expand);
-    let nested = meta.filter_map([false, true, false], optional);
+    let flattened = saved.flat_map(expand);
+    let nested = meta.List<bool>.filter_map([false, true, false],optional);
     let empty: meta.List<Integer> = [];
-    let unused = meta.flat_map(empty, |value| {
+    let unused = empty.flat_map(|value| {
         counter.* = 999;
         expand(value)
     });
-    let unused_filter = meta.filter_map(empty, |value| {
+    let unused_filter = empty.filter_map(|value| {
         counter.* = 999;
         select(value)
     });
-    visits == 123 and meta.length(original) == 0 and meta.length(saved) == 3
-        and meta.length(selected) == 2 and selected[0] == 10 and selected[1] == 30
-        and meta.length(flattened) == 4
+    visits == 123 and original.length() == 0 and saved.length() == 3
+        and selected.length() == 2 and selected[0] == 10 and selected[1] == 30
+        and flattened.length() == 4
         and flattened[0] == 1 and flattened[1] == 11
         and flattened[2] == 3 and flattened[3] == 13
-        and meta.length(nested) == 1
+        and nested.length() == 1
         and (nested[0] match { null => true, _? => false })
-        and meta.length(unused) == 0 and meta.length(unused_filter) == 0
+        and unused.length() == 0 and unused_filter.length() == 0
         and reducers_and_searches() and named_metadata() and stable_sorting()
         and exact_integer_division()
 }
@@ -59,20 +59,20 @@ comptime fn exact_integer_division() -> bool {
 
 comptime fn stable_sorting() -> bool {
     let input: meta.List<Integer> = [12, 1, 11, 3, 2];
-    let ordered = meta.sort_by(input, |a, b| {
+    let ordered = input.sort_by(|a, b| {
         let left = meta.rem_trunc(a, 10);
         let right = meta.rem_trunc(b, 10);
         left < right
     });
     let types: meta.List<Type> = [bool, u32, bool];
-    let retained = meta.sort_by(types, |a, b| false);
+    let retained = types.sort_by(|a, b| false);
     input[0] == 12 and input[1] == 1
         and ordered[0] == 1 and ordered[1] == 11 and ordered[2] == 12
         and ordered[3] == 2 and ordered[4] == 3
         and retained[0] == bool and retained[1] == u32 and retained[2] == bool
-        and meta.partition_point(ordered, |value| meta.rem_trunc(value, 10) < 2) == 2
-        and meta.lower_bound(ordered, 2, |a, b| meta.rem_trunc(a, 10) < meta.rem_trunc(b, 10)) == 2
-        and meta.upper_bound(ordered, 2, |a, b| meta.rem_trunc(a, 10) < meta.rem_trunc(b, 10)) == 4
+        and ordered.partition_point(|value| meta.rem_trunc(value, 10) < 2) == 2
+        and ordered.lower_bound(2, |a, b| meta.rem_trunc(a, 10) < meta.rem_trunc(b, 10)) == 2
+        and ordered.upper_bound(2, |a, b| meta.rem_trunc(a, 10) < meta.rem_trunc(b, 10)) == 4
 }
 
 comptime fn named_metadata() -> bool {
@@ -102,36 +102,36 @@ comptime fn reducers_and_searches() -> bool {
     let source = original.ref;
     var calls: Integer = 0;
     let counter = calls.ref;
-    let reduced = meta.reduce(saved, |left, right| {
+    let reduced = saved.reduce(|left, right| {
         counter.* += 1;
         source.* = [];
         left * 10 + right
     });
     let empty: meta.List<Integer> = [];
-    let absent = meta.reduce(empty, |left, right| {
+    let absent = empty.reduce(|left, right| {
         counter.* = 999;
         left + right
     });
     let singles: meta.List<Integer> = [7];
-    let singleton = meta.reduce(singles, |left, right| {
+    let singleton = singles.reduce(|left, right| {
         counter.* = 999;
         left + right
     });
     let optionals: meta.List<?Integer> = [null];
-    let nested = meta.reduce(optionals, |left, right| right);
+    let nested = optionals.reduce(|left, right| right);
     var visits: Integer = 0;
     let trace = visits.ref;
-    let found: ?Integer = meta.find_map(saved, |value| {
+    let found: ?Integer = saved.find_map(|value| {
         trace.* = trace.* * 10 + value;
         if value == 2 { value * 10 } else { null }
     });
-    let present_null = meta.find_map([false, true, false], optional);
-    let no_match = meta.find_map(empty, |value| {
+    let present_null = meta.List<bool>.find_map([false, true, false],optional);
+    let no_match = empty.find_map(|value| {
         trace.* = 999;
         select(value)
     });
-    calls == 2 and visits == 12 and meta.length(original) == 0
-        and meta.length(saved) == 3
+    calls == 2 and visits == 12 and original.length() == 0
+        and saved.length() == 3
         and (reduced match { value? => value == 123, null => false })
         and (absent match { null => true, _? => false })
         and (singleton match { value? => value == 7, null => false })

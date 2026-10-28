@@ -379,7 +379,7 @@ fn public_struct_builder_copies_reflected_fields_through_mutating_methods() {
         comptime fn run() -> bool {
             let names = meta.struct_field_names(Source);
             let types = meta.struct_field_types(Source);
-            let count = meta.length(names);
+            let count = names.length();
             var index = count - count;
             var builder = meta.StructBuilder.new(.name = .Columns);
             while index < count {
@@ -389,7 +389,7 @@ fn public_struct_builder_copies_reflected_fields_through_mutating_methods() {
             let generated = builder.Build();
             let observed = meta.struct_field_names(generated);
             let fields = meta.struct_field_types(generated);
-            meta.length(observed) == 2 and observed[0] == .first and observed[1] == .second
+            observed.length() == 2 and observed[0] == .first and observed[1] == .second
                 and fields[0] == bool and fields[1] == bool
         }
     ",
@@ -414,8 +414,8 @@ fn public_struct_builder_handles_empty_defaults_and_rejects_duplicate_fields() {
         comptime fn empty() -> bool {
             let first = meta.StructBuilder.new().Build();
             let second = meta.StructBuilder.new().Build();
-            meta.length(meta.struct_field_names(first)) == 0
-                and meta.length(meta.struct_field_types(second)) == 0 and not (first == second)
+            (meta.struct_field_names(first)).length() == 0
+                and (meta.struct_field_types(second)).length() == 0 and not (first == second)
         }
         comptime fn duplicate() -> bool {
             var builder = meta.StructBuilder.new();
@@ -505,9 +505,9 @@ fn standalone_cli_executes_builders_and_preserves_source_output_protection() {
         "mod meta {{ {} }}
         comptime fn Generate() -> bool {{
             let generated = meta.StructBuilder.new().Build();
-            meta.length(meta.struct_field_types(generated)) == 0
+            (meta.struct_field_types(generated)).length() == 0
         }}",
-        include_str!("../../../library/meta/lib.fl")
+        include!("support/meta_source.rs")
     ));
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
         .arg(fixture.0.join("lib.fl"))
@@ -563,11 +563,7 @@ fn sysroot_cli_installs_builder_service_after_loading_meta_bindings() {
     }
     std::fs::write(root.join("builtin/lib.fl"), "pub mod prelude {}").unwrap();
     std::fs::write(root.join("std/lib.fl"), "pub mod prelude {}").unwrap();
-    std::fs::write(
-        root.join("meta/lib.fl"),
-        include_str!("../../../library/meta/lib.fl"),
-    )
-    .unwrap();
+    std::fs::write(root.join("meta/lib.fl"), include!("support/meta_source.rs")).unwrap();
     std::fs::write(
         root.join("language-items.conf"),
         "version = 1\nmeta-list-type = meta.List\n",
@@ -1016,7 +1012,7 @@ fn public_builder_can_define_a_type_alias_from_reflected_fields() {
         comptime fn Columns() -> Type {
             let names = meta.struct_field_names(Source);
             let types = meta.struct_field_types(Source);
-            let count = meta.length(names);
+            let count = names.length();
             var index = count - count;
             var builder = meta.StructBuilder.new(.name = .Columns);
             while index < count {
@@ -1030,7 +1026,7 @@ fn public_builder_can_define_a_type_alias_from_reflected_fields() {
         impl ReadGenerated for Generated {fn first(self) -> bool {self.first}}
         comptime fn inspect() -> bool {
             let names=meta.struct_field_names(Generated);
-            meta.length(names)==2 and names[0]==.first and names[1]==.second
+            names.length()==2 and names[0]==.first and names[1]==.second
         }
         fn run() -> bool {let value=Generated {first:true,second:false};value.as(ReadGenerated).first()}",
     );
@@ -1138,7 +1134,7 @@ fn early_public_builder_reflects_computed_nominal_applications() {
                 let ty = bool;
                 var calls: .u32'builtin = 0;
                 let types = meta.struct_field_types({application});
-                let builder = meta.fold(types, meta.StructBuilder.new(), |draft, field| {{
+                let builder = types.fold(meta.StructBuilder.new(), |draft, field| {{
                     var draft = draft;
                     draft.add_field(.inner, field);
                     draft
@@ -1757,7 +1753,7 @@ fn code_generator_reflects_its_published_struct_to_select_runtime_code() {
             builder.add_field(.flag, bool);
             let T = builder.Build();
             let fields = meta.struct_field_names(T);
-            if meta.length(fields) == 1 and fields[0] == .flag {
+            if fields.length() == 1 and fields[0] == .flag {
                 return '(true);
             }
             '(false)
@@ -1830,8 +1826,8 @@ fn struct_builder_copies_live_types_once_and_keeps_drafts_independent() {
             let names = meta.struct_field_names(extended);
             let types = meta.struct_field_types(copied);
             visited and original != copied and original != extended
-                and meta.length(meta.struct_field_names(original)) == 1
-                and meta.length(names) == 2 and names[0] == .first and names[1] == .second
+                and (meta.struct_field_names(original)).length() == 1
+                and names.length() == 2 and names[0] == .first and names[1] == .second
                 and types[0] == bool
         }
     ",
@@ -1970,7 +1966,7 @@ fn public_builder_uses_invocation_ranges_for_distinct_reflected_subjects() {
             let names=meta.struct_field_names(subject);
             let types=meta.struct_field_types(subject);
             var builder=meta.StructBuilder.new(.name=name);
-            inline for index in 0..meta.length(names) {
+            inline for index in 0..(names).length() {
                 builder.add_field(names[index],types[index]);
             }
             builder.Build()
@@ -1980,8 +1976,8 @@ fn public_builder_uses_invocation_ranges_for_distinct_reflected_subjects() {
         comptime fn inspect()->bool {
             let first=meta.struct_field_types(FirstColumns);
             let second=meta.struct_field_types(SecondColumns);
-            meta.length(first)==2 and first[0]==bool and first[1]==.char'builtin
-                and meta.length(second)==1 and second[0]==.char'builtin
+            first.length()==2 and first[0]==bool and first[1]==.char'builtin
+                and second.length()==1 and second[0]==.char'builtin
         }
         fn run()->bool {
             let first=FirstColumns {flag:true,letter:'x'};
@@ -2030,9 +2026,9 @@ fn struct_builder_edits_preserve_order_snapshots_and_failed_bounds() {
             let old_names=meta.struct_field_names(old);
             replaced and removed and inserted and appended
                 and not negative and not far and not past
-                and meta.length(names)==3 and names[0]==.first and names[1]==.value
+                and names.length()==3 and names[0]==.first and names[1]==.value
                 and names[2]==.last and types[0]==bool and types[1]==.u8'builtin
-                and types[2]==bool and meta.length(old_names)==2
+                and types[2]==bool and old_names.length()==2
                 and old_names[0]==.old and old_names[1]==.removed
         }",
     );
@@ -2053,7 +2049,7 @@ fn struct_builder_can_edit_empty_drafts_and_remove_every_field() {
             let reinserted=builder.insert_field(0,.new,bool);
             let filled=builder.Build();
             not missing and not replacement and inserted and removed and reinserted
-                and meta.length(meta.struct_field_names(empty))==0
+                and (meta.struct_field_names(empty)).length()==0
                 and meta.struct_field_names(filled)[0]==.new
         }",
     );
@@ -2158,15 +2154,15 @@ fn enum_builder_edits_preserve_snapshots_and_reject_out_of_bounds_indices() {
             let unit=builder.Build();
             not negative and not far and not past and not group_negative and not group_past and not group_far
                 and unit_changed and meta.enum_variant_shapes(unit)[0]==.unit
-                and meta.length(meta.enum_variant_field_names(unit)[0])==0
-                and meta.length(meta.enum_variant_field_types(unit)[0])==0
+                and (meta.enum_variant_field_names(unit)[0]).length()==0
+                and (meta.enum_variant_field_types(unit)[0]).length()==0
                 and changed and published!=newer and saved!=published and saved!=newer
                 and meta.enum_variant_paths(published)[0][1]==.old
                 and meta.enum_variant_paths(saved)[0][1]==.old
                 and meta.enum_variant_shapes(saved)[0]==.tuple
-                and meta.length(meta.enum_variant_field_names(saved)[0])==0
-                and meta.length(meta.enum_variant_paths(newer))==1
-                and meta.length(meta.enum_group_paths(newer))==1
+                and (meta.enum_variant_field_names(saved)[0]).length()==0
+                and (meta.enum_variant_paths(newer)).length()==1
+                and (meta.enum_group_paths(newer)).length()==1
                 and meta.enum_variant_paths(newer)[0][1]==.new
                 and meta.enum_variant_shapes(newer)[0]==.named
                 and meta.enum_variant_field_names(newer)[0][0]==.flag
@@ -2188,8 +2184,8 @@ fn enum_builder_can_remove_every_variant_and_repopulate_the_draft() {
         let inserted=builder.insert_named(0,.value,[.flag],[bool],.group=[.group]);
         let filled=builder.Build();
         not missing and not group_missing and not replacement and first and removed and added and inserted
-            and meta.length(meta.enum_variant_paths(empty))==0
-            and meta.length(meta.enum_group_paths(empty))==0
+            and (meta.enum_variant_paths(empty)).length()==0
+            and (meta.enum_group_paths(empty)).length()==0
             and meta.enum_variant_paths(filled)[0][0]==.group
             and meta.enum_variant_field_types(filled)[0][0]==bool
     }");
@@ -2220,7 +2216,7 @@ fn enum_builder_edits_require_valid_payloads_and_explicit_group_repair() {
         let fixture = Fixture::new(&format!("enum Source {{group.{{one(bool)}},two}}
             comptime fn draft()->meta.EnumBuilder {{var builder=meta.EnumBuilder.from_type(Source); let edited={edit}; assumes edited; builder}}
             comptime fn Make()->.Type'builtin {{draft().Build()}}
-            comptime fn repaired()->bool {{var builder=draft(); let fixed={repair}; assumes fixed; let result=builder.Build(); meta.length(meta.enum_variant_paths(result))==2}}"));
+            comptime fn repaired()->bool {{var builder=draft(); let fixed={repair}; assumes fixed; let result=builder.Build(); (meta.enum_variant_paths(result)).length()==2}}"));
         assert!(
             fixture.invoke_meta("Make").is_err(),
             "accepted invalid edit {edit}"

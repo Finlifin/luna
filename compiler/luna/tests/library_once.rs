@@ -35,15 +35,23 @@ fn blanket_once_transfers_user_defined_values_without_explicit_markers() {
 #[test]
 fn blanket_once_does_not_grant_copy_or_clone() {
     for bound in ["Clone", "Copy"] {
-        assert!(compile(&format!("struct Token {{flag:bool}}
+        assert!(
+            compile(&format!(
+                "struct Token {{flag:bool}}
             fn require(value:T) where T:-{bound} {{}}
-            fn bad() {{require(Token {{flag:true}});}}")).is_err());
+            fn bad() {{require(Token {{flag:true}});}}"
+            ))
+            .is_err()
+        );
     }
-    let package = compile("struct Token {flag:bool}
+    let package = compile(
+        "struct Token {flag:bool}
         fn forward(value:T)->T where T:-Once {value}
         fn run()->bool {let token=Token {flag:true};
-            let moved=forward(token);token.flag}").unwrap();
-    let error = luna::execution::interpret_with_protocols(
-        &package, "run", "Copy", "Drop", 100_000).unwrap_err();
+            let moved=forward(token);token.flag}",
+    )
+    .unwrap();
+    let error = luna::execution::interpret_with_protocols(&package, "run", "Copy", "Drop", 100_000)
+        .unwrap_err();
     assert!(error.contains("unavailable value"), "{error}");
 }

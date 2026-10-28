@@ -5,7 +5,7 @@ comptime impl ListPatternView for meta.List<T> where T {
     assoc Element: .Type'builtin = T;
     assoc ElementComptime: .Type'builtin = T;
     comptime fn list_pattern_view_get_len_comptime(self) -> .usize'builtin {
-        meta.to_usize(meta.length(self))
+        meta.to_usize(self.length())
     }
     comptime fn list_pattern_view_get_element_comptime(self, index: .usize'builtin) -> T {
         -- A local index lets the VM copy only the selected element.

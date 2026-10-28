@@ -8,7 +8,7 @@ fn compile(source: &str) -> Result<nir::program::Package, String> {
     support::compile_with_source_bindings(
         &format!(
             "mod meta {{ {} }} {source}",
-            include_str!("../../../library/meta/lib.fl")
+            include!("support/meta_source.rs")
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -29,10 +29,10 @@ fn struct_fields_are_observed_in_order_with_applied_generic_types() {
         comptime fn run() -> bool {
             let types = meta.struct_field_types(Sample<.u32'builtin>);
             let names = meta.struct_field_names(Sample<.u32'builtin>);
-            meta.length(types) == 2 and types[0] == .u32'builtin and types[1] == bool
-                and meta.length(names) == 2 and names[0] == .first and names[1] == .second
-                and meta.length(meta.struct_field_types(Empty)) == 0
-                and meta.length(meta.struct_field_names(Empty)) == 0
+            types.length() == 2 and types[0] == .u32'builtin and types[1] == bool
+                and names.length() == 2 and names[0] == .first and names[1] == .second
+                and (meta.struct_field_types(Empty)).length() == 0
+                and (meta.struct_field_names(Empty)).length() == 0
         }
         pure comptime fn Packet<...fields: meta.List<Type>> -> Type {Packet<...fields>}
         pure comptime fn Generated() -> Type {
@@ -146,7 +146,7 @@ fn ordinary_package_observes_fields_through_meta_without_builtin_access() {
         comptime fn run() -> bool {
             let names = meta.struct_field_names(Flags);
             let types = meta.struct_field_types(Flags);
-            meta.length(names) == 1 and names[0] == .enabled and types[0] == bool
+            names.length() == 1 and names[0] == .enabled and types[0] == bool
         }
     ",
     )

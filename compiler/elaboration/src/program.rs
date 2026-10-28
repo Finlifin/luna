@@ -2857,7 +2857,7 @@ impl Checker<'_, '_> {
         Ok(ty)
     }
     fn type_identity_view(&self, ty: &Term, span: Span) -> Result<Term, Error> {
-        if self.bound_tuple_elements(ty).is_some() {
+        if self.bound_tuple_elements(ty).is_some() || self.context.is_list_type(ty) {
             return Ok(ty.clone());
         }
         if !matches!(

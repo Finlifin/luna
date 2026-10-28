@@ -447,7 +447,7 @@ impl Checker<'_, '_> {
                     "code method selection is waiting for the implementation world",
                 ));
             }
-            let subject = self.type_identity_view(&subject, head.span)?;
+            let subject = self.method_subject_view(&subject, head.span)?;
             if let Some((selected, inputs)) =
                 self.select_inherent_method_implementation(&subject, name.as_str(), head.span)?
             {

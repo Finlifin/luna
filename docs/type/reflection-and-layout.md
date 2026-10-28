@@ -165,7 +165,7 @@ fn example() -> First {
 
 comptime fn check_names() -> bool {
     let names = meta.struct_field_names(Pair<u32>);
-    meta.length(names) == 2 and names[0] == .first and names[1] == .ready
+    names.length() == 2 and names[0] == .first and names[1] == .ready
 }
 ```
 

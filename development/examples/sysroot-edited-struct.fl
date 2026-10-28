@@ -29,7 +29,7 @@ comptime fn inspect() -> bool {
     let names = meta.struct_field_names(Record);
     let types = meta.struct_field_types(Record);
     let original = meta.struct_field_names(Source);
-    meta.length(names) == 3 and names[0] == .ready and names[1] == .value
+    names.length() == 3 and names[0] == .ready and names[1] == .value
         and names[2] == .tail and types[0] == bool and types[1] == u8
         and types[2] == bool and original[0] == .old and original[1] == .removed
 }

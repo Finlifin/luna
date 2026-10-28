@@ -61,16 +61,16 @@ comptime fn inspect_enum() -> bool {
     let names = meta.enum_variant_field_names(Event);
     let types = meta.enum_variant_field_types(Event);
     let original = meta.enum_variant_paths(Source);
-    meta.length(groups) == 2 and groups[0][0] == .net and groups[1][0] == .remote
-        and meta.length(paths) == 4 and paths[0][0] == .waiting
+    groups.length() == 2 and groups[0][0] == .net and groups[1][0] == .remote
+        and paths.length() == 4 and paths[0][0] == .waiting
         and paths[1][0] == .net and paths[1][1] == .data
         and paths[2][1] == .record and paths[3][0] == .remote and paths[3][1] == .packet
         and shapes[0] == .unit and shapes[1] == .tuple and shapes[2] == .named
-        and shapes[3] == .tuple and meta.length(types[0]) == 0
-        and meta.length(names[1]) == 0 and names[2][0] == .flag
+        and shapes[3] == .tuple and (types[0]).length() == 0
+        and (names[1]).length() == 0 and names[2][0] == .flag
         and types[1][0] == u8 and types[2][0] == bool and types[3][0] == bool
-        and meta.length(original) == 2 and original[0][1] == .old
-        and original[1][1] == .dead and meta.length(meta.enum_group_paths(Source)) == 2
+        and original.length() == 2 and original[0][1] == .old
+        and original[1][1] == .dead and (meta.enum_group_paths(Source)).length() == 2
 }
 
 test edited_enum_values {

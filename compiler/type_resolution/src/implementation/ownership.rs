@@ -9,6 +9,7 @@ use std::fmt;
 pub enum Ownership {
     LocalInterface(DeclarationId),
     LocalNominal(DeclarationId),
+    LocalNormalForm(DeclarationId),
     UnresolvedInterface,
 }
 
@@ -71,13 +72,18 @@ pub fn default_strategy(
     Err(Error::Ownership(OwnershipError::NoLocalIdentity))
 }
 
-/// Inherent implementations require the subject's own nominal identity; a
+/// Inherent implementations require the subject's own declared head; a
 /// local argument inside a foreign wrapper does not own that wrapper.
 pub fn inherent(subject: &Term, package: u64) -> Result<Ownership, Error> {
     match subject {
         Term::Nominal { declaration, .. } if declaration.package == package => {
             Ok(Ownership::LocalNominal(*declaration))
         }
+        Term::NormalForm {
+            head,
+            sort: nir::Sort::Type,
+            ..
+        } if head.package == package => Ok(Ownership::LocalNormalForm(*head)),
         _ => Err(Error::Ownership(
             OwnershipError::InherentRequiresLocalNominal,
         )),
@@ -194,6 +200,7 @@ impl fmt::Display for Ownership {
         match self {
             Self::LocalInterface(id) => write!(f, "(local-interface {id})"),
             Self::LocalNominal(id) => write!(f, "(local-nominal {id})"),
+            Self::LocalNormalForm(id) => write!(f, "(local-normal-form {id})"),
             Self::UnresolvedInterface => write!(f, "(unresolved-interface)"),
         }
     }

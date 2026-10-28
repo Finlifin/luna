@@ -8,7 +8,7 @@ fn compile(source: &str, width: Option<u32>) -> Result<nir::program::Package, St
     support::compile_with_source_bindings_for_target(
         &format!(
             "mod meta {{ {} }} {source}",
-            include_str!("../../../library/meta/lib.fl")
+            include!("support/meta_source.rs")
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {

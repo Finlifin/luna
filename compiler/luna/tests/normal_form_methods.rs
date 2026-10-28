@@ -17,7 +17,7 @@ fn compile(source: &str) -> Result<nir::program::Package, String> {
     support::compile_with_source_bindings(
         &format!(
             "mod meta {{ {} }} {source}",
-            include_str!("../../../library/meta/lib.fl")
+            include!("support/meta_source.rs")
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -56,4 +56,23 @@ fn normal_form_method_lookup_does_not_unfold_heads_or_invent_members() {
             "{body} must not resolve through an invented type identity",
         );
     }
+}
+
+#[test]
+fn list_normal_form_resolves_inherent_receiver_methods() {
+    let package =
+        compile("comptime fn run()->bool {let xs:meta.List<bool> = [true];xs.length() == 1}")
+            .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_methods_do_not_unfold_factory_heads() {
+    let source = "typealias Type=.Type'builtin;
+        pure comptime fn Identity<T>->Type {T}
+        comptime fn bad(values:Identity<meta.List<bool>>)->.Integer'builtin {values.length()}";
+    assert!(compile(source).is_err());
 }

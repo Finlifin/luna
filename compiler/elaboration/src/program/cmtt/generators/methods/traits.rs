@@ -27,7 +27,7 @@ impl Checker<'_, '_> {
         } else {
             self.type_expr(base)?
         };
-        let subject = self.type_identity_view(&subject, head.span)?;
+        let subject = self.method_subject_view(&subject, head.span)?;
         let requested = self.interface_expr_for(interface_expr, &subject)?;
         let requested_resolution = self
             .resolve_trait_capability(&requested, &subject, Budget::default())

@@ -23449,11 +23449,7 @@ fn quoted_tuple_contract_requires_explicit_copy_and_preserves_caller() {
             include_str!("../../../library/builtin/tuple.fl"),
         )
         .unwrap();
-        fs::write(
-            w.0.join("meta.fl"),
-            include_str!("../../../library/meta/lib.fl"),
-        )
-        .unwrap();
+        fs::write(w.0.join("meta.fl"), include!("support/meta_source.rs")).unwrap();
         fs::write(
             w.0.join("resources.fl"),
             include_str!("../../../library/builtin/resources.fl"),

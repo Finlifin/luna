@@ -12,7 +12,7 @@ fn compile_bound(source: &str, splice: bool) -> Result<nir::program::Package, St
     support::compile_with_source_bindings(
         &format!(
             "mod meta {{ {} }} {source}",
-            include_str!("../../../library/meta/lib.fl")
+            include!("support/meta_source.rs")
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -34,15 +34,15 @@ fn binary_bounds_preserve_duplicate_ranges_and_custom_ordering() {
             let reverse:meta.List<Integer> = [4,2,2,1];
             let empty:meta.List<Integer> = [];
             let types:meta.List<Type> = [Identity<bool>,bool];
-            meta.lower_bound(values,2,less) == 1 and meta.upper_bound(values,2,less) == 4
-                and meta.lower_bound(values,0,less) == 0 and meta.upper_bound(values,5,less) == 5
-                and meta.lower_bound(values,3,less) == 4 and meta.upper_bound(values,3,less) == 4
-                and meta.lower_bound(reverse,2,|a,b|a > b) == 1
-                and meta.upper_bound(reverse,2,|a,b|a > b) == 3
-                and meta.lower_bound(empty,2,|a,b|{let bad:meta.List<bool> = [];bad[0]}) == 0
-                and meta.upper_bound(empty,2,|a,b|{let bad:meta.List<bool> = [];bad[0]}) == 0
-                and meta.lower_bound(types,bool,|a,b|false) == 0
-                and meta.upper_bound(types,bool,|a,b|false) == 2
+            values.lower_bound(2,less) == 1 and values.upper_bound(2,less) == 4
+                and values.lower_bound(0,less) == 0 and values.upper_bound(5,less) == 5
+                and values.lower_bound(3,less) == 4 and values.upper_bound(3,less) == 4
+                and reverse.lower_bound(2,|a,b|a > b) == 1
+                and reverse.upper_bound(2,|a,b|a > b) == 3
+                and empty.lower_bound(2,|a,b|{let bad:meta.List<bool> = [];bad[0]}) == 0
+                and empty.upper_bound(2,|a,b|{let bad:meta.List<bool> = [];bad[0]}) == 0
+                and types.lower_bound(bool,|a,b|false) == 0
+                and types.upper_bound(bool,|a,b|false) == 2
                 and types[0] == Identity<bool>
         }",
     )
@@ -71,7 +71,7 @@ fn partition_point_checks_all_boundaries_with_logarithmic_callback_counts() {
                 let values:meta.List<Integer> = [{values}];
                 inline for cut in 0..{end} {{
                     var calls:Integer=0;let counter=calls.ref;
-                    let index=meta.partition_point(values,|value|{{counter.* += 1;value < cut}});
+                    let index=values.partition_point(|value|{{counter.* += 1;value < cut}});
                     if index != cut or calls > {bound} {{return false;}}
                 }}
                 true
@@ -95,10 +95,10 @@ fn binary_search_uses_fixed_input_snapshots_and_midpoint_order() {
             var input:meta.List<Integer> = [0,1,2,3,4,5,6,7];
             let saved=input;let source=input.ref;
             var visits:Integer=0;let trace=visits.ref;
-            let result=meta.partition_point(input,|value| {
+            let result=input.partition_point(|value| {
                 trace.* = trace.* * 10 + value;source.* = [];value < 3
             });
-            result == 3 and visits == 423 and meta.length(input) == 0 and meta.length(saved) == 8
+            result == 3 and visits == 423 and input.length() == 0 and saved.length() == 8
         }",
     )
     .unwrap();
@@ -113,8 +113,8 @@ fn partition_callback_failure_stops_search_and_vm_recovers() {
     let package=compile(
         "typealias Integer=.Integer'builtin;
         comptime fn in_prefix(value:Integer)->bool {let flags:meta.List<bool> = [true];flags[value]}
-        comptime fn fail()->Integer {meta.partition_point([0,0,0,1,3],in_prefix)}
-        comptime fn recover()->Integer {let values:meta.List<Integer> = [1,2,2,4];meta.upper_bound(values,2,|a,b|a < b)}"
+        comptime fn fail()->Integer {meta.List<Integer>.partition_point([0,0,0,1,3],in_prefix)}
+        comptime fn recover()->Integer {let values:meta.List<Integer> = [1,2,2,4];values.upper_bound(2,|a,b|a < b)}"
     ).unwrap();
     let mut vm = comptime_interpretor::Interpreter::for_comptime(
         &package,
@@ -152,20 +152,20 @@ fn stable_sort_retains_type_identity_snapshots_and_equal_item_order() {
         pure comptime fn Identity<T>->Type {T}
         comptime fn run()->bool {
             let types:meta.List<Type> = [Identity<bool>,bool,Identity<bool>];
-            let sorted_types=meta.sort_by(types,|a,b| false);
+            let sorted_types=types.sort_by(|a,b| false);
             var input:meta.List<Integer> = [12,1,11,3,2];
             let saved=input;
             let target=input.ref;
-            let sorted=meta.sort_by(input,|a,b| {target.* = [];let left=if a > 10 {a - 10} else {a};let right=if b > 10 {b - 10} else {b};left < right});
+            let sorted=input.sort_by(|a,b| {target.* = [];let left=if a > 10 {a - 10} else {a};let right=if b > 10 {b - 10} else {b};left < right});
             let empty:meta.List<Integer> = [];
-            let no_calls=meta.sort_by(empty,|a,b| {let bad:meta.List<bool> = [];bad[0]});
-            let singles:meta.List<Integer> = [7];let single=meta.sort_by(singles,|a,b| {let bad:meta.List<bool> = [];bad[0]});
-            meta.length(input) == 0 and saved[0] == 12 and saved[4] == 2
+            let no_calls=empty.sort_by(|a,b| {let bad:meta.List<bool> = [];bad[0]});
+            let singles:meta.List<Integer> = [7];let single=singles.sort_by(|a,b| {let bad:meta.List<bool> = [];bad[0]});
+            input.length() == 0 and saved[0] == 12 and saved[4] == 2
                 and sorted[0] == 1 and sorted[1] == 11 and sorted[2] == 12
                 and sorted[3] == 2 and sorted[4] == 3
                 and sorted_types[0] == Identity<bool> and sorted_types[1] == bool
                 and sorted_types[2] == Identity<bool> and types[0] == Identity<bool>
-                and meta.length(no_calls) == 0 and single[0] == 7
+                and no_calls.length() == 0 and single[0] == 7
         }",
     ).unwrap();
     assert_eq!(
@@ -181,8 +181,8 @@ fn sort_callback_failure_stops_comparisons_and_vm_recovers() {
         comptime fn compare(a:Integer,b:Integer)->bool {
             let flags:meta.List<bool> = [true];flags[a]
         }
-        comptime fn fail()->meta.List<Integer> {meta.sort_by([0,0,0,2],compare)}
-        comptime fn recover()->bool {let input:meta.List<Integer> = [3,1,2];let values=meta.sort_by(input,|a,b|a < b);values[0] == 1 and values[1] == 2 and values[2] == 3}",
+        comptime fn fail()->meta.List<Integer> {meta.List<Integer>.sort_by([0,0,0,2],compare)}
+        comptime fn recover()->bool {let input:meta.List<Integer> = [3,1,2];let values=input.sort_by(|a,b|a < b);values[0] == 1 and values[1] == 2 and values[2] == 3}",
     ).unwrap();
     let mut vm = comptime_interpretor::Interpreter::for_comptime(
         &package,
@@ -220,13 +220,13 @@ fn ordered_list_queries_check_callback_contracts_even_without_comparisons() {
     ] {
         compile(callback).unwrap();
         for call in [
-            "sort_by(values,compare)",
-            "lower_bound(values,true,compare)",
-            "upper_bound(values,true,compare)",
+            "sort_by(compare)",
+            "lower_bound(true,compare)",
+            "upper_bound(true,compare)",
         ] {
             for values in ["[]", "[true]"] {
                 let call = format!(
-                    "comptime fn run() {{let values:meta.List<bool> = {values};meta.{call};}}"
+                    "comptime fn run() {{let values:meta.List<bool> = {values};values.{call};}}"
                 );
                 compile(&format!(
                     "comptime fn compare(a:bool,b:bool)->bool {{a and not b}} {call}"
@@ -265,8 +265,8 @@ fn sort_handles_incomplete_runs_with_bounded_comparison_counts() {
             comptime fn run()->bool {{
                 var comparisons:Integer=0;let counter=comparisons.ref;
                 let values:meta.List<Integer> = [{values}];
-                let ordered=meta.sort_by(values,|a,b| {{counter.* += 1;a < b}});
-                meta.length(ordered) == {count} and comparisons <= {bound} and {checks}
+                let ordered=values.sort_by(|a,b| {{counter.* += 1;a < b}});
+                ordered.length() == {count} and comparisons <= {bound} and {checks}
             }}",
             checks = if checks.is_empty() { "true" } else { &checks }
         ))
@@ -330,20 +330,20 @@ fn list_length_and_concat_preserve_empty_nested_and_type_elements() {
         comptime fn empty()->meta.List<bool> {[]}
         comptime fn run()->bool {
             let a:meta.List<bool> = [true,false];
-            let joined=meta.concat(a, [false,true]);
-            let nested=meta.concat<meta.List<bool>>([a], [[false]]);
-            let types=meta.concat<Type>([bool], [Integer]);
-            meta.length(empty()) == 0 and meta.length(joined) == 4
+            let joined=a.concat([false,true]);
+            let nested=meta.List<meta.List<bool>>.concat([a], [[false]]);
+            let types=meta.List<Type>.concat([bool], [Integer]);
+            (empty()).length() == 0 and joined.length() == 4
                 and joined[0] and not joined[1] and not joined[2] and joined[3]
-                and meta.length(meta.concat(empty(), a)) == 2
-                and meta.length(meta.concat(a, empty())) == 2
-                and meta.length(meta.concat(empty(), empty())) == 0
-                and meta.length(nested) == 2 and meta.length(nested[1]) == 1
-                and not nested[1][0] and meta.length(types) == 2
+                and ((empty()).concat(a)).length() == 2
+                and (a.concat(empty())).length() == 2
+                and ((empty()).concat(empty())).length() == 0
+                and nested.length() == 2 and (nested[1]).length() == 1
+                and not nested[1][0] and types.length() == 2
                 and types[0] == bool and types[1] == Integer
         }
         pure comptime fn Packet<...flags: meta.List<bool>> -> Type {bool}
-        comptime fn Joined() -> Type {Packet<...meta.concat<bool>([true], [false])>}
+        comptime fn Joined() -> Type {Packet<...meta.List<bool>.concat([true], [false])>}
         comptime fn Direct() -> Type {Packet<true, false>}
         const checked=run();
         fn check()->bool {checked}
@@ -374,18 +374,18 @@ fn list_operations_evaluate_arguments_once_in_order_and_propagate_returns() {
             [ordered]
         }
         comptime fn early_left()->bool {
-            meta.concat<bool>(do {return true;}, [false]); false
+            meta.List<bool>.concat(do {return true;}, [false]); false
         }
         comptime fn early_right()->bool {
-            meta.concat<bool>([false], do {return true;}); false
+            meta.List<bool>.concat([false], do {return true;}); false
         }
         comptime fn early_length()->bool {
             .list_length'builtin(do {return true;}); false
         }
         comptime fn run()->bool {
             var counter:Integer=0;
-            let xs=meta.concat(input(counter.ref,0), input(counter.ref,1));
-            let count=meta.length(input(counter.ref,2));
+            let xs=(input(counter.ref,0)).concat(input(counter.ref,1));
+            let count=(input(counter.ref,2)).length();
             counter == 3 and xs[0] and xs[1] and count == 1
                 and early_left() and early_right() and early_length()
         }
@@ -404,8 +404,8 @@ fn list_operations_reject_wrong_domains_arities_and_unbound_runtime_transfer() {
         "comptime fn bad()->bool {.list_length'builtin(true);true}",
         "comptime fn bad()->bool {.list_length'builtin();true}",
         "comptime fn bad()->bool {.list_concat'builtin([true]);true}",
-        "comptime fn bad()->bool {meta.concat<bool>([true], [42]);true}",
-        "fn bad()->bool {meta.length<bool>([true]) == 1}",
+        "comptime fn bad()->bool {meta.List<bool>.concat([true], [42]);true}",
+        "fn bad()->bool {meta.List<bool>.length([true]) == 1}",
     ] {
         assert!(compile(body).is_err(), "accepted {body}");
     }
@@ -418,7 +418,7 @@ fn ordinary_package_uses_public_list_operations_without_builtin_access() {
     let input = directory.join("input.fl");
     std::fs::write(
         &input,
-        "const size=meta.length(meta.concat<bool>([true], [false,true])); comptime fn run()->bool {size == 3}",
+        "const size=(meta.List<bool>.concat([true], [false,true])).length(); comptime fn run()->bool {size == 3}",
     )
     .unwrap();
     let library =
@@ -462,28 +462,28 @@ fn repository_list_combinators_preserve_callback_order_and_state() {
         comptime fn encode(acc:Integer, digit:Integer)->Integer {acc * 10 + digit}
         comptime fn total()->Integer {
             let values:meta.List<Integer> = [1,2,3];
-            let doubled=meta.map(values,|value| value * 2);
-            meta.fold(doubled,0,|sum,value| sum + value)
+            let doubled=values.map(|value| value * 2);
+            doubled.fold(0,|sum,value| sum + value)
         }
         comptime fn run()->bool {
             var visits:Integer=0;
             var calls:Integer=0;
             let call_count=calls.ref;
-            let mapped=meta.map(digits(),|value| {
+            let mapped=(digits()).map(|value| {
                 visits = visits + 1;
                 call_count.* = call_count.* + 1;
                 value + visits
             });
             var order:Integer=0;
             let output=order.ref;
-            meta.foreach(mapped,|value| {output.* = output.* * 10 + value;});
-            let folded=meta.fold(digits(),0,encode);
+            mapped.foreach(|value| {output.* = output.* * 10 + value;});
+            let folded=(digits()).fold(0,encode);
             let empty:meta.List<Integer> = [];
-            let untouched=meta.map(empty,|value| {call_count.* = call_count.* + 100;value});
-            meta.foreach(empty,|value| {call_count.* = call_count.* + 100;});
-            let initial=meta.fold(empty,42,|acc,value| {call_count.* = call_count.* + 100;acc + value});
+            let untouched=empty.map(|value| {call_count.* = call_count.* + 100;value});
+            empty.foreach(|value| {call_count.* = call_count.* + 100;});
+            let initial=empty.fold(42,|acc,value| {call_count.* = call_count.* + 100;acc + value});
             visits == 0 and calls == 3 and order == 246 and folded == 123 and initial == 42 and total() == 12
-                and meta.length(untouched) == 0 and meta.length(mapped) == 3
+                and untouched.length() == 0 and mapped.length() == 3
                 and mapped[0] == 2 and mapped[1] == 4 and mapped[2] == 6
         }
     ";
@@ -503,7 +503,7 @@ fn mapped_types_feed_variadic_type_factories_without_unfolding_the_head() {
         comptime fn fields()->meta.List<Type> {[bool,Char]}
         comptime fn Pointer(value:Type)->Type {*value}
         pure comptime fn Packet<...fields:meta.List<Type>>->Type {bool}
-        comptime fn Generated()->Type {Packet<...meta.map(fields(),Pointer)>}
+        comptime fn Generated()->Type {Packet<...(fields()).map(Pointer)>}
         comptime fn Direct()->Type {Packet<*bool,*Char>}
     ",
     )
@@ -522,13 +522,13 @@ fn mapped_types_feed_variadic_type_factories_without_unfolding_the_head() {
 #[test]
 fn list_combinators_reject_runtime_callbacks_and_incompatible_accumulators() {
     for body in [
-        "fn transform(value:bool)->bool {not value} comptime fn bad()->meta.List<bool> {let xs:meta.List<bool> = [true];meta.map(xs,transform)}",
-        "fn visit(value:bool) {} comptime fn bad() {let xs:meta.List<bool> = [true];meta.foreach(xs,visit);}",
-        "comptime fn bad()->bool {let xs:meta.List<bool> = [true];meta.fold(xs,true,|acc,value| 'x')}",
+        "fn transform(value:bool)->bool {not value} comptime fn bad()->meta.List<bool> {let xs:meta.List<bool> = [true];xs.map(transform)}",
+        "fn visit(value:bool) {} comptime fn bad() {let xs:meta.List<bool> = [true];xs.foreach(visit);}",
+        "comptime fn bad()->bool {let xs:meta.List<bool> = [true];xs.fold(true,|acc,value| 'x')}",
     ] {
         assert!(compile(body).is_err(), "accepted {body}");
     }
-    let package=compile("comptime fn invert(value:bool)->bool {not value} comptime fn run()->bool {let xs:meta.List<bool> = [true];let ys=meta.map(xs,invert);not ys[0]}").unwrap();
+    let package=compile("comptime fn invert(value:bool)->bool {not value} comptime fn run()->bool {let xs:meta.List<bool> = [true];let ys=xs.map(invert);not ys[0]}").unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -549,11 +549,11 @@ fn list_map_evaluates_producers_once_and_keeps_owned_inputs_separate() {
         }
         comptime fn run()->bool {
             var trace:Integer=0;
-            let mapped=meta.map(input(trace.ref),producer(trace.ref));
+            let mapped=(input(trace.ref)).map(producer(trace.ref));
             var original:meta.List<Integer> = [1,2,3];
-            let snapshot=meta.map(original,|value| {original = []; value});
+            let snapshot=original.map(|value| {original = []; value});
             trace == 12 and mapped[0] == 2 and mapped[2] == 4
-                and meta.length(original) == 3 and meta.length(snapshot) == 3
+                and original.length() == 3 and snapshot.length() == 3
                 and snapshot[0] == 1 and snapshot[1] == 2 and snapshot[2] == 3
         }
     ",
@@ -575,7 +575,7 @@ fn list_pointer_replacement_preserves_active_iteration_and_read_snapshots() {
             var original:meta.List<Integer> = [1,2,3];
             let slot=original.ref;
             let before=slot.*;
-            let mapped=meta.map(original,|value| {slot.* = []; value + 1});
+            let mapped=original.map(|value| {slot.* = []; value + 1});
             var types:meta.List<Type> = [bool];
             let types_slot=types.ref;
             let old_types=types_slot.*;
@@ -584,13 +584,13 @@ fn list_pointer_replacement_preserves_active_iteration_and_read_snapshots() {
             let nested_slot=nested.ref;
             let old_nested=nested_slot.*;
             nested_slot.* = [[false],[]];
-            meta.length(original) == 0 and meta.length(before) == 3
+            original.length() == 0 and before.length() == 3
                 and before[0] == 1 and before[2] == 3
-                and meta.length(mapped) == 3 and mapped[0] == 2 and mapped[2] == 4
-                and meta.length(old_types) == 1 and old_types[0] == bool
-                and meta.length(types) == 2 and types[0] == Integer and types[1] == Type
+                and mapped.length() == 3 and mapped[0] == 2 and mapped[2] == 4
+                and old_types.length() == 1 and old_types[0] == bool
+                and types.length() == 2 and types[0] == Integer and types[1] == Type
                 and old_nested[0][0] and not nested[0][0]
-                and meta.length(nested[1]) == 0
+                and (nested[1]).length() == 0
         }
         ",
     )
@@ -608,10 +608,10 @@ fn list_map_stops_at_callback_failure_and_the_vm_can_be_used_again() {
         typealias Integer=.Integer'builtin;
         comptime fn select(value:Integer)->Integer {let table:meta.List<Integer> = [10,5];table[value]}
         comptime fn fail()->meta.List<Integer> {
-            let values:meta.List<Integer> = [0,2,1]; meta.map(values,select)
+            let values:meta.List<Integer> = [0,2,1]; values.map(select)
         }
         comptime fn recover()->meta.List<Integer> {
-            let values:meta.List<Integer> = [0,1]; meta.map(values,select)
+            let values:meta.List<Integer> = [0,1]; values.map(select)
         }
     ",
     )
@@ -659,12 +659,12 @@ fn list_map_can_change_domains_without_flattening_optional_or_nested_values() {
         comptime fn packet(flag:bool)->meta.List<bool> {[flag,not flag]}
         comptime fn run()->bool {
             let input:meta.List<bool> = [true,false];
-            let optional=meta.map(input,select);
-            let nested=meta.map(input,packet);
-            meta.length(optional) == 2 and meta.length(nested) == 2
+            let optional=input.map(select);
+            let nested=input.map(packet);
+            optional.length() == 2 and nested.length() == 2
                 and (optional[0] match {value? => value == 7,null => false})
                 and (optional[1] match {_? => false,null => true})
-                and meta.length(nested[0]) == 2 and meta.length(nested[1]) == 2
+                and (nested[0]).length() == 2 and (nested[1]).length() == 2
                 and nested[0][0] and not nested[0][1]
                 and not nested[1][0] and nested[1][1]
         }
@@ -687,29 +687,29 @@ fn list_queries_short_circuit_and_empty_inputs_never_call_predicates() {
             let empty:meta.List<Integer> = [];
             var trace:Integer=0;
             let slot=trace.ref;
-            let found_any=meta.any(input,|value| {slot.* = slot.* * 10 + value; value == 2});
+            let found_any=input.any(|value| {slot.* = slot.* * 10 + value; value == 2});
             let any_order=trace == 12;
             trace = 0;
-            let every=meta.all(input,|value| {slot.* = slot.* * 10 + value; value < 2});
+            let every=input.all(|value| {slot.* = slot.* * 10 + value; value < 2});
             let all_order=trace == 12;
             trace = 0;
-            let found=meta.find(input,|value| {slot.* = slot.* * 10 + value; value == 2});
+            let found=input.find(|value| {slot.* = slot.* * 10 + value; value == 2});
             let find_order=trace == 12;
             trace = 0;
-            let no_any=meta.any(empty,|value| {slot.* = 99; true});
-            let yes_all=meta.all(empty,|value| {slot.* = 99; false});
-            let no_find=meta.find(empty,|value| {slot.* = 99; true});
-            let no_filter=meta.filter(empty,|value| {slot.* = 99; true});
+            let no_any=empty.any(|value| {slot.* = 99; true});
+            let yes_all=empty.all(|value| {slot.* = 99; false});
+            let no_find=empty.find(|value| {slot.* = 99; true});
+            let no_filter=empty.filter(|value| {slot.* = 99; true});
             found_any and not every and any_order and all_order and find_order
                 and (found match {value? => value == 2,null => false})
                 and not no_any and yes_all and trace == 0
                 and (no_find match {_? => false,null => true})
-                and meta.length(no_filter) == 0
-                and meta.length(meta.filter(input,|value| false)) == 0
-                and meta.length(meta.filter(input,|value| true)) == 3
-                and meta.all(input,|value| value > 0)
-                and not meta.any(input,|value| value == 4)
-                and (meta.find(input,|value| value == 4) match {_? => false,null => true})
+                and no_filter.length() == 0
+                and (input.filter(|value| false)).length() == 0
+                and (input.filter(|value| true)).length() == 3
+                and input.all(|value| value > 0)
+                and not input.any(|value| value == 4)
+                and (input.find(|value| value == 4) match {_? => false,null => true})
         }
         ",
     )
@@ -729,7 +729,7 @@ fn list_filter_preserves_order_identity_and_snapshot_during_callback_writes() {
         pure comptime fn Packet<...fields:meta.List<Type>>->Type {Packet<...fields>}
         comptime fn Generated()->Type {
             let types:meta.List<Type> = [bool,Integer,bool];
-            Packet<...meta.filter(types,|value| value == bool)>
+            Packet<...(types).filter(|value| value == bool)>
         }
         comptime fn Direct()->Type {Packet<bool,bool>}
         comptime fn run()->bool {
@@ -737,13 +737,13 @@ fn list_filter_preserves_order_identity_and_snapshot_during_callback_writes() {
             let slot=original.ref;
             var order:Integer=0;
             let order_slot=order.ref;
-            let kept=meta.filter(original,|value| {
+            let kept=original.filter(|value| {
                 order_slot.* = order_slot.* * 10 + value;
                 slot.* = [];
                 value == 1 or value == 3
             });
-            meta.length(original) == 0 and order == 1234
-                and meta.length(kept) == 2 and kept[0] == 1 and kept[1] == 3
+            original.length() == 0 and order == 1234
+                and kept.length() == 2 and kept[0] == 1 and kept[1] == 3
         }
         ",
     )
@@ -770,12 +770,12 @@ fn list_find_distinguishes_a_matched_null_element_from_no_match() {
         typealias Integer=.Integer'builtin;
         comptime fn run()->bool {
             let values:meta.List<?Integer> = [null,7,null];
-            let matched=meta.find(values,|value| value match {null => true,_? => false});
-            let missing=meta.find(values,|value| false);
-            let kept=meta.filter(values,|value| value match {null => true,_? => false});
+            let matched=values.find(|value| value match {null => true,_? => false});
+            let missing=values.find(|value| false);
+            let kept=values.filter(|value| value match {null => true,_? => false});
             (matched match {inner? => inner match {null => true,_? => false},null => false})
                 and (missing match {_? => false,null => true})
-                and meta.length(kept) == 2
+                and kept.length() == 2
                 and (kept[0] match {null => true,_? => false})
                 and (kept[1] match {null => true,_? => false})
         }
@@ -799,10 +799,10 @@ fn list_query_callback_failure_stops_and_vm_recovers() {
             }}
             comptime fn fail() {{
                 let input:meta.List<Integer> = [0,2,0];
-                meta.{query}(input,pred);
+                input.{query}(pred);
             }}
             comptime fn recover()->bool {{
-                let input:meta.List<bool> = [true]; meta.all(input,|value| value)
+                let input:meta.List<bool> = [true]; input.all(|value| value)
             }}
         ",
             if query == "all" { "true" } else { "false" }
@@ -850,7 +850,7 @@ fn list_queries_reject_incompatible_predicates_even_for_empty_inputs() {
             compile(pred).expect("predicate declaration is independently valid");
             for values in ["[]", "[true]"] {
                 let call = format!(
-                    "comptime fn run() {{let input:meta.List<bool> = {values}; meta.{query}(input,pred);}}"
+                    "comptime fn run() {{let input:meta.List<bool> = {values}; input.{query}(pred);}}"
                 );
                 compile(&format!(
                     "comptime fn pred(value:bool)->bool {{value}} {call}"
@@ -880,10 +880,10 @@ fn list_queries_evaluate_producers_once_and_retain_callback_capture_state() {
         }
         comptime fn run()->bool {
             var trace:Integer=0;
-            let first=meta.find(input(trace.ref),producer(trace.ref));
+            let first=(input(trace.ref)).find(producer(trace.ref));
             var visits:Integer=0;
             let values:meta.List<Integer> = [3,5,7];
-            let second=meta.find(values,|value| {visits = visits + 1; visits == 2});
+            let second=values.find(|value| {visits = visits + 1; visits == 2});
             trace == 12 and visits == 0
                 and (first match {value? => value == 3,null => false})
                 and (second match {value? => value == 5,null => false})
@@ -908,18 +908,18 @@ fn list_append_preserves_prior_snapshots_and_effectful_concat_order() {
         comptime fn run()->bool {
             var values:meta.List<bool> = [true];
             let snapshot=values;
-            meta.append(values.ref,false);
+            values.append(false);
             let target=values.ref;
             target.* = .list_concat'builtin(target.*,replace(target));
             let frozen=target.*;
-            meta.append(target,false);
+            target.*.append(false);
             var nested:meta.List<meta.List<bool>> = [];
-            meta.append(nested.ref,snapshot);
-            meta.append(nested.ref,values);
-            meta.length(snapshot) == 1 and snapshot[0]
-                and meta.length(frozen) == 3 and frozen[0] and not frozen[1] and frozen[2]
-                and meta.length(values) == 4 and not values[3]
-                and meta.length(nested[0]) == 1 and meta.length(nested[1]) == 4
+            nested.append(snapshot);
+            nested.append(values);
+            snapshot.length() == 1 and snapshot[0]
+                and frozen.length() == 3 and frozen[0] and not frozen[1] and frozen[2]
+                and values.length() == 4 and not values[3]
+                and (nested[0]).length() == 1 and (nested[1]).length() == 4
         }
     ",
     )
@@ -940,7 +940,7 @@ const LIST_VIEW: &str = "
     }
     impl ListView for meta.List<T> where T {
         assoc Element: Type = T;
-        comptime fn list_pattern_view_get_len(*self) -> Integer { meta.length(self.*) }
+        comptime fn list_pattern_view_get_len(*self) -> Integer { self.*.length() }
         comptime fn list_pattern_view_get_element(*self, comptime index: Integer) -> T {
             self.*[index]
         }
@@ -951,7 +951,7 @@ fn compile_list_view(source: &str) -> Result<nir::program::Package, String> {
     support::compile_with_source_bindings(
         &format!(
             "mod meta {{ {} }} {source}",
-            include_str!("../../../library/meta/lib.fl")
+            include!("support/meta_source.rs")
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -1031,29 +1031,29 @@ fn list_ranges_preserve_bounds_empty_results_and_input_snapshots() {
         typealias Integer = .Integer'builtin;
         comptime fn run() -> bool {
             let input: meta.List<Integer> = [10,20,30,40];
-            let middle = meta.slice(input, 1, 3);
-            let full = meta.slice(input, 0, 4);
-            let empty = meta.slice(input, 4, 4);
-            let changed = meta.replace_range(input, 1, 3, [7,8,9]);
-            let inserted = meta.replace_range(input, 0, 0, [7]);
-            let appended = meta.replace_range(input, 4, 4, [9]);
-            let removed = meta.replace_range<Integer>(input, 0, 4, []);
-            (middle match {xs? => meta.length(xs) == 2 and xs[0] == 20 and xs[1] == 30, null => false})
-                and (full match {xs? => meta.length(xs) == 4 and xs[3] == 40, null => false})
-                and (empty match {xs? => meta.length(xs) == 0, null => false})
-                and (changed match {xs? => meta.length(xs) == 5 and xs[0] == 10
+            let middle = input.slice(1, 3);
+            let full = input.slice(0, 4);
+            let empty = input.slice(4, 4);
+            let changed = input.replace_range(1, 3, [7,8,9]);
+            let inserted = input.replace_range(0, 0, [7]);
+            let appended = input.replace_range(4, 4, [9]);
+            let removed = meta.List<Integer>.replace_range(input, 0, 4, []);
+            (middle match {xs? => xs.length() == 2 and xs[0] == 20 and xs[1] == 30, null => false})
+                and (full match {xs? => xs.length() == 4 and xs[3] == 40, null => false})
+                and (empty match {xs? => xs.length() == 0, null => false})
+                and (changed match {xs? => xs.length() == 5 and xs[0] == 10
                     and xs[1] == 7 and xs[2] == 8 and xs[3] == 9 and xs[4] == 40, null => false})
-                and (inserted match {xs? => meta.length(xs) == 5 and xs[0] == 7 and xs[1] == 10, null => false})
-                and (appended match {xs? => meta.length(xs) == 5 and xs[4] == 9, null => false})
-                and (removed match {xs? => meta.length(xs) == 0, null => false})
-                and meta.length(input) == 4 and input[1] == 20
-                and (meta.slice<Integer>([], 0, 0) match {xs? => meta.length(xs) == 0, null => false})
-                and (meta.replace_range<Integer>([], 0, 0, [5]) match {xs? => xs[0] == 5, null => false})
+                and (inserted match {xs? => xs.length() == 5 and xs[0] == 7 and xs[1] == 10, null => false})
+                and (appended match {xs? => xs.length() == 5 and xs[4] == 9, null => false})
+                and (removed match {xs? => xs.length() == 0, null => false})
+                and input.length() == 4 and input[1] == 20
+                and (meta.List<Integer>.slice([], 0, 0) match {xs? => xs.length() == 0, null => false})
+                and (meta.List<Integer>.replace_range([], 0, 0, [5]) match {xs? => xs[0] == 5, null => false})
         }
         comptime fn invalid(start: Integer, end: Integer) -> bool {
             let input: meta.List<Integer> = [1,2];
-            (meta.slice(input, start, end) match {null => true, _? => false})
-                and (meta.replace_range(input, start, end, [3]) match {null => true, _? => false})
+            (input.slice(start, end) match {null => true, _? => false})
+                and (input.replace_range(start, end, [3]) match {null => true, _? => false})
         }
         comptime fn rejected() -> bool {
             invalid(-1, 1) and invalid(2, 1) and invalid(0, 3)
@@ -1079,7 +1079,7 @@ fn list_ranges_keep_nested_optional_and_normal_form_type_domains() {
         pure comptime fn Packet<...fields: meta.List<Type>> -> Type {Packet<...fields>}
         comptime fn Generated() -> Type {
             let fields: meta.List<Type> = [bool,Integer,bool];
-            meta.replace_range(fields, 1, 2, [bool]) match {
+            fields.replace_range(1, 2, [bool]) match {
                 xs? => Packet<...xs>, null => bool,
             }
         }
@@ -1087,12 +1087,12 @@ fn list_ranges_keep_nested_optional_and_normal_form_type_domains() {
         comptime fn run() -> bool {
             let nested: meta.List<meta.List<bool>> = [[true],[],[false]];
             let optional: meta.List<?Integer> = [7,null,9];
-            (meta.slice(nested, 1, 3) match {xs? => meta.length(xs) == 2
-                and meta.length(xs[0]) == 0 and not xs[1][0], null => false})
-                and (meta.slice(optional, 1, 2) match {xs? => meta.length(xs) == 1
+            (nested.slice(1, 3) match {xs? => xs.length() == 2
+                and (xs[0]).length() == 0 and not xs[1][0], null => false})
+                and (optional.slice(1, 2) match {xs? => xs.length() == 1
                     and (xs[0] match {null => true, _? => false}), null => false})
-                and (meta.replace_range<?Integer>(optional, 0, 3, [null]) match {
-                    xs? => meta.length(xs) == 1 and (xs[0] match {null => true, _? => false}), null => false})
+                and (meta.List<?Integer>.replace_range(optional, 0, 3, [null]) match {
+                    xs? => xs.length() == 1 and (xs[0] match {null => true, _? => false}), null => false})
         }
         ",
     ).unwrap();
@@ -1125,22 +1125,19 @@ fn list_ranges_evaluate_arguments_once_before_bounds_checks() {
         comptime fn run() -> bool {
             var trace: Integer = 0;
             var original: meta.List<Integer> = [1,2,3];
-            let changed = meta.replace_range(input(trace.ref, original),
-                bound(trace.ref, 2, 1), bound(trace.ref, 3, 2), replacement(trace.ref, original.ref));
-            let first = trace == 1234 and meta.length(original) == 0
-                and (changed match {xs? => meta.length(xs) == 3 and xs[0] == 1
+            let changed = (input(trace.ref, original)).replace_range(bound(trace.ref, 2, 1), bound(trace.ref, 3, 2), replacement(trace.ref, original.ref));
+            let first = trace == 1234 and original.length() == 0
+                and (changed match {xs? => xs.length() == 3 and xs[0] == 1
                     and xs[1] == 9 and xs[2] == 3, null => false});
             trace = 0;
             original = [1,2,3];
-            let invalid = meta.replace_range(input(trace.ref, original),
-                bound(trace.ref, 2, -1), bound(trace.ref, 3, 2), replacement(trace.ref, original.ref));
-            let second = trace == 1234 and meta.length(original) == 0
+            let invalid = (input(trace.ref, original)).replace_range(bound(trace.ref, 2, -1), bound(trace.ref, 3, 2), replacement(trace.ref, original.ref));
+            let second = trace == 1234 and original.length() == 0
                 and (invalid match {null => true, _? => false});
             trace = 0;
-            let selected = meta.slice(input(trace.ref, [7,8,9]),
-                bound(trace.ref, 2, 1), bound(trace.ref, 3, 3));
+            let selected = (input(trace.ref, [7,8,9])).slice(bound(trace.ref, 2, 1), bound(trace.ref, 3, 3));
             first and second and trace == 123
-                and (selected match {xs? => meta.length(xs) == 2 and xs[0] == 8 and xs[1] == 9, null => false})
+                and (selected match {xs? => xs.length() == 2 and xs[0] == 8 and xs[1] == 9, null => false})
         }
         ",
     ).unwrap();
@@ -1153,17 +1150,17 @@ fn list_ranges_evaluate_arguments_once_before_bounds_checks() {
 #[test]
 fn list_ranges_reject_incompatible_inputs_and_propagate_invocation_limits() {
     for source in [
-        "comptime fn bad() {meta.slice<bool>([true], false, 1);}",
-        "comptime fn bad() {meta.replace_range<bool>([true], 0, 1, [7]);}",
-        "comptime fn bad() {meta.slice<bool>(true, 0, 1);}",
-        "fn bad() {meta.slice<bool>([true], 0, 1);}",
+        "comptime fn bad() {meta.List<bool>.slice([true], false, 1);}",
+        "comptime fn bad() {meta.List<bool>.replace_range([true], 0, 1, [7]);}",
+        "comptime fn bad() {meta.List<bool>.slice(true, 0, 1);}",
+        "fn bad() {meta.List<bool>.slice([true], 0, 1);}",
     ] {
         assert!(compile(source).is_err(), "{source}");
     }
     let package = compile(
         "comptime fn run() -> bool {
-        meta.slice<bool>([true,false,true,false], 0, 4) match {
-            xs? => meta.length(xs) == 4, null => false,
+        meta.List<bool>.slice([true,false,true,false], 0, 4) match {
+            xs? => xs.length() == 4, null => false,
         }
     }",
     )
@@ -1193,8 +1190,8 @@ fn list_flat_map_preserves_nominal_type_elements_and_inner_order() {
         comptime fn expand(value:Type)->meta.List<Type> {[value,bool]}
         comptime fn run()->bool {
             let values:meta.List<Type> = [Identity<bool>,bool];
-            let output=meta.flat_map(values,expand);
-            meta.length(output) == 4 and output[0] == Identity<bool>
+            let output=values.flat_map(expand);
+            output.length() == 4 and output[0] == Identity<bool>
                 and output[1] == bool and output[2] == bool and output[3] == bool
         }",
     )
@@ -1214,8 +1211,8 @@ fn list_transform_collectors_stop_on_failure_and_recover() {
         let package=compile(&format!(
             "typealias Integer=.Integer'builtin;
             comptime fn transform(value:Integer)->{result} {{let table:meta.List<bool> = [true,false];{body}}}
-            comptime fn fail()->meta.List<bool> {{let values:meta.List<Integer> = [0,2,1];meta.{operation}(values,transform)}}
-            comptime fn recover()->meta.List<bool> {{let values:meta.List<Integer> = [0,1];meta.{operation}(values,transform)}}"
+            comptime fn fail()->meta.List<bool> {{let values:meta.List<Integer> = [0,2,1];values.{operation}(transform)}}
+            comptime fn recover()->meta.List<bool> {{let values:meta.List<Integer> = [0,1];values.{operation}(transform)}}"
         )).unwrap();
         let mut vm = comptime_interpretor::Interpreter::for_comptime(
             &package,
@@ -1250,14 +1247,14 @@ fn list_transform_collectors_stop_on_failure_and_recover() {
 #[test]
 fn list_transform_collectors_reject_wrong_callback_domains_and_runtime_use() {
     for source in [
-        "comptime fn bad()->meta.List<bool> {meta.filter_map([true],|value| [value])}",
-        "comptime fn bad()->meta.List<bool> {meta.flat_map([true],|value| value)}",
-        "fn callback(value:bool)->?bool {value} comptime fn bad()->meta.List<bool> {meta.filter_map([true],callback)}",
-        "fn bad()->meta.List<bool> {meta.flat_map([true],|value| [value])}",
-        "comptime fn bad() {meta.reduce([true],|left,right| [left]);}",
-        "comptime fn bad() {meta.find_map([true],|value| [value]);}",
-        "fn callback(value:bool)->?bool {value} comptime fn bad() {meta.find_map([true],callback);}",
-        "fn bad() {meta.reduce([true],|left,right| right);}",
+        "comptime fn bad()->meta.List<bool> {meta.List<bool>.filter_map([true],|value| [value])}",
+        "comptime fn bad()->meta.List<bool> {meta.List<bool>.flat_map([true],|value| value)}",
+        "fn callback(value:bool)->?bool {value} comptime fn bad()->meta.List<bool> {meta.List<bool>.filter_map([true],callback)}",
+        "fn bad()->meta.List<bool> {meta.List<bool>.flat_map([true],|value| [value])}",
+        "comptime fn bad() {meta.List<bool>.reduce([true],|left,right| [left]);}",
+        "comptime fn bad() {meta.List<bool>.find_map([true],|value| [value]);}",
+        "fn callback(value:bool)->?bool {value} comptime fn bad() {meta.List<bool>.find_map([true],callback);}",
+        "fn bad() {meta.List<bool>.reduce([true],|left,right| right);}",
     ] {
         assert!(compile(source).is_err(), "{source}");
     }
@@ -1309,7 +1306,7 @@ fn list_collectors_check_named_callback_contracts_before_iteration() {
             // must still enforce the declared callback contract.
             for values in ["[]", "[true]", "[true,false]"] {
                 let call = format!(
-                    "comptime fn run() {{let input:meta.List<bool> = {values}; meta.{query}(input,callback);}}"
+                    "comptime fn run() {{let input:meta.List<bool> = {values}; input.{query}(callback);}}"
                 );
                 compile(&format!("{valid} {call}"))
                     .expect("the same call accepts a compatible callback");
@@ -1331,8 +1328,8 @@ fn list_reduction_and_search_preserve_type_identity() {
         comptime fn select(value:Type)->?Type {value}
         comptime fn run()->bool {
             let values:meta.List<Type> = [Identity<bool>,bool];
-            let reduced=meta.reduce(values,|left,right|left);
-            let found=meta.find_map(values,select);
+            let reduced=values.reduce(|left,right|left);
+            let found=values.find_map(select);
             (reduced match {value?=>value == Identity<bool>,null=>false})
                 and (found match {value?=>value == Identity<bool>,null=>false})
         }",
@@ -1349,11 +1346,11 @@ fn list_reduction_and_search_abort_failed_callbacks_and_recover() {
     for (callback, invocation) in [
         (
             "comptime fn transform(left:Integer,right:Integer)->Integer {let values:meta.List<Integer> = [10];values[right]}",
-            "meta.reduce(values,transform)",
+            "values.reduce(transform)",
         ),
         (
             "comptime fn transform(value:Integer)->?Integer {let values:meta.List<Integer> = [10];let checked=values[value];null}",
-            "meta.find_map(values,transform)",
+            "values.find_map(transform)",
         ),
     ] {
         let package = compile(&format!(

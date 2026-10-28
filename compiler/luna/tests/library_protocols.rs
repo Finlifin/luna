@@ -8,7 +8,7 @@ use support::compile_with_source_bindings;
 
 const PRIMITIVES: &str = include_str!("../../../library/builtin/primitives.fl");
 const OPERATORS: &str = include_str!("../../../library/builtin/ops.fl");
-const META: &str = include_str!("../../../library/meta/lib.fl");
+const META: &str = include!("support/meta_source.rs");
 const TUPLE: &str = include_str!("../../../library/builtin/tuple.fl");
 const RESOURCES: &str = include_str!("../../../library/builtin/resources.fl");
 
@@ -991,7 +991,7 @@ fn repository_tuple_head_preserves_type_identity_and_value_layout() {
             value and not b
         }}
         comptime fn PairType()->Type {{Tuple<bool,bool>}}",
-        include_str!("../../../library/meta/lib.fl"),
+        include!("support/meta_source.rs"),
         include_str!("../../../library/builtin/tuple.fl"),
     );
     let package = compile_with_source_bindings(

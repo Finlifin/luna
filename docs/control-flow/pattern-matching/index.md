@@ -909,7 +909,7 @@ where T :- ListView {
 
 编译期列表观察也已接通：将协议及实现的两个方法都声明为 `comptime fn`，即可在 comptime 函数中使用列表模式。长度不匹配、前项模式失败时，后续提取器不会执行；前项绑定可用于后项 guard。提取结果也可以是 Type，并用于后续类型计算。读取存储的 Type 元素仍须有 Copy 依据，comptime 不免除资源检查。
 
-编译期协议的长度与索引还可使用 `Integer`，与 `meta.length` 和列表索引的编译期域一致；编译器生成的长度和索引始终非负。runtime 协议仍要求无符号机器大小类型。下面的协议可显式绑定为列表模式入口，并通过普通泛型实现观察 `meta.List<T>`：
+编译期协议的长度与索引还可使用 `Integer`，与 `List.length` 和列表索引的编译期域一致；编译器生成的长度和索引始终非负。runtime 协议仍要求无符号机器大小类型。下面的协议可显式绑定为列表模式入口，并通过普通泛型实现观察 `meta.List<T>`：
 
 ```flurry
 trait ComptimeListView {
@@ -920,7 +920,7 @@ trait ComptimeListView {
 
 impl ComptimeListView for meta.List<T> where T {
     assoc Element: Type = T;
-    comptime fn list_pattern_view_get_len(*self) -> Integer { meta.length(self.*) }
+    comptime fn list_pattern_view_get_len(*self) -> Integer { self.*.length() }
     comptime fn list_pattern_view_get_element(*self, comptime index: Integer) -> T {
         self.*[index]
     }

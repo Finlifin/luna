@@ -3248,3 +3248,37 @@ fn list_subject_eligibility_requires_trusted_metadata_at_selection_and_replay() 
         .verify_type_evidence(&evidence, &var(995), &[], &equal, Budget::default())
         .unwrap();
 }
+
+#[test]
+fn inherent_normal_form_ownership_belongs_to_the_head_not_its_arguments() {
+    use type_resolution::implementation::{Ownership, inherent_ownership};
+    let local = local_nominal(vec![]);
+    let Term::Nominal { declaration, .. } = local.clone() else {
+        panic!()
+    };
+    let subject = Term::NormalForm {
+        head: declaration,
+        sort: Sort::Type,
+        arguments: vec![var(1)],
+    };
+    assert_eq!(
+        inherent_ownership(&subject, declaration.package),
+        Ok(Ownership::LocalNormalForm(declaration))
+    );
+    assert!(inherent_ownership(&subject, declaration.package + 1).is_err());
+    let foreign = Term::NormalForm {
+        head: nir::DeclarationId {
+            package: declaration.package + 1,
+            ..declaration
+        },
+        sort: Sort::Type,
+        arguments: vec![local],
+    };
+    assert!(inherent_ownership(&foreign, declaration.package).is_err());
+    let value = Term::NormalForm {
+        head: declaration,
+        sort: Sort::ComptimeValue,
+        arguments: vec![],
+    };
+    assert!(inherent_ownership(&value, declaration.package).is_err());
+}

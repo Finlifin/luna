@@ -3928,10 +3928,7 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
         "library/builtin/ops.fl",
         include_str!("../../../library/builtin/ops.fl"),
     );
-    sandbox.write(
-        "library/meta/lib.fl",
-        include_str!("../../../library/meta/lib.fl"),
-    );
+    sandbox.write("library/meta/lib.fl", include!("support/meta_source.rs"));
     sandbox.write("library/std/lib.fl", "pub mod prelude {}");
     sandbox.write(
         "library/language-items.conf",

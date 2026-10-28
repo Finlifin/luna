@@ -24,7 +24,7 @@ impl Checker<'_, '_> {
     // Member selection can use the declared subject without proving a storage
     // shape. Unknown structural evidence is not evidence of a different type;
     // the implementation resolver must still prove its own applicability.
-    fn method_subject_view(&self, ty: &Term, span: Span) -> Result<Term, Error> {
+    pub(super) fn method_subject_view(&self, ty: &Term, span: Span) -> Result<Term, Error> {
         if self.bound_tuple_elements(ty).is_some()
             || !matches!(
                 ty,
@@ -2391,7 +2391,7 @@ impl Checker<'_, '_> {
             let Term::Pointer(inner) = &receiver.ty else {
                 break;
             };
-            if !n::intrinsic_pointer_value(inner) {
+            if !method.ty.is_comptime_callable() && !n::intrinsic_pointer_value(inner) {
                 return Err(error(
                     base.span,
                     "by-value pointer receiver requires memory transfer contracts",
@@ -2403,7 +2403,12 @@ impl Checker<'_, '_> {
                 kind: K::ReadPointer(Box::new(receiver)),
             };
         }
-        if matches!(receiver.kind, K::ReadPointer(_)) && !n::intrinsic_pointer_value(&receiver.ty) {
+        // Comptime reads use the VM's checked value-transfer rules. Runtime
+        // pointer reads still need intrinsic copy or memory transfer contracts.
+        if !method.ty.is_comptime_callable()
+            && matches!(receiver.kind, K::ReadPointer(_))
+            && !n::intrinsic_pointer_value(&receiver.ty)
+        {
             return Err(error(
                 base.span,
                 "by-value pointer receiver requires memory transfer contracts",

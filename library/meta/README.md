@@ -1,5 +1,15 @@
 # meta
 
+包入口只保留 `List` 类型工厂和公开导出；保持 `meta.List` 的 normal-form
+声明身份。列表算法位于 `list.fl` 的 `impl List<T> where T`，Object 操作、
+整数运算、struct builder 与 enum builder 分别位于 `object.fl`、`integer.fl`、
+`structs.fl`、`enums.fl`。
+
+列表操作使用接收者调用，例如 `values.length()`、`values.map(transform)`、
+`values.fold(initial, combine)`。`append` 使用 `*self`，通过 `values.append(value)`
+修改列表变量；其他操作观察输入快照。需要显式元素类型时可使用
+`meta.List<T>.concat(left, right)`。旧的 `meta.length(values)` 等自由函数不再导出。
+
 `to_usize(value: Integer) -> usize` 与 `from_usize(value: usize) -> Integer`
 是 pure comptime 函数，用于编译期数据与目标尺寸接口之间的精确转换。
 前者拒绝负数及超出目标 usize 范围的值，后者保留完整非负数值；不截断，
@@ -138,7 +148,7 @@ comptime fn configured() -> bool {
 这不授予 Object 全局 Copy 实现或 runtime 表示，带活动引用的 Object 也不会
 因此获得复制或常量逃逸权限。真实 sysroot 用例已纳入 `sysroot-meta` 检查。
 
-`*List<T>` 的读取、整体替换和 `meta.append` 使用同一套传送检查。元素的声明域
+`*List<T>` 的读取、整体替换和 `List.append` 使用同一套传送检查。元素的声明域
 必须允许复制；空列表、缺失 optional 以及 `List<Object>` 内的条目也不能绕过
 资源权限。纯 Type 描述保持 comptime 数据身份，不因这些检查展开 normal-form 头。
 
@@ -411,11 +421,11 @@ comptime fn Revised() -> Type {
 
 ### 转换后收集列表
 
-`filter_map(values, transform)` 要求 comptime 回调返回 `?U`，按输入顺序收集
+`values.filter_map(transform)` 要求 comptime 回调返回 `?U`，按输入顺序收集
 存在的结果，返回 `List<U>`。它只去掉外层可选性：回调返回 `??T` 时，存在
 但 payload 为 null 的结果仍作为 `?T` 元素保留。
 
-`flat_map(values, transform)` 要求 comptime 回调返回 `List<U>`，按外层输入
+`values.flat_map(transform)` 要求 comptime 回调返回 `List<U>`，按外层输入
 顺序、内层列表顺序收集元素，返回 `List<U>`。空的内层列表不产生元素。
 
 ```flurry
@@ -429,10 +439,10 @@ comptime fn expand(value: Integer) -> meta.List<Integer> {
 
 comptime fn example() -> bool {
     let input: meta.List<Integer> = [1, 2, 3];
-    let selected = meta.filter_map(input, select);
-    let expanded = meta.flat_map(input, expand);
-    meta.length(selected) == 2 and selected[0] == 10 and selected[1] == 30
-        and meta.length(expanded) == 4 and expanded[2] == 3
+    let selected = input.filter_map(select);
+    let expanded = input.flat_map(expand);
+    selected.length() == 2 and selected[0] == 10 and selected[1] == 30
+        and expanded.length() == 4 and expanded[2] == 3
 }
 ```
 
@@ -450,11 +460,11 @@ comptime fn example() -> bool {
 
 ### 首项归约与转换后查找
 
-`reduce(values, combine) -> ?T` 使用首项作为累积值，对后续元素按顺序调用
+`values.reduce(combine) -> ?T` 使用首项作为累积值，对后续元素按顺序调用
 `combine(accumulator, item) -> T`。空输入返回 null，单项输入不调用回调；
 非空输入调用次数为元素数减一，不要求调用方构造单位元。
 
-`find_map(values, transform) -> ?U` 按顺序执行返回 `?U` 的 comptime 回调，
+`values.find_map(transform) -> ?U` 按顺序执行返回 `?U` 的 comptime 回调，
 遇到第一个存在结果立即返回，不执行后续回调。所有结果均为空或输入为空时返回 null。
 两个接口均保留嵌套 optional 层：归约的首项为 null，或查找到的存在结果内含 null，
 都不会变成外层的缺失结果。
@@ -466,8 +476,8 @@ comptime fn first_positive(value: Integer) -> ?Integer {
 
 comptime fn example() -> bool {
     let values: meta.List<Integer> = [1, 2, 3];
-    let reduced = meta.reduce(values, |left, right| left * 10 + right);
-    let found = meta.find_map(values, first_positive);
+    let reduced = values.reduce(|left, right| left * 10 + right);
+    let found = values.find_map(first_positive);
     (reduced match { value? => value == 123, null => false })
         and (found match { value? => value == 1, null => false })
 }
@@ -480,7 +490,7 @@ comptime fn example() -> bool {
 
 ### 稳定排序
 
-`meta.sort_by(values, less) -> List<T>` 返回新列表，不修改输入快照。
+`values.sort_by(less) -> List<T>` 返回新列表，不修改输入快照。
 `less` 是接收两个 T 并返回 bool 的 comptime 回调，表示严格先后关系；
 等价元素保留原来的相对顺序。空列表与单元素列表不调用比较器，但仍检查其
 参数、结果和执行阶段。Type 元素保持原有身份，不展开 normal-form 头。
@@ -488,7 +498,7 @@ comptime fn example() -> bool {
 ```flurry
 comptime fn sorted_numbers() -> meta.List<Integer> {
     let input: meta.List<Integer> = [3, 1, 2];
-    meta.sort_by(input, |a, b| a < b)
+    input.sort_by(|a, b| a < b)
 }
 ```
 
@@ -508,20 +518,20 @@ comptime fn sorted_numbers() -> meta.List<Integer> {
 
 ### 分区点与二分边界查找
 
-`partition_point(values, pred) -> Integer` 返回 true 前缀之后第一个 false
+`values.partition_point(pred) -> Integer` 返回 true 前缀之后第一个 false
 元素的下标；全为 true 返回列表长度，全为 false 或空列表返回 0。调用者负责
 保证谓词把列表分为 true 前缀、false 后缀；实现不会先线性扫描验证这个前提。
 
-`lower_bound(values, needle, less)` 返回第一个不严格小于 needle 的位置；
-`upper_bound(values, needle, less)` 返回第一个严格大于 needle 的位置。
+`values.lower_bound(needle, less)` 返回第一个不严格小于 needle 的位置；
+`values.upper_bound(needle, less)` 返回第一个严格大于 needle 的位置。
 列表必须按同一个严格弱序比较器排序。相等元素的区间为 `[lower, upper)`，
 缺失时两者给出相同的插入位置。降序或按字段排序同样由 less 定义。
 
 ```flurry
 comptime fn duplicate_range() -> bool {
     let values: meta.List<Integer> = [1, 2, 2, 2, 4];
-    meta.lower_bound(values, 2, |a, b| a < b) == 1
-        and meta.upper_bound(values, 2, |a, b| a < b) == 4
+    values.lower_bound(2, |a, b| a < b) == 1
+        and values.upper_bound(2, |a, b| a < b) == 4
 }
 ```
 

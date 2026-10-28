@@ -9,7 +9,7 @@ comptime fn generate() -> <|-bool> {
     builder.add_field(.flag, bool);
     let T = builder.Build();
     let fields = meta.struct_field_names(T);
-    if meta.length(fields) == 1 and fields[0] == .flag {
+    if fields.length() == 1 and fields[0] == .flag {
         return '(true);
     }
     '(false)

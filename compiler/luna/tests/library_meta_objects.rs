@@ -6,7 +6,7 @@ mod support;
 use comptime_interpretor::{Interpreter, Value};
 use nir::{Primitive, Term};
 
-const META: &str = include_str!("../../../library/meta/lib.fl");
+const META: &str = include!("support/meta_source.rs");
 
 fn compile(source: &str) -> Result<nir::program::Package, String> {
     support::compile_with_source_bindings(
@@ -567,7 +567,7 @@ fn object_clause_inputs_reconstruct_nested_trusted_lists() {
         const METADATA={flags:FLAGS};
         comptime fn read()->bool where metadata:meta.Object {
             meta.object_value<meta.List<bool>>(metadata,0) match {
-                values?=>meta.length(values)==2 and values[0] and not values[1],
+                values?=>values.length()==2 and values[0] and not values[1],
                 null=>false,
             }
         }
