@@ -511,6 +511,7 @@ pub(crate) fn source_protocols(
         host_fma: None,
         host_sqrt: None,
         host_copysign: None,
+        comptime_intrinsics: &options.comptime_intrinsics,
         host_intrinsics: &[],
         list_pattern: options.list_pattern_protocol.as_deref(),
         iterator: options.iterator_protocol.as_deref(),
@@ -606,9 +607,11 @@ fn compile_sysroot(
         Default::default()
     };
     let host_intrinsics = defaults.merged_host_intrinsics(selectors, protocols);
+    let comptime_intrinsics = defaults.merged_comptime_intrinsics(selectors, protocols);
     let selectors = defaults.apply(
         crate::protocols::type_constructors::Selectors {
             host_intrinsics: &host_intrinsics,
+            comptime_intrinsics: &comptime_intrinsics,
             ..selectors
         },
         protocols,

@@ -6,6 +6,7 @@ pub struct Selectors<'a> {
     pub host_fma: Option<&'a str>,
     pub host_sqrt: Option<&'a str>,
     pub host_copysign: Option<&'a str>,
+    pub comptime_intrinsics: &'a [(nir::intrinsics::Operation, String)],
     pub host_intrinsics: &'a [(nir::intrinsics::Operation, String)],
     pub copy: Option<&'a str>,
     pub drop: Option<&'a str>,
@@ -33,7 +34,8 @@ impl Selectors<'_> {
         ) {
             return Ok(());
         }
-        if !self.host_intrinsics.is_empty()
+        if !self.comptime_intrinsics.is_empty()
+            || !self.host_intrinsics.is_empty()
             || [
                 self.host_fma,
                 self.host_sqrt,
@@ -117,12 +119,23 @@ fn resolve_host_tag(
 
 fn validate_host_bindings(protocols: &Protocols) -> Result<(), String> {
     let mut selected = std::collections::BTreeMap::new();
-    for (binding, operation) in protocols.host_bindings() {
-        if selected
-            .insert(binding, operation)
-            .is_some_and(|previous| previous != operation)
-        {
-            return Err("one intrinsic tag cannot bind both distinct target operations".into());
+    for (binding, operation, comptime) in protocols
+        .host_bindings()
+        .map(|(tag, op)| (tag, op, false))
+        .chain(
+            protocols
+                .comptime_intrinsics
+                .iter()
+                .map(|(tag, op)| (tag, *op, true)),
+        )
+    {
+        if let Some((previous, phase)) = selected.insert(binding, (operation, comptime)) {
+            if phase != comptime {
+                return Err("intrinsic tag cannot belong to both runtime and comptime".into());
+            }
+            if previous != operation {
+                return Err("one intrinsic tag cannot bind both distinct target operations".into());
+            }
         }
     }
     Ok(())
@@ -164,6 +177,23 @@ pub(crate) fn resolve_source(
             .any(|(existing, bound)| existing == &binding && bound == operation)
         {
             result.host_intrinsics.push((binding, *operation));
+        }
+    }
+    for (operation, selector) in selectors.comptime_intrinsics {
+        let binding = resolve_host_tag(&paths, hir, packages, "comptime intrinsic", selector)?;
+        if result.host_bindings().any(|(tag, _)| tag == &binding) {
+            return Err("intrinsic tag cannot belong to both runtime and comptime".into());
+        }
+        if let Some((_, previous)) = result
+            .comptime_intrinsics
+            .iter()
+            .find(|(tag, _)| tag == &binding)
+        {
+            if previous != operation {
+                return Err("conflicting comptime intrinsic binding".into());
+            }
+        } else {
+            result.comptime_intrinsics.push((binding, *operation));
         }
     }
     validate_host_bindings(&result)?;
@@ -362,7 +392,12 @@ pub(crate) fn validate(
 ) -> Result<(), String> {
     use nir::normal_forms::{Kind, Role};
     validate_host_bindings(protocols)?;
-    for ((id, name), operation) in protocols.host_bindings() {
+    for ((id, name), operation) in protocols.host_bindings().chain(
+        protocols
+            .comptime_intrinsics
+            .iter()
+            .map(|(tag, op)| (tag, *op)),
+    ) {
         let mut families = package
             .enums
             .iter()
@@ -416,6 +451,7 @@ pub(crate) fn validate(
 /// an input program. Package-set clients may supply their own driver identities.
 #[derive(Default)]
 pub(crate) struct SysrootBindings {
+    comptime_intrinsics: Vec<(nir::intrinsics::Operation, String)>,
     host_intrinsics: Vec<(nir::intrinsics::Operation, String)>,
     copy: Option<String>,
     drop: Option<String>,
@@ -478,14 +514,18 @@ impl SysrootBindings {
                 version = true;
                 continue;
             }
-            if let Some(name) = key.strip_prefix("host-intrinsic.") {
+            if let Some(name) = key
+                .strip_prefix("host-intrinsic.")
+                .or_else(|| key.strip_prefix("comptime-intrinsic."))
+            {
+                let bindings = if key.starts_with("comptime-") {
+                    &mut result.comptime_intrinsics
+                } else {
+                    &mut result.host_intrinsics
+                };
                 let operation = nir::intrinsics::Operation::from_name(name)
                     .ok_or_else(|| fail("unknown host intrinsic operation"))?;
-                if result
-                    .host_intrinsics
-                    .iter()
-                    .any(|(op, _)| *op == operation)
-                {
+                if bindings.iter().any(|(op, _)| *op == operation) {
                     return Err(fail("duplicate host intrinsic operation"));
                 }
                 if value.split(".").count() < 3
@@ -498,7 +538,7 @@ impl SysrootBindings {
                 {
                     return Err(fail("expected an unquoted package.Enum.variant selector"));
                 }
-                result.host_intrinsics.push((operation, value.to_owned()));
+                bindings.push((operation, value.to_owned()));
                 continue;
             }
             let target = match key {
@@ -574,6 +614,27 @@ impl SysrootBindings {
         }
         merged
     }
+    pub(crate) fn merged_comptime_intrinsics(
+        &self,
+        explicit: Selectors<'_>,
+        identities: &Protocols,
+    ) -> Vec<(nir::intrinsics::Operation, String)> {
+        let mut merged = explicit.comptime_intrinsics.to_vec();
+        for (operation, selector) in &self.comptime_intrinsics {
+            if !explicit
+                .comptime_intrinsics
+                .iter()
+                .any(|(op, _)| op == operation)
+                && !identities
+                    .comptime_intrinsics
+                    .iter()
+                    .any(|(_, op)| op == operation)
+            {
+                merged.push((*operation, selector.clone()));
+            }
+        }
+        merged
+    }
     pub(crate) fn apply<'a>(
         &'a self,
         explicit: Selectors<'a>,
@@ -583,6 +644,7 @@ impl SysrootBindings {
             host_fma: explicit.host_fma,
             host_sqrt: explicit.host_sqrt,
             host_copysign: explicit.host_copysign,
+            comptime_intrinsics: explicit.comptime_intrinsics,
             host_intrinsics: explicit.host_intrinsics,
             copy: explicit.copy.or_else(|| {
                 identities
@@ -914,6 +976,7 @@ mod stage_tests {
             },
         ];
         let options = crate::cli::Options {
+            comptime_intrinsics: Vec::new(),
             input: "absent.fl".into(),
             emit: Emit::Hir,
             output: None,
@@ -972,5 +1035,64 @@ mod stage_tests {
         .err()
         .unwrap();
         assert!(error.contains("not AST"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod comptime_math_bindings_tests {
+    use super::*;
+    use nir::intrinsics::Operation as O;
+
+    #[test]
+    fn defaults_preserve_partial_overrides_and_driver_identity() {
+        let config = SysrootBindings::parse("version = 1\ncomptime-intrinsic.sqrt = meta.math.Scalar.sqrt\ncomptime-intrinsic.fma = meta.math.Scalar.fma\n").unwrap();
+        let overrides = [(O::SquareRoot, "custom.Scalar.root".into())];
+        let selectors = Selectors {
+            comptime_intrinsics: &overrides,
+            ..Default::default()
+        };
+        let merged = config.merged_comptime_intrinsics(selectors, &Protocols::default());
+        assert_eq!(
+            merged,
+            vec![
+                overrides[0].clone(),
+                (O::FusedMultiplyAdd, "meta.math.Scalar.fma".into())
+            ]
+        );
+        let tag = (
+            nir::DeclarationId {
+                package: 7,
+                local: 9,
+            },
+            "fma".into(),
+        );
+        let mut protocols = Protocols {
+            comptime_intrinsics: vec![(tag.clone(), O::FusedMultiplyAdd)],
+            ..Default::default()
+        };
+        assert_eq!(
+            config.merged_comptime_intrinsics(selectors, &protocols),
+            overrides
+        );
+        protocols.host_intrinsics.push((tag, O::FusedMultiplyAdd));
+        assert!(
+            validate_host_bindings(&protocols)
+                .unwrap_err()
+                .contains("both runtime and comptime")
+        );
+    }
+
+    #[test]
+    fn malformed_or_conflicting_comptime_defaults_are_rejected() {
+        for entry in [
+            "comptime-intrinsic.missing = meta.Scalar.x",
+            "comptime-intrinsic.sqrt = meta.sqrt",
+            "comptime-intrinsic.sqrt = meta.Scalar.sqrt\ncomptime-intrinsic.sqrt = other.Scalar.sqrt",
+        ] {
+            assert!(
+                SysrootBindings::parse(&format!("version = 1\n{entry}\n")).is_err(),
+                "{entry}"
+            );
+        }
     }
 }

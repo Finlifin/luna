@@ -71,9 +71,20 @@ impl Checker<'_, '_> {
             self.require_expression(&output, expected, expr.span)?;
         }
         let family = &self.enums[&declaration];
+        let comptime = self
+            .protocols
+            .comptime_intrinsics
+            .iter()
+            .any(|((id, name), _)| *id == declaration && *name == family.variants[variant].name);
         let selected = self
             .protocols
             .host_bindings()
+            .chain(
+                self.protocols
+                    .comptime_intrinsics
+                    .iter()
+                    .map(|(tag, op)| (tag, *op)),
+            )
             .filter(|((id, name), _)| *id == declaration && *name == family.variants[variant].name)
             .map(|(_, operation)| operation)
             .collect::<Vec<_>>();
@@ -122,7 +133,11 @@ impl Checker<'_, '_> {
             admission
                 .validate_target_layout(self.target)
                 .map_err(|reason| error(expr.span, reason))?;
-            Some(admission)
+            Some(if comptime {
+                admission.for_comptime()
+            } else {
+                admission
+            })
         } else {
             None
         };

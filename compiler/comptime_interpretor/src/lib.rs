@@ -24,6 +24,7 @@ mod object_queries;
 #[cfg(test)]
 mod object_values;
 mod objects;
+mod scalar_math;
 pub use objects::ObjectProperty;
 mod generated_enums;
 pub use generated_enums::EnumPublicationError;
@@ -4063,7 +4064,7 @@ impl<'a> Interpreter<'a> {
             K::RequirePredicate(..) | K::EnsurePredicate(..) | K::CheckPredicate(..) => {
                 self.eval_check_predicate(expr, environment)
             }
-            K::Intrinsic { .. } => Err(self.failure(ErrorKind::Unsupported, Some(expr.source))),
+            K::Intrinsic { .. } => self.eval_scalar_math(expr, environment),
             K::UnsafeScope(body) => self.eval(body, environment),
             K::Discard(..) => self.eval_discard(expr, environment),
             K::Return(..) => self.eval_return(expr, environment),

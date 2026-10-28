@@ -1,0 +1,308 @@
+use builtin.*;
+
+{-
+  meta.math provides comptime counterparts of builtin.math scalar operations.
+  The sysroot binds these tags to the comptime VM, independently of the
+  runtime target. Fixed-width domains retain their IEEE and integer widths.
+
+  fma performs one fused rounding; it is not a multiply followed by an add.
+-}
+
+pub mod target {
+    ^intrinsic_enum
+    pub enum Scalar { fma, sqrt, copysign, floor, ceil, trunc, roundeven, round, fabs, sin, cos, exp, exp2, log, log2, log10, pow, powi, ldexp, minimum, maximum, bitreverse, ctpop, ctlz, cttz, bswap, fshl, fshr, minimumnum, maximumnum, isnan, isinf, isfinite, isnormal, issubnormal, signbit, add_sat, sub_sat, min, max, abs, bit_and, bit_or, bit_xor }
+}
+
+-- The float domain is proved before the target operation is specialized.
+pub pure comptime fn fma(a: T, b: T, c: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.fma'intrinsic(a, b, c).as(T) }
+}
+
+-- Bind every Scalar operation when loading this package, including unused generic bodies.
+pub pure comptime fn sqrt(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.sqrt'intrinsic(value).as(T) }
+}
+
+-- Preserve magnitude bits from magnitude, taking only the sign bit from sign.
+pub pure comptime fn copysign(magnitude: T, sign: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.copysign'intrinsic(magnitude, sign).as(T) }
+}
+
+-- Round toward negative infinity, retaining the floating type.
+pub pure comptime fn floor(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.floor'intrinsic(value).as(T) }
+}
+
+-- Round toward positive infinity, retaining the floating type.
+pub pure comptime fn ceil(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.ceil'intrinsic(value).as(T) }
+}
+
+-- Round toward zero; this is not a conversion to an integer type.
+pub pure comptime fn trunc(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.trunc'intrinsic(value).as(T) }
+}
+
+-- Round to nearest, resolving halfway cases to the even integer.
+pub pure comptime fn roundeven(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.roundeven'intrinsic(value).as(T) }
+}
+
+-- Comptime sin, retaining the IEEE input precision.
+pub pure comptime fn sin(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.sin'intrinsic(value).as(T) }
+}
+
+-- Comptime cos, retaining the IEEE input precision.
+pub pure comptime fn cos(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.cos'intrinsic(value).as(T) }
+}
+
+-- Comptime exp, retaining the IEEE input precision.
+pub pure comptime fn exp(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.exp'intrinsic(value).as(T) }
+}
+
+-- Comptime exp2, retaining the IEEE input precision.
+pub pure comptime fn exp2(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.exp2'intrinsic(value).as(T) }
+}
+
+-- Comptime log, retaining the IEEE input precision.
+pub pure comptime fn log(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.log'intrinsic(value).as(T) }
+}
+
+-- Comptime log2, retaining the IEEE input precision.
+pub pure comptime fn log2(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.log2'intrinsic(value).as(T) }
+}
+
+-- Comptime log10, retaining the IEEE input precision.
+pub pure comptime fn log10(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.log10'intrinsic(value).as(T) }
+}
+
+-- Comptime pow, retaining the IEEE input precision.
+pub pure comptime fn pow(base: T, exponent: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.pow'intrinsic(base, exponent).as(T) }
+}
+
+-- Clear only the sign bit, including for negative zero, infinity and NaN.
+pub pure comptime fn abs(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.fabs'intrinsic(value).as(T) }
+}
+
+-- Round to nearest, resolving halfway cases away from zero; retain float type.
+pub pure comptime fn round(value: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.round'intrinsic(value).as(T) }
+}
+
+-- IEEE minimum/maximum: propagate NaN; negative zero is less than positive zero.
+-- These are LLVM minimum/maximum, not minimumnum/maximumnum.
+pub pure comptime fn minimum(a: T, b: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.minimum'intrinsic(a, b).as(T) }
+}
+pub pure comptime fn maximum(a: T, b: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.maximum'intrinsic(a, b).as(T) }
+}
+
+-- Reverse all bits within the selected unsigned width (not byte reversal).
+pub pure comptime fn bit_reverse(value: T) -> T
+where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T == usize {
+    unsafe { target.Scalar.bitreverse'intrinsic(value).as(T) }
+}
+
+-- Count set bits. The result retains the input integer type, including for zero.
+pub pure comptime fn count_ones(value: T) -> T
+where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T == usize {
+    unsafe { target.Scalar.ctpop'intrinsic(value).as(T) }
+}
+
+-- Count zero bits at either end. Zero returns the input bit width.
+pub pure comptime fn leading_zeros(value: T) -> T
+where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T == usize {
+    unsafe { target.Scalar.ctlz'intrinsic(value).as(T) }
+}
+
+pub pure comptime fn trailing_zeros(value: T) -> T
+where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T == usize {
+    unsafe { target.Scalar.cttz'intrinsic(value).as(T) }
+}
+
+-- Reverse byte order, preserving bit order inside each byte.
+-- LLVM bswap requires an even positive number of bytes; u8 is not in this domain.
+-- usize requires a selected pointer width divisible by 16.
+pub pure comptime fn byte_swap(value: T) -> T
+where T, requires T == u16 or T == u32 or T == u64 or T == u128 or T == usize {
+    unsafe { target.Scalar.bswap'intrinsic(value).as(T) }
+}
+
+-- Concatenate a (high) and b (low); shift modulo the bit width.
+-- Return the high half of the shifted pair.
+pub pure comptime fn funnel_shift_left(a: T, b: T, amount: T) -> T
+where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T == usize {
+    unsafe { target.Scalar.fshl'intrinsic(a, b, amount).as(T) }
+}
+
+-- Ordinary arguments are evaluated once before reusing the bound value.
+pub pure comptime fn rotate_left(value: T, amount: T) -> T
+where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T == usize {
+    funnel_shift_left(value, value, amount)
+}
+
+-- Concatenate a (high) and b (low); shift modulo the bit width.
+-- Return the low half of the shifted pair.
+pub pure comptime fn funnel_shift_right(a: T, b: T, amount: T) -> T
+where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T == usize {
+    unsafe { target.Scalar.fshr'intrinsic(a, b, amount).as(T) }
+}
+
+-- Ordinary arguments are evaluated once before reusing the bound value.
+pub pure comptime fn rotate_right(value: T, amount: T) -> T
+where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T == usize {
+    funnel_shift_right(value, value, amount)
+}
+
+-- LLVM minimumNumber/maximumNumber: any single NaN yields to a number.
+-- Signed zeros are ordered -0.0 < +0.0. No fast-math flags are requested.
+pub pure comptime fn minimumnum(a: T, b: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.minimumnum'intrinsic(a, b).as(T) }
+}
+
+pub pure comptime fn maximumnum(a: T, b: T) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.maximumnum'intrinsic(a, b).as(T) }
+}
+
+-- IEEE classification; no fast-math assumptions, including signaling NaNs.
+pub pure comptime fn isnan(value: T) -> bool
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.isnan'intrinsic(value).as(bool) }
+}
+
+-- IEEE classification; no fast-math assumptions, including signaling NaNs.
+pub pure comptime fn isinf(value: T) -> bool
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.isinf'intrinsic(value).as(bool) }
+}
+
+-- IEEE classification; no fast-math assumptions, including signaling NaNs.
+pub pure comptime fn isfinite(value: T) -> bool
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.isfinite'intrinsic(value).as(bool) }
+}
+
+-- Positive or negative normal values; excludes zero, subnormals, infinity and NaNs.
+pub pure comptime fn isnormal(value: T) -> bool
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.isnormal'intrinsic(value).as(bool) }
+}
+
+-- Positive or negative subnormal values, without treating them as zero.
+pub pure comptime fn issubnormal(value: T) -> bool
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.issubnormal'intrinsic(value).as(bool) }
+}
+
+-- The sign bit, including negative zero and signed NaNs.
+pub pure comptime fn signbit(value: T) -> bool
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.signbit'intrinsic(value).as(bool) }
+}
+
+-- Clamp the mathematical result to the bounds of the input integer type.
+pub pure comptime fn saturating_add(a: T, b: T) -> T
+where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T == i8 or T == i16 or T == i32 or T == i64 or T == i128 or T == usize or T == isize {
+    unsafe { target.Scalar.add_sat'intrinsic(a, b).as(T) }
+}
+
+-- Clamp the mathematical result to the bounds of the input integer type.
+pub pure comptime fn saturating_sub(a: T, b: T) -> T
+where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T == i8 or T == i16 or T == i32 or T == i64 or T == i128 or T == usize or T == isize {
+    unsafe { target.Scalar.sub_sat'intrinsic(a, b).as(T) }
+}
+
+-- Select the smaller integer, comparing according to its signedness.
+pub pure comptime fn min(a: T, b: T) -> T
+where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T == i8 or T == i16 or T == i32 or T == i64 or T == i128 or T == usize or T == isize {
+    unsafe { target.Scalar.min'intrinsic(a, b).as(T) }
+}
+
+-- Select the larger integer, comparing according to its signedness.
+pub pure comptime fn max(a: T, b: T) -> T
+where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T == i8 or T == i16 or T == i32 or T == i64 or T == i128 or T == usize or T == isize {
+    unsafe { target.Scalar.max'intrinsic(a, b).as(T) }
+}
+
+-- Signed absolute value, wrapping INT_MIN back to itself (never poison).
+-- Unlike floating abs, the result may therefore still be negative.
+pub pure comptime fn wrapping_abs(value: T) -> result: T
+where T, requires T == i8 or T == i16 or T == i32 or T == i64 or T == i128 or T == isize,
+    ensures result == value'old or result == -value'old {
+    unsafe { target.Scalar.abs'intrinsic(value).as(T) }
+}
+
+-- Combine the two bit patterns; retain the source integer type.
+-- Platform integers use the explicitly selected target width.
+pub pure comptime fn bit_and(left: T, right: T) -> T
+where T, requires T == u8 or T == u16 or T == u32
+    or T == u64 or T == u128 or T == i8
+    or T == i16 or T == i32 or T == i64 or T == i128
+    or T == usize or T == isize {
+    unsafe { target.Scalar.bit_and'intrinsic(left, right).as(T) }
+}
+
+-- Combine the two bit patterns; retain the source integer type.
+-- Platform integers use the explicitly selected target width.
+pub pure comptime fn bit_or(left: T, right: T) -> T
+where T, requires T == u8 or T == u16 or T == u32
+    or T == u64 or T == u128 or T == i8
+    or T == i16 or T == i32 or T == i64 or T == i128
+    or T == usize or T == isize {
+    unsafe { target.Scalar.bit_or'intrinsic(left, right).as(T) }
+}
+
+-- Combine the two bit patterns; retain the source integer type.
+-- Platform integers use the explicitly selected target width.
+pub pure comptime fn bit_xor(left: T, right: T) -> T
+where T, requires T == u8 or T == u16 or T == u32
+    or T == u64 or T == u128 or T == i8
+    or T == i16 or T == i32 or T == i64 or T == i128
+    or T == usize or T == isize {
+    unsafe { target.Scalar.bit_xor'intrinsic(left, right).as(T) }
+}
+
+-- Integer exponentiation; multiplication/rounding order is
+-- intentionally unspecified. Both operands are evaluated once in source order.
+pub pure comptime fn powi(base: T, exponent: i32) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.powi'intrinsic(base, exponent).as(T) }
+}
+
+-- Scale by 2^exponent without constructing an intermediate
+-- floating power that can underflow/overflow before multiplying the input.
+pub pure comptime fn ldexp(value: T, exponent: i32) -> T
+where T, requires T == f32 or T == f64 {
+    unsafe { target.Scalar.ldexp'intrinsic(value, exponent).as(T) }
+}

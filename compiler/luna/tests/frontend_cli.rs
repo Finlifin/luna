@@ -547,6 +547,7 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
     };
     let sandbox = Sandbox::new();
     let mut options = Options {
+        comptime_intrinsics: Vec::new(),
         input: sandbox.write(
             "input.fl",
             include_str!("../../../development/examples/automatic-splice.fl"),
@@ -9426,4 +9427,38 @@ fn text_region_cli_selects_primary_package_and_tracks_provider_calls() {
         dump.contains("(source (resolution-id 9) (identity 901)"),
         "{dump}"
     );
+}
+
+#[test]
+fn sysroot_meta_math_invokes_vm_and_folds_into_runtime_code() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", "pure comptime fn root()->f64 {meta.math.sqrt<f64>(81.0)}\nfn run()->bool {inline if root() == 9.0 {true} else {false}}");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let root = root.to_str().unwrap();
+    let output = sandbox.run(&[
+        "input.fl",
+        "--sysroot",
+        root,
+        "--build-target",
+        "x86_64",
+        "linux",
+        "64",
+        "--invoke-comptime",
+        "root",
+    ]);
+    success(&output);
+    let output = sandbox.run(&[
+        "input.fl",
+        "--sysroot",
+        root,
+        "--build-target",
+        "x86_64",
+        "linux",
+        "64",
+        "--emit-llvm",
+        "run",
+    ]);
+    success(&output);
+    let ir = String::from_utf8(output.stdout).unwrap();
+    assert!(!ir.contains("call double @llvm.sqrt"), "{ir}");
 }

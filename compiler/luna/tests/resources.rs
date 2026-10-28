@@ -1457,6 +1457,7 @@ fn compile_in_with_resources(
     std::fs::write(&path, source).unwrap();
     let artifact = frontend::compile_in_package_with_source_protocols(
         &Options {
+            comptime_intrinsics: Vec::new(),
             input: path.clone(),
             emit: Emit::Nir,
             output: None,

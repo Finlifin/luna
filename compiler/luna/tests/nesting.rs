@@ -92,6 +92,7 @@ fn nested_expression_child() {
     std::fs::write(&path, source).unwrap();
     eprintln!("frontend begin");
     let result = frontend::compile(&Options {
+        comptime_intrinsics: Vec::new(),
         input: path.clone(),
         emit,
         output: None,

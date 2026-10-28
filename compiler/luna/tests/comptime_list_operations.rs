@@ -428,6 +428,18 @@ fn ordinary_package_uses_public_list_operations_without_builtin_access() {
         .arg(&input)
         .args(["--package", "2", "202", "meta"])
         .arg(&library)
+        .args(["--package", "3", "303", "builtin"])
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../library/builtin/primitives.fl"),
+        )
+        .args(["--dependency", "2", "builtin", "3"])
+        .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
+            [
+                "--comptime-intrinsic".to_owned(),
+                format!("{}=meta.scalar_math.target.Scalar.{}", op.name(), op.name()),
+            ]
+        }))
         .args([
             "--dependency",
             "1",

@@ -9,6 +9,10 @@ pub use integer.*;
 pub use structs.*;
 pub use enums.*;
 
+pub mod math {
+    pub use scalar_math.*;
+}
+
 pub mod prelude {
     pub use .List;
     pub use .Object;

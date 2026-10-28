@@ -8,10 +8,10 @@ import sys
 import tempfile
 
 from process_tools import ROOT, run, save_summary
-from host_examples import EXAMPLES
+from host_examples import EXAMPLES, MATH_OPERATIONS
 
 STAGES = ('declarations', 'attributes', 'merged-attributes', 'meta-values', 'inline-iteration', 'manifest', 'native-resources', 'native-comparison',
-          'native-math', 'native-option', 'native-result', 'native-tuple', 'native-conversion', 'hash-protocols', 'sysroot-hash', 'sysroot-meta', 'sysroot-builders', 'sysroot-enum-builder', 'sysroot-symbol-enum', 'sysroot-fixed-enum', 'sysroot-build-mode', 'sysroot-build-target', 'build-context', 'sysroot', 'sysroot-iteration', 'sysroot-resources', 'sysroot-patterns', 'sysroot-meta-patterns')
+          'native-math', 'sysroot-meta-math', 'native-option', 'native-result', 'native-tuple', 'native-conversion', 'hash-protocols', 'sysroot-hash', 'sysroot-meta', 'sysroot-builders', 'sysroot-enum-builder', 'sysroot-symbol-enum', 'sysroot-fixed-enum', 'sysroot-build-mode', 'sysroot-build-target', 'build-context', 'sysroot', 'sysroot-iteration', 'sysroot-resources', 'sysroot-patterns', 'sysroot-meta-patterns')
 
 
 def main():
@@ -42,6 +42,9 @@ def main():
                          '--package', '2', '202', 'meta', str(ROOT / 'library/meta/lib.fl'),
                          '--package', '3', '303', 'builtin', str(ROOT / 'library/builtin/primitives.fl'),
                          '--dependency', '1', 'meta', '2', '--dependency', '1', 'builtin', '3',
+                         '--dependency', '2', 'builtin', '3',
+                         *[arg for operation in MATH_OPERATIONS for arg in
+                           ('--comptime-intrinsic', f'{operation}=meta.scalar_math.target.Scalar.{operation}')],
                          '--primary', '1', '--meta-list-type', 'meta.List', '--invoke-comptime', 'run']),
         ('inline-iteration', ['test', '-p', 'luna', '--test', 'library_iteration']),
         ('manifest', ['test', '-p', 'luna', '--lib', 'repository_sysroot']),
@@ -64,6 +67,11 @@ def main():
                                '--dependency', '1', 'resources', '3', '--primary', '1',
                                '--copy-protocol', 'resources.Copy',
                                '--drop-protocol', 'resources.Drop', '--test-native']),
+        ('sysroot-meta-math', ['run', '-p', 'luna', '--',
+                               str(ROOT / 'development/examples/sysroot-meta-math.fl'),
+                               '--sysroot', str(ROOT / 'library'),
+                               '--build-target', 'x86_64', 'linux', '64',
+                               '--invoke-comptime', 'run']),
         ('native-math', ['run', '-p', 'luna', '--',
                         str(ROOT / 'development/examples/host-math-tests.fl'),
                         '--sysroot', str(ROOT / 'library'),
@@ -160,7 +168,7 @@ def main():
         matches = None
         if code == 0:
             output = (evidence / 'stdout.log').read_text().strip()
-            if label in ('sysroot', 'meta-values'):
+            if label in ('sysroot', 'meta-values', 'sysroot-meta-math'):
                 matches = output == '(bool true)'
             elif label in ('attributes', 'merged-attributes'):
                 matches = (output.count('(evaluated-attribute ') == 1

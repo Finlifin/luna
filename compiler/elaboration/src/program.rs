@@ -229,6 +229,7 @@ pub struct Protocols {
     pub host_fma: Option<(DeclarationId, String)>,
     pub host_sqrt: Option<(DeclarationId, String)>,
     pub host_copysign: Option<(DeclarationId, String)>,
+    pub comptime_intrinsics: Vec<((DeclarationId, String), nir::intrinsics::Operation)>,
     pub host_intrinsics: Vec<((DeclarationId, String), nir::intrinsics::Operation)>,
     pub copy: Option<DeclarationId>,
     pub drop: Option<DeclarationId>,

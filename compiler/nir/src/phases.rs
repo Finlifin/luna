@@ -525,8 +525,12 @@ pub fn machine_arithmetic_functions(
                             inputs,
                             binding,
                         } => {
-                            if ct {
+                            let comptime = binding.as_ref().is_some_and(|b| b.is_comptime());
+                            if ct && !comptime {
                                 return Err(error("target intrinsic cannot execute at comptime"));
+                            }
+                            if !ct && comptime {
+                                return Err(error("comptime intrinsic cannot execute at runtime"));
                             }
                             crate::intrinsics::validate_tag(package, *tag).map_err(error)?;
                             if let Some(binding) = binding {

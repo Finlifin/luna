@@ -1,5 +1,8 @@
 # meta
 
+[`meta.math`](math.md) 提供 `builtin.math` 的编译期对应接口，由 VM 执行；
+普通 `math` 名称仍指向 runtime 数学库。
+
 包入口只保留 `List` 类型工厂和公开导出；保持 `meta.List` 的 normal-form
 声明身份。列表算法位于 `list.fl` 的 `impl List<T> where T`，Object 操作、
 整数运算、struct builder 与 enum builder 分别位于 `object.fl`、`integer.fl`、

@@ -3388,6 +3388,7 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
     std::fs::write(&path, source).unwrap();
     let artifact = frontend::compile_in_package(
         &Options {
+            comptime_intrinsics: Vec::new(),
             input: path.clone(),
             emit: Emit::Nir,
             output: None,
@@ -3796,6 +3797,7 @@ fn trait_implementation_receiver_modes_must_match() {
         std::fs::write(&path, source).unwrap();
         let result = frontend::compile_in_package(
             &Options {
+                comptime_intrinsics: Vec::new(),
                 input: path.clone(),
                 emit: Emit::Nir,
                 output: None,

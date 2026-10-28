@@ -6,8 +6,6 @@ mod support;
 use comptime_interpretor::{Interpreter, Value};
 use nir::{Primitive, Term};
 
-const META: &str = include!("support/meta_source.rs");
-
 fn compile(source: &str) -> Result<nir::program::Package, String> {
     support::compile_with_source_bindings(
         source,
@@ -20,7 +18,8 @@ fn compile(source: &str) -> Result<nir::program::Package, String> {
 }
 
 fn invoke(source: &str) -> Result<Value, String> {
-    let package = compile(&format!("mod meta {{ {META} }} {source}"))?;
+    let meta = include!("support/meta_source.rs");
+    let package = compile(&format!("mod meta {{ {meta} }} {source}"))?;
     let mut vm =
         Interpreter::for_comptime(&package, Default::default()).map_err(|e| e.to_string())?;
     vm.invoke(support::id(&package, "run"), vec![])
@@ -85,18 +84,19 @@ fn named_object_reads_keep_argument_order_early_return_and_snapshot() {
 
 #[test]
 fn named_object_queries_reject_wrong_keys_and_runtime_use() {
+    let meta = include!("support/meta_source.rs");
     for source in [
         "comptime fn bad()->?bool {meta.object_get<bool>({flag:true},0)}",
         "fn bad()->?bool {meta.object_get<bool>({flag:true},.flag)}",
         "comptime fn bad()->?bool {.object_get'builtin(bool,{flag:true})}",
     ] {
         assert!(
-            compile(&format!("mod meta {{ {META} }} {source}")).is_err(),
+            compile(&format!("mod meta {{ {meta} }} {source}")).is_err(),
             "{source}"
         );
     }
     let package = compile(&format!(
-        "mod meta {{ {META} }} comptime fn run()->bool {{
+        "mod meta {{ {meta} }} comptime fn run()->bool {{
         meta.object_get<bool>({{flag:true}},.flag) matches true?
     }}"
     ))
@@ -111,12 +111,13 @@ fn named_object_queries_reject_wrong_keys_and_runtime_use() {
 
 #[test]
 fn named_lookup_avoids_repeated_object_transport_during_feature_search() {
+    let meta = include!("support/meta_source.rs");
     let fields = (0..64)
         .map(|index| format!("f{index}:true"))
         .collect::<Vec<_>>()
         .join(",");
     let package = compile(&format!(
-        "mod meta {{ {META} }}
+        "mod meta {{ {meta} }}
         comptime fn previous(object:meta.Object,key:.Symbol'builtin)->?bool {{
             let count=meta.object_length(object);
             var index:.Integer'builtin=0;
@@ -212,6 +213,7 @@ fn object_queries_preserve_type_identity_and_evaluate_inputs_once_in_order() {
 
 #[test]
 fn object_queries_reject_bounds_and_runtime_transport() {
+    let meta = include!("support/meta_source.rs");
     for index in ["-1", "1", "99999999999999999999999999999999999"] {
         for query in ["object_key", "ObjectEntryType", "object_value<bool>"] {
             let error = invoke(&format!(
@@ -222,7 +224,7 @@ fn object_queries_reject_bounds_and_runtime_transport() {
         }
     }
     let error = compile(&format!(
-        "mod meta {{ {META} }} fn bad()->.Integer'builtin {{meta.object_length({{true}})}}"
+        "mod meta {{ {meta} }} fn bad()->.Integer'builtin {{meta.object_length({{true}})}}"
     ))
     .unwrap_err();
     assert!(
@@ -250,8 +252,9 @@ fn object_query_argument_return_skips_later_inputs() {
 
 #[test]
 fn code_generators_can_reconstruct_nested_object_data_without_normal_term_erasure() {
+    let meta = include!("support/meta_source.rs");
     let package = compile(&format!(
-        "mod meta {{ {META} }}
+        "mod meta {{ {meta} }}
         comptime fn generate()-><|-bool> {{
             let nested={{flag:true}};
             let object={{nested:nested, tag:.sample}};
@@ -272,7 +275,7 @@ fn code_generators_can_reconstruct_nested_object_data_without_normal_term_erasur
     );
 
     let failure = compile(&format!(
-        "mod meta {{ {META} }}
+        "mod meta {{ {meta} }}
         comptime fn generate()-><|-bool> {{
             var flag=true; let object={{pointer:flag.ref}}; '(true)
         }} fn run()->bool {{~<generate()>}}
@@ -304,6 +307,18 @@ fn repository_package_exports_object_for_user_attribute_constructors() {
         .arg(&input)
         .args(["--package", "2", "202", "meta"])
         .arg(&library)
+        .args(["--package", "3", "303", "builtin"])
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../library/builtin/primitives.fl"),
+        )
+        .args(["--dependency", "2", "builtin", "3"])
+        .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
+            [
+                "--comptime-intrinsic".to_owned(),
+                format!("{}=meta.scalar_math.target.Scalar.{}", op.name(), op.name()),
+            ]
+        }))
         .args([
             "--dependency",
             "1",
@@ -332,8 +347,9 @@ fn repository_package_exports_object_for_user_attribute_constructors() {
 
 #[test]
 fn public_object_preserves_order_duplicate_keys_and_nested_constants() {
+    let meta = include!("support/meta_source.rs");
     let package = compile(&format!(
-        "mod meta {{ {META} }}
+        "mod meta {{ {meta} }}
          use meta.prelude.*;
          const saved = {{ flag: true, 'x', flag: false }};
          comptime fn identity(value: meta.Object) -> Object {{ value }}
@@ -378,12 +394,13 @@ fn public_object_preserves_order_duplicate_keys_and_nested_constants() {
 
 #[test]
 fn public_alias_does_not_allow_runtime_transport_or_wrong_values() {
+    let meta = include!("support/meta_source.rs");
     for body in [
         "fn invalid(value: Object) {}",
         "fn invalid() -> Object { let value = { flag: true }; value }",
         "comptime fn invalid() -> Object { true }",
     ] {
-        let source = format!("mod meta {{ {META} }} use meta.prelude.*; {body}");
+        let source = format!("mod meta {{ {meta} }} use meta.prelude.*; {body}");
         assert!(compile(&source).is_err(), "{body}");
     }
 }
@@ -418,6 +435,7 @@ fn object_edits_preserve_snapshots_order_keys_and_replacement_domains() {
 
 #[test]
 fn object_edits_check_indices_and_runtime_phase() {
+    let meta = include!("support/meta_source.rs");
     for index in ["-1", "1", "9999999999999999999999999999999999"] {
         for operation in [
             format!("meta.object_remove(object,{index})"),
@@ -430,7 +448,7 @@ fn object_edits_check_indices_and_runtime_phase() {
             assert!(error.contains("IndexOutOfBounds"), "{error}");
         }
     }
-    let error=compile(&format!("mod meta {{{META}}} fn run()->meta.Object {{let object={{flag:true}};meta.object_remove(object,0)}}")).unwrap_err();
+    let error=compile(&format!("mod meta {{{meta}}} fn run()->meta.Object {{let object={{flag:true}};meta.object_remove(object,0)}}")).unwrap_err();
     assert!(error.contains("comptime"), "{error}");
 }
 

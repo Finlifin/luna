@@ -13,6 +13,7 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
     ));
     std::fs::write(&path, source).unwrap();
     let result = frontend::compile(&Options {
+        comptime_intrinsics: Vec::new(),
         input: path.clone(),
         emit,
         output: None,

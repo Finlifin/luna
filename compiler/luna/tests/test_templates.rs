@@ -601,6 +601,7 @@ fn compile_with_constructors(
         std::fs::write(directory.join(name), contents).unwrap();
     }
     let result = frontend::compile(&Options {
+        comptime_intrinsics: Vec::new(),
         input: path.clone(),
         emit,
         output: None,

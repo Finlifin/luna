@@ -62,6 +62,7 @@ pub(crate) fn compile_with_source_bindings_for_target(
     std::fs::write(&path, source).unwrap();
     let result = frontend::compile_bound_for_target(
         &Options {
+            comptime_intrinsics: Vec::new(),
             input: path.clone(),
             emit: Emit::Nir,
             output: None,

@@ -482,6 +482,7 @@ impl Registry {
             }
         }
         Ok(Checked {
+            comptime: false,
             tag,
             operation,
             signature: Signature::Pending(scalar.clone()),
@@ -519,6 +520,7 @@ impl Registry {
             }
         }
         Ok(Checked {
+            comptime: false,
             tag,
             operation,
             signature: Signature::Concrete(*primitive),
@@ -533,6 +535,7 @@ impl Registry {
 /// checks a template's shape. Neither grants source unsafe permission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Checked {
+    comptime: bool,
     tag: Tag,
     operation: Operation,
     signature: Signature,
@@ -552,6 +555,14 @@ fn parameter(ty: &Term) -> bool {
     )
 }
 impl Checked {
+    pub fn for_comptime(mut self) -> Self {
+        self.comptime = true;
+        self
+    }
+    pub fn is_comptime(&self) -> bool {
+        self.comptime
+    }
+
     /// Revalidate after every rewrite/instantiation; stored evidence is never
     /// permission to change operand types, tag identity, or the output width.
     pub fn validate(
@@ -680,7 +691,12 @@ impl fmt::Display for Checked {
             Operation::CopySign => "copy-sign",
             operation => operation.name(),
         };
-        write!(f, "(host-intrinsic {} (operation {name}) ", self.tag)?;
+        write!(
+            f,
+            "({}-intrinsic {} (operation {name}) ",
+            if self.comptime { "comptime" } else { "host" },
+            self.tag
+        )?;
         match &self.signature {
             Signature::Concrete(Primitive::F32) => write!(f, "(float-width 32))"),
             Signature::Concrete(Primitive::F64) => write!(f, "(float-width 64))"),

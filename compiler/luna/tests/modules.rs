@@ -161,6 +161,7 @@ impl Project {
     }
     fn compile(&self) -> Result<nir::program::Package, String> {
         match frontend::compile(&Options {
+            comptime_intrinsics: Vec::new(),
             input: self.0.join("main.fl"),
             emit: Emit::Nir,
             output: None,
@@ -386,6 +387,7 @@ fn repeated_imports_deduplicate_but_distinct_declarations_conflict() {
 fn output_cannot_overwrite_an_automatically_discovered_source() {
     let project = Project::new(&[("main.fl", "fn run() {}"), ("other.fl", "fn keep() {}")]);
     let result = frontend::compile(&Options {
+        comptime_intrinsics: Vec::new(),
         input: project.0.join("main.fl"),
         emit: Emit::Nir,
         output: Some(project.0.join("other.fl")),
@@ -673,6 +675,7 @@ fn grouped_imports_preserve_shared_prefixes_nested_paths_and_aliases() {
     ]);
     assert_eq!(project.run(), Value::Bool(true));
     let artifact = frontend::compile(&Options {
+        comptime_intrinsics: Vec::new(),
         input: project.0.join("main.fl"),
         emit: Emit::Hir,
         output: None,

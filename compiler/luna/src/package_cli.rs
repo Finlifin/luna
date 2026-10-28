@@ -202,6 +202,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--host-sqrt"
                 | "--host-copysign"
                 | "--host-intrinsic"
+                | "--comptime-intrinsic"
                 | "--opt-level"
                 | "--copy-protocol"
                 | "--drop-protocol"
@@ -668,6 +669,7 @@ impl Request {
             options.output.as_deref(),
             &configured,
             crate::protocols::type_constructors::Selectors {
+                comptime_intrinsics: &options.comptime_intrinsics,
                 host_fma: match &self.action {
                     Action::Build { host_fma, .. }
                     | Action::EmitHost { host_fma, .. }

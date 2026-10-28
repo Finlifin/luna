@@ -1,0 +1,14 @@
+{-
+    Compile-time math uses the public library interface and VM bindings.
+    Runtime math keeps its ordinary default-prelude name.
+-}
+comptime fn run() -> bool {
+    let root = meta.math.sqrt<f64>(81.0);
+    let scale = meta.math.ldexp(root, 2);
+    let reverse = meta.math.bit_reverse<u8>(3);
+    let count = meta.math.leading_zeros<usize>(0);
+    let saturated = meta.math.saturating_add<i8>(120, 30);
+    let negative_zero = meta.math.minimum<f32>(0.0, -0.0);
+    root == 9.0 and scale == 36.0 and reverse == 192 and count == 64
+        and saturated == 127 and meta.math.signbit(negative_zero)
+}

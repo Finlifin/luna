@@ -26,6 +26,7 @@ fn compile_with_tuple_option(source: &str, emit: Emit, tuple: bool) -> Result<Ar
     };
     std::fs::write(&path, source).unwrap();
     let result = frontend::compile(&Options {
+        comptime_intrinsics: Vec::new(),
         input: path.clone(),
         emit,
         output: None,

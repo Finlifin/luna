@@ -8,7 +8,6 @@ use support::compile_with_source_bindings;
 
 const PRIMITIVES: &str = include_str!("../../../library/builtin/primitives.fl");
 const OPERATORS: &str = include_str!("../../../library/builtin/ops.fl");
-const META: &str = include!("support/meta_source.rs");
 const TUPLE: &str = include_str!("../../../library/builtin/tuple.fl");
 const RESOURCES: &str = include_str!("../../../library/builtin/resources.fl");
 
@@ -50,8 +49,9 @@ fn repository_list_pattern_protocol_retains_observation_write_checks() {
 
 #[test]
 fn repository_meta_lists_carry_homogeneous_comptime_values() {
+    let meta = include!("support/meta_source.rs");
     let source = format!(
-        "{PRIMITIVES} mod meta {{ {META} }}
+        "{PRIMITIVES} mod meta {{ {meta} }}
         comptime fn flags() -> meta.List<bool> {{ [true, false] }}
         comptime fn choose(xs: meta.List<bool>, index: Integer) -> bool {{ xs[index] }}
         comptime fn nested() -> meta.List<meta.List<bool>> {{ [flags(), [false, true]] }}
@@ -111,8 +111,9 @@ fn repository_meta_lists_carry_homogeneous_comptime_values() {
 
 #[test]
 fn repository_meta_list_clause_inputs_preserve_value_and_type_identity() {
+    let meta = include!("support/meta_source.rs");
     let source = format!(
-        "{PRIMITIVES} mod meta {{ {META} }}
+        "{PRIMITIVES} mod meta {{ {meta} }}
         comptime fn first()->bool where flags:meta.List<bool> {{flags[0]}}
         comptime fn flags()->meta.List<bool> {{[true,false]}}
         pure comptime fn Packet<bits:meta.List<bool>>->Type {{bool}}
@@ -150,8 +151,9 @@ fn repository_meta_list_clause_inputs_preserve_value_and_type_identity() {
 
 #[test]
 fn repository_meta_list_clauses_substitute_element_domains_and_defaults() {
+    let meta = include!("support/meta_source.rs");
     let source = format!(
-        "{PRIMITIVES} mod meta {{ {META} }}
+        "{PRIMITIVES} mod meta {{ {meta} }}
         comptime fn first() -> T where T, values: meta.List<T> {{ values[0] }}
         comptime fn defaulted() -> bool where .values: meta.List<bool> = [true, false] {{ values[0] }}
         comptime fn SelectedType() -> Type {{ first<Type, [bool]>() }}
@@ -188,8 +190,9 @@ fn repository_meta_list_clauses_substitute_element_domains_and_defaults() {
 
 #[test]
 fn repository_meta_value_list_variadics_preserve_order_and_identity() {
+    let meta = include!("support/meta_source.rs");
     let source = format!(
-        "{PRIMITIVES} mod meta {{ {META} }}
+        "{PRIMITIVES} mod meta {{ {meta} }}
         pure comptime fn Packet<...values: meta.List<bool>> -> Type {{ bool }}
         pure comptime fn DefaultPacket<.tag: bool = true, ...values: meta.List<bool>> -> Type {{ bool }}
         comptime fn flags() -> meta.List<bool> {{ [false, true] }}
@@ -281,8 +284,9 @@ fn repository_meta_value_list_variadics_preserve_order_and_identity() {
 
 #[test]
 fn repository_meta_dependent_collectors_share_defaulted_argument_plans() {
+    let meta = include!("support/meta_source.rs");
     let source = format!(
-        "{PRIMITIVES} mod meta {{ {META} }}
+        "{PRIMITIVES} mod meta {{ {meta} }}
         pure comptime fn Packet<T, .tag: bool = true, ...values: meta.List<T>> -> Type {{ T }}
         comptime fn flags() -> meta.List<bool> {{ [false, true] }}
         comptime fn Direct() -> Type {{ Packet<bool, true, false, true> }}
@@ -487,6 +491,7 @@ fn native_wrapper_copy_requires_every_payload_and_preserves_pointer_lifetime() {
 
 #[test]
 fn repository_tuple_once_native_preserves_affine_fields() {
+    let meta = include!("support/meta_source.rs");
     use std::{
         fs,
         process::Command,
@@ -502,7 +507,7 @@ fn repository_tuple_once_native_preserves_affine_fields() {
     ));
     fs::create_dir(&directory).unwrap();
     let source = format!(
-        "mod meta {{ {META} }} mod resources {{ {RESOURCES} }} mod tuples {{ {TUPLE} }}\n{}",
+        "mod meta {{ {meta} }} mod resources {{ {RESOURCES} }} mod tuples {{ {TUPLE} }}\n{}",
         include_str!("../../../development/examples/host-library-tuple-once.fl"),
     );
     fs::write(directory.join("source.fl"), source).unwrap();
@@ -548,8 +553,9 @@ fn repository_tuple_once_native_preserves_affine_fields() {
 
 #[test]
 fn tuple_implementation_infers_one_complete_type_list_input() {
+    let meta = include!("support/meta_source.rs");
     let source = format!(
-        "mod meta {{ {META} }}\nmod resources {{ {} }}\n{TUPLE}\ntrait TupleMarker {{}} impl TupleMarker for Tuple<.Es = Es> where Es:meta.List<.Type'builtin> {{}}\n
+        "mod meta {{ {meta} }}\nmod resources {{ {} }}\n{TUPLE}\ntrait TupleMarker {{}} impl TupleMarker for Tuple<.Es = Es> where Es:meta.List<.Type'builtin> {{}}\n
         fn forward(value:T)->T where T:-TupleMarker {{value}}
         fn run()->bool {{let (a,(b,),())=forward((true,(false,),()));a and not b}}",
         include_str!("../../../library/builtin/resources.fl"),
@@ -718,7 +724,7 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
         );
     }
     let constrained = format!(
-        "mod meta {{ {META} }} mod resources {{ {RESOURCES} }} {TUPLE}
+        "mod meta {{ {meta} }} mod resources {{ {RESOURCES} }} {TUPLE}
         trait SingleBool {{}}
         impl SingleBool for Tuple<...Es> where Es:meta.List<.Type'builtin>, requires Tuple<...Es> == Tuple<bool> {{}}
         fn only(value:T)->T where T:-SingleBool {{value}}
@@ -783,9 +789,10 @@ fn repository_conversion_protocols_select_full_interfaces_and_transfer_ownership
 
 #[test]
 fn repository_tuple_and_meta_definitions_preserve_identity_and_execute() {
+    let meta = include!("support/meta_source.rs");
     use nir::{Primitive, Term};
     let source = format!(
-        "{PRIMITIVES}\nmod meta {{ {META} }}\n{TUPLE}\n
+        "{PRIMITIVES}\nmod meta {{ {meta} }}\n{TUPLE}\n
         typealias Pair<T> = Tuple<T, bool>;
         comptime fn PairType(T: Type) -> Type {{ Pair<T> }}
         comptime fn Elements() -> meta.List<Type> {{ [u8, bool] }}

@@ -202,6 +202,7 @@ fn compile_selected(source: &str, emit: Emit, tuple: bool) -> Result<Artifact, S
     ));
     std::fs::write(&path, source).unwrap();
     let result = frontend::compile(&Options {
+        comptime_intrinsics: Vec::new(),
         input: path.clone(),
         emit,
         output: None,

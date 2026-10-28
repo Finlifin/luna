@@ -97,13 +97,37 @@ pub(crate) fn invoke_selected_with_publisher(
             .map_err(|error| format!("cannot prepare staged comptime invocation: {error}"))?,
         )
     } else {
-        prepared.to_mut().dispatch_instances =
-            elaboration::materialization::dispatch_instances_for_invocation(
-                prepared.as_ref(),
-                &roots,
-                preparation_budget,
-            )
-            .map_err(|error| format!("cannot prepare invocation dispatch: {error}"))?;
+        let mut dispatch = elaboration::materialization::dispatch_instances_for_invocation(
+            prepared.as_ref(),
+            &roots,
+            preparation_budget,
+        )
+        .map_err(|error| format!("cannot prepare invocation dispatch: {error}"))?;
+        // The NIR world still contains its concrete implementation contracts.
+        // Keep their admitted relationship witnesses (including generic parents
+        // such as Once<T>), without installing unused executable method links.
+        let mut selected: std::collections::HashSet<_> = dispatch
+            .iter()
+            .map(|instance| {
+                (
+                    instance.interface_instance(),
+                    instance.subject.clone(),
+                    instance.implementation,
+                )
+            })
+            .collect();
+        for original in &prepared.dispatch_instances {
+            if selected.insert((
+                original.interface_instance(),
+                original.subject.clone(),
+                original.implementation,
+            )) {
+                let mut witness = original.clone();
+                witness.methods.clear();
+                dispatch.push(witness);
+            }
+        }
+        prepared.to_mut().dispatch_instances = dispatch;
         None
     };
     let package = prepared.as_ref();

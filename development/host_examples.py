@@ -30,6 +30,17 @@ class Example:
         for owner, dependency in self.dependency_links:
             arguments.extend(['--dependency', str(identities[owner]), dependency,
                               str(identities[dependency])])
+        if 'meta' in identities:
+            primitives = next((identities[name] for name, path in self.dependencies
+                               if path == 'library/builtin/primitives.fl'), None)
+            if primitives is None:
+                primitives = len(self.dependencies) + 2
+                arguments.extend(['--package', str(primitives), str(primitives * 101),
+                                  'builtin', str(ROOT / 'library/builtin/primitives.fl')])
+            arguments.extend(['--dependency', str(identities['meta']), 'builtin', str(primitives)])
+            for operation in MATH_OPERATIONS:
+                arguments.extend(['--comptime-intrinsic',
+                                  f'{operation}=meta.scalar_math.target.Scalar.{operation}'])
         return arguments + ['--primary', '1']
 
 
