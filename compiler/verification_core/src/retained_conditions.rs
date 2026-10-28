@@ -385,7 +385,7 @@ impl Condition {
         }
         Ok(())
     }
-    pub(super) fn is_current(
+    pub fn is_current(
         &self,
         facts: &Facts,
         limits: &mut Limits,
@@ -466,7 +466,7 @@ impl Facts {
         }
         Ok(())
     }
-    pub(super) fn known_condition(
+    pub fn known_condition(
         &self,
         condition: &Condition,
         limits: &mut Limits,
@@ -602,7 +602,7 @@ impl Facts {
         }
         Ok(None)
     }
-    pub(super) fn remember_condition(
+    pub fn remember_condition(
         &mut self,
         condition: &Condition,
         truth: bool,
@@ -693,10 +693,7 @@ impl Facts {
         self.conditions = retained;
         Ok(())
     }
-    pub(super) fn copy_conditions(
-        &self,
-        limits: &mut Limits,
-    ) -> Result<Vec<(Condition, bool)>, Unknown> {
+    pub fn copy_conditions(&self, limits: &mut Limits) -> Result<Vec<(Condition, bool)>, Unknown> {
         let mut result = Vec::new();
         for (condition, truth) in &self.conditions {
             if condition.is_current(self, limits, 0)? {
@@ -743,7 +740,7 @@ impl Facts {
 impl Condition {
     /// Transport an established predicate only when every value is mapped to
     /// a copied destination, or is still current in the same analysis lineage.
-    pub(super) fn renamed(
+    pub fn renamed(
         &self,
         mapping: &BTreeMap<ValueId, ValueId>,
         target: &Facts,

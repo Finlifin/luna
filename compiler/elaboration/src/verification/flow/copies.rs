@@ -1,7 +1,7 @@
 //! Relational value transfer. Source facts are frozen at evaluation time, then
 //! renamed to fresh destination identities. This is evidence about value copies,
 //! not aliasing and not permission to read or mutate the original storage.
-use super::super::relations::exact_equal_values;
+use super::super::exact_equal_values;
 use super::*;
 use std::collections::BTreeSet;
 
@@ -67,7 +67,7 @@ impl Walker<'_> {
     ) -> Result<(), Reason> {
         for ghost in ghosts.iter().chain(additional_ghosts) {
             self.limits.step(1)?;
-            if !std::sync::Arc::ptr_eq(&ghost.source.versions, &state.facts.versions) {
+            if !ghost.source.shares_lineage(&state.facts) {
                 continue;
             }
             for (original, temporary) in &ghost.mapping {
@@ -211,7 +211,7 @@ impl Walker<'_> {
             }
         }
         let expression = match &value.polynomial {
-            Some(p) if p.terms.keys().any(|f| !f.is_empty()) => {
+            Some(p) if p.terms().keys().any(|f| !f.is_empty()) => {
                 if state.facts.relation_is_current(p, self.limits)? {
                     Some(self.freeze_expression(p, state)?)
                 } else {
@@ -374,7 +374,7 @@ impl Walker<'_> {
         // relation to surviving entry snapshots can then be projected from the
         // old state, instead of confusing the input and output value versions.
         let value = if value.polynomial.as_ref().is_some_and(|p| {
-            p.terms
+            p.terms()
                 .keys()
                 .any(|ids| ids.iter().any(|id| id.place == place(binding)))
         }) {
@@ -417,7 +417,7 @@ impl Walker<'_> {
             // AND value versions identify the same copied value across them.
             for other in copies {
                 self.limits.step(1)?;
-                if std::sync::Arc::ptr_eq(&copy.source.versions, &other.source.versions) {
+                if copy.source.shares_lineage(&other.source) {
                     for (old, new) in &other.mapping {
                         self.limits.step(1)?;
                         if let Some(previous) = mapping.insert(*old, *new) {
@@ -435,7 +435,7 @@ impl Walker<'_> {
             // copy's own conditions to its destination rather than letting the
             // last sibling win; unbounded equalities have no interval to spread.
             mapping.extend(copy.mapping.iter().map(|(old, new)| (*old, *new)));
-            let same_lineage = std::sync::Arc::ptr_eq(&copy.source.versions, &state.facts.versions);
+            let same_lineage = copy.source.shares_lineage(&state.facts);
             let mut already_imported = false;
             for (source, previous) in &imported {
                 self.limits.step(1)?;
@@ -456,7 +456,7 @@ impl Walker<'_> {
                 let mut selected: BTreeSet<_> = mapping.keys().copied().collect();
                 let mut all_source_values_current = same_lineage;
                 if same_lineage {
-                    for (place, (version, _)) in &copy.source.current {
+                    for (place, (version, _)) in copy.source.current_entries() {
                         self.limits.step(1)?;
                         let id = ValueId {
                             place: *place,
@@ -475,15 +475,11 @@ impl Walker<'_> {
                 // would only recompute redundant all-pairs difference guarantees.
                 // Stale snapshots and cross-frame copies still need projection.
                 let projected = if !all_source_values_current {
-                    super::super::differences::project_guarantees(
-                        &copy.source,
-                        &selected,
-                        self.limits,
-                    )?
+                    super::super::project_guarantees(&copy.source, &selected, self.limits)?
                 } else {
                     Vec::new()
                 };
-                for row in (&copy.source.inequalities).into_iter().chain(&projected) {
+                for row in copy.source.relation_rows().chain(&projected) {
                     if !copy.source.relation_is_current(row, self.limits)? {
                         continue;
                     }
@@ -492,7 +488,7 @@ impl Walker<'_> {
                     // get new identities: later writes may retire the originals.
                     if same_lineage {
                         let mut affected = false;
-                        for factors in row.terms.keys() {
+                        for factors in row.terms().keys() {
                             self.limits.step(
                                 factors
                                     .len()
@@ -506,7 +502,7 @@ impl Walker<'_> {
                         }
                         if !affected
                             && state.facts.relation_is_current(row, self.limits)?
-                            && state.facts.inequalities.contains(row, self.limits)?
+                            && state.facts.contains_relation(row, self.limits)?
                         {
                             continue;
                         }
@@ -584,7 +580,7 @@ fn project_expression_bounds(
     expression: &Polynomial,
     limits: &mut Limits,
 ) -> Result<(), Unknown> {
-    if !expression.terms.keys().any(|factors| factors.len() > 1) {
+    if !expression.terms().keys().any(|factors| factors.len() > 1) {
         return Ok(());
     }
     // Exact expression evidence does not require an interval. This optional
@@ -596,7 +592,11 @@ fn project_expression_bounds(
     }
     let variable = Polynomial::variable(destination, limits)?;
     for row in facts.copy_relations(limits)? {
-        let nonlinear = row.terms.keys().filter(|factors| factors.len() > 1).count();
+        let nonlinear = row
+            .terms()
+            .keys()
+            .filter(|factors| factors.len() > 1)
+            .count();
         for subtract in [true, false] {
             limits.step(1)?;
             let shifted = if subtract {
@@ -610,7 +610,7 @@ fn project_expression_bounds(
                 Err(e) => return Err(e),
             };
             if shifted
-                .terms
+                .terms()
                 .keys()
                 .filter(|factors| factors.len() > 1)
                 .count()
@@ -641,7 +641,7 @@ fn rename(
     limits: &mut Limits,
 ) -> Result<Option<Polynomial>, Unknown> {
     let mut result = Polynomial::default();
-    for (factors, c) in &p.terms {
+    for (factors, c) in p.terms() {
         limits.step(factors.len().saturating_add(1))?;
         let mut renamed = Vec::new();
         for id in factors {
@@ -696,10 +696,10 @@ pub(super) fn add_row(
     row: Polynomial,
     limits: &mut Limits,
 ) -> Result<(), Unknown> {
-    if row.terms.is_empty() {
+    if row.terms().is_empty() {
         return Ok(());
     }
-    facts.inequalities.insert(row, limits)?;
+    facts.assume_relation(row, limits)?;
     Ok(())
 }
 
@@ -916,7 +916,7 @@ impl Walker<'_> {
         if let Some(transfer) = transfer {
             let mut copies = self.install_copy_at(state, root, &[], transfer)?;
             for copy in &mut copies {
-                if !std::sync::Arc::ptr_eq(&copy.source.versions, &frame.facts.versions) {
+                if !copy.source.shares_lineage(&frame.facts) {
                     continue;
                 }
                 self.connect_call_observations(copy, state, ghosts, additional_ghosts)?;

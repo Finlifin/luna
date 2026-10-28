@@ -38,11 +38,12 @@ python3 -B development/check.py --timeout 900 -- test --release -p ptc
 | --- | --- | --- | --- |
 | 1，已完成 | `ptc` | 类型公式、有限理论、证明与反例 | 保留 opaque normal-form 头、预算及 Unknown 语义 |
 | 2，已完成 | `type_resolution` | inference store、obligations、matching、implementation、capabilities、associated 查询 | 把通用 Term 结构计量从 memory 模块移到 NIR 或类型基础层；候选事务和证据保持同一所有者 |
-| 3 | 实例语义与程序验证 | 将类型视图和方法选择与执行依赖闭包区分；随后迁出 flow、memory、moves、drop 等验证 | 消除验证对完整 materialization 调度器的反向依赖；先证明选中方法、预算及失败行为与原路径一致 |
+| 3，逻辑核心已完成 | 实例语义与程序验证 | 将类型视图和方法选择与执行依赖闭包区分；随后迁出 flow、memory、moves、drop 等验证 | 消除验证对完整 materialization 调度器的反向依赖；先证明选中方法、预算及失败行为与原路径一致 |
 | 4 | staging / materialization | quoted code、inline 展开和具体调用闭包 | 将已检查 NIR 上的展开与源码 Checker 分开，明确预算、fresh identity、来源映射和候选发布接口 |
 | 5 | 剩余 elaboration | HIR 到 NIR 的检查、协议接线、阶段交织与顶层协调 | 依赖上述稳定服务，不把活动推断状态冻结或交给全局缓存 |
 
-第三至第五步是后续设计方向，尚未创建这些 crate。不能把表格当作已经完成的拆分。
+第三步已创建 verification_core，完整程序验证的边界仍在拆解；第四、第五步
+仍是后续方向。不能把表格当作已经完成全部拆分。
 最值得继续移出的体量是 verification，而不是无限增加只有几个工具函数的小 crate。
 
 ## 已确认的依赖环
@@ -135,3 +136,54 @@ python3 -B development/check.py --timeout 900 -- test --release -p type_resoluti
   `/tmp/luna-library-79obq5tu/summary.json`。
 - 通过 command 入口的 `cargo fmt --all -- --check` 和 `git diff --check`。
   本轮没有运行全 workspace 测试。
+
+## 第三阶段前半：独立的程序逻辑核心
+
+`compiler/verification_core` 拥有有界整数/至多三次多项式推理、关系与差分约束、
+谓词证明和重放、版本化 Facts，以及 owned-position 的可用性状态机。
+约 7,200 行实现整体迁移，依赖仅 NIR 和 comptime_runtime，不依赖 PTC、
+type_resolution、materialization 或源码检查器。NIR 依赖用于已有的常量整数
+表达式差值查询；这里不选择 trait 方法或生成代码。
+
+elaboration 的 verification 模块重导出原有公共类型。NIR 控制流遍历、内存
+视图、移动/清理和效应检查仍在上层；它们调用逻辑核心检查程序规格，而不是
+把程序命题交给 PTC。验证器对 materialization 的四处调用仍在，不能把本阶段
+称为整个 verification 已独立。
+
+迁移时收紧了跨层存储访问：区间使用只读端点或消耗自身的 into_bounds；
+Facts 使用只读 relation/current 查询和 shares_lineage 检查。分支仍共享原子
+版本时钟，区间移动不额外复制大整数。assume_relation 明确是调用者已经建立
+关系后的假设入口，不是证明凭证；证明字段、关系存储和版本时钟不公开写入。
+计量、degree/depth 限制、Unknown、失败与恢复、证明重放和 S-expression 输出
+沿用原算法。只开放上层原本已调用的操作，不复制一个下层求解实现。
+
+原 verification 测试集中的纯逻辑用例与 ownership 测试迁入新 crate；
+两项 flow 集成用例保留在原 verification 测试入口，flow、moves 等
+NIR 层回归留在 elaboration，跨层执行案例留在 luna。
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p verification_core
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib verification::
+```
+
+再次检查方法选择后确认：普通 resolve_method_instance 不仅选中一个 body，
+还排队遍历该方法的传递函数/接口依赖。quote 路径不排入可执行函数，但共享
+接口展开和 specialization 的检查。下一阶段应先提取显式的 dispatch world
+与选择结果，再界定验证与执行闭包各自需要的检查；不能直接删去闭包遍历来
+消除依赖，也不能用全局 callback/TLS 把依赖藏起来。
+
+本阶段验证均在 `/home/fin/luna` 执行并退出 0：
+
+- 上述 `-p verification_core` 测试 129 项通过，
+  `/tmp/luna-tools-7s9nfbap/result.json`。
+- 上述 `-p elaboration --lib verification::` 测试 80 项通过，
+  `/tmp/luna-tools-njrfwzb7/result.json`。
+- 同一 check 入口的 `test --release -p elaboration --test verification`：
+  两项通过，`/tmp/luna-tools-jc1caqq8/result.json`。
+- `test --release -p luna --test execution relational`：四项通过，
+  `/tmp/luna-tools-rb58vgil/result.json`。
+- `python3 -B development/library_check.py --release --timeout 900
+  --stage native-math --stage sysroot-resources`：全部通过，
+  `/tmp/luna-library-rfqqre7x/summary.json`。
+- 格式检查通过，`/tmp/luna-tools-hhmb2wzf/result.json`；
+  `git diff --check` 通过。未运行全 workspace 测试。

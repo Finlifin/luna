@@ -199,8 +199,8 @@ impl Walker<'_> {
             if let Some(range) = self.local_value_at(&after, root)?.range {
                 state.facts.refine(
                     original,
-                    Some(&range.lower),
-                    Some(&range.upper),
+                    Some(range.lower()),
+                    Some(range.upper()),
                     self.limits,
                 )?;
             }

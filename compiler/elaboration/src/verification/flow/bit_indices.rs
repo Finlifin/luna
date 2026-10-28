@@ -60,7 +60,8 @@ impl Walker<'_> {
                 .range
                 .as_ref()
                 .ok_or(Reason::MissingBitWindowProof)?;
-            if range.lower.is_negative() || self.limits.compare(&range.upper, &maximum)?.is_gt() {
+            if range.lower().is_negative() || self.limits.compare(range.upper(), &maximum)?.is_gt()
+            {
                 return Err(Reason::MissingBitWindowProof);
             }
         }
@@ -115,10 +116,10 @@ impl Walker<'_> {
                 .range
                 .as_ref()
                 .ok_or(Reason::MissingBitIndexProof)?;
-            if range.lower.is_negative()
+            if range.lower().is_negative()
                 || self
                     .limits
-                    .compare(&range.upper, &Integer::from_u128(width as u128))?
+                    .compare(range.upper(), &Integer::from_u128(width as u128))?
                     != std::cmp::Ordering::Less
             {
                 return Err(Reason::MissingBitIndexProof);

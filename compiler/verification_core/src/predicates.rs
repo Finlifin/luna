@@ -18,7 +18,7 @@ impl Facts {
     /// exported: callers retaining a proof across state changes must use
     /// prove_condition and replay instead. Keep the same bounded admission and
     /// refutation procedure as proof construction.
-    pub(super) fn check_condition(
+    pub fn check_condition(
         &self,
         condition: &Condition,
         truth: bool,
@@ -208,7 +208,7 @@ impl Condition {
         }
     }
 
-    pub(super) fn truth_by_enclosure(
+    pub fn truth_by_enclosure(
         &self,
         facts: &Facts,
         limits: &mut Limits,
@@ -302,7 +302,7 @@ impl Condition {
         enclosed_comparison(&range, relation, limits)
     }
 
-    pub(super) fn copy_bounded(&self, limits: &mut Limits, depth: usize) -> Result<Self, Unknown> {
+    pub fn copy_bounded(&self, limits: &mut Limits, depth: usize) -> Result<Self, Unknown> {
         limits.step(1)?;
         if depth >= 128 {
             return Err(Unknown::ConditionDepthLimit);

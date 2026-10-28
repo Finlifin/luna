@@ -686,7 +686,7 @@ impl State {
     }
     // Remap analysis facts across an invocation frame. These operations do not
     // copy runtime values or grant resource permission.
-    pub(crate) fn import_position(
+    pub fn import_position(
         &mut self,
         root: PlaceId,
         source: &Self,
@@ -710,7 +710,7 @@ impl State {
         self.constructed.extend(facts);
         Ok(())
     }
-    pub(crate) fn update_position(
+    pub fn update_position(
         &mut self,
         place: &Place,
         source: &Self,
@@ -734,7 +734,7 @@ impl State {
         Ok(())
     }
     /// Original aggregate arity includes positions whose ownership was moved.
-    pub(crate) fn field_count(&self, place: &Place) -> Result<Option<usize>, Error> {
+    pub fn field_count(&self, place: &Place) -> Result<Option<usize>, Error> {
         Ok(match self.node(place)? {
             Node::Value(_) => None,
             Node::EmptyAggregate(_) => Some(0),
@@ -744,7 +744,7 @@ impl State {
 
     /// Expand a fully present opaque payload only after its layout has been
     /// selected by a runtime tag guard or explicit variant evidence.
-    pub(crate) fn refine_present_payload(
+    pub fn refine_present_payload(
         &mut self,
         place: &Place,
         shape: &Shape,
@@ -761,7 +761,7 @@ impl State {
     // Project from the state itself, not just a flow's lexical-root list:
     // borrowed/external positions must remain observable too. Construction
     // facts are local to their root and follow the same bounded remapping.
-    pub(crate) fn excluding_roots(
+    pub fn excluding_roots(
         &self,
         excluded: &std::collections::BTreeSet<PlaceId>,
         fuel: &mut usize,
@@ -783,7 +783,7 @@ impl State {
         }
         Ok(result)
     }
-    pub(crate) fn select_roots(
+    pub fn select_roots(
         &self,
         roots: &std::collections::BTreeSet<PlaceId>,
         fuel: &mut usize,

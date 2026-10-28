@@ -1,4 +1,4 @@
-use elaboration::verification::{
+use verification_core::{
     PlaceId,
     ownership::{Availability as A, Error, Place, Shape, State},
 };
@@ -349,10 +349,7 @@ fn cleanup_hierarchy_is_parent_first_reverse_fields_and_bounded() {
     assert_eq!(state.cleanup_tree(&place(&[]), &mut 1), Err(Error::Budget));
     assert_eq!(state, before);
     let tree = state.cleanup_tree(&place(&[]), &mut 100).unwrap().unwrap();
-    fn visit(
-        tree: &elaboration::verification::ownership::CleanupTree,
-        output: &mut Vec<Vec<usize>>,
-    ) {
+    fn visit(tree: &verification_core::ownership::CleanupTree, output: &mut Vec<Vec<usize>>) {
         output.push(tree.place.fields.clone());
         if let Some(children) = &tree.children {
             for child in children {

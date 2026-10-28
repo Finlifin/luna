@@ -6704,19 +6704,23 @@ impl Walker<'_> {
         };
         value.range = Some(match value.range.take() {
             None => range,
-            Some(old) => Interval::new(
-                if self.limits.compare(&old.lower, &range.lower)?.is_gt() {
-                    old.lower
-                } else {
-                    range.lower
-                },
-                if self.limits.compare(&old.upper, &range.upper)?.is_lt() {
-                    old.upper
-                } else {
-                    range.upper
-                },
-                self.limits,
-            )?,
+            Some(old) => {
+                let (old_lower, old_upper) = old.into_bounds();
+                let (lower, upper) = range.into_bounds();
+                Interval::new(
+                    if self.limits.compare(&old_lower, &lower)?.is_gt() {
+                        old_lower
+                    } else {
+                        lower
+                    },
+                    if self.limits.compare(&old_upper, &upper)?.is_lt() {
+                        old_upper
+                    } else {
+                        upper
+                    },
+                    self.limits,
+                )?
+            }
         });
         Ok(())
     }

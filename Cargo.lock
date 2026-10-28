@@ -234,6 +234,7 @@ dependencies = [
  "ptc",
  "rustc_span",
  "type_resolution",
+ "verification_core",
 ]
 
 [[package]]
@@ -1220,3 +1221,11 @@ name = "yansi"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
+
+[[package]]
+name = "verification_core"
+version = "0.1.0"
+dependencies = [
+ "comptime_runtime",
+ "nir",
+]

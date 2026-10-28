@@ -32,7 +32,7 @@ impl RelationStore {
         }
         Ok(hash.finish())
     }
-    pub(super) fn contains(&self, row: &Polynomial, limits: &mut Limits) -> Result<bool, Unknown> {
+    pub fn contains(&self, row: &Polynomial, limits: &mut Limits) -> Result<bool, Unknown> {
         let key = Self::fingerprint(row, limits)?;
         self.contains_key(key, row, limits)
     }
@@ -52,7 +52,7 @@ impl RelationStore {
         }
         Ok(false)
     }
-    pub(super) fn insert(&mut self, row: Polynomial, limits: &mut Limits) -> Result<bool, Unknown> {
+    pub fn insert(&mut self, row: Polynomial, limits: &mut Limits) -> Result<bool, Unknown> {
         let key = Self::fingerprint(&row, limits)?;
         if self.contains_key(key, &row, limits)? {
             return Ok(false);
@@ -71,18 +71,18 @@ impl RelationStore {
         }
         Ok(store)
     }
-    pub(super) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.rows.len()
     }
-    pub(super) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
-    pub(super) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.rows.clear();
         self.buckets.clear();
     }
     #[cfg(test)]
-    pub(super) fn push(&mut self, row: Polynomial) {
+    pub fn push(&mut self, row: Polynomial) {
         self.insert(row, &mut Limits::default()).unwrap();
     }
 }
@@ -101,7 +101,7 @@ impl From<Vec<Polynomial>> for RelationStore {
 }
 
 impl Facts {
-    pub(super) fn relation_is_current(
+    pub fn relation_is_current(
         &self,
         row: &Polynomial,
         limits: &mut Limits,
@@ -116,7 +116,7 @@ impl Facts {
         }
         Ok(true)
     }
-    pub(super) fn copy_relations(&self, limits: &mut Limits) -> Result<Vec<Polynomial>, Unknown> {
+    pub fn copy_relations(&self, limits: &mut Limits) -> Result<Vec<Polynomial>, Unknown> {
         let mut rows = Vec::new();
         for row in &self.inequalities {
             limits.step(1)?;
@@ -211,7 +211,7 @@ impl Facts {
         }
         Ok(())
     }
-    pub(super) fn propagate_relations(&mut self, limits: &mut Limits) -> Result<(), Unknown> {
+    pub fn propagate_relations(&mut self, limits: &mut Limits) -> Result<(), Unknown> {
         if !self.reachable || self.inequalities.is_empty() {
             return Ok(());
         }
@@ -283,7 +283,7 @@ impl Polynomial {
     /// Refine only failed range queries. A derivative enclosed above/below zero
     /// proves coordinate monotonicity throughout the original interval box.
     /// Substituting the corresponding endpoints preserves shared occurrences.
-    pub(super) fn enclosure_for_target(
+    pub fn enclosure_for_target(
         &self,
         target: &Interval,
         facts: &Facts,
@@ -758,7 +758,7 @@ impl Polynomial {
     /// Combine interval enclosure with checked polynomial inequalities. For
     /// q <= 0: p <= upper(p-q), and p >= lower(p+q). These rewrites preserve
     /// dependencies cancelled by plain interval arithmetic (e.g. end-start).
-    pub(super) fn enclosure(
+    pub fn enclosure(
         &self,
         facts: &Facts,
         limits: &mut Limits,
@@ -894,7 +894,7 @@ fn divide_ceil(
 impl Facts {
     /// Internal join preparation: each renamed identity denotes that branch's
     /// value of the same merged field. Callers allocate fresh shared versions.
-    pub(super) fn rename_values(
+    pub fn rename_values(
         &self,
         mapping: &BTreeMap<ValueId, ValueId>,
         limits: &mut Limits,
@@ -1051,7 +1051,7 @@ mod singleton_enclosure_tests {
 // Exact current-value equalities, independent of interval coincidence. Index
 // the two directions of c*(a-b) <= 0 once, instead of searching all rows for
 // each reverse inequality. Positive scaling does not change the direction.
-pub(super) fn exact_equal_values(
+pub fn exact_equal_values(
     facts: &Facts,
     limits: &mut Limits,
 ) -> Result<Vec<(ValueId, ValueId)>, Unknown> {

@@ -18,6 +18,7 @@ members = [
     "compiler/elaboration",
     "compiler/ptc",
     "compiler/type_resolution",
+    "compiler/verification_core",
     "compiler/luna", "compiler/nir", "compiler/comptime_executor", "compiler/comptime_interpretor", "compiler/comptime_runtime", "compiler/comptime_compiler", "compiler/iir",
     # Disabled until upstream crates are updated to use middle:: instead of ty:::
     # "compiler/ty",

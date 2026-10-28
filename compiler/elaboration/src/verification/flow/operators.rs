@@ -110,8 +110,8 @@ impl Walker<'_> {
         excludes_zero: bool,
     ) -> Result<(Interval, Interval), Unknown> {
         if !excludes_zero
-            || divisor.upper.is_negative()
-            || (!divisor.lower.is_negative() && !divisor.lower.is_zero())
+            || divisor.upper().is_negative()
+            || (!divisor.lower().is_negative() && !divisor.lower().is_zero())
         {
             return dividend.div_rem_trunc(divisor, self.limits);
         }
@@ -119,17 +119,17 @@ impl Walker<'_> {
         // can have either sign. Enclose each component, then join the results;
         // do not silently assume a rounding policy or a sign for the source.
         let mut ranges = Vec::new();
-        if divisor.lower.is_negative() {
+        if divisor.lower().is_negative() {
             ranges.push(Interval::new(
-                self.limits.integer(&divisor.lower)?,
+                self.limits.integer(divisor.lower())?,
                 Integer::from_i128(-1),
                 self.limits,
             )?);
         }
-        if !divisor.upper.is_negative() && !divisor.upper.is_zero() {
+        if !divisor.upper().is_negative() && !divisor.upper().is_zero() {
             ranges.push(Interval::new(
                 Integer::from_u128(1),
-                self.limits.integer(&divisor.upper)?,
+                self.limits.integer(divisor.upper())?,
                 self.limits,
             )?);
         }
@@ -175,8 +175,8 @@ impl Walker<'_> {
                 let excludes_zero =
                     if matches!(op, IntegerOp::DivideTrunc | IntegerOp::RemainderTrunc)
                         && b.range.as_ref().is_some_and(|range| {
-                            (range.lower.is_negative() || range.lower.is_zero())
-                                && !range.upper.is_negative()
+                            (range.lower().is_negative() || range.lower().is_zero())
+                                && !range.upper().is_negative()
                         })
                     {
                         if let Some(divisor) = b.polynomial(self.limits)? {
@@ -201,10 +201,10 @@ impl Walker<'_> {
                 // the divisor may have mutated the dividend's original place.
                 let upper_bound =
                     if matches!(op, IntegerOp::DivideTrunc | IntegerOp::RemainderTrunc)
-                        && a.range.as_ref().is_some_and(|r| !r.lower.is_negative())
+                        && a.range.as_ref().is_some_and(|r| !r.lower().is_negative())
                         && b.range
                             .as_ref()
-                            .is_some_and(|r| !r.lower.is_negative() && !r.lower.is_zero())
+                            .is_some_and(|r| !r.lower().is_negative() && !r.lower().is_zero())
                     {
                         match a.polynomial(self.limits)? {
                             Some(p) => match p.interval_enclosure(&state.facts, self.limits) {
@@ -221,7 +221,7 @@ impl Walker<'_> {
                     if matches!(op, IntegerOp::DivideTrunc | IntegerOp::RemainderTrunc)
                         && b.range
                             .as_ref()
-                            .is_some_and(|r| !r.lower.is_negative() && !r.lower.is_zero())
+                            .is_some_and(|r| !r.lower().is_negative() && !r.lower().is_zero())
                     {
                         match b.polynomial(self.limits)? {
                             Some(p) => match p.interval_enclosure(&state.facts, self.limits) {
@@ -239,11 +239,11 @@ impl Walker<'_> {
                     (Some(a), Some(b)) => Some(match op {
                         IntegerOp::Add => a.add(&b, self.limits)?,
                         IntegerOp::Subtract => Interval::new(
-                            a.lower
-                                .subtract(&b.upper, &mut self.limits.arithmetic)
+                            a.lower()
+                                .subtract(b.upper(), &mut self.limits.arithmetic)
                                 .map_err(Unknown::from)?,
-                            a.upper
-                                .subtract(&b.lower, &mut self.limits.arithmetic)
+                            a.upper()
+                                .subtract(b.lower(), &mut self.limits.arithmetic)
                                 .map_err(Unknown::from)?,
                             self.limits,
                         )?,
@@ -341,11 +341,11 @@ impl Walker<'_> {
                 if let Some(bound) = value.range {
                     result.range = Some(Interval::new(
                         bound
-                            .upper
+                            .upper()
                             .negate(&mut self.limits.arithmetic)
                             .map_err(Unknown::from)?,
                         bound
-                            .lower
+                            .lower()
                             .negate(&mut self.limits.arithmetic)
                             .map_err(Unknown::from)?,
                         self.limits,
@@ -374,9 +374,9 @@ impl Walker<'_> {
                     if let Some(range) = &value.range {
                         let one = Integer::from_u128(1);
                         result.range = Some(Interval::new(
-                            one.subtract(&range.upper, &mut self.limits.arithmetic)
+                            one.subtract(range.upper(), &mut self.limits.arithmetic)
                                 .map_err(Unknown::from)?,
-                            one.subtract(&range.lower, &mut self.limits.arithmetic)
+                            one.subtract(range.lower(), &mut self.limits.arithmetic)
                                 .map_err(Unknown::from)?,
                             self.limits,
                         )?);

@@ -3,7 +3,7 @@
 use super::{Integer, Interval, Limits, Unknown};
 
 impl Interval {
-    pub(super) fn div_rem_trunc(
+    pub fn div_rem_trunc(
         &self,
         divisor: &Self,
         limits: &mut Limits,

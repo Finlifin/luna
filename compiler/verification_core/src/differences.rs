@@ -12,7 +12,7 @@ pub(super) struct DifferenceBounds {
     inconsistent: bool,
 }
 impl DifferenceBounds {
-    pub(super) fn build(facts: &Facts, limits: &mut Limits) -> Result<Option<Self>, Unknown> {
+    pub fn build(facts: &Facts, limits: &mut Limits) -> Result<Option<Self>, Unknown> {
         Self::build_with_nodes(facts, &BTreeSet::new(), limits)
     }
     fn build_with_nodes(
@@ -108,7 +108,7 @@ impl DifferenceBounds {
     pub(super) fn contradiction(&self) -> bool {
         self.inconsistent
     }
-    pub(super) fn refine(&self, facts: &mut Facts, limits: &mut Limits) -> Result<bool, Unknown> {
+    pub fn refine(&self, facts: &mut Facts, limits: &mut Limits) -> Result<bool, Unknown> {
         let mut changed = false;
         for (i, node) in self.nodes.iter().enumerate().skip(1) {
             limits.step(1)?;
@@ -486,7 +486,7 @@ pub(super) fn join_guarantees(
 
 /// Existentially forget intermediate nodes while keeping implied differences
 /// between copied values. No source value identity is exported as a target ID.
-pub(super) fn project_guarantees(
+pub fn project_guarantees(
     facts: &Facts,
     selected: &BTreeSet<ValueId>,
     limits: &mut Limits,
