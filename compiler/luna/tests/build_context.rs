@@ -223,6 +223,18 @@ impl SourceFixture {
         Self(dir)
     }
     fn compile(&self, modes: &[(u64, &str)]) -> Result<luna::frontend::Artifact, String> {
+        let mut protocols = elaboration::program::Protocols::default();
+        protocols.build_modes = modes
+            .iter()
+            .map(|(id, mode)| (*id, (*mode).into()))
+            .collect();
+        self.compile_configured(&protocols, None)
+    }
+    fn compile_configured(
+        &self,
+        protocols: &elaboration::program::Protocols,
+        target: Option<TargetData>,
+    ) -> Result<luna::frontend::Artifact, String> {
         let packages = vec![
             SourcePackage {
                 resolution_id: 3,
@@ -244,11 +256,6 @@ impl SourceFixture {
                     .join("../../library/build/lib.fl"),
             },
         ];
-        let mut protocols = elaboration::program::Protocols::default();
-        protocols.build_modes = modes
-            .iter()
-            .map(|(id, mode)| (*id, (*mode).into()))
-            .collect();
         let dependencies = vec![
             resolve::DependencyEdge {
                 requester: 3,
@@ -266,13 +273,16 @@ impl SourceFixture {
                 provider: 7,
             },
         ];
-        luna::packages::compile_with_inputs(
+        luna::packages::compile_with_definitions(
             &packages,
             &dependencies,
             3,
             None,
-            &protocols,
+            protocols,
             Default::default(),
+            target,
+            &mut 100_000,
+            &mut |_, _, _| Ok(()),
         )
         .map(|(artifact, _)| artifact)
     }
@@ -515,4 +525,217 @@ fn package_cli_and_stream_transport_mode_and_invalidate_reuse() {
         replies[3]
     );
     assert!(replies[4].contains("(reused true)"));
+}
+
+fn target_protocols() -> elaboration::program::Protocols {
+    let mut app = input(100, "debug");
+    app.host_pipeline_target
+        .features
+        .insert("sse2".into(), true);
+    let mut dependency = input(200, "release");
+    dependency.host_pipeline_target.arch = "wasm32".into();
+    dependency.host_pipeline_target.os = "wasi".into();
+    dependency.host_pipeline_target.layout = TargetData::new(32).unwrap();
+    let mut protocols = elaboration::program::Protocols::default();
+    snapshot(vec![app, dependency]).configure(&mut protocols);
+    protocols
+}
+
+#[test]
+fn target_values_preserve_origin_aliases_and_optional_feature_states() {
+    let fixture = SourceFixture::new(
+        "use build.target as selected;
+        const saved = selected;
+        comptime fn run()->bool {
+            let target = saved;
+            (target.arch matches .x86_64) and (target.os matches .windows)
+            and target.pointer_bits == 64
+            and (target.features.get(.sse2) matches true?)
+            and (target.features.get(.avx2) matches false?)
+            and (target.features.get(.unknown) matches null)
+            and dependency.ready()
+        }",
+        "pub const saved = build.target;
+        pub comptime fn ready()->bool {
+            (saved.arch matches .wasm32) and (build.target.os matches .wasi)
+            and saved.pointer_bits == 32
+        }",
+    );
+    let luna::frontend::Artifact::Nir(package) = fixture
+        .compile_configured(&target_protocols(), None)
+        .unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn target_reads_reject_missing_origin_and_conflicting_layout() {
+    let fixture = SourceFixture::new(
+        "comptime fn run()->bool { dependency.ready() }",
+        "pub comptime fn ready()->bool {build.target.arch matches .wasm32}",
+    );
+    let mut protocols = target_protocols();
+    protocols.build_targets.remove(&200);
+    let error = fixture.compile_configured(&protocols, None).err().unwrap();
+    assert!(
+        error.contains("build target is unavailable for source package 200"),
+        "{error}"
+    );
+    protocols = target_protocols();
+    let error = fixture
+        .compile_configured(&protocols, Some(TargetData::new(64).unwrap()))
+        .err()
+        .unwrap();
+    assert!(error.contains("build target layout conflicts"), "{error}");
+    assert!(
+        fixture
+            .compile_configured(&protocols, Some(TargetData::new(32).unwrap()))
+            .is_ok()
+    );
+}
+
+#[test]
+fn target_values_keep_shadowing_and_runtime_splice_checks() {
+    let fixture = SourceFixture::new(
+        "mod build {pub mod target {pub const arch = .local;}}
+        comptime fn run()->bool {build.target.arch matches .local}",
+        "",
+    );
+    assert!(
+        fixture
+            .compile_configured(&Default::default(), None)
+            .is_ok()
+    );
+    let fixture = SourceFixture::new("fn run()->bool {build.target.arch matches .x86_64}", "");
+    let error = fixture
+        .compile_configured(&target_protocols(), None)
+        .err()
+        .unwrap();
+    assert!(error.contains("Splice"), "{error}");
+}
+
+#[test]
+fn installing_snapshot_replaces_targets_and_preserves_stable_dump() {
+    let mut protocols = target_protocols();
+    let old = protocols.build_targets[&100].clone();
+    protocols.build_targets.insert(999, old.clone());
+    snapshot(vec![input(100, "release"), input(200, "debug")]).configure(&mut protocols);
+    assert_eq!(protocols.build_targets.len(), 2);
+    assert!(!protocols.build_targets[&100].features.contains_key("sse2"));
+    let mut escaped = old;
+    escaped.arch = "a\"\n".into();
+    let dump = escaped.to_string();
+    assert!(dump.contains("a\\\"\\n"), "{dump}");
+    assert!(dump.find("avx2").unwrap() < dump.find("sse2").unwrap());
+}
+
+#[test]
+fn real_sysroot_target_branches_execute_at_o0_and_o3() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let luna::cli::Command::Compile(options) = luna::cli::parse([
+        root.join("development/examples/sysroot-build-target.fl")
+            .into_os_string(),
+        "--sysroot".into(),
+        root.join("library").into_os_string(),
+        "--emit".into(),
+        "nir".into(),
+    ])
+    .unwrap() else {
+        panic!("expected compilation")
+    };
+    let mut protocols = elaboration::program::Protocols::default();
+    let target = luna::frontend::native_test_target().expect("native target available");
+    assert_eq!(
+        target.pointer_bits(),
+        64,
+        "fixture expects a 64-bit native target"
+    );
+    protocols.build_targets.insert(
+        100,
+        elaboration::program::build_context::Target {
+            arch: "configured_arch".into(),
+            os: "configured_os".into(),
+            layout: target,
+            features: [("vector".into(), true), ("disabled".into(), false)].into(),
+        },
+    );
+    let (luna::frontend::Artifact::Nir(package), bindings) =
+        luna::frontend::compile_bound_for_target(
+            &options,
+            100,
+            &protocols,
+            Default::default(),
+            Some(target),
+        )
+        .unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    for optimization in [
+        luna::host::OptimizationLevel::O0,
+        luna::host::OptimizationLevel::O3,
+    ] {
+        let report = luna::testing::run_native_report_filtered(
+            &package,
+            100,
+            100_000,
+            Some(&bindings),
+            None,
+            &luna::host::Toolchain {
+                optimization,
+                ..Default::default()
+            },
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(report.results.len(), 2, "{report}");
+        assert_eq!(report.failures(), 0, "{report}");
+    }
+}
+
+#[test]
+fn inline_target_branches_keep_dependency_configuration() {
+    let fixture = SourceFixture::new(
+        "fn run()->bool {dependency.ready()}",
+        "pub inline fn ready()->bool {
+            inline if (build.target.arch matches .wasm32)
+                and (build.target.features.get(.avx2) matches false?) {true} else {false}
+        }",
+    );
+    let luna::frontend::Artifact::Nir(package) = fixture
+        .compile_configured(&target_protocols(), None)
+        .unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn source_target_rejects_unvalidated_empty_driver_names() {
+    let fixture = SourceFixture::new(
+        "comptime fn run()->bool {build.target.arch matches .x86_64}",
+        "",
+    );
+    for field in ["arch", "os", "feature"] {
+        let mut protocols = target_protocols();
+        let target = protocols.build_targets.get_mut(&100).unwrap();
+        match field {
+            "arch" => target.arch.clear(),
+            "os" => target.os.clear(),
+            _ => {
+                target.features.insert(String::new(), true);
+            }
+        }
+        let error = fixture.compile_configured(&protocols, None).err().unwrap();
+        assert!(error.contains("empty configuration name"), "{error}");
+    }
 }

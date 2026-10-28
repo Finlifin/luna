@@ -11,7 +11,7 @@ from process_tools import ROOT, run, save_summary
 from host_examples import EXAMPLES, MATH_OPTIONS
 
 STAGES = ('declarations', 'attributes', 'merged-attributes', 'meta-values', 'inline-iteration', 'manifest', 'native-resources', 'native-comparison',
-          'native-math', 'native-option', 'native-result', 'native-tuple', 'native-conversion', 'hash-protocols', 'sysroot-hash', 'sysroot-meta', 'sysroot-builders', 'sysroot-build-mode', 'sysroot', 'sysroot-iteration')
+          'native-math', 'native-option', 'native-result', 'native-tuple', 'native-conversion', 'hash-protocols', 'sysroot-hash', 'sysroot-meta', 'sysroot-builders', 'sysroot-build-mode', 'build-context', 'sysroot', 'sysroot-iteration')
 
 
 def main():
@@ -73,6 +73,7 @@ def main():
                         '--drop-protocol', 'resources.Drop',
                         *MATH_OPTIONS,
                         '--test-native']),
+        ('build-context', ['test', '-p', 'luna', '--test', 'build_context']),
         ('sysroot-build-mode', ['run', '-p', 'luna', '--',
                                 str(ROOT / 'development/examples/sysroot-build-mode.fl'),
                                 '--sysroot', str(ROOT / 'library'), '--build-mode', 'debug', '--test-native']),

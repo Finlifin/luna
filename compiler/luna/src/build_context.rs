@@ -1,8 +1,8 @@
 //! Immutable build inputs owned by source package identity.
 //!
 //! This is the driver-side query contract. Explicit mode bindings feed source
-//! elaboration; target queries and compilation-cache observations are not yet
-//! connected. No query consults the process environment or substitutes the
+//! elaboration; configure also installs source target snapshots. Precise
+//! compilation-cache observations are not yet connected. No query consults the process environment or substitutes the
 //! compiler's execution host as a target.
 use crate::packages::SourcePackage;
 use nir::{DeclarationId, QuotedDisplay, target::TargetData};
@@ -172,6 +172,27 @@ impl Snapshot {
             .packages
             .iter()
             .map(|(owner, input)| (*owner, input.mode.clone()))
+            .collect();
+    }
+
+    /// Replace source-visible modes and host pipeline target snapshots together.
+    pub fn configure(&self, protocols: &mut elaboration::program::Protocols) {
+        self.configure_modes(protocols);
+        protocols.build_targets = self
+            .packages
+            .iter()
+            .map(|(owner, input)| {
+                let target = &input.host_pipeline_target;
+                (
+                    *owner,
+                    elaboration::program::build_context::Target {
+                        arch: target.arch.clone(),
+                        os: target.os.clone(),
+                        layout: target.layout,
+                        features: target.features.clone(),
+                    },
+                )
+            })
             .collect();
     }
 

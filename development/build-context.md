@@ -1,7 +1,8 @@
 # build
 
 源码 `build.mode` 已通过显式驱动配置接通，见 [build 包说明](../library/build/README.md)。
-`build.target` 与 `build.package_metadata` 尚未接通，不提供占位值或宿主默认配置。
+`build.target` 已通过 Rust 快照输入接通；`build.package_metadata` 尚未接通。
+不提供占位值或宿主默认配置。
 
 已实现的基础位于 `luna::build_context`：
 
@@ -19,11 +20,16 @@
   按键排序。接口版本是驱动输入契约，尚无对应的流式/持久化传输格式。
 
 `configure_modes(&mut protocols)` 将快照中的 mode 绑定到源码 elaboration，读取
-位置按原始 HIR 定义归属取值，产物保留已选中的 Symbol。目标属性的源码查询与
+位置按原始 HIR 定义归属取值，产物保留已选中的 Symbol。
+`configure(&mut protocols)` 同时替换 modes 和 targets。目标使用真实 build 包的
+Target/TargetFeatures 声明，编译器校验 marker 的字段布局后生成 nominal 值；
+features 保存排序后的 Object，公开 get 方法是库中的普通 comptime 代码。
+具体编译布局与目标快照冲突时拒绝，未提供编译布局时可以独立进行 comptime
+配置查询。源码别名、常量和依赖包读取不会转移配置归属。
 字段级缓存证据尚未接线，Observation 仍是驱动侧接口；CLI/流式 mode 输入已
 进入完整请求缓存键，但不能据此宣称精确缓存
 失效或所有 template/CMTT 生成场景已经端到端完成。
-下一步需要扩展源码查询，同时将观察项交付给增量编译缓存。
+下一步需要接通目标快照的 CLI/流式传输，同时将观察项交付给增量编译缓存。
 `package_metadata` 的类型化值输入、构建脚本工具及 anar 调度/传输仍待实现。
 不会通过运行时环境变量隐式补齐这些输入。
 

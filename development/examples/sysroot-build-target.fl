@@ -1,0 +1,24 @@
+{-
+    The embedding driver supplies this package's explicit target snapshot.
+    Feature selection stays at comptime; runtime receives only checked branches.
+-}
+use build.target as selected;
+const target = selected;
+const enabled = target.features.get(.vector);
+const disabled = target.features.get(.disabled);
+const absent = target.features.get(.unknown);
+
+test selected_target {
+    inline if (target.arch matches .configured_arch)
+        and (target.os matches .configured_os)
+        and target.pointer_bits == 64 {
+        assumes true;
+    } else { assumes false; };
+}
+
+test selected_features {
+    inline if (enabled matches true?) and (disabled matches false?)
+        and (absent matches null) {
+        assumes true;
+    } else { assumes false; };
+}

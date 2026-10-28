@@ -4385,3 +4385,45 @@ CLI/流式请求尚未提供 mode 传输，编译缓存尚未消费快照观察�
 - `python3 -B -m unittest discover -s development -p test_library_check.py`：13 项通过。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
   通过 (`/tmp/luna-tools-h212bgsr/result.json`)；`git diff --check` 通过。
+
+
+### Build target snapshots in source (2026-10-28)
+
+Connected the real build package's `target: Target` contextual constant to
+explicit source-package snapshots. Target values retain nominal declaration
+identity and expose arch, os, pointer_bits, and `features.get(Symbol) -> ?bool`.
+The feature query is ordinary comptime library code over an ordered Object;
+missing, disabled and enabled remain distinct. Aliases, saved constants and
+inlined dependency functions retain their definition's configuration. Concrete
+compilation layouts must agree with the selected target layout; execution-host
+facts never substitute for target data. `Snapshot::configure` replaces both mode
+and target tables, removing stale package and feature entries.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test build_context --test compilation_cache`
+  exited 0: 18 build-context and 9 cache tests passed. The build-context suite
+  loads the complete repository sysroot and executes both cases in
+  `development/examples/sysroot-build-target.fl` at O0 and O3. It also checks
+  dependency origin, feature optionality, missing/invalid inputs, target-layout
+  conflict and recovery, shadowing, Splice rejection and stable escaped dumps.
+  Evidence: `/tmp/luna-tools-8pkj4348/result.json` and `stdout.log`.
+- `python3 -B development/library_check.py --release --stage sysroot-build-mode --stage manifest`
+  exited 0; actual sysroot mode test and manifest checks passed.
+  Evidence: `/tmp/luna-library-asb00cbq/summary.json`.
+- `python3 -B -m unittest discover -s development -p test_library_check.py`
+  exited 0, 13 runner tests passed after adding the build-context stage.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+  exited 0; `/tmp/luna-tools-izofi2dx/result.json`. `git diff --check` passed.
+
+Earlier local checks exposed and fixed a fixture calling an entrypoint whose
+fourth argument is a builtin package ID rather than TargetData
+(`/tmp/luna-tools-8cj6k807`), invalid Rust-style pub field syntax in the new
+Flurry declaration (`/tmp/luna-tools-q3yb1g3u`), and a native fixture missing its
+explicit NIR stage (`/tmp/luna-tools-vduoztbk`). The final combined run above
+covers all repaired cases.
+
+Complete target snapshots currently enter through the Rust embedding API.
+CLI/resident target transport, observation-selective cache invalidation,
+package_metadata and build scripts remain pending. The existing mode-only
+CLI/cache behavior remains covered; target snapshot cache reuse is not claimed.

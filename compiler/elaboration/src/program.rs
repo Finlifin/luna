@@ -21,7 +21,7 @@ mod spreads;
 mod tactics;
 use arguments::route_arguments;
 mod bit_indices;
-mod build_context;
+pub mod build_context;
 mod cmtt;
 mod constants;
 mod defaults;
@@ -220,6 +220,8 @@ pub struct Protocols {
     /// Explicit build modes by source semantic package identity. Empty means
     /// unavailable, never an implicit host/debug configuration.
     pub build_modes: BTreeMap<u64, String>,
+    /// Host pipeline targets selected by the originating source package.
+    pub build_targets: BTreeMap<u64, build_context::Target>,
     /// Explicit target operation declaration and variant, resolved by the driver.
     pub host_fma: Option<(DeclarationId, String)>,
     pub host_sqrt: Option<(DeclarationId, String)>,
@@ -986,8 +988,8 @@ fn elaborate_candidate<'a, 'h>(
                 }
             }
             ItemKind::Const(..) => {
-                if checker.is_build_mode(owner) {
-                    checker.validate_build_mode(owner, item.span)?;
+                if checker.is_build_context(owner) {
+                    checker.validate_build_context(owner, item.span)?;
                 } else {
                     checker.constant_value(owner, item.span)?;
                 }
@@ -10706,8 +10708,8 @@ impl Checker<'_, '_> {
                     if let Some(expected) = expected { self.require(&value.ty, expected, expr.span)?; }
                     return Ok(value);
                 }
-                if self.is_build_mode(owner) {
-                    let value = self.build_mode(expr, owner)?;
+                if self.is_build_context(owner) {
+                    let value = self.build_context_value(expr, owner)?;
                     if self.runtime_value_context() { return self.splice_value(expr, value, expected); }
                     if let Some(expected) = expected { self.require(&value.ty, expected, expr.span)?; }
                     return Ok(value);
