@@ -40,6 +40,14 @@ impl Entry {
         }
         Ok(Self { ty, value })
     }
+    /// Decode and admit on each use in the supplied provider world. The result
+    /// is not a persistent certificate and grants no resource copying permission.
+    pub fn admit(
+        &self,
+        interpreter: &mut comptime_interpretor::Interpreter<'_>,
+    ) -> Result<comptime_interpretor::Value, comptime_interpretor::Error> {
+        interpreter.decode_immutable_input(&self.value, &self.ty)
+    }
     pub fn ty(&self) -> &Term {
         &self.ty
     }
@@ -78,6 +86,45 @@ impl Observation {
     }
     pub fn value(&self) -> Option<&Entry> {
         self.value.as_deref()
+    }
+
+    /// Preserve absent fields without manufacturing a typed null. Admission of
+    /// a present descriptor uses the caller-supplied provider compilation world.
+    pub fn admit(
+        &self,
+        interpreter: &mut comptime_interpretor::Interpreter<'_>,
+    ) -> Result<Option<comptime_interpretor::Value>, AdmissionError> {
+        self.value
+            .as_ref()
+            .map(|entry| entry.admit(interpreter))
+            .transpose()
+            .map_err(|cause| AdmissionError {
+                owner: self.owner,
+                provider: self.resolved,
+                field: self.field.clone(),
+                cause,
+            })
+    }
+}
+
+#[derive(Debug)]
+pub struct AdmissionError {
+    pub owner: u64,
+    pub provider: u64,
+    pub field: String,
+    pub cause: comptime_interpretor::Error,
+}
+impl std::error::Error for AdmissionError {}
+impl fmt::Display for AdmissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(metadata-admission-error (owner {}) (provider {}) (field {}) (cause {}))",
+            self.owner,
+            self.provider,
+            Q(&self.field),
+            Q(&self.cause.to_string())
+        )
     }
 }
 

@@ -55,8 +55,8 @@ mode/target 的配置规则。`Input` 按语义包身份提供有序字段输入
 `Entry::new(type_term, value_term, fuel)` 保留原始类型与值，不将库自己的 enum、
 nominal Type 或 normal-form 头降成字符串／布尔配置。入口只验证闭合的描述符
 结构并计费：拒绝活动绑定、洞、rigid 参数和 runtime 依赖。它**没有证明值属于
-给定类型**；消费时仍必须在提供者的编译世界里做语义接纳，不能直接当作可信
-runtime 值或跳过普通 comptime 阶段检查。
+给定类型**；消费时使用 `Entry::admit` 或 `Observation::admit` 在提供者的编译世界
+中做语义接纳，不能直接当作可信 runtime 值或跳过普通 comptime 阶段检查。
 
 `Snapshot::read(origin, Provider::Dependency(alias), field)` 根据 origin 的语义包
 身份和该包的直接依赖别名选择提供者。resolution ID 只用于翻译依赖边；同名包
@@ -86,3 +86,37 @@ python3 -B development/check.py --timeout 900 -- test --release -p luna --test b
 `python3 -B development/check.py --timeout 900 -- test --release -p luna --test build_metadata`
 通过 9 项，报告 `/tmp/luna-tools-6jr3or6g/result.json`。
 格式检查报告 `/tmp/luna-tools-oy2ybqjv/result.json`；`git diff --check` 通过。
+
+
+### 元数据值的语义接纳
+
+`Entry::admit(&mut Interpreter)` 将描述符解码为不可变数据并在该 VM 的类型世界
+中检查值域、nominal 成员、payload、嵌入 Type 和类型形成约束。`Observation::admit`
+同时保留 absent；present 值失败时返回带 owner/provider/field 的 AdmissionError。
+这里不建立永久的 CheckedEntry，也不缓存 VM 的类型证明；在另一个提供者世界使用
+同一描述符必须重新接纳。
+
+实现复用 `Interpreter::decode_immutable_input`。它仅在 comptime 模式工作，并且
+与普通 invocation 的 normal-term 输入重建区分：不会为元数据执行 ClosureSnapshot
+工厂，也不重建 FunctionValue；这一限制递归适用于 optional、tuple、object、list
+及 nominal 字段。普通显式 invocation 仍保留既有 callable 快照重建能力。Type 中
+的 normal-form 头不展开，接纳也不授予 Copy／资源复制权限。
+
+这一步尚未接通源码 `build.package_metadata(...)`、配置传输或编译缓存。驱动必须
+提供实际类型环境；查询快照自身不加载依赖源码、不执行构建脚本，也不会把结构
+检查或一次接纳提升为对其他编译环境的有效性承诺。
+
+语义接纳阶段验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --test immutable_normal_inputs --lib`：
+  VM 单元 175 项、解码集成 3 项通过，报告 `/tmp/luna-tools-ars2_owe/result.json`。
+- 增加 Object 内隐藏 callable 和具名 FunctionValue 的拒绝例后，
+  `python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --test immutable_normal_inputs`
+  通过 3 项，报告 `/tmp/luna-tools-526lhm7k/result.json`。测试中的工厂可由普通
+  invocation 实际执行，元数据路径则保持无 EnterFunction 等执行事件。
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test build_metadata --test build_context`：
+  metadata 12 项、build context 24 项通过，报告 `/tmp/luna-tools-kwyw66wd/result.json`。
+  覆盖 nominal 的缺失类型、错误 variant/payload、false formation requirement、
+  Object 条目类型不匹配，以及失败后的正常接纳。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过，报告 `/tmp/luna-tools-f10axxfp/result.json`；`git diff --check` 通过。

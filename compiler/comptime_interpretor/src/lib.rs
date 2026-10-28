@@ -9517,18 +9517,28 @@ impl Interpreter<'_> {
     }
 
     fn normal_pattern_value(&mut self, term: &Term, ty: &Term) -> Result<Value, Error> {
-        self.normal_pattern_value_at(term, ty, 0)
+        self.normal_pattern_value_at(term, ty, 0, true)
     }
     fn normal_pattern_value_at(
         &mut self,
         term: &Term,
         ty: &Term,
         depth: usize,
+        reconstruct_callables: bool,
     ) -> Result<Value, Error> {
         if depth >= 128 {
             return Err(self.failure(ErrorKind::DepthExhausted, None));
         }
         self.tick(None)?;
+        if !reconstruct_callables
+            && matches!(
+                term,
+                Term::ClosureSnapshot { .. } | Term::FunctionValue { .. }
+            )
+        {
+            return Err(self.failure(ErrorKind::Type, None));
+        }
+
         if term.has_pending_error_branch() {
             return Err(self.failure(ErrorKind::AbstractValueUnresolved, None));
         }
@@ -9745,8 +9755,13 @@ impl Interpreter<'_> {
                         value: value
                             .as_ref()
                             .map(|value| {
-                                self.normal_pattern_value_at(value, payload, depth + 1)
-                                    .map(Box::new)
+                                self.normal_pattern_value_at(
+                                    value,
+                                    payload,
+                                    depth + 1,
+                                    reconstruct_callables,
+                                )
+                                .map(Box::new)
                             })
                             .transpose()?,
                     }
@@ -9774,7 +9789,12 @@ impl Interpreter<'_> {
                     Value::ErrorResult {
                         ty: ty.clone(),
                         error,
-                        value: Box::new(self.normal_pattern_value_at(value, payload, depth + 1)?),
+                        value: Box::new(self.normal_pattern_value_at(
+                            value,
+                            payload,
+                            depth + 1,
+                            reconstruct_callables,
+                        )?),
                     }
                 }
                 (
@@ -9801,7 +9821,12 @@ impl Interpreter<'_> {
                         })?;
                         let value = ObjectValue {
                             ty: domain.clone(),
-                            value: self.normal_pattern_value_at(value, domain, depth + 1)?,
+                            value: self.normal_pattern_value_at(
+                                value,
+                                domain,
+                                depth + 1,
+                                reconstruct_callables,
+                            )?,
                         };
                         entries.push(match key {
                             Some(key) => ObjectEntry::Property {
@@ -9831,7 +9856,14 @@ impl Interpreter<'_> {
                     self.integer_operation(None, |budget| budget.consume(fields.len()))?;
                     let values = fields
                         .iter()
-                        .map(|value| self.normal_pattern_value_at(value, &element, depth + 1))
+                        .map(|value| {
+                            self.normal_pattern_value_at(
+                                value,
+                                &element,
+                                depth + 1,
+                                reconstruct_callables,
+                            )
+                        })
                         .collect::<Result<_, _>>()?;
                     let value = Value::List {
                         ty: ty.clone(),
@@ -9874,7 +9906,14 @@ impl Interpreter<'_> {
                     let values = fields
                         .iter()
                         .zip(&types)
-                        .map(|(value, ty)| self.normal_pattern_value_at(value, ty, depth + 1))
+                        .map(|(value, ty)| {
+                            self.normal_pattern_value_at(
+                                value,
+                                ty,
+                                depth + 1,
+                                reconstruct_callables,
+                            )
+                        })
                         .collect::<Result<_, _>>()?;
                     match variant {
                         Some(index) => Value::Variant {
@@ -9920,7 +9959,12 @@ impl Interpreter<'_> {
                         }
                         fields.push((
                             name.clone(),
-                            self.normal_pattern_value_at(value, ty, depth + 1)?,
+                            self.normal_pattern_value_at(
+                                value,
+                                ty,
+                                depth + 1,
+                                reconstruct_callables,
+                            )?,
                         ));
                     }
                     Value::AnonymousRecord(fields)
@@ -9936,7 +9980,14 @@ impl Interpreter<'_> {
                         values
                             .iter()
                             .zip(types)
-                            .map(|(value, ty)| self.normal_pattern_value_at(value, ty, depth + 1))
+                            .map(|(value, ty)| {
+                                self.normal_pattern_value_at(
+                                    value,
+                                    ty,
+                                    depth + 1,
+                                    reconstruct_callables,
+                                )
+                            })
                             .collect::<Result<_, _>>()?,
                     )
                 }

@@ -414,3 +414,158 @@ fn metadata_rejects_runtime_dependencies_inside_types_and_values() {
         Err(Error::OpenEntry)
     );
 }
+
+fn metadata_world() -> nir::program::Package {
+    nir::program::Package {
+        enums: vec![nir::program::Enum {
+            declaration: id(200),
+            name: "TargetArch".into(),
+            is_intrinsic: false,
+            parameter_types: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            groups: vec![],
+            encoding: None,
+            symbol_encoding: None,
+            variants: vec![nir::program::Variant {
+                name: "gpu".into(),
+                shape: nir::program::VariantShape::Named(vec!["enabled".into()]),
+                fields: vec![Term::Primitive(Primitive::Bool)],
+            }],
+        }],
+        ..Default::default()
+    }
+}
+#[test]
+fn metadata_admission_checks_nominal_world_payload_and_variant_before_use() {
+    let world = metadata_world();
+    let ty = Term::Nominal {
+        declaration: id(200),
+        arguments: vec![],
+    };
+    let entry = |index, payload| {
+        Entry::new(
+            ty.clone(),
+            Term::NominalValue {
+                ty: Box::new(ty.clone()),
+                variant: Some(index),
+                fields: vec![payload],
+            },
+            &mut 1000,
+        )
+        .unwrap()
+    };
+    let valid = entry(0, Term::Bool(true));
+    let snapshot = snapshot(vec![Input {
+        identity: 200,
+        fields: vec![
+            ("arch".into(), valid.clone()),
+            ("bad_index".into(), entry(1, Term::Bool(true))),
+            ("bad_payload".into(), entry(0, Term::Symbol("wrong".into()))),
+        ],
+    }]);
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &world,
+        comptime_interpretor::Budget::default(),
+    )
+    .unwrap();
+    for field in ["bad_index", "bad_payload"] {
+        let error = snapshot
+            .read(id(100), dep(), field)
+            .unwrap()
+            .admit(&mut vm)
+            .unwrap_err();
+        assert_eq!(
+            (error.owner, error.provider, error.field.as_str()),
+            (100, 200, field)
+        );
+        assert!(error.to_string().contains("metadata-admission-error"));
+    }
+    assert!(matches!(
+        snapshot
+            .read(id(100), dep(), "arch")
+            .unwrap()
+            .admit(&mut vm)
+            .unwrap(),
+        Some(comptime_interpretor::Value::Variant { index: 0, .. })
+    ));
+    assert_eq!(
+        snapshot
+            .read(id(100), dep(), "absent")
+            .unwrap()
+            .admit(&mut vm)
+            .unwrap(),
+        None
+    );
+    assert!(vm.events().is_empty());
+    // An observation is not an admission certificate for a different world.
+    let absent_world = nir::program::Package::default();
+    let mut foreign = comptime_interpretor::Interpreter::for_comptime(
+        &absent_world,
+        comptime_interpretor::Budget::default(),
+    )
+    .unwrap();
+    assert!(valid.admit(&mut foreign).is_err());
+}
+#[test]
+fn metadata_admission_rechecks_nominal_formation_requirements() {
+    let mut world = metadata_world();
+    world.enums[0]
+        .requirements
+        .push(nir::program::TypePredicate::Bool(false));
+    let ty = Term::Nominal {
+        declaration: id(200),
+        arguments: vec![],
+    };
+    let entry = Entry::new(Term::Primitive(Primitive::Type), ty, &mut 1000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &world,
+        comptime_interpretor::Budget::default(),
+    )
+    .unwrap();
+    assert!(entry.admit(&mut vm).is_err());
+    assert!(vm.events().is_empty());
+}
+
+#[test]
+fn metadata_objects_validate_stored_domains_without_erasing_types() {
+    let world = metadata_world();
+    let object = Term::Primitive(Primitive::Object);
+    let ty = Term::Nominal {
+        declaration: id(200),
+        arguments: vec![],
+    };
+    let value = Term::NominalValue {
+        ty: Box::new(ty.clone()),
+        variant: Some(0),
+        fields: vec![Term::Bool(true)],
+    };
+    let valid = Entry::new(
+        object.clone(),
+        nir::objects::value(vec![nir::objects::entry(Some("arch"), ty, value)]),
+        &mut 10000,
+    )
+    .unwrap();
+    let invalid = Entry::new(
+        object,
+        nir::objects::value(vec![nir::objects::entry(
+            Some("enabled"),
+            Term::Primitive(Primitive::Bool),
+            Term::Symbol("wrong".into()),
+        )]),
+        &mut 10000,
+    )
+    .unwrap();
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &world,
+        comptime_interpretor::Budget::default(),
+    )
+    .unwrap();
+    assert!(invalid.admit(&mut vm).is_err());
+    assert!(matches!(
+        valid.admit(&mut vm).unwrap(),
+        comptime_interpretor::Value::Object(_)
+    ));
+    assert!(vm.events().is_empty());
+}

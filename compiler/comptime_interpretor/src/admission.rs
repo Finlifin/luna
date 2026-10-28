@@ -3,6 +3,29 @@
 use super::*;
 
 impl Interpreter<'_> {
+    /// Decode immutable host data in this VM's type world without executing
+    /// closure factories or reconstructing callable values. Nested aggregates
+    /// follow the same policy. Admission proves representation and domain, not
+    /// resource duplication permission or portability to a different world.
+    pub fn decode_immutable_input(&mut self, term: &Term, ty: &Term) -> Result<Value, Error> {
+        if !self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, None));
+        }
+        for input in [term, ty] {
+            let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let charged = nir::type_computations::charge_term(input, &mut fuel);
+            self.budget.steps -= (before - fuel) as u64;
+            charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, None))?;
+            input
+                .check_scope(&[])
+                .map_err(|_| self.failure(ErrorKind::Type, None))?;
+        }
+        let value = self.normal_pattern_value_at(term, ty, 0, false)?;
+        self.validate_immutable_input(&value, ty)?;
+        Ok(value)
+    }
+
     pub(super) fn admitted_nominal_layout(
         &self,
         ty: &Term,
