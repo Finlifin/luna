@@ -6,47 +6,6 @@ use n::Rewriter;
 mod effects;
 pub(crate) use effects::expand_materialized as expand_materialized_effects;
 
-/// Copy-local identities change; lexical inputs and transfers to an enclosing
-/// loop keep their identities. Used when materialization duplicates a branch.
-pub(crate) fn freshen_copied_expression(
-    expression: &mut n::Expr,
-    next: &mut u32,
-    sources: &mut Vec<n::ExpansionSource>,
-    fuel: &mut usize,
-) -> Result<(), String> {
-    let mut connections: BTreeMap<_, _> = nir::free_bindings::collect(expression, fuel)?
-        .into_iter()
-        .map(|id| (id, id))
-        .collect();
-    let mut loops = BTreeSet::new();
-    nir::visit::expression(expression, fuel, |expr, fuel| {
-        nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())?;
-        if let K::Loop { identity, .. } = expr.kind {
-            loops.insert(identity);
-        }
-        Ok(())
-    })?;
-    nir::visit::expression(expression, fuel, |expr, _| {
-        if let K::Break(id) | K::Continue(id) = expr.kind {
-            if !loops.contains(&id) {
-                connections.insert(id, id);
-            }
-        }
-        Ok(())
-    })?;
-    cmtt::freshen(
-        expression,
-        connections,
-        next,
-        sources,
-        Span::new(
-            rustc_span::BytePos(expression.source.start),
-            rustc_span::BytePos(expression.source.end),
-        ),
-    )
-    .map_err(|e| e.to_string())
-}
-
 /// Retry an ordinary inline call after its staged inputs have been bound.
 /// The caller owns recursion detection and subsequent dependency normalization.
 /// A failed candidate must not publish identities or return layouts.

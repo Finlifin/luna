@@ -449,13 +449,14 @@ impl Checker<'_, '_> {
             },
         )?;
         let mut body = template.clone();
-        body.rewrite_with(&mut Renamer {
-            bindings: connections,
-            next: &mut self.next_temporary_binding,
-            sources: &mut self.expansion_sources,
-            locations: BTreeMap::new(),
-            span,
-        })?;
+        nir::freshening::pattern(
+            &mut body,
+            connections,
+            &mut self.next_temporary_binding,
+            &mut self.expansion_sources,
+            source(span),
+        )
+        .map_err(|message| error(span, message))?;
         self.locals.extend(locals);
         Ok(body)
     }

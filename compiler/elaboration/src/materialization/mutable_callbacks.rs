@@ -212,7 +212,7 @@ pub(super) fn lower(
                     for (index, target) in targets.iter().enumerate() {
                         charge(target, fuel)?;
                         let mut body = target.clone();
-                        crate::program::inlining::freshen_copied_expression(
+                        nir::freshening::copied_expression(
                             &mut body,
                             next,
                             expansion_sources,

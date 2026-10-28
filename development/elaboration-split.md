@@ -255,3 +255,42 @@ materialization 的方法选择调用仍在。完整依赖闭包的服务边界�
   --stage sysroot-builders`：全部通过，`/tmp/luna-library-soaqno93/summary.json`。
 - 格式检查 `/tmp/luna-tools-bco9j_sg/result.json` 与 `git diff --check` 通过。
   未运行全 workspace 测试。
+
+## NIR 的复制身份与来源重写
+
+复制表达式、连接 expression code 和展开 pattern 共用
+`nir::freshening`。原 program/cmtt 的 Renamer 整体下移；源码层只把诊断位置
+适配为前端 Error，materialization 的五处复制入口直接调用 NIR。
+
+该操作区分复制品拥有的局部身份与保持连接的词法输入/外层循环目标；闭包
+捕获的存储绑定和参数重新分配，捕获值仍在外层求值。默认参数保留被调用者
+的参数帧。相同源码范围的 block/preparation 仍获得独立的生成位置，避免合并
+运行时清理边界。pattern 绑定与 remap 使用同一映射逻辑。
+
+结构预算预检、身份溢出和目前对 runtime-dependent quoted type 的拒绝规则
+沿用原行为。重写发生在私有候选上；失败时仍由调用者丢弃/回滚候选及其
+identity/source 游标，不能把局部变换描述成整个展开事务。
+
+materialization 对 program 的调用由九处降为四处，剩余是真正的 quote、inline
+与 inline-effect 展开，不再混有纯 NIR 复制操作。这些展开器还会调用方法选择
+与 annotation normalization，下一步需要同时拆它们的语义服务边界。
+
+本阶段验证在 `/home/fin/luna` 执行，全部退出 0：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p nir
+  --test freshening --test free_bindings`：18 项通过，
+  `/tmp/luna-tools-vs2vdp02/result.json`。
+- 同一入口的 `test --release -p luna --test cmtt --test cmtt_methods
+  --test quote_functions --test inline_control --test test_templates`：1,104 项通过，
+  `/tmp/luna-tools-p01j2aye/result.json`。
+- execution 的 quote/template 筛选分别通过 1/5 项；因覆盖过窄，另跑了上述
+  独立测试集，没有用六项测试替代整个 CMTT 迁移的验收。
+- `python3 -B development/library_check.py --release --timeout 900
+  --stage sysroot-iteration --stage sysroot-resources`：全部通过，
+  `/tmp/luna-library-8jl7f_s8/summary.json`。
+- 格式检查 `/tmp/luna-tools-wo85rt2u/result.json` 和 `git diff --check` 通过。
+  未运行全 workspace 测试。
+
+剩余四个展开入口均由 IIR 路径的 `instances.is_some()` 控制，含两处
+stage_direct_call 的入口。下一阶段可引入显式的 IIR 展开服务，把普通 dispatch
+闭包保留为无需源码展开器的下层服务；仍需以实际调用与失败检查证明边界。

@@ -227,9 +227,7 @@ impl Builder<'_> {
         });
         let source_end = sources.len();
         let previous_next = *next;
-        if let Err(error) =
-            crate::program::inlining::freshen_copied_expression(&mut copied, next, sources, fuel)
-        {
+        if let Err(error) = nir::freshening::copied_expression(&mut copied, next, sources, fuel) {
             sources.truncate(source_end);
             *next = previous_next;
             return Err(error);
@@ -346,7 +344,7 @@ fn resolve_scoped_callable(
                     parameter_bindings: vec![],
                 },
             };
-            crate::program::inlining::freshen_copied_expression(&mut body, next, sources, fuel)?;
+            nir::freshening::copied_expression(&mut body, next, sources, fuel)?;
             arms.push(n::MatchArm {
                 pattern: if index == last {
                     P::Wild
@@ -399,7 +397,7 @@ fn resolve_scoped_callable(
                 })),
             },
         };
-        crate::program::inlining::freshen_copied_expression(&mut candidate, next, sources, fuel)?;
+        nir::freshening::copied_expression(&mut candidate, next, sources, fuel)?;
         Ok(candidate)
     })();
     match result {

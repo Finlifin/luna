@@ -45,7 +45,7 @@ pub(super) fn dispatch(
     for (index, target) in targets.iter().enumerate() {
         charge(target, fuel)?;
         let mut body = target.clone();
-        crate::program::inlining::freshen_copied_expression(&mut body, next, sources, fuel)?;
+        nir::freshening::copied_expression(&mut body, next, sources, fuel)?;
         arms.push(n::MatchArm {
             pattern: if index + 1 == targets.len() {
                 P::Wild

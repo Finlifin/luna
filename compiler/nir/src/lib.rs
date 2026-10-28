@@ -69,3 +69,5 @@ pub mod call_safety;
 pub mod intrinsics;
 
 pub mod type_budget;
+
+pub mod freshening;
