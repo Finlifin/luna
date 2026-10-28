@@ -180,3 +180,55 @@ fn list_branch_observation_preserves_condition_and_selected_initializer() {
         assert_eq!(calls, vec![0, if flag { 1 } else { 2 }]);
     }
 }
+
+#[test]
+fn different_length_branches_retain_only_guaranteed_prefix_types() {
+    for body in [
+        "let types:meta.List<Type> = if flag {[bool,Byte]} else {[bool]};let T=types[0];let result:T=flag;result",
+        "let types:meta.List<Type> = flag match {true=>[bool],false=>[bool,Byte,Integer]};let T=types[0];let result:T=flag;result",
+        "let lists:meta.List<meta.List<Type>> = if flag {[[bool,Byte],[Integer]]} else {[[bool]]};let T=lists[0][0];let result:T=flag;result",
+        "let types:meta.List<Type> = if flag {if other {[bool,Byte]} else {[bool]}} else {[bool,Integer,Byte]};let T=types[0];let result:T=flag;result",
+    ] {
+        let source = format!("comptime fn choose(flag:bool,other:bool)->bool {{{body}}}");
+        let package = compile(&source).unwrap_or_else(|e| panic!("{source}: {e}"));
+        for flag in [false, true] {
+            for other in [false, true] {
+                let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+                assert_eq!(
+                    vm.invoke(
+                        support::id(&package, "choose"),
+                        vec![Value::Bool(flag), Value::Bool(other)]
+                    )
+                    .unwrap(),
+                    Value::Bool(flag)
+                );
+            }
+        }
+    }
+    for body in [
+        "let types:meta.List<Type> = if flag {[bool,Byte]} else {[bool]};let T=types[1];let result:T=true;result",
+        "let types:meta.List<Type> = if flag {[bool]} else {[Byte,Integer]};let T=types[0];let result:T=true;result",
+        "let types:meta.List<Type> = if flag {[bool]} else {[]};let T=types[0];let result:T=true;result",
+    ] {
+        let source = format!("comptime fn choose(flag:bool)->bool {{{body}}}");
+        assert!(compile(&source).is_err(), "unexpectedly accepted {source}");
+    }
+}
+
+#[test]
+fn prefix_observation_does_not_truncate_actual_list_values() {
+    let source = "comptime fn choose(flag:bool)->Integer {
+        let types:meta.List<Type> = if flag {[bool,Byte]} else {[bool]};
+        let T=types[0];let value:T=flag;
+        types.length()
+    }";
+    let package = compile(source).unwrap();
+    for (flag, length) in [(false, 1), (true, 2)] {
+        let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, "choose"), vec![Value::Bool(flag)])
+                .unwrap(),
+            Value::Integer(comptime_runtime::Integer::from_u128(length))
+        );
+    }
+}

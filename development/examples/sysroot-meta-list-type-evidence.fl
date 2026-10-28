@@ -14,6 +14,14 @@ comptime fn choose(flag: bool) -> bool {
     value
 }
 
+comptime fn prefix_length(flag: bool) -> Integer {
+    let types: meta.List<Type> = if flag { [bool, u8] } else { [bool] };
+    let T = types[0];
+    let value: T = flag;
+    types.length()
+}
+
 comptime fn run() -> bool {
     choose(true) and not choose(false)
+        and prefix_length(true) == 2 and prefix_length(false) == 1
 }

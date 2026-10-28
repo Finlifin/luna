@@ -41,6 +41,7 @@ enum PartialStagedData {
 #[derive(Clone, Debug, PartialEq)]
 enum PartialStagedShape {
     Tuple,
+    // Fields carry a guaranteed prefix; a branch join may forget the tail.
     List(Term),
     Record(DeclarationId),
     Variant(DeclarationId, usize),

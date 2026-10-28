@@ -26,10 +26,17 @@ impl PartialStagedValue {
         let Some((right_shape, right_fields)) = right.aggregate(meta_list) else {
             return Ok(Self::unknown());
         };
-        if left_shape != right_shape || left_fields.len() != right_fields.len() {
+        if left_shape != right_shape {
             return Ok(Self::unknown());
         }
-        let mut fields = Vec::with_capacity(left_fields.len());
+        // List fields describe a guaranteed prefix of evidence, not an exact
+        // runtime length. Other aggregate layouts still require equal arity.
+        if left_fields.len() != right_fields.len()
+            && !matches!(left_shape, PartialStagedShape::List(_))
+        {
+            return Ok(Self::unknown());
+        }
+        let mut fields = Vec::with_capacity(left_fields.len().min(right_fields.len()));
         let mut height = 1;
         for (a, b) in left_fields.iter().zip(&right_fields) {
             let field = Self::common(a, b, meta_list, depth + 1, fuel)?;
