@@ -1302,8 +1302,23 @@ impl Checker<'_, '_> {
                         return Err(error(
                             span,
                             format!(
-                                "required {kind} implementation is not established: {}",
-                                resolution.selection
+                                "required {kind} implementation is not established: {}{}",
+                                resolution.selection,
+                                resolution
+                                    .assessments
+                                    .iter()
+                                    .filter_map(|(id, assessment)| {
+                                        match assessment {
+                                            crate::implementation::TypeAssessment::Pending(
+                                                reason,
+                                            )
+                                            | crate::implementation::TypeAssessment::Invalid(
+                                                reason,
+                                            ) => Some(format!("; {id}: {reason}")),
+                                            _ => None,
+                                        }
+                                    })
+                                    .collect::<String>()
                             ),
                         ));
                     }

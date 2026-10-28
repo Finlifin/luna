@@ -2626,3 +2626,65 @@ fn repeated_boolean_contract_checks_share_budget_and_keep_world_local_facts() {
         type_resolution::capabilities::TraitTruth::Excluded
     );
 }
+
+#[test]
+fn generic_disjunctive_type_premises_discharge_matching_requirements() {
+    use nir::program::TypePredicate as Q;
+    use type_resolution::ptc::Formula;
+    let subject = Term::Rigid {
+        declaration: id(2),
+        sort: Sort::Type,
+    };
+    let condition = |t: Term| {
+        Q::Or(vec![
+            Q::Equal(t.clone(), Term::Primitive(Primitive::F16)),
+            Q::Equal(t, Term::Primitive(Primitive::Bf16)),
+        ])
+    };
+    let mut candidate = implementation(20, 100, var(), vec![id(1)], vec![]);
+    candidate.requirements = vec![condition(var())];
+    let implementations = vec![
+        candidate,
+        implementation(21, 100, Term::Pointer(Box::new(var())), vec![id(1)], vec![]),
+        implementation(
+            22,
+            100,
+            Term::Optional(Box::new(var())),
+            vec![id(1)],
+            vec![],
+        ),
+    ];
+    let ix = index(&implementations);
+    let traits = vec![marker(100)];
+    let mut ctx = context();
+    ctx.assume(Formula::from_predicate(&condition(subject.clone())));
+    let world = World {
+        index: &ix,
+        implementations: &implementations,
+        traits: &traits,
+        assumptions: &[],
+        context: &ctx,
+    };
+    let resolution = world
+        .resolve_instance(&id(100).into(), &subject, Budget::default())
+        .unwrap();
+    assert!(
+        matches!(resolution.types.selection, Selection::Selected(_)),
+        "{}",
+        resolution.types
+    );
+    for (wrapped, expected) in [
+        (Term::Pointer(Box::new(subject.clone())), id(21)),
+        (Term::Optional(Box::new(subject.clone())), id(22)),
+    ] {
+        let resolution = world
+            .resolve_instance(&id(100).into(), &wrapped, Budget::default())
+            .unwrap();
+        assert_eq!(
+            resolution.types.selection,
+            Selection::Selected(expected),
+            "{}",
+            resolution.types
+        );
+    }
+}

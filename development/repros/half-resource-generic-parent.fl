@@ -1,8 +1,9 @@
 {-
-    Deferred parent-interface evidence for a disjunctive generic impl.
-    Reproduce with the real sysroot and --interpret run. Concrete f16/bf16
-    implementations work; this generic child reports an applicable but pending
-    parent implementation. Keep this case for the trait solver follow-up.
+    Regression: parent-interface evidence for a disjunctive generic impl.
+    Run with --sysroot library --build-target x86_64 linux 64 --interpret run;
+    the expected result is true.
+    Eligibility preserves symbolic T while proving that every alternative is
+    admissible, without selecting f16 or bf16 during generic checking.
 -}
 trait Parent {}
 trait Child :- Parent {}

@@ -145,6 +145,14 @@ impl Checker<'_, '_> {
     }
     pub(super) fn intrinsic_pointer_input(&self, ty: &Term) -> bool {
         n::intrinsic_pointer_value(ty)
+            // Formation can retain a rigid scalar constrained to several
+            // primitive domains; instantiated loads still check resources.
+            || self.proved_primitive_family(ty, &[
+                P::Void, P::Bool, P::Char, P::Symbol, P::Integer, P::Float,
+                P::F16, P::Bf16, P::F32, P::F64,
+                P::U8, P::U16, P::U32, P::U64, P::U128, P::Usize,
+                P::I8, P::I16, P::I32, P::I64, P::I128, P::Isize,
+            ])
             || self
                 .context
                 .structural_view(ty, crate::ptc::Budget::default())

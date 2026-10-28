@@ -11,6 +11,69 @@ use std::{
     fmt,
 };
 
+// Eligibility need not reveal one concrete shape. A finite disjunction of
+// admissible shapes can authorize matching while the subject stays symbolic.
+fn eligible_shape(context: &Context, ty: &Term) -> bool {
+    matches!(
+        ty,
+        Term::Primitive(_)
+            | Term::ErrorResult { .. }
+            | Term::Nominal { .. }
+            | Term::Tuple(_)
+            | Term::Record(_)
+            | Term::Optional(_)
+            | Term::Pointer(_)
+            | Term::Function { .. }
+            | Term::ComptimeFunction(_)
+            | Term::UnsafeFunction(_)
+    ) || context.is_tuple_type(ty)
+        || context.is_list_type(ty)
+}
+
+fn prove_eligible_alternatives(
+    context: &Context,
+    subject: &Term,
+    budget: &mut Budget,
+) -> Option<Proof> {
+    budget.steps = budget.steps.checked_sub(context.assumptions().len())?;
+    let mut pending: Vec<_> = context.assumptions().iter().collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut alternatives = Vec::new();
+    while let Some(formula) = pending.pop() {
+        budget.steps = budget.steps.checked_sub(1)?;
+        match formula {
+            Formula::Equal(crate::ptc::Equality(a, b)) => {
+                for ty in [a, b] {
+                    nir::type_computations::charge_term(ty, &mut budget.steps).ok()?;
+                    if eligible_shape(context, ty) && seen.insert(ty.clone()) {
+                        nir::type_computations::charge_term(subject, &mut budget.steps).ok()?;
+                        alternatives.push(Formula::equal(subject.clone(), ty.clone()));
+                    }
+                }
+            }
+            Formula::And(parts) | Formula::Or(parts) => {
+                budget.steps = budget.steps.checked_sub(parts.len())?;
+                pending.extend(parts);
+            }
+            Formula::Not(inner) => pending.push(inner),
+            _ => {}
+        }
+    }
+    if alternatives.is_empty() {
+        return None;
+    }
+    match context.prove_metered(Formula::Or(alternatives), budget) {
+        Outcome::Entailed(proof) => Some(proof),
+        _ => None,
+    }
+}
+
+fn eligible_alternatives(context: &Context, subject: &Term, formula: &Formula) -> bool {
+    matches!(formula, Formula::Or(parts) if !parts.is_empty() && parts.iter().all(|part|
+        matches!(part, Formula::Equal(crate::ptc::Equality(original, shape))
+            if original == subject && eligible_shape(context, shape))))
+}
+
 /// Equality is queried only for Type domains, with the caller's shared budget.
 pub(crate) fn equivalent_domains(
     context: &Context,
@@ -601,11 +664,14 @@ impl ImplementationHead {
                     .0
                 {
                     Ok(Some((shape, proof))) => (shape, Some(proof)),
-                    _ => {
-                        return Err(TypeAssessment::Pending(
-                            "user implementation subject eligibility is unresolved".into(),
-                        ));
-                    }
+                    _ => match prove_eligible_alternatives(context, subject, &mut budget) {
+                        Some(proof) => (subject.clone(), Some(proof)),
+                        None => {
+                            return Err(TypeAssessment::Pending(
+                                "user implementation subject eligibility is unresolved".into(),
+                            ));
+                        }
+                    },
                 }
             }
             other => (other.clone(), None),
@@ -613,24 +679,28 @@ impl ImplementationHead {
         if matches!(shape, Term::Closure { .. } | Term::ContextualClosure { .. }) {
             return Err(TypeAssessment::ForbiddenSubject(shape));
         }
-        if !matches!(
-            shape,
-            Term::Primitive(_)
-                | Term::ErrorResult { .. }
-                | Term::Nominal { .. }
-                | Term::Tuple(_)
-                | Term::Record(_)
-                | Term::Optional(_)
-                | Term::Pointer(_)
-                | Term::Function { .. }
-                | Term::ComptimeFunction(_)
-                | Term::UnsafeFunction(_)
-        ) && !context.is_tuple_type(&shape)
-            && !context.is_list_type(&shape)
+        if !eligible_shape(context, &shape)
+            && !eligibility_proof
+                .as_ref()
+                .is_some_and(|proof| eligible_alternatives(context, subject, &proof.goal))
         {
             return Err(TypeAssessment::Pending(
                 "user implementation subject eligibility is unresolved".into(),
             ));
+        }
+        // A symbolic union can exclude structurally incompatible finer heads
+        // (for example *U against f16 | bf16) without inferring their inputs.
+        if eligibility_proof
+            .as_ref()
+            .is_some_and(|proof| eligible_alternatives(context, subject, &proof.goal))
+            && eligible_shape(context, &self.subject)
+        {
+            if let Outcome::Entailed(proof) = context.prove_metered(
+                Formula::equal(self.subject.clone(), subject.clone()).negate(),
+                &mut budget,
+            ) {
+                return Err(TypeAssessment::Excluded(proof));
+            }
         }
         let parameters = self
             .parameter_binders()
@@ -1463,31 +1533,20 @@ impl ImplementationHead {
             max_depth: budget.max_depth,
         };
         let shape = if let Some(proof) = &evidence.eligibility_proof {
-            let Formula::Equal(Equality(original, shape)) = &proof.goal else {
-                return Err(ProofError::Invalid);
-            };
-            if original != subject {
-                return Err(ProofError::Invalid);
-            }
             context.verify_proof(proof, budget)?;
-            shape
+            match &proof.goal {
+                Formula::Equal(Equality(original, shape)) if original == subject => shape,
+                goal if eligible_alternatives(context, subject, goal) => subject,
+                _ => return Err(ProofError::Invalid),
+            }
         } else {
             subject
         };
-        if !matches!(
-            shape,
-            Term::Primitive(_)
-                | Term::ErrorResult { .. }
-                | Term::Nominal { .. }
-                | Term::Tuple(_)
-                | Term::Record(_)
-                | Term::Optional(_)
-                | Term::Pointer(_)
-                | Term::Function { .. }
-                | Term::ComptimeFunction(_)
-                | Term::UnsafeFunction(_)
-        ) && !context.is_tuple_type(&shape)
-            && !context.is_list_type(&shape)
+        if !eligible_shape(context, shape)
+            && !evidence
+                .eligibility_proof
+                .as_ref()
+                .is_some_and(|proof| eligible_alternatives(context, subject, &proof.goal))
         {
             return Err(ProofError::Invalid);
         }

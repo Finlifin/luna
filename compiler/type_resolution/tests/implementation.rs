@@ -3282,3 +3282,83 @@ fn inherent_normal_form_ownership_belongs_to_the_head_not_its_arguments() {
     };
     assert!(inherent_ownership(&value, declaration.package).is_err());
 }
+
+#[test]
+fn disjunctive_subject_eligibility_keeps_symbolic_identity_and_replays() {
+    use type_resolution::{
+        implementation::TypeAssessment,
+        ptc::{Context, Formula},
+    };
+    let candidate = generic(200, var(1), vec![id(1)]);
+    let subject = var(2);
+    let mut context = Context::default();
+    context.assume(Formula::Or(vec![
+        Formula::equal(subject.clone(), ty(P::F16)),
+        Formula::equal(subject.clone(), ty(P::Bf16)),
+    ]));
+    let TypeAssessment::Applicable(evidence) =
+        candidate.assess_types(&subject, &[], &context, Budget::default())
+    else {
+        panic!("all alternatives are eligible");
+    };
+    assert_eq!(evidence.type_arguments, vec![subject.clone()]);
+    candidate
+        .verify_type_evidence(&evidence, &subject, &[], &context, Budget::default())
+        .unwrap();
+    assert!(
+        candidate
+            .verify_type_evidence(
+                &evidence,
+                &subject,
+                &[],
+                &Context::default(),
+                Budget::default()
+            )
+            .is_err()
+    );
+    assert!(
+        candidate
+            .verify_type_evidence(&evidence, &var(3), &[], &context, Budget::default())
+            .is_err()
+    );
+    assert!(matches!(
+        candidate.assess_types(
+            &subject,
+            &[],
+            &context,
+            Budget {
+                steps: 1,
+                ..Budget::default()
+            }
+        ),
+        TypeAssessment::Pending(_)
+    ));
+    for other in [
+        var(3),
+        Term::Closure {
+            environment: vec![ty(P::Bool)],
+            signature: Box::new(Term::Function {
+                parameters: vec![],
+                result: Box::new(ty(P::Bool)),
+            }),
+        },
+    ] {
+        let mut incomplete = Context::default();
+        incomplete.assume(Formula::Or(vec![
+            Formula::equal(subject.clone(), ty(P::F16)),
+            Formula::equal(subject.clone(), other),
+        ]));
+        assert!(matches!(
+            candidate.assess_types(&subject, &[], &incomplete, Budget::default()),
+            TypeAssessment::Pending(_)
+        ));
+        assert!(
+            candidate
+                .verify_type_evidence(&evidence, &subject, &[], &incomplete, Budget::default())
+                .is_err()
+        );
+    }
+    candidate
+        .verify_type_evidence(&evidence, &subject, &[], &context, Budget::default())
+        .unwrap();
+}

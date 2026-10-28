@@ -8486,3 +8486,33 @@ fn implementation_heads_are_checked_before_member_program_contracts() {
         "required parent interface implementation is not established",
     );
 }
+
+#[test]
+fn generic_parent_implementation_uses_disjunctive_subject_evidence() {
+    let prefix = "mod primitives { pub typealias f16 = .f16'builtin; pub typealias bf16 = .bf16'builtin; } use primitives.*;
+        trait Parent {} trait Child :- Parent {}";
+    accepted(&format!(
+        "{prefix}
+        impl Parent for T where T, requires T == f16 or T == bf16 {{}}
+        impl Child for T where T, requires T == f16 or T == bf16 {{}}"
+    ));
+    rejected(
+        &format!(
+            "{prefix}
+        impl Parent for T where T, requires T == f16 {{}}
+        impl Child for T where T, requires T == f16 or T == bf16 {{}}"
+        ),
+        "required parent interface implementation is not established",
+    );
+    accepted(&format!(
+        "{prefix}
+        fn read(value:*T)->T where T, requires T == f16 or T == bf16 {{value.*}}"
+    ));
+    rejected(
+        &format!(
+            "{prefix} struct Token {{}}
+        fn read(value:*T)->T where T, requires T == f16 or T == Token {{value.*}}"
+        ),
+        "pointer reads of non-intrinsic values require Copy evidence",
+    );
+}

@@ -1,14 +1,10 @@
 use resources.{Clone, Copy};
 
 -- Native half precision scalars copy their representation unchanged.
-impl Clone for f16 {
+impl Clone for T where T, requires T == f16 or T == bf16 {
     fn clone(*self) -> Self { self.* }
 }
 impl Copy for f16 {}
-
-impl Clone for bf16 {
-    fn clone(*self) -> Self { self.* }
-}
 impl Copy for bf16 {}
 
 {-
