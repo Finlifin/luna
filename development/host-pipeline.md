@@ -4103,3 +4103,32 @@ python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/rele
   O0 三项实际 native 用例通过 (`/tmp/luna-library-8r07_5wz/summary.json`)。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
   通过 (`/tmp/luna-tools-qz6pk0nk/result.json`)；`git diff --check` 通过。
+
+## 复用完整布局的析构平凡性证明
+
+同一 CleanupSession 现在缓存完整布局是否不含自定义析构责任的最终结论。肯定
+和否定结论都可复用：自定义析构导致的 false 是稳定结果，预算耗尽或未完成查询
+则不是。缓存只在完整组件遍历成功后写入，命中仍对完整类型键计费，不授予 Copy
+或内存访问许可，也不缓存运行时构造状态。move analyzer 的已证明类型从线性
+列表改为集合，避免每次命中都遍历无关类型；传递至被调函数分析时仍逐项计费。
+
+回归先取得包含 64 个字段的布局，再以不足预算连续查询两次，要求两次都失败。
+补足预算后分别验证普通记录为 true、自定义析构类型及其可选包装记录为 false；
+随后 16 次命中消耗 16 个名义类型键预算，零预算仍失败。此证据仅说明布局证明
+查询的工作量，不构成 wall-clock 加速或整个编译管线的预算保证。
+
+最终验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test drop --test library_iteration --test conditional_capture_cleanup --test temporary_method_cleanup --test match_cleanup`：
+  1053 项通过 (`/tmp/luna-tools-55dem_jt/result.json`，退出 0)，包含 997 项
+  Drop、41 项迭代、13 项匹配清理及条件捕获、临时方法清理各一项。
+- `python3 -B development/library_check.py --release --stage sysroot-iteration`：
+  显式 200,000 预算的 O0 三项通过 (`/tmp/luna-library-r2q700i_/summary.json`)。
+- `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-iteration.fl --sysroot library --test-native --inline-functions --fuel 200000 --opt-level 3`：
+  O3 三项通过 (`/tmp/luna-tools-e406943_/result.json`)。
+- 同一 native 命令去掉 `--fuel 200000 --opt-level 3` 后，默认预算仍在长组合链
+  上报告 `memory summary type budget exhausted`，另两项通过
+  (`/tmp/luna-tools-n7tm1da3/result.json`，退出 1)。因此尚未解决整条链的默认
+  预算问题，不以局部缓存收益代替端到端结论。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过 (`/tmp/luna-tools-kfmq_kk9/result.json`)；`git diff --check` 通过。

@@ -2097,7 +2097,7 @@ impl fmt::Display for EffectResultInput {
 
 struct Analyzer<'a, F, G> {
     // Captured in this analysis's immutable cleanup world; never grants Copy.
-    trivial_cleanup_types: Vec<Term>,
+    trivial_cleanup_types: std::collections::HashSet<Term>,
     cleanup: Option<&'a mut dyn CleanupPolicy>,
     package: Option<&'a Package>,
     exit_contract: Option<&'a Function>,
@@ -11070,11 +11070,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     }
     fn type_cleanup_is_trivial(&mut self, ty: &Term, source: SourceRange) -> Result<bool, Error> {
         super::memory::bound_type(ty, &mut self.fuel).map_err(|e| error(source, e))?;
-        for known in &self.trivial_cleanup_types {
-            super::memory::bound_type(known, &mut self.fuel).map_err(|e| error(source, e))?;
-            if known == ty {
-                return Ok(true);
-            }
+        if self.trivial_cleanup_types.contains(ty) {
+            return Ok(true);
         }
         let trivial = if let Some(cleanup) = self.cleanup.as_deref_mut() {
             cleanup
@@ -11084,7 +11081,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             false
         };
         if trivial {
-            self.trivial_cleanup_types.push(ty.clone());
+            self.trivial_cleanup_types.insert(ty.clone());
         }
         Ok(trivial)
     }
@@ -15601,7 +15598,7 @@ fn analyze_with_shapes<'a>(
         effect_result_inputs,
         borrowed_fields,
         &[],
-        &[],
+        &Default::default(),
     )
 }
 
@@ -15619,7 +15616,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
     effect_result_inputs: Vec<EffectResultInput>,
     borrowed_fields: &[BorrowedField],
     borrowed_code: &[BorrowedCode],
-    trivial_cleanup_types: &[Term],
+    trivial_cleanup_types: &std::collections::HashSet<Term>,
 ) -> Result<Report, Error> {
     // Callers supply many distinct closure types. Keep the large recursive
     // analyzer shared instead of monomorphizing it for every policy closure.
@@ -15641,7 +15638,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         effect_memory_inputs.push(input.memory_input(&mut fuel, source)?);
     }
     let mut analyzer = Analyzer {
-        trivial_cleanup_types: trivial_cleanup_types.to_vec(),
+        trivial_cleanup_types: trivial_cleanup_types.clone(),
         cleanup,
         package,
         exit_contract: Some(function),
@@ -16229,7 +16226,7 @@ pub fn analyze_in_package_with_borrowed_code_context<'a>(
         effects,
         borrowed_fields,
         borrowed_code,
-        &[],
+        &Default::default(),
     )
 }
 

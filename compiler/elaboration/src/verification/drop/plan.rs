@@ -983,6 +983,9 @@ pub struct CleanupSession<'a, 'w> {
     bindings: Vec<AcquiredCleanup>,
     // Paths refer only to immutable acquired trees, never runtime positions.
     binding_paths: std::collections::HashMap<Term, (usize, Vec<usize>)>,
+    // Completed yes/no answers about immutable acquired layouts. A custom
+    // destructor is a stable negative result, unlike a failed query.
+    trivial_layouts: std::collections::HashMap<Term, bool>,
     rejection_stack: Vec<Term>,
     memory_inert_stack: Vec<Term>,
     read_footprint_stack: Vec<Term>,
@@ -1006,6 +1009,7 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
             budget,
             bindings: vec![],
             binding_paths: Default::default(),
+            trivial_layouts: Default::default(),
             rejection_stack: vec![],
             memory_inert_stack: vec![],
             read_footprint_stack: vec![],
@@ -1044,6 +1048,10 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
 }
 impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
     fn is_trivial(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
+        crate::verification::memory::bound_type(ty, fuel)?;
+        if let Some(trivial) = self.trivial_layouts.get(ty) {
+            return Ok(*trivial);
+        }
         self.acquire(ty, fuel)?;
         let binding = self.find(ty, fuel)?.ok_or("missing acquired cleanup")?;
         let mut trivial = true;
@@ -1051,6 +1059,7 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
             trivial &= matches!(resolution, Resolution::NoCustomDrop(_));
             Ok(())
         })?;
+        self.trivial_layouts.insert(ty.clone(), trivial);
         Ok(trivial)
     }
     fn is_memory_inert(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {

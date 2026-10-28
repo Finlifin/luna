@@ -39674,3 +39674,32 @@ fn failed_cleanup_indexing_does_not_publish_partial_bindings() {
         );
     });
 }
+
+#[test]
+fn cleanup_triviality_reuses_complete_layout_evidence_without_caching_failure() {
+    use elaboration::verification::{drop::CleanupSession, moves::CleanupPolicy};
+    let mut source = String::from("trait Retire {fn drop(*self);}struct Plain {");
+    for index in 0..64 {
+        source.push_str(&format!("field{index}:bool,"));
+    }
+    source.push_str("}struct Custom {plain:Plain}impl Retire for Custom {fn drop(*self) {}}struct Wrapped {payload:?Custom}");
+    let package = compile(&source);
+    world(&package, |world, _| {
+        let protocol = package.traits[0].declaration;
+        let mut session = CleanupSession::new(&package, world, protocol, Budget::default());
+        for (name, expected) in [("Plain", true), ("Custom", false), ("Wrapped", false)] {
+            let ty = nominal(&package, name, vec![]);
+            session.acquire(&ty, &mut 100_000).unwrap();
+            // Acquiring a layout alone must not publish an unfinished proof.
+            assert!(session.is_trivial(&ty, &mut 8).is_err());
+            assert!(session.is_trivial(&ty, &mut 8).is_err());
+            assert_eq!(session.is_trivial(&ty, &mut 100_000).unwrap(), expected);
+            assert!(session.is_trivial(&ty, &mut 0).is_err());
+            let mut fuel = 16;
+            for _ in 0..16 {
+                assert_eq!(session.is_trivial(&ty, &mut fuel).unwrap(), expected);
+            }
+            assert_eq!(fuel, 0, "charge the nominal key on every hit");
+        }
+    });
+}
