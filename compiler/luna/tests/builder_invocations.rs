@@ -2121,3 +2121,164 @@ fn builder_diagnostics_identify_malformed_source_drafts() {
         assert!(error.contains("at (source "), "{error}");
     }
 }
+
+#[test]
+fn enum_builder_edits_payloads_groups_and_runtime_patterns() {
+    let fixture = Fixture::new(&format!(
+        "typealias Type=.Type'builtin; typealias u8=.u8'builtin; {}",
+        include_str!("../../../development/examples/sysroot-edited-enum.fl")
+    ));
+    let (Artifact::Nir(package), result, _) = fixture.invoke_meta("inspect_enum").unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(result, Value::Bool(true));
+    assert_eq!(
+        luna::execution::interpret(&package, "exercise_enum", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn enum_builder_edits_preserve_snapshots_and_reject_out_of_bounds_indices() {
+    let fixture = Fixture::new("enum Source {group.{old(bool)}}
+        comptime fn inspect()->bool {
+            var builder=meta.EnumBuilder.from_type(Source);
+            let snapshot=builder;
+            let published=builder.Build();
+            let negative=builder.remove_variant(-1);
+            let far=builder.insert_unit(99999999999999999999999999999999999999999999999,.bad);
+            let past=builder.replace_tuple(1,.bad,[bool]);
+            let group_negative=builder.insert_group(-1,.bad);
+            let group_past=builder.replace_group(1,.bad);
+            let group_far=builder.remove_group(99999999999999999999999999999999999999999999999);
+            let changed=builder.replace_named(0,.new,[.flag],[bool],.group=[.group]);
+            let newer=builder.Build();
+            let saved=snapshot.Build();
+            let unit_changed=builder.replace_unit(0,.empty,.group=[.group]);
+            let unit=builder.Build();
+            not negative and not far and not past and not group_negative and not group_past and not group_far
+                and unit_changed and meta.enum_variant_shapes(unit)[0]==.unit
+                and meta.length(meta.enum_variant_field_names(unit)[0])==0
+                and meta.length(meta.enum_variant_field_types(unit)[0])==0
+                and changed and published!=newer and saved!=published and saved!=newer
+                and meta.enum_variant_paths(published)[0][1]==.old
+                and meta.enum_variant_paths(saved)[0][1]==.old
+                and meta.enum_variant_shapes(saved)[0]==.tuple
+                and meta.length(meta.enum_variant_field_names(saved)[0])==0
+                and meta.length(meta.enum_variant_paths(newer))==1
+                and meta.length(meta.enum_group_paths(newer))==1
+                and meta.enum_variant_paths(newer)[0][1]==.new
+                and meta.enum_variant_shapes(newer)[0]==.named
+                and meta.enum_variant_field_names(newer)[0][0]==.flag
+        }");
+    assert_eq!(fixture.invoke_meta("inspect").unwrap().1, Value::Bool(true));
+}
+
+#[test]
+fn enum_builder_can_remove_every_variant_and_repopulate_the_draft() {
+    let fixture = Fixture::new("comptime fn inspect()->bool {
+        var builder=meta.EnumBuilder.new();
+        let missing=builder.remove_variant(0);
+        let group_missing=builder.replace_group(0,.bad);
+        let replacement=builder.replace_unit(0,.bad);
+        let first=builder.insert_tuple(0,.only,[bool]);
+        let removed=builder.remove_variant(0);
+        let empty=builder.Build();
+        let added=builder.insert_group(0,.group);
+        let inserted=builder.insert_named(0,.value,[.flag],[bool],.group=[.group]);
+        let filled=builder.Build();
+        not missing and not group_missing and not replacement and first and removed and added and inserted
+            and meta.length(meta.enum_variant_paths(empty))==0
+            and meta.length(meta.enum_group_paths(empty))==0
+            and meta.enum_variant_paths(filled)[0][0]==.group
+            and meta.enum_variant_field_types(filled)[0][0]==bool
+    }");
+    assert_eq!(fixture.invoke_meta("inspect").unwrap().1, Value::Bool(true));
+}
+
+#[test]
+fn enum_builder_edits_require_valid_payloads_and_explicit_group_repair() {
+    for (edit, repair) in [
+        (
+            "builder.replace_unit(1,.one,.group=[.group])",
+            "builder.replace_unit(1,.two)",
+        ),
+        (
+            "builder.replace_named(0,.one,[.flag],[bool,bool],.group=[.group])",
+            "builder.replace_named(0,.one,[.flag],[bool],.group=[.group])",
+        ),
+        (
+            "builder.replace_group(0,.renamed)",
+            "builder.replace_tuple(0,.one,[bool],.group=[.renamed])",
+        ),
+        (
+            "builder.remove_group(0)",
+            "builder.replace_tuple(0,.one,[bool])",
+        ),
+        ("builder.insert_group(1,.group)", "builder.remove_group(1)"),
+    ] {
+        let fixture = Fixture::new(&format!("enum Source {{group.{{one(bool)}},two}}
+            comptime fn draft()->meta.EnumBuilder {{var builder=meta.EnumBuilder.from_type(Source); let edited={edit}; assumes edited; builder}}
+            comptime fn Make()->.Type'builtin {{draft().Build()}}
+            comptime fn repaired()->bool {{var builder=draft(); let fixed={repair}; assumes fixed; let result=builder.Build(); meta.length(meta.enum_variant_paths(result))==2}}"));
+        assert!(
+            fixture.invoke_meta("Make").is_err(),
+            "accepted invalid edit {edit}"
+        );
+        assert_eq!(
+            fixture.invoke_meta("repaired").unwrap().1,
+            Value::Bool(true),
+            "{edit}"
+        );
+    }
+}
+
+#[test]
+fn enum_builder_nested_group_edits_preserve_opaque_payload_types() {
+    let fixture = Fixture::new(
+        "pure comptime fn Identity<T> -> .Type'builtin {T}
+        comptime fn inspect()->bool {
+            var builder=meta.EnumBuilder.new();
+            let root=builder.insert_group(0,.root);
+            let child=builder.insert_group(1,.child,.parent=[.root]);
+            let inserted=builder.insert_tuple(0,.data,[Identity<bool>],.group=[.root,.child]);
+            let old=builder.Build();
+            let renamed=builder.replace_group(1,.branch,.parent=[.root]);
+            let moved=builder.replace_tuple(0,.data,[Identity<bool>],.group=[.root,.branch]);
+            let edited=builder.Build();
+            let groups=meta.enum_group_paths(edited);
+            let paths=meta.enum_variant_paths(edited);
+            let types=meta.enum_variant_field_types(edited);
+            root and child and inserted and renamed and moved
+                and groups[1][0]==.root and groups[1][1]==.branch
+                and paths[0][0]==.root and paths[0][1]==.branch and paths[0][2]==.data
+                and types[0][0]==Identity<bool>
+                and meta.enum_variant_paths(old)[0][1]==.child
+        }",
+    );
+    let (Artifact::Nir(package), result, _) = fixture.invoke_meta("inspect").unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(result, Value::Bool(true));
+    let generated: Vec<_> = package
+        .enums
+        .iter()
+        .filter(|item| item.name == "Generated")
+        .collect();
+    assert_eq!(generated.len(), 2);
+    for item in generated {
+        let nir::Term::NormalForm {
+            head, arguments, ..
+        } = &item.variants[0].fields[0]
+        else {
+            panic!("payload head must remain opaque")
+        };
+        assert!(
+            package
+                .normal_forms
+                .iter()
+                .any(|item| item.declaration == *head)
+        );
+        assert_eq!(arguments, &vec![nir::Term::Primitive(nir::Primitive::Bool)]);
+    }
+}

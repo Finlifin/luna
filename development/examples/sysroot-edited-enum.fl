@@ -1,0 +1,83 @@
+{-
+    Reflect an enum, edit payload shapes and group paths, then use the generated
+    type normally. Indices describe declaration order, not discriminant values.
+-}
+enum Source { net.{old(bool), dead}, spare.{} }
+
+comptime fn EditedEnum() -> Type {
+    var builder = meta.EnumBuilder.from_type(Source, .name = .EditedEnum);
+    let replaced_payload = builder.replace_tuple(0, .data, [u8], .group = [.net]);
+    assumes replaced_payload;
+    let replaced_unit = builder.replace_unit(1, .ready);
+    assumes replaced_unit;
+    let inserted_record = builder.insert_named(1, .record, [.old], [u8], .group = [.net]);
+    assumes inserted_record;
+    let inserted_idle = builder.insert_unit(0, .idle);
+    assumes inserted_idle;
+    let removed_group = builder.remove_group(1);
+    assumes removed_group;
+    let inserted_group = builder.insert_group(1, .io);
+    assumes inserted_group;
+    let renamed_group = builder.replace_group(1, .remote);
+    assumes renamed_group;
+    let inserted_packet = builder.insert_tuple(4, .packet, [bool], .group = [.remote]);
+    assumes inserted_packet;
+    let removed_ready = builder.remove_variant(3);
+    assumes removed_ready;
+    let replaced_record = builder.replace_named(2, .record, [.flag], [bool], .group = [.net]);
+    assumes replaced_record;
+    let renamed_idle = builder.replace_unit(0, .waiting);
+    assumes renamed_idle;
+    let negative_index = builder.insert_tuple(-1, .wrong, [bool]);
+    assumes not negative_index;
+    let past_end = builder.replace_named(4, .wrong, [], []);
+    assumes not past_end;
+    let missing_group = builder.remove_group(2);
+    assumes not missing_group;
+    builder.Build()
+}
+
+typealias Event = EditedEnum();
+
+fn read_event(value: Event) -> bool {
+    value match {
+        .waiting => false,
+        .net.data(byte) => byte == 7,
+        .net.record { flag: flag } => flag,
+        .remote.packet(flag) => flag,
+    }
+}
+
+fn exercise_enum() -> bool {
+    not read_event(Event.waiting) and read_event(Event.net.data(7))
+        and read_event(Event.net.record { flag: true })
+        and read_event(Event.remote.packet(true))
+}
+
+comptime fn inspect_enum() -> bool {
+    let groups = meta.enum_group_paths(Event);
+    let paths = meta.enum_variant_paths(Event);
+    let shapes = meta.enum_variant_shapes(Event);
+    let names = meta.enum_variant_field_names(Event);
+    let types = meta.enum_variant_field_types(Event);
+    let original = meta.enum_variant_paths(Source);
+    meta.length(groups) == 2 and groups[0][0] == .net and groups[1][0] == .remote
+        and meta.length(paths) == 4 and paths[0][0] == .waiting
+        and paths[1][0] == .net and paths[1][1] == .data
+        and paths[2][1] == .record and paths[3][0] == .remote and paths[3][1] == .packet
+        and shapes[0] == .unit and shapes[1] == .tuple and shapes[2] == .named
+        and shapes[3] == .tuple and meta.length(types[0]) == 0
+        and meta.length(names[1]) == 0 and names[2][0] == .flag
+        and types[1][0] == u8 and types[2][0] == bool and types[3][0] == bool
+        and meta.length(original) == 2 and original[0][1] == .old
+        and original[1][1] == .dead and meta.length(meta.enum_group_paths(Source)) == 2
+}
+
+test edited_enum_values {
+    let accepted = exercise_enum();
+    assumes accepted;
+}
+
+test edited_enum_reflection {
+    inline if inspect_enum() { assumes true; } else { assumes false; };
+}

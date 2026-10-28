@@ -266,6 +266,47 @@ typealias Mirrored = Mirror();
 
 完整 native 示例见 [host-mirrored-enum.fl](../../development/examples/host-mirrored-enum.fl)。
 
+EnumBuilder 同时支持编辑已有的变体和分组：
+
+| 接口 | 行为 |
+| --- | --- |
+| `insert_unit(index, name, .group = [])` | 在逻辑索引前插入 unit 变体 |
+| `insert_tuple(index, name, fields, .group = [])` | 插入位置 payload 变体 |
+| `insert_named(index, name, names, fields, .group = [])` | 插入具名 payload 变体 |
+| `replace_unit` / `replace_tuple` / `replace_named` | 参数同对应 insert；替换已有变体，可改变 payload 形状 |
+| `remove_variant(index)` | 删除一个变体及其 payload 描述 |
+| `insert_group(index, name, .parent = [])` | 在分组列表中插入路径 |
+| `replace_group(index, name, .parent = [])` | 替换已有分组路径 |
+| `remove_group(index)` | 删除一个分组声明 |
+
+这些方法返回 bool。插入允许 `index == length`；替换和删除要求索引指向已有
+条目。负索引、越界和超大 Integer 索引返回 false，草稿不变。变体编辑先准备
+全部新的平行列表，再写入各列表槽位。它使用 List 的编译期不可变数据传送，
+不为整个 builder 授予隐式 Copy。
+
+索引来自反射的逻辑声明顺序，与编码判别值无关。组与变体列表分别编辑：
+重命名或删除组不会自动移动后代，须显式更新后代的路径。允许暂时不完整的
+草稿；重复路径、缺失父组、payload 名称/类型不匹配仍由 Build 拒绝。
+保存的草稿值和已经生成的 Type 不随后续编辑改变。编辑不展开 payload Type
+的 normal-form 头，也不复制源类型的 ABI、属性或 trait 实现。
+
+```flurry
+enum Source { old.{data(bool)}, stopped }
+
+comptime fn Revised() -> Type {
+    var builder = meta.EnumBuilder.from_type(Source);
+    let renamed = builder.replace_group(0, .net);
+    let moved = builder.replace_tuple(0, .data, [u8], .group = [.net]);
+    let inserted = builder.insert_named(1, .record, [.ready], [bool], .group = [.net]);
+    assumes renamed and moved and inserted;
+    builder.Build()
+}
+```
+
+完整 sysroot 示例见 [sysroot-edited-enum.fl](../../development/examples/sysroot-edited-enum.fl)，
+运行 `python3 -B development/library_check.py --release --stage sysroot-enum-builder`。
+
+
 ### 转换后收集列表
 
 `filter_map(values, transform)` 要求 comptime 回调返回 `?U`，按输入顺序收集

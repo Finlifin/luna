@@ -386,6 +386,95 @@ impl EnumBuilder {
         append(self.field_types, fields);
     }
 
+    {-
+        Indices refer to logical declaration order, never encoded tags. Editing
+        validates bounds; Build validates paths, payloads and group references.
+        Prepare all parallel lists before committing any part of a variant.
+    -}
+    pub comptime fn insert_unit(*self, index: .Integer'builtin, name: .Symbol'builtin,
+        .group: List<.Symbol'builtin> = []) -> bool {
+        self.edit_variants(index, index, [concat(group, [name])], [.unit], [[]], [[]])
+    }
+
+    pub comptime fn insert_tuple(*self, index: .Integer'builtin, name: .Symbol'builtin, fields: List<.Type'builtin>,
+        .group: List<.Symbol'builtin> = []) -> bool {
+        self.edit_variants(index, index, [concat(group, [name])], [.tuple], [[]], [fields])
+    }
+
+    pub comptime fn insert_named(*self, index: .Integer'builtin, name: .Symbol'builtin, names: List<.Symbol'builtin>, fields: List<.Type'builtin>,
+        .group: List<.Symbol'builtin> = []) -> bool {
+        self.edit_variants(index, index, [concat(group, [name])], [.named], [names], [fields])
+    }
+
+    pub comptime fn replace_unit(*self, index: .Integer'builtin, name: .Symbol'builtin,
+        .group: List<.Symbol'builtin> = []) -> bool {
+        self.edit_variants(index, index + 1, [concat(group, [name])], [.unit], [[]], [[]])
+    }
+
+    pub comptime fn replace_tuple(*self, index: .Integer'builtin, name: .Symbol'builtin, fields: List<.Type'builtin>,
+        .group: List<.Symbol'builtin> = []) -> bool {
+        self.edit_variants(index, index + 1, [concat(group, [name])], [.tuple], [[]], [fields])
+    }
+
+    pub comptime fn replace_named(*self, index: .Integer'builtin, name: .Symbol'builtin, names: List<.Symbol'builtin>, fields: List<.Type'builtin>,
+        .group: List<.Symbol'builtin> = []) -> bool {
+        self.edit_variants(index, index + 1, [concat(group, [name])], [.named], [names], [fields])
+    }
+
+    pub comptime fn remove_variant(*self, index: .Integer'builtin) -> bool {
+        self.edit_variants(index, index + 1, [], [], [], [])
+    }
+
+    comptime fn edit_variants(*self, start: .Integer'builtin, end: .Integer'builtin,
+        paths: List<List<.Symbol'builtin>>, shapes: List<.Symbol'builtin>,
+        names: List<List<.Symbol'builtin>>, types: List<List<.Type'builtin>>) -> bool {
+        let next_paths = replace_range<List<.Symbol'builtin>>(self.variant_names.*, start, end, paths) match {
+            value? => value, null => return false,
+        };
+        let next_shapes = replace_range<.Symbol'builtin>(self.shapes.*, start, end, shapes) match {
+            value? => value, null => return false,
+        };
+        let next_names = replace_range<List<.Symbol'builtin>>(self.field_names.*, start, end, names) match {
+            value? => value, null => return false,
+        };
+        let next_types = replace_range<List<.Type'builtin>>(self.field_types.*, start, end, types) match {
+            value? => value, null => return false,
+        };
+        self.variant_names.* = next_paths;
+        self.shapes.* = next_shapes;
+        self.field_names.* = next_names;
+        self.field_types.* = next_types;
+        true
+    }
+
+    {-
+        Group edits change only the group declaration list. Descendant paths
+        remain explicit; repair them before Build if a parent was renamed or
+        removed. This permits coordinated edits without silently moving cases.
+    -}
+    pub comptime fn insert_group(*self, index: .Integer'builtin, name: .Symbol'builtin,
+        .parent: List<.Symbol'builtin> = []) -> bool {
+        self.edit_groups(index, index, [concat(parent, [name])])
+    }
+
+    pub comptime fn replace_group(*self, index: .Integer'builtin, name: .Symbol'builtin,
+        .parent: List<.Symbol'builtin> = []) -> bool {
+        self.edit_groups(index, index + 1, [concat(parent, [name])])
+    }
+
+    pub comptime fn remove_group(*self, index: .Integer'builtin) -> bool {
+        self.edit_groups(index, index + 1, [])
+    }
+
+    comptime fn edit_groups(*self, start: .Integer'builtin, end: .Integer'builtin,
+        paths: List<List<.Symbol'builtin>>) -> bool {
+        let next = replace_range<List<.Symbol'builtin>>(self.groups.*, start, end, paths) match {
+            value? => value, null => return false,
+        };
+        self.groups.* = next;
+        true
+    }
+
     pub comptime fn Build(self) -> .Type'builtin {
         .build_enum_paths'builtin(self.name, self.groups, self.variant_names, self.shapes, self.field_names, self.field_types)
     }

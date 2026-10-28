@@ -4518,3 +4518,48 @@ Validation from `/home/fin/luna`:
 This fixes implemented signature-template and member-cloning paths; shared-body
 function templates and all remaining generation features are not thereby
 implemented. Build observations still use conservative request-wide cache keys.
+
+
+### Editable enum definition drafts (2026-10-28)
+
+Extended the real meta.EnumBuilder with insert/replace operations for unit,
+tuple and named variants, remove_variant, and insert/replace/remove_group.
+Indices refer to logical declaration order. Invalid bounds leave the draft
+unchanged; each variant edit prepares all parallel replacement lists before
+writing any slot. Group changes leave descendants explicit, and Build still
+rejects unrepaired parents, duplicate paths and malformed payloads. Published
+Types and saved drafts remain independent. Payload normal-form heads are
+preserved, without asserting equality or inequality to their factory bodies.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations`
+  exited 0: 61 tests passed at `/tmp/luna-tools-r2c8xag8/result.json`, covering the
+  new edits, empty drafts, snapshots, invalid bounds, rejected Build and repair.
+- After adding nested-parent/opaque-payload coverage and a named-to-unit check,
+  `python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations enum_builder_`
+  exited 0: 10 relevant tests passed, 52 filtered out. Evidence:
+  `/tmp/luna-tools-zq7m_cjo/result.json`. The unaffected cases were not repeated.
+- `python3 -B development/library_check.py --release --stage sysroot-enum-builder --stage sysroot-builders`
+  exited 0: two edited enum and two existing struct cases passed with the real
+  sysroot, public builder APIs and native resource checking.
+  Evidence: `/tmp/luna-library-j26t8mzf/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-edited-enum.fl --sysroot library --test-native --opt-level 3`
+  exited 0, both enum cases passed; `/tmp/luna-tools-v23vegi4/result.json`.
+- `python3 -B -m unittest discover -s development -p test_library_check.py`
+  exited 0: 13 orchestration tests passed with strict native result counts.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+  exited 0; `/tmp/luna-tools-c8roatnr/result.json`. `git diff --check` passed.
+
+Initial fixture predicates called mutating editors directly inside assumes;
+`/tmp/luna-tools-3gxbg03o` rejected those effectful specifications. Examples now
+bind call results before checking predicates. An attempted whole-builder pointer
+replacement was rejected for missing aggregate Copy/Drop evidence
+(`/tmp/luna-tools-urzv50mc`); the final code uses the established immutable List
+slot path and does not relax aggregate permissions. An initial opaque Type
+inequality check was unresolved (`/tmp/luna-tools-8nddagfj`); the corrected test
+checks reflexive Type identity and inspects the preserved NIR head instead.
+
+Enum ABI encodings, generic declaration builders, field defaults, attributes,
+and function/trait/impl builders remain separate incomplete work. These editor
+methods do not claim complete SoA/definition-builder support.
