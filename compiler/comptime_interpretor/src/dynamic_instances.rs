@@ -55,6 +55,7 @@ impl Interpreter<'_> {
             .instantiate_parameters(binders, arguments)
             .map_err(|_| self.failure(ErrorKind::Type, Some(argument.value.source)))?;
         let prepared = nir::program::CallArgument {
+            passing: argument.passing,
             parameter: argument.parameter,
             value,
             is_default: true,

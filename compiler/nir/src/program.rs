@@ -1378,8 +1378,25 @@ impl Place {
         self.fields.is_empty()
     }
 }
+/// Argument transport is distinct from the source type. Comptime references
+/// carry invocation-local storage; they never introduce a pointer type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArgumentPassing {
+    #[default]
+    Value,
+    ComptimeReference,
+}
+impl fmt::Display for ArgumentPassing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Value => "value",
+            Self::ComptimeReference => "comptime-reference",
+        })
+    }
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallArgument {
+    pub passing: ArgumentPassing,
     pub parameter: usize,
     pub value: Expr,
     pub is_default: bool,
@@ -1388,8 +1405,8 @@ impl fmt::Display for CallArgument {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(argument (parameter {}) (default {}) (value {}))",
-            self.parameter, self.is_default, self.value
+            "(argument (parameter {}) (default {}) (passing {}) (value {}))",
+            self.parameter, self.is_default, self.passing, self.value
         )
     }
 }

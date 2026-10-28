@@ -1393,6 +1393,7 @@ fn dynamic_trait_default_package() -> Package {
     *parameter_bindings = interface_bindings.clone();
     *arguments = vec![
         nir::program::CallArgument {
+            passing: Default::default(),
             parameter: 0,
             is_default: true,
             value: Expr {
@@ -1405,6 +1406,7 @@ fn dynamic_trait_default_package() -> Package {
             },
         },
         nir::program::CallArgument {
+            passing: Default::default(),
             parameter: 1,
             is_default: true,
             value: Expr {

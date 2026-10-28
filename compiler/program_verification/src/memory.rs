@@ -10325,6 +10325,7 @@ mod borrowed_capture_scope_tests {
             let call = node(K::Call {
                 callee: Box::new(node(K::Unit)),
                 arguments: vec![CallArgument {
+                    passing: Default::default(),
                     parameter: 0,
                     value: address(),
                     is_default,

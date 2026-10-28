@@ -67,6 +67,7 @@ fn tree() -> Expr {
                 }),
             )),
             arguments: vec![CallArgument {
+                passing: Default::default(),
                 parameter: 0,
                 value: flag(6),
                 is_default: true,

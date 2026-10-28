@@ -354,6 +354,7 @@ impl Domain {
                         .iter()
                         .map(|argument| {
                             Ok(nir::program::CallArgument {
+                                passing: argument.passing,
                                 parameter: argument.parameter,
                                 is_default: argument.is_default,
                                 value: self.opaque_argument(&argument.value, fuel, depth + 1)?,
@@ -468,6 +469,7 @@ mod tests {
                     }),
                 }),
                 arguments: vec![CallArgument {
+                    passing: Default::default(),
                     parameter: 0,
                     is_default: false,
                     value: Expr {

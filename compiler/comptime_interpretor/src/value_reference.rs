@@ -142,6 +142,41 @@ impl fmt::Debug for ValueReference {
     }
 }
 
+impl crate::Interpreter<'_> {
+    /// Preserve a local slot's identity instead of reading a value snapshot.
+    /// Computed receivers get a private slot after evaluating exactly once.
+    pub(super) fn prepare_value_reference(
+        &mut self,
+        expr: &crate::Expr,
+        environment: &mut crate::environment::Environment,
+    ) -> Result<crate::Flow, crate::Error> {
+        self.tick(Some(expr.source))?;
+        if let crate::K::Local(binding) = expr.kind {
+            let value = environment
+                .remove(&binding)
+                .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(expr.source)))?;
+            let storage = match value {
+                Value::Storage(storage) => storage,
+                value => Storage::new(value),
+            };
+            environment.insert(binding, Value::Storage(storage.clone()));
+            return Ok(crate::Flow::Value(Value::Storage(storage)));
+        }
+        if matches!(
+            expr.kind,
+            crate::K::Field { .. } | crate::K::AnonymousField { .. } | crate::K::ReadPointer(_)
+        ) {
+            return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
+        }
+        match self.eval(expr, environment)? {
+            crate::Flow::Value(value) => {
+                Ok(crate::Flow::Value(Value::Storage(Storage::new(value))))
+            }
+            control => Ok(control),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +368,196 @@ mod invocation_tests {
                 ("left".into(), Value::Bool(true)),
                 ("right".into(), Value::Bool(true))
             ])
+        );
+    }
+}
+
+#[cfg(test)]
+mod call_tests {
+    use crate::*;
+    use nir::program::{ArgumentPassing, CallArgument, Function, FunctionPhase, Place};
+    fn expr(kind: K) -> Expr {
+        Expr {
+            kind,
+            ty: Term::Primitive(Primitive::Bool),
+            source: SourceRange { start: 1, end: 2 },
+        }
+    }
+    fn setter() -> Function {
+        let binding = LocalId { owner: 2, index: 0 };
+        Function {
+            phase: FunctionPhase::Comptime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration: DeclarationId {
+                package: 1,
+                local: 2,
+            },
+            name: "set".into(),
+            signature: Term::Function {
+                parameters: vec![nir::Parameter {
+                    sort: nir::Sort::Runtime,
+                    ty: Term::Primitive(Primitive::Bool),
+                }],
+                result: Box::new(Term::Primitive(Primitive::Bool)),
+            },
+            parameters: vec![binding],
+            defaults: vec![],
+            body: expr(K::Block {
+                statements: vec![Expr {
+                    ty: Term::Primitive(Primitive::Void),
+                    source: SourceRange { start: 1, end: 2 },
+                    kind: K::Assign {
+                        place: Place {
+                            root: binding,
+                            fields: vec![],
+                        },
+                        value: Box::new(expr(K::Literal(Literal::Bool(true)))),
+                    },
+                }],
+                result: Some(Box::new(expr(K::Local(binding)))),
+            }),
+        }
+    }
+    fn call(target: &Function, passing: ArgumentPassing, value: Expr) -> Expr {
+        expr(K::Call {
+            callee: Box::new(Expr {
+                ty: target.callable_type(),
+                ..expr(K::Function(target.declaration))
+            }),
+            arguments: vec![CallArgument {
+                parameter: 0,
+                value,
+                is_default: false,
+                passing,
+            }],
+            parameter_bindings: target.parameters.clone(),
+        })
+    }
+    #[test]
+    fn explicit_reference_call_updates_the_callers_slot_but_value_call_does_not() {
+        let target = setter();
+        let package = Package {
+            functions: vec![target.clone()],
+            ..Default::default()
+        };
+        let binding = LocalId { owner: 1, index: 0 };
+        for passing in [ArgumentPassing::Value, ArgumentPassing::ComptimeReference] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut environment = Environment::new();
+            environment.insert(binding, Value::Bool(false));
+            let call = call(&target, passing, expr(K::Local(binding)));
+            assert!(matches!(
+                vm.eval(&call, &mut environment).unwrap(),
+                Flow::Value(Value::Bool(true))
+            ));
+            assert_eq!(
+                vm.local_value(&environment, binding, None).unwrap(),
+                Value::Bool(passing == ArgumentPassing::ComptimeReference)
+            );
+            assert_eq!(
+                vm.events()
+                    .iter()
+                    .filter(|event| matches!(event, Event::EnterFunction(_)))
+                    .count(),
+                1
+            );
+        }
+    }
+    #[test]
+    fn forwarded_references_keep_identity_and_computed_receivers_evaluate_once() {
+        let target = setter();
+        let mut forwarding = setter();
+        forwarding.declaration.local = 3;
+        forwarding.name = "forward".into();
+        forwarding.parameters = vec![LocalId { owner: 3, index: 0 }];
+        forwarding.body = call(
+            &target,
+            ArgumentPassing::ComptimeReference,
+            expr(K::Local(forwarding.parameters[0])),
+        );
+        let package = Package {
+            functions: vec![target.clone(), forwarding.clone()],
+            ..Default::default()
+        };
+        nir::phases::validate(&package).unwrap();
+        let binding = LocalId { owner: 1, index: 0 };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut environment = Environment::new();
+        environment.insert(binding, Value::Bool(false));
+        let forwarded = call(
+            &forwarding,
+            ArgumentPassing::ComptimeReference,
+            expr(K::Local(binding)),
+        );
+        assert!(matches!(
+            vm.eval(&forwarded, &mut environment).unwrap(),
+            Flow::Value(Value::Bool(true))
+        ));
+        assert_eq!(
+            vm.local_value(&environment, binding, None).unwrap(),
+            Value::Bool(true)
+        );
+        environment.insert(binding, Value::Bool(false));
+        let before = vm
+            .events()
+            .iter()
+            .filter(|event| matches!(event, Event::EnterFunction(_)))
+            .count();
+        let produced = call(&target, ArgumentPassing::Value, expr(K::Local(binding)));
+        let temporary = call(&target, ArgumentPassing::ComptimeReference, produced);
+        assert!(matches!(
+            vm.eval(&temporary, &mut environment).unwrap(),
+            Flow::Value(Value::Bool(true))
+        ));
+        assert_eq!(
+            vm.local_value(&environment, binding, None).unwrap(),
+            Value::Bool(false)
+        );
+        let after = vm
+            .events()
+            .iter()
+            .filter(|event| matches!(event, Event::EnterFunction(_)))
+            .count();
+        assert_eq!(after - before, 2);
+    }
+
+    #[test]
+    fn reference_call_rejects_runtime_and_default_transport() {
+        let target = setter();
+        let package = Package {
+            functions: vec![target.clone()],
+            ..Default::default()
+        };
+        let mut call = call(
+            &target,
+            ArgumentPassing::ComptimeReference,
+            expr(K::Literal(Literal::Bool(false))),
+        );
+        let mut runtime = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(
+            runtime
+                .eval(&call, &mut Environment::new())
+                .unwrap_err()
+                .kind,
+            ErrorKind::InvalidCallPlan
+        );
+        let K::Call { arguments, .. } = &mut call.kind else {
+            unreachable!()
+        };
+        arguments[0].is_default = true;
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.eval(&call, &mut Environment::new()).unwrap_err().kind,
+            ErrorKind::InvalidCallPlan
         );
     }
 }

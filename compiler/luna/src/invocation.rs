@@ -295,6 +295,7 @@ pub(crate) fn prepare_entry_in_package<'a>(
                 .find(|(slot, _)| *slot == index)
                 .unwrap();
             arguments.push(CallArgument {
+                passing: Default::default(),
                 parameter: index,
                 is_default: true,
                 value: value.clone(),

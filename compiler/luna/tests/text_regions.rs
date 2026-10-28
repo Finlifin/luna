@@ -1575,6 +1575,7 @@ fn default_callbacks_use_prepared_code_and_capture_frames() {
                             kind: K::Local(target.parameters[1]),
                         }),
                         arguments: vec![CallArgument {
+                            passing: Default::default(),
                             parameter: 0,
                             is_default: false,
                             value: Expr {

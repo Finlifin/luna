@@ -137,11 +137,13 @@ fn explicit_call_inputs_never_use_the_defaults_parameter_frame() {
         }))),
         arguments: vec![
             CallArgument {
+                passing: Default::default(),
                 parameter: 0,
                 value: local(1),
                 is_default: false,
             },
             CallArgument {
+                passing: Default::default(),
                 parameter: 1,
                 value: local(1),
                 is_default: true,

@@ -8651,6 +8651,11 @@ impl<'a> Interpreter<'a> {
         let mut defaults = false;
         let mut last_default = None;
         for argument in arguments {
+            if argument.passing == nir::program::ArgumentPassing::ComptimeReference
+                && (!this.comptime_only || argument.is_default || argument.parameter != 0)
+            {
+                return Err(this.failure(ErrorKind::InvalidCallPlan, Some(argument.value.source)));
+            }
             if argument.parameter >= slots.len() || slots[argument.parameter].is_some() {
                 return Err(this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
             }
@@ -8691,6 +8696,8 @@ impl<'a> Interpreter<'a> {
                         environment
                     ))
                 }
+            } else if argument.passing == nir::program::ArgumentPassing::ComptimeReference {
+                prepared_value!(this.prepare_value_reference(&argument.value, environment))
             } else {
                 prepared_value!(this.eval(&argument.value, environment))
             };

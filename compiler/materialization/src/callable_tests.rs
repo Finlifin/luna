@@ -119,6 +119,7 @@ fn fixture() -> (n::Expr, n::LocalId, Term) {
             callee: Box::new(expr(K::Local(binding), signature.clone())),
             parameter_bindings: vec![],
             arguments: vec![n::CallArgument {
+                passing: Default::default(),
                 parameter: 0,
                 is_default: false,
                 value: expr(
@@ -382,6 +383,7 @@ fn conditional_copy_failure_restores_expression_and_expansion_metadata() {
     ));
     let local = n::LocalId { owner: 2, index: 3 };
     arguments.push(n::CallArgument {
+        passing: Default::default(),
         parameter: 1,
         is_default: false,
         value: expr(

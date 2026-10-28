@@ -369,11 +369,13 @@ fn conditional_call_and_aggregate_children_keep_source_order() {
                     callee: Box::new(node(4, K::Function(id(1)))),
                     arguments: vec![
                         nir::program::CallArgument {
+                            passing: Default::default(),
                             parameter: 1,
                             value: node(5, K::Tuple(vec![node(6, K::Unit), node(7, K::Unit)])),
                             is_default: false,
                         },
                         nir::program::CallArgument {
+                            passing: Default::default(),
                             parameter: 0,
                             value: node(8, K::Return(Some(Box::new(node(9, K::Unit))))),
                             is_default: true,

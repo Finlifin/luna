@@ -8107,6 +8107,7 @@ impl Checker<'_, '_> {
                 self.expr(&input, Some(&parameters[slot].ty))?
             };
             arguments.push(n::CallArgument {
+                passing: Default::default(),
                 parameter: slot,
                 value,
                 is_default: false,
@@ -8135,6 +8136,7 @@ impl Checker<'_, '_> {
                 )
             };
             arguments.push(n::CallArgument {
+                passing: Default::default(),
                 parameter: slot,
                 value,
                 is_default,

@@ -186,6 +186,7 @@ fn dependent_default_values_receive_concrete_types_before_evaluation_or_runtime_
                     .into_iter()
                     .enumerate()
                     .map(|(parameter, value)| nir::program::CallArgument {
+                        passing: Default::default(),
                         parameter,
                         value,
                         is_default: parameter == 2,
@@ -316,11 +317,13 @@ fn dependent_defaults_do_not_recharge_unrelated_completed_payloads() {
     let payload = "x".repeat(8192);
     let mut arguments = vec![
         nir::program::CallArgument {
+            passing: Default::default(),
             parameter: 0,
             value: expr(K::TypeValue(p(Primitive::Bool)), p(Primitive::Type)),
             is_default: false,
         },
         nir::program::CallArgument {
+            passing: Default::default(),
             parameter: 1,
             value: expr(
                 K::Literal(nir::program::Literal::String(payload)),
@@ -333,6 +336,7 @@ fn dependent_defaults_do_not_recharge_unrelated_completed_payloads() {
         defaults
             .into_iter()
             .map(|(parameter, value)| nir::program::CallArgument {
+                passing: Default::default(),
                 parameter,
                 value,
                 is_default: true,

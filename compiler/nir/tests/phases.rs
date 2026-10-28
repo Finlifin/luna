@@ -174,6 +174,7 @@ fn call(target: &Function, arguments: Vec<(usize, Expr)>) -> Expr {
         arguments: arguments
             .into_iter()
             .map(|(parameter, value)| CallArgument {
+                passing: Default::default(),
                 parameter,
                 value,
                 is_default: false,
@@ -1609,5 +1610,51 @@ fn integer_representation_checks_domains_without_resolving_target_width() {
             invalid.functions[0].body.ty = Term::Primitive(Primitive::U64);
             assert!(nir::phases::validate(&invalid).is_err());
         }
+    }
+}
+
+#[test]
+fn value_reference_transport_preserves_phase_and_receiver_identity() {
+    use nir::program::ArgumentPassing;
+    let target = function(2, Phase::Comptime, &[Sort::Runtime]);
+    let mut caller = function(1, Phase::Comptime, &[]);
+    caller.body = call(&target, vec![(0, flag(K::Literal(Literal::Bool(false))))]);
+    let K::Call { arguments, .. } = &mut caller.body.kind else {
+        unreachable!()
+    };
+    arguments[0].passing = ArgumentPassing::ComptimeReference;
+    let package = Package {
+        functions: vec![caller.clone(), target.clone()],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    assert!(
+        caller
+            .body
+            .to_string()
+            .contains("(passing comptime-reference)")
+    );
+    let instantiated = caller.body.instantiate_parameters(&[], &[]).unwrap();
+    let K::Call { arguments, .. } = instantiated.kind else {
+        unreachable!()
+    };
+    assert_eq!(arguments[0].passing, ArgumentPassing::ComptimeReference);
+    for damage in 0..3 {
+        let mut invalid = package.clone();
+        if damage == 0 {
+            invalid.functions[0].phase = Phase::Runtime;
+        }
+        let K::Call {
+            callee, arguments, ..
+        } = &mut invalid.functions[0].body.kind
+        else {
+            unreachable!()
+        };
+        match damage {
+            1 => callee.ty = target.signature.clone(),
+            2 => arguments[0].is_default = true,
+            _ => {}
+        }
+        assert!(nir::phases::validate(&invalid).is_err());
     }
 }

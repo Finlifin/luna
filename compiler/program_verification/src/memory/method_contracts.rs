@@ -254,6 +254,7 @@ pub fn prepare_method_invocation(
     for (parameter, (binding, input)) in composed.parameters.iter().zip(parameters).enumerate() {
         bound_type(&input.ty, fuel)?;
         call_arguments.push(nir::program::CallArgument {
+            passing: Default::default(),
             parameter,
             is_default: false,
             value: Expr {

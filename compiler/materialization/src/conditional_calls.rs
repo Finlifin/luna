@@ -577,6 +577,7 @@ mod tests {
                 arguments: [2, 1, 0]
                     .into_iter()
                     .map(|parameter| n::CallArgument {
+                        passing: Default::default(),
                         parameter,
                         is_default: false,
                         value: producer(parameter as u32),

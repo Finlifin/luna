@@ -60,6 +60,7 @@ fn call(callee: Expr, values: Vec<Expr>, ty: Term) -> Expr {
                 .into_iter()
                 .enumerate()
                 .map(|(parameter, value)| CallArgument {
+                    passing: Default::default(),
                     parameter,
                     value,
                     is_default: false,

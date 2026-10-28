@@ -773,6 +773,19 @@ pub fn machine_arithmetic_functions(
                             arguments,
                             parameter_bindings,
                         } => {
+                            for argument in arguments {
+                                if argument.passing
+                                    == crate::program::ArgumentPassing::ComptimeReference
+                                    && (!ct
+                                        || !callee.ty.is_comptime_callable()
+                                        || argument.is_default
+                                        || argument.parameter != 0)
+                                {
+                                    return Err(error(
+                                        "value-reference transport requires an explicit comptime receiver",
+                                    ));
+                                }
+                            }
                             if ct != callee.ty.is_comptime_callable()
                                 && !matches!(
                                     callee.kind,

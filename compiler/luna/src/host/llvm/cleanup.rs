@@ -2130,6 +2130,7 @@ mod tests {
             kind: K::Call {
                 callee: Box::new(unit.clone()),
                 arguments: vec![nir::program::CallArgument {
+                    passing: Default::default(),
                     parameter: 0,
                     value,
                     is_default: true,

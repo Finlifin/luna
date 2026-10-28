@@ -11823,6 +11823,7 @@ fn parameterized_interface_package() -> Package {
                         },
                     }),
                     arguments: vec![n::CallArgument {
+                        passing: Default::default(),
                         parameter: 0,
                         is_default: false,
                         value: n::Expr {
@@ -23990,6 +23991,7 @@ fn generic_trait_reference_phase_checks_method_arguments_separately() {
         kind: ExprKind::Call {
             callee: Box::new(callee),
             arguments: vec![CallArgument {
+                passing: Default::default(),
                 parameter: 0,
                 value,
                 is_default: false,

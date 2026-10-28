@@ -203,6 +203,7 @@ fn capture_rejects_ambiguous_routes_unknown_bindings_and_effectful_operands() {
             }),
             arguments: vec![
                 CallArgument {
+                    passing: Default::default(),
                     parameter: 1,
                     value: Expr {
                         source,
@@ -212,6 +213,7 @@ fn capture_rejects_ambiguous_routes_unknown_bindings_and_effectful_operands() {
                     is_default: false,
                 },
                 CallArgument {
+                    passing: Default::default(),
                     parameter: 0,
                     value: Expr {
                         source,
@@ -584,6 +586,7 @@ fn exact_float_capture_preserves_decimal_identity_and_checks_domain_and_budget()
                 kind: K::Function(target()),
             }),
             arguments: vec![CallArgument {
+                passing: Default::default(),
                 parameter: 0,
                 is_default: false,
                 value: Expr {

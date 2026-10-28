@@ -141,11 +141,13 @@ fn closure_capture_cells_are_private_and_defaults_keep_the_callee_frame() {
         parameter_bindings: vec![id(1), id(2)],
         arguments: vec![
             CallArgument {
+                passing: Default::default(),
                 parameter: 0,
                 value: local(1),
                 is_default: false,
             },
             CallArgument {
+                passing: Default::default(),
                 parameter: 1,
                 value: local(1),
                 is_default: true,

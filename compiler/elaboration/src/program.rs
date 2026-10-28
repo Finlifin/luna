@@ -6440,6 +6440,7 @@ impl Checker<'_, '_> {
         let mut arguments = Vec::new();
         for (parameter, value) in checked.iter_mut().enumerate().take(offset) {
             arguments.push(n::CallArgument {
+                passing: Default::default(),
                 parameter,
                 value: value.take().unwrap(),
                 is_default: false,
@@ -6448,6 +6449,7 @@ impl Checker<'_, '_> {
         for route in &routes {
             let parameter = route.parameter + offset;
             arguments.push(n::CallArgument {
+                passing: Default::default(),
                 parameter,
                 value: checked[parameter].take().unwrap(),
                 is_default: false,
@@ -6467,6 +6469,7 @@ impl Checker<'_, '_> {
                     .map_err(|e| error(expr.span, e.to_string()))?;
                 value.rewrite_types(&mut |ty| self.callable_input_view(ty, expr.span))?;
                 arguments.push(n::CallArgument {
+                    passing: Default::default(),
                     parameter,
                     value,
                     is_default: true,
@@ -6827,6 +6830,7 @@ impl Checker<'_, '_> {
             .into_iter()
             .enumerate()
             .map(|(parameter, value)| n::CallArgument {
+                passing: Default::default(),
                 parameter,
                 value,
                 is_default: false,
@@ -6865,6 +6869,7 @@ impl Checker<'_, '_> {
                 })?
             };
             arguments.push(n::CallArgument {
+                passing: Default::default(),
                 parameter,
                 value: checked,
                 is_default: false,
@@ -6894,6 +6899,7 @@ impl Checker<'_, '_> {
                     value
                 };
                 arguments.push(n::CallArgument {
+                    passing: Default::default(),
                     parameter,
                     value,
                     is_default: true,
