@@ -41,6 +41,7 @@ enum PartialStagedData {
 #[derive(Clone, Debug, PartialEq)]
 enum PartialStagedShape {
     Tuple,
+    List(Term),
     Record(DeclarationId),
     Variant(DeclarationId, usize),
     AnonymousRecord(Vec<String>),
@@ -72,6 +73,9 @@ impl PartialStagedValue {
                     *fuel = fuel
                         .checked_sub(fields.len())
                         .ok_or("partial pattern evidence budget exhausted")?;
+                    if let PartialStagedShape::List(ty) = shape {
+                        nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
+                    }
                     if let PartialStagedShape::AnonymousRecord(names) = shape {
                         for name in names {
                             *fuel = fuel
@@ -95,6 +99,7 @@ impl std::fmt::Display for PartialStagedValue {
             PartialStagedData::Aggregate(shape, fields) => {
                 match shape {
                     PartialStagedShape::Tuple => write!(f, "(tuple")?,
+                    PartialStagedShape::List(ty) => write!(f, "(list (type {ty})")?,
                     PartialStagedShape::Record(id) => {
                         write!(f, "(record (declaration {} {})", id.package, id.local)?
                     }
@@ -1332,6 +1337,64 @@ impl Checker<'_, '_> {
                 return Ok(value.clone());
             }
         }
+        if let K::TypeListIndex(values, index) = &value.kind {
+            if self.list_element_type(&values.ty) != Some(&value.ty) {
+                return Ok(PartialStagedValue::unknown());
+            }
+            let sequence = self.partial_staged_value_in(values, depth + 1, fuel, scope)?;
+            let index = self.partial_staged_value_in(index, depth + 1, fuel, scope)?;
+            let PartialStagedData::Known(Term::Integer(index)) = &index.data else {
+                return Ok(PartialStagedValue::unknown());
+            };
+            *fuel = fuel
+                .checked_sub(index.bit_len().div_ceil(32).saturating_add(1))
+                .ok_or("partial list observation budget exhausted")?;
+            let Some(index) = index
+                .to_u128()
+                .ok()
+                .and_then(|index| usize::try_from(index).ok())
+            else {
+                return Ok(PartialStagedValue::unknown());
+            };
+            let known = match &sequence.data {
+                PartialStagedData::Aggregate(PartialStagedShape::List(ty), fields) => {
+                    nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
+                    return Ok(if *ty == values.ty {
+                        fields
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(PartialStagedValue::unknown)
+                    } else {
+                        PartialStagedValue::unknown()
+                    });
+                }
+                PartialStagedData::Known(Term::TypeListValue(fields))
+                    if self.is_type_list_type(&values.ty) =>
+                {
+                    fields.get(index).filter(|field| field.sort() == Sort::Type)
+                }
+                PartialStagedData::Known(Term::NominalValue {
+                    ty,
+                    variant: None,
+                    fields,
+                }) => {
+                    nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
+                    if **ty == values.ty {
+                        fields.get(index)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            return match known {
+                Some(value) => {
+                    nir::type_computations::charge_term(value, fuel).map_err(|e| e.to_string())?;
+                    Ok(PartialStagedValue::known(value.clone()))
+                }
+                None => Ok(PartialStagedValue::unknown()),
+            };
+        }
         // Follow the already checked field route. This inspects a snapshot,
         // never a pointer or a replay of the initializer that produced it.
         if let K::Field { value: base, .. } | K::AnonymousField { value: base, .. } = &value.kind {
@@ -1473,6 +1536,10 @@ impl Checker<'_, '_> {
         }
         let (shape, fields) = match (&value.kind, &value.ty) {
             (K::Tuple(fields), _) => (PartialStagedShape::Tuple, fields),
+            (K::TypeList(fields), ty) if self.list_element_type(ty).is_some() => {
+                nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
+                (PartialStagedShape::List(ty.clone()), fields)
+            }
             (
                 K::Record {
                     declaration,
