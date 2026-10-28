@@ -19,7 +19,7 @@ class LibraryCheckTests(unittest.TestCase):
                 calls.append((label, command))
                 evidence = kwargs['directory']
                 evidence.mkdir(parents=True)
-                count = {'native-resources': 4, 'native-comparison': 6, 'native-math': 8, 'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 3, 'sysroot-hash': 3}
+                count = {'native-resources': 4, 'native-comparison': 6, 'native-math': 8, 'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 3, 'sysroot-hash': 3, 'sysroot-meta': 1}
                 text = '(bool false)' if wrong_value else '(bool true)'
                 if label in ('attributes', 'merged-attributes'):
                     text = '(evaluated-attribute (property "abi") (symbol "c"))'
@@ -79,7 +79,7 @@ class LibraryCheckTests(unittest.TestCase):
             return status, summary
 
     def test_sysroot_suites_require_all_native_cases(self):
-        for stage in ['sysroot-iteration', 'sysroot-hash']:
+        for stage in ['sysroot-iteration', 'sysroot-hash', 'sysroot-meta']:
             for output in ['(count 0) (failures 0)', '(count 2) (failures 0)', '(count 3) (failures 1)']:
                 with self.subTest(stage=stage, output=output):
                     status, summary = self.check_stages(

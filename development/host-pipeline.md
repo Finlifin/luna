@@ -4199,3 +4199,30 @@ provenance 接线仍未完成，保留明确拒绝的回归。
   三项 O3 用例通过，退出 0 (`/tmp/luna-tools-ilashuvd/result.json`)。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
   通过 (`/tmp/luna-tools-ft30lkn9/result.json`)；`git diff --check` 通过。
+
+## meta 的转换收集与完整 sysroot 验收
+
+新增 `meta.filter_map` 与 `meta.flat_map`，复用已有 List、可选类型和 comptime
+回调能力。两者按输入快照顺序调用回调，分别收集外层存在的结果和内层列表元素，
+保留元素域与 normal-form 身份。没有新增编译器 intrinsic 或运行时列表表示。
+库说明及完整源码用例分别在 `library/meta/README.md` 和
+`development/examples/sysroot-meta-lists.fl`。`sysroot-meta` 已进入默认库检查集。
+
+在 `/home/fin/luna` 的实际验证：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_list_operations`：
+  30 项通过，退出 0 (`/tmp/luna-tools-dy98z6e0/result.json`)。新增回归覆盖
+  顺序、快照、空列表、嵌套可选值、Type 身份、失败停止/恢复及错误回调拒绝。
+- `python3 -B development/library_check.py --release --stage sysroot-meta`：
+  一项实际 host 原生用例通过，退出 0 (`/tmp/luna-library-knri0nss/summary.json`)。
+- `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-meta-lists.fl --sysroot library --test-native --opt-level 3`：
+  同一用例 O3 通过，退出 0 (`/tmp/luna-tools-5xfl1szv/result.json`)。
+- `python3 -B -m unittest discover -s development -p test_library_check.py`：
+  13 项通过，包含新增阶段的测试数/失败结果检查。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过 (`/tmp/luna-tools-6i500478/result.json`)；`git diff --check` 通过。
+
+初次用完整 sysroot 的 `--invoke-comptime run` 执行时，因库内目标宽度整数
+缺少 target 信息被拒绝 (`/tmp/luna-library-_56ie5lq/summary.json`，阶段退出 1)。
+最终使用 host 测试中的 inline if 消费编译期结果，未给无目标 invocation 偷加
+宿主布局。List 的不可变数据验证仍会影响大规模构造成本，不宣称线性时间。

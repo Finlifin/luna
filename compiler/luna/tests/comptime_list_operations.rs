@@ -901,3 +901,87 @@ fn list_ranges_reject_incompatible_inputs_and_propagate_invocation_limits() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn list_transform_collectors_preserve_order_snapshots_and_optional_layers() {
+    let source = include_str!("../../../development/examples/sysroot-meta-lists.fl");
+    let package = compile(&format!("typealias Integer=.Integer'builtin;{source}")).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_flat_map_preserves_nominal_type_elements_and_inner_order() {
+    let package = compile(
+        "typealias Type=.Type'builtin;
+        pure comptime fn Identity<T>->Type {T}
+        comptime fn expand(value:Type)->meta.List<Type> {[value,bool]}
+        comptime fn run()->bool {
+            let values:meta.List<Type> = [Identity<bool>,bool];
+            let output=meta.flat_map(values,expand);
+            meta.length(output) == 4 and output[0] == Identity<bool>
+                and output[1] == bool and output[2] == bool and output[3] == bool
+        }",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_transform_collectors_stop_on_failure_and_recover() {
+    for (operation, result, body) in [
+        ("filter_map", "?bool", "table[value]"),
+        ("flat_map", "meta.List<bool>", "[table[value]]"),
+    ] {
+        let package=compile(&format!(
+            "typealias Integer=.Integer'builtin;
+            comptime fn transform(value:Integer)->{result} {{let table:meta.List<bool> = [true,false];{body}}}
+            comptime fn fail()->meta.List<bool> {{let values:meta.List<Integer> = [0,2,1];meta.{operation}(values,transform)}}
+            comptime fn recover()->meta.List<bool> {{let values:meta.List<Integer> = [0,1];meta.{operation}(values,transform)}}"
+        )).unwrap();
+        let mut vm = comptime_interpretor::Interpreter::for_comptime(
+            &package,
+            comptime_interpretor::Budget {
+                steps: 1_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, "fail"), vec![])
+                .unwrap_err()
+                .kind,
+            comptime_interpretor::ErrorKind::IndexOutOfBounds
+        );
+        assert_eq!(
+            support::calls(&package, &vm)
+                .iter()
+                .filter(|name| **name == "transform")
+                .count(),
+            2
+        );
+        let Value::List { values, .. } =
+            vm.invoke(support::id(&package, "recover"), vec![]).unwrap()
+        else {
+            panic!("expected list")
+        };
+        assert_eq!(values, vec![Value::Bool(true), Value::Bool(false)]);
+    }
+}
+
+#[test]
+fn list_transform_collectors_reject_wrong_callback_domains_and_runtime_use() {
+    for source in [
+        "comptime fn bad()->meta.List<bool> {meta.filter_map([true],|value| [value])}",
+        "comptime fn bad()->meta.List<bool> {meta.flat_map([true],|value| value)}",
+        "fn callback(value:bool)->?bool {value} comptime fn bad()->meta.List<bool> {meta.filter_map([true],callback)}",
+        "fn bad()->meta.List<bool> {meta.flat_map([true],|value| [value])}",
+    ] {
+        assert!(compile(source).is_err(), "{source}");
+    }
+}

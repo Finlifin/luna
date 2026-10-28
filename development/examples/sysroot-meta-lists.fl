@@ -1,0 +1,56 @@
+{-
+    Use the complete sysroot and public meta interfaces. The callback state and
+    input snapshots belong to this invocation, not to the collection helpers.
+-}
+comptime fn select(value: Integer) -> ?Integer {
+    if value == 2 { null } else { value * 10 }
+}
+
+comptime fn expand(value: Integer) -> meta.List<Integer> {
+    if value == 2 { [] } else { [value, value + 10] }
+}
+
+comptime fn optional(flag: bool) -> ??Integer {
+    let values: meta.List<?Integer> = [null];
+    meta.find(values, |value| flag)
+}
+
+comptime fn run() -> bool {
+    var original: meta.List<Integer> = [1, 2, 3];
+    let saved = original;
+    var visits: Integer = 0;
+    let counter = visits.ref;
+    let source = original.ref;
+    let selected = meta.filter_map(saved, |value| {
+        counter.* = counter.* * 10 + value;
+        source.* = [];
+        select(value)
+    });
+    let flattened = meta.flat_map(saved, expand);
+    let nested = meta.filter_map([false, true, false], optional);
+    let empty: meta.List<Integer> = [];
+    let unused = meta.flat_map(empty, |value| {
+        counter.* = 999;
+        expand(value)
+    });
+    let unused_filter = meta.filter_map(empty, |value| {
+        counter.* = 999;
+        select(value)
+    });
+    visits == 123 and meta.length(original) == 0 and meta.length(saved) == 3
+        and meta.length(selected) == 2 and selected[0] == 10 and selected[1] == 30
+        and meta.length(flattened) == 4
+        and flattened[0] == 1 and flattened[1] == 11
+        and flattened[2] == 3 and flattened[3] == 13
+        and meta.length(nested) == 1
+        and (nested[0] match { null => true, _? => false })
+        and meta.length(unused) == 0 and meta.length(unused_filter) == 0
+}
+
+test comptime_list_collectors {
+    inline if run() {
+        assumes true;
+    } else {
+        assumes false;
+    };
+}

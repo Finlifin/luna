@@ -112,6 +112,35 @@ where T, U, c: (.Type'builtin).vars.Closure {
 }
 
 {-
+  Transform each input once in order. filter_map discards only the outer null;
+  flat_map appends every inner list in order, including empty inner results.
+  Both retain the input snapshot when callbacks replace the caller's list.
+-}
+pub comptime fn filter_map(values: List<T>, transform: %c comptime fn(T) -> ?U) -> List<U>
+where T, U, c: (.Type'builtin).vars.Closure {
+    let count = length(values);
+    var output: List<U> = [];
+    inline for index in 0..count {
+        transform(values[index]) match {
+            value? => append(output.ref, value),
+            null => {},
+        };
+    }
+    output
+}
+
+pub comptime fn flat_map(values: List<T>, transform: %c comptime fn(T) -> List<U>) -> List<U>
+where T, U, c: (.Type'builtin).vars.Closure {
+    let count = length(values);
+    var output: List<U> = [];
+    inline for index in 0..count {
+        let inner = transform(values[index]);
+        output = concat(output, inner);
+    }
+    output
+}
+
+{-
   Queries visit a fixed snapshot in order and stop as soon as the answer is
   known. Empty inputs satisfy all and fail any; find returns an absent outer
   optional. A matching optional element retains its own presence layer.

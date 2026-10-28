@@ -223,3 +223,42 @@ typealias Mirrored = Mirror();
 ```
 
 完整 native 示例见 [host-mirrored-enum.fl](../../development/examples/host-mirrored-enum.fl)。
+
+### 转换后收集列表
+
+`filter_map(values, transform)` 要求 comptime 回调返回 `?U`，按输入顺序收集
+存在的结果，返回 `List<U>`。它只去掉外层可选性：回调返回 `??T` 时，存在
+但 payload 为 null 的结果仍作为 `?T` 元素保留。
+
+`flat_map(values, transform)` 要求 comptime 回调返回 `List<U>`，按外层输入
+顺序、内层列表顺序收集元素，返回 `List<U>`。空的内层列表不产生元素。
+
+```flurry
+comptime fn select(value: Integer) -> ?Integer {
+    if value == 2 { null } else { value * 10 }
+}
+
+comptime fn expand(value: Integer) -> meta.List<Integer> {
+    if value == 2 { [] } else { [value, value + 10] }
+}
+
+comptime fn example() -> bool {
+    let input: meta.List<Integer> = [1, 2, 3];
+    let selected = meta.filter_map(input, select);
+    let expanded = meta.flat_map(input, expand);
+    meta.length(selected) == 2 and selected[0] == 10 and selected[1] == 30
+        and meta.length(expanded) == 4 and expanded[2] == 3
+}
+```
+
+两个操作都对输入快照的每个元素调用一次回调，空输入不调用回调。回调捕获状态
+在调用间保留；即使回调替换调用者持有的原列表，正在遍历的快照仍保持不变。
+回调失败立即中止当前收集；不会跳过失败元素继续执行。元素的 Type 身份不变，
+例如作为元素的 `Identity<bool>` 不会因收集而展开为 bool。接口只用于 comptime，
+不授予列表运行时表示，也不承诺线性时间构造；现有不可变数据校验仍然生效。
+
+完整 sysroot 用例见
+[sysroot-meta-lists.fl](../../development/examples/sysroot-meta-lists.fl)，运行
+`python3 -B development/library_check.py --release --stage sysroot-meta`。
+该阶段在 host 测试中通过 inline if 消费 comptime 结果，检查器要求实际执行
+一项测试且没有失败，不将仅成功编译视为通过。
