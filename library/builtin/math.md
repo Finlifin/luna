@@ -30,3 +30,8 @@ python3 -B development/check.py --timeout 900 -- run --release -p luna -- develo
 下 wrapping_abs 的契约检查会耗尽默认 10 万步预算。这里没有关闭契约或资源
 检查，也没有改变整数溢出规则。该验收只覆盖 host pipeline 的 math 接口，
 不代表全部内置包完成，也不承诺这些 LLVM 操作已能在 comptime VM 执行。
+
+最终 residual 契约验证已省去供分析报告使用的逐检查点事实、聚合值和字段
+路径快照；证明及成功路径上的事实更新仍然执行。优化器使用的分析入口继续
+保留完整报告。该优化降低了验证开销，但尚不足以让上述全部用例在 10 万步
+内完成，因此验收入口仍保留显式预算。

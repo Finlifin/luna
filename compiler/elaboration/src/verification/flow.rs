@@ -699,14 +699,14 @@ fn bind_place(
 }
 
 pub fn analyze(function: &Function, limits: &mut Limits) -> Result<Report, Error> {
-    analyze_impl(function, None, limits)
+    analyze_impl(function, None, limits, true)
 }
 pub fn analyze_in_package(
     package: &nir::program::Package,
     function: &Function,
     limits: &mut Limits,
 ) -> Result<Report, Error> {
-    analyze_impl(function, Some(package), limits)
+    analyze_impl(function, Some(package), limits, true)
 }
 
 /// Recheck program contracts, machine arithmetic and bit endpoints after
@@ -767,7 +767,7 @@ pub fn validate_residual_contracts(
         },
     })?;
     if required {
-        analyze_in_package(package, function, limits)?;
+        analyze_impl(function, Some(package), limits, false)?;
     }
     Ok(())
 }
@@ -775,6 +775,7 @@ fn analyze_impl(
     function: &Function,
     package: Option<&nir::program::Package>,
     limits: &mut Limits,
+    collect_points: bool,
 ) -> Result<Report, Error> {
     let source = function.body.source;
     let error = |reason| Error { source, reason };
@@ -902,6 +903,7 @@ fn analyze_impl(
         limits,
         package,
         points: vec![],
+        collect_points,
         failure_source: None,
         closure_context: vec![],
         single_pass_exits: BTreeMap::new(),
@@ -1006,6 +1008,8 @@ struct Walker<'a> {
     limits: &'a mut Limits,
     package: Option<&'a nir::program::Package>,
     points: Vec<Point>,
+    // Final validation consumes only success/failure, not report snapshots.
+    collect_points: bool,
     failure_source: Option<SourceRange>,
     closure_context: Vec<SourceRange>,
     single_pass_exits: BTreeMap<LocalId, Vec<State>>,
@@ -3224,6 +3228,9 @@ impl Walker<'_> {
         range: Option<&Interval>,
     ) -> Result<(), Unknown> {
         self.limits.step(1)?;
+        if !self.collect_points {
+            return Ok(());
+        }
         self.points.push(Point {
             source: expr.source,
             kind,
@@ -5348,9 +5355,13 @@ impl Walker<'_> {
             K::CheckPredicate(condition) => {
                 let checked = self.child(condition, state, depth)?;
                 let check_input = if let Some(condition) = checked.condition {
-                    let facts = state.facts.fork(self.limits)?;
+                    let facts = if self.collect_points {
+                        Some(state.facts.fork(self.limits)?)
+                    } else {
+                        None
+                    };
                     state.facts.assume(&condition, true, self.limits)?;
-                    Some(CheckInput {
+                    facts.map(|facts| CheckInput {
                         site: expr as *const Expr as usize,
                         condition,
                         facts,
@@ -5359,7 +5370,9 @@ impl Walker<'_> {
                     None
                 };
                 self.record(expr, state, PointKind::Check, None)?;
-                self.points.last_mut().unwrap().check_input = check_input;
+                if self.collect_points {
+                    self.points.last_mut().unwrap().check_input = check_input;
+                }
             }
             K::If { .. } => {
                 result = self.branch_expression(expr, state, depth)?;
@@ -7085,6 +7098,7 @@ mod memory_summary_cache_tests {
             limits: &mut limits,
             package: Some(&package),
             points: vec![],
+            collect_points: true,
             failure_source: None,
             closure_context: vec![],
             single_pass_exits: BTreeMap::new(),
@@ -7198,6 +7212,7 @@ mod conditional_origin_tests {
             limits: &mut limits,
             package: None,
             points: vec![],
+            collect_points: true,
             failure_source: None,
             closure_context: vec![],
             single_pass_exits: BTreeMap::new(),
@@ -7646,6 +7661,7 @@ mod tuple_storage_tests {
                 limits: &mut limits,
                 package: Some(&package),
                 points: vec![],
+                collect_points: true,
                 failure_source: None,
                 closure_context: vec![],
                 single_pass_exits: BTreeMap::new(),

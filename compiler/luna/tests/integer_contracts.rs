@@ -318,3 +318,60 @@ fn unbounded_integer_cancellation_proves_polynomial_preconditions() {
     let failure = compile_with_protocols(source, &Default::default()).unwrap_err();
     assert!(failure.contains("precondition"), "{failure}");
 }
+
+#[test]
+fn residual_contract_validation_avoids_report_snapshots_without_losing_checks() {
+    use elaboration::verification::{Limits, flow};
+    let checks = "assumes value < 255;".repeat(24);
+    let source = format!(
+        "typealias Byte = .u8'builtin; fn increment(value: Byte) -> Byte {{ {checks} value + 1 }}"
+    );
+    let package = compile(&source);
+    let function = package
+        .functions
+        .iter()
+        .find(|f| f.name == "increment")
+        .unwrap();
+    let budget = 2_000_000;
+    let mut reporting = Limits::default();
+    reporting.arithmetic.steps = budget;
+    let report = flow::analyze_in_package(&package, function, &mut reporting).unwrap();
+    assert_eq!(
+        report
+            .points
+            .iter()
+            .filter(|p| p.check_input.is_some())
+            .count(),
+        24
+    );
+    let mut validation = Limits::default();
+    validation.arithmetic.steps = budget;
+    flow::validate_residual_contracts(&package, function, &mut validation).unwrap();
+    assert!(
+        validation.arithmetic.steps > reporting.arithmetic.steps,
+        "validation used {}, reporting used {}",
+        budget - validation.arithmetic.steps,
+        budget - reporting.arithmetic.steps
+    );
+
+    let mut invalid = function.clone();
+    iir::visit::expression_mut(&mut invalid.body, &mut 100_000, |expr, _| {
+        if matches!(expr.kind, nir::program::ExprKind::CheckPredicate(_)) {
+            expr.kind = nir::program::ExprKind::Unit;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let reported = flow::analyze_in_package(&package, &invalid, &mut Limits::default())
+        .err()
+        .unwrap();
+    let validated =
+        flow::validate_residual_contracts(&package, &invalid, &mut Limits::default()).unwrap_err();
+    assert_eq!(reported, validated);
+    assert_eq!(validated.reason, flow::Reason::MissingMachineProof);
+
+    let mut exhausted = Limits::default();
+    exhausted.arithmetic.steps = 0;
+    assert!(flow::validate_residual_contracts(&package, function, &mut exhausted).is_err());
+    flow::validate_residual_contracts(&package, function, &mut Limits::default()).unwrap();
+}
