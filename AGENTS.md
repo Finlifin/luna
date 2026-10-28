@@ -109,6 +109,7 @@ Limitations:
 - 已有完整参数列表时优先具名赋值，例如 `Tuple<.Es = Es>`，不要先用 `Tuple<...Es>` 展开再收集。仅在确实需要逐项拼接或展开语义时使用参数展开；测试展开本身的用例不受此限制。
 - `Once` 在 builtin.resources 中定义，并由 `impl Once for T where T {}` 提供默认仿射能力，不为标量、指针、元组、可选或错误结果重复枚举实现。Once 不授予 Clone／Copy，也不替代移动与清理检查。
 - PTC 只处理类型命题；程序状态、内存与资源规格由程序验证层负责。
+- comptime 没有指针；comptime 方法的 `self` 使用值引用语义，不得用 `*self`、`*List<T>`、`.ref` 或 `.*` 模拟接收者及其更新。解释器内部可以引用存储，但不能把内部表示暴露为 comptime 指针类型或操作。修复现有库和 VM 时须实现值引用的实际行为，不能仅删掉指针语法后仍按值复制，也不能要求 runtime Copy／Clone 来支持 comptime 值引用。现存 comptime 指针实现、测试与文档描述属于待纠正的实现偏差，不构成语义依据；runtime 指针规则不受此条改变。
 - Elaboration 与 comptime interpretation／invocation 交织；冻结稳定残余和契约，不冻结活动推断变量、等待者或候选事务。
 - 运行时依赖类型使用可 intern 的带洞结构与引用端 substitution；共享 core 不等于完整类型相等，环境取得另行保持。
 - IIR 保留高级特征，不预设为 SSA；其中类型的 comptime 部分必须完成，合法 runtime 依赖仍可存在。
