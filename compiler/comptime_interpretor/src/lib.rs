@@ -25,6 +25,7 @@ mod object_queries;
 mod object_values;
 mod objects;
 mod scalar_math;
+mod value_reference;
 pub use objects::ObjectProperty;
 mod generated_enums;
 pub use generated_enums::EnumPublicationError;
@@ -1163,6 +1164,7 @@ pub enum ErrorKind {
     InvalidCallPlan,
     ExpiredPointer,
     InvalidPointer,
+    InvalidValueReference,
     UnmaterializedDispatch,
     Arity,
     Type,
@@ -3582,6 +3584,13 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| self.failure(ErrorKind::MissingBinding, source))?
         {
             Value::Storage(storage) => {
+                if self.comptime_only {
+                    let reference = value_reference::ValueReference::root(storage.clone());
+                    let contents = reference
+                        .borrow(&mut self.budget.steps)
+                        .map_err(|kind| self.failure(kind, source))?;
+                    return self.checkpoint_representation(contents.value(), location);
+                }
                 // Read the representation, retaining shared nested identities.
                 // Ownership is checked by the actual access/transfer operation;
                 // a projection may legally read one field of a partial owner.
@@ -7541,6 +7550,18 @@ impl<'a> Interpreter<'a> {
                     _ => None,
                 };
                 if let Some(storage) = storage {
+                    if self.comptime_only {
+                        let reference = value_reference::ValueReference::projected(
+                            storage,
+                            &place.fields,
+                            &mut self.budget.steps,
+                        )
+                        .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+                        reference
+                            .replace(value, &mut self.budget.steps)
+                            .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+                        return Ok(Flow::Value(Value::Unit));
+                    }
                     let pointer = storage
                         .assignment_pointer(expression.ty.clone(), &place.fields)
                         .map_err(|e| self.failure(e, Some(expr.source)))?;
