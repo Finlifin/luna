@@ -11182,8 +11182,12 @@ impl Checker<'_, '_> {
                 let observed = self.known_pattern_type_value(&value);
                 let pattern = self.pattern_observed(&decl.pattern, &binding_type, observed.as_ref())?;
                 if !decl.mutable {
-                    if in_comptime_body && decl.comptime {
-                        self.record_known_staged_pattern(&pattern, &value, decl.span)?;
+                    if in_comptime_body {
+                        if decl.comptime {
+                            self.record_known_staged_pattern(&pattern, &value, decl.span)?;
+                        } else {
+                            self.record_observed_initializer(&pattern, &value, decl.span)?;
+                        }
                     }
                     self.record_staged_pattern(&pattern, &value, decl.span)?;
                 }

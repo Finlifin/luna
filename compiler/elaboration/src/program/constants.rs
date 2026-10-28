@@ -1647,6 +1647,23 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
+    /// Observe an immutable ordinary comptime binding without promoting its
+    /// storage or reads to specialization inputs. Calls in its initializer
+    /// remain invocation work; unknown fields do not erase known siblings.
+    pub(super) fn record_observed_initializer(
+        &mut self,
+        pattern: &n::Pattern,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<(), Error> {
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let observed = self.partial_staged_value(value, 0, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        let observed = observed.map_err(|e| error(span, e))?;
+        self.record_observed_pattern(pattern, &observed, span)
+    }
+
     pub(super) fn observed_expression_type(
         &mut self,
         value: &n::Expr,
