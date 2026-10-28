@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 from process_tools import ROOT, run, save_summary
-from host_examples import EXAMPLES, MATH_OPTIONS
+from host_examples import EXAMPLES
 
 STAGES = ('declarations', 'attributes', 'merged-attributes', 'meta-values', 'inline-iteration', 'manifest', 'native-resources', 'native-comparison',
           'native-math', 'native-option', 'native-result', 'native-tuple', 'native-conversion', 'hash-protocols', 'sysroot-hash', 'sysroot-meta', 'sysroot-builders', 'sysroot-enum-builder', 'sysroot-symbol-enum', 'sysroot-fixed-enum', 'sysroot-build-mode', 'sysroot-build-target', 'build-context', 'sysroot', 'sysroot-iteration', 'sysroot-resources', 'sysroot-patterns', 'sysroot-meta-patterns')
@@ -62,17 +62,10 @@ def main():
                                '--dependency', '1', 'resources', '3', '--primary', '1',
                                '--copy-protocol', 'resources.Copy',
                                '--drop-protocol', 'resources.Drop', '--test-native']),
-        ('native-math', ['run', '-p', 'luna', '--', '--packages-v1',
-                        '--package', '1', '101', 'app',
+        ('native-math', ['run', '-p', 'luna', '--',
                         str(ROOT / 'development/examples/host-math-tests.fl'),
-                        '--package', '2', '202', 'math', str(ROOT / 'library/builtin/math_intrinsics.fl'),
-                        '--package', '3', '303', 'resources', str(ROOT / 'library/builtin/resources.fl'),
-                        '--dependency', '1', 'math', '2',
-                        '--dependency', '1', 'resources', '3', '--primary', '1',
-                        '--copy-protocol', 'resources.Copy',
-                        '--drop-protocol', 'resources.Drop',
-                        *MATH_OPTIONS,
-                        '--test-native']),
+                        '--sysroot', str(ROOT / 'library'),
+                        '--fuel', '2000000', '--test-native']),
         ('sysroot-build-target', ['run', '-p', 'luna', '--',
                                   str(ROOT / 'development/examples/sysroot-build-target.fl'),
                                   '--sysroot', str(ROOT / 'library'),
@@ -146,7 +139,7 @@ def main():
         ]))
     if args.stage:
         stages = [(label, command) for label, command in stages if label in args.stage]
-    native_counts = {'native-resources': 4, 'native-comparison': 6, 'native-math': 8,
+    native_counts = {'native-resources': 4, 'native-comparison': 6, 'native-math': 11,
                      'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 9, 'sysroot-resources': 3, 'sysroot-patterns': 3, 'sysroot-meta-patterns': 3, 'sysroot-hash': 3, 'sysroot-meta': 1, 'sysroot-builders': 2, 'sysroot-enum-builder': 2, 'sysroot-symbol-enum': 2, 'sysroot-fixed-enum': 2, 'sysroot-build-mode': 1, 'sysroot-build-target': 2}
     outcomes = []
     for label, command in stages:

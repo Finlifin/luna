@@ -19,7 +19,7 @@ class LibraryCheckTests(unittest.TestCase):
                 calls.append((label, command))
                 evidence = kwargs['directory']
                 evidence.mkdir(parents=True)
-                count = {'native-resources': 4, 'native-comparison': 6, 'native-math': 8, 'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 9, 'sysroot-resources': 3, 'sysroot-patterns': 3, 'sysroot-meta-patterns': 3, 'sysroot-hash': 3, 'sysroot-meta': 1, 'sysroot-builders': 2, 'sysroot-enum-builder': 2, 'sysroot-symbol-enum': 2, 'sysroot-fixed-enum': 2, 'sysroot-build-mode': 1, 'sysroot-build-target': 2}
+                count = {'native-resources': 4, 'native-comparison': 6, 'native-math': 11, 'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 9, 'sysroot-resources': 3, 'sysroot-patterns': 3, 'sysroot-meta-patterns': 3, 'sysroot-hash': 3, 'sysroot-meta': 1, 'sysroot-builders': 2, 'sysroot-enum-builder': 2, 'sysroot-symbol-enum': 2, 'sysroot-fixed-enum': 2, 'sysroot-build-mode': 1, 'sysroot-build-target': 2}
                 text = '(bool false)' if wrong_value else '(bool true)'
                 if label in ('attributes', 'merged-attributes'):
                     text = '(evaluated-attribute (property "abi") (symbol "c"))'
@@ -65,6 +65,14 @@ class LibraryCheckTests(unittest.TestCase):
                 if name == 'option':
                     self.assertNotIn('--optional-type', command)
                     self.assertIn('optional', command)
+            if not selected or 'native-math' in selected:
+                command = next(command for label, command in calls if label == 'native-math')
+                self.assertIn('--sysroot', command)
+                self.assertIn(str(library_check.ROOT / 'library'), command)
+                self.assertNotIn('--packages-v1', command)
+                self.assertNotIn('--host-intrinsic', command)
+                self.assertNotIn('--copy-protocol', command)
+                self.assertIn('--test-native', command)
             if not selected or 'sysroot' in selected:
                 build = next(command for label, command in calls if label == 'sysroot')
                 self.assertIn('--build', build)
@@ -138,8 +146,8 @@ class LibraryCheckTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertFalse(summary['stages'][-1]['value_matches'])
 
-    def test_native_math_requires_all_eight_tests_and_zero_failures(self):
-        for output in ['(count 4) (failures 0)', '(count 8) (failures 1)']:
+    def test_native_math_requires_all_eleven_tests_and_zero_failures(self):
+        for output in ['(count 8) (failures 0)', '(count 11) (failures 1)']:
             with self.subTest(output=output):
                 status, summary = self.check_stages(release=True, native_output=output)
                 self.assertEqual(status, 1)
