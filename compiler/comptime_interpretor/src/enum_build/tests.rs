@@ -312,3 +312,187 @@ fn duplicate_payload_diagnostic_does_not_publish_or_poison_recovery() {
     assert_eq!(calls.get(), 1);
     assert!(vm.enums.contains_key(&id(10)));
 }
+
+#[test]
+fn ordinary_enum_builder_rejects_host_added_symbol_encoding_before_commit() {
+    let world = world();
+    let commits = Cell::new(0);
+    let altered = Cell::new(true);
+    let builder = |request: &EnumBuildRequest, _: &mut u64| {
+        let mut result = prepared(
+            request,
+            Box::new(|| {
+                commits.set(commits.get() + 1);
+                Ok(())
+            }),
+        );
+        if altered.get() {
+            Arc::make_mut(&mut result.definitions)[0].symbol_encoding = Some(
+                nir::enum_encoding::SymbolRepresentation::new(
+                    vec![nir::enum_encoding::SymbolVariant {
+                        name: "Group.Data".into(),
+                        value: "different-abi".into(),
+                    }],
+                    &mut comptime_runtime::Budget::default(),
+                )
+                .unwrap(),
+            );
+        }
+        Ok(result)
+    };
+    let Value::Tuple(mut values) = input("unit") else {
+        unreachable!()
+    };
+    values[4] = Value::List {
+        ty: list(list(p(Primitive::Symbol))),
+        values: vec![symbols(&[])],
+    };
+    values[5] = Value::List {
+        ty: list(list(p(Primitive::Type))),
+        values: vec![Value::TypeList(vec![])],
+    };
+    let input = Value::Tuple(values);
+    let mut vm = Interpreter::for_comptime(&world, Budget::default())
+        .unwrap()
+        .with_enum_builder(&builder);
+    let error = vm.eval(&expression(), &mut env(input.clone())).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Type);
+    assert_eq!(commits.get(), 0);
+    assert!(!vm.enums.contains_key(&id(10)));
+    altered.set(false);
+    vm.eval(&expression(), &mut env(input)).unwrap();
+    assert_eq!(commits.get(), 1);
+    assert!(vm.enums[&id(10)].symbol_encoding.is_none());
+}
+
+#[test]
+fn ordinary_enum_builder_rejects_host_added_metadata_before_commit() {
+    for case in 0..5 {
+        let world = world();
+        let commits = Cell::new(0);
+        let altered = Cell::new(true);
+        let builder = |request: &EnumBuildRequest, _: &mut u64| {
+            let mut result = prepared(
+                request,
+                Box::new(|| {
+                    commits.set(commits.get() + 1);
+                    Ok(())
+                }),
+            );
+            if altered.get() {
+                let definition = &mut Arc::make_mut(&mut result.definitions)[0];
+                match case {
+                    0 => definition.is_intrinsic = true,
+                    1 => definition.type_parameters.push(id(20)),
+                    2 => definition.parameter_types.push(p(Primitive::Type)),
+                    3 => definition
+                        .requirements
+                        .push(nir::program::TypePredicate::Bool(true)),
+                    4 => definition
+                        .capabilities
+                        .push(nir::program::TraitRequirement {
+                            interface_arguments: vec![],
+                            subject: p(Primitive::Bool),
+                            interface: id(21),
+                        }),
+                    _ => unreachable!(),
+                }
+            }
+            Ok(result)
+        };
+        let mut vm = Interpreter::for_comptime(&world, Budget::default())
+            .unwrap()
+            .with_enum_builder(&builder);
+        let error = vm
+            .eval(&expression(), &mut env(input("named")))
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Type, "case {case}");
+        assert_eq!(error.source, Some(expression().source));
+        assert_eq!(commits.get(), 0);
+        assert!(!vm.enums.contains_key(&id(10)));
+        altered.set(false);
+        vm.eval(&expression(), &mut env(input("named"))).unwrap();
+        assert_eq!(commits.get(), 1);
+    }
+}
+
+#[test]
+fn ordinary_struct_builder_rejects_host_added_metadata_before_commit() {
+    // Reuse the same meta.List world to exercise the sibling descriptor protocol.
+    for case in 0..4 {
+        let world = world();
+        let commits = Cell::new(0);
+        let altered = Cell::new(true);
+        let builder = |request: &StructBuildRequest, _: &mut u64| {
+            let mut definition = nir::program::Struct {
+                declaration: id(10),
+                name: request.name.clone(),
+                fields: request
+                    .fields
+                    .iter()
+                    .map(|field| (field.name.clone(), field.ty.clone()))
+                    .collect(),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            };
+            if altered.get() {
+                match case {
+                    0 => definition.type_parameters.push(id(20)),
+                    1 => definition.parameter_types.push(p(Primitive::Type)),
+                    2 => definition
+                        .requirements
+                        .push(nir::program::TypePredicate::Bool(true)),
+                    3 => definition
+                        .capabilities
+                        .push(nir::program::TraitRequirement {
+                            interface_arguments: vec![],
+                            subject: p(Primitive::Bool),
+                            interface: id(21),
+                        }),
+                    _ => unreachable!(),
+                }
+            }
+            Ok(PreparedStructBuild {
+                result: id(10),
+                definitions: vec![definition].into(),
+                commit: Box::new(|| {
+                    commits.set(commits.get() + 1);
+                    Ok(())
+                }),
+            })
+        };
+        let source = SourceRange { start: 3, end: 7 };
+        let expr = Expr {
+            source,
+            ty: p(Primitive::Type),
+            kind: K::BuildStruct(Box::new(Expr {
+                source,
+                ty: Term::Tuple(vec![
+                    p(Primitive::Symbol),
+                    list(p(Primitive::Symbol)),
+                    list(p(Primitive::Type)),
+                ]),
+                kind: K::Local(LocalId { owner: 9, index: 0 }),
+            })),
+        };
+        let input = Value::Tuple(vec![
+            Value::Symbol("Generated".into()),
+            symbols(&["flag"]),
+            Value::TypeList(vec![p(Primitive::Bool)]),
+        ]);
+        let mut vm = Interpreter::for_comptime(&world, Budget::default())
+            .unwrap()
+            .with_struct_builder(&builder);
+        let error = vm.eval(&expr, &mut env(input.clone())).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Type, "case {case}");
+        assert_eq!(error.source, Some(source));
+        assert_eq!(commits.get(), 0);
+        altered.set(false);
+        assert!(
+            matches!(vm.eval(&expr, &mut env(input)).unwrap(), Flow::Value(Value::Type(Term::Nominal { declaration, .. })) if declaration == id(10))
+        );
+        assert_eq!(commits.get(), 1);
+    }
+}

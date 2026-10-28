@@ -181,7 +181,13 @@ impl<'a> Interpreter<'a> {
             self.budget.steps -= (before - fuel) as u64;
             charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(expr.source)))?;
         }
+        // A concrete field descriptor cannot authorize extra declaration inputs
+        // or constraints merely because the host returned an admissible type.
         if definition.name != request.name
+            || !definition.type_parameters.is_empty()
+            || !definition.parameter_types.is_empty()
+            || !definition.requirements.is_empty()
+            || !definition.capabilities.is_empty()
             || definition.fields.len() != request.fields.len()
             || definition
                 .fields

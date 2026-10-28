@@ -274,7 +274,16 @@ impl<'a> Interpreter<'a> {
         );
         self.budget.steps -= (before - fuel) as u64;
         charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(expr.source)))?;
+        // This request describes an ordinary concrete enum. Additional ABI or
+        // generic metadata is a different descriptor, even if admission accepts it.
         if definition.name != request.name
+            || definition.is_intrinsic
+            || !definition.type_parameters.is_empty()
+            || !definition.parameter_types.is_empty()
+            || !definition.requirements.is_empty()
+            || !definition.capabilities.is_empty()
+            || definition.encoding.is_some()
+            || definition.symbol_encoding.is_some()
             || definition.groups != request.groups
             || definition.variants != request.variants
         {

@@ -192,6 +192,10 @@ typealias Record = Edited();
 `EnumBuilder` 构造普通具体 enum，`new(.name = ...)` 指定诊断名称，
 `add_unit`、`add_tuple`、`add_named` 分别保留无 payload、位置 payload 和具名 payload
 的形状。`Build` 返回新鲜的 nominal Type；payload Type 的身份不会被展开替换。
+普通 `StructBuilder`／`EnumBuilder` 的发布回调必须忠实返回请求描述：不能额外
+附加泛型输入或约束；普通 enum 也不能被改成 intrinsic、固定宽度或 Symbol 编码。
+描述符不匹配在调用发布 commit 前拒绝，并保留构造表达式的源码位置；拒绝后可以
+在同一 invocation 中重试合法构造。这不限制以后通过专门构造接口支持这些定义。
 
 ```flurry
 comptime fn EventType() -> Type {
