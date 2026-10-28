@@ -2190,3 +2190,44 @@ fn instance_copy_budget_counts_expanded_parameter_occurrences_and_recovers() {
     assert_eq!(graph.roots, vec![key]);
     assert_eq!(source.to_string(), before);
 }
+
+#[test]
+fn optional_inline_pass_keeps_useful_expansion_under_inert_library_budget() {
+    let mut source = String::from("trait Marker {assoc Item:(.Type'builtin);}\n");
+    let inert = std::iter::repeat_n("true", 32)
+        .collect::<Vec<_>>()
+        .join(" and ");
+    for index in 0..128 {
+        source.push_str(&format!("inline fn unused{index}()->bool {{{inert}}}\n"));
+    }
+    source.push_str(
+        "inline fn identity(value:bool)->bool {value}\nfn entry()->bool {identity(true)}",
+    );
+    let mut package = compile(&source);
+    let untouched = package
+        .functions
+        .iter()
+        .find(|f| f.name == "unused0")
+        .unwrap()
+        .body
+        .to_string();
+    let mut fuel = 24_000;
+    let report = elaboration::program::inlining::expand(&mut package, &mut fuel).unwrap();
+    assert_eq!(report.expanded, 1, "{report}; remaining fuel {fuel}");
+    assert_eq!(
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == "unused0")
+            .unwrap()
+            .body
+            .to_string(),
+        untouched
+    );
+    let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}

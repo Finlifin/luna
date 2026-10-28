@@ -27,6 +27,26 @@ pub(super) fn expand(package: &mut n::Package, fuel: &mut usize) -> Result<(usiz
         if function.phase != n::FunctionPhase::Runtime {
             continue;
         }
+        // Rewriter clones types even when no installation can be rewritten.
+        // First scan only for a matching installation; keep this scan bounded.
+        let mut eligible = false;
+        if nir::visit::expression(&function.body, pass.fuel, |node, _| {
+            if let K::EffectHandle { handlers, .. } = &node.kind {
+                eligible |= !handlers.is_empty()
+                    && handlers.iter().all(|handler| {
+                        handler.abi == nir::effects::Abi::Direct
+                            && inline.contains(&handler.operation.declaration)
+                    });
+            }
+            Ok(())
+        })
+        .is_err()
+        {
+            break;
+        }
+        if !eligible {
+            continue;
+        }
         if charge(&function.body, pass.fuel).is_err() {
             break;
         }

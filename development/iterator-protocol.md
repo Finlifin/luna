@@ -225,3 +225,35 @@ Validation (working directory `/home/fin/luna`, unless noted):
   six passed; `/tmp/luna-tools-5xul652r/result.json`.
 - From `/home/fin/luna/development`, `python3 -B -m unittest test_library_check`:
   all 13 runner tests passed with the updated required native count.
+
+## Optional inline preparation cost
+
+The ordinary inliner now borrows templates from its immutable method-selection
+world instead of retaining a second copy. Its initial bounded traversal also
+records bodies containing calls; bodies without calls skip ordinary rewriting.
+The effect pass uses a bounded installation scan before entering the type-copying
+rewriter. Actual expansion, method selection and transactional fallback retain
+their existing contracts.
+
+A regression includes 128 inert inline helpers and a useful identity call, with
+an associated-type declaration requiring a selection world. At 24000 fuel the
+useful call expands, an inert body remains unchanged, and the resulting IIR runs
+successfully. This demonstrates reduced preparation cost, not a general speedup
+or a replacement for whole-sysroot budgeting.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test instantiation inline`:
+  33 passed, including rollback, evaluation order, recursion and budget cases;
+  `/tmp/luna-tools-rgb0pp6w/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test library_iteration`:
+  44 passed; `/tmp/luna-tools-_k8c5ecu/result.json`.
+- `python3 -B development/library_check.py --release --timeout 900 --stage sysroot-iteration`:
+  six native tests passed; `/tmp/luna-library-g488w801/summary.json`.
+- `python3 -B development/reproduce.py --timeout 120 --binary /tmp/luna-dev-002/target/release/luna -- development/examples/sysroot-iteration.fl --sysroot library --test-native --inline-functions --fuel 400000 --opt-level 3`:
+  six passed; `/tmp/luna-tools-cl1szjbr/result.json`.
+- The same native command at 200000 fuel without `--opt-level 3` still leaves
+  three reductions unexpanded and resource verification rejects them;
+  `/tmp/luna-tools-dnc8c12w/result.json`. Before this change, 200000 also failed
+  and 400000 passed. Keep the stage's 1000000 budget; these observations do not
+  establish a lower whole-sysroot budget threshold or a wall-clock speedup.

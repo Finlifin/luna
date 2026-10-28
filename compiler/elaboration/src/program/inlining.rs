@@ -117,26 +117,24 @@ impl std::fmt::Display for Report {
 /// and metadata intact. Staged calls await input completion; indirect calls and
 /// open method selections are left to their existing invocation paths.
 pub fn expand(package: &mut n::Package, fuel: &mut usize) -> Result<Report, String> {
-    let mut templates = BTreeMap::new();
-    for function in &package.functions {
-        if !function.inline || function.phase != n::FunctionPhase::Runtime {
-            continue;
-        }
-        nir::visit::expressions(function, fuel, |expr, fuel| {
-            nir::type_computations::charge_term(&expr.ty, fuel).map_err(|error| error.to_string())
-        })?;
-        nir::type_computations::charge_term(&function.signature, fuel)
-            .map_err(|e| e.to_string())?;
-        templates.insert(function.declaration, function.clone());
-    }
     // Selection observes the original checked package while expansion mutates
     // bodies and private return metadata. Charge the retained executable trees.
     let mut has_methods = false;
+    let mut candidates = BTreeSet::new();
     for function in &package.functions {
+        let mut has_call = false;
         nir::visit::expressions(function, fuel, |expr, fuel| {
             has_methods |= matches!(expr.kind, K::TraitMethod { .. });
+            has_call |= matches!(expr.kind, K::Call { .. });
             nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())
         })?;
+        if function.inline && function.phase == n::FunctionPhase::Runtime {
+            nir::type_computations::charge_term(&function.signature, fuel)
+                .map_err(|error| error.to_string())?;
+        }
+        if has_call {
+            candidates.insert(function.declaration);
+        }
     }
     // Associated annotations can require the same checked world even when
     // the expanded helper never invokes a trait method.
@@ -155,6 +153,29 @@ pub fn expand(package: &mut n::Package, fuel: &mut usize) -> Result<Report, Stri
     } else {
         None
     };
+    // The immutable selection world already owns the checked inline bodies.
+    // Borrow those templates instead of cloning every body a second time.
+    // Without a selection world, retain only the inline templates themselves.
+    let owned_templates = if selection.is_none() {
+        package
+            .functions
+            .iter()
+            .filter(|function| function.inline && function.phase == n::FunctionPhase::Runtime)
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let template_functions = selection
+        .as_ref()
+        .map_or(owned_templates.as_slice(), |world| {
+            world.functions.as_slice()
+        });
+    let templates = template_functions
+        .iter()
+        .filter(|function| function.inline && function.phase == n::FunctionPhase::Runtime)
+        .map(|function| (function.declaration, function))
+        .collect();
     let mut pass = Pass {
         selection: selection.as_ref(),
         methods: std::collections::HashMap::new(),
@@ -169,7 +190,9 @@ pub fn expand(package: &mut n::Package, fuel: &mut usize) -> Result<Report, Stri
         report: Report::default(),
     };
     for function in &mut package.functions {
-        if function.phase != n::FunctionPhase::Runtime {
+        if function.phase != n::FunctionPhase::Runtime
+            || !candidates.contains(&function.declaration)
+        {
             continue;
         }
         // Charge the traversal (including type clones performed by Rewriter)
@@ -206,7 +229,7 @@ struct Pass<'a> {
     active: Vec<(DeclarationId, Vec<Term>)>,
     methods: std::collections::HashMap<MethodKey, n::MethodInstance>,
     selection: Option<&'a n::Package>,
-    templates: &'a BTreeMap<DeclarationId, n::Function>,
+    templates: &'a BTreeMap<DeclarationId, &'a n::Function>,
     next: &'a mut u32,
     sources: &'a mut Vec<n::ExpansionSource>,
     enums: &'a mut Vec<n::Enum>,
