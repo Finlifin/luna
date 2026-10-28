@@ -528,9 +528,9 @@ fn repository_platform_comparison_protocols_follow_the_selected_target() {
                 let equal = high.as(Eq).eq(high) and low.as(Ord).le(low); assumes equal;
                 let unsigned = zero.as(Ord).lt(maximum) and maximum.as(Ord).ge(zero); assumes unsigned;
                 let different = maximum.as(Eq).ne(zero); assumes different;
-                let less = low.as(Ord).cmp(high) matches .Less; assumes less;
-                let greater = maximum.as(Ord).cmp(zero) matches .Greater; assumes greater;
-                let same = maximum.as(Ord).cmp(maximum) matches .Equal; assumes same;
+                let less = low.as(Ord).cmp(high) matches .less; assumes less;
+                let greater = maximum.as(Ord).cmp(zero) matches .greater; assumes greater;
+                let same = maximum.as(Ord).cmp(maximum) matches .equal; assumes same;
             }}",
             include_str!("../../../library/builtin/comparison.fl"),
             include_str!("../../../library/builtin/resources.fl"));

@@ -19,8 +19,8 @@ fn real_ord_defaults_drive_nominal_and_generic_operators() {
         struct Rank {{value:.i32'builtin}}
         impl comparison.Eq for Rank {{fn eq(self,other:Self)->bool {{self.value==other.value}}}}
         impl comparison.Ord for Rank {{
-            fn cmp(self,other:Self)->comparison.Ordering {{
-                if self.value < other.value {{.Less}} else if self.value == other.value {{.Equal}} else {{.Greater}}
+            fn cmp(self,other:Self)->comparison.Order {{
+                if self.value < other.value {{.less}} else if self.value == other.value {{.equal}} else {{.greater}}
             }}
         }}
         fn before(a:T,b:T)->bool where T :- comparison.Ord {{a < b}}

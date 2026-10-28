@@ -1,5 +1,5 @@
 -- The runner binds comparison.Ord by declaration identity.
-use comparison.{Eq, Ord, Ordering};
+use comparison.{Eq, Ord, Order};
 
 struct Version {
     major: .u32'builtin,
@@ -13,9 +13,9 @@ impl Eq for Version {
 }
 
 impl Ord for Version {
-    fn cmp(self, other: Self) -> Ordering {
-        if self.major < other.major { .Less }
-        else if self.major > other.major { .Greater }
+    fn cmp(self, other: Self) -> Order {
+        if self.major < other.major { .less }
+        else if self.major > other.major { .greater }
         else { self.minor.as(Ord).cmp(other.minor) }
     }
 }

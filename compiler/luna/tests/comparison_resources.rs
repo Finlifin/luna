@@ -17,10 +17,10 @@ fn source(body: &str) -> String {
             self.called.* = true;
             self.value == other.value
         }}}}
-        impl comparison.Ord for Watch {{fn cmp(self,other:Self)->comparison.Ordering {{
+        impl comparison.Ord for Watch {{fn cmp(self,other:Self)->comparison.Order {{
             assumes not self.dropped.* and not other.dropped.* and not self.called.*;
             self.called.* = true;
-            if self.value == other.value {{.Equal}} else if self.value {{.Greater}} else {{.Less}}
+            if self.value == other.value {{.equal}} else if self.value {{.greater}} else {{.less}}
         }}}}
         {body}",
         include_str!("../../../library/builtin/comparison.fl")
@@ -149,10 +149,10 @@ fn borrowed_comparison_preserves_owners_and_returned_resource() {
             assumes not self.dropped.*.* and not other.dropped.*.*;
             self.value.* == other.value.*
         }}
-        impl comparison.Ord for *Watch {fn cmp(self,other:Self)->comparison.Ordering {
+        impl comparison.Ord for *Watch {fn cmp(self,other:Self)->comparison.Order {
             assumes not self.dropped.*.* and not other.dropped.*.*;
-            if self.value.* == other.value.* {.Equal}
-            else if self.value.* {.Greater} else {.Less}
+            if self.value.* == other.value.* {.equal}
+            else if self.value.* {.greater} else {.less}
         }}
         fn precedes(a:T,b:T)->bool where T :- comparison.Ord {a < b}
         fn choose(a:T,b:T)->T where T, requires *T :- comparison.Ord {

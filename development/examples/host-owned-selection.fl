@@ -1,5 +1,5 @@
 -- Compare borrowed views, then transfer exactly one owner to the caller.
-use comparison.{Eq, Ord, Ordering};
+use comparison.{Eq, Ord, Order};
 use resources.Drop;
 
 struct Candidate {
@@ -22,11 +22,11 @@ impl Eq for *Candidate {
 }
 
 impl Ord for *Candidate {
-    fn cmp(self, other: Self) -> Ordering {
+    fn cmp(self, other: Self) -> Order {
         assumes not self.retired.*.* and not other.retired.*.*;
-        if self.preferred.* == other.preferred.* { .Equal }
-        else if self.preferred.* { .Greater }
-        else { .Less }
+        if self.preferred.* == other.preferred.* { .equal }
+        else if self.preferred.* { .greater }
+        else { .less }
     }
 }
 

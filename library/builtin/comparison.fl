@@ -1,5 +1,21 @@
 -- Equality and total ordering, independent of formatting and allocation.
 
+typealias u8 = .u8'builtin;
+typealias u16 = .u16'builtin;
+typealias u32 = .u32'builtin;
+typealias u64 = .u64'builtin;
+typealias u128 = .u128'builtin;
+typealias i8 = .i8'builtin;
+typealias i16 = .i16'builtin;
+typealias i32 = .i32'builtin;
+typealias i64 = .i64'builtin;
+typealias i128 = .i128'builtin;
+typealias char = .char'builtin;
+typealias Symbol = .Symbol'builtin;
+typealias usize = .usize'builtin;
+typealias isize = .isize'builtin;
+typealias str = .str'builtin;
+
 -- ── Equality ───────────────────────────────────────────────────────────────
 
 pub trait Eq {
@@ -12,121 +28,121 @@ pub trait Eq {
     comptime fn comptime_ne(self, other: Self) -> bool = not self.comptime_eq(other);
 }
 
--- ── Ordering ───────────────────────────────────────────────────────────────
+-- ── Order ───────────────────────────────────────────────────────────────
 
 pub trait Ord :- Eq {
-    fn cmp(self, other: Self) -> Ordering;
+    fn cmp(self, other: Self) -> Order;
     fn lt(self, other: Self) -> bool = self.cmp(other) match {
-        .Less => true,
+        .less => true,
         _ => false,
     };
     fn le(self, other: Self) -> bool = self.cmp(other) match {
-        .Greater => false,
+        .greater => false,
         _ => true,
     };
     fn gt(self, other: Self) -> bool = self.cmp(other) match {
-        .Greater => true,
+        .greater => true,
         _ => false,
     };
     fn ge(self, other: Self) -> bool = self.cmp(other) match {
-        .Less => false,
+        .less => false,
         _ => true,
     };
 }
 
-pub enum Ordering {
-    Less,
-    Equal,
-    Greater,
+pub enum Order {
+    less,
+    equal,
+    greater,
 }
 
-impl Eq for .u8'builtin {
+impl Eq for u8 {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .u8'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for u8 {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
-impl Eq for .u16'builtin {
+impl Eq for u16 {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .u16'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for u16 {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
-impl Eq for .u32'builtin {
+impl Eq for u32 {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .u32'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for u32 {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
-impl Eq for .u64'builtin {
+impl Eq for u64 {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .u64'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for u64 {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
-impl Eq for .u128'builtin {
+impl Eq for u128 {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .u128'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for u128 {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
-impl Eq for .i8'builtin {
+impl Eq for i8 {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .i8'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for i8 {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
-impl Eq for .i16'builtin {
+impl Eq for i16 {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .i16'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for i16 {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
-impl Eq for .i32'builtin {
+impl Eq for i32 {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .i32'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for i32 {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
-impl Eq for .i64'builtin {
+impl Eq for i64 {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .i64'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for i64 {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
-impl Eq for .i128'builtin {
+impl Eq for i128 {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .i128'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for i128 {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
@@ -135,41 +151,41 @@ impl Eq for bool {
     fn eq(self, other: Self) -> bool { self == other }
 }
 impl Ord for bool {
-    fn cmp(self, other: Self) -> Ordering {
-        if self == other { .Equal } else if self { .Greater } else { .Less }
+    fn cmp(self, other: Self) -> Order {
+        if self == other { .equal } else if self { .greater } else { .less }
     }
 }
 
 -- Character order follows Unicode scalar values, independent of locale.
-impl Eq for .char'builtin {
+impl Eq for char {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .char'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for char {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
 -- Symbol equality compares names, not backing storage addresses.
-impl Eq for .Symbol'builtin {
+impl Eq for Symbol {
     fn eq(self, other: Self) -> bool { self == other }
 }
 
-impl Eq for .usize'builtin {
+impl Eq for usize {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .usize'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for usize {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
-impl Eq for .isize'builtin {
+impl Eq for isize {
     fn eq(self, other: Self) -> bool { self == other }
 }
-impl Ord for .isize'builtin {
-    fn cmp(self, other: Self) -> Ordering {
-        if self < other { .Less } else if self == other { .Equal } else { .Greater }
+impl Ord for isize {
+    fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
     }
 }
 
@@ -177,49 +193,49 @@ impl Ord for .isize'builtin {
     Comptime equality shares each primitive implementation relationship with
     runtime equality, while supplying its independently checked phase.
 -}
-comptime impl Eq for .u8'builtin {
+comptime impl Eq for u8 {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .u16'builtin {
+comptime impl Eq for u16 {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .u32'builtin {
+comptime impl Eq for u32 {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .u64'builtin {
+comptime impl Eq for u64 {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .u128'builtin {
+comptime impl Eq for u128 {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .i8'builtin {
+comptime impl Eq for i8 {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .i16'builtin {
+comptime impl Eq for i16 {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .i32'builtin {
+comptime impl Eq for i32 {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .i64'builtin {
+comptime impl Eq for i64 {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .i128'builtin {
+comptime impl Eq for i128 {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
 comptime impl Eq for bool {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .char'builtin {
+comptime impl Eq for char {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .Symbol'builtin {
+comptime impl Eq for Symbol {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .usize'builtin {
+comptime impl Eq for usize {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .isize'builtin {
+comptime impl Eq for isize {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }
 
@@ -227,9 +243,9 @@ comptime impl Eq for .isize'builtin {
     Text equality observes the complete UTF-8 contents, including embedded
     zero bytes. It neither compares storage identities nor normalizes Unicode.
 -}
-impl Eq for .str'builtin {
+impl Eq for str {
     fn eq(self, other: Self) -> bool { self == other }
 }
-comptime impl Eq for .str'builtin {
+comptime impl Eq for str {
     comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }

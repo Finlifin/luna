@@ -44,7 +44,7 @@ std.prelude 不默认导入。需要时在包根写 use std.prelude.*；子模�
 
 math 属于 builtin，通过 builtin.prelude 导出 math 模块入口；常用路径为
 `math.sqrt(...)`，也可以显式使用 `builtin.math.sqrt(...)`。它不是第七个
-内置包。math 同时提供 Eq、Ord、Ordering 等比较协议；这些协议经其他入口
+内置包。math 同时提供 Eq、Ord、Order 等比较协议；这些协议经其他入口
 再导出时保留原始声明身份。math 中的数值 intrinsic 函数是 LLVM intrinsic
 的泛型包装，仍按具体操作的类型与目标契约检查，不因默认可见而改变数值语义。
 

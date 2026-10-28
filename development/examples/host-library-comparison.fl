@@ -18,8 +18,8 @@ test signed_boundaries {
     let low: .i128'builtin = -170141183460469231731687303715884105728;
     let high: .i128'builtin = 170141183460469231731687303715884105727;
     let smaller = lower(low, high);
-    let forward = low.as(Ord).cmp(high) matches .Less;
-    let backward = high.as(Ord).cmp(low) matches .Greater;
+    let forward = low.as(Ord).cmp(high) matches .less;
+    let backward = high.as(Ord).cmp(low) matches .greater;
     assumes smaller == low and forward and backward;
 }
 

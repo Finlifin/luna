@@ -185,7 +185,7 @@ returns an Err payload. By-value queries retire whichever payload is present.
 
 ## Standalone comparison protocols
 
-`builtin/comparison.fl` owns Eq, Ord and Ordering; `builtin/traits.fl` re-exports
+`builtin/comparison.fl` owns Eq, Ord and Order; `builtin/traits.fl` re-exports
 the same declarations. It has no String, formatting, allocation or panic dependency.
 Concrete Eq/Ord implementations cover bool (false precedes true) and the ten
 fixed-width integer types u8 through u128 and i8 through i128, plus Unicode scalar

@@ -5,7 +5,7 @@
 -- Fundamental protocols exposed through ordinary trait declarations.
 
 -- Comparison protocols can be loaded without formatting/owned strings.
-pub use comparison.{Eq, Ord, Ordering};
+pub use comparison.{Eq, Ord, Order};
 
 -- Resource protocols live separately from formatting and owned strings.
 pub use resources.{Once, Clone, Copy, Drop};

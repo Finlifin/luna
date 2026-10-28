@@ -1238,9 +1238,9 @@ fn repository_comparison_protocols_execute_integer_boundaries_and_defaults() {
             let check2 = low.as(Ord).lt(high) and not high.as(Ord).lt(low); assumes check2;
             let check3 = low.as(Ord).le(low) and high.as(Ord).ge(high); assumes check3;
             let check4 = high.as(Ord).gt(low) and not low.as(Ord).gt(high); assumes check4;
-            let check5 = low.as(Ord).cmp(high) matches .Less; assumes check5;
-            let check6 = high.as(Ord).cmp(low) matches .Greater; assumes check6;
-            let check7 = low.as(Ord).cmp(low) matches .Equal; assumes check7;
+            let check5 = low.as(Ord).cmp(high) matches .less; assumes check5;
+            let check6 = high.as(Ord).cmp(low) matches .greater; assumes check6;
+            let check7 = low.as(Ord).cmp(low) matches .equal; assumes check7;
         }}"
         );
         checks.push_str(&format!("fn {entry}() {body}"));
@@ -1322,9 +1322,9 @@ fn run() {{
     let zero = '\0'.as(Ord).lt('a'); assumes zero;
     let equal = character.as(Eq).eq('中'); assumes equal;
     let different = character.as(Eq).ne('文'); assumes different;
-    let before = 'a'.as(Ord).cmp(character) matches .Less; assumes before;
-    let after = character.as(Ord).cmp('a') matches .Greater; assumes after;
-    let same_character = character.as(Ord).cmp('中') matches .Equal; assumes same_character;
+    let before = 'a'.as(Ord).cmp(character) matches .less; assumes before;
+    let after = character.as(Ord).cmp('a') matches .greater; assumes after;
+    let same_character = character.as(Ord).cmp('中') matches .equal; assumes same_character;
     let le = character.as(Ord).le('中'); assumes le;
     let ge = character.as(Ord).ge('a'); assumes ge;
     let gt = character.as(Ord).gt('a'); assumes gt;

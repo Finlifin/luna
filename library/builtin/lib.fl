@@ -18,7 +18,7 @@ pub mod text {
 }
 
 pub mod math {
-    pub use comparison.{Eq, Ord, Ordering};
+    pub use comparison.{Eq, Ord, Order};
     pub use math_intrinsics.*;
 }
 

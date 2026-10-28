@@ -3843,8 +3843,8 @@ fn shipped_clone_protocol_preserves_noncopy_sources() {
     sandbox.write("lib.fl","pub use primitives.*;pub use traits.*;struct String {}
         struct Key {value:u8}
         impl Eq for Key {fn eq(self,other:Self)->bool {self.value == other.value}}
-        impl Ord for Key {fn cmp(self,other:Self)->Ordering {
-            if self.value < other.value {.Less} else if self.value == other.value {.Equal} else {.Greater}
+        impl Ord for Key {fn cmp(self,other:Self)->Order {
+            if self.value < other.value {.less} else if self.value == other.value {.equal} else {.greater}
         }}
         impl Hash for Key {fn hash(self)->u64 {7}}
         fn run()->bool {
@@ -3931,12 +3931,13 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     sandbox.write(
         "library/language-items.conf",
         // This fixture supplies list/tuple and numeric protocols, not the
-        // target-dependent iterator implementation from the complete sysroot.
+        // iterator or list-pattern implementations from the complete sysroot.
         include_str!("../../../library/language-items.conf")
             .lines()
             .filter(|line| {
                 !line.starts_with("iterator-protocol =")
                     && !line.starts_with("into-iterator-protocol =")
+                    && !line.starts_with("list-pattern-protocol =")
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -3965,8 +3966,8 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     );
     sandbox.write("input.fl", "struct Flag {value:bool}
         impl builtin.Eq for Flag {fn eq(self,other:Self)->bool {self.value==other.value}}
-        impl builtin.Ord for Flag {fn cmp(self,other:Self)->builtin.Ordering {
-            if not self.value and other.value {.Less} else if self.value==other.value {.Equal} else {.Greater}
+        impl builtin.Ord for Flag {fn cmp(self,other:Self)->builtin.Order {
+            if not self.value and other.value {.less} else if self.value==other.value {.equal} else {.greater}
         }}
         fn run()->bool {Flag {value:false} < Flag {value:true} and Flag {value:true}==Flag {value:true} and Flag {value:false}!=Flag {value:true}}");
     assert_eq!(
@@ -4021,6 +4022,7 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
             .filter(|line| {
                 !line.starts_with("iterator-protocol =")
                     && !line.starts_with("into-iterator-protocol =")
+                    && !line.starts_with("list-pattern-protocol =")
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -8740,7 +8742,7 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
     }
     sandbox.write(
         "library/builtin/lib.fl",
-        "pub mod math {pub use comparison.{Eq,Ord,Ordering};pub use math_intrinsics.*;} pub mod prelude {pub use math;pub use primitives.*;pub use math.{Eq,Ord,Ordering};}",
+        "pub mod math {pub use comparison.{Eq,Ord,Order};pub use math_intrinsics.*;} pub mod prelude {pub use math;pub use primitives.*;pub use math.{Eq,Ord,Order};}",
     );
     sandbox.write(
         "library/builtin/resources.fl",
@@ -8875,8 +8877,8 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
         "use builtin.math.Eq as Same;
         struct Flag {value:bool}
         impl math.Eq for Flag {fn eq(self,other:Self)->bool {self.value==other.value}}
-        impl math.Ord for Flag {fn cmp(self,other:Self)->math.Ordering {
-            if self.value==other.value {.Equal} else if self.value {.Greater} else {.Less}
+        impl math.Ord for Flag {fn cmp(self,other:Self)->math.Order {
+            if self.value==other.value {.equal} else if self.value {.greater} else {.less}
         }}
         fn run()->bool {
             Flag {value:false}.as(Eq).eq(Flag {value:false})

@@ -10,6 +10,6 @@ fn run() -> bool {
     let high: .i128'builtin = 170141183460469231731687303715884105727;
     let smaller = lower(high, low);
     let distinct = low.as(Eq).ne(high);
-    let ordered = low.as(Ord).cmp(high) matches .Less;
+    let ordered = low.as(Ord).cmp(high) matches .less;
     smaller == low and distinct and ordered and not lower(true, false)
 }
