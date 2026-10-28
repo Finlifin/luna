@@ -1107,3 +1107,214 @@ fn derived_members_keep_generator_source_configuration() {
     let error = fixture.compile_configured(&missing, None).err().unwrap();
     assert!(error.contains("source package 200"), "{error}");
 }
+
+fn metadata_protocols() -> elaboration::program::Protocols {
+    use luna::build_context::metadata::{Entry, Input, Snapshot, VERSION};
+    let mut packages = sources();
+    packages.push(SourcePackage {
+        resolution_id: 9,
+        identity: 300,
+        name: "build".into(),
+        entry: "unused.fl".into(),
+    });
+    let dependencies = vec![
+        resolve::DependencyEdge {
+            requester: 3,
+            alias: "dependency".into(),
+            provider: 7,
+        },
+        resolve::DependencyEdge {
+            requester: 7,
+            alias: "build".into(),
+            provider: 9,
+        },
+    ];
+    let inputs = [(200, true), (300, false)]
+        .into_iter()
+        .map(|(identity, value)| Input {
+            identity,
+            fields: vec![(
+                "enabled".into(),
+                Entry::new(
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                    nir::Term::Bool(value),
+                    &mut 1000,
+                )
+                .unwrap(),
+            )],
+        })
+        .collect();
+    let snapshot = Snapshot::new(VERSION, &packages, &dependencies, inputs, &mut 10000).unwrap();
+    let mut protocols = elaboration::program::Protocols::default();
+    snapshot.configure(&mut protocols);
+    protocols
+}
+
+#[test]
+fn source_package_metadata_uses_public_build_library_and_saved_origin() {
+    let fixture = SourceFixture::new(
+        r#"use build.package_metadata as lookup;
+        comptime fn run()->bool {
+            let own = lookup("dependency").features;
+            let foreign = dependency.saved("build").features;
+            (own.get(.enabled, bool) matches true?) and
+            (foreign.get(.enabled, bool) matches false?) and
+            (own.get(.absent, bool) matches null) and
+            (own.get(.enabled, .Symbol'builtin) matches null)
+        }"#,
+        "pub const saved = build.package_metadata;",
+    );
+    let luna::frontend::Artifact::Nir(package) = fixture
+        .compile_configured(&metadata_protocols(), None)
+        .unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn source_package_metadata_reports_unknown_alias_and_missing_input() {
+    for alias in ["unknown", "dependency"] {
+        let fixture = SourceFixture::new(
+            &format!(
+                "comptime fn run()->bool {{ build.package_metadata(\"{alias}\").features.get(.enabled, bool) matches true? }}"
+            ),
+            "",
+        );
+        let mut protocols = metadata_protocols();
+        std::sync::Arc::make_mut(protocols.build_metadata.as_mut().unwrap())
+            .inputs
+            .clear();
+        let luna::frontend::Artifact::Nir(package) =
+            fixture.compile_configured(&protocols, None).unwrap()
+        else {
+            panic!("expected NIR")
+        };
+        let error = luna::invocation::invoke(&package, "run", 100_000).unwrap_err();
+        assert!(
+            error.to_string().contains("BuildMetadataUnavailable"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn source_package_metadata_retains_dependency_enum_identity() {
+    let fixture = SourceFixture::new(
+        r#"comptime fn run()->bool {
+            build.package_metadata("dependency").features.get(.arch, dependency.TargetArch) matches .gpu?
+        }"#,
+        "pub enum TargetArch { cpu, gpu }",
+    );
+    let mut protocols = metadata_protocols();
+    let luna::frontend::Artifact::Nir(package) =
+        fixture.compile_configured(&protocols, None).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    let declaration = package
+        .enums
+        .iter()
+        .find(|item| item.name == "TargetArch")
+        .unwrap()
+        .declaration;
+    let ty = nir::Term::Nominal {
+        declaration,
+        arguments: vec![],
+    };
+    let value = nir::Term::NominalValue {
+        ty: Box::new(ty.clone()),
+        variant: Some(1),
+        fields: vec![],
+    };
+    std::sync::Arc::make_mut(protocols.build_metadata.as_mut().unwrap())
+        .inputs
+        .get_mut(&200)
+        .unwrap()
+        .insert("arch".into(), (ty, value));
+    let luna::frontend::Artifact::Nir(package) =
+        fixture.compile_configured(&protocols, None).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn real_sysroot_metadata_materializes_at_o0_and_o3() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let luna::cli::Command::Compile(options) = luna::cli::parse([
+        root.join("development/examples/sysroot-build-metadata.fl")
+            .into_os_string(),
+        "--sysroot".into(),
+        root.join("library").into_os_string(),
+        "--emit".into(),
+        "nir".into(),
+    ])
+    .unwrap() else {
+        panic!("expected compilation")
+    };
+    let mut protocols = elaboration::program::Protocols::default();
+    let target = luna::frontend::native_test_target().expect("native target available");
+    assert_eq!(
+        target.pointer_bits(),
+        64,
+        "fixture expects a 64-bit native target"
+    );
+    protocols.build_metadata = Some(std::sync::Arc::new(
+        elaboration::program::build_context::Metadata {
+            aliases: [(100, [("build".into(), 4)].into())].into(),
+            inputs: [(
+                4,
+                [(
+                    "enabled".into(),
+                    (
+                        nir::Term::Primitive(nir::Primitive::Bool),
+                        nir::Term::Bool(true),
+                    ),
+                )]
+                .into(),
+            )]
+            .into(),
+        },
+    ));
+    let (luna::frontend::Artifact::Nir(package), bindings) =
+        luna::frontend::compile_bound_for_target(
+            &options,
+            100,
+            &protocols,
+            Default::default(),
+            Some(target),
+        )
+        .unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    for optimization in [
+        luna::host::OptimizationLevel::O0,
+        luna::host::OptimizationLevel::O3,
+    ] {
+        let report = luna::testing::run_native_report_filtered(
+            &package,
+            100,
+            100_000,
+            Some(&bindings),
+            None,
+            &luna::host::Toolchain {
+                optimization,
+                ..Default::default()
+            },
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(report.results.len(), 2, "{report}");
+        assert_eq!(report.failures(), 0, "{report}");
+    }
+}

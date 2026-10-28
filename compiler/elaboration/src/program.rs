@@ -222,6 +222,8 @@ pub struct Protocols {
     pub build_modes: BTreeMap<u64, String>,
     /// Host pipeline targets selected by the originating source package.
     pub build_targets: BTreeMap<u64, build_context::Target>,
+    /// Immutable source-qualified dependency metadata supplied by the driver.
+    pub build_metadata: Option<std::sync::Arc<build_context::Metadata>>,
     /// Explicit target operation declaration and variant, resolved by the driver.
     pub host_fma: Option<(DeclarationId, String)>,
     pub host_sqrt: Option<(DeclarationId, String)>,

@@ -3,7 +3,8 @@
 //! This boundary checks closed descriptor shape, not semantic value admission.
 //! Consuming a descriptor as a Flurry value still requires the provider's type
 //! world. No process environment, filesystem lookup or global package-name search
-//! participates in resolution. Source elaboration is a separate integration step.
+//! participates in resolution. `Snapshot::configure` installs the immutable
+//! input for origin-bound source elaboration.
 use crate::packages::SourcePackage;
 use nir::{DeclarationId, QuotedDisplay as Q, Sort, Term};
 use std::{collections::BTreeMap, fmt, sync::Arc};
@@ -243,6 +244,28 @@ impl Snapshot {
             aliases,
             inputs: installed,
         })
+    }
+
+    /// Install this snapshot for origin-bound source metadata calls.
+    pub fn configure(&self, protocols: &mut elaboration::program::Protocols) {
+        protocols.build_metadata = Some(Arc::new(elaboration::program::build_context::Metadata {
+            aliases: self.aliases.clone(),
+            inputs: self
+                .inputs
+                .iter()
+                .map(|(owner, fields)| {
+                    (
+                        *owner,
+                        fields
+                            .iter()
+                            .map(|(name, entry)| {
+                                (name.clone(), (entry.ty.clone(), entry.value.clone()))
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }));
     }
 
     /// The origin is the definition's semantic package, not its resolution ID.

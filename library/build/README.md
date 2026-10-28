@@ -86,8 +86,22 @@ luna development/examples/sysroot-build-target.fl --sysroot library \
 目标输入参与完整请求缓存键，包含 feature 缺失与 false 的区别。字段级查询
 观察项尚未接入编译缓存。目标值中的 Object/Integer 等 comptime 数据仍受普通阶段与
 Splice 检查，不能直接当作 runtime 配置对象使用。
-`build.package_metadata` 的源码入口和构建脚本工具尚未实现。驱动侧已有独立的
-元数据描述符快照、按来源包直接依赖查询及观察项接口；描述符构造只验证闭合结构，
-`Entry::admit`／`Observation::admit` 可在提供者的 comptime VM 中进行语义接纳，
-检查值域、nominal payload 与类型形成约束，且不会执行元数据中的闭包工厂。该接口尚未接入 CLI、源码 elaboration 或缓存，参见
-[构建快照](../../development/build-context.md)。
+`build.package_metadata(alias)` 通过源码定义所属包的直接依赖别名查询元数据。
+保存或转交查询函数不会把读取上下文切换到调用者。驱动使用
+`luna::build_context::metadata::Snapshot::configure` 安装快照；没有输入时不会
+隐式读取进程环境。未知别名与 provider 未提供输入分别失败，显式空输入则合法。
+
+```flurry
+comptime {
+    let features = build.package_metadata("cuda").features;
+    let arch = features.get(.target_arch, cuda.config.TargetArch);
+}
+```
+
+`MetadataFeatures.get(name, comptime T)` 保留原始类型身份，缺失字段或域不匹配
+返回 `null`。元数据在提供者类型世界中接纳，不展开 normal-form 头、不执行
+闭包工厂，也不授予资源复制权限。示例中的 `cuda` 是调用包的显式依赖，
+`TargetArch` 由该依赖提供。
+
+CLI 元数据传输、缓存失效和构建脚本工具尚未接通；当前入口是 Rust driver
+快照配置与源码 elaboration。参见[构建快照](../../development/build-context.md)。

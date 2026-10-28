@@ -141,3 +141,31 @@ python3 -B development/check.py --timeout 900 -- test --release -p luna --test b
   未选中工厂不执行、缺失分类、错误后恢复、阶段拒绝、重复别名及 dump 转义。
 - `python3 -B development/check.py --timeout 900 -- test --release -p nir --lib`：
   5 项通过，报告 `/tmp/luna-tools-hi_pujgu/result.json`。
+
+### 公开 package_metadata 源码接口
+
+`Snapshot::configure` 把直接依赖映射及类型化字段安装到 elaboration Protocols。
+`build.package_metadata` 是上下文绑定的 comptime callable，读取时选取原始源码
+定义的 owner，并生成 capture-free closure 包装 BuildMetadata。保存与转交该
+callable 不改变来源；调用路由的常量探测也遵守该规则。库提供 PackageMetadata、
+MetadataFeatures 及 `get(name, comptime T)`，返回 `?T`；缺失与域不匹配返回 null。
+库循环使用普通 comptime while，不要求源码展开。复制元数据前进行预算检查。
+
+实际覆盖了公开库声明、driver 快照配置、直接调用、别名与保存的 callable、
+依赖 enum 身份、缺失 alias/input、字段缺失和类型不匹配。真实六包 sysroot
+用例 `development/examples/sysroot-build-metadata.fl` 检查 comptime 物化后进入
+LLVM host pipeline，在 O0 和 O3 下各执行两项测试。
+
+CLI 元数据传输、缓存失效与构建脚本尚未接通。外部 driver 必须用当前依赖图
+构造 Snapshot，并将配置变化纳入自身缓存键；本次不提供隐式全局包名查找。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test build_context --test build_metadata`：
+  build context 27 项、metadata 12 项通过，报告 `/tmp/luna-tools-fck_uvxh/result.json`。
+- 随后新增真实 sysroot 用例，运行
+  `python3 -B development/check.py --timeout 900 -- test --release -p luna --test build_context real_sysroot_metadata_materializes_at_o0_and_o3`：
+  通过，报告 `/tmp/luna-tools-e1k_ggm2/result.json`，覆盖 O0/O3 native 执行。
+- 初版签名缺少显式 comptime Type 参数、inline 循环触发暂不支持的 open method，
+  以及 callable 探测绕过上下文常量的失败均已修复；初版枚举 fixture 将内部
+  variant 索引误写为名称，也已修正，未改变语言层的具名枚举用法。

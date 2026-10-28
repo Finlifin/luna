@@ -390,7 +390,11 @@ impl Checker<'_, '_> {
             .item(owner)
             .is_some_and(|item| matches!(item.kind, ItemKind::Const(..)))
         {
-            let value = self.constant_value(owner, base.span)?;
+            let value = if self.is_build_context(owner) {
+                self.build_context_value(base, owner)?
+            } else {
+                self.constant_value(owner, base.span)?
+            };
             return if value.ty.is_comptime_callable() {
                 copy_result(&value.ty, &mut self.required_steps, base.span)
             } else {

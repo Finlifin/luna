@@ -25,6 +25,13 @@ impl std::fmt::Display for Target {
     }
 }
 
+/// A driver snapshot; keys are semantic package identities, never resolution IDs.
+#[derive(Clone, Debug, Default)]
+pub struct Metadata {
+    pub aliases: BTreeMap<u64, BTreeMap<String, u64>>,
+    pub inputs: BTreeMap<u64, BTreeMap<String, (Term, Term)>>,
+}
+
 impl Checker<'_, '_> {
     fn build_context_origin(&self, expr: &Expr<'_>) -> Result<u64, Error> {
         let original = self.package.source_origin(expr.hir_id).ok_or_else(|| {
@@ -39,7 +46,7 @@ impl Checker<'_, '_> {
     pub(super) fn is_build_context(&self, owner: OwnerId) -> bool {
         matches!(self.package.item(owner).map(|item| &item.kind),
             Some(ItemKind::Const(_, initializer))
-                if matches!(&initializer.kind, H::Builtin(name) if matches!(name.as_str(), "build_mode" | "build_target")))
+                if matches!(&initializer.kind, H::Builtin(name) if matches!(name.as_str(), "build_mode" | "build_target" | "build_package_metadata")))
     }
 
     pub(super) fn validate_build_context(
@@ -55,6 +62,12 @@ impl Checker<'_, '_> {
                 "build mode marker requires a constant declaration",
             ));
         };
+        if matches!(&initializer.kind, H::Builtin(name) if name.as_str() == "build_package_metadata")
+        {
+            let ty = self.type_expr(annotation)?;
+            self.metadata_shape(&ty, span)?;
+            return Ok(());
+        }
         if matches!(&initializer.kind, H::Builtin(name) if name.as_str() == "build_target") {
             let ty = self.type_expr(annotation)?;
             self.target_shape(&ty, span)?;
@@ -73,6 +86,13 @@ impl Checker<'_, '_> {
         owner: OwnerId,
     ) -> Result<n::Expr, Error> {
         self.validate_build_context(owner, expr.span)?;
+        if matches!(self.package.item(owner).map(|item| &item.kind),
+            Some(ItemKind::Const(_, initializer))
+                if matches!(&initializer.kind, H::Builtin(name) if name.as_str() == "build_package_metadata"))
+        {
+            return self.build_package_metadata(expr, owner);
+        }
+
         if matches!(self.package.item(owner).map(|item| &item.kind),
             Some(ItemKind::Const(_, initializer))
                 if matches!(&initializer.kind, H::Builtin(name) if name.as_str() == "build_target"))
@@ -225,5 +245,152 @@ impl Checker<'_, '_> {
                 ],
             },
         ))
+    }
+}
+
+impl Checker<'_, '_> {
+    fn metadata_shape(&mut self, ty: &Term, span: Span) -> Result<(Term, Term), Error> {
+        let invalid = || {
+            error(
+                span,
+                "package metadata requires comptime fn(str) -> PackageMetadata { features: MetadataFeatures { entries: Object } }",
+            )
+        };
+        let Term::ComptimeFunction(signature) = ty else {
+            return Err(invalid());
+        };
+        let Term::Function { parameters, result } = signature.as_ref() else {
+            return Err(invalid());
+        };
+        if parameters.len() != 1 || parameters[0].ty != p(P::Str) {
+            return Err(invalid());
+        }
+        self.ensure_nominal_type(result, span)?;
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = result.as_ref()
+        else {
+            return Err(invalid());
+        };
+        if !arguments.is_empty() {
+            return Err(invalid());
+        }
+        let fields = self
+            .structs
+            .get(declaration)
+            .ok_or_else(invalid)?
+            .fields
+            .clone();
+        if fields.len() != 1 || fields[0].0 != "features" {
+            return Err(invalid());
+        }
+        let features = fields[0].1.clone();
+        self.ensure_nominal_type(&features, span)?;
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = &features
+        else {
+            return Err(invalid());
+        };
+        if !arguments.is_empty()
+            || self.structs.get(declaration).ok_or_else(invalid)?.fields
+                != vec![("entries".into(), p(P::Object))]
+        {
+            return Err(invalid());
+        }
+        Ok((result.as_ref().clone(), features))
+    }
+
+    fn build_package_metadata(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+    ) -> Result<n::Expr, Error> {
+        let origin = self.build_context_origin(expr)?;
+        let metadata = self
+            .protocols
+            .build_metadata
+            .clone()
+            .ok_or_else(|| error(expr.span, "package metadata input is unavailable"))?;
+        let aliases = metadata
+            .aliases
+            .get(&origin)
+            .ok_or_else(|| error(expr.span, "package metadata source owner is unavailable"))?;
+        let Some(ItemKind::Const(annotation, _)) = self.package.item(owner).map(|item| &item.kind)
+        else {
+            unreachable!()
+        };
+        let ty = self.type_expr(annotation)?;
+        let (result, features) = self.metadata_shape(&ty, expr.span)?;
+        let mut preparation_fuel = 100_000usize;
+        for (alias, provider) in aliases {
+            preparation_fuel = preparation_fuel
+                .checked_sub(alias.len().saturating_add(1))
+                .ok_or_else(|| error(expr.span, "package metadata preparation budget exceeded"))?;
+            if let Some(fields) = metadata.inputs.get(provider) {
+                for (name, (domain, value)) in fields {
+                    preparation_fuel = preparation_fuel
+                        .checked_sub(name.len().saturating_add(1))
+                        .ok_or_else(|| {
+                        error(expr.span, "package metadata preparation budget exceeded")
+                    })?;
+                    for term in [domain, value] {
+                        nir::type_computations::charge_term(term, &mut preparation_fuel).map_err(
+                            |_| error(expr.span, "package metadata preparation budget exceeded"),
+                        )?;
+                    }
+                }
+            }
+        }
+        let mut entries = Vec::new();
+        for (alias, provider) in aliases {
+            let value = if let Some(fields) = metadata.inputs.get(provider) {
+                let mut values = Vec::new();
+                for (name, (domain, value)) in fields {
+                    self.ensure_nominal_type(domain, expr.span)?;
+                    values.push(nir::objects::entry(
+                        Some(name),
+                        domain.clone(),
+                        value.clone(),
+                    ));
+                }
+                Some(Term::NominalValue {
+                    ty: Box::new(result.clone()),
+                    variant: None,
+                    fields: vec![Term::NominalValue {
+                        ty: Box::new(features.clone()),
+                        variant: None,
+                        fields: vec![nir::objects::value(values)],
+                    }],
+                })
+            } else {
+                None
+            };
+            entries.push((alias.clone(), *provider, value));
+        }
+        let binding = local(expr.hir_id);
+        Ok(n::Expr {
+            source: source(expr.span),
+            ty,
+            kind: K::Closure {
+                parameters: vec![binding],
+                captures: vec![],
+                body: std::sync::Arc::new(n::Expr {
+                    source: source(expr.span),
+                    ty: result,
+                    kind: K::BuildMetadata {
+                        owner: origin,
+                        selector: Box::new(n::Expr {
+                            source: source(expr.span),
+                            ty: p(P::Str),
+                            kind: K::Local(binding),
+                        }),
+                        entries,
+                    },
+                }),
+            },
+        })
     }
 }

@@ -68,7 +68,11 @@ impl Checker<'_, '_> {
                         self.package.item(owner).map(|item| &item.kind),
                         Some(ItemKind::Const(..))
                     ) {
-                        let value = self.constant_value(owner, callee.span)?;
+                        let value = if self.is_build_context(owner) {
+                            self.build_context_value(callee, owner)?
+                        } else {
+                            self.constant_value(owner, callee.span)?
+                        };
                         if let K::TypeValue(ty) = value.kind {
                             return self.construct_typed(expr, ty, args, expected).map(Some);
                         }
