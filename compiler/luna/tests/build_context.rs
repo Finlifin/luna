@@ -1318,3 +1318,88 @@ fn real_sysroot_metadata_materializes_at_o0_and_o3() {
         assert_eq!(report.failures(), 0, "{report}");
     }
 }
+
+#[test]
+fn forwarded_metadata_callable_keeps_the_defining_packages_aliases() {
+    let fixture = SourceFixture::new(
+        "comptime fn run()->bool { dependency.read(build.package_metadata) }",
+        r#"pub comptime fn read(query: comptime fn(.str'builtin) -> build.PackageMetadata)->bool {
+            query("dependency").features.get(.enabled, bool) matches true?
+        }"#,
+    );
+    let luna::frontend::Artifact::Nir(package) = fixture
+        .compile_configured(&metadata_protocols(), None)
+        .unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn source_metadata_admission_rejects_bad_payload_and_recovers() {
+    let fixture = SourceFixture::new(
+        r#"comptime fn run()->bool {
+            build.package_metadata("dependency").features.get(.enabled, bool) matches true?
+        }"#,
+        "",
+    );
+    let mut protocols = metadata_protocols();
+    std::sync::Arc::make_mut(protocols.build_metadata.as_mut().unwrap())
+        .inputs
+        .get_mut(&200)
+        .unwrap()
+        .insert(
+            "enabled".into(),
+            (
+                nir::Term::Primitive(nir::Primitive::Bool),
+                nir::Term::Symbol("invalid".into()),
+            ),
+        );
+    let luna::frontend::Artifact::Nir(package) =
+        fixture.compile_configured(&protocols, None).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert!(luna::invocation::invoke(&package, "run", 100_000).is_err());
+    let luna::frontend::Artifact::Nir(recovered) = fixture
+        .compile_configured(&metadata_protocols(), None)
+        .unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::invocation::invoke(&recovered, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn source_metadata_requires_driver_configuration_only_when_read() {
+    let unused = SourceFixture::new("comptime fn run()->bool {true}", "");
+    assert!(unused.compile_configured(&Default::default(), None).is_ok());
+    let used = SourceFixture::new("const query=build.package_metadata;", "");
+    let error = used
+        .compile_configured(&Default::default(), None)
+        .err()
+        .expect("missing configuration must fail");
+    assert!(
+        error.contains("package metadata input is unavailable"),
+        "{error}"
+    );
+    let mut protocols = metadata_protocols();
+    std::sync::Arc::make_mut(protocols.build_metadata.as_mut().unwrap())
+        .aliases
+        .remove(&100);
+    let error = used
+        .compile_configured(&protocols, None)
+        .err()
+        .expect("missing owner must fail");
+    assert!(
+        error.contains("package metadata source owner is unavailable"),
+        "{error}"
+    );
+}
