@@ -1006,7 +1006,12 @@ impl Builder<'_> {
                 .collect();
             let mut methods = Vec::new();
             for template in &contract.methods {
-                if !template.type_parameters.is_empty()
+                // Runtime interface retention must not instantiate a different
+                // trait phase's signatures or its associated values. A type
+                // can implement this phase without a comptime contribution.
+                if template.phase != n::TraitPhase::Runtime
+                    || template.signature.is_comptime_callable()
+                    || !template.type_parameters.is_empty()
                     || !template.requirements.is_empty()
                     || !template.capabilities.is_empty()
                 {

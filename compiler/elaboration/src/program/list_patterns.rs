@@ -22,9 +22,9 @@ impl Checker<'_, '_> {
                 "list patterns require a bound ListPatternView protocol",
             )
         })?;
-        let contract = crate::list_patterns::protocol(&self.checked_traits, protocol)
-            .map_err(|message| error(pattern.span, message))?;
         let comptime = !self.runtime_value_context() && !self.in_code_body;
+        let contract = crate::list_patterns::for_phase(&self.checked_traits, protocol, comptime)
+            .map_err(|message| error(pattern.span, message))?;
         if contract.comptime != comptime {
             return Err(error(
                 pattern.span,
@@ -45,14 +45,19 @@ impl Checker<'_, '_> {
             .checked_add(1)
             .ok_or_else(|| error(pattern.span, "pattern temporary binding space exhausted"))?;
         self.locals.insert(binding, ty.clone());
-        let receiver = n::Expr {
+        let subject = n::Expr {
             source: source(pattern.span),
-            ty: Term::Pointer(Box::new(ty.clone())),
-            kind: K::AddressOf(Box::new(n::Expr {
+            ty: ty.clone(),
+            kind: K::Local(binding),
+        };
+        let receiver = if contract.by_value {
+            subject
+        } else {
+            n::Expr {
                 source: source(pattern.span),
-                ty: ty.clone(),
-                kind: K::Local(binding),
-            })),
+                ty: Term::Pointer(Box::new(ty.clone())),
+                kind: K::AddressOf(Box::new(subject)),
+            }
         };
         let call = |this: &mut Self, name: &str, index: Option<usize>| {
             let location = index.map(|index| &elements[index]).unwrap_or(pattern);
@@ -89,7 +94,7 @@ impl Checker<'_, '_> {
             Some(&size),
             pattern.span,
         )?;
-        let length = call(self, "list_pattern_view_get_len", None)?;
+        let length = call(self, contract.length, None)?;
         let (value, next) = if rest.is_some() {
             (
                 n::Expr {
@@ -120,7 +125,7 @@ impl Checker<'_, '_> {
         };
         let mut steps = vec![length_check];
         for (index, element) in elements.iter().enumerate() {
-            let value = call(self, "list_pattern_view_get_element", Some(index))?;
+            let value = call(self, contract.element, Some(index))?;
             let next = self.pattern(element, &value.ty)?;
             steps.push(n::Pattern::Then {
                 first: Box::new(n::Pattern::Wild),

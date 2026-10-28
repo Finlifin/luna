@@ -853,6 +853,39 @@ fn same_pair(value: Repeated) -> bool {
 以及带 Drop 的仿射主体只清理一次。协议不自动授予主体或提取结果 Copy，
 也不代表尚未实现的 TuplePatternView、映射或字符串模式协议已经可用。
 
+默认协议还提供独立的 comptime 相：`ElementComptime` 与
+`list_pattern_view_get_len_comptime(self)`、
+`list_pattern_view_get_element_comptime(self, index: usize)` 都标有
+`comptime_phase` 属性。两个方法是 comptime fn，接收值主语；索引是普通值参数，
+不再额外标记 comptime。运行时相仍借用主语，索引使用显式 comptime 参数。
+模式所处阶段决定选择哪组方法和元素类型；quoted runtime code 使用运行时相。
+
+```flurry
+struct PairView { value: bool }
+
+comptime impl ListPatternView for PairView {
+    assoc Element: Type = bool;
+    assoc ElementComptime: Type = Integer;
+    comptime fn list_pattern_view_get_len_comptime(self) -> usize { 2 }
+    comptime fn list_pattern_view_get_element_comptime(self, index: usize) -> Integer {
+        if self.value { 11 } else { 22 }
+    }
+}
+
+comptime fn inspect(value: PairView) -> bool {
+    value match { [11, 11] => true, _ => false }
+}
+```
+
+这里 `Element` 是共同关联声明，comptime contribution 仍提供它；实际编译期提取
+返回的是 `ElementComptime`。只实现运行时相的类型不必提供 comptime 相成员，
+运行时 IIR 也不会为未提供的编译期成员物化签名。两相的实现分别选择，不能仅凭
+方法名带有 `_comptime` 就取得对应的 phase。
+
+显式绑定的单相协议仍使用前述方法名与已声明的阶段。默认双相协议用于
+`meta.List` 的实现尚待长度与索引的 Integer／usize 转换接通；绑定协议本身
+不会赋予 comptime 列表 runtime 表示，也不将两个整数类型视为同一类型。
+
 列表模式的内部主体观察名只在本次候选匹配中可见，不是成功分支导出的变量。or-pattern 可以据此独立尝试各分支；成功后只统一导出用户绑定。该规则也适用于嵌套 tuple、`as whole` 和 inline／quote 展开。内部主体地址不得通过提取绑定逃逸，候选失败不清理原主体。
 
 泛型函数可以通过协议约束确定元素类型，并把关联结果交付给调用者；不同实现的 `Element` 分别实例化，不要求所有列表使用同一种元素类型：

@@ -9,6 +9,23 @@ impl ListPatternView for Repeated {
     }
 }
 
+{- The same subject exposes Integer elements only in its comptime phase. -}
+comptime impl ListPatternView for Repeated {
+    assoc Element: Type = bool;
+    assoc ElementComptime: Type = Integer;
+    comptime fn list_pattern_view_get_len_comptime(self) -> usize { self.length }
+    comptime fn list_pattern_view_get_element_comptime(self, index: usize) -> Integer {
+        if self.value { 11 } else { 22 }
+    }
+}
+
+comptime fn staged_contract() -> bool {
+    let pair = Repeated {length: 2, value: true};
+    let matched = pair match { [11, (second if second == 11)] => true, _ => false };
+    let empty = Repeated {length: 0, value: false} match { [] => true, _ => false };
+    matched and empty
+}
+
 fn exact(value: Repeated) -> bool {
     value match { [a, (b if a == b)] => a, _ => false }
 }
@@ -34,6 +51,7 @@ test failed_candidate_keeps_subject {
     let matched = retry(Repeated {length: 2, value: false});
     let empty = Repeated {length: 0, value: true} match { [] => true, _ => false };
     assumes matched and empty;
+    inline if staged_contract() { assumes true; } else { assumes false; };
 }
 
 struct Tracked { retired: *bool }

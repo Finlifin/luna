@@ -20,6 +20,44 @@ const PROTOCOL: &str = "typealias Type=.Type'builtin; typealias Size=.u64'builti
     }";
 
 #[test]
+fn dual_phase_list_protocol_rejects_malformed_staged_contracts() {
+    let source = include_str!("../../../library/builtin/patterns.fl");
+    for (from, to) in [
+        ("comptime_phase: true", "comptime_phase: false"),
+        ("get_len_comptime(self)", "get_len_comptime(*self)"),
+        ("self, index:", "self, comptime index:"),
+        (
+            "assoc ElementComptime: .Type'builtin;",
+            "assoc ElementComptime: bool;",
+        ),
+        (
+            "comptime fn list_pattern_view_get_len_comptime",
+            "fn list_pattern_view_get_len_comptime",
+        ),
+        (
+            "list_pattern_view_get_element_comptime",
+            "wrong_element_method",
+        ),
+    ] {
+        let malformed = source.replace(from, to);
+        assert_ne!(source, malformed);
+        let error = support::compile_with_source_bindings(
+            &malformed,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                list_pattern: Some("input.ListPatternView"),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("ListPatternView") || error.contains("associated value used as a type"),
+            "{from}: {error}"
+        );
+    }
+}
+
+#[test]
 fn list_wildcard_rest_checks_minimum_length_and_only_extracts_prefix() {
     let package = compile(
         "trait Duplicate {} trait Retire {fn drop(*self);}
