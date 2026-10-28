@@ -138,8 +138,8 @@ impl Checker<'_, '_> {
                 traits,
                 &[assumption],
                 Budget::default(),
-                &self.implementation_index.parameter_domains,
-                Some(&self.implementation_index.nominal_layouts),
+                self.implementation_index.parameter_domains(),
+                Some(self.implementation_index.nominal_layouts()),
             ) {
                 context.assume(Formula::from_predicate(&requirement));
             }
@@ -348,7 +348,7 @@ impl Checker<'_, '_> {
         // binders, but the implementation being checked is never an assumption.
         self.checked_traits = traits.values().cloned().collect();
         let mut index = crate::implementation::Index::for_target(self.target);
-        for (id, domain) in &self.implementation_index.parameter_domains {
+        for (id, domain) in self.implementation_index.parameter_domains() {
             index
                 .register_parameter_domain(*id, domain.clone())
                 .map_err(|message| error(Span::default(), message))?;
@@ -1179,12 +1179,12 @@ impl Checker<'_, '_> {
         inherent_index
             .check_coherence(&coherence_context, Budget::default())
             .map_err(|message| error(Span::default(), message))?;
-        for (id, domain) in &self.implementation_index.parameter_domains {
+        for (id, domain) in self.implementation_index.parameter_domains() {
             index
                 .register_parameter_domain(*id, domain.clone())
                 .map_err(|message| error(Span::default(), message))?;
         }
-        for (id, domain) in &self.implementation_index.parameter_domains {
+        for (id, domain) in self.implementation_index.parameter_domains() {
             inherent_index
                 .register_parameter_domain(*id, domain.clone())
                 .map_err(|message| error(Span::default(), message))?;

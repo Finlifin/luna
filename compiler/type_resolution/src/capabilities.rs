@@ -335,7 +335,7 @@ impl World<'_> {
         }
         .given_scoped(requirement, budget, parameters)
     }
-    pub(crate) fn given_in_context(
+    pub fn given_in_context(
         &self,
         requirement: &TraitRequirement,
         budget: Budget,
@@ -362,7 +362,7 @@ impl World<'_> {
     /// Search caller-owned premises while some runtime domains are unavailable.
     /// All subjects and interface arguments are validated in the supplied sort
     /// frame. Equality needs the world's own context; no type wrapper is invented.
-    pub(crate) fn given_in_input_scope(
+    pub fn given_in_input_scope(
         &self,
         requirement: &TraitRequirement,
         budget: Budget,

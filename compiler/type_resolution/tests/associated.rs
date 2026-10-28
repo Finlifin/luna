@@ -1,12 +1,12 @@
-use elaboration::{
-    capabilities::World,
-    implementation::{ImplementationHead, Index},
-    ptc::{Budget, Context},
-};
 use nir::program::{
     AssociatedContract, Expr, ExprKind, Implementation, Trait, TraitRequirement, TypePredicate,
 };
 use nir::{AssociatedTypeOrigin, DeclarationId as Id, Primitive as P, Sort, Term};
+use type_resolution::{
+    capabilities::World,
+    implementation::{ImplementationHead, Index},
+    ptc::{Budget, Context},
+};
 
 fn id(local: u32) -> Id {
     Id { package: 1, local }
@@ -84,7 +84,7 @@ fn query(
     implementations: &[Implementation],
     term: &Term,
     budget: Budget,
-) -> Result<elaboration::associated::AssociatedTypeResolution, String> {
+) -> Result<type_resolution::associated::AssociatedTypeResolution, String> {
     with_world(traits, implementations, |world| {
         world.resolve_associated_type(term, budget)
     })
@@ -94,7 +94,7 @@ fn normalize(
     implementations: &[Implementation],
     term: &Term,
     budget: Budget,
-) -> Result<elaboration::associated::AssociatedTypeNormalization, String> {
+) -> Result<type_resolution::associated::AssociatedTypeNormalization, String> {
     with_world(traits, implementations, |world| {
         world.normalize_associated_types(term, budget)
     })
@@ -134,7 +134,7 @@ fn with_world<R>(
 
 #[test]
 fn implementation_equalities_use_replayable_nested_associated_views() {
-    use elaboration::implementation::Selection;
+    use type_resolution::implementation::Selection;
     let traits = [contract()];
     let provider = implementation(ty(P::Bool), ty(P::Bool));
     let mut wrapper = implementation(holder(rigid(9)), projection(rigid(9), vec![]));
@@ -629,7 +629,7 @@ fn normalization_cache_hits_charge_the_expanded_type_payload() {
 
 #[test]
 fn capability_projection_qualification_shares_cycles_and_recovers_after_failure() {
-    use elaboration::implementation::Selection;
+    use type_resolution::implementation::Selection;
     let source = implementation(ty(P::Bool), ty(P::Bool));
     let mut target = source.clone();
     target.declaration = id(100);
@@ -676,7 +676,7 @@ fn capability_projection_qualification_shares_cycles_and_recovers_after_failure(
                 .unwrap();
             assert!(!matches!(result.types.selection, Selection::Selected(_)));
             assert!(result.qualifications.values().any(|q| matches!(q,
-            elaboration::capabilities::Qualification::Pending(reason) if reason.contains("recursive") || reason.contains("pending"))));
+            type_resolution::capabilities::Qualification::Pending(reason) if reason.contains("recursive") || reason.contains("pending"))));
         },
     );
     with_world(&traits, &[source, target, allowed], |world| {

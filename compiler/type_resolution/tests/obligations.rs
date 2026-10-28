@@ -1,9 +1,9 @@
-use elaboration::{
+use nir::{Primitive as P, Sort, Term};
+use type_resolution::{
     InferenceTerm as T,
     obligations::{Engine, Error, Requirement as R, State},
     ptc::{Budget, Formula as F, Outcome, TypeKind as K},
 };
-use nir::{Primitive as P, Sort, Term};
 fn stable(p: P) -> T {
     T::Stable(Term::Primitive(p))
 }

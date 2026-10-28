@@ -398,7 +398,7 @@ impl Default for Index {
         Self {
             parameter_domains: BTreeMap::new(),
             nominal_layouts: Default::default(),
-            identity: crate::unique(),
+            identity: crate::fresh_identity(),
             entries: BTreeMap::new(),
             contributions: BTreeSet::new(),
             buckets: BTreeMap::new(),
@@ -407,6 +407,14 @@ impl Default for Index {
     }
 }
 impl Index {
+    pub fn parameter_domains(&self) -> &BTreeMap<DeclarationId, Term> {
+        &self.parameter_domains
+    }
+
+    pub fn nominal_layouts(&self) -> &nir::program::Package {
+        &self.nominal_layouts
+    }
+
     pub fn for_target(target: Option<nir::target::TargetData>) -> Self {
         let mut index = Self::default();
         index.nominal_layouts.target = target;
@@ -453,7 +461,7 @@ impl Index {
 
     /// Avoid copying complete layouts on repeated method lookup in an unchanged
     /// declaration world. Metadata order is canonical before comparison.
-    pub(crate) fn sync_nominal_layouts<'a>(
+    pub fn sync_nominal_layouts<'a>(
         &mut self,
         structs: impl IntoIterator<Item = &'a nir::program::Struct>,
         enums: impl IntoIterator<Item = &'a nir::program::Enum>,

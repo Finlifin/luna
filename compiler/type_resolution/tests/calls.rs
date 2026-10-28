@@ -1,8 +1,8 @@
-use elaboration::{
+use nir::{DeclarationId, Parameter, Primitive as P, RuntimeId, Sort, Term};
+use type_resolution::{
     calls::{Argument, Scheme},
     ptc::Budget,
 };
-use nir::{DeclarationId, Parameter, Primitive as P, RuntimeId, Sort, Term};
 fn generic(index: usize) -> Term {
     Term::Bound {
         depth: 1,
@@ -51,7 +51,7 @@ fn scoped_inference_keeps_caller_bindings_and_rejects_escape() {
         sort: Sort::Type,
     };
     let identity = scheme(vec![generic(0)], generic(0), 1);
-    let context = elaboration::ptc::Context::default();
+    let context = type_resolution::ptc::Context::default();
     let candidate = identity
         .infer_scoped_types(
             &[Some(local.clone())],
@@ -138,7 +138,7 @@ fn scoped_inference_distinguishes_callback_local_and_enclosing_bindings() {
         sort: Sort::Type,
         ty: primitive(P::Type),
     }];
-    let context = elaboration::ptc::Context::default();
+    let context = type_resolution::ptc::Context::default();
     let callback = |result| Term::Function {
         parameters: vec![Parameter {
             sort: Sort::Type,
@@ -516,7 +516,7 @@ fn partial_context_does_not_require_unrelated_parameters_to_be_solved() {
 
 #[test]
 fn structural_result_contexts_keep_holes_private_and_recover_from_failure() {
-    use elaboration::calls::InputContext as C;
+    use type_resolution::calls::InputContext as C;
     let scheme = scheme(vec![generic(0)], generic(0), 1);
     let context = C::Tuple(vec![C::Known(primitive(P::U8)), C::Unknown]);
     let mut candidate = scheme
@@ -582,7 +582,7 @@ fn structural_result_contexts_keep_holes_private_and_recover_from_failure() {
 
 #[test]
 fn record_callback_context_preserves_names_and_binder_frames() {
-    use elaboration::calls::InputContext as C;
+    use type_resolution::calls::InputContext as C;
     let callback = Term::Function {
         parameters: vec![Parameter {
             sort: Sort::Runtime,
@@ -628,7 +628,7 @@ fn record_callback_context_preserves_names_and_binder_frames() {
 
 #[test]
 fn tuple_callback_context_preserves_its_own_binder_frame() {
-    use elaboration::calls::InputContext as C;
+    use type_resolution::calls::InputContext as C;
     let callback = Term::Function {
         parameters: vec![Parameter {
             sort: Sort::Runtime,
@@ -663,7 +663,7 @@ fn tuple_callback_context_preserves_its_own_binder_frame() {
 
 #[test]
 fn tuple_context_keeps_unknown_components_private() {
-    use elaboration::calls::InputContext as C;
+    use type_resolution::calls::InputContext as C;
     let scheme = scheme(
         vec![Term::Tuple(vec![
             generic(0),
@@ -736,7 +736,7 @@ fn callback_context_freezes_inputs_independently_of_its_result() {
 #[test]
 fn partial_result_shape_passes_through_a_generic_identity() {
     let scheme = scheme(vec![generic(0)], generic(0), 1);
-    let context = elaboration::calls::CallableContext {
+    let context = type_resolution::calls::CallableContext {
         comptime: false,
         environment: None,
         open_environment: false,
@@ -749,7 +749,7 @@ fn partial_result_shape_passes_through_a_generic_identity() {
             &[None],
             None,
             Some(&context),
-            &elaboration::ptc::Context::default(),
+            &type_resolution::ptc::Context::default(),
             Budget::default(),
         )
         .unwrap();
@@ -771,7 +771,7 @@ fn partial_result_shape_passes_through_a_generic_identity() {
             &[Some(callback.clone())],
             None,
             Some(&context),
-            &elaboration::ptc::Context::default(),
+            &type_resolution::ptc::Context::default(),
             Budget::default(),
         )
         .unwrap()
@@ -783,7 +783,7 @@ fn partial_result_shape_passes_through_a_generic_identity() {
 #[test]
 fn inspecting_candidate_context_cannot_export_a_conflicting_call() {
     let scheme = scheme(vec![generic(0)], generic(0), 1);
-    let context = elaboration::calls::CallableContext {
+    let context = type_resolution::calls::CallableContext {
         comptime: false,
         environment: None,
         open_environment: false,
@@ -803,7 +803,7 @@ fn inspecting_candidate_context_cannot_export_a_conflicting_call() {
             &[Some(callback.clone())],
             None,
             Some(&context),
-            &elaboration::ptc::Context::default(),
+            &type_resolution::ptc::Context::default(),
             Budget::default(),
         )
         .unwrap();
@@ -814,7 +814,7 @@ fn inspecting_candidate_context_cannot_export_a_conflicting_call() {
 #[test]
 fn pending_context_does_not_hide_an_independent_type_conflict() {
     let scheme = scheme(vec![generic(0), generic(0)], generic(1), 2);
-    let partial = elaboration::calls::CallableContext {
+    let partial = type_resolution::calls::CallableContext {
         comptime: false,
         environment: None,
         open_environment: false,
@@ -827,20 +827,20 @@ fn pending_context_does_not_hide_an_independent_type_conflict() {
             &[Some(primitive(P::Bool)), Some(primitive(P::Char))],
             None,
             Some(&partial),
-            &elaboration::ptc::Context::default(),
+            &type_resolution::ptc::Context::default(),
             Budget::default(),
         )
         .unwrap();
     assert!(matches!(
         candidate.finish(),
-        Err(elaboration::calls::Error::UnsettledRequirement { .. })
+        Err(type_resolution::calls::Error::UnsettledRequirement { .. })
     ));
 }
 
 #[test]
 fn partial_comptime_closure_context_preserves_environment_and_phase() {
     let scheme = scheme(vec![generic(0)], generic(0), 1);
-    let context = elaboration::calls::CallableContext {
+    let context = type_resolution::calls::CallableContext {
         comptime: true,
         open_environment: false,
         environment: Some(vec![Some(primitive(P::Bool)), None]),
@@ -853,7 +853,7 @@ fn partial_comptime_closure_context_preserves_environment_and_phase() {
             &[None],
             None,
             Some(&context),
-            &elaboration::ptc::Context::default(),
+            &type_resolution::ptc::Context::default(),
             Budget::default(),
         )
         .unwrap();
@@ -880,7 +880,7 @@ fn partial_comptime_closure_context_preserves_environment_and_phase() {
             &[Some(closure.clone())],
             None,
             Some(&context),
-            &elaboration::ptc::Context::default(),
+            &type_resolution::ptc::Context::default(),
             Budget::default(),
         )
         .unwrap()
@@ -894,7 +894,7 @@ fn partial_comptime_closure_context_preserves_environment_and_phase() {
                 &[Some(signature)],
                 None,
                 Some(&context),
-                &elaboration::ptc::Context::default(),
+                &type_resolution::ptc::Context::default(),
                 Budget::default(),
             )
             .and_then(|c| c.finish())
@@ -1056,8 +1056,8 @@ fn metered_type_views_share_remaining_allowance_without_minting_work() {
 
 #[test]
 fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
-    use elaboration::{calls::InputContext as C, ptc::Context};
     use nir::normal_forms::{Head, Kind, Parameter as Input, Role};
+    use type_resolution::{calls::InputContext as C, ptc::Context};
     let head = DeclarationId {
         package: 55,
         local: 1,
@@ -1169,7 +1169,7 @@ fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
 
 #[test]
 fn partial_nominal_contexts_preserve_known_arguments_without_exporting_holes() {
-    use elaboration::{calls::InputContext as C, ptc::Context};
+    use type_resolution::{calls::InputContext as C, ptc::Context};
     let id = DeclarationId {
         package: 77,
         local: 1,
@@ -1266,7 +1266,7 @@ fn partial_nominal_contexts_preserve_known_arguments_without_exporting_holes() {
 
 #[test]
 fn partial_callable_nominal_results_survive_forwarding_and_reject_conflicts() {
-    use elaboration::{calls::InputContext as C, ptc::Context};
+    use type_resolution::{calls::InputContext as C, ptc::Context};
     let id = DeclarationId {
         package: 78,
         local: 1,
@@ -1404,7 +1404,7 @@ fn candidate_type_equations_are_transactional_and_do_not_invert_opaque_heads() {
 
 #[test]
 fn sparse_caller_inference_retains_slots_and_lexical_assumptions() {
-    use elaboration::ptc::{Context, Formula};
+    use type_resolution::ptc::{Context, Formula};
     let scope = vec![
         (Sort::Runtime, None),
         (Sort::Type, Some(primitive(P::Type))),
@@ -1485,7 +1485,7 @@ fn sparse_caller_inference_retains_slots_and_lexical_assumptions() {
 
 #[test]
 fn sparse_caller_inference_preserves_closed_assumptions() {
-    use elaboration::ptc::{Context, Formula};
+    use type_resolution::ptc::{Context, Formula};
     let left = Term::Rigid {
         declaration: DeclarationId {
             package: 7,
@@ -1518,7 +1518,7 @@ fn sparse_caller_inference_preserves_closed_assumptions() {
 
 #[test]
 fn partial_nominal_value_indices_keep_identity_scope_and_budget_recovery() {
-    use elaboration::{calls::InputContext as C, ptc::Context};
+    use type_resolution::{calls::InputContext as C, ptc::Context};
     let id = DeclarationId {
         package: 79,
         local: 1,
@@ -1619,7 +1619,7 @@ fn mixed_clause_sorts_infer_values_without_turning_them_into_types() {
         2,
     );
     mixed.parameter_sorts = vec![Sort::Type, Sort::ComptimeValue];
-    let mut context = elaboration::ptc::Context::default();
+    let mut context = type_resolution::ptc::Context::default();
     context.admit_nominal_constructor(head);
     for value in [true, false] {
         let candidate = mixed
@@ -1656,7 +1656,7 @@ fn mixed_clause_sorts_infer_values_without_turning_them_into_types() {
 
 #[test]
 fn unknown_nominal_value_contexts_keep_their_sort_across_calls() {
-    use elaboration::{calls::InputContext as C, ptc::Context};
+    use type_resolution::{calls::InputContext as C, ptc::Context};
     let id = DeclarationId {
         package: 80,
         local: 1,
@@ -1792,7 +1792,7 @@ fn open_closure_environments_infer_empty_and_captured_contexts() {
 
 #[test]
 fn open_environment_partial_context_survives_higher_order_identity() {
-    use elaboration::calls::{CallableContext, InputContext};
+    use type_resolution::calls::{CallableContext, InputContext};
     let identity = scheme(vec![generic(0)], generic(0), 1);
     let partial = CallableContext {
         comptime: false,
@@ -1851,7 +1851,7 @@ fn open_environment_partial_context_survives_higher_order_identity() {
 
 #[test]
 fn open_environment_rejections_do_not_change_an_existing_candidate() {
-    use elaboration::calls::{CallableContext, InputContext};
+    use type_resolution::calls::{CallableContext, InputContext};
     let identity = scheme(vec![generic(0)], generic(0), 1);
     let actual = Term::contextual_closure(
         Term::ClosureContextValue(vec![primitive(P::Char)]),
@@ -1996,7 +1996,7 @@ fn open_environment_can_forward_a_caller_context_without_capturing_its_binders()
 
 #[test]
 fn ordinary_callable_context_still_rejects_nonempty_capture_storage() {
-    use elaboration::calls::CallableContext;
+    use type_resolution::calls::CallableContext;
     let identity = scheme(vec![generic(0)], generic(0), 1);
     let partial = CallableContext {
         comptime: false,
@@ -2029,7 +2029,7 @@ fn ordinary_callable_context_still_rejects_nonempty_capture_storage() {
 
 #[test]
 fn open_environment_preserves_partially_known_fixed_capture_fields() {
-    use elaboration::calls::{CallableContext, InputContext};
+    use type_resolution::calls::{CallableContext, InputContext};
     let mut relay = open_environment_scheme();
     let Term::Function { parameters, result } = &mut relay.signature else {
         unreachable!()
@@ -2210,7 +2210,7 @@ fn error_label_inference_keeps_permutation_ambiguity_and_budget_failure() {
 
 #[test]
 fn partial_optional_context_preserves_layers_and_recovers_after_failure() {
-    use elaboration::{calls::InputContext as C, ptc::Context};
+    use type_resolution::{calls::InputContext as C, ptc::Context};
     let optional = |ty| Term::Optional(Box::new(ty));
     let world = Context::default();
     let consumer = scheme(vec![optional(optional(generic(0)))], generic(0), 1);
@@ -2282,7 +2282,7 @@ fn partial_optional_context_preserves_layers_and_recovers_after_failure() {
 
 #[test]
 fn partial_optional_callback_result_survives_forwarding() {
-    use elaboration::{calls::InputContext as C, ptc::Context};
+    use type_resolution::{calls::InputContext as C, ptc::Context};
     let optional = |ty| Term::Optional(Box::new(ty));
     let callback = |result| Term::Function {
         parameters: vec![Parameter {
@@ -2358,7 +2358,7 @@ fn partial_optional_callback_result_survives_forwarding() {
 
 #[test]
 fn incompatible_optional_record_relation_cannot_export_an_instance() {
-    use elaboration::{calls::InputContext as C, ptc::Context};
+    use type_resolution::{calls::InputContext as C, ptc::Context};
     let world = Context::default();
     let signature = scheme(
         vec![],
@@ -2401,8 +2401,8 @@ fn incompatible_optional_record_relation_cannot_export_an_instance() {
 
 #[test]
 fn bound_list_head_proposes_element_types_without_an_inverse_equality_rule() {
-    use elaboration::ptc::{Context, Equality, Formula, Outcome};
     use nir::normal_forms::{Head, Kind, Parameter as Input, Role};
+    use type_resolution::ptc::{Context, Equality, Formula, Outcome};
     let head = DeclarationId {
         package: 98,
         local: 1,

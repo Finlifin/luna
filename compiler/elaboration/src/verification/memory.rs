@@ -8139,97 +8139,10 @@ fn finish_instance_summary(
     Ok(())
 }
 
-// Type keys are walked iteratively before recursive cloning/substitution. This
-// is a structural work limit, not a type proposition or normalization step.
+// Preserve the diagnostic used by program verification callers.
 pub(crate) fn bound_type(ty: &Term, fuel: &mut usize) -> Result<(), String> {
-    let mut pending = vec![(ty, 0)];
-    while let Some((ty, depth)) = pending.pop() {
-        if *fuel == 0 || depth >= 64 {
-            return Err("memory summary type budget exhausted".into());
-        }
-        *fuel -= 1;
-        match ty {
-            Term::ErrorResult { errors, result } => {
-                if errors.len().saturating_add(1) > *fuel {
-                    return Err("memory summary type budget exhausted".into());
-                }
-                pending.push((result, depth + 1));
-                pending.extend(errors.iter().map(|ty| (ty, depth + 1)));
-            }
-            Term::Computation { effects, result } => {
-                *fuel = fuel
-                    .checked_sub(effects.len())
-                    .ok_or("memory summary type budget exhausted")?;
-                let width = effects.iter().try_fold(1usize, |n, operation| {
-                    n.checked_add(operation.arguments.len())
-                });
-                if width.is_none_or(|n| n > *fuel) {
-                    return Err("memory summary type budget exhausted".into());
-                }
-                pending.push((result, depth + 1));
-                for operation in effects {
-                    pending.extend(operation.arguments.iter().map(|ty| (ty, depth + 1)));
-                }
-            }
-            Term::AssociatedType {
-                arguments, subject, ..
-            } => {
-                pending.push((subject, depth + 1));
-                pending.extend(arguments.iter().map(|ty| (ty, depth + 1)));
-            }
-            Term::Optional(inner)
-            | Term::Pointer(inner)
-            | Term::ComptimeFunction(inner)
-            | Term::UnsafeFunction(inner) => pending.push((inner, depth + 1)),
-            Term::OptionalValue { ty, value } => {
-                pending.push((ty, depth + 1));
-                if let Some(value) = value {
-                    pending.push((value, depth + 1));
-                }
-            }
-            Term::ErrorValue { ty, label, value } => {
-                pending.push((ty, depth + 1));
-                if let Some(label) = label {
-                    pending.push((label, depth + 1));
-                }
-                pending.push((value, depth + 1));
-            }
-            Term::NominalValue { ty, fields, .. } => {
-                pending.push((ty, depth + 1));
-                pending.extend(fields.iter().map(|field| (field, depth + 1)));
-            }
-            Term::Record(fields) | Term::RecordValue(fields) => {
-                pending.extend(fields.iter().map(|(_, ty)| (ty, depth + 1)))
-            }
-            Term::Tuple(fields)
-            | Term::TypeListValue(fields)
-            | Term::TypeListConcat(fields)
-            | Term::TupleValue(fields)
-            | Term::Nominal {
-                arguments: fields, ..
-            }
-            | Term::NormalForm {
-                arguments: fields, ..
-            } => pending.extend(fields.iter().map(|ty| (ty, depth + 1))),
-            Term::Closure {
-                environment,
-                signature,
-            } => {
-                pending.push((signature, depth + 1));
-                pending.extend(environment.iter().map(|ty| (ty, depth + 1)));
-            }
-            Term::Function { parameters, result } => {
-                pending.push((result, depth + 1));
-                pending.extend(
-                    parameters
-                        .iter()
-                        .map(|parameter| (&parameter.ty, depth + 1)),
-                );
-            }
-            _ => (),
-        }
-    }
-    Ok(())
+    nir::type_budget::charge_structure(ty, fuel)
+        .map_err(|_| "memory summary type budget exhausted".into())
 }
 fn derive_with_borrowed(
     package: &Package,

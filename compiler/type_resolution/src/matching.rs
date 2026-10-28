@@ -17,7 +17,7 @@ impl From<InferenceError> for MatchError {
     }
 }
 
-pub(crate) fn propose(
+pub fn propose(
     inference: &mut InferenceContext,
     left: &I,
     right: &I,

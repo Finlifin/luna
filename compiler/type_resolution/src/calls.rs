@@ -250,7 +250,7 @@ impl Scheme {
         self.infer_sparse_scoped_types_mode(actual, expected, None, context, budget, false, scope)
     }
 
-    pub(crate) fn infer_sparse_scoped_types_mode(
+    pub fn infer_sparse_scoped_types_mode(
         &self,
         actual: &[Option<Term>],
         expected: Option<&Term>,
@@ -556,7 +556,7 @@ impl CallCandidate {
         self.constrain_component_context(target, context, budget)
     }
 
-    pub(crate) fn constrain_parameter_context(
+    pub fn constrain_parameter_context(
         &mut self,
         index: usize,
         context: &InputContext,
@@ -905,7 +905,7 @@ impl CallCandidate {
         }
         Ok(())
     }
-    pub(crate) fn type_argument(&self, index: usize) -> Result<Option<Term>, Error> {
+    pub fn type_argument(&self, index: usize) -> Result<Option<Term>, Error> {
         self.inspect_component(
             self.types
                 .get(index)
@@ -913,7 +913,7 @@ impl CallCandidate {
                 .clone(),
         )
     }
-    pub(crate) fn constrain_type_argument(
+    pub fn constrain_type_argument(
         &mut self,
         index: usize,
         value: &Term,
@@ -1059,7 +1059,7 @@ impl CallCandidate {
     }
     /// A description may inspect a settled result without exporting a call
     /// instance. Unresolved binders remain private to this candidate.
-    pub(crate) fn result_type(&self) -> Result<Option<Term>, Error> {
+    pub fn result_type(&self) -> Result<Option<Term>, Error> {
         self.inspect_component(self.result.clone())
     }
     pub fn parameter_input_context(&self, index: usize) -> Result<InputContext, Error> {
@@ -1343,7 +1343,7 @@ impl CallCandidate {
     }
     /// Obtain stable inferred binders without expanding the whole signature.
     /// Effect formation applies its own expansion budget before that copy.
-    pub(crate) fn inferred_type_arguments(&self) -> Result<Vec<Term>, Error> {
+    pub fn inferred_type_arguments(&self) -> Result<Vec<Term>, Error> {
         if self.engine.waits_only_for_inference() {
             return Err(Error::NeedsContext);
         }

@@ -1,5 +1,5 @@
-use elaboration::*;
 use nir::{Primitive, Sort, Term};
+use type_resolution::*;
 fn boolean() -> InferenceTerm {
     InferenceTerm::Stable(Term::Primitive(Primitive::Bool))
 }

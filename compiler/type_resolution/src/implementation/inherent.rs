@@ -56,7 +56,7 @@ impl InherentIndex {
 
     /// Avoid copying complete layouts on repeated method lookup in an unchanged
     /// declaration world. Metadata order is canonical before comparison.
-    pub(crate) fn sync_nominal_layouts<'a>(
+    pub fn sync_nominal_layouts<'a>(
         &mut self,
         structs: impl IntoIterator<Item = &'a nir::program::Struct>,
         enums: impl IntoIterator<Item = &'a nir::program::Enum>,

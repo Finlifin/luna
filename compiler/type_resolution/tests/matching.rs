@@ -1,10 +1,10 @@
-use elaboration::{
+use nir::{Primitive as P, Sort, Term};
+use type_resolution::{
     InferenceTerm as I,
     matching::MatchError,
     obligations::{Engine, Error, State},
     ptc::{Budget, Outcome},
 };
-use nir::{Primitive as P, Sort, Term};
 fn stable(p: P) -> I {
     I::Stable(Term::Primitive(p))
 }
@@ -54,7 +54,7 @@ fn tuple_pack_inference_preserves_head_proofs_and_transaction_isolation() {
         }],
         ..Default::default()
     };
-    let context = elaboration::ptc::Context::from_package(&package).unwrap();
+    let context = type_resolution::ptc::Context::from_package(&package).unwrap();
     for fields in [
         vec![],
         vec![Term::Primitive(P::Bool)],
@@ -297,9 +297,9 @@ fn occurs_and_capacity_failures_leave_parent_untouched() {
     };
     assert!(matches!(
         engine.match_types(I::Meta(a), recursive, Budget::default()),
-        Err(MatchError::Inference(elaboration::InferenceError::Occurs(
-            _
-        )))
+        Err(MatchError::Inference(
+            type_resolution::InferenceError::Occurs(_)
+        ))
     ));
     assert!(matches!(
         engine.match_types(
@@ -321,9 +321,9 @@ fn assigned_aliases_and_existing_waiters_join_the_candidate() {
     let a = engine.fresh(Sort::Type);
     let b = engine.fresh(Sort::Type);
     engine.assign(a, I::Meta(b)).unwrap();
-    let waiting = engine.require(elaboration::obligations::Requirement::Kind(
+    let waiting = engine.require(type_resolution::obligations::Requirement::Kind(
         I::Meta(a),
-        elaboration::ptc::TypeKind::Integer,
+        type_resolution::ptc::TypeKind::Integer,
     ));
     finish(&mut engine);
     let (mut candidate, relation) = engine
@@ -617,7 +617,7 @@ fn matching_copy_budget_does_not_evaluate_unused_substitution_inputs() {
 
 #[test]
 fn bounded_alias_resolution_preserves_unresolved_inputs_and_recovers() {
-    let mut context = elaboration::InferenceContext::default();
+    let mut context = type_resolution::InferenceContext::default();
     let first = context.fresh(Sort::Type);
     let mut previous = first;
     for _ in 0..64 {
@@ -628,7 +628,7 @@ fn bounded_alias_resolution_preserves_unresolved_inputs_and_recovers() {
     let mut small = 8;
     assert!(matches!(
         context.resolve_with_limits(&I::Meta(first), &mut small, 128),
-        Err(elaboration::InferenceError::Budget)
+        Err(type_resolution::InferenceError::Budget)
     ));
     let mut enough = 10_000;
     assert_eq!(
@@ -649,7 +649,7 @@ fn bounded_alias_resolution_preserves_unresolved_inputs_and_recovers() {
 
 #[test]
 fn bounded_assignment_does_not_publish_on_exhaustion_or_occurs_failure() {
-    let mut context = elaboration::InferenceContext::default();
+    let mut context = type_resolution::InferenceContext::default();
     let target = context.fresh(Sort::Type);
     let first = context.fresh(Sort::Type);
     let mut previous = first;
@@ -661,13 +661,13 @@ fn bounded_assignment_does_not_publish_on_exhaustion_or_occurs_failure() {
     let mut small = 4;
     assert!(matches!(
         context.assign_with_limits(target, I::Meta(first), &mut small, 128),
-        Err(elaboration::InferenceError::Budget)
+        Err(type_resolution::InferenceError::Budget)
     ));
     assert!(context.freeze(&I::Meta(target)).is_err());
     context.assign(previous, I::Meta(target)).unwrap();
     let mut enough = 10_000;
     assert!(
-        matches!(context.assign_with_limits(target,I::Meta(first),&mut enough,128),Err(elaboration::InferenceError::Occurs(id)) if id==target)
+        matches!(context.assign_with_limits(target,I::Meta(first),&mut enough,128),Err(type_resolution::InferenceError::Occurs(id)) if id==target)
     );
     context
         .assign_with_limits(target, stable(P::Bool), &mut enough, 128)

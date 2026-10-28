@@ -1,7 +1,7 @@
 //! Candidate-owned type obligations. Waiting for inference information is
 //! distinct from a stable PTC Unknown; neither is a successful obligation.
 use crate::ptc::{self, Budget, Formula, Outcome, TypeKind};
-use crate::{InferenceContext, InferenceError, InferenceTerm, MetaId, unique};
+use crate::{InferenceContext, InferenceError, InferenceTerm, MetaId, fresh_identity};
 use nir::{DeclarationId, Sort, Term};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -274,7 +274,7 @@ pub struct Engine {
 impl Default for Engine {
     fn default() -> Self {
         Self {
-            identity: unique(),
+            identity: fresh_identity(),
             revision: 0,
             parent: None,
             inference: InferenceContext::default(),
@@ -290,7 +290,7 @@ impl Engine {
     pub(crate) fn is_tuple_head(&self, head: nir::DeclarationId) -> bool {
         self.context.is_tuple_head(head)
     }
-    pub(crate) fn is_nominal_constructor(&self, head: nir::DeclarationId) -> bool {
+    pub fn is_nominal_constructor(&self, head: nir::DeclarationId) -> bool {
         self.context.is_nominal_constructor(head)
     }
     pub(crate) fn with_call_scope(context: ptc::Context, scope: Vec<nir::Parameter>) -> Self {
@@ -488,7 +488,7 @@ impl Engine {
         self.invalidate();
     }
     pub fn require(&mut self, requirement: Requirement) -> ObligationId {
-        let id = ObligationId(unique());
+        let id = ObligationId(fresh_identity());
         Arc::make_mut(&mut self.obligations).insert(
             id,
             Arc::new(Obligation {
@@ -662,7 +662,7 @@ impl Engine {
     /// and untouched obligations remain shared even after a table detaches.
     pub fn trial(&self) -> Self {
         Self {
-            identity: unique(),
+            identity: fresh_identity(),
             revision: 0,
             parent: Some((self.identity, self.revision)),
             inference: self.inference.trial(),
@@ -713,7 +713,7 @@ impl Engine {
     }
     // Read-only candidate inspection. These are NOT export operations: callers
     // must still settle the original obligations before publishing any NIR.
-    pub(crate) fn inspect(&self, term: &InferenceTerm) -> Result<InferenceTerm, Error> {
+    pub fn inspect(&self, term: &InferenceTerm) -> Result<InferenceTerm, Error> {
         Ok(self.inference.resolve(term)?)
     }
     pub(crate) fn inspect_type(&self, term: &InferenceTerm) -> Result<Term, Error> {

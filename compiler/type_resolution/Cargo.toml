@@ -1,0 +1,12 @@
+[package]
+name = "type_resolution"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nir = { path = "../nir" }
+ptc = { path = "../ptc" }
+hir = { path = "../hir" }
+
+[dev-dependencies]
+comptime_runtime = { path = "../comptime_runtime" }

@@ -309,7 +309,7 @@ impl World<'_> {
 
     /// The caller owns this cache for one immutable implementation world.
     /// Publish newly completed projections only after the whole query succeeds.
-    pub(crate) fn normalize_associated_types_cached(
+    pub fn normalize_associated_types_cached(
         &self,
         ty: &Term,
         budget: Budget,
@@ -324,7 +324,7 @@ impl World<'_> {
     /// Definition-side type view: given interfaces remain abstract, while
     /// independent concrete projections may still resolve. IIR uses the strict
     /// normalization entry and cannot retain these abstract results.
-    pub(crate) fn associated_type_view(
+    pub fn associated_type_view(
         &self,
         ty: &Term,
         budget: Budget,
@@ -332,7 +332,7 @@ impl World<'_> {
         self.associated_type_view_metered(ty, &mut { budget })
     }
 
-    pub(crate) fn associated_type_view_metered(
+    pub fn associated_type_view_metered(
         &self,
         ty: &Term,
         budget: &mut Budget,
@@ -350,7 +350,7 @@ impl World<'_> {
         }
     }
 
-    pub(crate) fn associated_type_view_cached(
+    pub fn associated_type_view_cached(
         &self,
         ty: &Term,
         budget: Budget,
@@ -838,8 +838,9 @@ fn charge_projection_substitution(
         .map_err(|e| e.to_string())
 }
 
-pub(crate) fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<(), String> {
-    crate::verification::memory::bound_type(term, fuel)?;
+pub fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<(), String> {
+    nir::type_budget::charge_structure(term, fuel)
+        .map_err(|_| "memory summary type budget exhausted".to_string())?;
     let mut pending = vec![term];
     while let Some(term) = pending.pop() {
         let cost = match term {
@@ -1341,7 +1342,7 @@ impl World<'_> {
         }
         Ok((value, remaining))
     }
-    pub(crate) fn resolve_associated_value_plan_budgeted(
+    pub fn resolve_associated_value_plan_budgeted(
         &self,
         interface: &InterfaceInstance,
         member_id: nir::DeclarationId,

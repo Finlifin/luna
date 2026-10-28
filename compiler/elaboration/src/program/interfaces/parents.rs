@@ -302,8 +302,8 @@ impl Checker<'_, '_> {
             &self.capability_assumptions(),
             Budget::default(),
             &frames,
-            &self.implementation_index.parameter_domains,
-            Some(&self.implementation_index.nominal_layouts),
+            self.implementation_index.parameter_domains(),
+            Some(self.implementation_index.nominal_layouts()),
         )
         .map_err(|message| error(span, message))?
         {

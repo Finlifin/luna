@@ -364,7 +364,7 @@ impl<'a> Session<'a> {
         solver: Option<ProofSolver<'a>>,
         pointer_copy: Option<&'a dyn Fn(&Term, &mut u64) -> bool>,
     ) -> Result<Self, Error> {
-        if context.parent.is_some() {
+        if context.is_trial() {
             return Err(Error::SpeculativeContext);
         }
         let mut interpreter = Interpreter::for_comptime_in_budget(package, assumptions, budget)
@@ -386,17 +386,17 @@ impl<'a> Session<'a> {
         Ok(Self {
             identity: crate::unique(),
             package,
-            context: context.identity,
+            context: context.identity(),
             interpreter,
             pending: BTreeMap::new(),
             failed: BTreeSet::new(),
         })
     }
     fn check_context(&self, context: &InferenceContext) -> Result<(), Error> {
-        if context.parent.is_some() {
+        if context.is_trial() {
             return Err(Error::SpeculativeContext);
         }
-        if context.identity != self.context {
+        if context.identity() != self.context {
             return Err(Error::ForeignContext);
         }
         Ok(())
@@ -1084,11 +1084,7 @@ impl<'a> Session<'a> {
                 // Preserve resume's terminal failure and propagation contract.
                 return self.resume(context, output);
             }
-            let variable = context
-                .variables
-                .get(&id)
-                .ok_or(InferenceError::ForeignVariable(id))?;
-            if variable.value.is_some() {
+            if context.is_assigned(id)? {
                 self.resume(context, id)?;
                 return self.resume(context, output);
             }
@@ -1168,11 +1164,7 @@ impl<'a> Session<'a> {
             acyclic?;
             // Check this before invocation so an externally assigned output
             // cannot cause effects followed by a failed publication.
-            let variable = context
-                .variables
-                .get(&output)
-                .ok_or(InferenceError::ForeignVariable(output))?;
-            if variable.value.is_some() {
+            if context.is_assigned(output)? {
                 return Err(Error::Inference(InferenceError::AlreadyAssigned(output)));
             }
             let waiting = pending.inputs.dependencies(context)?;

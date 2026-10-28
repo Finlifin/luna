@@ -1,7 +1,9 @@
-use elaboration::implementation::{Error, ImplementationHead, Index, PhaseSelection, Selection};
-use elaboration::ptc::{Budget, Context};
 use hir::ImplementationPhase::{Comptime, Runtime};
 use nir::{DeclarationId as Id, Primitive, Sort, Term};
+use type_resolution::implementation::{
+    Error, ImplementationHead, Index, PhaseSelection, Selection,
+};
+use type_resolution::ptc::{Budget, Context};
 
 fn id(local: u32) -> Id {
     Id { package: 0, local }
@@ -26,7 +28,7 @@ fn head(local: u32, binder: Option<u32>) -> ImplementationHead {
         requirements: vec![],
     }
 }
-fn resolve(index: &Index) -> elaboration::implementation::TypeResolution {
+fn resolve(index: &Index) -> type_resolution::implementation::TypeResolution {
     index
         .resolve_types(
             id(100),

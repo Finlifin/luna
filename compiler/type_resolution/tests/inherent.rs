@@ -1,9 +1,9 @@
-use elaboration::implementation::{
-    ImplementationHead, InherentHead, InherentIndex, Selection, TypeAssessment,
-};
-use elaboration::ptc::{Budget, Context, Formula};
 use nir::program::TypePredicate;
 use nir::{DeclarationId as Id, Primitive as P, Sort, Term};
+use type_resolution::implementation::{
+    ImplementationHead, InherentHead, InherentIndex, Selection, TypeAssessment,
+};
+use type_resolution::ptc::{Budget, Context, Formula};
 fn id(local: u32) -> Id {
     Id { package: 0, local }
 }

@@ -92,7 +92,7 @@ impl Description {
         types: &Context,
         budget: &mut ptc::Budget,
     ) -> Result<Freeze, Error> {
-        if inference.parent.is_some() {
+        if inference.is_trial() {
             return Err(Error::SpeculativeContext);
         }
         budget.steps = budget.steps.checked_sub(1).ok_or(Error::Budget)?;

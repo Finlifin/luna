@@ -1,10 +1,10 @@
-use elaboration::{
+use nir::program::{Implementation, Trait, TraitRequirement};
+use nir::{DeclarationId as Id, Primitive, Sort, Term};
+use type_resolution::{
     capabilities::{Qualification, World},
     implementation::{ImplementationHead, Index, Selection},
     ptc::{Budget, Context},
 };
-use nir::program::{Implementation, Trait, TraitRequirement};
-use nir::{DeclarationId as Id, Primitive, Sort, Term};
 fn id(local: u32) -> Id {
     Id { package: 0, local }
 }
@@ -348,8 +348,8 @@ fn parameterized_parent_assumptions_substitute_all_interface_arguments() {
 
 #[test]
 fn subject_guarantees_preserve_substitution_scope_and_budget() {
-    use elaboration::capabilities::subject_requirements;
     use nir::program::{InterfaceInstance, TypePredicate};
+    use type_resolution::capabilities::subject_requirements;
     let rigid = |local| Term::Rigid {
         declaration: id(local),
         sort: Sort::Type,
@@ -502,12 +502,12 @@ fn given_capabilities_follow_parameter_edges_with_full_subject_identity() {
             .is_none()
     );
     let sources =
-        elaboration::capabilities::capability_sources(&traits, &assumptions, Budget::default())
+        type_resolution::capabilities::capability_sources(&traits, &assumptions, Budget::default())
             .unwrap();
     assert!(sources.contains(&requirement));
     assert!(sources.len() <= 3);
     assert!(
-        elaboration::capabilities::capability_sources(
+        type_resolution::capabilities::capability_sources(
             &traits,
             &assumptions,
             Budget {
@@ -525,9 +525,12 @@ fn given_capabilities_follow_parameter_edges_with_full_subject_identity() {
         arguments: vec![rigid(102)],
     }];
     parents[1].capabilities.clear();
-    let sources =
-        elaboration::capabilities::capability_sources(&parents, &assumptions, Budget::default())
-            .unwrap();
+    let sources = type_resolution::capabilities::capability_sources(
+        &parents,
+        &assumptions,
+        Budget::default(),
+    )
+    .unwrap();
     assert_eq!(
         sources, assumptions,
         "parent members must keep child shadowing"
@@ -615,7 +618,7 @@ fn scoped_given_evidence_follows_parents_and_parameter_capabilities() {
         world.given_in_scope(&requested, Budget::default(), &scope),
         Some(assumption.clone())
     );
-    let sources = elaboration::capabilities::capability_sources_in_scope(
+    let sources = type_resolution::capabilities::capability_sources_in_scope(
         &traits,
         &assumptions,
         Budget::default(),
@@ -629,7 +632,7 @@ fn scoped_given_evidence_follows_parents_and_parameter_capabilities() {
         "parent members must remain under their child lookup root"
     );
     assert!(
-        elaboration::capabilities::capability_sources_in_scope(
+        type_resolution::capabilities::capability_sources_in_scope(
             &traits,
             &assumptions,
             Budget {
@@ -642,7 +645,7 @@ fn scoped_given_evidence_follows_parents_and_parameter_capabilities() {
         "partial lookup roots cannot establish an unambiguous member"
     );
     assert!(
-        elaboration::capabilities::capability_sources_in_scope(
+        type_resolution::capabilities::capability_sources_in_scope(
             &traits,
             &assumptions,
             Budget::default(),
@@ -651,7 +654,7 @@ fn scoped_given_evidence_follows_parents_and_parameter_capabilities() {
         .is_err()
     );
     assert!(
-        elaboration::capabilities::capability_sources(&traits, &assumptions, Budget::default())
+        type_resolution::capabilities::capability_sources(&traits, &assumptions, Budget::default())
             .is_err()
     );
     let mut invalid_traits = traits.clone();
@@ -661,7 +664,7 @@ fn scoped_given_evidence_follows_parents_and_parameter_capabilities() {
         sort: Sort::Type,
     };
     assert!(
-        elaboration::capabilities::capability_sources_in_scope(
+        type_resolution::capabilities::capability_sources_in_scope(
             &invalid_traits,
             &assumptions,
             Budget::default(),
@@ -737,7 +740,7 @@ fn scoped_given_evidence_follows_parents_and_parameter_capabilities() {
 fn scoped_given_evidence_retains_closed_type_equalities() {
     let index = Index::default();
     let mut context = Context::default();
-    context.assume(elaboration::ptc::Formula::equal(
+    context.assume(type_resolution::ptc::Formula::equal(
         var(),
         Term::Primitive(Primitive::Bool),
     ));
@@ -784,7 +787,7 @@ fn scoped_given_evidence_retains_closed_type_equalities() {
 }
 #[test]
 fn symbol_indexed_world_queries_check_domains_and_preserve_evidence() {
-    use elaboration::{
+    use type_resolution::{
         capabilities::TraitTruth,
         ptc::{Formula, Outcome},
     };
@@ -807,7 +810,7 @@ fn symbol_indexed_world_queries_check_domains_and_preserve_evidence() {
         assumptions: &[],
         context: &context,
     };
-    let query = elaboration::ptc::TraitQuery {
+    let query = type_resolution::ptc::TraitQuery {
         interface: id(100),
         subject: Term::Primitive(Primitive::Integer),
         arguments: implementations[0].interface_arguments.clone(),
@@ -929,7 +932,7 @@ fn symbol_indexed_parent_assumptions_keep_input_sorts() {
     query.interface_arguments[0] = Term::Symbol("em".into());
     assert!(world.given(&query, Budget::default()).is_none());
     let sources =
-        elaboration::capabilities::capability_sources(&traits, &assumptions, Budget::default())
+        type_resolution::capabilities::capability_sources(&traits, &assumptions, Budget::default())
             .unwrap();
     assert!(sources.iter().any(|source| source.interface == id(102)
         && source.interface_arguments == vec![Term::Symbol("px".into())]));
@@ -943,8 +946,8 @@ fn symbol_indexed_parent_assumptions_keep_input_sorts() {
     assert!(invalid.parameter_binders(&mut 1000).is_err());
 }
 
-fn trait_query(n: u32, subject: Term) -> elaboration::ptc::TraitQuery {
-    elaboration::ptc::TraitQuery {
+fn trait_query(n: u32, subject: Term) -> type_resolution::ptc::TraitQuery {
+    type_resolution::ptc::TraitQuery {
         interface: id(n),
         arguments: vec![],
         subject,
@@ -953,7 +956,7 @@ fn trait_query(n: u32, subject: Term) -> elaboration::ptc::TraitQuery {
 
 #[test]
 fn trait_decisions_bind_absence_and_logical_proofs_to_the_exact_world() {
-    use elaboration::{
+    use type_resolution::{
         capabilities::TraitTruth,
         ptc::{Formula, Outcome},
     };
@@ -1009,7 +1012,7 @@ fn trait_decisions_bind_absence_and_logical_proofs_to_the_exact_world() {
 
 #[test]
 fn trait_decisions_keep_open_and_recursive_queries_pending() {
-    use elaboration::capabilities::TraitTruth;
+    use type_resolution::capabilities::TraitTruth;
     let ctx = context();
     let traits = vec![marker(100)];
     let empty = index(&[]);
@@ -1052,7 +1055,7 @@ fn trait_decisions_keep_open_and_recursive_queries_pending() {
 
 #[test]
 fn trait_decisions_retain_nested_exclusion_evidence_and_given_origins() {
-    use elaboration::capabilities::TraitTruth;
+    use type_resolution::capabilities::TraitTruth;
     let ctx = context();
     let traits = vec![marker(100), marker(101)];
     let subject = Term::Primitive(Primitive::Bool);
@@ -1096,7 +1099,7 @@ fn trait_decisions_retain_nested_exclusion_evidence_and_given_origins() {
 
 #[test]
 fn trait_decisions_validate_formation_and_recover_after_exhaustion() {
-    use elaboration::capabilities::TraitTruth;
+    use type_resolution::capabilities::TraitTruth;
     let ctx = context();
     let traits = vec![marker(100)];
     let ix = index(&[]);
@@ -1154,7 +1157,7 @@ fn trait_decisions_validate_formation_and_recover_after_exhaustion() {
 
 #[test]
 fn world_propositions_combine_positive_negative_and_type_evidence() {
-    use elaboration::ptc::{Formula as F, Outcome};
+    use type_resolution::ptc::{Formula as F, Outcome};
     let ctx = context();
     let traits = vec![marker(100), marker(101)];
     let subject = Term::Primitive(Primitive::Bool);
@@ -1195,7 +1198,7 @@ fn world_propositions_combine_positive_negative_and_type_evidence() {
 
 #[test]
 fn world_propositions_use_atoms_from_assumptions_and_keep_unknowns_open() {
-    use elaboration::ptc::{Formula as F, Outcome};
+    use type_resolution::ptc::{Formula as F, Outcome};
     let mut ctx = context();
     let traits = vec![marker(100), marker(101)];
     let a = F::Trait(trait_query(100, var()));
@@ -1262,7 +1265,7 @@ fn world_propositions_do_not_turn_invalid_interface_formation_into_absence() {
 
 #[test]
 fn world_propositions_leave_conflicting_candidates_pending() {
-    use elaboration::{
+    use type_resolution::{
         capabilities::TraitTruth,
         ptc::{Formula, Outcome},
     };
@@ -1296,8 +1299,8 @@ fn world_propositions_leave_conflicting_candidates_pending() {
 
 #[test]
 fn matched_candidate_requirements_are_proved_only_in_the_selected_world() {
-    use elaboration::ptc::{Formula, Outcome};
     use nir::program::TypePredicate;
+    use type_resolution::ptc::{Formula, Outcome};
     let ctx = context();
     let traits = vec![marker(100), marker(101)];
     let mut candidate = implementation(20, 100, var(), vec![id(1)], vec![]);
@@ -1515,8 +1518,8 @@ fn conditional_implementation_nested_disjunctions_share_the_solver() {
 
 #[test]
 fn conditional_inherent_evidence_preserves_member_subject_and_both_indexes() {
-    use elaboration::implementation::{InherentHead, InherentIndex};
     use nir::program::TypePredicate as Q;
+    use type_resolution::implementation::{InherentHead, InherentIndex};
     let ctx = context();
     let traits = vec![marker(100)];
     let mut candidate = implementation(20, 100, boxed(var()), vec![id(1)], vec![]);
@@ -1667,7 +1670,7 @@ fn condition_scope_covers_type_context_even_without_boolean_support() {
         if contracts {
             changed_context.admit_nominal_constructor(id(99));
         } else {
-            changed_context.assume(elaboration::ptc::Formula::True);
+            changed_context.assume(type_resolution::ptc::Formula::True);
         }
         let changed = World {
             index: &ix,
@@ -1712,8 +1715,8 @@ fn condition_scope_covers_type_context_even_without_boolean_support() {
 
 #[test]
 fn absence_decisions_use_context_equalities_without_guessing_or_unfolding() {
-    use elaboration::capabilities::TraitTruth;
-    use elaboration::ptc::{Formula, TraitQuery};
+    use type_resolution::capabilities::TraitTruth;
+    use type_resolution::ptc::{Formula, TraitQuery};
     let mut ctx = context();
     ctx.assume(Formula::equal(var(), Term::Primitive(Primitive::Bool)));
     let mut parameterized = marker(101);
@@ -1822,7 +1825,7 @@ fn scoped_given_evidence_uses_equalities_in_the_same_input_scope() {
         sort: Sort::Type,
     };
     let mut context = Context::with_scope(vec![vec![Sort::Type, Sort::Type]]);
-    context.assume(elaboration::ptc::Formula::equal(a.clone(), b.clone()));
+    context.assume(type_resolution::ptc::Formula::equal(a.clone(), b.clone()));
     let assumptions = [requirement(100, a.clone())];
     let index = Index::default();
     let world = World {
@@ -1856,7 +1859,7 @@ fn scoped_given_evidence_uses_equalities_in_the_same_input_scope() {
 
 #[test]
 fn scoped_world_queries_preserve_abstract_absence_and_use_proved_input_views() {
-    use elaboration::{
+    use type_resolution::{
         capabilities::TraitTruth,
         ptc::{Formula as F, Outcome},
     };
@@ -1925,11 +1928,11 @@ fn scoped_world_queries_preserve_abstract_absence_and_use_proved_input_views() {
 
 #[test]
 fn scoped_interface_formation_is_checked_before_given_evidence() {
-    use elaboration::{
+    use nir::program::TypePredicate;
+    use type_resolution::{
         capabilities::TraitTruth,
         ptc::{Formula, TraitQuery},
     };
-    use nir::program::TypePredicate;
     let a = Term::Bound {
         depth: 1,
         index: 0,
@@ -2001,8 +2004,8 @@ fn scoped_interface_formation_is_checked_before_given_evidence() {
 
 #[test]
 fn metered_world_propositions_share_budget_and_preserve_evidence() {
-    use elaboration::ptc::{Formula, Outcome};
     use nir::program::TypePredicate;
+    use type_resolution::ptc::{Formula, Outcome};
     let ctx = context();
     let traits = vec![marker(100)];
     let subject = Term::Primitive(Primitive::Bool);
@@ -2061,7 +2064,7 @@ fn metered_world_propositions_share_budget_and_preserve_evidence() {
 
 #[test]
 fn rigid_value_domains_control_matching_replay_and_index_revision() {
-    use elaboration::implementation::TypeAssessment;
+    use type_resolution::implementation::TypeAssessment;
     let parameter = id(701);
     let external = id(702);
     let rigid = |id| Term::Rigid {
@@ -2148,8 +2151,8 @@ fn rigid_value_domains_control_matching_replay_and_index_revision() {
 
 #[test]
 fn external_value_domains_preserve_only_subject_guarantees_through_parents() {
-    use elaboration::capabilities::subject_requirements_with_domains;
     use nir::program::{InterfaceInstance, TypePredicate};
+    use type_resolution::capabilities::subject_requirements_with_domains;
     let rigid = |local, sort| Term::Rigid {
         declaration: id(local),
         sort,
@@ -2228,7 +2231,7 @@ fn external_value_domains_preserve_only_subject_guarantees_through_parents() {
 
 #[test]
 fn repeated_value_indices_do_not_prove_absence_from_an_unknown_input() {
-    use elaboration::{capabilities::TraitTruth, ptc::TraitQuery};
+    use type_resolution::{capabilities::TraitTruth, ptc::TraitQuery};
     let value = |n| Term::Rigid {
         declaration: id(n),
         sort: Sort::ComptimeValue,
@@ -2364,10 +2367,10 @@ fn nominal_trait_indices_resolve_only_with_valid_layouts() {
 
 #[test]
 fn nominal_capability_sources_and_subject_facts_require_layout_evidence() {
-    use elaboration::capabilities::{
+    use nir::program::TypePredicate;
+    use type_resolution::capabilities::{
         capability_sources_with_layouts, subject_requirements_with_layouts,
     };
-    use nir::program::TypePredicate;
     let config_id = id(900);
     let config = Term::Nominal {
         declaration: config_id,
@@ -2560,8 +2563,8 @@ fn candidate_search_returns_budget_even_when_no_implementation_matches() {
 
 #[test]
 fn repeated_boolean_contract_checks_share_budget_and_keep_world_local_facts() {
-    use elaboration::ptc::{Formula, Outcome};
     use nir::program::TypePredicate as Q;
+    use type_resolution::ptc::{Formula, Outcome};
     let ctx = context();
     let traits = vec![marker(100), marker(101), marker(102)];
     let subject = Term::Primitive(Primitive::Bool);
@@ -2574,7 +2577,7 @@ fn repeated_boolean_contract_checks_share_budget_and_keep_world_local_facts() {
         assumptions: &[],
         context: &ctx,
     };
-    let malformed = elaboration::ptc::TraitQuery::from(&requirement(999, subject.clone()));
+    let malformed = type_resolution::ptc::TraitQuery::from(&requirement(999, subject.clone()));
     let mut rejected = Budget::default();
     let before = rejected.steps;
     assert!(
@@ -2614,12 +2617,12 @@ fn repeated_boolean_contract_checks_share_budget_and_keep_world_local_facts() {
         Outcome::Entailed(_)
     ));
     let absent =
-        elaboration::ptc::TraitQuery::from(&requirement(100, Term::Primitive(Primitive::Bool)));
+        type_resolution::ptc::TraitQuery::from(&requirement(100, Term::Primitive(Primitive::Bool)));
     assert_eq!(
         world
             .decide_trait(&absent, Budget::default())
             .unwrap()
             .truth(),
-        elaboration::capabilities::TraitTruth::Excluded
+        type_resolution::capabilities::TraitTruth::Excluded
     );
 }

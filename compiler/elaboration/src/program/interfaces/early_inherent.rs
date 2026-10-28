@@ -137,7 +137,7 @@ impl Checker<'_, '_> {
                 })?;
             members.insert(identity, named[0]);
         }
-        for (id, domain) in &self.implementation_index.parameter_domains {
+        for (id, domain) in self.implementation_index.parameter_domains() {
             index
                 .register_parameter_domain(*id, domain.clone())
                 .map_err(|message| error(span, message))?;

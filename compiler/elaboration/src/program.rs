@@ -4590,8 +4590,8 @@ impl Checker<'_, '_> {
             &self.checked_traits,
             &self.binder_assumptions(owner),
             crate::ptc::Budget::default(),
-            &self.implementation_index.parameter_domains,
-            Some(&self.implementation_index.nominal_layouts),
+            self.implementation_index.parameter_domains(),
+            Some(self.implementation_index.nominal_layouts()),
         ) {
             if !requirements.contains(&requirement) {
                 requirements.push(requirement);
@@ -4605,8 +4605,8 @@ impl Checker<'_, '_> {
             &self.checked_traits,
             &self.binder_assumptions(owner),
             crate::ptc::Budget::default(),
-            &self.implementation_index.parameter_domains,
-            Some(&self.implementation_index.nominal_layouts),
+            self.implementation_index.parameter_domains(),
+            Some(self.implementation_index.nominal_layouts()),
         ) {
             context.assume(crate::ptc::Formula::from_predicate(&requirement));
         }

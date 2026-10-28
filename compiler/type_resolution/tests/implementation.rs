@@ -1,8 +1,8 @@
-use elaboration::implementation::{
+use nir::{DeclarationId as Id, Primitive as P, Sort, Term};
+use type_resolution::implementation::{
     Applicability as A, Error, ImplementationHead, Index, Key, Selection,
 };
-use elaboration::ptc::Budget;
-use nir::{DeclarationId as Id, Primitive as P, Sort, Term};
+use type_resolution::ptc::Budget;
 fn id(local: u32) -> Id {
     Id { package: 0, local }
 }
@@ -38,8 +38,8 @@ fn add(index: &mut Index, n: u32, subject: Term) {
 
 #[test]
 fn nominal_head_separation_reserves_solver_work_for_same_family_constraints() {
-    use elaboration::{implementation::PairAssessment, ptc::Context};
     use nir::program::TypePredicate;
+    use type_resolution::{implementation::PairAssessment, ptc::Context};
     let mut index = Index::default();
     for member in 0..70 {
         add(&mut index, 1000 + member, node(2000 + member, vec![var(1)]));
@@ -93,7 +93,7 @@ fn coherence_budget_separates_precision_groups_within_one_interface() {
 }
 
 fn check_coherence_group_budget(same_interface: bool) {
-    use elaboration::ptc::Context;
+    use type_resolution::ptc::Context;
     let mut index = Index::default();
     for group in 0..3 {
         for member in 0..20 {
@@ -153,7 +153,7 @@ fn check_coherence_group_budget(same_interface: bool) {
 
 #[test]
 fn record_value_indices_retain_type_candidates_and_replay_field_proofs() {
-    use elaboration::ptc::{Context, Formula};
+    use type_resolution::ptc::{Context, Formula};
     let record = |element| {
         Term::RecordValue(vec![
             ("element".into(), element),
@@ -688,8 +688,8 @@ fn generic(n: u32, subject: Term, parameters: Vec<Id>) -> ImplementationHead {
     h.type_parameters = parameters;
     h
 }
-fn context() -> elaboration::ptc::Context {
-    let mut context = elaboration::ptc::Context::default();
+fn context() -> type_resolution::ptc::Context {
+    let mut context = type_resolution::ptc::Context::default();
     for n in [10, 11, 12] {
         context.admit_nominal_constructor(id(n));
     }
@@ -698,7 +698,7 @@ fn context() -> elaboration::ptc::Context {
 
 #[test]
 fn fixed_scalar_indices_select_infer_and_replay_without_value_equations() {
-    use elaboration::implementation::{PairAssessment, TypeAssessment};
+    use type_resolution::implementation::{PairAssessment, TypeAssessment};
     for (px, em) in [
         (Term::Symbol("px".into()), Term::Symbol("em".into())),
         (Term::Bool(true), Term::Bool(false)),
@@ -744,7 +744,7 @@ fn fixed_scalar_indices_select_infer_and_replay_without_value_equations() {
         );
         assert_eq!(
             mismatch.applicability(),
-            elaboration::implementation::Applicability::Excluded
+            type_resolution::implementation::Applicability::Excluded
         );
         assert!(mismatch.to_string().contains("(value-index-mismatch"));
         let mut other = h.clone();
@@ -797,7 +797,7 @@ fn fixed_scalar_indices_select_infer_and_replay_without_value_equations() {
 
 #[test]
 fn real_candidate_matching_solves_subject_and_trait_arguments_together() {
-    use elaboration::implementation::TypeAssessment;
+    use type_resolution::implementation::TypeAssessment;
     let mut h = generic(200, node(11, vec![var(1), var(2)]), vec![id(1), id(2)]);
     h.interface_arguments = vec![var(2), var(1)];
     let context = context();
@@ -828,8 +828,8 @@ fn real_candidate_matching_solves_subject_and_trait_arguments_together() {
 
 #[test]
 fn requires_are_proved_not_assumed_and_countermodels_do_not_exclude_open_requirements() {
-    use elaboration::implementation::TypeAssessment;
     use nir::program::TypePredicate as R;
+    use type_resolution::implementation::TypeAssessment;
     let mut h = generic(200, node(10, vec![var(1)]), vec![id(1)]);
     h.requirements.push(R::Equal(var(1), ty(P::Bool)));
     let mut context = context();
@@ -860,7 +860,7 @@ fn requires_are_proved_not_assumed_and_countermodels_do_not_exclude_open_require
         h.assess_types(&node(10, vec![var(90)]), &[], &context, Budget::default()),
         TypeAssessment::Pending(_)
     ));
-    context.assume(elaboration::ptc::Formula::equal(var(90), ty(P::Bool)));
+    context.assume(type_resolution::ptc::Formula::equal(var(90), ty(P::Bool)));
     assert!(matches!(
         h.assess_types(&node(10, vec![var(90)]), &[], &context, Budget::default()),
         TypeAssessment::Applicable(_)
@@ -878,7 +878,7 @@ fn requires_are_proved_not_assumed_and_countermodels_do_not_exclude_open_require
 
 #[test]
 fn repeated_parameters_are_real_equalities_and_do_not_escape_failed_candidates() {
-    use elaboration::implementation::TypeAssessment;
+    use type_resolution::implementation::TypeAssessment;
     let repeated = generic(200, node(11, vec![var(1), var(1)]), vec![id(1)]);
     let separate = generic(201, node(11, vec![var(1), var(2)]), vec![id(1), id(2)]);
     let context = context();
@@ -905,7 +905,7 @@ fn repeated_parameters_are_real_equalities_and_do_not_escape_failed_candidates()
 
 #[test]
 fn blanket_user_implementations_check_final_subject_eligibility() {
-    use elaboration::implementation::TypeAssessment;
+    use type_resolution::implementation::TypeAssessment;
     let h = generic(200, var(1), vec![id(1)]);
     let context = context();
     let closure = Term::Closure {
@@ -928,7 +928,7 @@ fn blanket_user_implementations_check_final_subject_eligibility() {
         TypeAssessment::Applicable(_)
     ));
     let mut known = context.fork();
-    known.assume(elaboration::ptc::Formula::equal(
+    known.assume(type_resolution::ptc::Formula::equal(
         var(90),
         node(10, vec![ty(P::Bool)]),
     ));
@@ -946,8 +946,8 @@ fn blanket_user_implementations_check_final_subject_eligibility() {
 
 #[test]
 fn tuple_kind_conflict_excludes_uninferable_generic_candidates() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
     use nir::normal_forms::{Head, Kind, Parameter, Role};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let mut package = nir::program::Package {
         normal_forms: vec![Head {
             declaration: id(990),
@@ -1026,8 +1026,8 @@ fn tuple_kind_conflict_excludes_uninferable_generic_candidates() {
 
 #[test]
 fn tuple_subject_eligibility_requires_trusted_metadata_at_selection_and_replay() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
     use nir::normal_forms::{Head, Kind, Parameter, Role};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let mut package = nir::program::Package {
         normal_forms: vec![Head {
             declaration: id(990),
@@ -1079,7 +1079,7 @@ fn tuple_subject_eligibility_requires_trusted_metadata_at_selection_and_replay()
             .is_err()
     );
     let mut equal = trusted.fork();
-    equal.assume(elaboration::ptc::Formula::equal(var(995), subject));
+    equal.assume(type_resolution::ptc::Formula::equal(var(995), subject));
     let TypeAssessment::Applicable(evidence) =
         implementation.assess_types(&var(995), &[], &equal, Budget::default())
     else {
@@ -1166,7 +1166,7 @@ fn real_type_resolution_waits_for_finer_contracts_then_selects_or_reports_confli
 
 #[test]
 fn unresolved_parameters_and_budget_exhaustion_are_not_applicability() {
-    use elaboration::implementation::TypeAssessment;
+    use type_resolution::implementation::TypeAssessment;
     let unused = generic(200, ty(P::Bool), vec![id(1)]);
     assert!(matches!(
         unused.assess_types(&ty(P::Bool), &[], &context(), Budget::default()),
@@ -1196,8 +1196,8 @@ fn unresolved_parameters_and_budget_exhaustion_are_not_applicability() {
 
 #[test]
 fn type_evidence_replay_checks_query_substitution_contracts_and_scope() {
-    use elaboration::implementation::TypeAssessment;
     use nir::program::TypePredicate as R;
+    use type_resolution::implementation::TypeAssessment;
     let mut h = generic(200, node(10, vec![var(1)]), vec![id(1)]);
     h.requirements.push(R::Equal(var(1), ty(P::Bool)));
     let subject = node(10, vec![ty(P::Bool)]);
@@ -1242,7 +1242,7 @@ fn type_evidence_replay_checks_query_substitution_contracts_and_scope() {
             &evidence,
             &subject,
             &[],
-            &elaboration::ptc::Context::default(),
+            &type_resolution::ptc::Context::default(),
             Budget::default()
         )
         .is_err()
@@ -1264,7 +1264,7 @@ fn type_evidence_replay_checks_query_substitution_contracts_and_scope() {
 
 #[test]
 fn opaque_factories_are_not_inverted_by_candidate_matching() {
-    use elaboration::implementation::TypeAssessment;
+    use type_resolution::implementation::TypeAssessment;
     let opaque = |arg| Term::NormalForm {
         head: id(500),
         sort: Sort::Type,
@@ -1332,7 +1332,7 @@ fn local_nominal(arguments: Vec<Term>) -> Term {
 
 #[test]
 fn ownership_observes_subject_then_arguments_and_nominal_preorder() {
-    use elaboration::implementation::{Ownership, OwnershipError};
+    use type_resolution::implementation::{Ownership, OwnershipError};
     let local = local_nominal(vec![var(1)]);
     let local_id = Id {
         package: 1,
@@ -1371,7 +1371,7 @@ fn ownership_observes_subject_then_arguments_and_nominal_preorder() {
 
 #[test]
 fn ownership_cannot_be_granted_by_requires_or_factory_names() {
-    use elaboration::implementation::OwnershipError;
+    use type_resolution::implementation::OwnershipError;
     let mut impl_head = foreign_head(var(1), vec![]);
     impl_head
         .requirements
@@ -1396,7 +1396,7 @@ fn ownership_cannot_be_granted_by_requires_or_factory_names() {
 
 #[test]
 fn inherent_ownership_does_not_extend_to_foreign_wrappers() {
-    use elaboration::implementation::{OwnershipError, inherent_ownership};
+    use type_resolution::implementation::{OwnershipError, inherent_ownership};
     let local = local_nominal(vec![var(1)]);
     assert!(inherent_ownership(&local, 1).is_ok());
     for subject in [node(10, vec![local.clone()]), ty(P::Bool), var(1)] {
@@ -1463,8 +1463,8 @@ fn ownership_traversal_is_bounded_without_publishing_partial_entries() {
 
 #[test]
 fn generic_same_precision_coherence_proves_disjoint_requires_and_replays_proofs() {
-    use elaboration::{implementation::PairAssessment, ptc::Context};
     use nir::program::TypePredicate;
+    use type_resolution::{implementation::PairAssessment, ptc::Context};
     let mut context = Context::default();
     context.admit_nominal_constructor(id(10));
     let mut left = head(200, node(10, vec![var(1)]));
@@ -1490,7 +1490,7 @@ fn generic_same_precision_coherence_proves_disjoint_requires_and_replays_proofs(
 
 #[test]
 fn overlap_alpha_renames_each_implementations_quantified_parameters() {
-    use elaboration::{implementation::PairAssessment, ptc::Context};
+    use type_resolution::{implementation::PairAssessment, ptc::Context};
     let mut left = head(200, Term::Tuple(vec![var(1), ty(P::Bool)]));
     left.type_parameters = vec![id(1)];
     let mut right = head(201, Term::Tuple(vec![ty(P::Char), var(1)]));
@@ -1505,7 +1505,7 @@ fn overlap_alpha_renames_each_implementations_quantified_parameters() {
 
 #[test]
 fn coherence_uses_full_interface_arguments_and_never_caller_assumptions() {
-    use elaboration::{
+    use type_resolution::{
         implementation::PairAssessment,
         ptc::{Context, Formula},
     };
@@ -1529,7 +1529,7 @@ fn coherence_uses_full_interface_arguments_and_never_caller_assumptions() {
 
 #[test]
 fn coherence_reports_are_bounded_and_world_specific() {
-    use elaboration::{implementation::PairAssessment, ptc::Context};
+    use type_resolution::{implementation::PairAssessment, ptc::Context};
     let context = Context::default();
     let mut index = Index::default();
     add(&mut index, 200, var(1));
@@ -1573,8 +1573,8 @@ fn coherence_reports_are_bounded_and_world_specific() {
 
 #[test]
 fn coherence_renaming_does_not_capture_free_rigid_identities() {
-    use elaboration::{implementation::PairAssessment, ptc::Context};
     use nir::program::TypePredicate;
+    use type_resolution::{implementation::PairAssessment, ptc::Context};
     let external = Term::Rigid {
         declaration: Id {
             package: u64::MAX,
@@ -1596,7 +1596,7 @@ fn coherence_renaming_does_not_capture_free_rigid_identities() {
 
 #[test]
 fn coherence_replay_rejects_missing_pairs_forged_proofs_and_stale_worlds() {
-    use elaboration::{
+    use type_resolution::{
         implementation::PairAssessment,
         ptc::{Context, Formula},
     };
@@ -1626,7 +1626,7 @@ fn coherence_replay_rejects_missing_pairs_forged_proofs_and_stale_worlds() {
 
 #[test]
 fn typed_interface_queries_treat_rigid_arguments_as_stable_symbols() {
-    use elaboration::ptc::{Context, Formula};
+    use type_resolution::ptc::{Context, Formula};
     let mut index = Index::default();
     let mut generic = head(200, node(10, vec![var(1)]));
     generic.type_parameters = vec![id(1)];
@@ -1640,7 +1640,7 @@ fn typed_interface_queries_treat_rigid_arguments_as_stable_symbols() {
         .resolve_types(id(100), &arguments, &subject, &context, Budget::default())
         .unwrap();
     assert_eq!(result.selection, Selection::Selected(id(200)));
-    let elaboration::implementation::TypeAssessment::Applicable(evidence) =
+    let type_resolution::implementation::TypeAssessment::Applicable(evidence) =
         &result.assessments[&id(200)]
     else {
         panic!()
@@ -1692,8 +1692,8 @@ fn tuple_value_identity_does_not_prune_potentially_equal_opaque_fields() {
 
 #[test]
 fn matched_heads_retain_substituted_trait_conditions_without_claiming_applicability() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
     use nir::program::{TraitRequirement, TypePredicate as Q};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let mut h = head(20, var(1));
     h.type_parameters = vec![id(1)];
     h.requirements = vec![Q::Not(Box::new(Q::Trait(TraitRequirement {
@@ -1734,7 +1734,7 @@ fn matched_heads_retain_substituted_trait_conditions_without_claiming_applicabil
 
 #[test]
 fn matched_heads_do_not_hide_a_definitely_false_requirement() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let mut h = head(20, var(1));
     h.type_parameters = vec![id(1)];
     h.requirements = vec![nir::program::TypePredicate::Bool(false)];
@@ -1752,7 +1752,7 @@ fn matched_heads_do_not_hide_a_definitely_false_requirement() {
 
 #[test]
 fn matched_head_replay_checks_declaration_query_requirements_and_scope() {
-    use elaboration::ptc::{Context, Formula};
+    use type_resolution::ptc::{Context, Formula};
     let mut h = head(20, var(1));
     h.type_parameters = vec![id(1)];
     h.interface_arguments = vec![var(1)];
@@ -1831,7 +1831,7 @@ fn matched_head_replay_checks_declaration_query_requirements_and_scope() {
 
 #[test]
 fn matched_heads_keep_unresolved_inputs_and_exhaustion_out_of_the_success_path() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let mut h = head(20, var(1));
     let context = Context::default();
     assert!(matches!(
@@ -1898,7 +1898,7 @@ fn record_labels_charge_opaque_index_keys_before_copying() {
 
 #[test]
 fn record_label_budget_does_not_publish_candidate_applicability() {
-    use elaboration::implementation::TypeAssessment;
+    use type_resolution::implementation::TypeAssessment;
     let subject = Term::Record(vec![("x".repeat(512), ty(P::Bool))]);
     let candidate = generic(200, subject.clone(), vec![]);
     assert!(matches!(
@@ -2035,8 +2035,8 @@ fn candidate_comparisons_charge_repeated_scalar_and_label_payloads() {
 
 #[test]
 fn nominal_impl_value_parameters_infer_domains_and_replay() {
-    use elaboration::implementation::TypeAssessment;
-    use elaboration::ptc::Context;
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::Context;
     let mut context = Context::default();
     context.admit_nominal_constructor(id(800));
     let mut h = head(
@@ -2082,8 +2082,8 @@ fn nominal_impl_value_parameters_infer_domains_and_replay() {
 
 #[test]
 fn nominal_impl_value_inference_preserves_dependent_domains_and_repeated_indices() {
-    use elaboration::implementation::TypeAssessment;
-    use elaboration::ptc::Context;
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::Context;
     let mut context = Context::default();
     context.admit_nominal_constructor(id(800));
     let index = Term::Rigid {
@@ -2129,8 +2129,8 @@ fn nominal_impl_value_inference_preserves_dependent_domains_and_repeated_indices
 
 #[test]
 fn direct_trait_value_parameters_infer_without_value_propositions() {
-    use elaboration::implementation::TypeAssessment;
-    use elaboration::ptc::Context;
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::Context;
     let context = Context::default();
     let mut h = head(801, ty(P::Bool));
     h.type_parameters = vec![id(1)];
@@ -2179,8 +2179,8 @@ fn direct_trait_value_parameters_infer_without_value_propositions() {
 
 #[test]
 fn interface_value_inference_checks_repeated_and_record_inputs() {
-    use elaboration::implementation::TypeAssessment;
-    use elaboration::ptc::Context;
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::Context;
     let context = Context::default();
     let mut h = head(801, ty(P::Bool));
     let value = Term::Rigid {
@@ -2211,8 +2211,8 @@ fn interface_value_inference_checks_repeated_and_record_inputs() {
 
 #[test]
 fn whole_record_value_binders_replay_their_type_leaves() {
-    use elaboration::implementation::TypeAssessment;
-    use elaboration::ptc::Context;
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::Context;
     let context = Context::default();
     let mut h = head(801, ty(P::Bool));
     h.type_parameters = vec![id(1)];
@@ -2241,8 +2241,8 @@ fn whole_record_value_binders_replay_their_type_leaves() {
 
 #[test]
 fn unresolved_record_value_leaves_do_not_refute_candidates() {
-    use elaboration::implementation::TypeAssessment;
-    use elaboration::ptc::Context;
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::Context;
     let record = |value| Term::RecordValue(vec![("flag".into(), value)]);
     let mut h = head(801, ty(P::Bool));
     h.type_parameters.clear();
@@ -2264,8 +2264,8 @@ fn unresolved_record_value_leaves_do_not_refute_candidates() {
 
 #[test]
 fn partially_symbolic_record_indices_prove_and_replay_disjointness() {
-    use elaboration::implementation::PairAssessment;
-    use elaboration::ptc::Context;
+    use type_resolution::implementation::PairAssessment;
+    use type_resolution::ptc::Context;
     let context = Context::default();
     let record = |tag, leaf| {
         Term::RecordValue(vec![(
@@ -2325,8 +2325,8 @@ fn partially_symbolic_record_indices_prove_and_replay_disjointness() {
 
 #[test]
 fn disjoint_open_record_impls_select_and_infer_their_value_arguments() {
-    use elaboration::implementation::TypeAssessment;
-    use elaboration::ptc::Context;
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::Context;
     let context = Context::default();
     let record = |tag, value| {
         Term::RecordValue(vec![
@@ -2373,8 +2373,8 @@ fn disjoint_open_record_impls_select_and_infer_their_value_arguments() {
 
 #[test]
 fn external_domain_head_replay_preserves_pending_requirements() {
-    use elaboration::ptc::Context;
     use nir::program::TypePredicate;
+    use type_resolution::ptc::Context;
     let value = |n| Term::Rigid {
         declaration: id(n),
         sort: Sort::ComptimeValue,
@@ -2468,7 +2468,7 @@ fn external_domain_head_replay_preserves_pending_requirements() {
 
 #[test]
 fn dependent_domain_equality_is_rechecked_during_proof_replay() {
-    use elaboration::ptc::{Context, Formula};
+    use type_resolution::ptc::{Context, Formula};
     let value = |n| Term::Rigid {
         declaration: id(n),
         sort: Sort::ComptimeValue,
@@ -2514,7 +2514,7 @@ fn dependent_domain_equality_is_rechecked_during_proof_replay() {
     let selected = index
         .resolve_types(id(100), &args, &ty(P::Bool), &context, Budget::default())
         .unwrap();
-    let elaboration::implementation::TypeAssessment::Applicable(evidence) =
+    let type_resolution::implementation::TypeAssessment::Applicable(evidence) =
         &selected.assessments[&id(200)]
     else {
         panic!("{selected}")
@@ -2566,7 +2566,7 @@ fn dependent_domain_equality_is_rechecked_during_proof_replay() {
 
 #[test]
 fn repeated_symbolic_value_inputs_remain_pending_in_both_orders() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let value = |n| Term::Rigid {
         declaration: id(n),
         sort: Sort::ComptimeValue,
@@ -2623,7 +2623,7 @@ fn repeated_symbolic_value_inputs_remain_pending_in_both_orders() {
 
 #[test]
 fn symbolic_value_shared_by_subject_and_interface_is_not_refuted() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let value = |n| Term::Rigid {
         declaration: id(n),
         sort: Sort::ComptimeValue,
@@ -2661,7 +2661,7 @@ fn symbolic_value_shared_by_subject_and_interface_is_not_refuted() {
 
 #[test]
 fn whole_symbolic_record_indices_replay_and_keep_unknown_relations_pending() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let value = |n| Term::Rigid {
         declaration: id(n),
         sort: Sort::ComptimeValue,
@@ -2703,7 +2703,7 @@ fn whole_symbolic_record_indices_replay_and_keep_unknown_relations_pending() {
 
 #[test]
 fn known_record_tags_refute_repeated_inputs_despite_other_unknown_fields() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let value = |n| Term::Rigid {
         declaration: id(n),
         sort: Sort::ComptimeValue,
@@ -2737,7 +2737,7 @@ fn known_record_tags_refute_repeated_inputs_despite_other_unknown_fields() {
 
 #[test]
 fn known_value_conflicts_are_not_hidden_by_earlier_unknown_inputs() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let value = Term::Rigid {
         declaration: id(2),
         sort: Sort::ComptimeValue,
@@ -2776,8 +2776,8 @@ fn known_value_conflicts_are_not_hidden_by_earlier_unknown_inputs() {
 
 #[test]
 fn nominal_value_subjects_require_layouts_for_selection_and_replay() {
-    use elaboration::implementation::TypeAssessment;
-    use elaboration::ptc::Context;
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::Context;
     let config = node(30, vec![]);
     let mut h = head(
         200,
@@ -2896,8 +2896,8 @@ fn nominal_value_subjects_require_layouts_for_selection_and_replay() {
 
 #[test]
 fn partially_symbolic_nominal_indices_prove_and_replay_disjointness() {
-    use elaboration::implementation::PairAssessment;
-    use elaboration::ptc::Context;
+    use type_resolution::implementation::PairAssessment;
+    use type_resolution::ptc::Context;
     let context = Context::default();
     let record = |tag, leaf| Term::NominalValue {
         ty: Box::new(node(900, vec![])),
@@ -2953,8 +2953,8 @@ fn partially_symbolic_nominal_indices_prove_and_replay_disjointness() {
 
 #[test]
 fn disjoint_open_nominal_impls_select_and_infer_their_value_arguments() {
-    use elaboration::implementation::TypeAssessment;
-    use elaboration::ptc::Context;
+    use type_resolution::implementation::TypeAssessment;
+    use type_resolution::ptc::Context;
     let mut context = Context::default();
     context.admit_nominal_constructor(id(900));
     let record = |tag, value| Term::NominalValue {
@@ -3027,7 +3027,7 @@ fn opaque_index_keys_see_open_inputs_inside_error_results() {
 
 #[test]
 fn explicit_error_prefix_excludes_uninferable_ordinary_candidates() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let mut context = Context::default();
     context.admit_nominal_constructor(id(10));
     let qualified = |result| Term::error_result(vec![ty(P::Bool)], result);
@@ -3068,7 +3068,7 @@ fn coherence_proof_budget_is_not_diluted_by_unrelated_interfaces() {
         unrelated.interface = Some(id(500 + n));
         index.insert(unrelated, Budget::default()).unwrap();
     }
-    let context = elaboration::ptc::Context::default();
+    let context = type_resolution::ptc::Context::default();
     let budget = Budget {
         steps: 2000,
         ..Budget::default()
@@ -3090,7 +3090,7 @@ fn coherence_proof_budget_is_not_diluted_by_unrelated_interfaces() {
 
 #[test]
 fn optional_candidates_preserve_payload_inference_and_distinct_outer_heads() {
-    use elaboration::ptc::Context;
+    use type_resolution::ptc::Context;
     let optional = |t| Term::Optional(Box::new(t));
     let opaque = Term::NormalForm {
         head: id(500),
@@ -3142,7 +3142,7 @@ fn optional_candidates_preserve_payload_inference_and_distinct_outer_heads() {
 
 #[test]
 fn optional_value_indices_infer_type_leaves_and_replay_presence() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let context = Context::default();
     let wrap = |value| Term::OptionalValue {
         ty: Box::new(Term::Optional(Box::new(ty(P::Type)))),
@@ -3185,8 +3185,8 @@ fn optional_value_indices_infer_type_leaves_and_replay_presence() {
 
 #[test]
 fn list_subject_eligibility_requires_trusted_metadata_at_selection_and_replay() {
-    use elaboration::{implementation::TypeAssessment, ptc::Context};
     use nir::normal_forms::{Head, Kind, Parameter, Role};
+    use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let mut package = nir::program::Package {
         normal_forms: vec![Head {
             declaration: id(990),
@@ -3237,7 +3237,7 @@ fn list_subject_eligibility_requires_trusted_metadata_at_selection_and_replay() 
             .is_err()
     );
     let mut equal = trusted.fork();
-    equal.assume(elaboration::ptc::Formula::equal(var(995), subject));
+    equal.assume(type_resolution::ptc::Formula::equal(var(995), subject));
     let TypeAssessment::Applicable(evidence) =
         implementation.assess_types(&var(995), &[], &equal, Budget::default())
     else {
