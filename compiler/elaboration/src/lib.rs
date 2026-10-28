@@ -21,7 +21,7 @@ mod machine_float_coverage;
 mod symbol_coverage;
 
 /// Program-state arithmetic reasoning, separate from the type proposition engine.
-pub mod verification;
+pub use ::program_verification as verification;
 
 pub mod effects;
 

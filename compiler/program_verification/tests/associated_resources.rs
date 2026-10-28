@@ -1,8 +1,8 @@
 //! Resource evidence for unresolved associated values; selection remains a
 //! separate prerequisite enforced by semantic publication and materialization.
-use elaboration::verification::moves::{self, Delivery};
 use nir::program::{Expr, ExprKind as K, Function, FunctionPhase, Literal, SourceRange};
 use nir::{DeclarationId, Primitive as P, Term};
+use program_verification::moves::{self, Delivery};
 
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 1, local }

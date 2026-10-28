@@ -1,6 +1,6 @@
 //! Preserve conditional caller origins when exporting acquired cleanup accesses.
 use super::*;
-use crate::verification::{drop::CleanupStep, memory};
+use crate::{drop::CleanupStep, memory};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BorrowedRoot {

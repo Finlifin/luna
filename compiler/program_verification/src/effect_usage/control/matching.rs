@@ -1,7 +1,7 @@
 //! A failed pattern retains its evaluated guards before the next candidate.
 //! Pattern mismatch, branch success and nonlocal control are separate outcomes.
 use super::*;
-use crate::verification::pattern_facts::{irrefutable_shape, known_pattern};
+use crate::pattern_facts::{irrefutable_shape, known_pattern};
 
 #[derive(Default)]
 struct Probe {
@@ -93,7 +93,7 @@ fn pure(pattern: &Pattern, fuel: &mut usize, depth: usize) -> Result<bool, Strin
     }
 }
 impl Analyzer<'_, '_, '_, '_> {
-    pub(in crate::verification::effect_usage) fn handler_candidates(
+    pub(in crate::effect_usage) fn handler_candidates(
         &mut self,
         arms: &[MatchArm],
         n: usize,

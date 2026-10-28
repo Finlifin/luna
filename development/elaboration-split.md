@@ -38,13 +38,12 @@ python3 -B development/check.py --timeout 900 -- test --release -p ptc
 | --- | --- | --- | --- |
 | 1，已完成 | `ptc` | 类型公式、有限理论、证明与反例 | 保留 opaque normal-form 头、预算及 Unknown 语义 |
 | 2，已完成 | `type_resolution` | inference store、obligations、matching、implementation、capabilities、associated 查询 | 把通用 Term 结构计量从 memory 模块移到 NIR 或类型基础层；候选事务和证据保持同一所有者 |
-| 3，逻辑核心已完成 | 实例语义与程序验证 | 将类型视图和方法选择与执行依赖闭包区分；随后迁出 flow、memory、moves、drop 等验证 | 下移 materialization，保留完整方法闭包检查；解除对源码展开器的反向 Cargo 依赖 |
+| 3，已完成 | 实例语义与程序验证 | 将类型视图和方法选择与执行依赖闭包区分；随后迁出 flow、memory、moves、drop 等验证 | 下移 materialization，保留完整方法闭包检查；解除对源码展开器的反向 Cargo 依赖 |
 | 4，materialization 已完成 | staging / materialization | quoted code、inline 展开和具体调用闭包 | 将已检查 NIR 上的展开与源码 Checker 分开，明确预算、fresh identity、来源映射和候选发布接口 |
 | 5 | 剩余 elaboration | HIR 到 NIR 的检查、协议接线、阶段交织与顶层协调 | 依赖上述稳定服务，不把活动推断状态冻结或交给全局缓存 |
 
-第三步已创建 verification_core，完整程序验证的边界仍在拆解；第四步已拆出
+第三步已拆出 verification_core 与 program_verification；第四步已拆出
 materialization，源码展开器仍在 elaboration。第五步尚未完成。
-最值得继续移出的体量是 verification，而不是无限增加只有几个工具函数的小 crate。
 
 ## 最初确认的依赖环
 
@@ -338,3 +337,40 @@ materialization，materialization 使用 type_resolution/NIR/IIR。源码 CMTT �
   `/tmp/luna-library-knqvfdll/summary.json`。
 - 格式检查 `/tmp/luna-tools-dalejusj/result.json` 与 `git diff --check` 通过。
   未运行全 workspace 测试。
+
+## 独立 program_verification crate
+
+将剩余约 61,800 行验证实现整体迁到 `compiler/program_verification`，涵盖
+flow、memory、moves、copy、drop、effect_usage、contracts 和 optimization。
+依赖仅包含 NIR、IIR、type_resolution、materialization、verification_core
+与 comptime_runtime；不依赖 elaboration、HIR 或源码 Checker。
+`elaboration::verification` 重导出同一 crate，已有消费者保持原路径和类型身份。
+程序命题仍由程序验证层处理，没有并入 PTC。
+
+纯度分析继续留在源码检查器，通过公开的内存布局查询、错误路径映射、方法
+行为查询和清理分量遍历接口访问验证服务。方法缓存字段和其余内部辅助函数
+保持私有，没有公开整个验证状态。原 associated_resources、verification 集成
+测试随所属实现迁移；依赖上层源码检查的测试继续留在 elaboration。
+
+当前 elaboration/src 约 100,951 行（包含内联测试），主要剩余源码检查和展开。
+后续仍可按源码检查阶段划分，但需要先厘清 Checker 的活动状态和递归调用；
+本次不把这些状态改成全局服务，也不宣称整个拆分已经结束。
+
+本阶段验证在 `/home/fin/luna` 执行，全部退出 0：
+
+- `python3 -B development/check.py --timeout 900 -- test --release
+  -p program_verification -p elaboration --lib --tests`：405 项通过，
+  `/tmp/luna-tools-3gwox6xp/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna
+  --test resources --test runtime_purity --test effect_contracts
+  --test effect_memory_transfers --test method_memory_contracts
+  --test captured_memory --test associated_purity --test optional_purity
+  --test trait_purity --test comparison_resources --test effect_spreads`：
+  701 项通过，`/tmp/luna-tools-ldadz_ev/result.json`。
+- `python3 -B development/library_check.py --release --timeout 900
+  --stage sysroot-iteration --stage sysroot-resources`：全部通过，
+  `/tmp/luna-library-6n4tpxjt/summary.json`。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+  与 `git diff --check` 通过；格式报告 `/tmp/luna-tools-54m_vx0q/result.json`。
+  未运行全 workspace 测试。原 moves/effects.rs 的既有格式修改随迁移留在工作区，
+  本提交仅迁移其 HEAD 内容，未混入先前的未提交修改。

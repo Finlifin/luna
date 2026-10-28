@@ -908,7 +908,7 @@ fn display_owned_path(path: &[usize], f: &mut fmt::Formatter<'_>) -> fmt::Result
     Ok(())
 }
 
-pub(crate) fn error_tag_mapping(
+pub fn error_tag_mapping(
     expr: &Expr,
     package: Option<&Package>,
     fuel: &mut usize,
@@ -938,7 +938,7 @@ pub(crate) fn error_tag_mapping(
     )
     .map_err(|failure| failure.to_string())
 }
-pub(crate) fn remap_error_path(
+pub fn remap_error_path(
     path: &mut [usize],
     mapping: &nir::error_results::RepresentationTransport,
     fuel: &mut usize,
@@ -950,7 +950,7 @@ pub(crate) fn remap_error_path(
 
 // Cleanup uses success tag zero and error row index plus one. This is a
 // private storage layout, not an enum type or an effect continuation.
-pub(crate) fn owned_constructor<'a>(
+pub fn owned_constructor<'a>(
     expr: &'a Expr,
     fuel: &mut usize,
 ) -> Result<(&'a [Expr], Option<usize>), String> {
@@ -996,7 +996,7 @@ pub(crate) fn owned_constructor<'a>(
     }
 }
 
-pub(crate) fn owned_variant_pattern<'p>(
+pub fn owned_variant_pattern<'p>(
     package: Option<&Package>,
     pattern: &'p Pattern,
     ty: &Term,
@@ -1119,7 +1119,7 @@ pub(crate) fn owned_variants(
     }
     Err("memory variant metadata missing".into())
 }
-pub(crate) fn owned_path_type(
+pub fn owned_path_type(
     package: Option<&Package>,
     ty: &Term,
     path: &[usize],
@@ -1643,7 +1643,7 @@ impl fmt::Display for CodeResult {
         }
     }
 }
-pub(crate) fn code_result_bottom(
+pub fn code_result_bottom(
     package: Option<&Package>,
     ty: &Term,
     fuel: &mut usize,
@@ -2061,7 +2061,7 @@ pub(crate) fn capture_pointer_replacement_layout(
 
 /// Data-only replacement leaves pointer provenance and callable identity intact.
 /// Copy and cleanup legality are separate obligations of the transfer analysis.
-pub(crate) fn data_representation(
+pub fn data_representation(
     package: Option<&Package>,
     ty: &Term,
     fuel: &mut usize,
@@ -7688,7 +7688,7 @@ type MethodKey = (
 /// Package-local successful dispatch evidence. Runtime arguments and source
 /// locations do not select implementations; the full interface signature does.
 #[derive(Default)]
-pub(crate) struct MethodCallees(std::collections::HashMap<MethodKey, Expr>);
+pub struct MethodCallees(std::collections::HashMap<MethodKey, Expr>);
 
 impl MethodCallees {
     pub(crate) fn select(
@@ -7702,7 +7702,7 @@ impl MethodCallees {
 
     /// Select only code identity for behavior analysis. The original interface
     /// call remains in the program and retains all its predicate obligations.
-    pub(crate) fn select_behavior(
+    pub fn select_behavior(
         &mut self,
         package: &Package,
         callee: &Expr,
@@ -8140,7 +8140,7 @@ fn finish_instance_summary(
 }
 
 // Preserve the diagnostic used by program verification callers.
-pub(crate) fn bound_type(ty: &Term, fuel: &mut usize) -> Result<(), String> {
+pub fn bound_type(ty: &Term, fuel: &mut usize) -> Result<(), String> {
     nir::type_budget::charge_structure(ty, fuel)
         .map_err(|_| "memory summary type budget exhausted".into())
 }

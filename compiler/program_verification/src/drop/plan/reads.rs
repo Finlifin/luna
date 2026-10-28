@@ -2,7 +2,7 @@
 //! These retain component boundaries: no receiver storage or pointer validity
 //! is assumed, and no caller-relative accesses are manufactured here.
 use super::*;
-use crate::verification::{memory, moves::CleanupPolicy};
+use crate::{memory, moves::CleanupPolicy};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CleanupReader {
@@ -337,7 +337,7 @@ impl CleanupSession<'_, '_> {
                     return Ok(None);
                 }
                 if summary.may_reject {
-                    let mut rejection = crate::verification::rejection::Cache::new(Some(package));
+                    let mut rejection = crate::rejection::Cache::new(Some(package));
                     if rejection
                         .function_may_reject_with_cleanup(
                             reader.method.body,

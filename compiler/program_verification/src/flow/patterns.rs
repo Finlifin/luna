@@ -304,7 +304,7 @@ impl Walker<'_> {
                 Ok(match tag.scalar {
                     Some(Scalar::Local(value)) => Some(Condition::Compare {
                         value,
-                        relation: crate::verification::Comparison::Equal,
+                        relation: crate::Comparison::Equal,
                         constant: Integer::from_u128(u128::from(present)),
                     }),
                     _ => None,
@@ -352,7 +352,7 @@ impl Walker<'_> {
                 match tag.scalar {
                     Some(Scalar::Local(value)) => Some(Condition::Compare {
                         value,
-                        relation: crate::verification::Comparison::Equal,
+                        relation: crate::Comparison::Equal,
                         constant: Integer::from_u128(index as u128),
                     }),
                     _ => None,

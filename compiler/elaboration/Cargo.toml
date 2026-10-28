@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+program_verification = { path = "../program_verification" }
 materialization = { path = "../materialization" }
 verification_core = { path = "../verification_core" }
 type_resolution = { path = "../type_resolution" }

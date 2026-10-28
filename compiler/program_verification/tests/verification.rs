@@ -1,13 +1,13 @@
 use comptime_runtime::Integer;
-use elaboration::verification::Limits;
+use program_verification::Limits;
 
 #[test]
 fn captured_integer_facts_check_domains_budgets_and_symbolic_inputs() {
-    use elaboration::verification::flow;
     use nir::program::{
         Expr, ExprKind as K, Function, FunctionPhase, IntegerOp, Literal, SourceRange,
     };
     use nir::{DeclarationId, Primitive, Sort, Term};
+    use program_verification::flow;
     let function = |primitive, value| {
         let ty = Term::Primitive(primitive);
         let expression = |kind| Expr {
@@ -124,12 +124,12 @@ fn captured_integer_facts_check_domains_budgets_and_symbolic_inputs() {
 
 #[test]
 fn checked_nonzero_division_preserves_both_signs_and_machine_obligations() {
-    use elaboration::verification::flow;
     use nir::program::{
         Expr, ExprKind as K, Function, FunctionPhase, IntegerOp, Literal, LocalId, Place,
         SourceRange,
     };
     use nir::{DeclarationId, Parameter, Primitive, Sort, Term};
+    use program_verification::flow;
     let ty = Term::Primitive(Primitive::I8);
     let divisor = LocalId { owner: 1, index: 0 };
     let expression = |kind, ty| Expr {

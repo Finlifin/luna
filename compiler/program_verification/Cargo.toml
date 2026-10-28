@@ -1,0 +1,12 @@
+[package]
+name = "program_verification"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nir = { path = "../nir" }
+iir = { path = "../iir" }
+materialization = { path = "../materialization" }
+type_resolution = { path = "../type_resolution" }
+verification_core = { path = "../verification_core" }
+comptime_runtime = { path = "../comptime_runtime" }

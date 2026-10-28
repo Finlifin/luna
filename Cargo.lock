@@ -232,6 +232,7 @@ dependencies = [
  "iir",
  "materialization",
  "nir",
+ "program_verification",
  "ptc",
  "rustc_span",
  "type_resolution",
@@ -628,6 +629,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89ae43fd86e4158d6db51ad8e2b80f313af9cc74f5c0e03ccb87de09998732de"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "program_verification"
+version = "0.1.0"
+dependencies = [
+ "comptime_runtime",
+ "iir",
+ "materialization",
+ "nir",
+ "type_resolution",
+ "verification_core",
 ]
 
 [[package]]

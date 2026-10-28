@@ -6,7 +6,7 @@ use nir::{Term, program::Package};
 /// Empty sets are reserved for leaves excluded by established tag evidence;
 /// missing physical origins remain missing and therefore unknown to callers.
 pub(super) fn bind_input_origins(
-    layout: &[crate::verification::memory::PointerInputLeaf],
+    layout: &[crate::memory::PointerInputLeaf],
     origins: &super::ValueOrigins,
     domains: &EnumDomains,
     fuel: &mut usize,
@@ -108,7 +108,7 @@ pub(super) fn pointer_possible(
             result
         }
         Term::Optional(payload) => {
-            crate::verification::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
+            crate::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
             let Some((&0, rest)) = fields.split_first() else {
                 return Ok(false);
             };
@@ -133,7 +133,7 @@ pub(super) fn pointer_possible(
             possible
         }
         Term::ErrorResult { errors, result } => {
-            crate::verification::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
+            crate::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
             let Some((&0, rest)) = fields.split_first() else {
                 return Ok(false);
             };
@@ -182,8 +182,7 @@ pub(super) fn pointer_possible(
                 .find(|item| item.declaration == *declaration)
             {
                 for (_, ty) in &definition.fields {
-                    crate::verification::memory::bound_type(ty, fuel)
-                        .map_err(|e| error(source, e))?;
+                    crate::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
                 }
                 let types = definition
                     .instantiate_fields(arguments)
@@ -239,8 +238,7 @@ pub(super) fn pointer_possible(
             {
                 for variant in &definition.variants {
                     for ty in &variant.fields {
-                        crate::verification::memory::bound_type(ty, fuel)
-                            .map_err(|e| error(source, e))?;
+                        crate::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
                     }
                 }
                 let variants = definition
@@ -288,7 +286,7 @@ mod tests {
     use super::*;
     #[test]
     fn conditional_input_binding_distinguishes_absence_unknown_and_live_targets() {
-        use crate::verification::{PlaceId, memory::PointerInputLeaf, ownership::Place};
+        use crate::{PlaceId, memory::PointerInputLeaf, ownership::Place};
         use std::collections::{BTreeMap, BTreeSet};
         let source = SourceRange { start: 1, end: 2 };
         let leaf = |tag, field| PointerInputLeaf {
@@ -546,7 +544,7 @@ pub(super) fn observation_preserves_pointers(
 #[cfg(test)]
 mod observation_tests {
     use super::*;
-    use crate::verification::{
+    use crate::{
         PlaceId,
         moves::{BorrowedRoot, Flow, Report},
         ownership::Place,

@@ -1,8 +1,8 @@
 //! Check the captured destructor's memory footprint against the current owner.
 //! This does not acquire environments, prove program predicates, or run Drop.
 use super::*;
-use crate::verification::PlaceId;
-use crate::verification::{
+use crate::PlaceId;
+use crate::{
     memory,
     ownership::{Availability, CleanupTree, Place, State},
 };

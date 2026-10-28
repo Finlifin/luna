@@ -1,7 +1,7 @@
 //! Acquire destructor choices, then plan against ownership and variant evidence.
 //! Steps require normal completion of prior steps; this is not cleanup execution.
 use super::*;
-use crate::verification::{
+use crate::{
     moves::{VARIANT_PATH, VariantSelection},
     ownership::{Availability, CleanupTree, Place, Shape, State},
 };
@@ -48,7 +48,7 @@ impl AcquiredCleanup {
     /// Inspect only responsibilities retained by a checked ownership tree.
     /// This is behavior evidence, not permission to execute cleanup or access
     /// storage. Unrefined values still inspect every possible component.
-    pub(crate) fn visit_remaining_components(
+    pub fn visit_remaining_components(
         &self,
         tree: &CleanupTree,
         variants: &[VariantSelection],
@@ -135,7 +135,7 @@ impl AcquiredCleanup {
 
     /// Inspect the frozen selection for every possible cleanup component.
     /// This does not authorize memory access or acquire runtime environments.
-    pub(crate) fn visit_components(
+    pub fn visit_components(
         &self,
         fuel: &mut usize,
         check: &mut impl FnMut(&Term, &Resolution, &mut usize) -> Result<(), String>,
@@ -296,7 +296,7 @@ fn step(fuel: &mut usize, depth: usize) -> Result<(), String> {
     Ok(())
 }
 fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>, String> {
-    crate::verification::memory::bound_type(ty, fuel)?;
+    crate::memory::bound_type(ty, fuel)?;
     if let Some(fields) = nir::normal_forms::tuple_fields(Some(package), ty) {
         return Ok(Layout::Fields(fields.to_vec()));
     }
@@ -321,7 +321,7 @@ fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>
                 .find(|s| s.declaration == *declaration)
             {
                 for (_, field) in &definition.fields {
-                    crate::verification::memory::bound_type(field, fuel)?;
+                    crate::memory::bound_type(field, fuel)?;
                 }
                 Ok(Layout::Fields(
                     definition
@@ -337,7 +337,7 @@ fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>
                 for variant in &definition.variants {
                     step(fuel, 0)?;
                     for field in &variant.fields {
-                        crate::verification::memory::bound_type(field, fuel)?;
+                        crate::memory::bound_type(field, fuel)?;
                     }
                 }
                 Ok(Layout::Variants(
@@ -430,7 +430,7 @@ pub fn acquire_cleanup(
         depth: usize,
     ) -> Result<AcquiredCleanup, String> {
         step(fuel, depth)?;
-        crate::verification::memory::bound_type(ty, fuel)?;
+        crate::memory::bound_type(ty, fuel)?;
         let resolution = select(package, world, protocol, ty, budget)?;
         match &resolution {
             Resolution::Pending(reason) => {
@@ -532,7 +532,7 @@ impl Planner<'_, '_> {
     ) -> Result<(), String> {
         let mut layout = vec![];
         for field in fields {
-            crate::verification::memory::bound_type(&field.ty, self.fuel)?;
+            crate::memory::bound_type(&field.ty, self.fuel)?;
             layout.push(field.ty.clone());
         }
         step(self.fuel, tree.place.fields.len())?;
@@ -1023,7 +1023,7 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
         ty: &Term,
         fuel: &mut usize,
     ) -> Result<Option<&'b AcquiredCleanup>, String> {
-        crate::verification::memory::bound_type(ty, fuel)?;
+        crate::memory::bound_type(ty, fuel)?;
         step(fuel, 0)?;
         let Some((root, path)) = self.binding_paths.get(ty) else {
             return Ok(None);
@@ -1046,9 +1046,9 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
         Ok(Some(binding))
     }
 }
-impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
+impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
     fn is_trivial(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
-        crate::verification::memory::bound_type(ty, fuel)?;
+        crate::memory::bound_type(ty, fuel)?;
         if let Some(trivial) = self.trivial_layouts.get(ty) {
             return Ok(*trivial);
         }
@@ -1063,12 +1063,12 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
         Ok(trivial)
     }
     fn is_memory_inert(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
-        crate::verification::memory::bound_type(ty, fuel)?;
+        crate::memory::bound_type(ty, fuel)?;
         if self.memory_inert_types.contains(ty) {
             return Ok(true);
         }
         for active in &self.memory_inert_stack {
-            crate::verification::memory::bound_type(active, fuel)?;
+            crate::memory::bound_type(active, fuel)?;
             if active == ty {
                 return Ok(false);
             }
@@ -1093,7 +1093,7 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
         })();
         self.memory_inert_stack.pop();
         if matches!(result, Ok(true)) {
-            crate::verification::memory::bound_type(ty, fuel)?;
+            crate::memory::bound_type(ty, fuel)?;
             self.memory_inert_types.insert(ty.clone());
         }
         result
@@ -1102,7 +1102,7 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
         &mut self,
         ty: &Term,
         fuel: &mut usize,
-    ) -> Result<Option<Vec<crate::verification::memory::Access>>, String> {
+    ) -> Result<Option<Vec<crate::memory::Access>>, String> {
         self.read_footprint(ty, fuel)?
             .map(|footprint| footprint.root_accesses(self.package, fuel))
             .transpose()
@@ -1113,8 +1113,8 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
         target: &Term,
         fuel: &mut usize,
     ) -> Result<(), String> {
-        crate::verification::memory::bound_type(source, fuel)?;
-        crate::verification::memory::bound_type(target, fuel)?;
+        crate::memory::bound_type(source, fuel)?;
+        crate::memory::bound_type(target, fuel)?;
         if source == target {
             return Ok(());
         }
@@ -1129,12 +1129,12 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
         }
     }
     fn may_reject(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
-        crate::verification::memory::bound_type(ty, fuel)?;
+        crate::memory::bound_type(ty, fuel)?;
         if self.nonrejecting_types.contains(ty) {
             return Ok(false);
         }
         for active in &self.rejection_stack {
-            crate::verification::memory::bound_type(active, fuel)?;
+            crate::memory::bound_type(active, fuel)?;
             if active == ty {
                 return Ok(true);
             }
@@ -1151,7 +1151,7 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
                 Resolution::NoCustomDrop(_) => {}
                 Resolution::Selected(selected) => {
                     for argument in &selected.method.arguments {
-                        crate::verification::memory::bound_type(argument, fuel)?;
+                        crate::memory::bound_type(argument, fuel)?;
                     }
                     methods.push((selected.method.body, selected.method.arguments.clone()));
                 }
@@ -1169,11 +1169,9 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
             // which the structural rejection scan intentionally leaves unknown.
             // If retirement is its only uncertainty, inspect nested cleanup
             // against this same captured implementation world.
-            let mut rejection = crate::verification::rejection::Cache::new(Some(package));
+            let mut rejection = crate::rejection::Cache::new(Some(package));
             for (method, arguments) in methods {
-                let summary = crate::verification::memory::infer_in_package(
-                    package, method, &arguments, fuel,
-                )?;
+                let summary = crate::memory::infer_in_package(package, method, &arguments, fuel)?;
                 if summary.may_reject
                     && rejection
                         .function_may_reject_with_cleanup(
@@ -1191,7 +1189,7 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
         })();
         self.rejection_stack.pop();
         if matches!(result, Ok(false)) {
-            crate::verification::memory::bound_type(ty, fuel)?;
+            crate::memory::bound_type(ty, fuel)?;
             self.nonrejecting_types.insert(ty.clone());
         }
         result
@@ -1216,7 +1214,7 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
                 depth: usize,
             ) -> Result<(), String> {
                 step(fuel, depth)?;
-                crate::verification::memory::bound_type(&binding.ty, fuel)?;
+                crate::memory::bound_type(&binding.ty, fuel)?;
                 *fuel = fuel
                     .checked_sub(path.len())
                     .ok_or("cleanup index budget exhausted")?;
