@@ -53,3 +53,8 @@ python3 -B development/check.py --timeout 900 -- run --release -p luna -- develo
 保留 NaN 载荷与 signaling 位。`minimum/maximum` 传播 NaN；
 `minimumnum/maximumnum` 在仅一侧为 NaN 时选择数值。最小值选择负零，
 最大值选择正零。`meta.math` 提供相同的 comptime 行为。
+
+半精度的 `floor`、`ceil`、`trunc`、`roundeven`、`round` 返回相同浮点类型。
+`roundeven` 的中点取偶数，`round` 的中点远离零；所有操作保留零的符号，
+无穷不变，NaN 仍为 NaN。bf16 在 LLVM 路径中精确扩宽到 f32 后取整，
+结果可精确表示为 bf16，因此回存不引入第二次舍入。

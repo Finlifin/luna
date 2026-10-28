@@ -4,7 +4,9 @@ use crate::{Budget, Error, Integer, decimal::DecimalValue};
 use std::{cmp::Ordering, fmt};
 
 mod arithmetic;
+mod integral;
 pub use arithmetic::Float16Op;
+pub use integral::IntegralRounding;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Float16Format {

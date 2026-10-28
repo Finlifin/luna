@@ -62,6 +62,27 @@ impl Emitter<'_> {
         if op == Op::AbsoluteValue {
             return Ok(self.instruction(Ty::BFloat16, format!("and i16 {}, 32767", a.text)));
         }
+        if matches!(
+            op,
+            Op::Floor | Op::Ceiling | Op::Truncate | Op::RoundEven | Op::RoundAway
+        ) {
+            // Widening is exact, and every integral result of a bf16 value is
+            // itself representable in bf16. Thus no second rounding is needed.
+            let wide = self.widen_bfloat(a);
+            let symbol = format!("llvm.{}.f32", op.name());
+            self.declarations
+                .insert(format!("declare float @{symbol}(float)"));
+            let rounded = self.instruction(
+                Ty::Float32,
+                format!("call float @{symbol}(float {})", wide.text),
+            );
+            let bits = self.instruction(
+                Ty::Int(32, false),
+                format!("bitcast float {} to i32", rounded.text),
+            );
+            let upper = self.instruction(Ty::Int(32, false), format!("lshr i32 {}, 16", bits.text));
+            return Ok(self.instruction(Ty::BFloat16, format!("trunc i32 {} to i16", upper.text)));
+        }
         let b = values
             .get(1)
             .ok_or("bf16 intrinsic requires two operands")?;

@@ -10208,3 +10208,110 @@ fn sysroot_bfloat_internal_calls_preserve_all_payload_classes() {
         }
     }
 }
+
+#[test]
+fn sysroot_half_float_rounding_preserves_zero_and_tie_directions() {
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    for (ty, one, three, four, half, one_half, two_half, three_half, infinity) in [
+        (
+            "f16", 0x3c00u16, 0x4200, 0x4400, 0x3800, 0x3e00, 0x4100, 0x4300, 0x7c00,
+        ),
+        (
+            "bf16", 0x3f80, 0x4040, 0x4080, 0x3f00, 0x3fc0, 0x4020, 0x4060, 0x7f80,
+        ),
+    ] {
+        let integers = [0, one, 0x4000, three, four];
+        let cases = [
+            (0, [0, 0, 0, 0, 0]),
+            (1, [0, 1, 0, 0, 0]),
+            (half, [0, 1, 0, 0, 1]),
+            (one_half, [1, 2, 1, 2, 2]),
+            (two_half, [2, 3, 2, 2, 3]),
+            (three_half, [3, 4, 3, 4, 4]),
+        ];
+        let mut calls = Vec::new();
+        for (bits, expected) in cases {
+            for sign in [0, 0x8000] {
+                let mut expected = expected.map(|i| integers[i] | sign);
+                if sign != 0 {
+                    expected.swap(0, 1);
+                }
+                calls.push(format!(
+                    "({}, {}, {}, {}, {}, {})",
+                    bits | sign,
+                    expected[0],
+                    expected[1],
+                    expected[2],
+                    expected[3],
+                    expected[4]
+                ));
+            }
+        }
+        for bits in [
+            infinity - 1,
+            infinity,
+            (infinity - 1) | 0x8000,
+            infinity | 0x8000,
+        ] {
+            calls.push(format!("({bits},{bits},{bits},{bits},{bits},{bits})"));
+        }
+        let mut source = String::new();
+        for (phase, module, helper, entry) in [
+            ("", "math", "check", "run"),
+            ("comptime ", "meta.math", "staged_check", "staged"),
+        ] {
+            source.push_str(&format!(
+                r#"
+{phase}fn {helper}(raw:u16, down:u16, up:u16, zero:u16, even:u16, away:u16)->bool {{
+    let value=raw'bitvec.as({ty});
+    {module}.floor(value)'bitvec.as(u16)==down and {module}.ceil(value)'bitvec.as(u16)==up
+        and {module}.trunc(value)'bitvec.as(u16)==zero
+        and {module}.roundeven(value)'bitvec.as(u16)==even
+        and {module}.round(value)'bitvec.as(u16)==away
+}}
+{phase}fn {entry}()->bool {{{checks}}}
+"#,
+                checks = calls
+                    .iter()
+                    .map(|c| format!("{helper}{c}"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ));
+        }
+        source.push_str("fn folded()->bool {const result=staged();result}");
+        sandbox.write("input.fl", source);
+        let base = [
+            "input.fl",
+            "--sysroot",
+            root.to_str().unwrap(),
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+        ];
+        assert_eq!(
+            success(&sandbox.run(&[base.as_slice(), &["--invoke-comptime", "staged"]].concat()))
+                .trim(),
+            "(bool true)"
+        );
+        for entry in ["run", "folded"] {
+            for level in ["0", "3"] {
+                success(
+                    &sandbox.run(
+                        &[
+                            base.as_slice(),
+                            &["--build", entry, "--opt-level", level, "--output", "native"],
+                        ]
+                        .concat(),
+                    ),
+                );
+                assert_eq!(
+                    success(&Command::new(sandbox.path("native")).output().unwrap()).trim(),
+                    "(bool true)",
+                    "{ty} {entry} O{level}"
+                );
+            }
+        }
+    }
+}

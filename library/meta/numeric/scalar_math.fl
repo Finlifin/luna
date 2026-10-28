@@ -42,28 +42,28 @@ where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 
 -- Round toward negative infinity, retaining the floating type.
 pub pure comptime fn floor(value: T) -> T
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.floor'intrinsic(value).as(T) }
 }
 
 -- Round toward positive infinity, retaining the floating type.
 pub pure comptime fn ceil(value: T) -> T
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.ceil'intrinsic(value).as(T) }
 }
 
 -- Round toward zero; this is not a conversion to an integer type.
 pub pure comptime fn trunc(value: T) -> T
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.trunc'intrinsic(value).as(T) }
 }
 
 -- Round to nearest, resolving halfway cases to the even integer.
 pub pure comptime fn roundeven(value: T) -> T
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.roundeven'intrinsic(value).as(T) }
 }
@@ -133,7 +133,7 @@ where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 
 -- Round to nearest, resolving halfway cases away from zero; retain float type.
 pub pure comptime fn round(value: T) -> T
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.round'intrinsic(value).as(T) }
 }

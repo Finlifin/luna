@@ -67,5 +67,11 @@ for `issubnormal`, even though widening it could produce a normal value.
 also accept both half formats. Sign operations preserve all non-sign bits,
 including signaling NaN payloads. Extrema order negative zero below positive
 zero; propagating variants return NaN if either operand is NaN, while number
-variants choose the number when exactly one operand is NaN. Other floating
-math wrappers do not yet admit half precision.
+variants choose the number when exactly one operand is NaN.
+
+`floor`, `ceil`, `trunc`, `roundeven`, and `round` also accept both half
+formats and return the original floating type. Ties go to even for
+`roundeven` and away from zero for `round`. Zero signs and infinities are
+preserved; NaNs remain NaNs. The VM rounds the source significand directly
+with bounded integer operations. Other floating math wrappers do not yet
+admit half precision.

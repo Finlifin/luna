@@ -270,7 +270,18 @@ fn half_scalar(op: Op, values: &[Value], bfloat: bool) -> Option<Value> {
     if op.is_float_predicate() {
         return half_predicate(op, a, infinity);
     }
-    let result = if op == Op::AbsoluteValue {
+    use comptime_runtime::float16::IntegralRounding as R;
+    let rounding = match op {
+        Op::Floor => Some(R::Floor),
+        Op::Ceiling => Some(R::Ceiling),
+        Op::Truncate => Some(R::Truncate),
+        Op::RoundEven => Some(R::NearestEven),
+        Op::RoundAway => Some(R::NearestAway),
+        _ => None,
+    };
+    let result = if let Some(mode) = rounding {
+        format.round_integral(a, mode)
+    } else if op == Op::AbsoluteValue {
         a & 0x7fff
     } else {
         let b = bits(values.get(1)?)?;

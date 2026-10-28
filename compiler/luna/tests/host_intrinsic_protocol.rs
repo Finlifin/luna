@@ -2166,10 +2166,15 @@ fn ldexp_requires_float_base_and_signed_i32_exponent_including_pending_templates
 }
 
 #[test]
-fn half_sign_and_extrema_bindings_preserve_format_identity() {
+fn half_sign_extrema_and_rounding_bindings_preserve_format_identity() {
     let package = support::compile("^intrinsic_enum enum Ops {operation}");
     let tag = tag(&package, "Ops", 0);
     for op in [
+        Operation::Floor,
+        Operation::Ceiling,
+        Operation::Truncate,
+        Operation::RoundEven,
+        Operation::RoundAway,
         Operation::AbsoluteValue,
         Operation::CopySign,
         Operation::Minimum,
