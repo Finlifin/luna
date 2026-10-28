@@ -99,7 +99,8 @@ Limitations:
 - Flurry 没有 Option 和 Result。可选类型与错误结果遵循语言自己的语义和 ABI，不引入同名标准库枚举，也不在 prelude 中导出它们。现存同名库文件与绑定属于待纠正的实现，不构成语义依据；此规则不限制编译器内部使用 Rust 的 Option/Result。
 - Flurry 源码、公开接口、驱动选择器和示例中的路径统一用点分隔，不使用双冒号路径。Rust 实现本身仍遵循 Rust 语法。
 - 除 std 外，builtin、meta、build、attrs、verification 的 prelude 默认导入，使用普通通配解析与声明身份去重；不向提供者自身注入自己的 prelude。std.prelude 需要显式导入。
-- str 位于 builtin，String 位于 std；内存相关模块使用 mem 命名。直接访问编译器内置符号的语法仅供六个内置包内部使用，用户经普通公开接口使用对应内容。
+- str 位于 builtin，String 位于 std；内存相关模块使用 mem 命名。
+- 禁止在使用处直接写 `.symbol'builtin`；这里的 `symbol` 泛指任意编译器内置符号，并非仅指 Symbol 类型。必须先在六个内置包内部的集中绑定层建立具名绑定（类型使用 `typealias`，值或函数使用相应具名绑定），其余代码通过绑定名称、导入或公开接口使用。此规则同样约束内置包自身的签名、子句、impl 和函数体；已有绑定应复用，不得在各使用处重复绑定。原始 builtin 访问只允许出现在建立这些绑定的定义中，用户代码不直接访问。例如先定义 `pub typealias u8 = .u8'builtin;`，之后统一使用 `u8`。
 - Normal form 的头不展开；Identity<T> 不因函数体返回 T 就与 T 相等。
 - Tuple 的签名是 `pure comptime fn Tuple<...Es: meta.List<Type>> -> Type`；变参收集为一个类型列表输入，类型身份保留 Tuple 的 normal-form 头。内部结构视图与迁移期的结构元组表示不能替代这一语言定义。
 - 已有完整参数列表时优先具名赋值，例如 `Tuple<.Es = Es>`，不要先用 `Tuple<...Es>` 展开再收集。仅在确实需要逐项拼接或展开语义时使用参数展开；测试展开本身的用例不受此限制。
