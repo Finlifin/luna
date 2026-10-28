@@ -134,6 +134,16 @@ Flurry 示例和 fixture 先核对 docs/grammar/syntax 与 index.md：取址 .re
 
 注释符与正文之间留空格。短提示使用行注释，连续说明使用排版清晰的块注释；Flurry 块注释使用 `{-` 与 `-}`，成段正文分行并适当缩进，不将长段说明挤成一串行注释。
 
+Flurry 函数的 `where`／`requires` 子句相对函数签名另起一行时，函数体的左大括号 `{` 也必须另起一行，与函数声明对齐，不能接在最后一行子句末尾。此规则同样适用于库源码、文档示例和测试 fixture。例如：
+
+```flurry
+pub pure fn fma(a: T, b: T, c: T) -> T
+where T, requires T == f32 or T == f64
+{
+    unsafe { target.Scalar.fma'intrinsic(a, b, c).as(T) }
+}
+```
+
 记录检查的工作目录、命令、退出结果和输出锚点。现有入口与限制见 [development/README.md](development/README.md)；不能把旧日志当成本轮执行结果。工具不可用或依赖未就绪时明确记录，不伪造通过。
 
 完成时交付改动、验证证据、剩余限制与集成状态。开发记录只为跨任务接口、真实阻塞和重要决策服务，不恢复逐轮文档审阅流程。
