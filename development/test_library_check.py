@@ -19,7 +19,7 @@ class LibraryCheckTests(unittest.TestCase):
                 calls.append((label, command))
                 evidence = kwargs['directory']
                 evidence.mkdir(parents=True)
-                count = {'native-resources': 4, 'native-comparison': 6, 'native-math': 11, 'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 11, 'sysroot-resources': 3, 'sysroot-patterns': 3, 'sysroot-meta-patterns': 3, 'sysroot-hash': 3, 'sysroot-meta': 1, 'sysroot-builders': 2, 'sysroot-enum-builder': 2, 'sysroot-symbol-enum': 2, 'sysroot-fixed-enum': 2, 'sysroot-build-mode': 1, 'sysroot-build-target': 2}
+                count = {'native-resources': 4, 'native-comparison': 6, 'native-math': 11, 'sysroot-qualified-methods': 1, 'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 11, 'sysroot-resources': 3, 'sysroot-patterns': 3, 'sysroot-meta-patterns': 3, 'sysroot-hash': 3, 'sysroot-meta': 1, 'sysroot-builders': 2, 'sysroot-enum-builder': 2, 'sysroot-symbol-enum': 2, 'sysroot-fixed-enum': 2, 'sysroot-build-mode': 1, 'sysroot-build-target': 2}
                 text = '(bool false)' if wrong_value else '(bool true)'
                 if label in ('attributes', 'merged-attributes'):
                     text = '(evaluated-attribute (property "abi") (symbol "c"))'
@@ -112,10 +112,11 @@ class LibraryCheckTests(unittest.TestCase):
         self.assertFalse(summary['stages'][0]['passed'])
 
     def test_meta_values_requires_the_expected_comptime_result(self):
-        for wrong_value in [False, True]:
-            status, summary = self.check_stages(selected=['meta-values'], wrong_value=wrong_value)
-            self.assertEqual(status, int(wrong_value))
-            self.assertEqual(summary['stages'][0]['value_matches'], not wrong_value)
+        for label in ['meta-values', 'sysroot-meta-object']:
+            for wrong_value in [False, True]:
+                status, summary = self.check_stages(selected=[label], wrong_value=wrong_value)
+                self.assertEqual(status, int(wrong_value))
+                self.assertEqual(summary['stages'][0]['value_matches'], not wrong_value)
 
     def test_attribute_stages_require_evaluation_and_merge_evidence(self):
         raw = '(evaluated-attribute (property "abi") (symbol "c"))'
@@ -155,7 +156,7 @@ class LibraryCheckTests(unittest.TestCase):
                 self.assertFalse(math['value_matches'])
 
     def test_value_type_stages_require_a_real_passing_native_test(self):
-        for label in ['native-option', 'native-result']:
+        for label in ['native-option', 'native-result', 'sysroot-qualified-methods']:
             for output in ['(count 0) (failures 0)', '(count 1) (failures 1)']:
                 with self.subTest(label=label, output=output):
                     status, summary = self.check_stages(native_output=output, native_stage=label)

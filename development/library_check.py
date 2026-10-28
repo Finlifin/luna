@@ -11,7 +11,7 @@ from process_tools import ROOT, run, save_summary
 from host_examples import EXAMPLES, MATH_OPERATIONS
 
 STAGES = ('declarations', 'attributes', 'merged-attributes', 'meta-values', 'inline-iteration', 'manifest', 'native-resources', 'native-comparison',
-          'native-math', 'sysroot-meta-math', 'native-option', 'native-result', 'native-tuple', 'native-conversion', 'hash-protocols', 'sysroot-hash', 'sysroot-meta', 'sysroot-builders', 'sysroot-enum-builder', 'sysroot-symbol-enum', 'sysroot-fixed-enum', 'sysroot-build-mode', 'sysroot-build-target', 'build-context', 'sysroot', 'sysroot-iteration', 'sysroot-resources', 'sysroot-patterns', 'sysroot-meta-patterns')
+          'native-math', 'sysroot-meta-math', 'sysroot-meta-object', 'sysroot-qualified-methods', 'native-option', 'native-result', 'native-tuple', 'native-conversion', 'hash-protocols', 'sysroot-hash', 'sysroot-meta', 'sysroot-builders', 'sysroot-enum-builder', 'sysroot-symbol-enum', 'sysroot-fixed-enum', 'sysroot-build-mode', 'sysroot-build-target', 'build-context', 'sysroot', 'sysroot-iteration', 'sysroot-resources', 'sysroot-patterns', 'sysroot-meta-patterns')
 
 
 def main():
@@ -42,7 +42,7 @@ def main():
                          '--package', '2', '202', 'meta', str(ROOT / 'library/meta/lib.fl'),
                          '--package', '3', '303', 'builtin', str(ROOT / 'library/builtin/primitives.fl'),
                          '--dependency', '1', 'meta', '2', '--dependency', '1', 'builtin', '3',
-                         '--dependency', '2', 'builtin', '3',
+                         '--dependency', '2', 'builtin', '3', '--builtin-impl-package', '2',
                          *[arg for operation in MATH_OPERATIONS for arg in
                            ('--comptime-intrinsic', f'{operation}=meta.numeric.scalar_math.target.Scalar.{operation}')],
                          '--primary', '1', '--meta-list-type', 'meta.List', '--invoke-comptime', 'run']),
@@ -123,24 +123,19 @@ def main():
                      '--sysroot', str(ROOT / 'library'), '--build', 'run',
                      '--output', str(sysroot_executable)]),
     ]
+    stages[-1:-1] = [
+        ('sysroot-meta-object', ['run', '-p', 'luna', '--',
+                                str(ROOT / 'development/examples/sysroot-meta-object-methods.fl'),
+                                '--sysroot', str(ROOT / 'library'),
+                                '--build-target', 'x86_64', 'linux', '64',
+                                '--invoke-comptime', 'run']),
+        ('sysroot-qualified-methods', ['run', '-p', 'luna', '--',
+                                      str(ROOT / 'development/examples/sysroot-qualified-methods.fl'),
+                                      '--sysroot', str(ROOT / 'library'), '--test-native']),
+    ]
     attribute_command = next(command for label, command in stages if label == 'attributes')
     stages.insert(2, ('merged-attributes', [*attribute_command[:-1], 'merged-attributes']))
-    for name, alias, bindings in [
-        ('option', 'optional', []),
-        ('result', 'fallible', []),
-    ]:
-        stages.insert(-1, (f'native-{name}', [
-            'run', '-p', 'luna', '--', '--packages-v1',
-            '--package', '1', '101', 'app',
-            str(ROOT / f'development/examples/host-library-{name}.fl'),
-            '--package', '2', '202', alias, str(ROOT / f'library/builtin/types/{name}.fl'),
-            '--package', '3', '303', 'resources', str(ROOT / 'library/builtin/protocols/resources.fl'),
-            '--dependency', '1', alias, '2', '--dependency', '1', 'resources', '3',
-            '--primary', '1', *bindings,
-            '--copy-protocol', 'resources.Copy', '--drop-protocol', 'resources.Drop',
-            '--test-native',
-        ]))
-    for name in ['tuple', 'conversion']:
+    for name in ['option', 'result', 'tuple', 'conversion']:
         example = EXAMPLES[f'library-{name}']
         stages.insert(-1, (f'native-{name}', [
             'run', '-p', 'luna', '--',
@@ -150,7 +145,7 @@ def main():
     if args.stage:
         stages = [(label, command) for label, command in stages if label in args.stage]
     native_counts = {'native-resources': 4, 'native-comparison': 6, 'native-math': 11,
-                     'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 11, 'sysroot-resources': 3, 'sysroot-patterns': 3, 'sysroot-meta-patterns': 3, 'sysroot-hash': 3, 'sysroot-meta': 1, 'sysroot-builders': 2, 'sysroot-enum-builder': 2, 'sysroot-symbol-enum': 2, 'sysroot-fixed-enum': 2, 'sysroot-build-mode': 1, 'sysroot-build-target': 2}
+                     'sysroot-qualified-methods': 1, 'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 11, 'sysroot-resources': 3, 'sysroot-patterns': 3, 'sysroot-meta-patterns': 3, 'sysroot-hash': 3, 'sysroot-meta': 1, 'sysroot-builders': 2, 'sysroot-enum-builder': 2, 'sysroot-symbol-enum': 2, 'sysroot-fixed-enum': 2, 'sysroot-build-mode': 1, 'sysroot-build-target': 2}
     outcomes = []
     for label, command in stages:
         if args.release:
@@ -168,7 +163,7 @@ def main():
         matches = None
         if code == 0:
             output = (evidence / 'stdout.log').read_text().strip()
-            if label in ('sysroot', 'meta-values', 'sysroot-meta-math'):
+            if label in ('sysroot', 'meta-values', 'sysroot-meta-math', 'sysroot-meta-object'):
                 matches = output == '(bool true)'
             elif label in ('attributes', 'merged-attributes'):
                 matches = (output.count('(evaluated-attribute ') == 1
