@@ -101,3 +101,114 @@ fn text_queries_preserve_early_exit_and_reject_wrong_input_domains() {
         );
     }
 }
+
+#[test]
+fn symbol_bytes_observe_utf8_without_materializing_string_views() {
+    let aliases = "typealias Symbol=.Symbol'builtin;typealias u64=.u64'builtin;";
+    let body = "fn run()->bool {
+        let symbol:Symbol=.é;
+        let size=.symbol_byte_length'builtin(symbol);
+        let first=.symbol_byte'builtin(symbol,0) match {byte?=>byte == 195,null=>false};
+        let last=.symbol_byte'builtin(symbol,1) match {byte?=>byte == 169,null=>false};
+        let past=.symbol_byte'builtin(symbol,2) match {_?=>false,null=>true};
+        let far=.symbol_byte'builtin(symbol,18446744073709551615) match {_?=>false,null=>true};
+        size == 2 and first and last and past and far
+    }";
+    let staged = body.replace("fn run", "comptime fn staged");
+    let package = support::compile(&format!(
+        "{aliases}{body}{staged} fn verify() {{let result=run();assumes result;}}"
+    ));
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "staged", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(format!("{package}").contains("(text-query symbol-byte-length"));
+    let ir = luna::host::llvm_ir(&package, "verify", 100_000).unwrap();
+    for optimization in [
+        luna::host::OptimizationLevel::O0,
+        luna::host::OptimizationLevel::O3,
+    ] {
+        luna::host::Toolchain {
+            optimization,
+            ..Default::default()
+        }
+        .execute_test(&ir, std::time::Duration::from_secs(5))
+        .unwrap();
+    }
+    let declaration = package
+        .functions
+        .iter()
+        .find(|f| f.name == "run")
+        .unwrap()
+        .declaration;
+    let summary = elaboration::verification::memory::infer_text_regions(
+        &package,
+        declaration,
+        &[],
+        &mut 100_000,
+    )
+    .unwrap();
+    assert_eq!(
+        summary.reads,
+        std::collections::BTreeSet::from([
+            elaboration::verification::memory::TextRegionOrigin::Static
+        ])
+    );
+}
+
+#[test]
+fn symbol_byte_queries_preserve_operand_order_and_early_exit() {
+    let package = support::compile(
+        "typealias Symbol=.Symbol'builtin;typealias u64=.u64'builtin;
+        fn observe(state:*u64)->Symbol {assumes state.* == 0;state.* = 1;.az}
+        fn position(state:*u64)->u64 {assumes state.* == 1;state.* = 2;1}
+        fn run()->bool {
+            var state:u64=0;
+            let byte=.symbol_byte'builtin(observe(state.ref),position(state.ref));
+            byte match {value?=>value == 122 and state == 2,null=>false}
+        }
+        fn early()->bool {.symbol_byte'builtin(do {return true;},0);false}
+        comptime fn staged()->bool {.symbol_byte'builtin(do {return true;},0);false}",
+    );
+    for name in ["run", "early"] {
+        assert_eq!(
+            luna::execution::interpret(&package, name, 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+    assert_eq!(
+        luna::invocation::invoke(&package, "staged", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn symbol_byte_queries_keep_distinct_domains_and_checked_indices() {
+    use nir::{Primitive as P, Term, program::TextQueryKind as Q};
+    let ty = |p| Term::Primitive(p);
+    let result = Term::Optional(Box::new(ty(P::U8)));
+    assert!(Q::SymbolByte.validate(&Term::Tuple(vec![ty(P::Symbol), ty(P::U64)]), &result));
+    assert!(!Q::SymbolByte.validate(&Term::Tuple(vec![ty(P::Str), ty(P::U64)]), &result));
+    assert!(!Q::Byte.validate(&Term::Tuple(vec![ty(P::Symbol), ty(P::U64)]), &result));
+    assert!(!Q::SymbolByte.validate(&Term::Tuple(vec![ty(P::Symbol), ty(P::U8)]), &result));
+    assert!(!Q::SymbolByte.validate(&Term::Tuple(vec![ty(P::Symbol), ty(P::U64)]), &ty(P::U8)));
+    for expression in [
+        ".symbol_byte'builtin(\"text\",0)",
+        ".symbol_byte'builtin(.name,true)",
+        ".symbol_byte'builtin(.name)",
+        ".symbol_byte_length'builtin(\"text\")",
+    ] {
+        assert!(
+            support::compile_with_protocols(
+                &format!("fn invalid() {{{expression};}}"),
+                &Default::default()
+            )
+            .is_err(),
+            "{expression}"
+        );
+    }
+}

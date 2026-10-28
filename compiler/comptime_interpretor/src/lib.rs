@@ -4097,14 +4097,21 @@ impl<'a> Interpreter<'a> {
                 let Value::Tuple(values) = value!(self.eval(subject, environment)) else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
-                let Some(Value::String(text)) = values.first() else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                let text = match values.first() {
+                    Some(Value::String(text)) if !query.is_symbol() => text,
+                    Some(Value::Symbol(text)) if query.is_symbol() => text,
+                    _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
                 };
                 match query {
-                    nir::program::TextQueryKind::ByteLength if values.len() == 1 => {
+                    nir::program::TextQueryKind::ByteLength
+                    | nir::program::TextQueryKind::SymbolByteLength
+                        if values.len() == 1 =>
+                    {
                         Ok(Flow::Value(Value::UnsignedInteger(text.len() as u128)))
                     }
-                    nir::program::TextQueryKind::Byte if values.len() == 2 => {
+                    nir::program::TextQueryKind::Byte | nir::program::TextQueryKind::SymbolByte
+                        if values.len() == 2 =>
+                    {
                         let Value::UnsignedInteger(index) = values[1] else {
                             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                         };

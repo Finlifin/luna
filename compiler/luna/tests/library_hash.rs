@@ -178,7 +178,22 @@ fn symbol_hashes_follow_utf8_content_in_both_phases_and_native_code() {
             Value::UnsignedInteger(expected.into()),
             "{name}"
         );
-        let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
+        let protocol = |name: &str| {
+            package
+                .traits
+                .iter()
+                .find(|item| item.name == name)
+                .unwrap()
+                .declaration
+        };
+        let ir = luna::host::llvm_ir_with_protocols(
+            &package,
+            "verify",
+            1_000_000,
+            protocol("Copy"),
+            protocol("Drop"),
+        )
+        .unwrap();
         for optimization in [
             luna::host::OptimizationLevel::O0,
             luna::host::OptimizationLevel::O3,
@@ -376,11 +391,8 @@ fn text_hashes_and_equality_observe_complete_utf8_contents() {
 }
 
 #[test]
-fn text_backed_hashes_do_not_bypass_resource_provenance_checks() {
-    for body in [
-        "fn run()->u64 {let value:Symbol=.foobar;value.as(Hash).hash()}",
-        "fn run()->u64 {let value:str=\"foobar\";value.as(Hash).hash()}",
-    ] {
+fn string_hash_does_not_bypass_resource_provenance_checks() {
+    for body in ["fn run()->u64 {let value:str=\"foobar\";value.as(Hash).hash()}"] {
         let package = support::compile(&source(body));
         let protocol = |name: &str| {
             package

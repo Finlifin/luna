@@ -2496,7 +2496,14 @@ impl Query<'_, '_> {
                 let Some(value) = self.expr(subject, locals, returned, next)? else {
                     return Ok(None);
                 };
-                if *query == nir::program::TextQueryKind::Byte {
+                if *query == nir::program::TextQueryKind::SymbolByte {
+                    // Symbol names have immutable storage independent of the
+                    // local scalar that carries the symbol identity.
+                    self.reads
+                        .last_mut()
+                        .unwrap()
+                        .insert(TextRegionOrigin::Static);
+                } else if *query == nir::program::TextQueryKind::Byte {
                     let origins = value
                         .get(&vec![0])
                         .filter(|origins| !origins.is_empty())

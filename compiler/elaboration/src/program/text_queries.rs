@@ -11,13 +11,21 @@ impl Checker<'_, '_> {
         let H::Builtin(name) = &callee.kind else {
             unreachable!()
         };
-        let length = name.as_str() == "str_byte_length";
+        let query = match name.as_str() {
+            "str_byte_length" => n::TextQueryKind::ByteLength,
+            "str_byte" => n::TextQueryKind::Byte,
+            "symbol_byte_length" => n::TextQueryKind::SymbolByteLength,
+            "symbol_byte" => n::TextQueryKind::SymbolByte,
+            _ => unreachable!(),
+        };
+        let length = query.is_length();
+        let input = if query.is_symbol() { P::Symbol } else { P::Str };
         if args.len() != if length { 1 } else { 2 }
             || args.iter().any(|arg| !matches!(arg, Arg::Positional(_)))
         {
             return Err(error(
                 expr.span,
-                "text primitive requires positional str and optional u64 index",
+                "byte observation requires a positional subject and optional u64 index",
             ));
         }
         let mut values = Vec::new();
@@ -25,7 +33,7 @@ impl Checker<'_, '_> {
             let Arg::Positional(arg) = arg else {
                 unreachable!()
             };
-            values.push(self.expr(arg, Some(&p(if index == 0 { P::Str } else { P::U64 })))?);
+            values.push(self.expr(arg, Some(&p(if index == 0 { input } else { P::U64 })))?);
         }
         let ty = if values.iter().any(|value| is_never(&value.ty)) {
             p(P::Never)
@@ -41,11 +49,7 @@ impl Checker<'_, '_> {
             source: source(expr.span),
             ty,
             kind: K::TextQuery {
-                query: if length {
-                    n::TextQueryKind::ByteLength
-                } else {
-                    n::TextQueryKind::Byte
-                },
+                query,
                 subject: Box::new(n::Expr {
                     source: source(expr.span),
                     ty: Term::Tuple(values.iter().map(|value| value.ty.clone()).collect()),

@@ -853,33 +853,46 @@ pub fn integer_representation_valid(input: &Term, result: &Term) -> bool {
 pub enum TextQueryKind {
     ByteLength,
     Byte,
+    SymbolByteLength,
+    SymbolByte,
 }
 impl fmt::Display for TextQueryKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::ByteLength => "byte-length",
             Self::Byte => "byte",
+            Self::SymbolByteLength => "symbol-byte-length",
+            Self::SymbolByte => "symbol-byte",
         })
     }
 }
 impl TextQueryKind {
+    pub fn is_length(self) -> bool {
+        matches!(self, Self::ByteLength | Self::SymbolByteLength)
+    }
+    pub fn is_symbol(self) -> bool {
+        matches!(self, Self::SymbolByteLength | Self::SymbolByte)
+    }
     pub fn validate(self, packet: &Term, result: &Term) -> bool {
         use crate::Primitive as P;
         let Term::Tuple(inputs) = packet else {
             return false;
         };
-        let count = if self == Self::ByteLength { 1 } else { 2 };
+        let count = if self.is_length() { 1 } else { 2 };
         if inputs.len() != count
             || inputs.iter().enumerate().any(|(i, ty)| {
-                *ty != Term::Primitive(if i == 0 { P::Str } else { P::U64 })
-                    && *ty != Term::Primitive(P::Never)
+                *ty != Term::Primitive(if i == 0 {
+                    if self.is_symbol() { P::Symbol } else { P::Str }
+                } else {
+                    P::U64
+                }) && *ty != Term::Primitive(P::Never)
             })
         {
             return false;
         }
         let expected = if inputs.contains(&Term::Primitive(P::Never)) {
             Term::Primitive(P::Never)
-        } else if self == Self::ByteLength {
+        } else if self.is_length() {
             Term::Primitive(P::U64)
         } else {
             Term::Optional(Box::new(Term::Primitive(P::U8)))

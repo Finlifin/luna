@@ -38,13 +38,18 @@ test wide_values_and_comptime_phase {
     assumes signed_hash == 9223372036854775808;
 }
 
-test symbol_comptime_phase {
+test symbol_runtime_and_comptime_phases {
     let first: Symbol = .foobar;
     let second: Symbol = .foobar;
     let different: Symbol = .a;
     assumes first == second and first != different;
+    let first_hash = first.as(Hash).hash();
+    let second_hash = second.as(Hash).hash();
+    let different_hash = different.as(Hash).hash();
+    assumes first_hash == second_hash;
+    assumes different_hash == 12638187200555641996;
     inline if symbol_digest() == 9625390261332436968 {
-        assumes true;
+        assumes first_hash == 9625390261332436968;
     } else {
         assumes false;
     };

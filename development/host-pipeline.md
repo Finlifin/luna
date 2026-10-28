@@ -4169,3 +4169,33 @@ LLVM 执行成功来宣称支持。新增回归要求 Symbol/str Hash 在这条�
   13 项检查器测试通过。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
   通过 (`/tmp/luna-tools-8p4i_uik/result.json`)；`git diff --check` 通过。
+
+
+## Symbol 的独立字节观察与资源检查下的 Hash
+
+Symbol 名称具有独立于局部承载对象的只读存储，语义依据见
+`docs/basics/literals.md` 的 Symbol 与 tag_name 说明。本次增加内部
+`symbol_byte_length` / `symbol_byte`，在 NIR 中保留独立的 Symbol 输入域，
+同时接通 elaboration、comptime interpreter、LLVM 和文本区域摘要。
+索引固定为 u64，读取返回 ?u8；LLVM 只在无符号索引小于长度后加载字节。
+操作数仍按顺序求值一次，提前退出不会触发后续读取。
+
+Symbol Hash 的两个阶段直接观察名称字节，保留原 FNV-1a 内容算法，不再为了
+Hash 构造 str 描述符。字节读取的区域摘要记录 Static；长度只观察描述符。
+这利用 Symbol 已有的存储保证，没有给 str 增加 Copy 或跳过资源检查。
+上一节记录的 Symbol Hash 阻塞由本路径解决；一般 str Hash 的 backing
+provenance 接线仍未完成，保留明确拒绝的回归。
+
+本阶段验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test text_bytes --test library_hash --test text_regions --test text_view_layout --test symbols --test symbol_staging`：
+  95 项通过，退出 0 (`/tmp/luna-tools-phoy6lgh/result.json`)。新增用例覆盖
+  UTF-8、越界、输入域拒绝、求值顺序、提前退出和 Static 读取摘要；Symbol
+  Hash 的原生测试使用带 Copy/Drop 的资源检查入口，并验证 O0/O3。
+- `python3 -B development/library_check.py --release --stage hash-protocols --stage sysroot-hash`：
+  10 项协议回归、3 项完整 sysroot 原生用例通过，退出 0
+  (`/tmp/luna-library-autvwsqs/summary.json`，scope=selected)。
+- `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-hash.fl --sysroot library --test-native --opt-level 3`：
+  三项 O3 用例通过，退出 0 (`/tmp/luna-tools-ilashuvd/result.json`)。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过 (`/tmp/luna-tools-ft30lkn9/result.json`)；`git diff --check` 通过。

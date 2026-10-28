@@ -16,14 +16,19 @@ impl Emitter<'_> {
             return Ok(Value::unit());
         }
         let text = self.record_field(&packet, 0)?;
-        if text.ty != Ty::String {
-            return Err("host text query requires str".into());
+        let expected = if query.is_symbol() {
+            Ty::Symbol
+        } else {
+            Ty::String
+        };
+        if text.ty != expected {
+            return Err("host byte query subject representation mismatch".into());
         }
         let length = self.instruction(
             Ty::Int(64, false),
             format!("extractvalue {} {}, 1", text.ty.llvm(), text.text),
         );
-        if query == nir::program::TextQueryKind::ByteLength {
+        if query.is_length() {
             return Ok(length);
         }
         let index = self.record_field(&packet, 1)?;

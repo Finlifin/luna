@@ -214,15 +214,55 @@ comptime impl Hash for .str'builtin {
     }
 }
 
+{-
+    Symbol names have immutable storage independent of their local carrier.
+    Observe bytes directly, without creating a borrowed str descriptor.
+-}
 impl Hash for .Symbol'builtin {
     fn hash(self) -> u64 {
-        self'tag_name.as(Hash).hash()
+        let name = self;
+        let length = .symbol_byte_length'builtin(name);
+        var index: u64 = 0;
+        var state: u64 = 14695981039346656037;
+        while index < length {
+            let byte = .symbol_byte'builtin(name, index) match {
+                value? => value,
+                null => return state,
+            };
+            let bits = state'bitvec;
+            let widened = byte'bitvec.as(u64);
+            let input = widened'bitvec;
+            let mixed = ((bits and not input) or (not bits and input)).as(u128);
+            assumes mixed <= 18446744073709551615;
+            let product = mixed * 1099511628211;
+            state = product'bitvec[0..64].as(u64);
+            index = index + 1;
+        }
+        state
     }
 }
 
 comptime impl Hash for .Symbol'builtin {
     comptime fn comptime_hash(self) -> u64 {
-        self'tag_name.as(Hash).comptime_hash()
+        let name = self;
+        let length = .symbol_byte_length'builtin(name);
+        var index: u64 = 0;
+        var state: u64 = 14695981039346656037;
+        while index < length {
+            let byte = .symbol_byte'builtin(name, index) match {
+                value? => value,
+                null => return state,
+            };
+            let bits = state'bitvec;
+            let widened = byte'bitvec.as(u64);
+            let input = widened'bitvec;
+            let mixed = ((bits and not input) or (not bits and input)).as(u128);
+            assumes mixed <= 18446744073709551615;
+            let product = mixed * 1099511628211;
+            state = product'bitvec[0..64].as(u64);
+            index = index + 1;
+        }
+        state
     }
 }
 
