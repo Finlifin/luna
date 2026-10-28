@@ -21,6 +21,7 @@ mod spreads;
 mod tactics;
 use arguments::route_arguments;
 mod bit_indices;
+mod build_context;
 mod cmtt;
 mod constants;
 mod defaults;
@@ -216,6 +217,9 @@ pub fn elaborate_packages(
 /// Source names never designate these protocols implicitly.
 #[derive(Clone, Debug, Default)]
 pub struct Protocols {
+    /// Explicit build modes by source semantic package identity. Empty means
+    /// unavailable, never an implicit host/debug configuration.
+    pub build_modes: BTreeMap<u64, String>,
     /// Explicit target operation declaration and variant, resolved by the driver.
     pub host_fma: Option<(DeclarationId, String)>,
     pub host_sqrt: Option<(DeclarationId, String)>,
@@ -982,7 +986,11 @@ fn elaborate_candidate<'a, 'h>(
                 }
             }
             ItemKind::Const(..) => {
-                checker.constant_value(owner, item.span)?;
+                if checker.is_build_mode(owner) {
+                    checker.validate_build_mode(owner, item.span)?;
+                } else {
+                    checker.constant_value(owner, item.span)?;
+                }
             }
             ItemKind::Associated(_) => {}
             _ => {
@@ -10698,6 +10706,12 @@ impl Checker<'_, '_> {
                     if let Some(expected) = expected { self.require(&value.ty, expected, expr.span)?; }
                     return Ok(value);
                 }
+                if self.is_build_mode(owner) {
+                    let value = self.build_mode(expr, owner)?;
+                    if self.runtime_value_context() { return self.splice_value(expr, value, expected); }
+                    if let Some(expected) = expected { self.require(&value.ty, expected, expr.span)?; }
+                    return Ok(value);
+                }
                 if matches!(
                     self.package.item(owner).map(|i| &i.kind),
                     Some(ItemKind::Const(..))
@@ -11147,8 +11161,14 @@ impl Checker<'_, '_> {
                 (ty, K::Tuple(values))
             }
             H::If(condition, yes, no) => {
-                let condition = self.expr(condition, Some(&p(P::Bool)))?;
                 let selection = self.inline_selection.filter(|(id,_)| *id == expr.hir_id).map(|(_, choice)| choice);
+                // An inline selector remains a comptime input while checking
+                // both ordinary branches; it is not delivered to runtime.
+                let saved_comptime = self.in_required_comptime;
+                self.in_required_comptime |= selection.is_some();
+                let condition = self.expr(condition, Some(&p(P::Bool)));
+                self.in_required_comptime = saved_comptime;
+                let condition = condition?;
                 let suppressed = self.in_unselected_inline;
                 self.in_unselected_inline = suppressed || selection == Some(1);
                 let yes = self.under_type_condition(&condition,true,expr.span,|checker|

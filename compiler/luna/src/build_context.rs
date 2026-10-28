@@ -1,8 +1,9 @@
 //! Immutable build inputs owned by source package identity.
 //!
-//! This is the driver-side query contract. Source `build` declarations and the
-//! compilation cache have not yet been connected to it. No query consults the
-//! process environment or substitutes the compiler's execution host as a target.
+//! This is the driver-side query contract. Explicit mode bindings feed source
+//! elaboration; target queries and compilation-cache observations are not yet
+//! connected. No query consults the process environment or substitutes the
+//! compiler's execution host as a target.
 use crate::packages::SourcePackage;
 use nir::{DeclarationId, QuotedDisplay, target::TargetData};
 use std::{
@@ -162,6 +163,16 @@ impl Snapshot {
             }
         }
         Ok(Self { packages })
+    }
+
+    /// Install only this snapshot's explicit mode values for source elaboration.
+    /// This replaces previous values; missing packages must not inherit stale data.
+    pub fn configure_modes(&self, protocols: &mut elaboration::program::Protocols) {
+        protocols.build_modes = self
+            .packages
+            .iter()
+            .map(|(owner, input)| (*owner, input.mode.clone()))
+            .collect();
     }
 
     /// `definition` must be the originating declaration, even after inlining or

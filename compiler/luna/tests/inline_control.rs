@@ -6184,3 +6184,23 @@ fn inline_range_and_tuple_indices_keep_branch_local_guard_bindings() {
         .replacen("index if accepts(index)", "index if flag", 1);
     assert!(compile(&invalid).is_err());
 }
+
+#[test]
+fn inline_if_constant_selector_does_not_require_runtime_splice() {
+    let package =
+        compile("const enabled=true; fn run()->bool {inline if enabled {true} else {false}}")
+            .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let error =
+        compile("const enabled=true; fn run()->bool {if enabled {true} else {false}}").unwrap_err();
+    assert!(error.contains("Splice"), "{error}");
+    assert!(
+        compile(
+            "const enabled=true; fn run()->bool {inline if enabled {true} else {unknown_name}}"
+        )
+        .is_err()
+    );
+}

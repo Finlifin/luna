@@ -1,7 +1,7 @@
 # build
 
-本包的源码入口尚未接通，不能在 Flurry 程序中使用 `build.mode`、`build.target`
-或 `build.package_metadata`。本文记录实现边界，不提供占位值或宿主默认配置。
+源码 `build.mode` 已通过显式驱动配置接通，见 [build 包说明](../library/build/README.md)。
+`build.target` 与 `build.package_metadata` 尚未接通，不提供占位值或宿主默认配置。
 
 已实现的基础位于 `luna::build_context`：
 
@@ -18,9 +18,11 @@
 - 快照和查询证据的 Display 为稳定的 S-expression，名称转义，包与 feature
   按键排序。接口版本是驱动输入契约，尚无对应的流式/持久化传输格式。
 
-这些是驱动侧基础 API，尚未接入源码 elaboration、comptime invocation 或编译
-缓存；因此不能据此宣称内联/template 下的源码配置归属或缓存失效已端到端完成。
-下一步需要把定义来源和快照接入源码查询，同时将观察项交付给增量编译缓存。
+`configure_modes(&mut protocols)` 将快照中的 mode 绑定到源码 elaboration，读取
+位置按原始 HIR 定义归属取值，产物保留已选中的 Symbol。目标属性的源码查询与
+编译缓存尚未接线，字段级 Observation 仍是驱动侧接口；不能据此宣称精确缓存
+失效或所有 template/CMTT 生成场景已经端到端完成。
+下一步需要扩展源码查询，同时将观察项交付给增量编译缓存。
 `package_metadata` 的类型化值输入、构建脚本工具及 anar 调度/传输仍待实现。
 不会通过运行时环境变量隐式补齐这些输入。
 

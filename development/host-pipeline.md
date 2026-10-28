@@ -4319,3 +4319,36 @@ anar 传输同样尚待实现。下一步应接通定义来源查询与缓存证
   实际原生用例通过 (`/tmp/luna-library-p5ubztct/summary.json`)。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
   通过 (`/tmp/luna-tools-3lhqzidf/result.json`)；`git diff --check` 通过。
+
+## build.mode 的源码读取
+
+新增实际 `library/build/lib.fl`。mode 是以编译器内部 marker 声明的上下文
+常量；普通名称解析先确定声明，读取再按表达式原始 HIR owner 的语义包身份
+取得驱动显式输入。别名不改变身份，普通同名常量不触发上下文读取。
+`Snapshot::configure_modes` 完全替换 Protocols 的 mode 表，清除旧配置残留。
+缺失或空 mode 拒绝，不借用调用者或 build 提供者的模式，也不读进程环境。
+
+首次源码回归发现 inline if 的条件在 required evaluation 后复查普通分支时
+被当成 runtime 输入，从而错误地要求 Splice。现在已选定 inline 条件的复查
+继续处于 comptime 上下文；分支体恢复原阶段，未选分支仍需通过普通检查。
+普通 runtime 使用 mode 仍调用原有 Splice 路径。
+
+CLI/流式请求尚未提供 mode 传输，编译缓存尚未消费快照观察证据。当前调用方
+使用 Rust 驱动 API，必须把配置纳入自身重编译条件；build.target 与 metadata
+的源码查询仍未接线。不能将当前普通定义归属测试扩张为全部 template/CMTT
+生成场景的保证。
+
+本阶段验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test build_context --test inline_control`：
+  九项构建上下文、250 项 inline control 测试通过
+  (`/tmp/luna-tools-ry8ax4jv/result.json`)，包括真实 build 包的跨包常量/别名读取、
+  配置变化、缺失拒绝、局部遮蔽、依赖 inline 函数及 Splice 边界。
+- 首轮 `/tmp/luna-tools-10l64dwv/result.json` 有两项失败：测试中 matches 表达式
+  缺少限定范围的括号，以及上述 inline 条件阶段错误；均修复后重跑通过。
+- `python3 -B development/library_check.py --release --stage manifest --stage sysroot-meta --stage sysroot-builders`：
+  manifest 及三项完整 sysroot 原生用例通过
+  (`/tmp/luna-library-2pqqnzmy/summary.json`，scope=selected)。这些用例证明新增
+  build 包可加载且不要求未读取的 mode；不替代配置读取的源码 API 测试。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过 (`/tmp/luna-tools-80msd4rl/result.json`)；`git diff --check` 通过。

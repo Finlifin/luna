@@ -207,3 +207,173 @@ fn dumps_are_stable_escaped_and_balanced() {
         "(build-read (owner 200) (query (target-feature \"avx2\")) (value (feature (present false))))"
     );
 }
+
+struct SourceFixture(std::path::PathBuf);
+impl SourceFixture {
+    fn new(app: &str, dependency: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "luna-build-mode-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("app.fl"), app).unwrap();
+        std::fs::write(dir.join("dependency.fl"), dependency).unwrap();
+        Self(dir)
+    }
+    fn compile(&self, modes: &[(u64, &str)]) -> Result<luna::frontend::Artifact, String> {
+        let packages = vec![
+            SourcePackage {
+                resolution_id: 3,
+                identity: 100,
+                name: "app".into(),
+                entry: self.0.join("app.fl"),
+            },
+            SourcePackage {
+                resolution_id: 7,
+                identity: 200,
+                name: "dependency".into(),
+                entry: self.0.join("dependency.fl"),
+            },
+            SourcePackage {
+                resolution_id: 9,
+                identity: 300,
+                name: "build".into(),
+                entry: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../library/build/lib.fl"),
+            },
+        ];
+        let mut protocols = elaboration::program::Protocols::default();
+        protocols.build_modes = modes
+            .iter()
+            .map(|(id, mode)| (*id, (*mode).into()))
+            .collect();
+        let dependencies = vec![
+            resolve::DependencyEdge {
+                requester: 3,
+                alias: "build".into(),
+                provider: 9,
+            },
+            resolve::DependencyEdge {
+                requester: 7,
+                alias: "build".into(),
+                provider: 9,
+            },
+            resolve::DependencyEdge {
+                requester: 3,
+                alias: "dependency".into(),
+                provider: 7,
+            },
+        ];
+        luna::packages::compile_with_inputs(
+            &packages,
+            &dependencies,
+            3,
+            None,
+            &protocols,
+            Default::default(),
+        )
+        .map(|(artifact, _)| artifact)
+    }
+}
+impl Drop for SourceFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn source_build_mode_preserves_definition_origin_aliases_and_constants() {
+    let fixture = SourceFixture::new(
+        "use build.mode as selected; const own=selected;
+        comptime fn run()->bool {(own matches .debug) and dependency.release()}",
+        "pub const saved=build.mode;
+        pub comptime fn release()->bool {(saved matches .release) and (build.mode matches .release)}",
+    );
+    let luna::frontend::Artifact::Nir(package) = fixture
+        .compile(&[(100, "debug"), (200, "release"), (300, "provider")])
+        .unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let luna::frontend::Artifact::Nir(changed) = fixture
+        .compile(&[(100, "release"), (200, "release"), (300, "debug")])
+        .unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::invocation::invoke(&changed, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(false)
+    );
+}
+
+#[test]
+fn source_build_mode_never_falls_back_to_caller_or_provider() {
+    let fixture = SourceFixture::new(
+        "comptime fn run()->bool {dependency.ready()}",
+        "pub comptime fn ready()->bool {build.mode matches .debug}",
+    );
+    let error = fixture
+        .compile(&[(100, "debug"), (300, "debug")])
+        .err()
+        .unwrap();
+    assert!(
+        error.contains("build mode is unavailable for source package 200"),
+        "{error}"
+    );
+    assert!(fixture.compile(&[(100, "debug"), (200, "release")]).is_ok());
+}
+
+#[test]
+fn source_build_mode_keeps_normal_shadowing_and_runtime_stage_checks() {
+    let shadow = SourceFixture::new(
+        "mod build {pub const mode=.local;} comptime fn run()->bool {build.mode matches .local}",
+        "",
+    );
+    let luna::frontend::Artifact::Nir(package) = shadow.compile(&[]).unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let runtime = SourceFixture::new("fn run()->bool {build.mode matches .debug}", "");
+    let error = runtime.compile(&[(100, "debug")]).err().unwrap();
+    assert!(error.contains("Splice"), "{error}");
+}
+
+#[test]
+fn inline_configuration_branch_uses_dependency_mode() {
+    let fixture = SourceFixture::new(
+        "fn run()->bool {dependency.selected()}",
+        "pub inline fn selected()->bool {inline if build.mode matches .release {true} else {false}}",
+    );
+    let luna::frontend::Artifact::Nir(package) = fixture
+        .compile(&[(100, "debug"), (200, "release")])
+        .unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn installing_snapshot_modes_removes_stale_bindings() {
+    let mut protocols = elaboration::program::Protocols::default();
+    protocols.build_modes.insert(999, "stale".into());
+    let world = snapshot(vec![input(100, "debug"), input(200, "release")]);
+    world.configure_modes(&mut protocols);
+    assert_eq!(
+        protocols.build_modes,
+        [(100, "debug".into()), (200, "release".into())].into()
+    );
+}
