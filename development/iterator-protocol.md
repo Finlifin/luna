@@ -173,3 +173,55 @@ Formatting passed with report `/tmp/luna-tools-73pbu4r_/result.json`, exit 0;
 All luna test targets compile successfully; check report
 `/tmp/luna-tools-fedzux28/result.json`, exit 0. This compiles the updated public
 Options consumers without executing the entire workspace test suite.
+
+## First-item reduction
+
+`Iterator.reduce(f: %c fn(Item, Item) -> Item) -> ?Item` consumes the iterator
+through its inline delivery effect. The first item seeds the accumulator; only
+subsequent items call `f`, in source order. Empty input returns null, singleton
+input returns its item without calling `f`, and nested optional payloads retain
+their layers. Each callback receives ownership of both its accumulator and the
+new item. No identity value, Copy or Clone requirement is introduced.
+
+```flurry
+let first: ?bool = true;
+let second: ?bool = false;
+let result = first.as(Iterator).chain(second).as(Iterator)
+    .reduce(|left, right| left and right);
+let correct = result matches false?;
+assumes correct;
+```
+
+The method follows the existing joint inline expansion path. The unexpanded
+reference interpreter still rejects borrowed accumulator move/reinitialization
+without an environment contract, as with fold. Pointer-bearing replacement
+additionally requires an environment writeback contract in that unexpanded
+path. These rejections remain tested; expansion does not erase resource checks.
+Expanded tests verify callback order, absence and singleton behavior, present
+null payloads, affine accumulator cleanup, and repeated capture-consumption
+rejection. Native sysroot tests also verify retirement of an unused callback's
+capture. Optional result matches in the examples are ordinary expressions;
+`assumes` then checks the resulting bool without demanding unsupported observed
+optional matching.
+
+The complete sysroot iteration stage now has six native tests. Its preparation
+budget is 1000000: the old 200000 budget could leave the new reductions
+unexpanded while traversing the complete sysroot. This changes the test's
+budget, not the memory checks or semantics.
+
+Validation (working directory `/home/fin/luna`, unless noted):
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test library_iteration`:
+  44 passed; `/tmp/luna-tools-flqr5iny/result.json`. New reduction cases check
+  expanded resource-aware interpretation and native O0/O3 execution, while
+  asserting the documented unexpanded refusals.
+- After adding reduction to the repeated-capture rejection group,
+  `python3 -B development/check.py --timeout 900 -- test --release -p luna --test library_iteration repository_iterator_rejects_repeated_consumption_of_callback_capture`:
+  passed; `/tmp/luna-tools-g_zsel_9/result.json`. The producer emits three items
+  so reduction must invoke its callback twice.
+- `python3 -B development/library_check.py --release --timeout 900 --stage sysroot-iteration`:
+  six passed; `/tmp/luna-library-36aa78f3/summary.json`.
+- `python3 -B development/reproduce.py --timeout 120 --binary /tmp/luna-dev-002/target/release/luna -- development/examples/sysroot-iteration.fl --sysroot library --test-native --inline-functions --fuel 1000000 --opt-level 3`:
+  six passed; `/tmp/luna-tools-5xul652r/result.json`.
+- From `/home/fin/luna/development`, `python3 -B -m unittest test_library_check`:
+  all 13 runner tests passed with the updated required native count.

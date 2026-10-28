@@ -288,6 +288,7 @@ fn repository_iterator_rejects_repeated_consumption_of_callback_capture() {
     for adapter in [
         "map(|flag| ticket).as(Iterator).foreach(|item| {})",
         "fold(false, |state, flag| {let consumed=ticket;state})",
+        "reduce(|state, flag| {let consumed=ticket;state})",
         "filter_map<Ticket>(|flag| ticket).as(Iterator).foreach(|item| {})",
         "flat_map<?Ticket>(|flag| ticket).as(Iterator).foreach(|item| {})",
         "take_while(|flag| {let consumed=ticket;true}).as(Iterator).foreach(|item| {})",
@@ -301,7 +302,7 @@ fn repository_iterator_rejects_repeated_consumption_of_callback_capture() {
         impl Iterator for Flags {{
             assoc Item:(.Type'builtin)=bool;
             inline fn iterate(self)->#emit_item<bool> Unit {{
-                emit_item<bool>(false)#;emit_item<bool>(true)#;
+                emit_item<bool>(false)#;emit_item<bool>(true)#;emit_item<bool>(false)#;
             }}
         }}
         fn run() {{
@@ -1397,4 +1398,92 @@ fn ordinary_for_prefers_direct_iteration_and_converts_generic_inputs() {
         include_str!("../../../library/builtin/resources.fl")
     );
     check_iteration(&source);
+}
+
+#[test]
+fn reduce_seeds_from_first_item_and_calls_combiner_in_order() {
+    let source = format!(
+        r#"{}
+{}
+        fn run()->bool {{
+            var calls:.u32'builtin=0;
+            let counter=calls.ref;
+            let first:?.u32'builtin=1;
+            let second:?.u32'builtin=2;
+            let third:?.u32'builtin=3;
+            let result=first.as(Iterator).chain(second).as(Iterator).chain(third).as(Iterator)
+                .reduce(|previous, value| {{
+                    assumes counter.* < 2;
+                    assumes previous == if counter.* == 0 {{1}} else {{12}};
+                    assumes value == if counter.* == 0 {{2}} else {{3}};
+                    counter.* = counter.* + 1;
+                    previous * 10 + value
+                }});
+            let empty:?.u32'builtin=null;
+            let none=empty.as(Iterator).reduce(|left,right| {{assumes false;left}});
+            let singleton:?.u32'builtin=7;
+            let single=singleton.as(Iterator).reduce(|left,right| {{assumes false;right}});
+            calls == 2 and (result matches 123?) and (none matches null) and (single matches 7?)
+        }}
+        fn verify() {{let passed=run();assumes passed;}}
+    "#,
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    check_iteration_with_contract_limit(
+        &source,
+        Some("borrowed handler data capture must remain complete on every exit"),
+    );
+}
+
+#[test]
+fn reduce_preserves_a_present_null_item() {
+    let source = format!(
+        r#"{}
+{}
+        fn run()->bool {{
+            let payload:?bool=null;
+            let source:??bool=payload;
+            let result=source.as(Iterator).reduce(|left,right| {{assumes false;left}});
+            result match {{ inner? => inner matches null, null => false }}
+        }}
+        fn verify() {{let passed=run();assumes passed;}}
+    "#,
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    check_iteration_with_contract_limit(
+        &source,
+        Some("borrowed handler data capture must remain complete on every exit"),
+    );
+}
+
+#[test]
+fn reduce_moves_affine_items_and_retires_only_replaced_accumulators() {
+    let source = format!(
+        r#"{}
+{}
+        struct Watch {{seen:*bool}}
+        impl Drop for Watch {{fn drop(*self) {{assumes not self.seen.*.*;self.seen.*.* = true;}}}}
+        fn run()->bool {{
+            var first=false;var second=false;var third=false;
+            {{
+                let a:?Watch=Watch {{seen:first.ref}};
+                let b:?Watch=Watch {{seen:second.ref}};
+                let c:?Watch=Watch {{seen:third.ref}};
+                let result=a.as(Iterator).chain(b).as(Iterator).chain(c).as(Iterator)
+                    .reduce(|previous,value| value);
+                assumes first and second and not third;
+            }}
+            first and second and third
+        }}
+        fn verify() {{let passed=run();assumes passed;}}
+    "#,
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    check_iteration_with_contract_limit(
+        &source,
+        Some("captured pointer rebinding requires an environment writeback contract"),
+    );
 }

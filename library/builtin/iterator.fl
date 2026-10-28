@@ -106,6 +106,26 @@ pub trait Iterator {
         C.from_iter(self)
     }
 
+    {-
+        The first item becomes the accumulator without calling f. Each later
+        item and the previous accumulator move into f exactly once. Empty
+        input returns null; a null item inside an optional item type remains
+        a present result. No identity value or Copy implementation is required.
+    -}
+    inline fn reduce(self, f: %c fn(Item, Item) -> Item) -> ?Item
+        where c: (.Type'builtin).vars.Closure {
+        var accumulator: ?Item = null;
+        self.iterate()# {
+            emit_item<Item>(value) => {
+                accumulator = accumulator match {
+                    previous? => f(previous, value),
+                    null => value,
+                };
+            },
+        }
+        accumulator
+    }
+
     inline fn fold(self, initial: A, f: %c fn(A, Item) -> A) -> A
         where A, c: (.Type'builtin).vars.Closure {
         var accumulator = initial;
