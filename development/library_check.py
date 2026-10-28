@@ -58,6 +58,8 @@ def main():
                                str(ROOT / 'development/examples/host-library-comparison.fl'),
                                '--package', '2', '202', 'comparison', str(ROOT / 'library/builtin/comparison.fl'),
                                '--package', '3', '303', 'resources', str(ROOT / 'library/builtin/resources.fl'),
+                               '--package', '4', '404', 'attrs', str(ROOT / 'library/attrs/lib.fl'),
+                               '--dependency', '2', 'attrs', '4',
                                '--dependency', '1', 'comparison', '2',
                                '--dependency', '1', 'resources', '3', '--primary', '1',
                                '--copy-protocol', 'resources.Copy',

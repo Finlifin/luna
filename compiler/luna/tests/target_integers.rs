@@ -1,3 +1,5 @@
+#[path = "support/library.rs"]
+mod library;
 use luna::frontend::{self, Artifact};
 use nir::target::TargetData;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -532,7 +534,7 @@ fn repository_platform_comparison_protocols_follow_the_selected_target() {
                 let greater = maximum.as(Ord).cmp(zero) matches .greater; assumes greater;
                 let same = maximum.as(Ord).cmp(maximum) matches .equal; assumes same;
             }}",
-            include_str!("../../../library/builtin/comparison.fl"),
+            library::with_attrs(include_str!("../../../library/builtin/comparison.fl")),
             include_str!("../../../library/builtin/resources.fl"));
         let package = compile(&source, Some(width)).unwrap();
         assert_eq!(

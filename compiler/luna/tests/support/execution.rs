@@ -180,3 +180,8 @@ pub(crate) fn run_iir_with_tuple(
     let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
     vm.invoke_instance(&graph.roots[0], inputs).unwrap()
 }
+
+#[path = "library.rs"]
+mod library;
+#[allow(unused_imports)]
+pub(crate) use library::with_attrs;

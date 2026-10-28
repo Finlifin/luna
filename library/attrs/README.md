@@ -5,6 +5,21 @@
 `comptime_phase: true` 的 Object 常量，条目保留 Bool 类型。
 `attrs.prelude` 导出两者。
 
+内置包也复用这些公开接口。`builtin` 的比较、哈希及列表模式协议统一使用
+`^attrs.comptime_phase`，不重复写属性 Object；属性键和值的构造留在 attrs 中。
+例如，列表模式的 comptime 关联类型与方法写作：
+
+```flurry
+^attrs.comptime_phase
+assoc ElementComptime: Type;
+^attrs.comptime_phase
+comptime fn list_pattern_view_get_len_comptime(self) -> usize;
+```
+
+独立加载这些 builtin 模块时，需要提供 attrs 依赖；完整 sysroot 已提供该依赖。
+测试使用真实 attrs 源码，属性的 phase 校验和普通调用路径共用同一实现。
+
+
 ```flurry
 use attrs.abi;
 

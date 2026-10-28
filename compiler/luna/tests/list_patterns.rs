@@ -21,9 +21,9 @@ const PROTOCOL: &str = "typealias Type=.Type'builtin; typealias Size=.u64'builti
 
 #[test]
 fn dual_phase_list_protocol_rejects_malformed_staged_contracts() {
-    let source = include_str!("../../../library/builtin/patterns.fl");
+    let source = support::with_attrs(include_str!("../../../library/builtin/patterns.fl"));
     for (from, to) in [
-        ("comptime_phase: true", "comptime_phase: false"),
+        ("^attrs.comptime_phase", "^{comptime_phase: false}"),
         ("get_len_comptime(self)", "get_len_comptime(*self)"),
         ("self, index:", "self, comptime index:"),
         (

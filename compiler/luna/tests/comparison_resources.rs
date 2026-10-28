@@ -23,7 +23,7 @@ fn source(body: &str) -> String {
             if self.value == other.value {{.equal}} else if self.value {{.greater}} else {{.less}}
         }}}}
         {body}",
-        include_str!("../../../library/builtin/comparison.fl")
+        support::with_attrs(include_str!("../../../library/builtin/comparison.fl"))
     )
 }
 

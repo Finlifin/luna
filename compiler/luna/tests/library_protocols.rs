@@ -24,7 +24,7 @@ fn repository_list_pattern_protocol_retains_observation_write_checks() {
         mod patterns {{ {} }} use patterns.*;
         {fixture}
         fn run()->bool {{exact(Repeated {{length:2,value:false}})}}",
-        include_str!("../../../library/builtin/patterns.fl"),
+        support::with_attrs(include_str!("../../../library/builtin/patterns.fl")),
     );
     let target = luna::host::Toolchain::default()
         .target_layout()
@@ -1252,7 +1252,7 @@ fn repository_comparison_protocols_execute_integer_boundaries_and_defaults() {
     entries.push("check_all".into());
     let source = format!(
         "{}\n{}\n{checks}",
-        include_str!("../../../library/builtin/comparison.fl"),
+        support::with_attrs(include_str!("../../../library/builtin/comparison.fl")),
         include_str!("../../../library/builtin/resources.fl")
     );
     let package = compile_with_source_bindings(
@@ -1331,7 +1331,7 @@ fn run() {{
     let lt = 'a'.as(Ord).lt(character); assumes lt;
 }}
 "#,
-        include_str!("../../../library/builtin/comparison.fl"),
+        support::with_attrs(include_str!("../../../library/builtin/comparison.fl")),
         include_str!("../../../library/builtin/resources.fl")
     );
     let package = compile_with_source_bindings(

@@ -22,9 +22,9 @@ pub trait Eq {
     fn eq(self, other: Self) -> bool;
     fn ne(self, other: Self) -> bool = not self.eq(other);
 
-    ^{comptime_phase: true}
+    ^attrs.comptime_phase
     comptime fn comptime_eq(self, other: Self) -> bool;
-    ^{comptime_phase: true}
+    ^attrs.comptime_phase
     comptime fn comptime_ne(self, other: Self) -> bool = not self.comptime_eq(other);
 }
 

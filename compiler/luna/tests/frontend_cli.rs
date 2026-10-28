@@ -3915,6 +3915,11 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
         "library/builtin/tuple.fl",
         include_str!("../../../library/builtin/tuple.fl"),
     );
+    fs::create_dir_all(sandbox.path("library/attrs")).unwrap();
+    sandbox.write(
+        "library/attrs/lib.fl",
+        include_str!("../../../library/attrs/lib.fl"),
+    );
     sandbox.write(
         "library/builtin/comparison.fl",
         include_str!("../../../library/builtin/comparison.fl"),
@@ -8751,6 +8756,11 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
     sandbox.write(
         "library/builtin/primitives.fl",
         include_str!("../../../library/builtin/primitives.fl"),
+    );
+    fs::create_dir_all(sandbox.path("library/attrs")).unwrap();
+    sandbox.write(
+        "library/attrs/lib.fl",
+        include_str!("../../../library/attrs/lib.fl"),
     );
     sandbox.write(
         "library/builtin/comparison.fl",

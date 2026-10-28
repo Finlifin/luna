@@ -14,7 +14,7 @@ pub use resources.{Once, Clone, Copy, Drop};
 
 pub trait Hash {
     fn hash(self) -> u64;
-    ^{comptime_phase: true}
+    ^attrs.comptime_phase
     comptime fn comptime_hash(self) -> u64;
 }
 

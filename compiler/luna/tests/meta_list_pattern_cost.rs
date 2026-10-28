@@ -29,7 +29,7 @@ fn compile(width: u32, legacy: bool) -> nir::program::Package {
              comptime fn Read(values:meta.List<.Type'builtin>, index:.usize'builtin)
                  ->.Type'builtin {{values.as(ListPatternView).list_pattern_view_get_element_comptime(index)}}",
             include_str!("../../../library/meta/lib.fl"),
-            include_str!("../../../library/builtin/patterns.fl"),
+            support::with_attrs(include_str!("../../../library/builtin/patterns.fl")),
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
