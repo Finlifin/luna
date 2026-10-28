@@ -269,6 +269,40 @@ impl StructBuilder {
         append(self.field_types, field_type);
     }
 
+    {-
+        Edit by declaration-order index. Invalid bounds leave both snapshots
+        unchanged. Names and Types are prepared together before either write;
+        Build remains responsible for duplicate names and layout admission.
+    -}
+    pub comptime fn insert_field(*self, index: .Integer'builtin,
+        name: .Symbol'builtin, field_type: .Type'builtin) -> bool {
+        self.edit_fields(index, index, [name], [field_type])
+    }
+
+    pub comptime fn replace_field(*self, index: .Integer'builtin,
+        name: .Symbol'builtin, field_type: .Type'builtin) -> bool {
+        self.edit_fields(index, index + 1, [name], [field_type])
+    }
+
+    pub comptime fn remove_field(*self, index: .Integer'builtin) -> bool {
+        self.edit_fields(index, index + 1, [], [])
+    }
+
+    comptime fn edit_fields(*self, start: .Integer'builtin, end: .Integer'builtin,
+        names: List<.Symbol'builtin>, types: List<.Type'builtin>) -> bool {
+        let next_names = replace_range<.Symbol'builtin>(self.field_names.*, start, end, names) match {
+            value? => value,
+            null => return false,
+        };
+        let next_types = replace_range<.Type'builtin>(self.field_types.*, start, end, types) match {
+            value? => value,
+            null => return false,
+        };
+        self.field_names.* = next_names;
+        self.field_types.* = next_types;
+        true
+    }
+
     pub comptime fn Build(self) -> .Type'builtin {
         .build_struct'builtin(self.name, self.field_names, self.field_types)
     }

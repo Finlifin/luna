@@ -1,0 +1,39 @@
+{-
+    Start from a reflected layout, edit its ordered fields, then construct and
+    use the generated type through the complete sysroot and resource checker.
+-}
+struct Source { old: bool, removed: bool }
+
+comptime fn Edited() -> Type {
+    var builder = meta.StructBuilder.from_type(Source, .name = .Edited);
+    let replaced = builder.replace_field(0, .value, u8);
+    let removed = builder.remove_field(1);
+    let inserted = builder.insert_field(0, .ready, bool);
+    let appended = builder.insert_field(2, .tail, bool);
+    let negative = builder.remove_field(-1);
+    let past_end = builder.replace_field(3, .wrong, u64);
+    let too_far = builder.insert_field(4, .wrong, u64);
+    assumes replaced and removed and inserted and appended;
+    assumes not negative and not past_end and not too_far;
+    builder.Build()
+}
+
+typealias Record = Edited();
+
+test edited_fields {
+    let record = Record { ready: true, value: 42, tail: false };
+    assumes record.ready and record.value == 42 and not record.tail;
+}
+
+comptime fn inspect() -> bool {
+    let names = meta.struct_field_names(Record);
+    let types = meta.struct_field_types(Record);
+    let original = meta.struct_field_names(Source);
+    meta.length(names) == 3 and names[0] == .ready and names[1] == .value
+        and names[2] == .tail and types[0] == bool and types[1] == u8
+        and types[2] == bool and original[0] == .old and original[1] == .removed
+}
+
+test edited_reflection {
+    inline if inspect() { assumes true; } else { assumes false; };
+}

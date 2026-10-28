@@ -2007,3 +2007,87 @@ fn public_builder_uses_invocation_ranges_for_distinct_reflected_subjects() {
     assert_ne!(generated[0].declaration, generated[1].declaration);
     assert!(generated.iter().all(|item| item.declaration.package == 900));
 }
+
+#[test]
+fn struct_builder_edits_preserve_order_snapshots_and_failed_bounds() {
+    let fixture = Fixture::new(
+        "typealias Type=.Type'builtin;
+        struct Source {old:bool,removed:bool}
+        comptime fn inspect()->bool {
+            var builder=meta.StructBuilder.from_type(Source);
+            let snapshot=builder;
+            let replaced=builder.replace_field(0,.value,.u8'builtin);
+            let removed=builder.remove_field(1);
+            let inserted=builder.insert_field(0,.first,bool);
+            let appended=builder.insert_field(2,.last,bool);
+            let negative=builder.insert_field(-1,.bad,bool);
+            let far=builder.remove_field(99999999999999999999999999999999999999999999999);
+            let past=builder.replace_field(3,.bad,bool);
+            let result=builder.Build();
+            let old=snapshot.Build();
+            let names=meta.struct_field_names(result);
+            let types=meta.struct_field_types(result);
+            let old_names=meta.struct_field_names(old);
+            replaced and removed and inserted and appended
+                and not negative and not far and not past
+                and meta.length(names)==3 and names[0]==.first and names[1]==.value
+                and names[2]==.last and types[0]==bool and types[1]==.u8'builtin
+                and types[2]==bool and meta.length(old_names)==2
+                and old_names[0]==.old and old_names[1]==.removed
+        }",
+    );
+    let (_, result, _) = fixture.invoke_meta("inspect").unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
+fn struct_builder_can_edit_empty_drafts_and_remove_every_field() {
+    let fixture = Fixture::new(
+        "comptime fn inspect()->bool {
+            var builder=meta.StructBuilder.new();
+            let missing=builder.remove_field(0);
+            let replacement=builder.replace_field(0,.bad,bool);
+            let inserted=builder.insert_field(0,.only,bool);
+            let removed=builder.remove_field(0);
+            let empty=builder.Build();
+            let reinserted=builder.insert_field(0,.new,bool);
+            let filled=builder.Build();
+            not missing and not replacement and inserted and removed and reinserted
+                and meta.length(meta.struct_field_names(empty))==0
+                and meta.struct_field_names(filled)[0]==.new
+        }",
+    );
+    let (_, result, _) = fixture.invoke_meta("inspect").unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
+fn struct_builder_edits_do_not_bypass_duplicate_field_validation() {
+    for edit in [
+        "builder.insert_field(1,.first,bool)",
+        "builder.replace_field(1,.first,bool)",
+    ] {
+        let fixture = Fixture::new(&format!(
+            "struct Source {{first:bool,second:bool}}
+            comptime fn draft()->meta.StructBuilder {{
+                var builder=meta.StructBuilder.from_type(Source);
+                let accepted={edit};
+                assumes accepted;
+                builder
+            }}
+            comptime fn Make()->.Type'builtin {{draft().Build()}}
+            comptime fn repaired()->bool {{
+                var builder=draft();
+                let fixed=builder.replace_field(1,.unique,bool);
+                let result=builder.Build();
+                fixed and meta.struct_field_names(result)[1]==.unique
+            }}"
+        ));
+        let error = fixture.invoke_meta("Make").err().unwrap();
+        assert!(error.contains("interpretation Type"), "{error}");
+        assert_eq!(
+            fixture.invoke_meta("repaired").unwrap().1,
+            Value::Bool(true)
+        );
+    }
+}

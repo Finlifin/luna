@@ -122,6 +122,39 @@ fn example() -> bool {
 }
 ```
 
+草稿也支持按声明顺序编辑字段，索引为 comptime `Integer`：
+
+| 方法 | 行为 |
+| --- | --- |
+| `insert_field(index, name, field_type)` | 在 index 前插入；允许在字段数处追加 |
+| `replace_field(index, name, field_type)` | 同时替换已有字段的名称和 Type |
+| `remove_field(index)` | 删除已有字段，后面的字段保持顺序向前移动 |
+
+合法位置返回 true；负数或越界返回 false，草稿不变。空草稿只允许在 0 插入。
+字段名和 Type 的新列表都准备好后才写回；此前保存的草稿快照不受后续编辑影响。
+这些方法只检查编辑位置，重名、不可存储 Type 等仍由 `Build` 检查，编辑成功不
+代表定义已经合法。接口不复制或编辑尚未接通的字段默认表达式和属性。
+
+```flurry
+struct Source { old: bool, removed: bool }
+
+comptime fn Edited() -> Type {
+    var builder = meta.StructBuilder.from_type(Source, .name = .Edited);
+    let replaced = builder.replace_field(0, .value, u8);
+    let removed = builder.remove_field(1);
+    let inserted = builder.insert_field(0, .ready, bool);
+    assumes replaced and removed and inserted;
+    builder.Build()
+}
+
+typealias Record = Edited();
+```
+
+生成的 Record 字段依次为 `ready: bool`、`value: u8`。完整 sysroot 的原生构造、
+字段读取和反射测试见
+[sysroot-edited-struct.fl](../../development/examples/sysroot-edited-struct.fl)，通过
+`python3 -B development/library_check.py --release --stage sysroot-builders` 执行。
+
 `Build` 检查字段 Type 的形成与有限存储表示后才发布类型，重名字段会被拒绝；字段 Type
 保留 normal-form 头。空草稿可以发布空结构体，名称相同不代表类型身份相同。
 草稿及其中的 List 数据不能成为 runtime 接口。

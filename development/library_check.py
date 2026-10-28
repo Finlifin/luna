@@ -11,7 +11,7 @@ from process_tools import ROOT, run, save_summary
 from host_examples import EXAMPLES, MATH_OPTIONS
 
 STAGES = ('declarations', 'attributes', 'merged-attributes', 'meta-values', 'inline-iteration', 'manifest', 'native-resources', 'native-comparison',
-          'native-math', 'native-option', 'native-result', 'native-tuple', 'native-conversion', 'hash-protocols', 'sysroot-hash', 'sysroot-meta', 'sysroot', 'sysroot-iteration')
+          'native-math', 'native-option', 'native-result', 'native-tuple', 'native-conversion', 'hash-protocols', 'sysroot-hash', 'sysroot-meta', 'sysroot-builders', 'sysroot', 'sysroot-iteration')
 
 
 def main():
@@ -73,6 +73,9 @@ def main():
                         '--drop-protocol', 'resources.Drop',
                         *MATH_OPTIONS,
                         '--test-native']),
+        ('sysroot-builders', ['run', '-p', 'luna', '--',
+                              str(ROOT / 'development/examples/sysroot-edited-struct.fl'),
+                              '--sysroot', str(ROOT / 'library'), '--test-native']),
         ('sysroot-meta', ['run', '-p', 'luna', '--',
                           str(ROOT / 'development/examples/sysroot-meta-lists.fl'),
                           '--sysroot', str(ROOT / 'library'), '--test-native']),
@@ -116,7 +119,7 @@ def main():
     if args.stage:
         stages = [(label, command) for label, command in stages if label in args.stage]
     native_counts = {'native-resources': 4, 'native-comparison': 6, 'native-math': 8,
-                     'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 3, 'sysroot-hash': 3, 'sysroot-meta': 1}
+                     'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 3, 'sysroot-hash': 3, 'sysroot-meta': 1, 'sysroot-builders': 2}
     outcomes = []
     for label, command in stages:
         if args.release:

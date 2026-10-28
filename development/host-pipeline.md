@@ -4226,3 +4226,34 @@ provenance 接线仍未完成，保留明确拒绝的回归。
 缺少 target 信息被拒绝 (`/tmp/luna-library-_56ie5lq/summary.json`，阶段退出 1)。
 最终使用 host 测试中的 inline if 消费编译期结果，未给无目标 invocation 偷加
 宿主布局。List 的不可变数据验证仍会影响大规模构造成本，不宣称线性时间。
+
+## 可编辑的 StructBuilder 字段草稿
+
+`meta.StructBuilder` 增加按声明顺序索引的 `insert_field`、`replace_field`、
+`remove_field`，均返回 bool。负数和越界不修改草稿；插入允许位于字段数处，
+替换与删除要求已有字段。内部先生成完整的新名称列表和 Type 列表，再写回
+两者，保留既有快照。字段合法性与存储布局继续由 Build 校验，没有授予生成
+类型 Copy 或自动复制原类型的实现。公开示例见
+`development/examples/sysroot-edited-struct.fl`，已加入 `sysroot-builders` 阶段。
+
+实际验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations --test comptime_list_operations`：
+  56 项 builder、30 项列表测试通过，退出 0 (`/tmp/luna-tools-fpif8twy/result.json`)。
+  覆盖位置与类型同步、草稿快照、负数/大索引、空草稿、全部删除后重插入，以及
+  重名发布拒绝后修正并重新构造。
+- `python3 -B development/library_check.py --release --stage sysroot-builders --stage sysroot-meta`：
+  结构体两项、列表一项实际 host 测试通过，退出 0
+  (`/tmp/luna-library-01cltl9i/summary.json`，scope=selected)。
+- `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-edited-struct.fl --sysroot library --test-native --opt-level 3`：
+  两项 O3 测试通过 (`/tmp/luna-tools-tmatwgvj/result.json`)。
+- `python3 -B -m unittest discover -s development -p test_library_check.py`：
+  13 项通过，包含少测、多测、零测试和失败结果拒绝。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过 (`/tmp/luna-tools-jmifkppq/result.json`)；`git diff --check` 通过。
+
+初版库代码遗漏了指针字段投影的显式解引用；修正为 `self.field_names.*` 等
+读写，未改动语言规则。首轮回归的重名诊断断言与实际不符
+(`/tmp/luna-tools-fh7eacsv/result.json`)：构造服务当前返回通用 interpretation
+Type 错误，不保留具体 duplicate 消息。最终回归断言实际错误并验证修正冲突
+后的构造成功。字段默认代码、属性、泛型子句与 impl 构造仍待后续接通。
