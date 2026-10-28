@@ -205,6 +205,7 @@ fn compile_selected(source: &str, emit: Emit, tuple: bool) -> Result<Artifact, S
         input: path.clone(),
         emit,
         output: None,
+        build_modes: Default::default(),
         sysroot: None,
         splice_protocol: None,
         meta_list_type: tuple.then(|| "input.List".into()),

@@ -917,6 +917,7 @@ mod stage_tests {
             input: "absent.fl".into(),
             emit: Emit::Hir,
             output: None,
+            build_modes: Default::default(),
             sysroot: None,
             index_protocol: None,
             ord_protocol: None,

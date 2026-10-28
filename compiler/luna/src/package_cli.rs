@@ -167,6 +167,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--test-filter"
                 | "--test-timeout-ms"
                 | "--fuel"
+                | "--build-mode"
+                | "--package-build-mode"
                 | "--host-fma"
                 | "--host-sqrt"
                 | "--host-copysign"
@@ -535,6 +537,7 @@ impl Request {
             })
             .collect::<Vec<_>>();
         let options = &self.options;
+        options.build_modes.validate_stage(options.emit)?;
         let (copy, drop) = match &self.action {
             Action::Tests {
                 protocols: Some((copy, drop)),
@@ -560,6 +563,17 @@ impl Request {
             _ => (None, None),
         };
         let target = self.semantic_target()?;
+        let primary_identity = self
+            .packages
+            .iter()
+            .find(|package| package.resolution_id == self.primary)
+            .ok_or("primary source package is absent")?
+            .identity;
+        let configured = options.build_modes.bind(
+            self.packages.iter().map(|package| package.identity),
+            primary_identity,
+            &Default::default(),
+        )?;
         crate::packages::compile_observed_for_target_with_invocation(
             &self.packages,
             &dependencies,
@@ -567,7 +581,7 @@ impl Request {
             self.builtin,
             options.emit,
             options.output.as_deref(),
-            &Default::default(),
+            &configured,
             crate::protocols::type_constructors::Selectors {
                 host_fma: match &self.action {
                     Action::Build { host_fma, .. }

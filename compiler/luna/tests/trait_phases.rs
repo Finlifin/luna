@@ -18,6 +18,7 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         input: path.clone(),
         emit,
         output: None,
+        build_modes: Default::default(),
         sysroot: None,
         splice_protocol: None,
         meta_list_type: None,

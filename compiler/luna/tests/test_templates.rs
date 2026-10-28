@@ -604,6 +604,7 @@ fn compile_with_constructors(
         input: path.clone(),
         emit,
         output: None,
+        build_modes: Default::default(),
         sysroot: None,
         splice_protocol: None,
         meta_list_type: meta_list.map(str::to_owned),

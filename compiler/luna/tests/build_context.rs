@@ -377,3 +377,142 @@ fn installing_snapshot_modes_removes_stale_bindings() {
         [(100, "debug".into()), (200, "release".into())].into()
     );
 }
+
+#[test]
+fn cli_mode_inputs_are_explicit_and_reject_ambiguous_forms() {
+    let parse = |args: &[&str]| luna::cli::parse(args.iter().map(std::ffi::OsString::from));
+    let luna::cli::Command::Compile(options) = parse(&[
+        "input.fl",
+        "--emit",
+        "nir",
+        "--build-mode",
+        "debug",
+        "--package-build-mode",
+        "200=release",
+    ])
+    .unwrap() else {
+        panic!("expected compile")
+    };
+    assert_eq!(options.build_modes.primary.as_deref(), Some("debug"));
+    assert_eq!(
+        options.build_modes.packages.get(&200).map(String::as_str),
+        Some("release")
+    );
+    for args in [
+        vec!["input.fl", "--emit", "nir", "--build-mode", ""],
+        vec![
+            "input.fl",
+            "--emit",
+            "nir",
+            "--build-mode",
+            "debug",
+            "--build-mode",
+            "release",
+        ],
+        vec![
+            "input.fl",
+            "--emit",
+            "nir",
+            "--package-build-mode",
+            "-1=debug",
+        ],
+        vec!["input.fl", "--emit", "nir", "--package-build-mode", "1="],
+        vec![
+            "input.fl",
+            "--emit",
+            "nir",
+            "--package-build-mode",
+            "1=debug",
+            "--package-build-mode",
+            "01=release",
+        ],
+        vec!["input.fl", "--emit", "hir", "--build-mode", "debug"],
+    ] {
+        assert!(parse(&args).is_err(), "{args:?}");
+    }
+    let mut modes = luna::build_context::ModeOptions::default();
+    modes.set_primary("debug".into()).unwrap();
+    modes.add_package("100=release").unwrap();
+    assert!(
+        modes
+            .bind([100], 100, &Default::default())
+            .unwrap_err()
+            .contains("conflicts")
+    );
+}
+
+#[test]
+fn package_cli_and_stream_transport_mode_and_invalidate_reuse() {
+    let fixture = SourceFixture::new(
+        "fn run()->bool {inline if build.mode matches .debug {true} else {false}}",
+        "",
+    );
+    let build = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl");
+    let base = vec![
+        "--package".to_string(),
+        "3".into(),
+        "100".into(),
+        "app".into(),
+        fixture.0.join("app.fl").to_str().unwrap().into(),
+        "--package".into(),
+        "9".into(),
+        "300".into(),
+        "build".into(),
+        build.to_str().unwrap().into(),
+        "--dependency".into(),
+        "3".into(),
+        "build".into(),
+        "9".into(),
+        "--primary".into(),
+        "3".into(),
+        "--emit".into(),
+        "nir".into(),
+    ];
+    let mut frames = String::new();
+    for mode in [
+        Some("debug"),
+        Some("debug"),
+        Some("release"),
+        None,
+        Some("debug"),
+    ] {
+        let mut args = base.clone();
+        if let Some(mode) = mode {
+            args.extend(["--build-mode".into(), mode.into()]);
+        }
+        frames.push_str(
+            &args
+                .iter()
+                .map(|arg| {
+                    arg.as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        frames.push('\n');
+    }
+    let mut output = Vec::new();
+    luna::package_stream::serve(&mut std::io::Cursor::new(frames), &mut output, 4).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    let replies = output.lines().collect::<Vec<_>>();
+    assert_eq!(replies.len(), 5);
+    for index in [0, 1, 2, 4] {
+        assert!(
+            replies[index].contains("(exit-code 0)"),
+            "{}",
+            replies[index]
+        );
+    }
+    assert!(replies[0].contains("(reused false)"));
+    assert!(replies[1].contains("(reused true)"));
+    assert!(replies[2].contains("(reused false)"));
+    assert!(
+        replies[3].contains("(exit-code 1)") && replies[3].contains("source package 100"),
+        "{}",
+        replies[3]
+    );
+    assert!(replies[4].contains("(reused true)"));
+}

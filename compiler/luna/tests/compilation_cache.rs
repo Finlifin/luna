@@ -348,3 +348,54 @@ fn retargeted_root_rebuilds_and_failed_replacement_is_not_cached() {
     assert!(!recovered.reused);
     assert_eq!(result(&recovered), comptime_interpretor::Value::Bool(true));
 }
+
+#[test]
+fn explicit_build_modes_invalidate_cached_source_results_without_fallback() {
+    let files = Files::new();
+    files.write(
+        "client.fl",
+        "fn run()->bool {inline if build.mode matches .debug {true} else {false}}",
+    );
+    let mut request = files.request("client.fl");
+    request.packages.push(luna::packages::SourcePackage {
+        resolution_id: 2,
+        identity: 202,
+        name: "build".into(),
+        entry: std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl"),
+    });
+    request.dependencies.push((1, "build".into(), 2));
+    request.options.build_modes.primary = Some("debug".into());
+    let mut cache = CompilationCache::new(4);
+    let first = cache.compile(&request).unwrap();
+    assert!(!first.reused);
+    assert_eq!(result(&first), comptime_interpretor::Value::Bool(true));
+    assert!(cache.compile(&request).unwrap().reused);
+    let mut release = request.clone();
+    release.options.build_modes.primary = Some("release".into());
+    let changed = cache.compile(&release).unwrap();
+    assert!(!changed.reused);
+    assert_eq!(result(&changed), comptime_interpretor::Value::Bool(false));
+    let mut missing = request.clone();
+    missing.options.build_modes.primary = None;
+    missing
+        .options
+        .build_modes
+        .packages
+        .insert(202, "debug".into());
+    let error = cache.compile(&missing).err().unwrap();
+    assert!(error.contains("source package 101"), "{error}");
+    let recovered = cache.compile(&request).unwrap();
+    assert!(recovered.reused);
+    assert_eq!(result(&recovered), comptime_interpretor::Value::Bool(true));
+    let mut unknown = request.clone();
+    unknown
+        .options
+        .build_modes
+        .packages
+        .insert(2, "release".into());
+    let error = cache.compile(&unknown).err().unwrap();
+    assert!(
+        error.contains("unknown semantic package identity 2"),
+        "{error}"
+    );
+}

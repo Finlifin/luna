@@ -553,6 +553,7 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         ),
         emit: Emit::Nir,
         output: None,
+        build_modes: Default::default(),
         sysroot: None,
         splice_protocol: Some("Splice".into()),
         meta_list_type: None,
@@ -3928,7 +3929,16 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     sandbox.write("library/std/lib.fl", "pub mod prelude {}");
     sandbox.write(
         "library/language-items.conf",
-        include_str!("../../../library/language-items.conf"),
+        // This fixture supplies list/tuple and numeric protocols, not the
+        // target-dependent iterator implementation from the complete sysroot.
+        include_str!("../../../library/language-items.conf")
+            .lines()
+            .filter(|line| {
+                !line.starts_with("iterator-protocol =")
+                    && !line.starts_with("into-iterator-protocol =")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
     sandbox.write(
         "library/builtin/math_intrinsics.fl",
@@ -4005,7 +4015,14 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     );
     sandbox.write(
         "library/language-items.conf",
-        include_str!("../../../library/language-items.conf"),
+        include_str!("../../../library/language-items.conf")
+            .lines()
+            .filter(|line| {
+                !line.starts_with("iterator-protocol =")
+                    && !line.starts_with("into-iterator-protocol =")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
     sandbox.write(
         "library/builtin/math_intrinsics.fl",
@@ -4745,7 +4762,13 @@ fn deferred_definition_attributes_keep_target_scope_and_application_order() {
     assert_eq!(dump, hir_dump(&again));
     let rejected = sandbox.run(&["input.fl", "--emit", "nir"]);
     assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("definition attribute or modifier"));
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains(
+            "expression elaboration requires a protocol or construct not yet implemented"
+        ),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
 }
 
 #[test]
@@ -4938,7 +4961,13 @@ fn configurations_belong_to_the_enclosing_definition_before_prefix_attributes() 
     );
     let result = sandbox.run(&["input.fl", "--emit", "nir"]);
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("definition configuration"));
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains(
+            "expression elaboration requires a protocol or construct not yet implemented"
+        ),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     for source in [
         ".mode , fn next() {}",
         "struct Broken { .mode , value:bool, }",

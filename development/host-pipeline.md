@@ -4352,3 +4352,36 @@ CLI/流式请求尚未提供 mode 传输，编译缓存尚未消费快照观察�
   build 包可加载且不要求未读取的 mode；不替代配置读取的源码 API 测试。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
   通过 (`/tmp/luna-tools-80msd4rl/result.json`)；`git diff --check` 通过。
+
+## build.mode 的进程入口与缓存隔离
+
+新增 `--build-mode MODE`（仅主源码包）及可重复的
+`--package-build-mode IDENTITY=MODE`（语义包身份）。普通 CLI、显式包 CLI 和
+版本 1 驻留流式请求共用 ModeOptions，拒绝空值、重复/冲突绑定、未知身份和
+不执行 elaboration 的输出模式。Options 的显式初始化点同步增加空配置，原有
+无配置行为不变；驱动快照与 CLI 值冲突时拒绝而非静默覆盖。
+
+完整请求缓存键现在包含配置，因此不同 mode 不会复用同一个残余；恢复原配置
+可以命中对应旧结果，失败请求不回退到其他模式。当前是保守失效，尚未使用
+字段级 Observation。新增 `sysroot-build-mode` 原生检查阶段，实际读取别名并
+经普通常量保存配置，再用 inline if 消费结果。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli --test build_context --test compilation_cache`：
+  最后一次组合运行中 11 项上下文、9 项缓存测试通过；CLI 为 225 项通过、
+  一项部分 sysroot fixture 失败 (`/tmp/luna-tools-8dgd9dw0/result.json`)。
+  修正该 fixture 恢复 manifest 时误带 Iterator/IntoIterator 绑定后，运行
+  `python3 -B development/check.py --timeout 900 -- test --release -p luna --test frontend_cli sysroot_language_items_bind_real_list_and_tuple_definitions_by_default`：
+  该项通过 (`/tmp/luna-tools-lnpe29ld/result.json`)。未重复其余已通过用例。
+- 较早组合运行还暴露两个旧属性拒绝文案断言，以及上述 fixture 初始 manifest
+  缺模块。复现未定义 attrs/options 表达式后，按实际表达式检查诊断更新断言；
+  仍要求拒绝，未放宽执行行为。对应失败报告为 txuudxzt、37m6j88w；独立诊断
+  报告为 `/tmp/luna-tools-mraj6het/result.json`、`/tmp/luna-tools-env5kpki/result.json`。
+- `python3 -B development/library_check.py --release --stage sysroot-build-mode`：
+  实际原生用例通过 (`/tmp/luna-library-l_rl_ibf/summary.json`)。
+- `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-build-mode.fl --sysroot library --build-mode debug --test-native --opt-level 3`：
+  O3 通过 (`/tmp/luna-tools-q56pyhog/result.json`)。
+- `python3 -B -m unittest discover -s development -p test_library_check.py`：13 项通过。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过 (`/tmp/luna-tools-h212bgsr/result.json`)；`git diff --check` 通过。

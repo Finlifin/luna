@@ -29,6 +29,7 @@ fn compile_with_tuple_option(source: &str, emit: Emit, tuple: bool) -> Result<Ar
         input: path.clone(),
         emit,
         output: None,
+        build_modes: Default::default(),
         sysroot: None,
         splice_protocol: None,
         meta_list_type: tuple.then(|| "input.TupleElements".into()),

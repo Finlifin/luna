@@ -269,3 +269,88 @@ impl fmt::Display for Snapshot {
         f.write_str(")")
     }
 }
+
+/// Process-boundary mode inputs. Primary applies only to the source entry package.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModeOptions {
+    pub primary: Option<String>,
+    pub packages: BTreeMap<u64, String>,
+}
+impl ModeOptions {
+    pub fn validate_stage(&self, emit: crate::cli::Emit) -> Result<(), String> {
+        if !self.is_empty() && emit != crate::cli::Emit::Nir {
+            return Err("build mode inputs require NIR elaboration or execution".into());
+        }
+        Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.primary.is_none() && self.packages.is_empty()
+    }
+    pub fn set_primary(&mut self, value: String) -> Result<(), String> {
+        if value.is_empty() {
+            return Err("--build-mode requires a nonempty mode".into());
+        }
+        if self.primary.is_some() {
+            return Err("--build-mode supplied more than once".into());
+        }
+        self.primary = Some(value);
+        Ok(())
+    }
+    pub fn add_package(&mut self, value: &str) -> Result<(), String> {
+        let (id, mode) = value
+            .split_once('=')
+            .ok_or("--package-build-mode requires identity=mode")?;
+        if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) || mode.is_empty() {
+            return Err(
+                "--package-build-mode requires an unsigned identity and nonempty mode".into(),
+            );
+        }
+        let id = id
+            .parse::<u64>()
+            .map_err(|_| "build mode package identity is out of range")?;
+        if self.packages.contains_key(&id) {
+            return Err(format!("duplicate build mode for package {id}"));
+        }
+        self.packages.insert(id, mode.into());
+        Ok(())
+    }
+    pub fn bind(
+        &self,
+        owners: impl IntoIterator<Item = u64>,
+        primary: u64,
+        base: &elaboration::program::Protocols,
+    ) -> Result<elaboration::program::Protocols, String> {
+        let owners: BTreeSet<_> = owners.into_iter().collect();
+        let mut selected = self.packages.clone();
+        if let Some(mode) = &self.primary {
+            if selected.insert(primary, mode.clone()).is_some() {
+                return Err(format!(
+                    "primary build mode conflicts with explicit package {primary}"
+                ));
+            }
+        }
+        let mut protocols = base.clone();
+        for (owner, mode) in selected {
+            if !owners.contains(&owner) {
+                return Err(format!(
+                    "build mode names unknown semantic package identity {owner}"
+                ));
+            }
+            if mode.is_empty() {
+                return Err(format!("empty build mode for package {owner}"));
+            }
+            if protocols
+                .build_modes
+                .get(&owner)
+                .is_some_and(|old| old != &mode)
+            {
+                return Err(format!(
+                    "build mode conflicts with driver snapshot for package {owner}"
+                ));
+            }
+            protocols.build_modes.insert(owner, mode);
+        }
+        Ok(protocols)
+    }
+}

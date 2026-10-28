@@ -277,6 +277,7 @@ fn compile_bound_for_target_with_invocation(
     target: Option<nir::target::TargetData>,
     invocation: Option<&mut crate::packages::BuilderInvocation<'_>>,
 ) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    options.build_modes.validate_stage(options.emit)?;
     source_protocols(options).validate_stage(options.emit)?;
     selectors.validate_stage(options.emit)?;
     let cwd = std::env::current_dir()
@@ -304,6 +305,10 @@ fn compile_bound_for_target_with_invocation(
         }
     }
 
+    let configured = options
+        .build_modes
+        .bind([package_identity], package_identity, protocols)?;
+    let protocols = &configured;
     let source_file = sess
         .source_map
         .load_file(&options.input)
@@ -557,6 +562,12 @@ fn compile_sysroot(
         });
         next_identity += 1;
     }
+    let configured = options.build_modes.bind(
+        packages.iter().map(|package| package.identity),
+        identity,
+        protocols,
+    )?;
+    let protocols = &configured;
     let mut dependencies = Vec::new();
     for requester in &packages {
         for provider in packages.iter().skip(1) {

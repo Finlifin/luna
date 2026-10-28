@@ -140,6 +140,7 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
             input: path.clone(),
             emit: Emit::Nir,
             output: None,
+            build_modes: Default::default(),
             sysroot: None,
             splice_protocol: None,
             meta_list_type: None,

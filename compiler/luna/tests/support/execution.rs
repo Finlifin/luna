@@ -65,6 +65,7 @@ pub(crate) fn compile_with_source_bindings_for_target(
             input: path.clone(),
             emit: Emit::Nir,
             output: None,
+            build_modes: Default::default(),
             sysroot: None,
             splice_protocol: selectors.splice.map(str::to_owned),
             meta_list_type: selectors.meta_list.map(str::to_owned),
