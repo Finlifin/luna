@@ -82,6 +82,7 @@ pub enum Action {
     AnalyzeTextRegions {
         entry: String,
         fuel: u64,
+        inline: bool,
     },
     Analyze {
         entry: String,
@@ -378,7 +379,15 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
             options,
             entry,
             fuel,
-        } => (options, Action::AnalyzeTextRegions { entry, fuel }),
+            inline_functions,
+        } => (
+            options,
+            Action::AnalyzeTextRegions {
+                entry,
+                fuel,
+                inline: inline_functions,
+            },
+        ),
         Command::AnalyzeResources {
             options,
             entry,
@@ -921,10 +930,16 @@ impl Action {
                 };
                 value.map(|v| v.to_string())
             }
-            Action::AnalyzeTextRegions { entry, fuel } => {
+            Action::AnalyzeTextRegions {
+                entry,
+                fuel,
+                inline,
+            } => (if *inline {
+                crate::text_regions::analyze_inlined_in_package(package, identity, entry, *fuel)
+            } else {
                 crate::text_regions::analyze_in_package(&package, identity, entry, *fuel)
-                    .map(|summary| summary.to_string())
-            }
+            })
+            .map(|summary| summary.to_string()),
             Action::Analyze {
                 entry, fuel, drop, ..
             } => crate::resources::analyze_selected(

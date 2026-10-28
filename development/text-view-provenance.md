@@ -1,5 +1,29 @@
 # Text iteration prerequisite: borrowed storage provenance
 
+## Analyzing joint inline expansion
+
+`--analyze-text-regions <entry> --inline-functions` jointly expands inline
+producers and handlers before inferring text dependencies. It works for ordinary
+source inputs and explicit package sets. Entry selection still uses the primary
+semantic package and requires an ordinary nongeneric runtime wrapper. Expansion
+and inference share `--fuel`; failed queries do not publish output files.
+
+```sh
+python3 -B development/check.py --timeout 900 -- run --release -p luna -- development/examples/text-inline-regions.fl --sysroot library --build-target x86_64 linux 64 --analyze-text-regions observed --inline-functions --fuel 2000000
+```
+
+The example reads and returns the backing region of parameter zero. It does not
+turn that caller-owned region into static storage. Tests also cover the byte
+iteration prototype, adapters and lexical exits after expansion, including
+static UTF-8 literals and symbolic text inputs.
+The explicit target supplies the sysroot's `usize` layout; analysis does not
+silently substitute the compiler host's pointer width.
+
+This is dependency analysis, not runtime permission. It neither enables Copy
+nor proves backing-character liveness. Pointer-only resource consumers still
+reject unsupported text regions, and the byte iterator remains a prototype.
+General unexpanded effect transfer is still outside this analysis path.
+
 `development/library-prototypes/builtin/text_iteration.fl` composes the existing
 checked byte query with inline item delivery. It is intentionally outside the
 sysroot and has no public export. The algorithm works in unchecked reference

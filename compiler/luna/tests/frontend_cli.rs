@@ -9334,6 +9334,44 @@ fn text_region_cli_rejects_conflicting_actions_and_permissions() {
 }
 
 #[test]
+fn text_region_cli_jointly_expands_inline_effects_with_one_budget() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "typealias str=.str'builtin;typealias Unit=.void'builtin;
+        inline effect deliver(value:str);
+        inline fn produce(value:str)->#deliver Unit {deliver(value)#;}
+        fn run(value:str)->str {
+            produce(value)# {deliver(text)=>{let byte=.str_byte'builtin(text,0);return text;},};
+            \"unused\"
+        }",
+    );
+    let arguments = [
+        "input.fl",
+        "--analyze-text-regions",
+        "run",
+        "--inline-functions",
+    ];
+    let output = sandbox.run(&arguments);
+    let dump = success(&output);
+    single_sexpression(dump);
+    assert!(
+        dump.contains("(reads (parameter-text-region 0 (fields)))"),
+        "{dump}"
+    );
+    assert!(
+        dump.contains("(returned (view (fields) (origins (parameter-text-region 0 (fields)))))"),
+        "{dump}"
+    );
+    sandbox.write("result.lisp", OLD_OUTPUT);
+    let mut limited = arguments.to_vec();
+    limited.extend(["--fuel", "1", "--output", "result.lisp"]);
+    failure(&sandbox.run(&limited), 1);
+    assert_eq!(fs::read(sandbox.path("result.lisp")).unwrap(), OLD_OUTPUT);
+    assert_eq!(success(&sandbox.run(&arguments)), dump);
+}
+
+#[test]
 fn text_region_cli_selects_primary_package_and_tracks_provider_calls() {
     let sandbox = Sandbox::new();
     sandbox.write(
@@ -9342,7 +9380,7 @@ fn text_region_cli_selects_primary_package_and_tracks_provider_calls() {
     );
     sandbox.write(
         "provider.fl",
-        "pub fn echo(value:.str'builtin)->.str'builtin {value} fn run()->.str'builtin {\"wrong\"}",
+        "pub inline fn echo(value:.str'builtin)->.str'builtin {value} fn run()->.str'builtin {\"wrong\"}",
     );
     let output = sandbox.run(&[
         "--packages-v1",
@@ -9364,6 +9402,7 @@ fn text_region_cli_selects_primary_package_and_tracks_provider_calls() {
         "9",
         "--analyze-text-regions",
         "run",
+        "--inline-functions",
         "--with-inputs",
     ]);
     let dump = success(&output);

@@ -4,7 +4,7 @@
 mod support;
 use comptime_interpretor::Value;
 
-fn check(body: &str) {
+fn compile(body: &str) -> nir::program::Package {
     let source = format!(
         "{}\n{}\nmod iterator {{ {} }}\nmod text_bytes {{ {} }}\nmod text_iteration {{ {} }}\n{}",
         include_str!("../../../library/builtin/primitives.fl"),
@@ -14,7 +14,7 @@ fn check(body: &str) {
         include_str!("../../../development/library-prototypes/builtin/text_iteration.fl"),
         body
     );
-    let package = support::compile_with_source_bindings_for_target(
+    support::compile_with_source_bindings_for_target(
         &source,
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
@@ -25,9 +25,22 @@ fn check(body: &str) {
         },
         Some(luna::frontend::native_test_target().unwrap()),
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn check(body: &str) {
+    let package = compile(body);
     let mut expanded = package.clone();
     elaboration::program::inlining::expand(&mut expanded, &mut 2_000_000).unwrap();
+    let summary =
+        luna::text_regions::analyze_inlined_in_package(package.clone(), 0, "run", 2_000_000)
+            .unwrap();
+    assert_eq!(
+        summary.reads,
+        std::collections::BTreeSet::from([
+            elaboration::verification::memory::TextRegionOrigin::Static,
+        ])
+    );
     for package in [&package, &expanded] {
         assert_eq!(
             luna::execution::interpret(package, "run", 2_000_000).unwrap(),
@@ -88,4 +101,26 @@ fn bytes_compose_with_adapters_and_lexical_exits() {
         fn verify() {let passed=run();assumes passed;}
     "#,
     );
+}
+
+#[test]
+fn inlined_iteration_retains_symbolic_backing_regions_and_budget_failures() {
+    let package = compile(
+        "fn first(value:str)->?u8 {for byte in text_iteration.bytes(value) {return byte;}null}",
+    );
+    assert!(
+        luna::text_regions::analyze_inlined_in_package(package.clone(), 0, "first", 1).is_err()
+    );
+    let summary =
+        luna::text_regions::analyze_inlined_in_package(package, 0, "first", 2_000_000).unwrap();
+    assert_eq!(
+        summary.reads,
+        std::collections::BTreeSet::from([
+            elaboration::verification::memory::TextRegionOrigin::Parameter {
+                parameter: 0,
+                fields: vec![]
+            },
+        ])
+    );
+    assert!(summary.returned.unwrap().is_empty());
 }
