@@ -163,3 +163,26 @@ fn arithmetic_budget_and_storage_failures_leave_later_operations_usable() {
         assert_eq!(eval(f, Op::Divide, one, one), one);
     }
 }
+
+#[test]
+fn square_root_exhausts_both_formats_against_wide_quantization() {
+    for (format, fraction, bias, infinity) in
+        [(F::Binary16, 10, 15, 0x7c00), (F::BFloat16, 7, 127, 0x7f80)]
+    {
+        for bits in 0..=u16::MAX {
+            let actual = format.square_root(bits);
+            let expected = quantize(
+                decode(bits, fraction, bias, infinity).sqrt(),
+                fraction,
+                bias,
+                infinity,
+            );
+            if expected & 0x7fff > infinity {
+                assert!(actual & 0x7fff > infinity, "{format} {bits:04x}");
+                assert_ne!(actual & (1 << (fraction - 1)), 0);
+            } else {
+                assert_eq!(actual, expected, "{format} {bits:04x}");
+            }
+        }
+    }
+}

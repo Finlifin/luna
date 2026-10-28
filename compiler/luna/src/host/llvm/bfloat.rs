@@ -62,6 +62,35 @@ impl Emitter<'_> {
         if op == Op::AbsoluteValue {
             return Ok(self.instruction(Ty::BFloat16, format!("and i16 {}, 32767", a.text)));
         }
+        if op == Op::SquareRoot {
+            // bf16 midpoint squares need at most 18 significant bits. A
+            // correctly rounded f32 sqrt cannot cross a bf16 midpoint for a
+            // bf16 input; round the widened result to nearest-even explicitly.
+            let wide = self.widen_bfloat(a);
+            self.declarations
+                .insert("declare float @llvm.sqrt.f32(float)".into());
+            let root = self.instruction(
+                Ty::Float32,
+                format!("call float @llvm.sqrt.f32(float {})", wide.text),
+            );
+            let bits = self.instruction(
+                Ty::Int(32, false),
+                format!("bitcast float {} to i32", root.text),
+            );
+            let high = self.instruction(Ty::Int(32, false), format!("lshr i32 {}, 16", bits.text));
+            let parity = self.instruction(Ty::Int(32, false), format!("and i32 {}, 1", high.text));
+            let bias = self.instruction(
+                Ty::Int(32, false),
+                format!("add i32 {}, 32767", parity.text),
+            );
+            let rounded = self.instruction(
+                Ty::Int(32, false),
+                format!("add i32 {}, {}", bits.text, bias.text),
+            );
+            let upper =
+                self.instruction(Ty::Int(32, false), format!("lshr i32 {}, 16", rounded.text));
+            return Ok(self.instruction(Ty::BFloat16, format!("trunc i32 {} to i16", upper.text)));
+        }
         if matches!(
             op,
             Op::Floor | Op::Ceiling | Op::Truncate | Op::RoundEven | Op::RoundAway

@@ -58,3 +58,8 @@ python3 -B development/check.py --timeout 900 -- run --release -p luna -- develo
 `roundeven` 的中点取偶数，`round` 的中点远离零；所有操作保留零的符号，
 无穷不变，NaN 仍为 NaN。bf16 在 LLVM 路径中精确扩宽到 f32 后取整，
 结果可精确表示为 bf16，因此回存不引入第二次舍入。
+
+`sqrt` 接受 f16/bf16，按最近偶数舍入返回原类型。负零仍为负零，正无穷
+保持不变；负非零输入与 NaN 输入产生 NaN，不承诺 NaN 的具体载荷。
+f16 使用 LLVM half sqrt，bf16 使用精确扩宽后的 f32 sqrt，再按最近偶数
+舍入回 bf16。对 bf16 输入，这条路径不会因中间舍入跨过 bf16 的舍入中点。

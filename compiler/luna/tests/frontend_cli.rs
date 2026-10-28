@@ -10315,3 +10315,93 @@ fn sysroot_half_float_rounding_preserves_zero_and_tie_directions() {
         }
     }
 }
+
+#[test]
+fn sysroot_half_float_square_root_handles_boundaries_and_domain_errors() {
+    use comptime_runtime::float16::Float16Format as F;
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    for (ty, format, one, normal, infinity) in [
+        ("f16", F::Binary16, 0x3c00u16, 0x400, 0x7c00),
+        ("bf16", F::BFloat16, 0x3f80, 0x80, 0x7f80),
+    ] {
+        let patterns = [
+            0,
+            0x8000,
+            1,
+            normal - 1,
+            normal,
+            one - 1,
+            one,
+            one + 1,
+            0x4000,
+            0x4040,
+            infinity - 1,
+            infinity,
+            infinity | 0x8000,
+            one | 0x8000,
+            infinity | 1,
+            infinity | 0x8001,
+        ];
+        let mut source = String::new();
+        for (phase, module, helper, entry) in [
+            ("", "math", "check", "run"),
+            ("comptime ", "meta.math", "staged_check", "staged"),
+        ] {
+            let checks = patterns
+                .iter()
+                .map(|&bits| {
+                    let expected = format.square_root(bits);
+                    format!(
+                        "{helper}({bits},{expected},{})",
+                        expected & 0x7fff > infinity
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" and ");
+            source.push_str(&format!(
+                r#"
+{phase}fn {helper}(raw:u16, expected:u16, nan:bool)->bool {{
+    let result={module}.sqrt(raw'bitvec.as({ty}));
+    if nan {{ {module}.isnan(result) }} else {{ result'bitvec.as(u16)==expected }}
+}}
+{phase}fn {entry}()->bool {{ {checks} }}
+"#
+            ));
+        }
+        source.push_str("fn folded()->bool {const result=staged();result}");
+        sandbox.write("input.fl", source);
+        let base = [
+            "input.fl",
+            "--sysroot",
+            root.to_str().unwrap(),
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+        ];
+        assert_eq!(
+            success(&sandbox.run(&[base.as_slice(), &["--invoke-comptime", "staged"]].concat()))
+                .trim(),
+            "(bool true)"
+        );
+        for entry in ["run", "folded"] {
+            for level in ["0", "3"] {
+                success(
+                    &sandbox.run(
+                        &[
+                            base.as_slice(),
+                            &["--build", entry, "--opt-level", level, "--output", "native"],
+                        ]
+                        .concat(),
+                    ),
+                );
+                assert_eq!(
+                    success(&Command::new(sandbox.path("native")).output().unwrap()).trim(),
+                    "(bool true)",
+                    "{ty} {entry} O{level}"
+                );
+            }
+        }
+    }
+}

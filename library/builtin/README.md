@@ -26,4 +26,5 @@ NaN 的有序比较为 false，正负零比较相等；VM、常量折叠和 LLVM
 `abs`、`copysign`、`minimum`、`maximum`、`minimumnum`、`maximumnum`
 也已接通半精度；符号操作保留其余位模式，极值操作区分 NaN 策略与正负零。
 `floor`、`ceil`、`trunc`、`roundeven`、`round` 也支持这两种格式，
-返回原浮点类型并保留零的符号。其余数学包装当前的浮点运算域仍为 f32/f64。
+返回原浮点类型并保留零的符号。`sqrt` 也已支持这两种格式；负非零输入
+产生 NaN，负零保留。其余数学包装当前的浮点运算域仍为 f32/f64。

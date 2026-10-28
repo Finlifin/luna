@@ -21,8 +21,9 @@ pure comptime fn reversed_mask() -> u8 {
 }
 ```
 
-The arithmetic scalar domain matches `builtin.math`: IEEE `f32`/`f64`, fixed-width
-integers, and `usize`/`isize` with an explicitly selected compilation target.
+The arithmetic scalar domain matches `builtin.math`: IEEE `f32`/`f64`,
+`f16`/`bf16` for the operations detailed below, fixed-width integers, and
+`usize`/`isize` with an explicitly selected compilation target.
 It does not convert the arbitrary-precision `Integer` or decimal `Float` to a
 machine scalar implicitly. Extending those domains requires their own numeric
 contracts and implementations; they are not implemented by this module yet.
@@ -73,5 +74,11 @@ variants choose the number when exactly one operand is NaN.
 formats and return the original floating type. Ties go to even for
 `roundeven` and away from zero for `round`. Zero signs and infinities are
 preserved; NaNs remain NaNs. The VM rounds the source significand directly
-with bounded integer operations. Other floating math wrappers do not yet
-admit half precision.
+with bounded integer operations.
+
+`sqrt` also accepts both formats and rounds to nearest-even. It preserves
+negative zero and positive infinity, and produces NaN for negative nonzero
+inputs and NaNs. NaN payloads are not part of this interface contract. The
+VM compares the input with exact squared midpoints in a bounded binary
+search; it does not first round through a host floating type. Other floating
+math wrappers do not yet admit half precision.

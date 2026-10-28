@@ -2166,10 +2166,11 @@ fn ldexp_requires_float_base_and_signed_i32_exponent_including_pending_templates
 }
 
 #[test]
-fn half_sign_extrema_and_rounding_bindings_preserve_format_identity() {
+fn half_math_bindings_preserve_format_identity() {
     let package = support::compile("^intrinsic_enum enum Ops {operation}");
     let tag = tag(&package, "Ops", 0);
     for op in [
+        Operation::SquareRoot,
         Operation::Floor,
         Operation::Ceiling,
         Operation::Truncate,
@@ -2196,7 +2197,7 @@ fn half_sign_extrema_and_rounding_bindings_preserve_format_identity() {
             assert!(registry.check(tag, &inputs, &ty).is_err());
         }
     }
-    for op in [Operation::SquareRoot, Operation::FusedMultiplyAdd] {
+    for op in [Operation::FusedMultiplyAdd] {
         let registry = Registry::new(&package, &[(tag, op)]).unwrap();
         for primitive in [P::F16, P::Bf16] {
             let ty = Term::Primitive(primitive);

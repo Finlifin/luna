@@ -281,6 +281,8 @@ fn half_scalar(op: Op, values: &[Value], bfloat: bool) -> Option<Value> {
     };
     let result = if let Some(mode) = rounding {
         format.round_integral(a, mode)
+    } else if op == Op::SquareRoot {
+        format.square_root(a)
     } else if op == Op::AbsoluteValue {
         a & 0x7fff
     } else {

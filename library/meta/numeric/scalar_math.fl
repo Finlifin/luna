@@ -28,7 +28,7 @@ where T, requires T == f32 or T == f64
 
 -- Bind every Scalar operation when loading this package, including unused generic bodies.
 pub pure comptime fn sqrt(value: T) -> T
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.sqrt'intrinsic(value).as(T) }
 }
