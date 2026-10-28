@@ -378,3 +378,23 @@ The resolver exposes `build_package_set_with_preludes` for explicitly designated
 provider IDs. The existing package-set CLI still designates only builtin through
 its existing option; additional provider registration currently enters through
 the sysroot path, not by guessing roles from arbitrary package names.
+
+
+### Explicit source build targets
+
+Package requests and resident frames accept `--build-target ARCH OS BITS` and
+`--build-feature NAME=true|false` for the primary semantic package, plus
+`--package-build-target ID ARCH OS BITS` and
+`--package-build-feature ID NAME=true|false` for explicit semantic identities.
+Features can precede targets; each selected package must have its own complete
+target input. Empty names, duplicate targets/features, unknown identities,
+primary/explicit overlap and unsupported pointer widths are errors. Resolution
+IDs do not stand in for semantic IDs. No dependency inherits the primary input.
+
+These inputs require NIR compilation or execution and are retained in the full
+request cache key. Architecture, OS, width and feature presence/value changes
+invalidate reuse; missing-input failures do not substitute old compiled values.
+The primary width supplies semantic TargetData for NIR-only requests. Native
+actions use their actual backend layout and reject a conflicting primary width.
+The inputs describe the source build context; they do not select LLVM target
+triples or CPU feature flags. Observation-selective reuse remains pending.

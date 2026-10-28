@@ -154,6 +154,19 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--list-tests",
             ) => forwarded.push(argument),
             Some(
+                flag @ ("--build-target" | "--package-build-target" | "--package-build-feature"),
+            ) => {
+                let count = match flag {
+                    "--build-target" => 3,
+                    "--package-build-target" => 4,
+                    _ => 2,
+                };
+                forwarded.push(argument);
+                for _ in 0..count {
+                    forwarded.push(take(&mut args, "build target value")?);
+                }
+            }
+            Some(
                 "--build"
                 | "--emit-llvm"
                 | "--emit-asm"
@@ -167,6 +180,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--test-filter"
                 | "--test-timeout-ms"
                 | "--fuel"
+                | "--build-feature"
                 | "--build-mode"
                 | "--package-build-mode"
                 | "--host-fma"
@@ -502,17 +516,24 @@ impl Request {
         self.compile_observed(None)
     }
     pub(crate) fn semantic_target(&self) -> Result<Option<nir::target::TargetData>, String> {
-        if matches!(&self.action, Action::Build { .. } | Action::EmitHost { .. }) {
-            Ok(Some(
+        let target = if matches!(&self.action, Action::Build { .. } | Action::EmitHost { .. }) {
+            Some(
                 crate::host::Toolchain::default()
                     .target_layout()?
                     .semantic_target()?,
-            ))
+            )
         } else if matches!(&self.action, Action::Tests { native: true, .. }) {
-            Ok(crate::frontend::native_test_target())
+            crate::frontend::native_test_target()
         } else {
-            Ok(None)
-        }
+            None
+        };
+        let primary = self
+            .packages
+            .iter()
+            .find(|package| package.resolution_id == self.primary)
+            .ok_or("primary source package is absent")?
+            .identity;
+        self.options.build_targets.resolve_layout(primary, target)
     }
 
     pub(crate) fn compile_observed(
@@ -538,6 +559,7 @@ impl Request {
             .collect::<Vec<_>>();
         let options = &self.options;
         options.build_modes.validate_stage(options.emit)?;
+        options.build_targets.validate_stage(options.emit)?;
         let (copy, drop) = match &self.action {
             Action::Tests {
                 protocols: Some((copy, drop)),
@@ -573,6 +595,11 @@ impl Request {
             self.packages.iter().map(|package| package.identity),
             primary_identity,
             &Default::default(),
+        )?;
+        let configured = options.build_targets.bind(
+            self.packages.iter().map(|package| package.identity),
+            primary_identity,
+            &configured,
         )?;
         crate::packages::compile_observed_for_target_with_invocation(
             &self.packages,

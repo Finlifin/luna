@@ -399,3 +399,75 @@ fn explicit_build_modes_invalidate_cached_source_results_without_fallback() {
         "{error}"
     );
 }
+
+#[test]
+fn target_snapshots_and_optional_features_participate_in_cache_identity() {
+    let files = Files::new();
+    files.write(
+        "client.fl",
+        "fn run()->bool {
+        inline if (build.target.arch matches .arch) and (build.target.os matches .os)
+            and build.target.pointer_bits == 64
+            and (build.target.features.get(.simd) matches true?) {true}else{false}
+    }",
+    );
+    let mut request = files.request("client.fl");
+    request.packages.push(luna::packages::SourcePackage {
+        resolution_id: 2,
+        identity: 202,
+        name: "build".into(),
+        entry: std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl"),
+    });
+    request.dependencies.push((1, "build".into(), 2));
+    let options = |arch: &str, os: &str, bits: &str, feature: Option<bool>| {
+        let mut selected = luna::build_context::TargetOptions::default();
+        selected
+            .set_target(None, arch.into(), os.into(), bits)
+            .unwrap();
+        if let Some(feature) = feature {
+            selected
+                .add_feature(None, &format!("simd={feature}"))
+                .unwrap();
+        }
+        selected
+    };
+    request.options.build_targets = options("arch", "os", "64", Some(true));
+    let mut cache = CompilationCache::new(10);
+    let first = cache.compile(&request).unwrap();
+    assert!(!first.reused);
+    assert_eq!(result(&first), comptime_interpretor::Value::Bool(true));
+    assert_eq!(
+        match &first.compilation.artifact {
+            Artifact::Nir(package) => package.target,
+            _ => None,
+        },
+        Some(nir::target::TargetData::new(64).unwrap())
+    );
+    assert!(cache.compile(&request).unwrap().reused);
+    for (arch, os, bits, feature) in [
+        ("other", "os", "64", Some(true)),
+        ("arch", "other", "64", Some(true)),
+        ("arch", "os", "32", Some(true)),
+        ("arch", "os", "64", Some(false)),
+        ("arch", "os", "64", None),
+    ] {
+        let mut changed = request.clone();
+        changed.options.build_targets = options(arch, os, bits, feature);
+        let outcome = cache.compile(&changed).unwrap();
+        assert!(!outcome.reused, "{arch}/{os}/{bits}/{feature:?}");
+        assert_eq!(result(&outcome), comptime_interpretor::Value::Bool(false));
+        assert!(cache.compile(&changed).unwrap().reused);
+    }
+    let mut missing = request.clone();
+    missing.options.build_targets = Default::default();
+    missing
+        .options
+        .build_targets
+        .set_target(Some(202), "arch".into(), "os".into(), "64")
+        .unwrap();
+    let error = cache.compile(&missing).err().unwrap();
+    assert!(error.contains("source package 101"), "{error}");
+    let recovered = cache.compile(&request).unwrap();
+    assert!(recovered.reused);
+    assert_eq!(result(&recovered), comptime_interpretor::Value::Bool(true));
+}

@@ -918,6 +918,7 @@ mod stage_tests {
             emit: Emit::Hir,
             output: None,
             build_modes: Default::default(),
+            build_targets: Default::default(),
             sysroot: None,
             index_protocol: None,
             ord_protocol: None,

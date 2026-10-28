@@ -375,3 +375,187 @@ impl ModeOptions {
         Ok(protocols)
     }
 }
+
+/// A target and its explicit feature overrides form one complete input.
+/// Features may precede the target flag, but cannot exist without that target.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TargetSelection {
+    target: Option<elaboration::program::build_context::Target>,
+    features: BTreeMap<String, bool>,
+}
+impl TargetSelection {
+    fn complete(&self) -> Result<Option<elaboration::program::build_context::Target>, String> {
+        match &self.target {
+            Some(target) => {
+                let mut target = target.clone();
+                target.features = self.features.clone();
+                Ok(Some(target))
+            }
+            None if self.features.is_empty() => Ok(None),
+            None => Err("build features require an explicit target for the same package".into()),
+        }
+    }
+}
+
+/// Explicit CLI target inputs, keyed by semantic package identity.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TargetOptions {
+    primary: TargetSelection,
+    packages: BTreeMap<u64, TargetSelection>,
+}
+impl TargetOptions {
+    fn selection(&mut self, owner: Option<u64>) -> &mut TargetSelection {
+        match owner {
+            Some(owner) => self.packages.entry(owner).or_default(),
+            None => &mut self.primary,
+        }
+    }
+
+    pub fn package_identity(value: &str) -> Result<u64, String> {
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("build target requires an unsigned semantic package identity".into());
+        }
+        value
+            .parse()
+            .map_err(|_| "build target package identity is out of range".into())
+    }
+
+    pub fn set_target(
+        &mut self,
+        owner: Option<u64>,
+        arch: String,
+        os: String,
+        bits: &str,
+    ) -> Result<(), String> {
+        if arch.is_empty() || os.is_empty() {
+            return Err("build target architecture and OS must be nonempty".into());
+        }
+        if bits.is_empty() || !bits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("build target pointer width must be an unsigned decimal integer".into());
+        }
+        let bits = bits
+            .parse::<u32>()
+            .map_err(|_| "build target pointer width is out of range")?;
+        let layout = TargetData::new(bits)?;
+        let selected = self.selection(owner);
+        if selected.target.is_some() {
+            return Err("duplicate build target for the same package".into());
+        }
+        selected.target = Some(elaboration::program::build_context::Target {
+            arch,
+            os,
+            layout,
+            features: BTreeMap::new(),
+        });
+        Ok(())
+    }
+
+    pub fn add_feature(&mut self, owner: Option<u64>, feature: &str) -> Result<(), String> {
+        let (name, value) = feature
+            .split_once('=')
+            .ok_or("build feature requires name=true|false")?;
+        if name.is_empty() {
+            return Err("build feature name must be nonempty".into());
+        }
+        let enabled = match value {
+            "true" => true,
+            "false" => false,
+            _ => return Err("build feature requires name=true|false".into()),
+        };
+        let selected = self.selection(owner);
+        if selected.features.contains_key(name) {
+            return Err(format!("duplicate build feature {name}"));
+        }
+        selected.features.insert(name.into(), enabled);
+        Ok(())
+    }
+
+    pub fn validate_stage(&self, emit: crate::cli::Emit) -> Result<(), String> {
+        if self.primary.target.is_none()
+            && self.primary.features.is_empty()
+            && self.packages.is_empty()
+        {
+            return Ok(());
+        }
+        if emit != crate::cli::Emit::Nir {
+            return Err("build target inputs require NIR elaboration or execution".into());
+        }
+        self.primary.complete()?;
+        for selected in self.packages.values() {
+            selected.complete()?;
+        }
+        Ok(())
+    }
+
+    /// Target input supplies semantic pointer width, but does not retarget LLVM.
+    /// Native actions provide their actual layout and must agree with this input.
+    pub fn resolve_layout(
+        &self,
+        primary: u64,
+        existing: Option<TargetData>,
+    ) -> Result<Option<TargetData>, String> {
+        let direct = self.primary.complete()?;
+        let explicit = self
+            .packages
+            .get(&primary)
+            .map(TargetSelection::complete)
+            .transpose()?
+            .flatten();
+        if direct.is_some() && explicit.is_some() {
+            return Err(format!(
+                "primary build target conflicts with explicit package {primary}"
+            ));
+        }
+        let configured = direct.or(explicit).map(|target| target.layout);
+        if matches!((existing, configured), (Some(a), Some(b)) if a != b) {
+            return Err("build target layout conflicts with the compilation target".into());
+        }
+        Ok(existing.or(configured))
+    }
+
+    pub fn bind(
+        &self,
+        owners: impl IntoIterator<Item = u64>,
+        primary: u64,
+        base: &elaboration::program::Protocols,
+    ) -> Result<elaboration::program::Protocols, String> {
+        let owners: BTreeSet<_> = owners.into_iter().collect();
+        let mut selected = BTreeMap::new();
+        for (owner, input) in &self.packages {
+            if !owners.contains(owner) {
+                return Err(format!(
+                    "build target names unknown semantic package identity {owner}"
+                ));
+            }
+            if let Some(target) = input.complete()? {
+                selected.insert(*owner, target);
+            }
+        }
+        if let Some(target) = self.primary.complete()? {
+            if !owners.contains(&primary) {
+                return Err(format!(
+                    "build target names unknown semantic package identity {primary}"
+                ));
+            }
+            if selected.insert(primary, target).is_some() {
+                return Err(format!(
+                    "primary build target conflicts with explicit package {primary}"
+                ));
+            }
+        }
+        let mut protocols = base.clone();
+        for (owner, target) in selected {
+            if protocols
+                .build_targets
+                .get(&owner)
+                .is_some_and(|old| old != &target)
+            {
+                return Err(format!(
+                    "build target conflicts with driver snapshot for package {owner}"
+                ));
+            }
+            protocols.build_targets.insert(owner, target);
+        }
+        Ok(protocols)
+    }
+}

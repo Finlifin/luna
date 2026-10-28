@@ -17,7 +17,8 @@
   只读 mode 不依赖目标 feature 或执行宿主。缺失 feature 与显式 false 不等价，
   来源包消失也会使旧证据失效。
 - 快照和查询证据的 Display 为稳定的 S-expression，名称转义，包与 feature
-  按键排序。接口版本是驱动输入契约，尚无对应的流式/持久化传输格式。
+  按键排序。接口版本是驱动输入契约，完整 Snapshot 仍无持久化传输格式；
+  mode/目标输入可通过版本 1 包请求的命令行参数传输。
 
 `configure_modes(&mut protocols)` 将快照中的 mode 绑定到源码 elaboration，读取
 位置按原始 HIR 定义归属取值，产物保留已选中的 Symbol。
@@ -26,10 +27,11 @@ Target/TargetFeatures 声明，编译器校验 marker 的字段布局后生成 n
 features 保存排序后的 Object，公开 get 方法是库中的普通 comptime 代码。
 具体编译布局与目标快照冲突时拒绝，未提供编译布局时可以独立进行 comptime
 配置查询。源码别名、常量和依赖包读取不会转移配置归属。
-字段级缓存证据尚未接线，Observation 仍是驱动侧接口；CLI/流式 mode 输入已
+字段级缓存证据尚未接线，Observation 仍是驱动侧接口；CLI/流式 mode 和目标输入已
 进入完整请求缓存键，但不能据此宣称精确缓存
 失效或所有 template/CMTT 生成场景已经端到端完成。
-下一步需要接通目标快照的 CLI/流式传输，同时将观察项交付给增量编译缓存。
+下一步需要将观察项交付给增量编译缓存。CLI 目标参数仅提供构建事实和主包的
+语义布局，不改变 LLVM 目标三元组或 CPU feature 设置；native 布局冲突拒绝。
 `package_metadata` 的类型化值输入、构建脚本工具及 anar 调度/传输仍待实现。
 不会通过运行时环境变量隐式补齐这些输入。
 

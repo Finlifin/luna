@@ -4427,3 +4427,49 @@ Complete target snapshots currently enter through the Rust embedding API.
 CLI/resident target transport, observation-selective cache invalidation,
 package_metadata and build scripts remain pending. The existing mode-only
 CLI/cache behavior remains covered; target snapshot cache reuse is not claimed.
+
+
+### Target configuration in CLI and resident requests (2026-10-28)
+
+Added complete per-package target inputs to ordinary commands, explicit package
+requests and resident frames. Primary and semantic-ID forms supply architecture,
+OS, pointer width and optional Boolean features. Feature flags can precede target
+flags; orphan features, duplicate inputs, unknown identities, conflicting driver
+snapshots and ambiguous primary bindings reject rather than silently override.
+Primary pointer width supplies NIR TargetData, while native actions require it
+to match the actual backend layout. These are build-context inputs, not LLVM
+triple/CPU selection flags.
+
+The full parsed request includes targets and feature presence. Cache tests alter
+architecture, OS, pointer width, enabled/disabled/absent features independently,
+check the resulting runtime Boolean, then recover the original cached result.
+Actual resident frames check reuse, changed input, missing input failure and
+recovery. The public sysroot fixture now runs directly from the CLI.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test build_context --test compilation_cache`
+  exited 0: 20 build-context and 10 cache tests passed, including complete sysroot
+  O0/O3 execution. Evidence: `/tmp/luna-tools-dwkam_q6/result.json`, `stdout.log`.
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --lib cli::tests`
+  exited 0: 7 ordinary/package CLI unit tests passed, 73 filtered out.
+  Evidence: `/tmp/luna-tools-c9x21fru/result.json`.
+- `python3 -B development/library_check.py --release --stage sysroot-build-target --stage sysroot-build-mode`
+  exited 0: two native target cases and one mode case passed via real CLI inputs.
+  Evidence: `/tmp/luna-library-se_35bmp/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-build-target.fl --sysroot library --build-target configured_arch configured_os 64 --build-feature vector=true --build-feature disabled=false --test-native --opt-level 3`
+  exited 0: both native cases passed at O3.
+  Evidence: `/tmp/luna-tools-wuf8yrln/result.json`, `stdout.log`.
+- `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-build-target.fl --sysroot library --build-target configured_arch configured_os 32 --build-feature vector=true --test-native`
+  exited 1 as expected with `build target layout conflicts with the compilation target`.
+  Evidence: `/tmp/luna-tools-o1nwiqf9/result.json`, `stderr.log`.
+- `python3 -B -m unittest discover -s development -p test_library_check.py`
+  exited 0: 13 orchestration tests passed, including rejection of missing native
+  target test results. `git diff --check` passed.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+  exited 0; `/tmp/luna-tools-jf42azjq/result.json`.
+
+Observation-selective reuse, typed package metadata and build scripts remain
+pending. No cross-compilation backend selection is claimed. Options literals
+across the existing tests received the new default target field; unrelated
+suites were not rerun for that mechanical API update.

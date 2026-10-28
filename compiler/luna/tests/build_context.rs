@@ -739,3 +739,258 @@ fn source_target_rejects_unvalidated_empty_driver_names() {
         assert!(error.contains("empty configuration name"), "{error}");
     }
 }
+
+#[test]
+fn cli_targets_validate_identity_features_and_stage_without_order_dependence() {
+    let parse = |extra: &[&str]| {
+        luna::cli::parse(
+            ["input.fl", "--emit", "nir"]
+                .into_iter()
+                .chain(extra.iter().copied())
+                .map(std::ffi::OsString::from),
+        )
+    };
+    let luna::cli::Command::Compile(options) = parse(&[
+        "--build-feature",
+        "avx2=false",
+        "--build-target",
+        "x86_64",
+        "linux",
+        "64",
+        "--package-build-feature",
+        "200",
+        "simd=true",
+        "--package-build-target",
+        "200",
+        "aarch64",
+        "other",
+        "64",
+    ])
+    .unwrap() else {
+        panic!("expected compile")
+    };
+    let bindings = options
+        .build_targets
+        .bind([100, 200], 100, &Default::default())
+        .unwrap();
+    assert_eq!(
+        bindings.build_targets[&100].features.get("avx2"),
+        Some(&false)
+    );
+    assert_eq!(
+        bindings.build_targets[&200].features.get("simd"),
+        Some(&true)
+    );
+    assert_eq!(bindings.build_targets[&200].arch, "aarch64");
+    assert_eq!(
+        options.build_targets.resolve_layout(100, None).unwrap(),
+        Some(TargetData::new(64).unwrap())
+    );
+    assert!(
+        options
+            .build_targets
+            .resolve_layout(100, Some(TargetData::new(32).unwrap()))
+            .is_err()
+    );
+    // Reapplying an identical snapshot is permitted, conflicting data is not.
+    assert!(
+        options
+            .build_targets
+            .bind([100, 200], 100, &bindings)
+            .is_ok()
+    );
+    let mut conflicting = bindings.clone();
+    conflicting
+        .build_targets
+        .get_mut(&100)
+        .unwrap()
+        .features
+        .clear();
+    assert!(
+        options
+            .build_targets
+            .bind([100, 200], 100, &conflicting)
+            .unwrap_err()
+            .contains("conflicts with driver snapshot")
+    );
+    assert!(
+        options
+            .build_targets
+            .bind([100], 100, &Default::default())
+            .unwrap_err()
+            .contains("unknown semantic package identity 200")
+    );
+    for invalid in [
+        vec!["--build-target", "x86_64", "linux"],
+        vec!["--build-target", "", "linux", "64"],
+        vec!["--build-target", "x86_64", "", "64"],
+        vec!["--build-target", "x86_64", "linux", "0"],
+        vec!["--build-target", "x86_64", "linux", "65"],
+        vec!["--build-target", "x86_64", "linux", "256"],
+        vec!["--build-target", "x86_64", "linux", "+64"],
+        vec!["--build-feature", "simd=true"],
+        vec!["--build-feature", "=true"],
+        vec!["--build-feature", "simd=yes"],
+        vec![
+            "--build-target",
+            "x",
+            "y",
+            "64",
+            "--build-feature",
+            "simd=true",
+            "--build-feature",
+            "simd=false",
+        ],
+        vec![
+            "--build-target",
+            "x",
+            "y",
+            "64",
+            "--build-target",
+            "x",
+            "y",
+            "64",
+        ],
+        vec!["--package-build-target", "-1", "x", "y", "64"],
+        vec![
+            "--package-build-target",
+            "18446744073709551616",
+            "x",
+            "y",
+            "64",
+        ],
+        vec![
+            "--package-build-target",
+            "1",
+            "x",
+            "y",
+            "64",
+            "--package-build-target",
+            "01",
+            "x",
+            "y",
+            "64",
+        ],
+        vec![
+            "--build-target",
+            "x",
+            "y",
+            "64",
+            "--package-build-feature",
+            "200",
+            "simd=true",
+        ],
+    ] {
+        assert!(parse(&invalid).is_err(), "{invalid:?}");
+    }
+    assert!(
+        luna::cli::parse(
+            ["input.fl", "--build-target", "x", "y", "64"].map(std::ffi::OsString::from)
+        )
+        .is_err()
+    );
+    let luna::cli::Command::Compile(dual) = parse(&[
+        "--build-target",
+        "x",
+        "y",
+        "64",
+        "--package-build-target",
+        "100",
+        "x",
+        "y",
+        "64",
+    ])
+    .unwrap() else {
+        panic!("expected compile")
+    };
+    assert!(
+        dual.build_targets
+            .bind([100], 100, &Default::default())
+            .is_err()
+    );
+}
+
+#[test]
+fn resident_target_inputs_recompile_changes_and_recover_after_missing_config() {
+    let fixture = SourceFixture::new(
+        "fn run()->bool {inline if build.target.features.get(.simd) matches true? {true}else{false}}",
+        "",
+    );
+    let build = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl");
+    let base = vec![
+        "--package".to_string(),
+        "3".into(),
+        "100".into(),
+        "app".into(),
+        fixture.0.join("app.fl").to_str().unwrap().into(),
+        "--package".into(),
+        "9".into(),
+        "300".into(),
+        "build".into(),
+        build.to_str().unwrap().into(),
+        "--dependency".into(),
+        "3".into(),
+        "build".into(),
+        "9".into(),
+        "--primary".into(),
+        "3".into(),
+        "--emit".into(),
+        "nir".into(),
+    ];
+    let mut frames = String::new();
+    for feature in [
+        Some("true"),
+        Some("true"),
+        Some("false"),
+        None,
+        Some("true"),
+    ] {
+        let mut args = base.clone();
+        if let Some(feature) = feature {
+            args.extend([
+                "--package-build-feature".into(),
+                "100".into(),
+                format!("simd={feature}"),
+                "--package-build-target".into(),
+                "100".into(),
+                "arch".into(),
+                "os".into(),
+                "64".into(),
+            ]);
+        }
+        frames.push_str(
+            &args
+                .iter()
+                .map(|arg| {
+                    arg.as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        frames.push('\n');
+    }
+    let mut output = Vec::new();
+    luna::package_stream::serve(&mut std::io::Cursor::new(frames), &mut output, 4).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    let replies: Vec<_> = output.lines().collect();
+    assert_eq!(replies.len(), 5);
+    for index in [0, 1, 2, 4] {
+        assert!(
+            replies[index].contains("(exit-code 0)"),
+            "{}",
+            replies[index]
+        );
+    }
+    assert!(replies[0].contains("(reused false)"));
+    assert!(replies[1].contains("(reused true)"));
+    assert!(replies[2].contains("(reused false)"));
+    assert!(
+        replies[3].contains("(exit-code 1)") && replies[3].contains("source package 100"),
+        "{}",
+        replies[3]
+    );
+    assert!(replies[4].contains("(reused true)"));
+}

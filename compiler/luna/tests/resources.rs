@@ -1461,6 +1461,7 @@ fn compile_in_with_resources(
             emit: Emit::Nir,
             output: None,
             build_modes: Default::default(),
+            build_targets: Default::default(),
             sysroot: None,
             splice_protocol: None,
             meta_list_type: None,

@@ -60,8 +60,29 @@ host pipeline target。安装会替换旧表，不保留旧快照的包或 featu
 TargetData 时，读取到的目标布局必须与它一致。读取缺少目标的包会报错，单独
 传入 mode 或选择 LLVM host 后端均不自动补齐目标配置。
 
-该源码路径已接通；CLI/流式协议尚未接受完整目标快照，精确查询观察项也尚未
-接入编译缓存。目标值中的 Object/Integer 等 comptime 数据仍受普通阶段与
+命令行与版本 1 包/流式请求可用以下选项传入目标：
+
+- `--build-target ARCH OS POINTER_BITS`：仅为主包指定目标。
+- `--build-feature NAME=true|false`：添加主包目标 feature，可重复使用不同名称。
+- `--package-build-target ID ARCH OS POINTER_BITS`：指定语义包 ID 的目标。
+- `--package-build-feature ID NAME=true|false`：添加该包的目标 feature。
+
+feature 可以出现在目标选项之前，但必须有同一包的完整目标选项；不能用
+feature 参数局部覆盖驱动快照。重复目标、重复 feature、主包双重绑定、未知
+语义 ID、空名称和不支持的指针宽度均拒绝。目标不会隐式传播到依赖包。
+主包输入提供 NIR 所需的指针宽度；native 操作要求它与实际后端布局一致。
+架构、系统和 feature 是驱动提供的构建事实，这些选项本身不切换 LLVM 的
+目标三元组或启用 CPU 指令集，不据此宣称已支持完整交叉编译。
+
+```sh
+python3 -B development/library_check.py --release --stage sysroot-build-target
+luna development/examples/sysroot-build-target.fl --sysroot library \
+  --build-target configured_arch configured_os 64 \
+  --build-feature vector=true --build-feature disabled=false --test-native
+```
+
+目标输入参与完整请求缓存键，包含 feature 缺失与 false 的区别。字段级查询
+观察项尚未接入编译缓存。目标值中的 Object/Integer 等 comptime 数据仍受普通阶段与
 Splice 检查，不能直接当作 runtime 配置对象使用。
 `build.package_metadata` 和构建脚本工具尚未实现，参见
 [构建快照](../../development/build-context.md)。

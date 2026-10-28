@@ -278,6 +278,10 @@ fn compile_bound_for_target_with_invocation(
     invocation: Option<&mut crate::packages::BuilderInvocation<'_>>,
 ) -> Result<(Artifact, elaboration::program::Protocols), String> {
     options.build_modes.validate_stage(options.emit)?;
+    options.build_targets.validate_stage(options.emit)?;
+    let target = options
+        .build_targets
+        .resolve_layout(package_identity, target)?;
     source_protocols(options).validate_stage(options.emit)?;
     selectors.validate_stage(options.emit)?;
     let cwd = std::env::current_dir()
@@ -308,6 +312,10 @@ fn compile_bound_for_target_with_invocation(
     let configured = options
         .build_modes
         .bind([package_identity], package_identity, protocols)?;
+    let configured =
+        options
+            .build_targets
+            .bind([package_identity], package_identity, &configured)?;
     let protocols = &configured;
     let source_file = sess
         .source_map
@@ -566,6 +574,11 @@ fn compile_sysroot(
         packages.iter().map(|package| package.identity),
         identity,
         protocols,
+    )?;
+    let configured = options.build_targets.bind(
+        packages.iter().map(|package| package.identity),
+        identity,
+        &configured,
     )?;
     let protocols = &configured;
     let mut dependencies = Vec::new();

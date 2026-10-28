@@ -554,6 +554,7 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         emit: Emit::Nir,
         output: None,
         build_modes: Default::default(),
+        build_targets: Default::default(),
         sysroot: None,
         splice_protocol: Some("Splice".into()),
         meta_list_type: None,
