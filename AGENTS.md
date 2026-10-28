@@ -80,6 +80,7 @@ Limitations:
 ### 内置包持续开发
 
 - 为某个类型准备的方法直接定义在该类型的固有 `impl` 中，通过类型或接收者调用，不堆积为带类型名前缀的自由函数，也不为承载这些方法另造扩展 trait。此规则同时适用于 runtime 与 comptime 方法。
+- 可选类型与错误限定类型也直接使用固有实现，例如 `impl ?T where T { ... }` 和 `impl !E T where T, E { ... }`。它们的专属操作不需要新增 `OptionalOps`、`ErrorResultOps` 等承载方法的 trait；现有此类接口属于待迁移实现，不能据此要求调用方导入 trait 或通过 `.as(Trait)` 访问这些方法。这不限制它们按需实现 Iterator、Clone 等实际协议。
 - 对编译器 builtin 类型，`builtin`、`meta`、`build`、`attrs`、`std`、`verification` 六个内置包都可以为其编写 `impl`（包括固有方法和 trait 实现），不受孤儿规则限制，不要求类型或 trait 归当前包所有。该豁免不自动扩展到用户包或非 builtin 类型，也不免除重复／冲突实现及其他语义检查；目标类型仍通过已有具名绑定引用。
 - 内置包是完成 Flurry 的主线交付，不能长期只推进编译器而搁置库实现，也不能等编译器全部完成后才补库。持续推进 `builtin`、`meta`、`build`、`attrs`、`std` 的实际能力；`verification` 按作者此前决定暂缓高级内容，但保留接口与依赖边界。
 - `math` 归入 `builtin`，通过 `builtin.prelude` 导出，其函数按 LLVM intrinsic 的泛型包装实现；不能遗漏，也不另立第七个内置包。
