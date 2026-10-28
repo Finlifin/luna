@@ -4257,3 +4257,34 @@ provenance 接线仍未完成，保留明确拒绝的回归。
 (`/tmp/luna-tools-fh7eacsv/result.json`)：构造服务当前返回通用 interpretation
 Type 错误，不保留具体 duplicate 消息。最终回归断言实际错误并验证修正冲突
 后的构造成功。字段默认代码、属性、泛型子句与 impl 构造仍待后续接通。
+
+## definition builder 的草稿诊断
+
+草稿输入校验此前在 VM 内直接返回通用 Type 错误，具体原因未进入发布服务的
+诊断通道。本阶段增加 `ErrorKind::InvalidDefinition(DefinitionBuildError)`：
+字段数量、重名字段、重名 variant、payload 形状和非法路径分别保留结构化原因。
+Display 使用转义后的 S-expression，外层 Error 继续携带构造表达式源码范围。
+类型形成、预算和发布事务错误仍使用既有分类；这不是对所有构造错误的完整覆盖。
+
+enum 回归在同一 VM 里先提交重复 payload 字段，要求发布回调次数为零且没有
+安装定义；修正后调用一次并成功安装。源码回归检查具体名称/数量与源码范围，
+并将上一阶段的重名字段通用 Type 断言升级为 duplicate-field 断言。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib`：
+  当时 167 项通过 (`/tmp/luna-tools-oxhm_ydw/result.json`)；随后新增同 VM 恢复
+  用例，执行 `python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib enum_build::tests`：
+  六项通过 (`/tmp/luna-tools-hko2lrpg/result.json`)，未重复全部 VM 测试。
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations --test generated_definitions --test reflected_definitions`：
+  60 项通过，退出 0 (`/tmp/luna-tools-iezjulv_/result.json`)。
+- `python3 -B development/library_check.py --release --stage sysroot-builders`：
+  两项实际原生用例通过 (`/tmp/luna-library-qxp1pd4m/summary.json`)。
+- 以完整 sysroot 编译 `/tmp/luna-invalid-builder.fl`：Broken builder 连续添加
+  两个 flag 字段后 Build，typealias 使用该结果。命令
+  `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna /tmp/luna-invalid-builder.fl --sysroot library --test-native`
+  按预期退出 1 (`/tmp/luna-tools-_jhlor4y/result.json`)，包含 DuplicateField、
+  Broken、flag 和构造源码范围。即时 Type computation 的外层仍采用既有 Debug
+  包装，虽保留结构化原因但尚未统一为直接 invocation 的 Display 形式。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过 (`/tmp/luna-tools-m2pgbfd3/result.json`)；`git diff --check` 通过。

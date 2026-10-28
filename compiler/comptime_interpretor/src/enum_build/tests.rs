@@ -146,7 +146,12 @@ fn malformed_shape_and_runtime_operation_do_not_call_the_builder() {
             vm.eval(&expression(), &mut env(input(shape)))
                 .unwrap_err()
                 .kind,
-            ErrorKind::Type
+            ErrorKind::InvalidDefinition(DefinitionBuildError::VariantShape {
+                name: "Group.Data".into(),
+                shape: shape.into(),
+                names: 1,
+                types: 1
+            })
         );
     }
     vm.comptime_only = false;
@@ -245,7 +250,7 @@ fn segmented_paths_reject_empty_and_embedded_separator_segments_before_host_call
             vm.eval(&expression(), &mut env(Value::Tuple(values)))
                 .unwrap_err()
                 .kind,
-            ErrorKind::Type
+            ErrorKind::InvalidDefinition(DefinitionBuildError::InvalidPath)
         );
     }
     assert_eq!(calls.get(), 0);
@@ -263,4 +268,47 @@ fn segmented_paths_reject_empty_and_embedded_separator_segments_before_host_call
     vm.eval(&expression(), &mut env(Value::Tuple(values)))
         .unwrap();
     assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn duplicate_payload_diagnostic_does_not_publish_or_poison_recovery() {
+    let world = world();
+    let calls = Cell::new(0);
+    let builder = |request: &EnumBuildRequest, _: &mut u64| {
+        calls.set(calls.get() + 1);
+        Ok(prepared(request, Box::new(|| Ok(()))))
+    };
+    let mut vm = Interpreter::for_comptime(&world, Budget::default())
+        .unwrap()
+        .with_enum_builder(&builder);
+    let Value::Tuple(mut values) = input("named") else {
+        unreachable!()
+    };
+    values[4] = Value::List {
+        ty: list(list(p(Primitive::Symbol))),
+        values: vec![symbols(&["flag", "flag"])],
+    };
+    values[5] = Value::List {
+        ty: list(list(p(Primitive::Type))),
+        values: vec![Value::TypeList(vec![
+            p(Primitive::Bool),
+            p(Primitive::Bool),
+        ])],
+    };
+    let error = vm
+        .eval(&expression(), &mut env(Value::Tuple(values)))
+        .unwrap_err();
+    assert_eq!(
+        error.kind,
+        ErrorKind::InvalidDefinition(DefinitionBuildError::DuplicateField {
+            owner: "Group.Data".into(),
+            name: "flag".into(),
+        })
+    );
+    assert_eq!(error.source, Some(expression().source));
+    assert_eq!(calls.get(), 0);
+    assert!(!vm.enums.contains_key(&id(10)));
+    vm.eval(&expression(), &mut env(input("named"))).unwrap();
+    assert_eq!(calls.get(), 1);
+    assert!(vm.enums.contains_key(&id(10)));
 }

@@ -159,6 +159,15 @@ typealias Record = Edited();
 保留 normal-form 头。空草稿可以发布空结构体，名称相同不代表类型身份相同。
 草稿及其中的 List 数据不能成为 runtime 接口。
 
+草稿输入错误保留结构化诊断及构造调用的源码范围。重名字段报告
+`duplicate-field`（包含所属定义或 variant 与字段名），重名 variant 报告
+`duplicate-variant`；字段数量不匹配显示 names/types 数量，错误 payload 形状
+显示 variant 名、shape 和数量，分组路径的空片段或内嵌点号报告 `invalid-path`。
+名称按字符串转义，诊断可按 S-expression 阅读。这些错误在发布前拒绝，不会
+将半成品定义交给后续代码；修正草稿后可再次构造。其他类型形成、预算与发布
+错误仍按各自检查路径处理，不保证所有失败都已有专门的草稿诊断。
+
+
 可以通过现有 `--invoke-comptime` 执行构造入口，单文件、显式包集合和 sysroot
 路径都会安装发布服务；显式加载 meta 时仍需绑定 `--meta-list-type meta.List`。
 驱动的 `compile_and_invoke_with_struct_builders` API 还会同时返回调用值和含生成

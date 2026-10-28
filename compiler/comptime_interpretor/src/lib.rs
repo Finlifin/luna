@@ -31,6 +31,8 @@ pub use generated_structs::{
     DefinitionAdmissionSession, PreparedEnumAdmission, PreparedStructAdmission,
     StructAdmissionSession, StructPublicationError,
 };
+mod definition_diagnostics;
+pub use definition_diagnostics::DefinitionBuildError;
 mod enum_build;
 pub use enum_build::{EnumBuildRequest, PreparedEnumBuild};
 mod struct_build;
@@ -1132,6 +1134,7 @@ impl Default for Budget {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
+    InvalidDefinition(DefinitionBuildError),
     DivisionByZero,
     IndexOutOfBounds,
     MachineOverflow,
@@ -1166,7 +1169,10 @@ pub struct Error {
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "interpretation {:?}", self.kind)?;
+        match &self.kind {
+            ErrorKind::InvalidDefinition(reason) => write!(f, "interpretation {reason}")?,
+            _ => write!(f, "interpretation {:?}", self.kind)?,
+        }
         if self.kind == ErrorKind::StepsExhausted {
             f.write_str(" (step budget exhausted)")?;
         }

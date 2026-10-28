@@ -2084,10 +2084,40 @@ fn struct_builder_edits_do_not_bypass_duplicate_field_validation() {
             }}"
         ));
         let error = fixture.invoke_meta("Make").err().unwrap();
-        assert!(error.contains("interpretation Type"), "{error}");
+        assert!(
+            error.contains("duplicate-field") && error.contains("(name \"first\")"),
+            "{error}"
+        );
         assert_eq!(
             fixture.invoke_meta("repaired").unwrap().1,
             Value::Bool(true)
         );
+    }
+}
+
+#[test]
+fn builder_diagnostics_identify_malformed_source_drafts() {
+    for (body, expected) in [
+        (
+            ".build_struct'builtin(.Bad,[.first,.second],[bool])",
+            "(field-count (names 2) (types 1))",
+        ),
+        (
+            "var b=meta.EnumBuilder.new();b.add_unit(.ready);b.add_unit(.ready);b.Build()",
+            "(duplicate-variant (name \"ready\"))",
+        ),
+        (
+            "var b=meta.EnumBuilder.new();b.add_named(.data,[.flag,.flag],[bool,bool]);b.Build()",
+            "(duplicate-field (owner \"data\") (name \"flag\"))",
+        ),
+        (
+            "var b=meta.EnumBuilder.new();b.add_named(.data,[.flag],[bool,bool]);b.Build()",
+            "(variant-shape (name \"data\") (shape \"named\") (names 1) (types 2))",
+        ),
+    ] {
+        let fixture = Fixture::new(&format!("comptime fn Bad()->.Type'builtin {{{body}}}"));
+        let error = fixture.invoke_meta("Bad").err().unwrap();
+        assert!(error.contains(expected), "expected {expected}: {error}");
+        assert!(error.contains("at (source "), "{error}");
     }
 }

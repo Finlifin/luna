@@ -104,29 +104,42 @@ impl<'a> Interpreter<'a> {
         else {
             return Err(fail());
         };
-        if self.list_element(&names_ty) != Some(&Term::Primitive(Primitive::Symbol))
-            || names.len() != types.len()
-        {
+        if self.list_element(&names_ty) != Some(&Term::Primitive(Primitive::Symbol)) {
             return Err(fail());
+        }
+        if names.len() != types.len() {
+            return Err(self.failure(
+                ErrorKind::InvalidDefinition(DefinitionBuildError::FieldCount {
+                    names: names.len(),
+                    types: types.len(),
+                }),
+                Some(expr.source),
+            ));
         }
         self.integer_operation(Some(expr.source), |budget| {
             budget.consume(name.len().saturating_add(names.len()))
         })?;
         let mut fields = Vec::with_capacity(names.len());
         let mut seen = BTreeSet::new();
-        for (name, ty) in names.into_iter().zip(types) {
-            let Value::Symbol(name) = name else {
+        for (field_name, ty) in names.into_iter().zip(types) {
+            let Value::Symbol(field_name) = field_name else {
                 return Err(fail());
             };
             self.integer_operation(Some(expr.source), |budget| {
-                budget.consume(name.len().saturating_add(1))
+                budget.consume(field_name.len().saturating_add(1))
             })?;
-            if !seen.insert(name.clone()) {
-                return Err(fail());
+            if !seen.insert(field_name.clone()) {
+                return Err(self.failure(
+                    ErrorKind::InvalidDefinition(DefinitionBuildError::DuplicateField {
+                        owner: name.to_string(),
+                        name: field_name.to_string(),
+                    }),
+                    Some(expr.source),
+                ));
             }
             self.admit_type(&ty, 0)?;
             fields.push(ReflectedField {
-                name: name.to_string(),
+                name: field_name.to_string(),
                 ty,
             });
         }

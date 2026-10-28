@@ -192,7 +192,10 @@ impl<'a> Interpreter<'a> {
             .zip(field_types)
         {
             if !seen.insert(name.clone()) {
-                return Err(fail());
+                return Err(self.failure(
+                    ErrorKind::InvalidDefinition(DefinitionBuildError::DuplicateVariant { name }),
+                    Some(expr.source),
+                ));
             }
             let names = self.enum_symbols(field_names, expr.source)?;
             let Value::TypeList(fields) = field_types else {
@@ -203,12 +206,32 @@ impl<'a> Interpreter<'a> {
                 "tuple" if names.is_empty() => nir::program::VariantShape::Tuple,
                 "named" if names.len() == fields.len() => {
                     let mut unique = BTreeSet::new();
-                    if names.iter().any(|name| !unique.insert(name)) {
-                        return Err(fail());
+                    for field in &names {
+                        if !unique.insert(field) {
+                            return Err(self.failure(
+                                ErrorKind::InvalidDefinition(
+                                    DefinitionBuildError::DuplicateField {
+                                        owner: name,
+                                        name: field.clone(),
+                                    },
+                                ),
+                                Some(expr.source),
+                            ));
+                        }
                     }
                     nir::program::VariantShape::Named(names)
                 }
-                _ => return Err(fail()),
+                _ => {
+                    return Err(self.failure(
+                        ErrorKind::InvalidDefinition(DefinitionBuildError::VariantShape {
+                            name,
+                            shape,
+                            names: names.len(),
+                            types: fields.len(),
+                        }),
+                        Some(expr.source),
+                    ));
+                }
             };
             for field in &fields {
                 self.admit_type(field, 0)?;
@@ -297,7 +320,10 @@ impl<'a> Interpreter<'a> {
                     .iter()
                     .any(|segment| segment.is_empty() || segment.contains('.'))
             {
-                return Err(fail());
+                return Err(self.failure(
+                    ErrorKind::InvalidDefinition(DefinitionBuildError::InvalidPath),
+                    Some(source),
+                ));
             }
             let work = segments.iter().fold(segments.len() - 1, |work, segment| {
                 work.saturating_add(segment.len())
