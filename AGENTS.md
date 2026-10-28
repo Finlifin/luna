@@ -99,6 +99,8 @@ Limitations:
 - str 位于 builtin，String 位于 std；内存相关模块使用 mem 命名。直接访问编译器内置符号的语法仅供六个内置包内部使用，用户经普通公开接口使用对应内容。
 - Normal form 的头不展开；Identity<T> 不因函数体返回 T 就与 T 相等。
 - Tuple 的签名是 `pure comptime fn Tuple<...Es: meta.List<Type>> -> Type`；变参收集为一个类型列表输入，类型身份保留 Tuple 的 normal-form 头。内部结构视图与迁移期的结构元组表示不能替代这一语言定义。
+- 已有完整参数列表时优先具名赋值，例如 `Tuple<.Es = Es>`，不要先用 `Tuple<...Es>` 展开再收集。仅在确实需要逐项拼接或展开语义时使用参数展开；测试展开本身的用例不受此限制。
+- `Once` 在 builtin.resources 中定义，并由 `impl Once for T where T {}` 提供默认仿射能力，不为标量、指针、元组、可选或错误结果重复枚举实现。Once 不授予 Clone／Copy，也不替代移动与清理检查。
 - PTC 只处理类型命题；程序状态、内存与资源规格由程序验证层负责。
 - Elaboration 与 comptime interpretation／invocation 交织；冻结稳定残余和契约，不冻结活动推断变量、等待者或候选事务。
 - 运行时依赖类型使用可 intern 的带洞结构与引用端 substitution；共享 core 不等于完整类型相等，环境取得另行保持。

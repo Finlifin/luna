@@ -11,7 +11,6 @@ const OPERATORS: &str = include_str!("../../../library/builtin/ops.fl");
 const META: &str = include_str!("../../../library/meta/lib.fl");
 const TUPLE: &str = include_str!("../../../library/builtin/tuple.fl");
 const RESOURCES: &str = include_str!("../../../library/builtin/resources.fl");
-const TUPLE_RESOURCES: &str = include_str!("../../../library/builtin/tuple_resources.fl");
 
 #[test]
 fn repository_list_pattern_protocol_retains_observation_write_checks() {
@@ -503,7 +502,7 @@ fn repository_tuple_once_native_preserves_affine_fields() {
     ));
     fs::create_dir(&directory).unwrap();
     let source = format!(
-        "mod meta {{ {META} }} mod resources {{ {RESOURCES} }} mod tuples {{ {TUPLE} }} mod tuple_resources {{ {TUPLE_RESOURCES} }}\n{}",
+        "mod meta {{ {META} }} mod resources {{ {RESOURCES} }} mod tuples {{ {TUPLE} }}\n{}",
         include_str!("../../../development/examples/host-library-tuple-once.fl"),
     );
     fs::write(directory.join("source.fl"), source).unwrap();
@@ -550,8 +549,8 @@ fn repository_tuple_once_native_preserves_affine_fields() {
 #[test]
 fn tuple_implementation_infers_one_complete_type_list_input() {
     let source = format!(
-        "mod meta {{ {META} }}\nmod resources {{ {} }}\n{TUPLE}\nmod tuple_resources {{ {TUPLE_RESOURCES} }}\n
-        fn forward(value:T)->T where T:-resources.Once {{value}}
+        "mod meta {{ {META} }}\nmod resources {{ {} }}\n{TUPLE}\ntrait TupleMarker {{}} impl TupleMarker for Tuple<.Es = Es> where Es:meta.List<.Type'builtin> {{}}\n
+        fn forward(value:T)->T where T:-TupleMarker {{value}}
         fn run()->bool {{let (a,(b,),())=forward((true,(false,),()));a and not b}}",
         include_str!("../../../library/builtin/resources.fl"),
     );
@@ -709,7 +708,7 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
         assert!(
             compile_with_source_bindings(
                 &source.replace(
-                    "where T:-resources.Once",
+                    "where T:-TupleMarker",
                     &format!("where T:-resources.{capability}")
                 ),
                 &Default::default(),

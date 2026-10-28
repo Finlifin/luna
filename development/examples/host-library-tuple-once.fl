@@ -1,5 +1,5 @@
 -- The library_protocols native test loads this with the actual Tuple, meta,
--- resources and tuple_resources modules in the resource trait's owning package.
+-- resources module in the resource trait's owning package.
 use tuples.Tuple;
 
 fn forward(value: T) -> T where T :- resources.Once { value }

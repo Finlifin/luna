@@ -27,25 +27,18 @@ clone_call -> expr.clone()
 
 Once 的一次限制针对消耗，不限制消耗前满足契约的观察次数。通过指针观察不会凭空产生另一份 owner，而修改也仍需满足对象及方法契约。
 
-当前 builtin 库通过显式实现让元组进入要求 Once 的泛型接口：
+builtin 为所有类型提供默认 Once 实现：
 
 ~~~flurry
-impl resources.Once for Tuple<...Es>
-where Es: meta.List<Type> {}
+pub trait Once {}
+impl Once for T where T {}
 
-fn forward(value: T) -> T where T :- resources.Once { value }
+fn forward(value: T) -> T where T :- Once { value }
 ~~~
 
-`Es` 是一个完整类型列表输入，不是若干独立类型参数。实现位于资源 trait 的定义包，构造器单独作为另一个包加载时不会自动取得这份实现。该标记不赋予 Clone／Copy，也不替代元素的清理；包含非 Copy 字段的元组仍只能按移动规则交付。通用逐元素 Clone／Copy 尚未接通。
-
-原生可选类型及单一错误类型的结果也由 builtin 提供 Once 实现：
-
-~~~flurry
-impl Once for ?T where T {}
-impl Once for !E T where E, T {}
-~~~
-
-因此 `forward` 可以直接交付 `?Token`、`??Token` 或 `!Error Token`，无需库包装枚举。空值没有载荷清理；present、成功或错误分支只转移实际存在的责任，离开清理范围时执行一次清理。该实现不要求载荷先具有显式 Once 标记，也不替载荷提供 Clone／Copy。任意异构错误行的通用 Once 实现、借用载荷的通用 Clone 与条件 Copy 仍待接通。
+因此用户结构体、元组、可选值和错误结果无需逐个声明 Once。该标记不授予
+Clone／Copy，也不替代字段或载荷的清理：非 Copy 值只能按移动规则交付；
+空值没有载荷清理，present、成功或错误分支转移实际存在的责任。
 
 `ErrorResultOps.inspect` 与 `inspect_err` 接收整个结果的所有权，分别在成功或错误分支把载荷的指针交给回调，随后返回原分支及其完整载荷：
 
