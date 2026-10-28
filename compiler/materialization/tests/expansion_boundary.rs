@@ -170,3 +170,38 @@ fn iir_service_is_scoped_and_failed_candidates_do_not_publish() {
     assert_eq!(output.expansion_sources.len(), successful.quotes.get());
     assert_eq!(package, before);
 }
+
+#[test]
+fn dispatch_roots_do_not_visit_unrelated_function_bodies() {
+    let (mut package, root) = fixture();
+    let mut unrelated = package.functions[0].clone();
+    unrelated.declaration = id(2);
+    unrelated.name = "unrelated".into();
+    unrelated.body.kind = n::ExprKind::Call {
+        callee: Box::new(n::Expr {
+            source: unrelated.body.source,
+            ty: unrelated.signature.clone(),
+            kind: n::ExprKind::Function(id(99)),
+        }),
+        arguments: vec![],
+        parameter_bindings: vec![],
+    };
+    package.functions.push(unrelated);
+    for materialize in [
+        dispatch_instances_for_roots,
+        materialization::dispatch_instances_for_invocation,
+    ] {
+        assert!(materialize(&package, &[root.clone()], Budget::default()).is_ok());
+        assert!(
+            materialize(
+                &package,
+                &[iir::InstanceKey {
+                    declaration: id(2),
+                    arguments: vec![],
+                }],
+                Budget::default()
+            )
+            .is_err()
+        );
+    }
+}

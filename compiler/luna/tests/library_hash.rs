@@ -415,3 +415,67 @@ fn string_hash_does_not_bypass_resource_provenance_checks() {
         assert!(error.contains("string-view memory provenance"), "{error}");
     }
 }
+
+#[test]
+fn root_dispatch_preserves_generic_parents_of_concrete_implementations() {
+    let package = support::compile(
+        "trait Parent {} impl Parent for T where T {}\n\
+         trait Child :- Parent {} impl Child for bool {}\n\
+         comptime fn run()->bool {true}",
+    );
+    let root = iir::InstanceKey {
+        declaration: package
+            .functions
+            .iter()
+            .find(|f| f.name == "run")
+            .unwrap()
+            .declaration,
+        arguments: vec![],
+    };
+    for invocation in [false, true] {
+        let materialize = if invocation {
+            elaboration::materialization::dispatch_instances_for_invocation
+        } else {
+            elaboration::materialization::dispatch_instances_for_roots
+        };
+        assert!(
+            materialize(
+                &package,
+                &[root.clone()],
+                elaboration::ptc::Budget {
+                    steps: 0,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        let mut prepared = package.clone();
+        prepared.dispatch_instances =
+            materialize(&package, &[root.clone()], Default::default()).unwrap();
+        let parent = package
+            .traits
+            .iter()
+            .find(|t| t.name == "Parent")
+            .unwrap()
+            .declaration;
+        assert!(
+            prepared
+                .dispatch_instances
+                .iter()
+                .any(|i| i.interface == parent
+                    && i.subject == nir::Term::Primitive(nir::Primitive::Bool))
+        );
+        let mut vm =
+            comptime_interpretor::Interpreter::for_comptime(&prepared, Default::default()).unwrap();
+        assert_eq!(
+            vm.invoke_instantiated(root.declaration, vec![], vec![])
+                .unwrap(),
+            Value::Bool(true)
+        );
+        let mut missing = package.clone();
+        missing
+            .implementations
+            .retain(|i| i.interface != Some(parent));
+        assert!(materialize(&missing, &[root.clone()], Default::default()).is_err());
+    }
+}

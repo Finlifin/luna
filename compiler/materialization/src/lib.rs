@@ -127,7 +127,9 @@ pub fn dispatch_instances(
     )
     .map(|(dispatch, _, _, _, _, _, _)| dispatch)
 }
-/// Prepare only the transitive dispatch dependencies of explicit entry points.
+/// Prepare transitive dispatch dependencies of explicit entry points and the
+/// parent/capability closure of concrete implementations retained by the NIR VM.
+/// Unrelated function bodies remain unvisited.
 /// This preserves NIR function bodies and does not impose runtime IIR closure
 /// or layout requirements on a comptime invocation.
 pub fn dispatch_instances_for_roots(
@@ -397,6 +399,13 @@ fn build(
     String,
 > {
     let quote_selection = matches!(roots, Roots::QuoteMethod(..));
+    // NIR interpretation retains all unconditional concrete implementations.
+    // Their parent/capability worlds must remain closed even when only a few
+    // function bodies are reachable. IIR instead owns its reachable world.
+    let retain_concrete_world = matches!(
+        roots,
+        Roots::All | Roots::AllWithMethods(_) | Roots::Dispatch(_) | Roots::Invocation(_)
+    );
     let (world, mut input_fuel) = DeclarationWorld::new(package, budget, context)?;
     let inline_effects = if matches!(roots, Roots::Iir(_)) {
         input_fuel = input_fuel
@@ -532,12 +541,19 @@ fn build(
                     .push_back(Task::Function(function.declaration, vec![]));
             }
         }
-        // Preserve the concrete world for external non-generic entry arguments.
+    }
+    if retain_concrete_world {
         for implementation in &package.implementations {
+            builder.tick(0)?;
             if let Some(interface) = implementation.interface {
                 if implementation.type_parameters.is_empty()
                     && implementation.requirements.is_empty()
                 {
+                    for term in std::iter::once(&implementation.subject)
+                        .chain(&implementation.interface_arguments)
+                    {
+                        crate::associated::charge_projection_copy(term, &mut builder.fuel)?;
+                    }
                     builder.queue.push_back(Task::Interface(
                         n::InterfaceInstance {
                             declaration: interface,
