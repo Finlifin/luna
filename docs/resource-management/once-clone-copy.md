@@ -40,7 +40,7 @@ fn forward(value: T) -> T where T :- Once { value }
 Clone／Copy，也不替代字段或载荷的清理：非 Copy 值只能按移动规则交付；
 空值没有载荷清理，present、成功或错误分支转移实际存在的责任。
 
-`ErrorResultOps.inspect` 与 `inspect_err` 接收整个结果的所有权，分别在成功或错误分支把载荷的指针交给回调，随后返回原分支及其完整载荷：
+`!E T` 的固有方法 `inspect` 与 `inspect_err` 接收整个结果的所有权，分别在成功或错误分支把载荷的指针交给回调，随后返回原分支及其完整载荷：
 
 ~~~flurry
 struct Ticket { valid: bool }
@@ -50,8 +50,8 @@ fn check_ticket(ticket: *Ticket) { assumes ticket.valid.*; }
 fn check_failure(failure: *Failure) { assumes failure.retryable.*; }
 
 fn check(value: !Failure Ticket) -> !Failure Ticket {
-    value.as(ErrorResultOps<Ticket, Failure>).inspect(check_ticket)
-        .as(ErrorResultOps<Ticket, Failure>).inspect_err(check_failure)
+    value.inspect(check_ticket)
+        .inspect_err(check_failure)
 }
 ~~~
 

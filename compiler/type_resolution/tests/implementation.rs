@@ -3030,9 +3030,20 @@ fn explicit_error_prefix_excludes_uninferable_ordinary_candidates() {
     use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let mut context = Context::default();
     context.admit_nominal_constructor(id(10));
+    context.admit_list_inference_head(id(11));
+    let list = |element| Term::NormalForm {
+        head: id(11),
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
     let qualified = |result| Term::error_result(vec![ty(P::Bool)], result);
     let error_head = generic(200, qualified(var(1)), vec![id(1)]);
     for (candidate, subject) in [
+        (error_head.clone(), list(ty(P::Char))),
+        (
+            generic(202, list(var(1)), vec![id(1)]),
+            qualified(ty(P::Char)),
+        ),
         (error_head.clone(), node(10, vec![ty(P::Char)])),
         (
             generic(201, node(10, vec![var(1)]), vec![id(1)]),

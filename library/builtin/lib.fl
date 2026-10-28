@@ -11,8 +11,6 @@ use numeric.{comparison, math_intrinsics};
 pub use primitives.*;
 pub use tuple.Tuple;
 pub use traits.*;
-pub use option.OptionalOps;
-pub use result.ErrorResultOps;
 pub use patterns.ListPatternView;
 pub use iterator.{Iterator, IntoIterator, FromIterator, emit_item, MapIterator, FilterIterator, FilterMapIterator, FlatMapIterator, FlattenIterator, TakeWhileIterator, SkipWhileIterator, TakeIterator, SkipIterator, ChainIterator, InspectIterator};
 pub use ops.*;
@@ -31,8 +29,6 @@ pub mod prelude {
     pub use primitives.*;
     pub use tuple.Tuple;
     pub use traits.*;
-    pub use option.OptionalOps;
-    pub use result.ErrorResultOps;
     pub use patterns.ListPatternView;
     pub use iterator.{Iterator, IntoIterator, FromIterator};
     pub use ops.*;

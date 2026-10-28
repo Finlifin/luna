@@ -30,6 +30,7 @@ impl Search<'_> {
             if constructor(term).is_some()
                 || matches!(term, Term::Record(_))
                 || self.context.is_tuple_type(term)
+                || self.context.is_list_type(term)
             {
                 let root = classes.root(index);
                 closed[0] |= root == lr;

@@ -4,59 +4,49 @@
     language's matching, propagation and error elimination rules.
 -}
 
-pub trait ErrorResultOps where T, E {
-    fn is_ok(self) -> bool;
-    fn is_err(self) -> bool;
-    fn inspect(self, observer: %c fn(*T)) -> !E T where c: (.Type'builtin).vars.Closure;
-    fn inspect_err(self, observer: %c fn(*E)) -> !E T where c: (.Type'builtin).vars.Closure;
-    fn map(self, f: %c fn(T) -> U) -> !E U where U, c: (.Type'builtin).vars.Closure;
-    fn map_err(self, f: %c fn(E) -> F) -> !F T where F, c: (.Type'builtin).vars.Closure;
-    fn and_then(self, f: %c fn(T) -> !E U) -> !E U where U, c: (.Type'builtin).vars.Closure;
-    fn or_else(self, f: %c fn(E) -> !F T) -> !F T where F, c: (.Type'builtin).vars.Closure;
-    fn unwrap_or_else(self, fallback: %c fn(E) -> T) -> T where c: (.Type'builtin).vars.Closure;
-}
+use primitives.Type;
 
-impl ErrorResultOps<T, E> for !E T where T, E {
-    fn is_ok(self) -> bool = self match {
+impl !E T where T, E {
+    pub fn is_ok(self) -> bool = self match {
         _! => true,
         error _ => false,
     };
 
-    fn is_err(self) -> bool = not self.as(ErrorResultOps<T, E>).is_ok();
+    pub fn is_err(self) -> bool = not self.is_ok();
 
     {- Observe only the active branch, then transfer its complete payload.
        The observer borrows the payload; ownership remains with the result. -}
-    fn inspect(self, observer: %c fn(*T)) -> !E T where c: (.Type'builtin).vars.Closure = self match {
+    pub fn inspect(self, observer: %c fn(*T)) -> !E T where c: Type.vars.Closure = self match {
         value! => do { observer(value.ref); value },
         error failure => error failure,
     };
 
-    fn inspect_err(self, observer: %c fn(*E)) -> !E T where c: (.Type'builtin).vars.Closure = self match {
+    pub fn inspect_err(self, observer: %c fn(*E)) -> !E T where c: Type.vars.Closure = self match {
         value! => value,
         error failure => do { observer(failure.ref); error failure },
     };
 
-    fn map(self, f: %c fn(T) -> U) -> !E U where U, c: (.Type'builtin).vars.Closure = self match {
+    pub fn map(self, f: %c fn(T) -> U) -> !E U where U, c: Type.vars.Closure = self match {
         value! => f(value),
         error failure => error failure,
     };
 
-    fn map_err(self, f: %c fn(E) -> F) -> !F T where F, c: (.Type'builtin).vars.Closure = self match {
+    pub fn map_err(self, f: %c fn(E) -> F) -> !F T where F, c: Type.vars.Closure = self match {
         value! => value,
         error failure => error f(failure),
     };
 
-    fn and_then(self, f: %c fn(T) -> !E U) -> !E U where U, c: (.Type'builtin).vars.Closure = self match {
+    pub fn and_then(self, f: %c fn(T) -> !E U) -> !E U where U, c: Type.vars.Closure = self match {
         value! => f(value),
         error failure => error failure,
     };
 
-    fn or_else(self, f: %c fn(E) -> !F T) -> !F T where F, c: (.Type'builtin).vars.Closure = self match {
+    pub fn or_else(self, f: %c fn(E) -> !F T) -> !F T where F, c: Type.vars.Closure = self match {
         value! => value,
         error failure => f(failure),
     };
 
-    fn unwrap_or_else(self, fallback: %c fn(E) -> T) -> T where c: (.Type'builtin).vars.Closure = self match {
+    pub fn unwrap_or_else(self, fallback: %c fn(E) -> T) -> T where c: Type.vars.Closure = self match {
         value! => value,
         error failure => fallback(failure),
     };

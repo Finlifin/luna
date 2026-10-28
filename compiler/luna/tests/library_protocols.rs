@@ -373,12 +373,16 @@ fn repository_meta_dependent_collectors_share_defaulted_argument_plans() {
 fn optional_combinators_preserve_affine_payloads_and_conditional_callbacks() {
     let source = format!(
         "mod resources {{ {RESOURCES} }} mod optional {{ {} }}\n{}",
-        include_str!("../../../library/builtin/types/option.fl"),
+        format!(
+            "mod primitives {{\n{}\n}}\n{}",
+            include_str!("../../../library/builtin/primitives.fl"),
+            include_str!("../../../library/builtin/types/option.fl")
+        ),
         include_str!("../../../development/examples/host-library-optional-combinators.fl"),
     );
     let package = compile_with_source_bindings(
         &source,
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             copy: Some("input.resources.Copy"),
             drop: Some("input.resources.Drop"),
@@ -1438,7 +1442,7 @@ fn repository_option_operations_preserve_affine_payloads_and_cleanup() {
             var fallback_done=false;
             do {{
                 let value:?Watch=if present {{Watch {{seen:payload_done.ref}}}} else {{null}};
-                let selected=value.as(OptionalOps<Watch>).unwrap_or(Watch {{seen:fallback_done.ref}});
+                let selected=value.unwrap_or(Watch {{seen:fallback_done.ref}});
                 assumes not payload_done;
                 assumes fallback_done == present;
                 let observed=selected.seen.*;
@@ -1449,16 +1453,16 @@ fn repository_option_operations_preserve_affine_payloads_and_cleanup() {
         fn map_case(present:bool)->bool {{
             var done=false;
             let value:?Watch=if present {{Watch {{seen:done.ref}}}} else {{null}};
-            let mapped=value.as(OptionalOps<Watch>).map(inspect);
-            done == present and mapped.as(OptionalOps<bool>).unwrap_or(true)
+            let mapped=value.map(inspect);
+            done == present and mapped.unwrap_or(true)
         }}
         fn chain_case()->bool {{
             var done=false;
             do {{
                 let value:?Watch=Watch {{seen:done.ref}};
-                let chained=value.as(OptionalOps<Watch>).and_then(keep);
+                let chained=value.and_then(keep);
                 assumes not done;
-                let seen=chained.as(OptionalOps<Watch>).is_some();
+                let seen=chained.is_some();
                 assumes seen;
             }};
             done
@@ -1474,7 +1478,7 @@ fn repository_option_operations_preserve_affine_payloads_and_cleanup() {
                     captured
                 }};
                 let input:?Watch=if present {{Watch {{seen:payload_done.ref}}}} else {{null}};
-                let selected=input.as(OptionalOps<Watch>).unwrap_or_else(callback);
+                let selected=input.unwrap_or_else(callback);
                 assumes called == not present;
                 assumes fallback_done == present;
                 assumes not payload_done;
@@ -1490,12 +1494,16 @@ fn repository_option_operations_preserve_affine_payloads_and_cleanup() {
             let c=map_case(true);let d=map_case(false);let e=chain_case();
             assumes a and b and c and d and e;
         }}",
-        include_str!("../../../library/builtin/types/option.fl"),
+        format!(
+            "mod primitives {{\n{}\n}}\n{}",
+            include_str!("../../../library/builtin/primitives.fl"),
+            include_str!("../../../library/builtin/types/option.fl")
+        ),
         include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     let package = compile_with_source_bindings(
         &source,
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             copy: Some("input.Copy"),
             drop: Some("input.Drop"),
@@ -1545,19 +1553,19 @@ fn repository_result_operations_preserve_both_affine_branches() {
         fn mapped_case(ok:bool)->bool {{
             var good_done=false;var bad_done=false;
             let value:!Watch Watch = if ok {{Watch {{seen:good_done.ref}}}} else {{error Watch {{seen:bad_done.ref}}}};
-            let mapped=value.as(ErrorResultOps<Watch,Watch>).map(inspect);
+            let mapped=value.map(inspect);
             assumes good_done == ok;
             assumes not bad_done;
-            let converted=mapped.as(ErrorResultOps<bool,Watch>).map_err(inspect);
+            let converted=mapped.map_err(inspect);
             assumes bad_done == not ok;
             converted match {{flag! =>flag,error flag=>flag}}
         }}
         fn chained_case(ok:bool)->bool {{
             var done=false;
             let value:!Watch Watch = if ok {{Watch {{seen:done.ref}}}} else {{error Watch {{seen:done.ref}}}};
-            let chained=value.as(ErrorResultOps<Watch,Watch>).and_then(reroute);
+            let chained=value.and_then(reroute);
             assumes not done;
-            let bad=chained.as(ErrorResultOps<bool,Watch>).is_err();
+            let bad=chained.is_err();
             bad and done
         }}
         struct Observed {{seen:*bool,done:*bool}}
@@ -1573,11 +1581,11 @@ fn repository_result_operations_preserve_both_affine_branches() {
             var seen=false;var done=false;
             let value:!Observed Observed = if ok {{Observed {{seen:seen.ref,done:done.ref}}}}
                 else {{error Observed {{seen:seen.ref,done:done.ref}}}};
-            let first=value.as(ErrorResultOps<Observed,Observed>).inspect(observe);
+            let first=value.inspect(observe);
             assumes seen == ok and not done;
-            let second=first.as(ErrorResultOps<Observed,Observed>).inspect_err(observe);
+            let second=first.inspect_err(observe);
             assumes seen and not done;
-            let retained=second.as(ErrorResultOps<Observed,Observed>).is_ok();
+            let retained=second.is_ok();
             retained == ok and done
         }}
         fn run() {{
@@ -1586,12 +1594,12 @@ fn repository_result_operations_preserve_both_affine_branches() {
             let e=observed_case(true);let f=observed_case(false);
             assumes a and b and c and d and e and f;
         }}",
-        include_str!("../../../library/builtin/types/result.fl"),
+        format!("mod primitives {{\n{}\n}}\n{}", include_str!("../../../library/builtin/primitives.fl"), include_str!("../../../library/builtin/types/result.fl")),
         include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     let package = compile_with_source_bindings(
         &source,
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             copy: Some("input.Copy"),
             drop: Some("input.Drop"),
@@ -1647,7 +1655,7 @@ fn repository_value_combinators_own_callback_environments_on_both_branches() {
     for (input_type, method, parameters, returned, observe, active, inactive) in [
         (
             "!bool bool",
-            "as(ErrorResultOps<bool,bool>).inspect",
+            "inspect",
             "value:*bool",
             "assumes value.*;",
             "mapped match {v! =>v,error v=>v}",
@@ -1656,7 +1664,7 @@ fn repository_value_combinators_own_callback_environments_on_both_branches() {
         ),
         (
             "!bool bool",
-            "as(ErrorResultOps<bool,bool>).inspect_err",
+            "inspect_err",
             "value:*bool",
             "assumes value.*;",
             "mapped match {v! =>v,error v=>v}",
@@ -1665,7 +1673,7 @@ fn repository_value_combinators_own_callback_environments_on_both_branches() {
         ),
         (
             "?bool",
-            "as(OptionalOps<bool>).unwrap_or_else",
+            "unwrap_or_else",
             "",
             "true",
             "mapped",
@@ -1674,25 +1682,25 @@ fn repository_value_combinators_own_callback_environments_on_both_branches() {
         ),
         (
             "?bool",
-            "as(OptionalOps<bool>).map",
+            "map",
             "value:bool",
             "value",
-            "mapped.as(OptionalOps<bool>).unwrap_or(true)",
+            "mapped.unwrap_or(true)",
             "true",
             "null",
         ),
         (
             "?bool",
-            "as(OptionalOps<bool>).and_then",
+            "and_then",
             "value:bool",
             "do {let result:?bool=value; result}",
-            "mapped.as(OptionalOps<bool>).unwrap_or(true)",
+            "mapped.unwrap_or(true)",
             "true",
             "null",
         ),
         (
             "!bool bool",
-            "as(ErrorResultOps<bool,bool>).map",
+            "map",
             "value:bool",
             "value",
             "mapped match {v! =>v,error v=>v}",
@@ -1701,7 +1709,7 @@ fn repository_value_combinators_own_callback_environments_on_both_branches() {
         ),
         (
             "!bool bool",
-            "as(ErrorResultOps<bool,bool>).map_err",
+            "map_err",
             "value:bool",
             "value",
             "mapped match {v! =>v,error v=>v}",
@@ -1710,7 +1718,7 @@ fn repository_value_combinators_own_callback_environments_on_both_branches() {
         ),
         (
             "!bool bool",
-            "as(ErrorResultOps<bool,bool>).and_then",
+            "and_then",
             "value:bool",
             "do {let result:!bool bool=value;result}",
             "mapped match {v! =>v,error v=>v}",
@@ -1731,7 +1739,7 @@ fn repository_value_combinators_own_callback_environments_on_both_branches() {
 }} mod fallible {{
 {}
 }} {}\n
-                    use optional.OptionalOps;use fallible.ErrorResultOps;
+
                     struct State {{called:*bool,retired:*bool}}
                     impl Drop for State {{fn drop(*self) {{assumes not self.retired.*.*;self.retired.*.* = true;}}}}
                     fn run() {{
@@ -1748,12 +1756,12 @@ fn repository_value_combinators_own_callback_environments_on_both_branches() {
                         let observed={observe};
                         assumes observed and called == {invoked} and retired;
                     }}",
-                    include_str!("../../../library/builtin/types/option.fl"),
-                    include_str!("../../../library/builtin/types/result.fl"),
+                    format!("mod primitives {{\n{}\n}}\n{}", include_str!("../../../library/builtin/primitives.fl"), include_str!("../../../library/builtin/types/option.fl")),
+                    format!("mod primitives {{\n{}\n}}\n{}", include_str!("../../../library/builtin/primitives.fl"), include_str!("../../../library/builtin/types/result.fl")),
                     include_str!("../../../library/builtin/protocols/resources.fl"));
                 let package = compile_with_source_bindings(
                     &source,
-                    &Default::default(),
+                    &support::meta_fixture_protocols(),
                     luna::protocols::type_constructors::Selectors {
                         copy: Some("input.Copy"),
                         drop: Some("input.Drop"),
@@ -1809,7 +1817,7 @@ fn repository_error_operations_preserve_rows_when_callbacks_add_errors() {
         fn input(present:bool)->!InputErr bool {{if present {{true}} else {{error InputErr.Missing}}}}
         fn step(value:bool)->!ComputeErr bool {{if value {{error ComputeErr.Rejected}} else {{false}}}}
         fn mapped(present:bool)->![InputErr,ComputeErr] bool {{
-            input(present).as(ErrorResultOps<bool,InputErr>).map(step)
+            input(present).map(step)
         }}
         fn retried()->![InputErr,ComputeErr] bool {{mapped(false)! {{
             InputErr.Missing=>mapped(true),ComputeErr.Rejected=>false,
@@ -1820,12 +1828,12 @@ fn repository_error_operations_preserve_rows_when_callbacks_add_errors() {
             (retried() match {{error ComputeErr.Rejected=>true,error InputErr.Missing=>false,_! =>false}})
         }}
         fn verify() {{let passed=run();assumes passed;}}",
-        include_str!("../../../library/builtin/types/result.fl"),
+        format!("mod primitives {{\n{}\n}}\n{}", include_str!("../../../library/builtin/primitives.fl"), include_str!("../../../library/builtin/types/result.fl")),
         include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     let package = compile_with_source_bindings(
         &source,
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             copy: Some("input.Copy"),
             drop: Some("input.Drop"),

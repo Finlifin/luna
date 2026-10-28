@@ -2,7 +2,6 @@
     Optional combinators preserve ownership and observe only the outer layer.
     The test harness supplies the real optional and resources packages.
 -}
-use optional.OptionalOps;
 
 struct Token { dropped: *bool }
 impl resources.Drop for Token {
@@ -18,13 +17,13 @@ fn filtered(keep: bool) -> bool {
     let calls = called.ref;
     do {
         let source: ?Token = Token { dropped: dropped.ref };
-        let result = source.as(OptionalOps<Token>).filter(|value: *Token| {
+        let result = source.filter(|value: *Token| {
             assumes not calls.* and not value.dropped.*.*;
             calls.* = true;
             keep
         });
         assumes called and dropped == not keep;
-        let present = result.as(OptionalOps<Token>).is_some();
+        let present = result.is_some();
         assumes present == keep;
     };
     dropped
@@ -36,12 +35,12 @@ fn observed() -> bool {
     let calls = called.ref;
     do {
         let source: ?Token = Token { dropped: dropped.ref };
-        let result = source.as(OptionalOps<Token>).inspect(|value: *Token| {
+        let result = source.inspect(|value: *Token| {
             assumes not calls.* and not value.dropped.*.*;
             calls.* = true;
         });
         assumes called and not dropped;
-        let present = result.as(OptionalOps<Token>).is_some();
+        let present = result.is_some();
         assumes present;
     };
     dropped
@@ -54,21 +53,21 @@ fn zipped(left_present: bool, right_present: bool) -> bool {
     let calls = called.ref;
     let left: ?Token = if left_present {Token { dropped: left_dropped.ref }} else {null};
     let right: ?Token = if right_present {Token { dropped: right_dropped.ref }} else {null};
-    let result = left.as(OptionalOps<Token>).zip_with(right, |a: Token, b: Token| {
+    let result = left.zip_with(right, |a: Token, b: Token| {
         assumes not calls.* and not a.dropped.* and not b.dropped.*;
         calls.* = true;
         true
     });
     called == (left_present and right_present)
         and left_dropped == left_present and right_dropped == right_present
-        and result.as(OptionalOps<bool>).unwrap_or(false) == called
+        and result.unwrap_or(false) == called
 }
 
 fn lazy_and_nested() -> bool {
     var called = false;
     let calls = called.ref;
     let absent: ?bool = null;
-    let recovered = absent.as(OptionalOps<bool>).or_else(|| {
+    let recovered = absent.or_else(|| {
         assumes not calls.*;
         calls.* = true;
         let value: ?bool = true;
@@ -77,26 +76,26 @@ fn lazy_and_nested() -> bool {
     assumes called;
     let inner: ?bool = null;
     let outer: ??bool = inner;
-    let retained = outer.as(OptionalOps<?bool>).or_else(|| {
+    let retained = outer.or_else(|| {
         assumes false;
         let value: ??bool = null;
         value
     });
     let missing: ?bool = null;
-    let ignored = missing.as(OptionalOps<bool>).inspect(|value: *bool| {assumes false;});
+    let ignored = missing.inspect(|value: *bool| {assumes false;});
     let empty: ?bool = null;
-    let filtered = empty.as(OptionalOps<bool>).filter(|value: *bool| {assumes false; true});
+    let filtered = empty.filter(|value: *bool| {assumes false; true});
     let first: ?bool = true;
     let second: ?bool = false;
-    let combined = first.as(OptionalOps<bool>).zip_with(second, |a: bool, b: bool| {
+    let combined = first.zip_with(second, |a: bool, b: bool| {
         let result: ?bool = null;
         result
     });
-    recovered.as(OptionalOps<bool>).unwrap_or(false)
-        and ignored.as(OptionalOps<bool>).is_none()
-        and filtered.as(OptionalOps<bool>).is_none()
-        and (retained match {value? => value.as(OptionalOps<bool>).is_none(), null => false})
-        and (combined match {value? => value.as(OptionalOps<bool>).is_none(), null => false})
+    recovered.unwrap_or(false)
+        and ignored.is_none()
+        and filtered.is_none()
+        and (retained match {value? => value.is_none(), null => false})
+        and (combined match {value? => value.is_none(), null => false})
 }
 
 fn discarded_callbacks() -> bool {
@@ -109,37 +108,37 @@ fn discarded_callbacks() -> bool {
     let fallback_state = Token { dropped: fallback_done.ref };
     let combine_state = Token { dropped: combine_done.ref };
     let absent: ?bool = null;
-    let filtered = absent.as(OptionalOps<bool>).filter(|value: *bool| {
+    let filtered = absent.filter(|value: *bool| {
         assumes filter_state.dropped.*;
         true
     });
     let empty: ?bool = null;
-    let observed = empty.as(OptionalOps<bool>).inspect(|value: *bool| {
+    let observed = empty.inspect(|value: *bool| {
         assumes inspect_state.dropped.*;
     });
     let present: ?bool = true;
-    let retained = present.as(OptionalOps<bool>).or_else(|| {
+    let retained = present.or_else(|| {
         assumes fallback_state.dropped.*;
         let value: ?bool = null;
         value
     });
     let missing: ?bool = null;
     let other: ?bool = true;
-    let combined = missing.as(OptionalOps<bool>).zip_with(other, |a: bool, b: bool| {
+    let combined = missing.zip_with(other, |a: bool, b: bool| {
         assumes combine_state.dropped.*;
         false
     });
     filter_done and inspect_done and fallback_done and combine_done
-        and filtered.as(OptionalOps<bool>).is_none()
-        and observed.as(OptionalOps<bool>).is_none()
-        and retained.as(OptionalOps<bool>).unwrap_or(false)
-        and combined.as(OptionalOps<bool>).is_none()
+        and filtered.is_none()
+        and observed.is_none()
+        and retained.unwrap_or(false)
+        and combined.is_none()
 }
 
 fn callback_mutations() -> bool {
     let initial: ?bool = false;
-    let inspected = initial.as(OptionalOps<bool>).inspect(|value: *bool| {value.* = true;});
-    let filtered = inspected.as(OptionalOps<bool>).filter(|value: *bool| {
+    let inspected = initial.inspect(|value: *bool| {value.* = true;});
+    let filtered = inspected.filter(|value: *bool| {
         assumes value.*;
         value.* = false;
         true

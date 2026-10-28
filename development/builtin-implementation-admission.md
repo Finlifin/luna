@@ -38,3 +38,17 @@ covers explicit driver grants, early Type methods, optional generic receivers,
 all six sysroot providers, application rejection, duplicate inherent methods,
 and a foreign-trait implementation through runtime instantiation. This verifies
 the source admission path; the library Object facade is covered by library_meta_objects.
+
+Native optional and error-qualified operations now live in `impl ?T where T`
+and `impl !E T where T, E`. Their public methods no longer require OptionalOps
+or ErrorResultOps imports or trait casts. This includes conditional callbacks,
+nested optional layers, error mapping, and affine payload cleanup; it does not
+add a library enum or change either native representation. Closure domains use
+the centralized primitive Type binding.
+
+The compiler-bound List family has a closed error row. PTC uses that fact to
+exclude overlap with error-qualified inherent methods while retaining empty-row
+normalization and opacity for unregistered normal-form heads. The real sysroot
+fixture is `development/examples/sysroot-qualified-methods.fl`; isolated library
+fixtures explicitly designate their provider package instead of granting
+application packages an ownership exemption.

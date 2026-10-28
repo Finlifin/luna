@@ -1,0 +1,24 @@
+{- Native qualified types expose inherent methods without protocol casts. -}
+fn good() -> !u8 bool { true }
+fn bad() -> !u8 bool { error 7 }
+fn absent(value: bool) -> ?bool { null }
+
+fn run() -> bool {
+    let present: ?bool = true;
+    let missing: ?bool = null;
+    let nested = present.map(absent);
+    let flat = present.and_then(absent);
+    let recovered = bad().or_else(|code: u8| {
+        let result: !bool bool = code == 7;
+        result
+    });
+    present.is_some() and missing.is_none()
+        and (nested match { inner? => inner.is_none(), null => false })
+        and flat.is_none()
+        and missing.unwrap_or_else(|| true)
+        and good().map(|value: bool| not value).is_ok()
+        and bad().map_err(|code: u8| code == 7).is_err()
+        and recovered.unwrap_or_else(|failure: bool| false)
+}
+
+test { let passed = run(); assumes passed; }

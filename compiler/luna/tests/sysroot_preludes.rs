@@ -110,7 +110,7 @@ fn complete_shipped_sysroot_runs_tuple_optional_math_and_iteration() {
             let pair:Tuple<bool,bool> = (true,false);
             let (yes,no)=pair;
             let query:?bool=yes;
-            let present=query.as(OptionalOps<bool>).is_some();
+            let present=query.is_some();
             let value:?bool=yes;
             let number:f64=4.0;
             let root=math.sqrt(number);
@@ -119,6 +119,39 @@ fn complete_shipped_sysroot_runs_tuple_optional_math_and_iteration() {
         }
         test {let passed=run();assumes passed;}
     ",
+    );
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(input.0.join("input.fl"))
+        .arg("--sysroot")
+        .arg(library)
+        .args([
+            "--test-native",
+            "--inline-functions",
+            "--copy-protocol",
+            "builtin.protocols.resources.Copy",
+            "--drop-protocol",
+            "builtin.protocols.resources.Drop",
+            "--fuel",
+            "4000000",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(report.contains("(count 1) (failures 0)"), "{report}");
+}
+
+#[test]
+fn complete_shipped_sysroot_runs_inherent_qualified_type_methods() {
+    let input = Inputs::new();
+    input.write(
+        "input.fl",
+        include_str!("../../../development/examples/sysroot-qualified-methods.fl"),
     );
     let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))

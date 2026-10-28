@@ -626,6 +626,7 @@ impl ImplementationHead {
         let ordinary = |ty: &Term| {
             nominal(ty)
                 || context.is_tuple_type(ty)
+                || context.is_list_type(ty)
                 || matches!(
                     ty,
                     Term::Primitive(_)
