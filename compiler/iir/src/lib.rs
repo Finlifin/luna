@@ -306,6 +306,9 @@ impl Package {
                     }
                 }
                 if instance.function.phase == nir::program::FunctionPhase::Runtime {
+                    if matches!(expr.kind, K::ComptimeIntegerConvert(_)) {
+                        return Err("IIR requires comptime integer conversion completion".into());
+                    }
                     if let K::Call { callee, .. } = &expr.kind {
                         if !callee.ty.is_comptime_callable()
                             && matches!(callee.ty.callable_signature(), Term::Function { parameters, .. }

@@ -431,6 +431,7 @@ fn walk_roots<'a>(
                     | K::TakeBits(value)
                     | K::TextQuery { subject: value, .. }
                     | K::IntegerRepresentation(value)
+                    | K::ComptimeIntegerConvert(value)
                     | K::SymbolName(value)
                     | K::EnumName(value)
                     | K::Not(value)
@@ -845,6 +846,7 @@ fn walk_mut(
                     | K::TakeBits(value)
                     | K::TextQuery { subject: value, .. }
                     | K::IntegerRepresentation(value)
+                    | K::ComptimeIntegerConvert(value)
                     | K::SymbolName(value)
                     | K::EnumName(value)
                     | K::Not(value)

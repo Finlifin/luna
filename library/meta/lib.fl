@@ -8,6 +8,19 @@
 pub typealias Object = .Object'builtin;
 
 {-
+  Exact host-pipeline size conversion during comptime invocation. to_usize
+  rejects negatives and values outside the configured target width; from_usize
+  retains the complete value. Neither operation guesses the compiler's width.
+-}
+pub pure comptime fn to_usize(value: .Integer'builtin) -> .usize'builtin {
+    .comptime_integer_convert'builtin(.usize'builtin, value)
+}
+
+pub pure comptime fn from_usize(value: .usize'builtin) -> .Integer'builtin {
+    .comptime_integer_convert'builtin(.Integer'builtin, value)
+}
+
+{-
   Observe ordered Object entries without merging duplicate keys. Indices are
   checked; an out-of-range index fails the invocation. A positional entry has
   no key. Typed reads return an absent optional only for a domain mismatch.

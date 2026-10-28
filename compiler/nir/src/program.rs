@@ -834,6 +834,18 @@ impl fmt::Display for ObjectEditKind {
     }
 }
 
+/// Type formation only; target widths and value bounds are checked at invocation.
+pub fn comptime_integer_conversion_valid(input: &Term, result: &Term) -> bool {
+    use crate::Primitive;
+    let integer = |ty: &Term| {
+        matches!(ty, Term::Primitive(p)
+        if *p == Primitive::Integer || p.fixed_integer_layout().is_some()
+            || matches!(p, Primitive::Usize | Primitive::Isize))
+    };
+    integer(result) && (integer(input) || *input == Term::Primitive(Primitive::Never))
+        || *input == Term::Primitive(Primitive::Never) && *result == *input
+}
+
 /// The result width is fixed even when the input representation needs a target.
 pub fn integer_representation_valid(input: &Term, result: &Term) -> bool {
     use crate::Primitive as P;
@@ -1291,6 +1303,8 @@ pub enum ExprKind {
     SymbolName(Box<Expr>),
     /// Zero-extend integer representation bits to u128 using execution target facts.
     IntegerRepresentation(Box<Expr>),
+    /// Exact comptime Integer/machine-integer conversion; never truncates.
+    ComptimeIntegerConvert(Box<Expr>),
     /// UTF-8 observations; packet is (str) or (str, u64), in evaluation order.
     TextQuery {
         subject: Box<Expr>,
@@ -3386,6 +3400,7 @@ impl fmt::Display for ExprKind {
             Self::BitEqual(a, b) => write!(f, "(bit-equal {a} {b})"),
             Self::EnumName(x) => write!(f, "(enum-name {x})"),
             Self::IntegerRepresentation(x) => write!(f, "(integer-representation {x})"),
+            Self::ComptimeIntegerConvert(x) => write!(f, "(comptime-integer-convert {x})"),
             Self::SymbolName(x) => write!(f, "(symbol-name {x})"),
             Self::TextQuery { subject, query } => write!(f, "(text-query {query} {subject})"),
             Self::Snapshot(x) => write!(f, "(snapshot {x})"),
@@ -3671,6 +3686,7 @@ impl Expr {
                     | ExprKind::TakeBits(_)
                     | ExprKind::TextQuery { subject: _, .. }
                     | ExprKind::IntegerRepresentation(_)
+                    | ExprKind::ComptimeIntegerConvert(_)
                     | ExprKind::SymbolName(_)
                     | ExprKind::EnumName(_)
                     | ExprKind::Not(_)
@@ -3762,6 +3778,7 @@ impl Expr {
                 | ExprKind::TakeBits(value)
                 | ExprKind::TextQuery { subject: value, .. }
                 | ExprKind::IntegerRepresentation(value)
+                | ExprKind::ComptimeIntegerConvert(value)
                 | ExprKind::SymbolName(value)
                 | ExprKind::EnumName(value)
                 | ExprKind::Not(value)
@@ -4159,6 +4176,7 @@ impl Expr {
             | ExprKind::TakeBits(value)
             | ExprKind::TextQuery { subject: value, .. }
             | ExprKind::IntegerRepresentation(value)
+            | ExprKind::ComptimeIntegerConvert(value)
             | ExprKind::SymbolName(value)
             | ExprKind::EnumName(value)
             | ExprKind::Not(value)
@@ -4836,6 +4854,7 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
             | ExprKind::TakeBits(value)
             | ExprKind::TextQuery { subject: value, .. }
             | ExprKind::IntegerRepresentation(value)
+            | ExprKind::ComptimeIntegerConvert(value)
             | ExprKind::SymbolName(value)
             | ExprKind::EnumName(value)
             | ExprKind::UnsafeScope(value)

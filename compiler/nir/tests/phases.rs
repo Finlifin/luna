@@ -50,6 +50,56 @@ fn function(local: u32, phase: Phase, inputs: &[Sort]) -> Function {
 }
 
 #[test]
+fn comptime_integer_conversion_checks_phase_and_both_domains() {
+    let mut f = function(1, Phase::Comptime, &[]);
+    f.signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Primitive(Primitive::U8)),
+    };
+    f.body = Expr {
+        source: f.body.source,
+        ty: Term::Primitive(Primitive::U8),
+        kind: K::ComptimeIntegerConvert(Box::new(Expr {
+            source: f.body.source,
+            ty: Term::Primitive(Primitive::Integer),
+            kind: K::Literal(Literal::Integer("255".into())),
+        })),
+    };
+    let package = Package {
+        functions: vec![f],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    let mut runtime = package.clone();
+    runtime.functions[0].phase = Phase::Runtime;
+    let K::ComptimeIntegerConvert(value) = &mut runtime.functions[0].body.kind else {
+        unreachable!()
+    };
+    value.ty = Term::Primitive(Primitive::U8);
+    value.kind = K::Literal(Literal::UnsignedInteger(255));
+    let failure = nir::phases::validate(&runtime).unwrap_err();
+    assert!(
+        failure
+            .message
+            .contains("requires comptime integer domains"),
+        "{failure:?}"
+    );
+    let mut bad = package.clone();
+    let K::ComptimeIntegerConvert(value) = &mut bad.functions[0].body.kind else {
+        unreachable!()
+    };
+    *value = Box::new(flag(K::Literal(Literal::Bool(true))));
+    assert!(nir::phases::validate(&bad).is_err());
+    let mut bad = package;
+    bad.functions[0].body.ty = Term::Primitive(Primitive::Bool);
+    bad.functions[0].signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    assert!(nir::phases::validate(&bad).is_err());
+}
+
+#[test]
 fn text_queries_validate_packet_domains_in_both_phases() {
     use nir::program::TextQueryKind as Q;
     for phase in [Phase::Runtime, Phase::Comptime] {

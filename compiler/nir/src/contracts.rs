@@ -205,6 +205,7 @@ pub fn remap_predicate(
             | K::TakeBits(v)
             | K::TextQuery { subject: v, .. }
             | K::IntegerRepresentation(v)
+            | K::ComptimeIntegerConvert(v)
             | K::SymbolName(v)
             | K::EnumName(v)
             | K::UnsafeScope(v)

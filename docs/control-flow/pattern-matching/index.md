@@ -882,9 +882,11 @@ comptime fn inspect(value: PairView) -> bool {
 运行时 IIR 也不会为未提供的编译期成员物化签名。两相的实现分别选择，不能仅凭
 方法名带有 `_comptime` 就取得对应的 phase。
 
-显式绑定的单相协议仍使用前述方法名与已声明的阶段。默认双相协议用于
-`meta.List` 的实现尚待长度与索引的 Integer／usize 转换接通；绑定协议本身
-不会赋予 comptime 列表 runtime 表示，也不将两个整数类型视为同一类型。
+显式绑定的单相协议仍使用前述方法名与已声明的阶段。完整 sysroot 为
+`meta.List<T>` 提供 comptime contribution，元素类型为 T，长度和索引通过
+`meta.to_usize`／`meta.from_usize` 精确转换。负数或超出目标 usize 范围的
+转换会失败，不发生截断；没有目标依据时不能猜测 usize 宽度。该实现不会
+赋予 comptime 列表 runtime 表示，也不将两个整数类型视为同一类型。
 
 列表模式的内部主体观察名只在本次候选匹配中可见，不是成功分支导出的变量。or-pattern 可以据此独立尝试各分支；成功后只统一导出用户绑定。该规则也适用于嵌套 tuple、`as whole` 和 inline／quote 展开。内部主体地址不得通过提取绑定逃逸，候选失败不清理原主体。
 

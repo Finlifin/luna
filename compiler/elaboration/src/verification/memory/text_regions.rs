@@ -2639,6 +2639,7 @@ impl Query<'_, '_> {
             | K::BitConvert(value)
             | K::TakeBits(value)
             | K::IntegerRepresentation(value)
+            | K::ComptimeIntegerConvert(value)
             | K::BitSlice { value, .. } => Ok(self
                 .expr(value, locals, returned, next)?
                 .map(|_| Regions::new())),

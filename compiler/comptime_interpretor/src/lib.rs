@@ -4191,6 +4191,41 @@ impl<'a> Interpreter<'a> {
                 }
                 self.eval(value, environment)
             }
+            K::ComptimeIntegerConvert(operand) => {
+                if !self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
+                }
+                if !nir::program::comptime_integer_conversion_valid(&operand.ty, &expr.ty) {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                }
+                let value = value!(self.eval(operand, environment));
+                if !self.has_type(&value, &operand.ty) {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                }
+                let integer = match value {
+                    Value::Integer(value) => value,
+                    Value::UnsignedInteger(value) => comptime_runtime::Integer::from_u128(value),
+                    Value::SignedInteger(value) => comptime_runtime::Integer::from_i128(value),
+                    _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
+                };
+                let Term::Primitive(target) = expr.ty else {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                };
+                if target == Primitive::Integer {
+                    return Ok(Flow::Value(Value::Integer(integer)));
+                }
+                let (signed, width) = self
+                    .integer_layout(target)
+                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
+                self.tick(Some(expr.source))?;
+                let converted = if signed {
+                    integer.to_signed(width).map(Value::SignedInteger)
+                } else {
+                    integer.to_unsigned(width).map(Value::UnsignedInteger)
+                }
+                .map_err(|_| self.failure(ErrorKind::MachineOverflow, Some(expr.source)))?;
+                Ok(Flow::Value(converted))
+            }
             K::IntegerRepresentation(operand) => {
                 if !nir::program::integer_representation_valid(&operand.ty, &expr.ty) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));

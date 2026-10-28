@@ -9523,6 +9523,42 @@ impl Checker<'_, '_> {
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "list_length" | "list_concat")) => {
                     self.list_builtin(expr, callee, args, expected)
                 }
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "comptime_integer_convert") =>
+                {
+                    if self.runtime_value_context() || self.in_code_body {
+                        return Err(error(
+                            expr.span,
+                            "integer conversion requires comptime invocation",
+                        ));
+                    }
+                    let [Arg::Positional(target), Arg::Positional(value)] = args else {
+                        return Err(error(
+                            expr.span,
+                            "integer conversion requires a Type and an integer",
+                        ));
+                    };
+                    let target = self.type_expr(target)?;
+                    let value = self.expr(value, None)?;
+                    let ty = if is_never(&value.ty) {
+                        p(P::Never)
+                    } else {
+                        target
+                    };
+                    if !n::comptime_integer_conversion_valid(&value.ty, &ty) {
+                        return Err(error(
+                            expr.span,
+                            "integer conversion requires concrete integer domains",
+                        ));
+                    }
+                    if let Some(expected) = expected {
+                        self.require_expression(&ty, expected, expr.span)?;
+                    }
+                    Ok(n::Expr {
+                        source: source(expr.span),
+                        ty,
+                        kind: K::ComptimeIntegerConvert(Box::new(value)),
+                    })
+                }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "integer_representation") =>
                 {
                     let [Arg::Positional(value)] = args else {
@@ -11851,6 +11887,7 @@ fn readonly_guard_operand(expr: &n::Expr, fuel: &mut u64, span: Span) -> Result<
             | K::TakeBits(value)
             | K::TextQuery { subject: value, .. }
             | K::IntegerRepresentation(value)
+            | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::BitSlice { value, .. } => pending.push((value, depth + 1)),
             K::IntegerBinary { left, right, .. }
@@ -12196,6 +12233,7 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::TakeBits(value)
         | K::TextQuery { subject: value, .. }
         | K::IntegerRepresentation(value)
+        | K::ComptimeIntegerConvert(value)
         | K::SymbolName(value)
         | K::EnumName(value)
         | K::FloatNegate(value)

@@ -2621,6 +2621,7 @@ pub(super) fn references(
                 | K::TakeBits(value)
                 | K::TextQuery { subject: value, .. }
                 | K::IntegerRepresentation(value)
+                | K::ComptimeIntegerConvert(value)
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::Not(value)

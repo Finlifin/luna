@@ -1,0 +1,13 @@
+use patterns.ListPatternView;
+
+{- List values and elements stay in the comptime phase. -}
+comptime impl ListPatternView for meta.List<T> where T {
+    assoc Element: .Type'builtin = T;
+    assoc ElementComptime: .Type'builtin = T;
+    comptime fn list_pattern_view_get_len_comptime(self) -> .usize'builtin {
+        meta.to_usize(meta.length(self))
+    }
+    comptime fn list_pattern_view_get_element_comptime(self, index: .usize'builtin) -> T {
+        self[meta.from_usize(index)]
+    }
+}

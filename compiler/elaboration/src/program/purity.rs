@@ -2425,6 +2425,7 @@ impl<'a> Analysis<'a> {
             | K::Snapshot(inner)
             | K::TakeBits(inner)
             | K::IntegerRepresentation(inner)
+            | K::ComptimeIntegerConvert(inner)
             | K::SymbolName(inner)
             | K::EnumName(inner)
             | K::BitSlice { value: inner, .. } => {

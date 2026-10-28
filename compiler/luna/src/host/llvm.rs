@@ -1561,6 +1561,11 @@ impl Emitter<'_> {
                 }
                 Value::unit()
             }
+            K::ComptimeIntegerConvert(_) => {
+                return Err(
+                    "comptime integer conversion must complete before LLVM lowering".into(),
+                );
+            }
             K::IntegerRepresentation(e) => {
                 if !nir::program::integer_representation_valid(&e.ty, &expr.ty) {
                     return Err("host integer representation domain mismatch".into());

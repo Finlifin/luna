@@ -2016,6 +2016,7 @@ impl Builder<'_> {
                         K::EnumName(_)
                             | K::TextQuery { subject: _, .. }
                             | K::IntegerRepresentation(_)
+                            | K::ComptimeIntegerConvert(_)
                             | K::SymbolName(_)
                             | K::TakeBits(_)
                             | K::BitConvert(_)
@@ -2854,6 +2855,7 @@ impl Builder<'_> {
                 | K::TakeBits(value)
                 | K::TextQuery { subject: value, .. }
                 | K::IntegerRepresentation(value)
+                | K::ComptimeIntegerConvert(value)
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::Not(value)
@@ -3326,6 +3328,7 @@ impl Builder<'_> {
             | K::TakeBits(value)
             | K::TextQuery { subject: value, .. }
             | K::IntegerRepresentation(value)
+            | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::Not(value)

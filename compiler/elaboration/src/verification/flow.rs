@@ -5433,6 +5433,7 @@ impl Walker<'_> {
             | K::TakeBits(value)
             | K::TextQuery { subject: value, .. }
             | K::IntegerRepresentation(value)
+            | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::BitConvert(value) => {
@@ -6895,6 +6896,7 @@ fn exportable_postcondition(
             | K::TakeBits(a)
             | K::TextQuery { subject: a, .. }
             | K::IntegerRepresentation(a)
+            | K::ComptimeIntegerConvert(a)
             | K::SymbolName(a)
             | K::EnumName(a)
             | K::BitConvert(a)

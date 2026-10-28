@@ -1,5 +1,26 @@
 # meta
 
+`to_usize(value: Integer) -> usize` 与 `from_usize(value: usize) -> Integer`
+是 pure comptime 函数，用于编译期数据与目标尺寸接口之间的精确转换。
+前者拒绝负数及超出目标 usize 范围的值，后者保留完整非负数值；不截断，
+也不按位重解释。两者使用本次编译的目标宽度，缺少目标依据时调用失败，
+不会采用运行编译器的机器宽度。转换操作数按普通调用规则求值一次，
+失败携带调用内部转换节点的源码位置，并消耗 invocation 预算。
+
+```flurry
+comptime fn checked_size(value: Integer) -> bool {
+    let count = meta.to_usize(value);
+    meta.from_usize(count) == value
+}
+```
+
+完整 sysroot 已为 `List<T>` 提供 `ListPatternView` 的 comptime contribution。
+`[a, b]`、`[a, ..._]` 与 `[]` 可直接用于编译期列表，提取的元素保持 T 的身份；
+列表自身仍没有 runtime 表示或 runtime 迭代承诺。
+长度和索引经上述接口转换，使用主机 pipeline 时目标依据由驱动提供。
+例子见 [sysroot-meta-list-patterns.fl](../../development/examples/sysroot-meta-list-patterns.fl)，
+通过 `python3 -B development/library_check.py --release --stage sysroot-meta-patterns` 检查。
+
 `Object` 是编译期异构对象的公开类型别名，经 `meta.prelude` 导出。
 用户代码无需直接引用编译器内置符号：
 

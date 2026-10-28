@@ -1,0 +1,32 @@
+{- No custom protocol declaration or driver binding is needed for meta.List. -}
+comptime fn values() -> bool {
+    let input: meta.List<Integer> = [1, 2, 3];
+    let prefix = input match { [first, (second if second > first), ..._] => true, _ => false };
+    let exact = input match { [1, 2] => false, [1, 2, 3] => true, _ => false };
+    let empty: meta.List<bool> = [];
+    let empty_match = empty match { [] => true, _ => false };
+    let optional: meta.List<?Integer> = [null, 3];
+    let layers = optional match { [null, number?] => number == 3, _ => false };
+    prefix and exact and empty_match and layers
+}
+
+pure comptime fn Identity<T> -> Type { T }
+
+comptime fn types() -> bool {
+    let input: meta.List<Type> = [Identity<bool>, bool];
+    input match { [first, second] => first == Identity<bool> and second == bool, _ => false }
+}
+
+test comptime_list_value_patterns {
+    inline if values() { assumes true; } else { assumes false; };
+}
+
+test comptime_list_type_patterns {
+    inline if types() { assumes true; } else { assumes false; };
+}
+
+test public_size_conversion {
+    inline if meta.from_usize(meta.to_usize(2147483647)) == 2147483647 {
+        assumes true;
+    } else { assumes false; };
+}
