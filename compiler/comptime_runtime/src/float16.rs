@@ -5,6 +5,7 @@ use std::{cmp::Ordering, fmt};
 
 mod arithmetic;
 mod integral;
+mod scale;
 mod sqrt;
 pub use arithmetic::Float16Op;
 pub use integral::IntegralRounding;

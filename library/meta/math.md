@@ -80,5 +80,12 @@ with bounded integer operations.
 negative zero and positive infinity, and produces NaN for negative nonzero
 inputs and NaNs. NaN payloads are not part of this interface contract. The
 VM compares the input with exact squared midpoints in a bounded binary
-search; it does not first round through a host floating type. Other floating
-math wrappers do not yet admit half precision.
+search; it does not first round through a host floating type.
+
+`ldexp` accepts both half formats with an `i32` exponent, including its
+minimum and maximum values. It rounds subnormal results to nearest-even,
+returns signed infinity on overflow and signed zero on complete underflow,
+and preserves zeros and infinities for any exponent. NaNs remain NaNs.
+The VM adjusts exponents with bounded integer work and rounds only at the
+final subnormal boundary. Other floating math wrappers do not yet admit
+half precision.

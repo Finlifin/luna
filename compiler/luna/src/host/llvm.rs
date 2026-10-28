@@ -1182,11 +1182,14 @@ impl Emitter<'_> {
                     ));
                 }
                 if checked.operation().has_integer_exponent() {
-                    if !matches!(ty, Ty::Float32 | Ty::Float64)
+                    if !matches!(ty, Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64)
                         || values[0].ty != ty
                         || values[1].ty != Ty::Int(32, true)
                     {
                         return Err("host integer-exponent operand representation mismatch".into());
+                    }
+                    if ty == Ty::BFloat16 {
+                        return self.bfloat_intrinsic(checked.operation(), &values);
                     }
                     let scalar = ty.llvm();
                     let symbol = format!("llvm.{}.f{width}.i32", checked.operation().name());

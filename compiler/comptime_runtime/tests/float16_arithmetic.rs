@@ -186,3 +186,53 @@ fn square_root_exhausts_both_formats_against_wide_quantization() {
         }
     }
 }
+
+#[test]
+fn scaling_covers_every_encoding_and_extreme_integer_exponents() {
+    for (format, fraction, bias, infinity) in
+        [(F::Binary16, 10, 15, 0x7c00), (F::BFloat16, 7, 127, 0x7f80)]
+    {
+        for bits in 0..=u16::MAX {
+            let value = decode(bits, fraction, bias, infinity);
+            for exponent in [
+                i32::MIN,
+                -300,
+                -150,
+                -134,
+                -25,
+                -14,
+                -11,
+                -2,
+                -1,
+                0,
+                1,
+                2,
+                11,
+                14,
+                25,
+                128,
+                134,
+                150,
+                300,
+                i32::MAX,
+            ] {
+                let actual = format.scale_pow2(bits, exponent);
+                // Every finite half input times 2^[-300,300] is exact and
+                // finite in f64. Larger powers are already beyond either
+                // half format's complete finite dynamic range.
+                let expected = quantize(
+                    value * 2.0f64.powi(exponent.clamp(-300, 300)),
+                    fraction,
+                    bias,
+                    infinity,
+                );
+                if expected & 0x7fff > infinity {
+                    assert!(actual & 0x7fff > infinity, "{format} {bits:04x} {exponent}");
+                    assert_ne!(actual & (1 << (fraction - 1)), 0);
+                } else {
+                    assert_eq!(actual, expected, "{format} {bits:04x} {exponent}");
+                }
+            }
+        }
+    }
+}

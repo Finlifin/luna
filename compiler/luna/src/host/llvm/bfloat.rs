@@ -13,6 +13,43 @@ impl Emitter<'_> {
         self.instruction(Ty::Float32, format!("bitcast i32 {} to float", bits.text))
     }
 
+    // Round finite f32 values to nearest-even, preserving infinities and
+    // quieting NaNs before rounding could turn their payload into infinity.
+    fn round_bfloat(&mut self, value: &Value) -> Value {
+        let bits = self.instruction(
+            Ty::Int(32, false),
+            format!("bitcast float {} to i32", value.text),
+        );
+        let high = self.instruction(Ty::Int(32, false), format!("lshr i32 {}, 16", bits.text));
+        let parity = self.instruction(Ty::Int(32, false), format!("and i32 {}, 1", high.text));
+        let bias = self.instruction(
+            Ty::Int(32, false),
+            format!("add i32 {}, 32767", parity.text),
+        );
+        let rounded = self.instruction(
+            Ty::Int(32, false),
+            format!("add i32 {}, {}", bits.text, bias.text),
+        );
+        let upper = self.instruction(Ty::Int(32, false), format!("lshr i32 {}, 16", rounded.text));
+        let magnitude = self.instruction(
+            Ty::Int(32, false),
+            format!("and i32 {}, 2147483647", bits.text),
+        );
+        let nan = self.instruction(
+            Ty::Bool,
+            format!("icmp ugt i32 {}, 2139095040", magnitude.text),
+        );
+        let quiet = self.instruction(Ty::Int(32, false), format!("or i32 {}, 64", high.text));
+        let result = self.instruction(
+            Ty::Int(32, false),
+            format!(
+                "select i1 {}, i32 {}, i32 {}",
+                nan.text, quiet.text, upper.text
+            ),
+        );
+        self.instruction(Ty::BFloat16, format!("trunc i32 {} to i16", result.text))
+    }
+
     pub(super) fn float_compare(&mut self, predicate: &str, a: &Value, b: &Value) -> Value {
         let (a, b) = if a.ty == Ty::BFloat16 {
             (self.widen_bfloat(a), self.widen_bfloat(b))
@@ -73,23 +110,23 @@ impl Emitter<'_> {
                 Ty::Float32,
                 format!("call float @llvm.sqrt.f32(float {})", wide.text),
             );
-            let bits = self.instruction(
-                Ty::Int(32, false),
-                format!("bitcast float {} to i32", root.text),
+            return Ok(self.round_bfloat(&root));
+        }
+        if op == Op::ScaleByPowerOfTwo {
+            // The f32 significand and subnormal range retain all bits that
+            // could affect rounding a scaled bf16 input back to bf16.
+            let wide = self.widen_bfloat(a);
+            let exponent = values.get(1).ok_or("bf16 ldexp requires an exponent")?;
+            self.declarations
+                .insert("declare float @llvm.ldexp.f32.i32(float, i32)".into());
+            let result = self.instruction(
+                Ty::Float32,
+                format!(
+                    "call float @llvm.ldexp.f32.i32(float {}, i32 {})",
+                    wide.text, exponent.text
+                ),
             );
-            let high = self.instruction(Ty::Int(32, false), format!("lshr i32 {}, 16", bits.text));
-            let parity = self.instruction(Ty::Int(32, false), format!("and i32 {}, 1", high.text));
-            let bias = self.instruction(
-                Ty::Int(32, false),
-                format!("add i32 {}, 32767", parity.text),
-            );
-            let rounded = self.instruction(
-                Ty::Int(32, false),
-                format!("add i32 {}, {}", bits.text, bias.text),
-            );
-            let upper =
-                self.instruction(Ty::Int(32, false), format!("lshr i32 {}, 16", rounded.text));
-            return Ok(self.instruction(Ty::BFloat16, format!("trunc i32 {} to i16", upper.text)));
+            return Ok(self.round_bfloat(&result));
         }
         if matches!(
             op,

@@ -281,6 +281,11 @@ fn half_scalar(op: Op, values: &[Value], bfloat: bool) -> Option<Value> {
     };
     let result = if let Some(mode) = rounding {
         format.round_integral(a, mode)
+    } else if op == Op::ScaleByPowerOfTwo {
+        let Value::SignedInteger(power) = values.get(1)? else {
+            return None;
+        };
+        format.scale_pow2(a, i32::try_from(*power).ok()?)
     } else if op == Op::SquareRoot {
         format.square_root(a)
     } else if op == Op::AbsoluteValue {

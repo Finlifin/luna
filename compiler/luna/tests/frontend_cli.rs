@@ -10405,3 +10405,93 @@ fn sysroot_half_float_square_root_handles_boundaries_and_domain_errors() {
         }
     }
 }
+
+#[test]
+fn sysroot_half_float_ldexp_handles_subnormal_ties_and_extreme_exponents() {
+    use comptime_runtime::float16::Float16Format as F;
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    for (ty, format, one, normal, infinity, minimum_exponent) in [
+        ("f16", F::Binary16, 0x3c00u16, 0x400, 0x7c00, -24),
+        ("bf16", F::BFloat16, 0x3f80, 0x80, 0x7f80, -133),
+    ] {
+        let cases = [
+            (0, i32::MAX),
+            (0x8000, i32::MIN),
+            (1, -1),
+            (3, -1),
+            (normal, -1),
+            (normal - 1, 1),
+            (one, minimum_exponent - 1),
+            (one + 1, minimum_exponent - 1),
+            (one, minimum_exponent),
+            (infinity - 1, 1),
+            (one, i32::MAX),
+            (one, i32::MIN),
+            (one | 0x8000, i32::MIN),
+            (infinity, i32::MIN),
+            (infinity | 0x8000, i32::MAX),
+            (infinity | 1, i32::MAX),
+        ];
+        let mut source = String::new();
+        for (phase, module, helper, entry) in [
+            ("", "math", "check", "run"),
+            ("comptime ", "meta.math", "staged_check", "staged"),
+        ] {
+            let checks = cases
+                .iter()
+                .map(|&(bits, exponent)| {
+                    let expected = format.scale_pow2(bits, exponent);
+                    format!(
+                        "{helper}({bits},{exponent},{expected},{})",
+                        expected & 0x7fff > infinity
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" and ");
+            source.push_str(&format!(
+                r#"
+{phase}fn {helper}(raw:u16, exponent:i32, expected:u16, nan:bool)->bool {{
+    let result={module}.ldexp(raw'bitvec.as({ty}), exponent);
+    if nan {{ {module}.isnan(result) }} else {{ result'bitvec.as(u16)==expected }}
+}}
+{phase}fn {entry}()->bool {{ {checks} }}
+"#
+            ));
+        }
+        source.push_str("fn folded()->bool {const result=staged();result}");
+        sandbox.write("input.fl", source);
+        let base = [
+            "input.fl",
+            "--sysroot",
+            root.to_str().unwrap(),
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+        ];
+        assert_eq!(
+            success(&sandbox.run(&[base.as_slice(), &["--invoke-comptime", "staged"]].concat()))
+                .trim(),
+            "(bool true)"
+        );
+        for entry in ["run", "folded"] {
+            for level in ["0", "3"] {
+                success(
+                    &sandbox.run(
+                        &[
+                            base.as_slice(),
+                            &["--build", entry, "--opt-level", level, "--output", "native"],
+                        ]
+                        .concat(),
+                    ),
+                );
+                assert_eq!(
+                    success(&Command::new(sandbox.path("native")).output().unwrap()).trim(),
+                    "(bool true)",
+                    "{ty} {entry} O{level}"
+                );
+            }
+        }
+    }
+}

@@ -263,9 +263,9 @@ impl Operation {
             | Self::Log2
             | Self::Log10
             | Self::Power
-            | Self::IntegerPower
-            | Self::ScaleByPowerOfTwo => &[F32, F64],
+            | Self::IntegerPower => &[F32, F64],
             Self::SquareRoot
+            | Self::ScaleByPowerOfTwo
             | Self::Floor
             | Self::Ceiling
             | Self::Truncate

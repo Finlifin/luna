@@ -2098,7 +2098,12 @@ fn check_integer_exponent_signature(operation: Operation) {
     let tag = tag(&package, "Ops", 0);
     let registry = Registry::new(&package, &[(tag, operation)]).unwrap();
     let exponent = Term::Primitive(P::I32);
-    for scalar in [Term::Primitive(P::F32), Term::Primitive(P::F64)] {
+    let scalars: &[P] = if operation == Operation::ScaleByPowerOfTwo {
+        &[P::F16, P::Bf16, P::F32, P::F64]
+    } else {
+        &[P::F32, P::F64]
+    };
+    for scalar in scalars.iter().copied().map(Term::Primitive) {
         let binding = registry
             .check(tag, &[scalar.clone(), exponent.clone()], &scalar)
             .unwrap();
