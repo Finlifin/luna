@@ -3,6 +3,9 @@
 use crate::{Budget, Error, Integer, decimal::DecimalValue};
 use std::{cmp::Ordering, fmt};
 
+mod arithmetic;
+pub use arithmetic::Float16Op;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Float16Format {
     Binary16,

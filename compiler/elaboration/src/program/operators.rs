@@ -8,7 +8,7 @@ pub(super) fn native_arithmetic_operand(
     target: Option<nir::target::TargetData>,
 ) -> bool {
     match shape {
-        Term::Primitive(P::F32 | P::F64) => *op != BinOp::Rem,
+        Term::Primitive(P::F16 | P::Bf16 | P::F32 | P::F64) => *op != BinOp::Rem,
         Term::Primitive(P::Integer | P::Float) => !matches!(op, BinOp::Div | BinOp::Rem),
         Term::Primitive(primitive) => target
             .map_or_else(
@@ -73,7 +73,7 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn proved_float_family(&self, ty: &Term) -> bool {
-        self.proved_primitive_family(ty, &[P::F32, P::F64])
+        self.proved_primitive_family(ty, &[P::F16, P::Bf16, P::F32, P::F64])
     }
 
     fn proved_signed_integer_family(&self, ty: &Term) -> bool {
@@ -252,8 +252,10 @@ impl Checker<'_, '_> {
             H::Unary(UnOp::Neg, _) => {
                 let value = checked.take().expect("checked unary operand");
                 let shape = self.structural_type(&value.ty, expr.span)?;
-                let kind = if matches!(shape, Term::Primitive(P::Float | P::F32 | P::F64))
-                    || self.proved_float_family(&shape)
+                let kind = if matches!(
+                    shape,
+                    Term::Primitive(P::Float | P::F16 | P::Bf16 | P::F32 | P::F64)
+                ) || self.proved_float_family(&shape)
                 {
                     K::FloatNegate(Box::new(value))
                 } else {
@@ -316,7 +318,7 @@ impl Checker<'_, '_> {
             crate::arithmetic::Operator::Negate => {
                 matches!(
                     shape,
-                    Term::Primitive(P::Integer | P::Float | P::F32 | P::F64)
+                    Term::Primitive(P::Integer | P::Float | P::F16 | P::Bf16 | P::F32 | P::F64)
                 ) || matches!(shape,Term::Primitive(primitive) if self.integer_layout(primitive).is_some())
                     // Protocol availability must not change the established
                     // builtin operation for a proved generic scalar family.

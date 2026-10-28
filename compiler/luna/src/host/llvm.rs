@@ -1341,7 +1341,12 @@ impl Emitter<'_> {
                 if self.terminated {
                     return Ok(Value::unit());
                 }
-                if a.ty != b.ty || !matches!(a.ty.clone(), Ty::Float32 | Ty::Float64) {
+                if a.ty != b.ty
+                    || !matches!(
+                        a.ty.clone(),
+                        Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
+                    )
+                {
                     return Err("host floating operand mismatch".into());
                 }
                 let operation = match op {
@@ -1365,10 +1370,11 @@ impl Emitter<'_> {
                         value.text
                     ),
                 );
-                let canonical = if a.ty == Ty::Float32 {
-                    "bitcast (i32 2143289344 to float)"
-                } else {
-                    "bitcast (i64 9221120237041090560 to double)"
+                let canonical = match a.ty {
+                    Ty::Float16 => "bitcast (i16 32256 to half)",
+                    Ty::BFloat16 => "bitcast (i16 32704 to bfloat)",
+                    Ty::Float32 => "bitcast (i32 2143289344 to float)",
+                    _ => "bitcast (i64 9221120237041090560 to double)",
                 };
                 self.instruction(
                     a.ty.clone(),

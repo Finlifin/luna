@@ -107,3 +107,69 @@ fn half_comparison_folding_preserves_zero_and_unordered_nan() {
         }
     }
 }
+
+#[test]
+fn half_arithmetic_folding_preserves_precision_and_negation_payloads() {
+    use nir::program::FloatOp;
+    for (ty, literal, a, b, results, nan) in [
+        (
+            P::F16,
+            Literal::Float16 as fn(u16) -> Literal,
+            0x4200,
+            0x4000,
+            [0x4500, 0x3c00, 0x4600, 0x3e00],
+            0x7e42,
+        ),
+        (
+            P::Bf16,
+            Literal::BFloat16 as fn(u16) -> Literal,
+            0x4040,
+            0x4000,
+            [0x40a0, 0x3f80, 0x40c0, 0x3fc0],
+            0x7fc2,
+        ),
+    ] {
+        let value = |bits| Expr {
+            source: SourceRange { start: 10, end: 14 },
+            ty: Term::Primitive(ty),
+            kind: K::Literal(literal(bits)),
+        };
+        for (op, expected) in [
+            FloatOp::Add,
+            FloatOp::Subtract,
+            FloatOp::Multiply,
+            FloatOp::Divide,
+        ]
+        .into_iter()
+        .zip(results)
+        {
+            let expression = Expr {
+                kind: K::FloatBinary {
+                    op,
+                    left: Box::new(value(a)),
+                    right: Box::new(value(b)),
+                },
+                ..value(0)
+            };
+            assert!(iir::staging::fold_value(&expression, &mut 0).is_err());
+            assert_eq!(
+                iir::staging::fold_value(&expression, &mut 100000)
+                    .unwrap()
+                    .kind,
+                K::Literal(literal(expected))
+            );
+        }
+        for bits in [0, nan, nan | 0x8000] {
+            let expression = Expr {
+                kind: K::FloatNegate(Box::new(value(bits))),
+                ..value(0)
+            };
+            assert_eq!(
+                iir::staging::fold_value(&expression, &mut 100000)
+                    .unwrap()
+                    .kind,
+                K::Literal(literal(bits ^ 0x8000))
+            );
+        }
+    }
+}

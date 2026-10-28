@@ -816,7 +816,10 @@ fn supported_float_operation(expr: &Expr) -> bool {
             _ => false,
         };
     }
-    if !matches!(expr.ty, Term::Primitive(Primitive::F32 | Primitive::F64)) {
+    if !matches!(
+        expr.ty,
+        Term::Primitive(Primitive::F16 | Primitive::Bf16 | Primitive::F32 | Primitive::F64)
+    ) {
         return false;
     }
     match &expr.kind {
@@ -867,6 +870,8 @@ fn fold_float_operation<'layout>(
             *fuel = budget.steps;
             Literal::Float(result.map_err(|e| e.to_string())?)
         }
+        (Term::Float16(value), None, None) => Literal::Float16(value ^ 0x8000),
+        (Term::BFloat16(value), None, None) => Literal::BFloat16(value ^ 0x8000),
         (Term::Float32(value), None, None) => Literal::Float32(value ^ (1 << 31)),
         (Term::Float64(value), None, None) => Literal::Float64(value ^ (1 << 63)),
         (Term::Float(left), Some(Term::Float(right)), Some(op)) => {
@@ -883,6 +888,34 @@ fn fold_float_operation<'layout>(
             .and_then(|v| v.to_literal(&mut budget));
             *fuel = budget.steps;
             Literal::Float(result.map_err(|e| e.to_string())?)
+        }
+        (Term::Float16(left), Some(Term::Float16(right)), Some(op)) => {
+            let mut budget = comptime_runtime::Budget {
+                steps: *fuel,
+                max_limbs: 4096,
+            };
+            let result = op.evaluate_half(
+                comptime_runtime::float16::Float16Format::Binary16,
+                left,
+                right,
+                &mut budget,
+            );
+            *fuel = budget.steps;
+            Literal::Float16(result.map_err(|e| e.to_string())?)
+        }
+        (Term::BFloat16(left), Some(Term::BFloat16(right)), Some(op)) => {
+            let mut budget = comptime_runtime::Budget {
+                steps: *fuel,
+                max_limbs: 4096,
+            };
+            let result = op.evaluate_half(
+                comptime_runtime::float16::Float16Format::BFloat16,
+                left,
+                right,
+                &mut budget,
+            );
+            *fuel = budget.steps;
+            Literal::BFloat16(result.map_err(|e| e.to_string())?)
         }
         (Term::Float32(left), Some(Term::Float32(right)), Some(op)) => {
             Literal::Float32(op.evaluate_f32(left, right))

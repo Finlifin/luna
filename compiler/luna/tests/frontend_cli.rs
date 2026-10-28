@@ -9721,3 +9721,96 @@ fn run()->bool {{
         }
     }
 }
+
+#[test]
+fn sysroot_half_float_arithmetic_rounds_once_and_preserves_special_values() {
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    for (ty, tag, result, third, nan, infinity, maximum, midpoint) in [
+        (
+            "f16",
+            "float16",
+            "4100",
+            "3555",
+            "7e00",
+            "7c00",
+            "65504.0",
+            "0.00048828125",
+        ),
+        (
+            "bf16",
+            "bfloat16",
+            "4020",
+            "3eab",
+            "7fc0",
+            "7f80",
+            "3.3895313892515354759047080037148786688e38",
+            "0.00390625",
+        ),
+    ] {
+        sandbox.write(
+            "input.fl",
+            format!(
+                r#"
+fn combine(a:T,b:T)->T
+where T, requires T == f16 or T == bf16
+{{ ((a + b) * (a - b)) / b }}
+fn run()->{ty} {{ combine<{ty}>(3.0, 2.0) }}
+comptime fn staged()->{ty} {{
+    let a:{ty} = 3.0; let b:{ty} = 2.0;
+    ((a + b) * (a - b)) / b
+}}
+fn folded()->{ty} {{ const result = staged(); result }}
+fn sign()->{ty} {{ let zero:{ty} = 0.0; -zero }}
+fn nan()->{ty} {{ let zero:{ty} = 0.0; zero / zero }}
+fn overflow()->{ty} {{ let maximum:{ty} = {maximum}; maximum * 2.0 }}
+fn third()->{ty} {{ let one:{ty} = 1.0; one / 3.0 }}
+fn tie()->{ty} {{ let one:{ty} = 1.0; one + {midpoint} }}
+"#
+            ),
+        );
+        let base = [
+            "input.fl",
+            "--sysroot",
+            root.to_str().unwrap(),
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+        ];
+        assert_eq!(
+            success(&sandbox.run(&[base.as_slice(), &["--invoke-comptime", "staged"]].concat()))
+                .trim(),
+            format!("({tag} (bits \"{result}\"))")
+        );
+        for (entry, bits) in [
+            ("run", result),
+            ("folded", result),
+            ("sign", "8000"),
+            ("nan", nan),
+            ("overflow", infinity),
+            ("third", third),
+            ("tie", if ty == "f16" { "3c00" } else { "3f80" }),
+        ] {
+            assert_eq!(
+                success(&sandbox.run(&[base.as_slice(), &["--interpret", entry]].concat())).trim(),
+                format!("({tag} (bits \"{bits}\"))")
+            );
+            for level in ["0", "3"] {
+                success(
+                    &sandbox.run(
+                        &[
+                            base.as_slice(),
+                            &["--build", entry, "--opt-level", level, "--output", "native"],
+                        ]
+                        .concat(),
+                    ),
+                );
+                assert_eq!(
+                    success(&Command::new(sandbox.path("native")).output().unwrap()).trim(),
+                    format!("({tag} (bits {bits}))")
+                );
+            }
+        }
+    }
+}

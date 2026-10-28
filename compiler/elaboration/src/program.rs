@@ -9118,8 +9118,10 @@ impl Checker<'_, '_> {
             .map(|ty| self.structural_type(ty, expr.span))
             .transpose()?;
         let hint = hint.as_ref().filter(|ty| {
-            matches!(ty, Term::Primitive(P::Float | P::F32 | P::F64 | P::Integer))
-                || matches!(ty, Term::Primitive(p) if self.integer_layout(*p).is_some())
+            matches!(
+                ty,
+                Term::Primitive(P::Float | P::F16 | P::Bf16 | P::F32 | P::F64 | P::Integer)
+            ) || matches!(ty, Term::Primitive(p) if self.integer_layout(*p).is_some())
                 || self.proved_integer_family(ty, false)
                 || self.proved_float_family(ty)
         });
@@ -9178,8 +9180,10 @@ impl Checker<'_, '_> {
         if shape == p(P::Float) && *op == BinOp::Div {
             return Err(error(expr.span, "exact Float division is not implemented"));
         }
-        let kind = if matches!(shape, Term::Primitive(P::Float | P::F32 | P::F64))
-            || self.proved_float_family(&shape)
+        let kind = if matches!(
+            shape,
+            Term::Primitive(P::Float | P::F16 | P::Bf16 | P::F32 | P::F64)
+        ) || self.proved_float_family(&shape)
         {
             K::FloatBinary {
                 op: match op {

@@ -7842,7 +7842,13 @@ impl<'a> Interpreter<'a> {
         let supported = |ty: &Term| {
             matches!(
                 ty,
-                Term::Primitive(Primitive::F32 | Primitive::F64 | Primitive::Never)
+                Term::Primitive(
+                    Primitive::F16
+                        | Primitive::Bf16
+                        | Primitive::F32
+                        | Primitive::F64
+                        | Primitive::Never
+                )
             )
         };
         match &expr.kind {
@@ -7863,6 +7869,8 @@ impl<'a> Interpreter<'a> {
                     Value::Float(value) => Value::Float(
                         self.integer_operation(Some(expr.source), |budget| value.negate(budget))?,
                     ),
+                    Value::Float16(bits) => Value::Float16(bits ^ 0x8000),
+                    Value::BFloat16(bits) => Value::BFloat16(bits ^ 0x8000),
                     Value::Float32(bits) => Value::Float32(bits ^ (1 << 31)),
                     Value::Float64(bits) => Value::Float64(bits ^ (1 << 63)),
                     _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
@@ -7902,6 +7910,26 @@ impl<'a> Interpreter<'a> {
                             }
                         },
                     )?),
+                    (Value::Float16(a), Value::Float16(b)) => {
+                        Value::Float16(self.integer_operation(Some(expr.source), |budget| {
+                            op.evaluate_half(
+                                comptime_runtime::float16::Float16Format::Binary16,
+                                a,
+                                b,
+                                budget,
+                            )
+                        })?)
+                    }
+                    (Value::BFloat16(a), Value::BFloat16(b)) => {
+                        Value::BFloat16(self.integer_operation(Some(expr.source), |budget| {
+                            op.evaluate_half(
+                                comptime_runtime::float16::Float16Format::BFloat16,
+                                a,
+                                b,
+                                budget,
+                            )
+                        })?)
+                    }
                     (Value::Float32(a), Value::Float32(b)) => Value::Float32(op.evaluate_f32(a, b)),
                     (Value::Float64(a), Value::Float64(b)) => Value::Float64(op.evaluate_f64(a, b)),
                     _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),

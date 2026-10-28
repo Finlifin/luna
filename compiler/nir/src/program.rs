@@ -750,6 +750,26 @@ pub enum FloatOp {
     Divide,
 }
 impl FloatOp {
+    pub fn evaluate_half(
+        self,
+        format: comptime_runtime::float16::Float16Format,
+        left: u16,
+        right: u16,
+        budget: &mut comptime_runtime::Budget,
+    ) -> Result<u16, comptime_runtime::Error> {
+        use comptime_runtime::float16::Float16Op as Op;
+        format.arithmetic(
+            match self {
+                Self::Add => Op::Add,
+                Self::Subtract => Op::Subtract,
+                Self::Multiply => Op::Multiply,
+                Self::Divide => Op::Divide,
+            },
+            left,
+            right,
+            budget,
+        )
+    }
     pub fn evaluate_f32(self, left: u32, right: u32) -> u32 {
         let (left, right) = (f32::from_bits(left), f32::from_bits(right));
         let value = match self {
