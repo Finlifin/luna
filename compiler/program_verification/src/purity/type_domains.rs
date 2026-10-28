@@ -139,7 +139,7 @@ pub(super) fn cases(
                             if (p.fixed_integer_layout().is_some()
                                 // Classifying a platform scalar's behavior does not
                                 // select its layout. Execution still needs target data.
-                                || matches!(p, P::Bool | P::Char | P::F32 | P::F64 | P::Usize | P::Isize))
+                                || matches!(p, P::Bool | P::Char | P::F16 | P::Bf16 | P::F32 | P::F64 | P::Usize | P::Isize))
                                 && !candidates.contains(ty)
                             {
                                 candidates.push(ty.clone());

@@ -9589,3 +9589,59 @@ fn sysroot_half_float_literals_keep_direct_rounding_through_vm_and_llvm() {
         }
     }
 }
+
+#[test]
+fn sysroot_half_float_resource_protocols_preserve_copies_and_clones() {
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    for (ty, tag) in [("f16", "float16"), ("bf16", "bfloat16")] {
+        sandbox.write(
+            "input.fl",
+            format!(
+                r#"
+fn consume(value: T) where T :- Copy {{}}
+fn duplicate(value: T) -> T where T :- Copy {{
+    consume(value);
+    value
+}}
+struct Pair {{ original: {ty}, copied: {ty} }}
+fn run() -> {ty} {{
+    var original: {ty} = -0.0;
+    let cloned = original.as(Clone).clone();
+    original = 2.0;
+    let values = Pair {{ original: original, copied: duplicate(cloned) }};
+    consume(values.original);
+    consume(cloned);
+    values.copied
+}}
+"#
+            ),
+        );
+        let base = [
+            "input.fl",
+            "--sysroot",
+            root.to_str().unwrap(),
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+        ];
+        assert_eq!(
+            success(&sandbox.run(&[base.as_slice(), &["--interpret", "run"]].concat())).trim(),
+            format!("({tag} (bits \"8000\"))")
+        );
+        for level in ["0", "3"] {
+            success(
+                &sandbox.run(
+                    &[
+                        base.as_slice(),
+                        &["--build", "run", "--opt-level", level, "--output", "native"],
+                    ]
+                    .concat(),
+                ),
+            );
+            let output = Command::new(sandbox.path("native")).output().unwrap();
+            assert_eq!(success(&output).trim(), format!("({tag} (bits 8000))"));
+        }
+    }
+}

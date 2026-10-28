@@ -43,6 +43,8 @@ pub fn copy_scalar(ty: &Term) -> bool {
             | P::U128
             | P::Isize
             | P::Usize
+            | P::F16
+            | P::Bf16
             | P::F32
             | P::F64
             | P::BitVec(_),

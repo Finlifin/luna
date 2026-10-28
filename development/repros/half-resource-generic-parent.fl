@@ -1,0 +1,11 @@
+{-
+    Deferred parent-interface evidence for a disjunctive generic impl.
+    Reproduce with the real sysroot and --interpret run. Concrete f16/bf16
+    implementations work; this generic child reports an applicable but pending
+    parent implementation. Keep this case for the trait solver follow-up.
+-}
+trait Parent {}
+trait Child :- Parent {}
+impl Parent for T where T, requires T == f16 or T == bf16 {}
+impl Child for T where T, requires T == f16 or T == bf16 {}
+fn run() -> bool { true }

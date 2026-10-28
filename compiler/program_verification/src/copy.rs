@@ -217,6 +217,8 @@ pub fn classify_with_fuel(
                     | Primitive::U128
                     | Primitive::Isize
                     | Primitive::Usize
+                    | Primitive::F16
+                    | Primitive::Bf16
                     | Primitive::F32
                     | Primitive::F64
             )

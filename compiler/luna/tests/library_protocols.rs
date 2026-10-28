@@ -445,7 +445,8 @@ fn native_wrapper_once_preserves_affine_payloads_without_granting_copy() {
 #[test]
 fn native_wrapper_copy_requires_every_payload_and_preserves_pointer_lifetime() {
     let resources = format!(
-        "mod resources {{ {RESOURCES} }}\nmod native_resources {{ {} }}\nuse resources.*;",
+        "mod primitives {{ {} }} use primitives.*;\nmod resources {{ {RESOURCES} }}\nmod native_resources {{ {} }}\nuse resources.*;",
+        include_str!("../../../library/builtin/primitives.fl"),
         include_str!("../../../library/builtin/protocols/native_resources.fl")
     );
     let selectors = || luna::protocols::type_constructors::Selectors {

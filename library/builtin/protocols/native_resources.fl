@@ -1,5 +1,16 @@
 use resources.{Clone, Copy};
 
+-- Native half precision scalars copy their representation unchanged.
+impl Clone for f16 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for f16 {}
+
+impl Clone for bf16 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for bf16 {}
+
 {-
     Copyable payloads allow copying the complete native wrapper. All possible
     payloads must satisfy Copy, including the inactive error branch. Cloning
