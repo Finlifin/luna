@@ -1933,7 +1933,7 @@ fn float_classification_requires_float_input_and_bool_result() {
         Operation::SignBit,
     ] {
         let registry = Registry::new(&package, &[(tag, op)]).unwrap();
-        for primitive in [P::F32, P::F64] {
+        for primitive in [P::F16, P::Bf16, P::F32, P::F64] {
             let input = Term::Primitive(primitive);
             let output = Term::Primitive(P::Bool);
             assert!(registry.check(tag, &[input.clone()], &output).is_ok());

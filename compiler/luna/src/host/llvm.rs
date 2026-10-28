@@ -1135,27 +1135,35 @@ impl Emitter<'_> {
                 let ty = repr(self.graph, &expr.ty, self.checked)?;
                 if checked.operation().is_float_predicate() {
                     let input = &values[0];
-                    if ty != Ty::Bool || !matches!(input.ty, Ty::Float32 | Ty::Float64) {
+                    if ty != Ty::Bool
+                        || !matches!(
+                            input.ty,
+                            Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
+                        )
+                    {
                         return Err("host float predicate representation mismatch".into());
                     }
                     if checked.operation() == nir::intrinsics::Operation::SignBit {
-                        // Copy only the sign onto an exact, finite magnitude.
-                        // Comparing the original value with zero loses -0 and NaNs.
-                        let symbol = format!("llvm.copysign.f{width}");
-                        let scalar = input.ty.llvm();
-                        self.declarations
-                            .insert(format!("declare {scalar} @{symbol}({scalar}, {scalar})"));
-                        let sign = self.instruction(
-                            input.ty.clone(),
-                            format!(
-                                "call {scalar} @{symbol}({scalar} 1.0, {scalar} {})",
-                                input.text
-                            ),
-                        );
-                        return Ok(self.instruction(
-                            Ty::Bool,
-                            format!("fcmp olt {scalar} {}, 0.0", sign.text),
-                        ));
+                        // LLVM 21's bfloat-to-i16 legalization can erase the
+                        // sign test. Exact widening preserves the sign of all
+                        // classes, including zero and NaNs; unlike magnitude
+                        // classification, sign classification permits widening.
+                        let sign_input = if input.ty == Ty::BFloat16 {
+                            self.instruction(
+                                Ty::Float32,
+                                format!("fpext bfloat {} to float", input.text),
+                            )
+                        } else {
+                            input.clone()
+                        };
+                        let bits = self.to_bits(sign_input)?;
+                        let width =
+                            bits::bit_width(&bits.ty).ok_or("float sign has no bit width")?;
+                        return Ok(self
+                            .instruction(Ty::Bool, format!("icmp slt i{width} {}, 0", bits.text)));
+                    }
+                    if matches!(input.ty, Ty::Float16 | Ty::BFloat16) {
+                        return self.half_float_predicate(input.clone(), checked.operation());
                     }
                     let mask = match checked.operation() {
                         nir::intrinsics::Operation::IsNan => 3,

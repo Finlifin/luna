@@ -276,13 +276,13 @@ impl Operation {
             | Self::Minimum
             | Self::Maximum
             | Self::MinimumNumber
-            | Self::MaximumNumber
-            | Self::IsNan
+            | Self::MaximumNumber => &[F32, F64],
+            Self::IsNan
             | Self::IsInfinite
             | Self::IsNormal
             | Self::IsSubnormal
             | Self::SignBit
-            | Self::IsFinite => &[F32, F64],
+            | Self::IsFinite => &[F16, Bf16, F32, F64],
         }
     }
 
@@ -621,7 +621,7 @@ impl Checked {
         match self.signature {
             Signature::Concrete(primitive) => match primitive {
                 Primitive::U8 | Primitive::I8 => Some(8),
-                Primitive::U16 | Primitive::I16 => Some(16),
+                Primitive::U16 | Primitive::I16 | Primitive::F16 | Primitive::Bf16 => Some(16),
                 Primitive::U32 | Primitive::I32 | Primitive::F32 => Some(32),
                 Primitive::U64 | Primitive::I64 | Primitive::F64 => Some(64),
                 Primitive::U128 | Primitive::I128 => Some(128),

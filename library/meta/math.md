@@ -21,7 +21,7 @@ pure comptime fn reversed_mask() -> u8 {
 }
 ```
 
-The initial scalar domain matches `builtin.math`: IEEE `f32`/`f64`, fixed-width
+The arithmetic scalar domain matches `builtin.math`: IEEE `f32`/`f64`, fixed-width
 integers, and `usize`/`isize` with an explicitly selected compilation target.
 It does not convert the arbitrary-precision `Integer` or decimal `Float` to a
 machine scalar implicitly. Extending those domains requires their own numeric
@@ -58,3 +58,9 @@ Explicit package-set drivers can supply each binding with
 `--comptime-intrinsic sqrt=meta.numeric.scalar_math.target.Scalar.sqrt` (and the
 corresponding flag for every other operation). They must also provide meta
 with a `builtin` dependency. Sysroot users receive these bindings automatically.
+
+The six floating classification functions also accept `f16` and `bf16`.
+They classify the original representation: a half subnormal stays subnormal
+for `issubnormal`, even though widening it could produce a normal value.
+`signbit` observes negative zero and signed NaNs without changing the payload.
+Other floating math wrappers do not yet admit half precision.

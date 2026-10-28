@@ -9907,3 +9907,112 @@ fn folded() -> bool {{ const bits = staged(); bits == ({nan} + 0x8000) }}
         }
     }
 }
+
+#[test]
+fn sysroot_half_float_math_classifies_original_format_in_both_phases() {
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    for (ty, infinity, normal) in [("f16", 0x7c00u16, 0x400u16), ("bf16", 0x7f80, 0x80)] {
+        let mut source = String::new();
+        for (phase, module, name) in [
+            ("", "math", "check"),
+            ("comptime ", "meta.math", "staged_check"),
+        ] {
+            source.push_str(&format!(
+                r#"
+{phase}fn {name}(raw: u16, nan: bool, infinite: bool, finite: bool,
+    normal: bool, subnormal: bool, negative: bool) -> bool {{
+    let value = raw'bitvec.as({ty});
+    {module}.isnan<{ty}>(value) == nan
+        and {module}.isinf<{ty}>(value) == infinite
+        and {module}.isfinite<{ty}>(value) == finite
+        and {module}.isnormal<{ty}>(value) == normal
+        and {module}.issubnormal<{ty}>(value) == subnormal
+        and {module}.signbit<{ty}>(value) == negative
+}}
+"#
+            ));
+        }
+        let mut cases = Vec::new();
+        for (bits, flags) in [
+            (0, [false, false, true, false, false]),
+            (1, [false, false, true, false, true]),
+            (normal - 1, [false, false, true, false, true]),
+            (normal, [false, false, true, true, false]),
+            (infinity - 1, [false, false, true, true, false]),
+            (infinity, [false, true, false, false, false]),
+            (infinity + 1, [true, false, false, false, false]),
+            (0x7fff, [true, false, false, false, false]),
+        ] {
+            for negative in [false, true] {
+                let bits = bits | if negative { 0x8000 } else { 0 };
+                cases.push(format!(
+                    "({bits}, {}, {}, {}, {}, {}, {negative})",
+                    flags[0], flags[1], flags[2], flags[3], flags[4]
+                ));
+            }
+        }
+        source.push_str(&format!("fn run()->bool {{{}}}\ncomptime fn staged()->bool {{{}}}\nfn folded()->bool {{const result = staged(); result}}",
+            cases.iter().map(|c| format!("check{c}")).collect::<Vec<_>>().join(" and "),
+            cases.iter().map(|c| format!("staged_check{c}")).collect::<Vec<_>>().join(" and ")));
+        source.push_str(&format!(
+            "fn diagnose()->u16 {{{} 65535}}",
+            cases
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("if not check{c} {{return {i};}} "))
+                .collect::<String>()
+        ));
+        sandbox.write("input.fl", source);
+        let base = [
+            "input.fl",
+            "--sysroot",
+            root.to_str().unwrap(),
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+        ];
+        assert_eq!(
+            success(&sandbox.run(&[base.as_slice(), &["--invoke-comptime", "staged"]].concat()))
+                .trim(),
+            "(bool true)"
+        );
+        for entry in ["run", "folded"] {
+            // Runtime math tags execute in the host backend; comptime math is
+            // invoked above and also materialized into the folded entry.
+            for level in ["0", "3"] {
+                success(
+                    &sandbox.run(
+                        &[
+                            base.as_slice(),
+                            &["--build", entry, "--opt-level", level, "--output", "native"],
+                        ]
+                        .concat(),
+                    ),
+                );
+                let output = Command::new(sandbox.path("native")).output().unwrap();
+                if success(&output).trim() != "(bool true)" {
+                    success(
+                        &sandbox.run(
+                            &[
+                                base.as_slice(),
+                                &[
+                                    "--build",
+                                    "diagnose",
+                                    "--opt-level",
+                                    level,
+                                    "--output",
+                                    "diagnostic",
+                                ],
+                            ]
+                            .concat(),
+                        ),
+                    );
+                    let diagnostic = Command::new(sandbox.path("diagnostic")).output().unwrap();
+                    panic!("{ty} {entry} O{level}: {}", success(&diagnostic));
+                }
+            }
+        }
+    }
+}

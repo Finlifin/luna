@@ -241,42 +241,42 @@ where T, requires T == f32 or T == f64
 
 -- IEEE classification; no fast-math assumptions, including signaling NaNs.
 pub pure fn isnan(value: T) -> bool
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.isnan'intrinsic(value).as(bool) }
 }
 
 -- IEEE classification; no fast-math assumptions, including signaling NaNs.
 pub pure fn isinf(value: T) -> bool
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.isinf'intrinsic(value).as(bool) }
 }
 
 -- IEEE classification; no fast-math assumptions, including signaling NaNs.
 pub pure fn isfinite(value: T) -> bool
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.isfinite'intrinsic(value).as(bool) }
 }
 
 -- Positive or negative normal values; excludes zero, subnormals, infinity and NaNs.
 pub pure fn isnormal(value: T) -> bool
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.isnormal'intrinsic(value).as(bool) }
 }
 
 -- Positive or negative subnormal values, without treating them as zero.
 pub pure fn issubnormal(value: T) -> bool
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.issubnormal'intrinsic(value).as(bool) }
 }
 
 -- The sign bit, including negative zero and signed NaNs.
 pub pure fn signbit(value: T) -> bool
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.signbit'intrinsic(value).as(bool) }
 }

@@ -19,4 +19,6 @@ NaN 的有序比较为 false，正负零比较相等；VM、常量折叠和 LLVM
 已支持 `value'bitvec` 读取 16 位表示、同宽 `.as(f16)`／`.as(bf16)`
 重解释和可写位置的位段更新；这些操作保留负零与 NaN 载荷，不做数值舍入。
 数值转换仍待接通；
-`builtin.math` 与 `meta.math` 当前的浮点运算域仍为 f32/f64。
+`builtin.math` 与 `meta.math` 的六个分类函数已支持 f16/bf16，
+包括 `isnan`、`isinf`、`isfinite`、`isnormal`、`issubnormal` 和 `signbit`；
+其他数学包装当前的浮点运算域仍为 f32/f64。

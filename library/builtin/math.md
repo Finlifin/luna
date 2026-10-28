@@ -42,3 +42,9 @@ python3 -B development/check.py --timeout 900 -- run --release -p luna -- develo
 独立 i8 wrapping_abs 实例的 residual 验证从 135,634 步降到 128,643 步
 （约 5.2%）。这是确定性工作预算的测量，不是端到端耗时，也不代表默认
 10 万步已足够。回归同时检查错误保护条件的拒绝和右侧赋值的执行顺序。
+
+`isnan`、`isinf`、`isfinite`、`isnormal`、`issubnormal` 和 `signbit`
+也接受 `f16`、`bf16`。分类按原始格式进行，不先扩宽到 f32；因此次正规数
+分类不会改变，符号位检查能识别负零与带符号 NaN。对应的 `meta.math`
+函数遵循相同规则。半精度分类的 sysroot 集成测试覆盖 comptime 与 LLVM O0/O3；
+这不代表其余半精度数学包装已实现。

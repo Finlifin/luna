@@ -370,3 +370,54 @@ fn empty_bits() -> Value {
         text: "zeroinitializer".into(),
     }
 }
+
+impl Emitter<'_> {
+    // Classify half magnitudes in their original representation: promoting
+    // to float can turn subnormals into normals. Sign extraction is handled
+    // separately because exact widening preserves that property.
+    pub(super) fn half_float_predicate(
+        &mut self,
+        value: Value,
+        operation: nir::intrinsics::Operation,
+    ) -> Result<Value, String> {
+        use nir::intrinsics::Operation as Op;
+        let mask = match value.ty {
+            Ty::Float16 => 0x7c00,
+            Ty::BFloat16 => 0x7f80,
+            _ => return Err("half classification requires a half representation".into()),
+        };
+        let bits = self.to_bits(value)?;
+        let magnitude =
+            self.instruction(Ty::Int(16, false), format!("and i16 {}, 32767", bits.text));
+        match operation {
+            Op::IsNan => {
+                Ok(self.instruction(Ty::Bool, format!("icmp ugt i16 {}, {mask}", magnitude.text)))
+            }
+            Op::IsInfinite => {
+                Ok(self.instruction(Ty::Bool, format!("icmp eq i16 {}, {mask}", magnitude.text)))
+            }
+            Op::IsFinite => {
+                Ok(self.instruction(Ty::Bool, format!("icmp ult i16 {}, {mask}", magnitude.text)))
+            }
+            Op::IsNormal | Op::IsSubnormal => {
+                let exponent =
+                    self.instruction(Ty::Int(16, false), format!("and i16 {}, {mask}", bits.text));
+                let (first, second) = if operation == Op::IsNormal {
+                    (
+                        format!("icmp ne i16 {}, 0", exponent.text),
+                        format!("icmp ne i16 {}, {mask}", exponent.text),
+                    )
+                } else {
+                    (
+                        format!("icmp eq i16 {}, 0", exponent.text),
+                        format!("icmp ne i16 {}, 0", magnitude.text),
+                    )
+                };
+                let first = self.instruction(Ty::Bool, first);
+                let second = self.instruction(Ty::Bool, second);
+                Ok(self.instruction(Ty::Bool, format!("and i1 {}, {}", first.text, second.text)))
+            }
+            _ => Err("unsupported half classification operation".into()),
+        }
+    }
+}

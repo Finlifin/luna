@@ -141,6 +141,8 @@ macro_rules! float_math {
 
 fn scalar(op: Op, values: &[Value], width: Option<u32>) -> Option<Value> {
     match values.first()? {
+        Value::Float16(bits) => half_predicate(op, *bits, 0x7c00),
+        Value::BFloat16(bits) => half_predicate(op, *bits, 0x7f80),
         Value::Float32(_) => float_math!(
             Float32,
             f32,
@@ -236,4 +238,19 @@ fn integer(op: Op, values: &[Value], width: u32) -> Option<Value> {
     } else {
         Value::UnsignedInteger(bits)
     })
+}
+
+// Classify the representation directly: widening changes subnormal classes.
+fn half_predicate(op: Op, bits: u16, exponent_mask: u16) -> Option<Value> {
+    let magnitude = bits & 0x7fff;
+    let exponent = bits & exponent_mask;
+    Some(Value::Bool(match op {
+        Op::IsNan => magnitude > exponent_mask,
+        Op::IsInfinite => magnitude == exponent_mask,
+        Op::IsFinite => exponent != exponent_mask,
+        Op::IsNormal => exponent != 0 && exponent != exponent_mask,
+        Op::IsSubnormal => exponent == 0 && magnitude != 0,
+        Op::SignBit => bits & 0x8000 != 0,
+        _ => return None,
+    }))
 }
