@@ -29,6 +29,20 @@ impl Checker<'_, '_> {
             || self
                 .readable_storage_input(ty, &mut 10_000, 0, true, true)
                 .unwrap_or(false)
+            || self.protocols.copy.is_some_and(|interface| {
+                // Generic Copy evidence can authorize formation before the
+                // payload layout is known. Instantiated resource verification
+                // still checks the complete layout, Drop and live origins.
+                self.establish_type_requirement(
+                    &n::TypePredicate::Trait(n::TraitRequirement {
+                        subject: ty.clone(),
+                        interface,
+                        interface_arguments: Vec::new(),
+                    }),
+                    Span::default(),
+                )
+                .is_ok()
+            })
     }
     fn readable_storage_input(
         &self,

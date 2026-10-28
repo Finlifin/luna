@@ -1,0 +1,17 @@
+use resources.{Clone, Copy};
+
+{-
+    Copyable payloads allow copying the complete native wrapper. All possible
+    payloads must satisfy Copy, including the inactive error branch. Cloning
+    here copies the value; it does not call a payload's user-defined clone.
+    Clone-only payloads need a separate borrowed reconstruction implementation.
+-}
+impl Clone for ?T where T :- Copy {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for ?T where T :- Copy {}
+
+impl Clone for !E T where E :- Copy, T :- Copy {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for !E T where E :- Copy, T :- Copy {}

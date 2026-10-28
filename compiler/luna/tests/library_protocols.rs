@@ -402,6 +402,55 @@ fn native_wrapper_once_preserves_affine_payloads_without_granting_copy() {
 }
 
 #[test]
+fn native_wrapper_copy_requires_every_payload_and_preserves_pointer_lifetime() {
+    let resources = format!(
+        "mod resources {{ {RESOURCES} }}\nmod native_resources {{ {} }}\nuse resources.*;",
+        include_str!("../../../library/builtin/native_resources.fl")
+    );
+    let selectors = || luna::protocols::type_constructors::Selectors {
+        copy: Some("input.resources.Copy"),
+        drop: Some("input.resources.Drop"),
+        ..Default::default()
+    };
+    for (wrapper, initial) in [
+        ("?Token", "Token {}"),
+        ("!bool Token", "Token {}"),
+        ("!Token bool", "true"),
+        ("!?Token bool", "true"),
+    ] {
+        let source = format!(
+            "{resources}
+            struct Token {{}}
+            fn require(value:T) where T:-Copy {{}}
+            fn run() {{let value:{wrapper}={initial};require(value);}}"
+        );
+        let error =
+            compile_with_source_bindings(&source, &Default::default(), selectors()).unwrap_err();
+        assert!(
+            error.contains("trait bound") || error.contains("capability"),
+            "{error}"
+        );
+    }
+    let source = format!(
+        "{resources}
+        fn escape()->?*bool {{
+            var local=true;
+            let original:?*bool=local.ref;
+            original.as(Clone).clone()
+        }}
+        fn run() {{let dangling=escape();}}"
+    );
+    let package = compile_with_source_bindings(&source, &Default::default(), selectors()).unwrap();
+    let error =
+        luna::execution::interpret_with_protocols(&package, "run", "Copy", "Drop", 1_000_000)
+            .unwrap_err();
+    assert!(
+        error.contains("local") || error.contains("escape"),
+        "{error}"
+    );
+}
+
+#[test]
 fn repository_tuple_once_native_preserves_affine_fields() {
     use std::{
         fs,

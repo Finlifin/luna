@@ -1,0 +1,52 @@
+{-
+    Native wrapper copying is conditional on every payload's Copy evidence.
+    Run with --sysroot library --test-native to retain resource checking.
+-}
+fn optional(value: ?bool) -> bool {
+    value match { item? => item, null => false }
+}
+
+fn result(value: !bool bool) -> bool {
+    value match { item! => item, error failure => not failure }
+}
+
+test copy_native_wrappers {
+    let present: ?bool = true;
+    let absent: ?bool = null;
+    let has_present = optional(present) and optional(present.as(Clone).clone());
+    assumes has_present;
+    let has_absent = not optional(absent) and not optional(absent.as(Clone).clone());
+    assumes has_absent;
+    let success: !bool bool = true;
+    let failure: !bool bool = error false;
+    let has_success = result(success) and result(success.as(Clone).clone());
+    assumes has_success;
+    let has_failure = result(failure) and result(failure.as(Clone).clone());
+    assumes has_failure;
+}
+
+fn nested(value: ??bool) -> bool {
+    value match { item? => item match { null => true, _? => false }, null => false }
+}
+
+test copy_keeps_optional_layers {
+    let inner: ?bool = null;
+    let outer: ??bool = inner;
+    let preserved = nested(outer) and nested(outer.as(Clone).clone());
+    assumes preserved;
+}
+
+fn write(value: ?*bool) {
+    value match { pointer? => { pointer.* = true; }, null => {} };
+}
+
+test copy_preserves_pointer_target {
+    var target = false;
+    let original: ?*bool = target.ref;
+    let duplicate = original.as(Clone).clone();
+    write(duplicate);
+    assumes target;
+    target = false;
+    write(original);
+    assumes target;
+}
