@@ -347,13 +347,25 @@ impl Checker<'_, '_> {
         // Declaration guarantees are available when checking implementation
         // binders, but the implementation being checked is never an assumption.
         self.checked_traits = traits.values().cloned().collect();
-        let mut index = crate::implementation::Index::for_target(self.target);
+        let mut index = crate::implementation::Index::for_builtin_packages(
+            self.target,
+            self.protocols
+                .builtin_implementation_packages
+                .iter()
+                .copied(),
+        );
         for (id, domain) in self.implementation_index.parameter_domains() {
             index
                 .register_parameter_domain(*id, domain.clone())
                 .map_err(|message| error(Span::default(), message))?;
         }
-        let mut inherent_index = crate::implementation::InherentIndex::for_target(self.target);
+        let mut inherent_index = crate::implementation::InherentIndex::for_builtin_packages(
+            self.target,
+            self.protocols
+                .builtin_implementation_packages
+                .iter()
+                .copied(),
+        );
         // Collect and admit every head before elaborating any implementation
         // member. A head is candidate data, not evidence of a complete trait
         // implementation; keep this index private until all checks succeed.
@@ -498,16 +510,17 @@ impl Checker<'_, '_> {
                         })?;
                 relationships.insert(own, relationship);
             } else {
-                crate::implementation::inherent_ownership(
-                    &subject,
-                    declaration(self.package, &self.package_identities, owner).package,
-                )
-                .map_err(|e| {
-                    error(
-                        item.span,
-                        format!("inherent implementation admission failed: {e:?}"),
+                inherent_index
+                    .check_ownership(
+                        &subject,
+                        declaration(self.package, &self.package_identities, owner).package,
                     )
-                })?;
+                    .map_err(|e| {
+                        error(
+                            item.span,
+                            format!("inherent implementation admission failed: {e:?}"),
+                        )
+                    })?;
             }
             headers.push((
                 owner,

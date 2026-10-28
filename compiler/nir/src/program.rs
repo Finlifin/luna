@@ -1905,6 +1905,8 @@ impl fmt::Display for TraitRequirement {
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
+    /// Driver-authorized builtin implementation packages retained across snapshots.
+    pub builtin_implementation_packages: std::collections::BTreeSet<u64>,
     /// Explicit compilation target facts. None is target-independent; it must
     /// never be filled from the process host during semantic queries.
     pub target: Option<crate::target::TargetData>,
@@ -3490,6 +3492,13 @@ impl fmt::Display for Function {
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(nir-package")?;
+        if !self.builtin_implementation_packages.is_empty() {
+            f.write_str(" (builtin-implementation-packages")?;
+            for package in &self.builtin_implementation_packages {
+                write!(f, " {package}")?;
+            }
+            f.write_str(")")?;
+        }
         if self.definition_identity_cursor != 0 {
             write!(
                 f,

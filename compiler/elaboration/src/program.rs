@@ -218,6 +218,8 @@ pub fn elaborate_packages(
 /// Source names never designate these protocols implicitly.
 #[derive(Clone, Debug, Default)]
 pub struct Protocols {
+    /// Explicit authority to implement compiler builtin types, by semantic package ID.
+    pub builtin_implementation_packages: BTreeSet<u64>,
     /// Explicit build modes by source semantic package identity. Empty means
     /// unavailable, never an implicit host/debug configuration.
     pub build_modes: BTreeMap<u64, String>,
@@ -449,10 +451,16 @@ fn elaborate_with_attributes(
         declaration_projection_depth: 0,
         associated_definition_equations: BTreeMap::new(),
         associated_signature_values: BTreeMap::new(),
-        implementation_index: crate::implementation::Index::for_target(target),
+        implementation_index: crate::implementation::Index::for_builtin_packages(
+            target,
+            protocols.builtin_implementation_packages.iter().copied(),
+        ),
         trait_parameter_types: BTreeMap::new(),
         nominal_input_prefixes: BTreeMap::new(),
-        inherent_index: crate::implementation::InherentIndex::for_target(target),
+        inherent_index: crate::implementation::InherentIndex::for_builtin_packages(
+            target,
+            protocols.builtin_implementation_packages.iter().copied(),
+        ),
         type_parameters: BTreeMap::new(),
         normal_parameters: BTreeMap::new(),
         normal_input_prefixes: BTreeMap::new(),
@@ -1131,6 +1139,8 @@ fn elaborate_candidate<'a, 'h>(
     }
     let mut output = n::Package::default();
     output.target = target;
+    output.builtin_implementation_packages =
+        checker.protocols.builtin_implementation_packages.clone();
     for (owner, info) in package.owners() {
         if matches!(&info.node.expect_item().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_test) {
             output

@@ -17,16 +17,24 @@ Trait admission, phase admission, and inherent admission use the same package
 boundary. Duplicate declarations, coherence, budgets, and method selection retain
 their existing checks. Dumps include the sorted authorized IDs.
 
-Driver/elaboration wiring remains pending. It must derive the authorized IDs
-from the selected builtin packages, retain them across early and final method
-indexes, and distinguish real packages from same-named user modules. Do not
-infer privileges from a meta.List selector or a user-written alias. Until that
-wiring is complete, meta.Object's proposed inherent API still fails admission;
-the working library retains its existing public functions.
+The sysroot driver grants the semantic IDs of its actual six selected library
+packages; it does not grant the application package or same-named source modules.
+The package-set driver grants the explicitly designated `--builtin` package.
+Embedding callers can supply additional selected library identities through
+`Protocols.builtin_implementation_packages`; source selectors do not grant them.
+
+Elaboration carries the same set into early and final trait/inherent indexes.
+NIR retains the set, including required-invocation and resource snapshots, and
+later VM/type/resource worlds reuse it when rebuilding indexes. VM world-table
+construction charges the extra metadata. The proposed meta.Object inherent API
+is a separate library migration; existing public free functions remain for now.
 
 Verification: type_resolution integration suites builtin_ownership,
 implementation, implementation_phases, and inherent. The new suite checks
 unprivileged rejection, foreign nominal/normal-form rejection, primitive and
 qualified-type admission, duplicate/budget failure atomicity, phase merging,
-coherence, and deterministic dumps. This is index-level verification, not proof
-that the source-language Object method API works yet.
+coherence, and deterministic dumps. The luna builtin_implementations suite
+covers explicit driver grants, early Type methods, optional generic receivers,
+all six sysroot providers, application rejection, duplicate inherent methods,
+and a foreign-trait implementation through runtime instantiation. This verifies
+the source admission path; it does not migrate the library Object facade.

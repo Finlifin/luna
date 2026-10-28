@@ -576,11 +576,14 @@ fn compile_sysroot(
         identity,
         protocols,
     )?;
-    let configured = options.build_targets.bind(
+    let mut configured = options.build_targets.bind(
         packages.iter().map(|package| package.identity),
         identity,
         &configured,
     )?;
+    configured
+        .builtin_implementation_packages
+        .extend(packages.iter().skip(1).map(|package| package.identity));
     let protocols = &configured;
     let mut dependencies = Vec::new();
     for requester in &packages {

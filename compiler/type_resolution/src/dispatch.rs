@@ -29,7 +29,10 @@ impl<'a> DeclarationWorld<'a> {
             None => Context::from_package(package)
                 .map_err(|reason| format!("dispatch type context: {reason}"))?,
         };
-        let mut index = Index::for_target(package.target);
+        let mut index = Index::for_builtin_packages(
+            package.target,
+            package.builtin_implementation_packages.iter().copied(),
+        );
         index.set_normal_form_metadata(package.normal_forms.clone());
         index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
 

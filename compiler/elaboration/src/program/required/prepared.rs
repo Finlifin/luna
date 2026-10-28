@@ -1227,7 +1227,10 @@ pub(super) fn implementation_index(
     package: &n::Package,
     span: Span,
 ) -> Result<crate::implementation::Index, Error> {
-    let mut index = crate::implementation::Index::default();
+    let mut index = crate::implementation::Index::for_builtin_packages(
+        package.target,
+        package.builtin_implementation_packages.iter().copied(),
+    );
     index.set_normal_form_metadata(package.normal_forms.clone());
     index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
     for (id, domain) in package

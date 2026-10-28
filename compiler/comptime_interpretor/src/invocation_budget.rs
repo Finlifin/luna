@@ -6,6 +6,7 @@ use nir::program::{Package, TraitRequirement};
 /// Nested type, contract and substitution work keeps its separate existing cost.
 pub(super) fn charge_world_tables(package: &Package, budget: &mut Budget) -> Result<(), Error> {
     let Package {
+        builtin_implementation_packages,
         target: _,
         tests,
         function_parameters,
@@ -29,6 +30,7 @@ pub(super) fn charge_world_tables(package: &Package, budget: &mut Budget) -> Res
         enums,
     } = package;
     let cost = [
+        builtin_implementation_packages.len(),
         tests.len(),
         function_parameters.len(),
         runtime_instances.len(),

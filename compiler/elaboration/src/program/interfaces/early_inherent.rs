@@ -48,7 +48,13 @@ impl Checker<'_, '_> {
     ) -> Result<Option<n::Expr>, Error> {
         let context = self.context.clone();
         let query_owner = self.signature_owner;
-        let mut index = crate::implementation::InherentIndex::for_target(self.target);
+        let mut index = crate::implementation::InherentIndex::for_builtin_packages(
+            self.target,
+            self.protocols
+                .builtin_implementation_packages
+                .iter()
+                .copied(),
+        );
         let mut members = BTreeMap::new();
         // Enumerate all source declarations for this name. An incomplete world
         // must never silently choose the first currently available candidate.
@@ -104,14 +110,14 @@ impl Checker<'_, '_> {
                 _ => self.nominal_self_type(owner),
             };
             let identity = declaration(self.package, &self.package_identities, owner);
-            crate::implementation::inherent_ownership(&receiver, identity.package).map_err(
-                |e| {
+            index
+                .check_ownership(&receiver, identity.package)
+                .map_err(|e| {
                     error(
                         item.span,
                         format!("inherent implementation admission failed: {e:?}"),
                     )
-                },
-            )?;
+                })?;
             let mut parameters = self.type_parameters[&owner].clone();
             parameters.extend(self.nominal_capture_ids(owner));
             index

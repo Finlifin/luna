@@ -6,7 +6,10 @@ use elaboration::{
 use nir::program::Package;
 
 pub(crate) fn index(package: &Package, budget: Budget) -> Result<Index, String> {
-    let mut index = Index::for_target(package.target);
+    let mut index = Index::for_builtin_packages(
+        package.target,
+        package.builtin_implementation_packages.iter().copied(),
+    );
     index.set_normal_form_metadata(package.normal_forms.clone());
     index.set_nominal_layouts(
         package.structs.clone(),

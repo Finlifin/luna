@@ -911,7 +911,10 @@ impl<'a> Analysis<'a> {
         &mut self,
     ) -> Option<(crate::ptc::Context, crate::implementation::Index)> {
         let context = crate::ptc::Context::from_package(self.package).ok()?;
-        let mut index = crate::implementation::Index::for_target(self.package.target);
+        let mut index = crate::implementation::Index::for_builtin_packages(
+            self.package.target,
+            self.package.builtin_implementation_packages.iter().copied(),
+        );
         index.set_normal_form_metadata(self.package.normal_forms.clone());
         index.sync_nominal_layouts(
             &self.package.structs,

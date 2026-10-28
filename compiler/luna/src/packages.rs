@@ -901,7 +901,7 @@ fn compile_with_expansion(
         .iter()
         .map(|p| (p.resolution_id, p.identity))
         .collect();
-    let protocols = crate::protocols::type_constructors::resolve_source(
+    let mut protocols = crate::protocols::type_constructors::resolve_source(
         package,
         &packages
             .iter()
@@ -910,6 +910,16 @@ fn compile_with_expansion(
         selectors,
         protocols,
     )?;
+    if let Some(selected) = builtin {
+        if let Some(package) = packages
+            .iter()
+            .find(|package| package.resolution_id == selected)
+        {
+            protocols
+                .builtin_implementation_packages
+                .insert(package.identity);
+        }
+    }
     if matches!(emit, Emit::Attributes | Emit::MergedAttributes) {
         let attributes =
             elaboration::program::attributes::inspect(package, &identities, &protocols, target)

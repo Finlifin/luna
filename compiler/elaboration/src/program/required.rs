@@ -1972,6 +1972,10 @@ impl Checker<'_, '_> {
                 });
             }
             let mut package = n::Package {
+                builtin_implementation_packages: self
+                    .protocols
+                    .builtin_implementation_packages
+                    .clone(),
                 definition_identity_cursor: self.next_definition_identity,
                 target: self.target,
                 runtime_function_identities,
@@ -2164,6 +2168,10 @@ impl Checker<'_, '_> {
                     copy_authority: self.protocols.copy.zip(self.protocols.drop).map(
                         |(copy, drop)| {
                             let resources = n::Package {
+                                builtin_implementation_packages: self
+                                    .protocols
+                                    .builtin_implementation_packages
+                                    .clone(),
                                 target: self.target,
                                 traits: self.checked_traits.clone(),
                                 implementations: self.checked_implementations.clone(),
