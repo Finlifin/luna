@@ -23,5 +23,4 @@ comptime_interpretor = { path = "../comptime_interpretor" }
 
 comptime_executor = { path = "../comptime_executor" }
 
-[dev-dependencies]
 comptime_runtime = { path = "../comptime_runtime" }

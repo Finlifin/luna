@@ -415,7 +415,8 @@ unknown owners and exhausted preparation budgets fail without returning cached
 artifacts as fallback. Descriptor and name copies are charged before snapshot
 construction. Source changes still use the ordinary source revalidation path.
 
-This field has no CLI or resident-frame encoding yet. Process clients cannot
-supply it through a new flag; the interface here is the typed Rust request API.
-Observation-selective reuse and cross-process metadata serialization remain
-separate work.
+Explicit package CLI and resident requests accept one `--package-metadata-v1 HEX`
+argument. See [the versioned format](metadata-wire.md) for encoding, limits and
+unsupported descriptors. The decoder produces the same typed request inputs;
+hex spelling does not participate in cache identity. Observation-selective
+reuse remains separate work.

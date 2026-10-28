@@ -17,7 +17,7 @@ pub struct Request {
     pub with_inputs: bool,
     /// Typed embedding input, included in the complete request cache key.
     /// None is unavailable; Some(empty) explicitly installs an empty snapshot.
-    /// The current process CLI does not yet encode this field.
+    /// Process requests encode this with --package-metadata-v1.
     pub metadata: Option<Vec<crate::build_context::metadata::Input>>,
 }
 
@@ -119,8 +119,18 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
     let mut builtin = None;
     let mut forwarded = Vec::new();
     let mut with_inputs = false;
+    let mut metadata = None;
     while let Some(argument) = args.next() {
         match argument.to_str() {
+            Some("--package-metadata-v1") => {
+                if metadata.is_some() {
+                    return Err("--package-metadata-v1 supplied more than once".into());
+                }
+                metadata = Some(crate::build_context::metadata::wire::decode_hex(&text(
+                    &mut args,
+                    "metadata payload",
+                )?)?);
+            }
             Some("--with-inputs") => {
                 if std::mem::replace(&mut with_inputs, true) {
                     return Err("--with-inputs supplied more than once".into());
@@ -400,7 +410,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
         options,
         action,
         with_inputs,
-        metadata: None,
+        metadata,
     })
 }
 

@@ -1403,3 +1403,111 @@ fn source_metadata_requires_driver_configuration_only_when_read() {
         "{error}"
     );
 }
+
+#[test]
+fn metadata_wire_stream_invalidates_and_recovers_without_stale_fallback() {
+    use luna::build_context::metadata::{Entry, Input, wire::encode_hex};
+    let fixture = SourceFixture::new(
+        r#"fn run()->bool { inline if build.package_metadata("build").features.get(.enabled, bool) matches true? {true} else {false} }"#,
+        "",
+    );
+    let build = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl");
+    let base = vec![
+        "--package".to_string(),
+        "3".into(),
+        "100".into(),
+        "app".into(),
+        fixture.0.join("app.fl").to_str().unwrap().into(),
+        "--package".into(),
+        "9".into(),
+        "300".into(),
+        "build".into(),
+        build.to_str().unwrap().into(),
+        "--dependency".into(),
+        "3".into(),
+        "build".into(),
+        "9".into(),
+        "--primary".into(),
+        "3".into(),
+        "--emit".into(),
+        "nir".into(),
+    ];
+
+    let encoded = |value| {
+        encode_hex(&[Input {
+            identity: 300,
+            fields: vec![(
+                "enabled".into(),
+                Entry::new(
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                    nir::Term::Bool(value),
+                    &mut 1000,
+                )
+                .unwrap(),
+            )],
+        }])
+        .unwrap()
+    };
+    let first = encoded(true);
+    let payloads = [
+        Some(first.clone()),
+        Some(first.to_uppercase()),
+        Some(encoded(false)),
+        Some("zz".into()),
+        Some(encode_hex(&[]).unwrap()),
+        None,
+        Some(first.clone()),
+    ];
+    let mut frames = String::new();
+    for payload in payloads {
+        let mut args = base.clone();
+        if let Some(payload) = payload {
+            args.extend(["--package-metadata-v1".into(), payload]);
+        }
+        frames.push_str(
+            &args
+                .iter()
+                .map(|arg| {
+                    arg.as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        frames.push('\n');
+    }
+    let mut output = Vec::new();
+    luna::package_stream::serve(&mut std::io::Cursor::new(frames), &mut output, 4).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    let replies = output.lines().collect::<Vec<_>>();
+    assert_eq!(replies.len(), 7);
+    for index in [0, 1, 2, 6] {
+        assert!(
+            replies[index].contains("(exit-code 0)"),
+            "{}",
+            replies[index]
+        );
+    }
+    assert!(replies[0].contains("(reused false)"));
+    assert!(replies[1].contains("(reused true)"));
+    assert!(replies[2].contains("(reused false)"));
+    assert!(replies[3].contains("(exit-code 2)") && replies[3].contains("metadata wire"));
+    for index in [4, 5] {
+        assert!(
+            replies[index].contains("(exit-code 1)") && replies[index].contains("(reused false)"),
+            "{}",
+            replies[index]
+        );
+    }
+    assert!(replies[6].contains("(reused true)"));
+    let mut duplicate = base;
+    duplicate.extend([
+        "--package-metadata-v1".into(),
+        first.clone(),
+        "--package-metadata-v1".into(),
+        first,
+    ]);
+    assert!(luna::package_cli::parse(duplicate.into_iter().map(Into::into)).is_err());
+}

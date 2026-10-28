@@ -104,6 +104,8 @@ comptime {
 `TargetArch` 由该依赖提供。
 
 Rust 包编译请求可通过 `Request::metadata` 安装输入，完整请求缓存键包含
-字段名称、类型、值及依赖映射，配置变化会保守地使缓存失效。CLI 元数据传输、
-按观察字段选择性复用和构建脚本工具尚未接通；直接使用 Protocols 的外部驱动
+字段名称、类型、值及依赖映射，配置变化会保守地使缓存失效。显式 package CLI
+和驻留请求支持 `--package-metadata-v1 HEX`，格式和限制见
+[元数据传输](../../development/metadata-wire.md)。按观察字段选择性复用和构建脚本
+工具尚未接通；直接使用 Protocols 的外部驱动
 仍需维护自己的缓存键。参见[构建快照](../../development/build-context.md)。

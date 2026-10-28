@@ -9,6 +9,8 @@ use crate::packages::SourcePackage;
 use nir::{DeclarationId, QuotedDisplay as Q, Sort, Term};
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
+pub mod wire;
+
 pub const VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -190,3 +190,30 @@ CLI/resident frame 的文本编码尚未实现；字段选择性失效也尚未�
   超额输入、错误后恢复及相同请求复用。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
   通过，报告 `/tmp/luna-tools-3wzzzx6m/result.json`；`git diff --check` 通过。
+
+### 显式 package CLI 与驻留传输
+
+`--packages-v1` 和 `--packages-stream-v1` 的请求现在接受一次
+`--package-metadata-v1 HEX`，直接解码到 Request 的类型化输入，因此沿用已有
+快照验证和完整请求缓存失效。`metadata::wire::encode_hex` 提供生产端入口，
+不解析 Display，不读取额外文件，不执行源码或闭包工厂。格式详见
+[metadata-wire.md](metadata-wire.md)。输入保留 nominal/normal-form 头、optional
+层次、字段类型、枚举 variant、任意精度整数/十进制值、位向量和 IEEE 原始位。
+
+解码具有 128 KiB 字节上限、64 层深度上限及独立的遍历/结构/数字预算。
+非法长度、UTF-8、标记、版本、截断和尾随内容均拒绝。执行性描述符与 store
+handle 不可传输；effect-row/associated-type 描述符暂未分配 wire tag，明确
+拒绝而非丢失信息。独立 implicit-sysroot CLI 尚未接受这一参数。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test metadata_wire --test build_context --test build_metadata --test compilation_cache`：
+  wire 3、build context 32、metadata 12、cache 11 项通过，报告
+  `/tmp/luna-tools-2658p9bg/result.json`。包含驻留请求的值变化、等价大小写编码
+  复用、非法编码、空输入、缺失配置及后续正常请求恢复。
+- 增补手写字节包、UTF-8 和未知 tag 检查后，运行
+  `python3 -B development/check.py --timeout 900 -- test --release -p luna --test metadata_wire`：
+  4 项通过，报告 `/tmp/luna-tools-hadaxmev/result.json`。首轮负整数解码问题已
+  修复：符号与无符号 lexical integer 的解析分别处理。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过，报告 `/tmp/luna-tools-7hs7bhpk/result.json`；`git diff --check` 通过。
