@@ -187,32 +187,32 @@ impl Context {
     pub fn scope(&self) -> &[Vec<Sort>] {
         &self.scope
     }
-    pub(crate) fn admit_tuple_head(&mut self, head: DeclarationId) {
+    pub fn admit_tuple_head(&mut self, head: DeclarationId) {
         Arc::make_mut(&mut self.tuple_heads).insert(head);
     }
-    pub(crate) fn admit_list_inference_head(&mut self, head: DeclarationId) {
+    pub fn admit_list_inference_head(&mut self, head: DeclarationId) {
         Arc::make_mut(&mut self.list_inference_heads).insert(head);
     }
-    pub(crate) fn is_list_inference_head(&self, head: DeclarationId) -> bool {
+    pub fn is_list_inference_head(&self, head: DeclarationId) -> bool {
         self.list_inference_heads.contains(&head)
     }
     /// Recognize the compiler-bound List domain without unfolding its head.
-    pub(crate) fn is_list_type(&self, ty: &Term) -> bool {
+    pub fn is_list_type(&self, ty: &Term) -> bool {
         matches!(ty, Term::NormalForm { head, sort: Sort::Type, arguments }
             if self.is_list_inference_head(*head) && arguments.len() == 1
                 && arguments[0].sort() == Sort::Type)
     }
-    pub(crate) fn is_tuple_head(&self, head: DeclarationId) -> bool {
+    pub fn is_tuple_head(&self, head: DeclarationId) -> bool {
         self.tuple_heads.contains(&head)
     }
-    pub(crate) fn is_tuple_type(&self, ty: &Term) -> bool {
+    pub fn is_tuple_type(&self, ty: &Term) -> bool {
         matches!(ty, Term::NormalForm { head, sort: Sort::Type, arguments }
             if self.is_tuple_head(*head) && arguments.len() == 1 && arguments[0].sort() == Sort::ComptimeValue)
     }
     fn evaluate_kind(&self, kind: TypeKind, ty: &Term) -> Option<bool> {
         evaluate_kind_with_heads(kind, ty, &self.nominal_constructors, &self.tuple_heads)
     }
-    pub(crate) fn assumptions(&self) -> &[Formula] {
+    pub fn assumptions(&self) -> &[Formula] {
         &self.assumptions
     }
     /// Restore declaration theory from checked owned NIR, without importing any
@@ -483,7 +483,7 @@ impl Context {
     pub fn admit_nominal_constructor(&mut self, declaration: DeclarationId) {
         Arc::make_mut(&mut self.nominal_constructors).insert(declaration);
     }
-    pub(crate) fn is_nominal_constructor(&self, declaration: DeclarationId) -> bool {
+    pub fn is_nominal_constructor(&self, declaration: DeclarationId) -> bool {
         self.nominal_constructors.contains(&declaration)
     }
     /// Branch facts are isolated by copy-on-write ownership. Read-only forks
@@ -610,7 +610,7 @@ enum Input<'a> {
     Formula(&'a Formula),
     Term(&'a Term),
 }
-pub(crate) fn within_limits(formula: &Formula, limit: usize, fuel: &mut usize) -> bool {
+pub fn within_limits(formula: &Formula, limit: usize, fuel: &mut usize) -> bool {
     within_input_limits(Input::Formula(formula), limit, fuel)
 }
 fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool {
@@ -1101,7 +1101,7 @@ fn constructor(term: &Term) -> Option<Head> {
 /// theory's constructor identities, without inspecting inputs or assuming
 /// injectivity. Unit aliases, projections, opaque computations and callable
 /// binders deliberately stay on the ordinary proof path.
-pub(crate) fn distinct_outer_type_heads(left: &Term, right: &Term) -> bool {
+pub fn distinct_outer_type_heads(left: &Term, right: &Term) -> bool {
     let head = |term: &Term| match term {
         Term::Primitive(_)
         | Term::Optional(_)
@@ -1158,7 +1158,7 @@ impl Context {
     /// Forward congruence premises for an admitted pair of heads. Consumers
     /// must prove every returned pair equal; this does not grant injectivity or
     /// unfold opaque heads. Function binders still require scope-aware handling.
-    pub(crate) fn congruence_arguments<'a>(
+    pub fn congruence_arguments<'a>(
         &self,
         left: &'a Term,
         right: &'a Term,

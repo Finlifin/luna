@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ptc = { path = "../ptc" }
 nir = { path = "../nir" }
 hir = { path = "../hir" }
 rustc_span = { workspace = true }

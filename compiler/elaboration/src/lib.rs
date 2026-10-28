@@ -451,7 +451,8 @@ pub mod derivation;
 pub mod implementation;
 pub mod matching;
 pub mod obligations;
-pub mod ptc;
+// Preserve downstream Rust paths while the solver has its own build unit.
+pub use ::ptc;
 
 mod coverage;
 

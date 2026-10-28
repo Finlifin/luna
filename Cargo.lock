@@ -231,6 +231,7 @@ dependencies = [
  "hir",
  "iir",
  "nir",
+ "ptc",
  "rustc_span",
 ]
 
@@ -620,6 +621,13 @@ name = "query"
 version = "0.1.0"
 dependencies = [
  "salsa",
+]
+
+[[package]]
+name = "ptc"
+version = "0.1.0"
+dependencies = [
+ "nir",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
-use elaboration::ptc::{Budget, Context, Formula, Outcome, ProofError};
 use nir::{DeclarationId, Primitive, Sort, Term};
+use ptc::{Budget, Context, Formula, Outcome, ProofError};
 fn variable(index: u32) -> Term {
     Term::Rigid {
         declaration: DeclarationId {

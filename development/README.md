@@ -265,13 +265,13 @@ HIR 的 `Package`、表达式、模式及其相关结构提供 `Display`，使�
 
 NIR 已有不可变类型 core、runtime 依赖抽象、引用端 substitution、使用点绑定检查、依赖参数契约接口与 S-expression Display。24 项局部测试覆盖共享 core 与 runtime identity 的分离、无捕获替换、normal form 保留以及非法绑定拒绝。函数签名实例化按参数顺序替换依赖契约和返回类型，保留 normal form 的头，并在嵌套函数返回类型中避免捕获。结构相等不充当完整类型等价判定；契约的语义检查仍由后续 elaborator 提供，driver 已接入单态函数检查和 NIR dump；依赖类型求解、泛型、comptime 执行及资源检查仍未接通。
 
-PTC 的首个类型相等片段位于 `compiler/elaboration/src/ptc.rs`，已经用于单态检查器的参数、结果与分支类型要求。支持布尔组合、等价类、闭合结构构造器的同余/分解，以及显式准入的 normal-form 头同余；不会展开 normal form。每次查询独立持有事实，分支与后续查询不共享可变合并状态。结果区分 Entailed、带实际闭合类型反例的 NotEntailed、Unknown 和 IllFormed；抽象模型不能验证时保留 Unknown。证明树携带假设与同余契约，可在相同上下文回放并检查冲突；证明、反例和残余义务都有 S-expression 输出。
+PTC 的首个类型相等片段位于 `compiler/ptc/src/lib.rs`，已经用于单态检查器的参数、结果与分支类型要求。支持布尔组合、等价类、闭合结构构造器的同余/分解，以及显式准入的 normal-form 头同余；不会展开 normal form。每次查询独立持有事实，分支与后续查询不共享可变合并状态。结果区分 Entailed、带实际闭合类型反例的 NotEntailed、Unknown 和 IllFormed；抽象模型不能验证时保留 Unknown。证明树携带假设与同余契约，可在相同上下文回放并检查冲突；证明、反例和残余义务都有 S-expression 输出。
 
 该实现是有预算的布尔分支搜索与相等理论，不是完整 CDCL(T) 引擎；尚无学习子句、增量缓存或优化的回滚并查集。证明回放共享相等理论检查器，尚不是独立形式化证明内核。依赖绑定结构保守处理，程序状态完全不进入 PTC。源码泛型/where 假设尚未传入求解上下文，其余原子命题、一般线性/同余整数、BV/行类型理论、trait 选择与推断义务调度尚未接通。
 
-数学整数差分逻辑位于 `compiler/elaboration/src/ptc/integer.rs`，与类型等式通过统一原子和布尔搜索组合。`IntegerTerm` 表示独立数学整数参数加常数，`IntLe` 表示两项的小于等于；否定转换严格处理整数的一单位差。Bellman–Ford 检测负环并产生具体整数赋值，零点归一后再核对完整源公式；整数与类型变量即便使用同一声明编号也属于不同逻辑域。冲突进入同一证明树并支持回放。内部采用 checked i128 运算，超容量返回 ArithmeticRange/Unknown，不赋予数学整数机器溢出语义；这是当前实现容量限制，不是任意精度整数的完整实现。此接口仅供准入的静态命题，不接受程序内存规格，也未接入源码整数 predicate lowering。
+数学整数差分逻辑位于 `compiler/ptc/src/integer.rs`，与类型等式通过统一原子和布尔搜索组合。`IntegerTerm` 表示独立数学整数参数加常数，`IntLe` 表示两项的小于等于；否定转换严格处理整数的一单位差。Bellman–Ford 检测负环并产生具体整数赋值，零点归一后再核对完整源公式；整数与类型变量即便使用同一声明编号也属于不同逻辑域。冲突进入同一证明树并支持回放。内部采用 checked i128 运算，超容量返回 ArithmeticRange/Unknown，不赋予数学整数机器溢出语义；这是当前实现容量限制，不是任意精度整数的完整实现。此接口仅供准入的静态命题，不接受程序内存规格，也未接入源码整数 predicate lowering。
 
-类型分类 A02 的基础片段位于 `compiler/elaboration/src/ptc/classification.rs`。当前登记 bool、整数、有符号/无符号整数、浮点、tuple、pointer、function 八种查询；整数包含有符号与无符号类别，分类不是互斥枚举。分类事实沿类型等价类传播，并与封闭结构描述及分类间已定义的包含/互斥关系共同产生冲突。反例选择实际类型后核对整条公式，有限候选未能构造模型时保留 Unknown。没有完整描述的名义/newtype、normal-form 和 closure 分类保守保留，不能由底层表示、工厂实参或环境猜测。公开反射入口和源码分类 predicate lowering 尚未连接，宇宙、限定和槽观察仍待实现。
+类型分类 A02 的基础片段位于 `compiler/ptc/src/classification.rs`。当前登记 bool、整数、有符号/无符号整数、浮点、tuple、pointer、function 八种查询；整数包含有符号与无符号类别，分类不是互斥枚举。分类事实沿类型等价类传播，并与封闭结构描述及分类间已定义的包含/互斥关系共同产生冲突。反例选择实际类型后核对整条公式，有限候选未能构造模型时保留 Unknown。没有完整描述的名义/newtype、normal-form 和 closure 分类保守保留，不能由底层表示、工厂实参或环境猜测。公开反射入口和源码分类 predicate lowering 尚未连接，宇宙、限定和槽观察仍待实现。
 
 2026-10-07 类型分类验证在 `/home/fin/luna` 执行：`cargo test -p elaboration --locked --offline --target-dir /tmp/luna-dev-002/target` 退出 0（`/tmp/luna-kind-final.log`），7 项推断、14 项相等/布尔、8 项整数及 7 项分类测试通过。分类测试包含 64 个封闭描述/类别组合、等式传播、结构冲突、反例、未知名义/工厂描述、分支隔离和非法输入。`cargo test -p luna --test elaboration --test execution --test modules --locked --offline --target-dir /tmp/luna-dev-002/target` 退出 0（`/tmp/luna-kind-frontend.log`），40/33/23 项通过。PTC 示例新增经等式与整数分支导出的分类证明，重新导出 `/tmp/flurry-ptc.lisp` 后通过 Emacs 单表达式读取和缩进检查。
 
