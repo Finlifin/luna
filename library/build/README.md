@@ -86,5 +86,7 @@ luna development/examples/sysroot-build-target.fl --sysroot library \
 目标输入参与完整请求缓存键，包含 feature 缺失与 false 的区别。字段级查询
 观察项尚未接入编译缓存。目标值中的 Object/Integer 等 comptime 数据仍受普通阶段与
 Splice 检查，不能直接当作 runtime 配置对象使用。
-`build.package_metadata` 和构建脚本工具尚未实现，参见
+`build.package_metadata` 的源码入口和构建脚本工具尚未实现。驱动侧已有独立的
+元数据描述符快照、按来源包直接依赖查询及观察项接口；它只验证闭合结构，消费值
+仍需提供者编译世界的语义接纳。该接口尚未接入 CLI、源码 elaboration 或缓存，参见
 [构建快照](../../development/build-context.md)。

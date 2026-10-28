@@ -11,6 +11,8 @@ use std::{
     fmt,
 };
 
+pub mod metadata;
+
 pub const INPUT_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

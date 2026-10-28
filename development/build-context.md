@@ -36,7 +36,7 @@ features 保存排序后的 Object，公开 get 方法是库中的普通 comptim
 失效或所有 template/CMTT 生成场景已经端到端完成。
 下一步需要将观察项交付给增量编译缓存。CLI 目标参数仅提供构建事实和主包的
 语义布局，不改变 LLVM 目标三元组或 CPU feature 设置；native 布局冲突拒绝。
-`package_metadata` 的类型化值输入、构建脚本工具及 anar 调度/传输仍待实现。
+`package_metadata` 的源码取值与语义接纳、构建脚本工具及 anar 调度/传输仍待实现。
 不会通过运行时环境变量隐式补齐这些输入。
 
 针对性验证：
@@ -44,3 +44,45 @@ features 保存排序后的 Object，公开 get 方法是库中的普通 comptim
 ```sh
 python3 -B development/check.py --timeout 900 -- test --release -p luna --test build_context
 ```
+
+
+## 包元数据的驱动查询层
+
+`luna::build_context::metadata` 提供单独版本化的不可变输入快照，不改变现有
+mode/target 的配置规则。`Input` 按语义包身份提供有序字段输入，构造快照时拒绝
+重复、空字段、未知输入包和歧义依赖图，并转为稳定排序的只读表。
+
+`Entry::new(type_term, value_term, fuel)` 保留原始类型与值，不将库自己的 enum、
+nominal Type 或 normal-form 头降成字符串／布尔配置。入口只验证闭合的描述符
+结构并计费：拒绝活动绑定、洞、rigid 参数和 runtime 依赖。它**没有证明值属于
+给定类型**；消费时仍必须在提供者的编译世界里做语义接纳，不能直接当作可信
+runtime 值或跳过普通 comptime 阶段检查。
+
+`Snapshot::read(origin, Provider::Dependency(alias), field)` 根据 origin 的语义包
+身份和该包的直接依赖别名选择提供者。resolution ID 只用于翻译依赖边；同名包
+可以同时存在，不做全局名称搜索，也不递归寻找间接依赖。`Provider::Local`
+显式读取来源包自己。此处的 Local/Dependency 是驱动接口，不是新的 Flurry 语法。
+
+元数据未提供是 MissingInput；提供空元数据后查询不存在的字段产生带 absent 的
+观察项。显式 false、显式可选 null 和字段不存在三者不同。观察项保留来源包、
+依赖别名、实际提供者、字段和不可变值；`unchanged` 检查改绑、类型/值变化、字段
+增加/删除以及提供者输入丢失。无关字段变动不使此观察项失效。比较采用保守的
+结构相等，不能由结构不同推导 Flurry 类型不等。
+
+这些观察项只覆盖元数据输入依赖，不能替代源码、类型定义和编译上下文的依赖，
+也尚未安装到编译缓存。快照、描述符与观察项均提供稳定转义的 S-expression dump。
+源码 `build.package_metadata(...)`、CLI/流式传输和 anar 接线仍未实现；此阶段
+交付的是后续接线必须依赖的驱动查询契约，没有新增占位的 build 包函数。
+
+验证入口：
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test build_metadata --test build_context
+```
+
+本次验证（工作目录 `/home/fin/luna`）：上述组合命令通过原有 24 项 build context
+测试和初版 7 项 metadata 测试，报告 `/tmp/luna-tools-icos208p/result.json`。
+补充显式 null 与嵌套 runtime 依赖后，单独运行
+`python3 -B development/check.py --timeout 900 -- test --release -p luna --test build_metadata`
+通过 9 项，报告 `/tmp/luna-tools-6jr3or6g/result.json`。
+格式检查报告 `/tmp/luna-tools-oy2ybqjv/result.json`；`git diff --check` 通过。
