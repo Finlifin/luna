@@ -57,7 +57,7 @@ impl Entry {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Input {
     pub identity: u64,
     /// Vec preserves duplicate names for validation before canonicalization.

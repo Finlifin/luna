@@ -398,3 +398,24 @@ The primary width supplies semantic TargetData for NIR-only requests. Native
 actions use their actual backend layout and reject a conflicting primary width.
 The inputs describe the source build context; they do not select LLVM target
 triples or CPU feature flags. Observation-selective reuse remains pending.
+
+### Typed metadata for embedding callers
+
+Rust callers can set `package_cli::Request::metadata` to `Some(Vec<Input>)`
+using `build_context::metadata::Input` and validated `Entry` descriptors. The
+compiler builds dependency aliases from that request's actual source graph;
+metadata owners are semantic package identities. `None` means no metadata
+configuration, while `Some(vec![])` installs a configuration with no supplied
+provider inputs. Metadata requires NIR compilation or execution.
+
+The complete request cache key includes field names, types, immutable values,
+absence and dependency/provider identities. This is conservative structural
+comparison, not a new type-equivalence rule. Invalid input, duplicate owners,
+unknown owners and exhausted preparation budgets fail without returning cached
+artifacts as fallback. Descriptor and name copies are charged before snapshot
+construction. Source changes still use the ordinary source revalidation path.
+
+This field has no CLI or resident-frame encoding yet. Process clients cannot
+supply it through a new flag; the interface here is the typed Rust request API.
+Observation-selective reuse and cross-process metadata serialization remain
+separate work.

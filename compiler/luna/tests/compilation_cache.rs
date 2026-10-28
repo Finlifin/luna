@@ -471,3 +471,103 @@ fn target_snapshots_and_optional_features_participate_in_cache_identity() {
     assert!(recovered.reused);
     assert_eq!(result(&recovered), comptime_interpretor::Value::Bool(true));
 }
+
+#[test]
+fn typed_metadata_requests_invalidate_values_presence_and_provider_identity() {
+    use luna::build_context::metadata::{Entry, Input};
+    let files = Files::new();
+    files.write("client.fl", r#"fn run()->bool {
+        inline if build.package_metadata("provider").features.get(.enabled, bool) matches true? { true } else { false }
+    }"#);
+    files.write("first.fl", "");
+    files.write("second.fl", "");
+    let mut request = files.request("client.fl");
+    let build = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl");
+    for (resolution_id, identity, name, entry) in [
+        (2, 202, "first", files.0.join("first.fl")),
+        (3, 303, "second", files.0.join("second.fl")),
+        (4, 404, "build", build),
+    ] {
+        request.packages.push(luna::packages::SourcePackage {
+            resolution_id,
+            identity,
+            name: name.into(),
+            entry,
+        });
+    }
+    request.dependencies = vec![(1, "provider".into(), 2), (1, "build".into(), 4)];
+    let input = |identity, enabled| Input {
+        identity,
+        fields: vec![(
+            "enabled".into(),
+            Entry::new(
+                nir::Term::Primitive(nir::Primitive::Bool),
+                nir::Term::Bool(enabled),
+                &mut 1000,
+            )
+            .unwrap(),
+        )],
+    };
+    request.metadata = Some(vec![input(202, true), input(303, false)]);
+    let mut cache = CompilationCache::new(8);
+    let first = cache.compile(&request).unwrap();
+    assert!(!first.reused);
+    assert_eq!(result(&first), comptime_interpretor::Value::Bool(true));
+    assert!(cache.compile(&request).unwrap().reused);
+    request.metadata = Some(vec![input(202, false), input(303, false)]);
+    let changed = cache.compile(&request).unwrap();
+    assert!(!changed.reused);
+    assert_eq!(result(&changed), comptime_interpretor::Value::Bool(false));
+    request.metadata = Some(vec![
+        Input {
+            identity: 202,
+            fields: vec![],
+        },
+        input(303, false),
+    ]);
+    assert!(!cache.compile(&request).unwrap().reused);
+    request.metadata = Some(vec![Input {
+        identity: 202,
+        fields: vec![(
+            "enabled".into(),
+            Entry::new(
+                nir::Term::Primitive(nir::Primitive::Symbol),
+                nir::Term::Symbol("yes".into()),
+                &mut 1000,
+            )
+            .unwrap(),
+        )],
+    }]);
+    let different_domain = cache.compile(&request).unwrap();
+    assert!(!different_domain.reused);
+    assert_eq!(
+        result(&different_domain),
+        comptime_interpretor::Value::Bool(false)
+    );
+    request.metadata = Some(vec![input(202, true), input(303, false)]);
+    request.dependencies[0].2 = 3;
+    let rebound = cache.compile(&request).unwrap();
+    assert!(!rebound.reused);
+    assert_eq!(result(&rebound), comptime_interpretor::Value::Bool(false));
+    request.metadata = None;
+    assert!(cache.compile(&request).is_err());
+    request.metadata = Some(vec![]);
+    assert!(cache.compile(&request).is_err());
+    request.metadata = Some(vec![input(999, true)]);
+    assert!(cache.compile(&request).is_err());
+    request.metadata = Some(vec![input(303, true), input(303, false)]);
+    assert!(cache.compile(&request).is_err());
+    let mut oversized = input(303, true);
+    oversized.fields[0].0 = "x".repeat(100_001);
+    request.metadata = Some(vec![oversized]);
+    let error = cache
+        .compile(&request)
+        .err()
+        .expect("oversized metadata must fail");
+    assert!(error.contains("metadata input budget exceeded"), "{error}");
+    request.metadata = Some(vec![input(303, true)]);
+    let recovered = cache.compile(&request).unwrap();
+    assert!(!recovered.reused);
+    assert_eq!(result(&recovered), comptime_interpretor::Value::Bool(true));
+    assert!(cache.compile(&request).unwrap().reused);
+}

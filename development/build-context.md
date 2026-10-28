@@ -169,3 +169,24 @@ CLI 元数据传输、缓存失效与构建脚本尚未接通。外部 driver �
 - 初版签名缺少显式 comptime Type 参数、inline 循环触发暂不支持的 open method，
   以及 callable 探测绕过上下文常量的失败均已修复；初版枚举 fixture 将内部
   variant 索引误写为名称，也已修正，未改变语言层的具名枚举用法。
+
+### 类型化包请求与缓存
+
+Rust embedding 调用者可以把 `Vec<metadata::Input>` 放入 `Request::metadata`。
+包请求从自身的 sources/dependencies 构造快照，不接受另一个图的别名映射；
+描述符与名称在复制前扣除准备预算。None 与 Some(empty) 保持不同含义。
+完整请求缓存键包含字段的名称、类型、值、缺失状态及依赖提供者。这个保守
+策略允许安全重用相同请求，不声称不同表示必然是不同类型。
+
+CLI/resident frame 的文本编码尚未实现；字段选择性失效也尚未接通。
+直接配置 Protocols 而不经过 Request 的外部驱动仍须自行维护缓存键。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test compilation_cache --test build_context --test build_metadata`：
+  11 项缓存、31 项构建上下文、12 项元数据检查通过，报告
+  `/tmp/luna-tools-omli73sb/result.json`。新增缓存用例实际检查 true/false、
+  缺失字段、字段类型变化、依赖重绑定、无配置、缺失/未知/重复提供者、
+  超额输入、错误后恢复及相同请求复用。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过，报告 `/tmp/luna-tools-3wzzzx6m/result.json`；`git diff --check` 通过。

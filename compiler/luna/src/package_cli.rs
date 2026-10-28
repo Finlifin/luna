@@ -15,6 +15,10 @@ pub struct Request {
     pub options: Options,
     pub action: Action,
     pub with_inputs: bool,
+    /// Typed embedding input, included in the complete request cache key.
+    /// None is unavailable; Some(empty) explicitly installs an empty snapshot.
+    /// The current process CLI does not yet encode this field.
+    pub metadata: Option<Vec<crate::build_context::metadata::Input>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,6 +400,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
         options,
         action,
         with_inputs,
+        metadata: None,
     })
 }
 
@@ -601,6 +606,40 @@ impl Request {
             primary_identity,
             &configured,
         )?;
+        let mut configured = configured;
+        if let Some(inputs) = &self.metadata {
+            if options.emit != Emit::Nir {
+                return Err("package metadata requires --emit nir".into());
+            }
+            // Charge descriptor copies before cloning input into the snapshot.
+            // The same budget covers graph validation and field installation.
+            let mut fuel = 100_000usize
+                .checked_sub(inputs.len())
+                .ok_or("package metadata input budget exceeded")?;
+            for input in inputs {
+                fuel = fuel
+                    .checked_sub(input.fields.len())
+                    .ok_or("package metadata input budget exceeded")?;
+                for (name, entry) in &input.fields {
+                    fuel = fuel
+                        .checked_sub(name.len())
+                        .ok_or("package metadata input budget exceeded")?;
+                    for term in [entry.ty(), entry.value()] {
+                        nir::type_computations::charge_term(term, &mut fuel)
+                            .map_err(|_| "package metadata input budget exceeded")?;
+                    }
+                }
+            }
+            crate::build_context::metadata::Snapshot::new(
+                crate::build_context::metadata::VERSION,
+                &self.packages,
+                &dependencies,
+                inputs.clone(),
+                &mut fuel,
+            )
+            .map_err(|error| error.to_string())?
+            .configure(&mut configured);
+        }
         crate::packages::compile_observed_for_target_with_invocation(
             &self.packages,
             &dependencies,
