@@ -25,6 +25,8 @@ pub typealias i32 = .i32'builtin;
 pub typealias i64 = .i64'builtin;
 pub typealias i128 = .i128'builtin;
 pub typealias isize = .isize'builtin;
+pub typealias f16 = .f16'builtin;
+pub typealias bf16 = .bf16'builtin;
 pub typealias f32 = .f32'builtin;
 pub typealias f64 = .f64'builtin;
 

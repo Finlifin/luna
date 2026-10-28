@@ -4229,6 +4229,8 @@ impl Checker<'_, '_> {
                     "u128" => P::U128,
                     "isize" => P::Isize,
                     "usize" => P::Usize,
+                    "f16" => P::F16,
+                    "bf16" => P::Bf16,
                     "f32" => P::F32,
                     "f64" => P::F64,
                     _ => return Err(error(expr.span, format!("unsupported builtin type {name}"))),

@@ -64,6 +64,8 @@ pub enum Primitive {
     U128,
     Isize,
     Usize,
+    F16,
+    Bf16,
     F32,
     F64,
 }
@@ -2088,6 +2090,8 @@ impl fmt::Display for Primitive {
             Self::U128 => "u128",
             Self::Isize => "isize",
             Self::Usize => "usize",
+            Self::F16 => "f16",
+            Self::Bf16 => "bf16",
             Self::F32 => "f32",
             Self::F64 => "f64",
         })

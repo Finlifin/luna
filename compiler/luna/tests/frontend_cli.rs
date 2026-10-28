@@ -9470,3 +9470,58 @@ fn sysroot_meta_math_invokes_vm_and_folds_into_runtime_code() {
     let ir = String::from_utf8(output.stdout).unwrap();
     assert!(!ir.contains("call double @llvm.sqrt"), "{ir}");
 }
+
+#[test]
+fn sysroot_half_float_types_have_distinct_public_identities() {
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let root = root.to_str().unwrap();
+    sandbox.write("input.fl", "comptime fn run()->bool { f16 != bf16 and f16 != f32 and bf16 != f32 and f16 == builtin.f16 and bf16 == builtin.bf16 }\nfn half(value:f16)->f16 {value}\nfn brain(value:bf16)->bf16 {value}");
+    let output = sandbox.run(&[
+        "input.fl",
+        "--sysroot",
+        root,
+        "--build-target",
+        "x86_64",
+        "linux",
+        "64",
+        "--invoke-comptime",
+        "run",
+    ]);
+    assert_eq!(success(&output).trim(), "(bool true)");
+    let output = sandbox.run(&[
+        "input.fl",
+        "--sysroot",
+        root,
+        "--build-target",
+        "x86_64",
+        "linux",
+        "64",
+        "--emit",
+        "nir",
+    ]);
+    let dump = success(&output);
+    assert!(dump.contains("f16") && dump.contains("bf16"), "{dump}");
+    for source in [
+        "fn invalid(value:f16)->bf16 {value}",
+        "fn invalid(value:bf16)->f16 {value}",
+        "fn invalid(value:f16)->f32 {value}",
+        "fn invalid(value:bf16)->f32 {value}",
+    ] {
+        sandbox.write("input.fl", source);
+        failure(
+            &sandbox.run(&[
+                "input.fl",
+                "--sysroot",
+                root,
+                "--build-target",
+                "x86_64",
+                "linux",
+                "64",
+                "--emit",
+                "nir",
+            ]),
+            1,
+        );
+    }
+}

@@ -66,8 +66,8 @@ pub fn initialize(_ty_ctxt: &TyCtxt) -> IntrinsicContext {
     let mut lang_items = LangItems::new();
     use LangItem::*;
     for item in [
-        AnyType, U8, U16, U32, U64, U128, Usize, I8, I16, I32, I64, I128, Isize, Integer, F16, F32,
-        F64, Real, Bool, Char, Str, Void, NoReturn, Type,
+        AnyType, U8, U16, U32, U64, U128, Usize, I8, I16, I32, I64, I128, Isize, Integer, F16,
+        Bf16, F32, F64, Real, Bool, Char, Str, Void, NoReturn, Type,
     ] {
         lang_items
             .set(item, LangItemDef::Builtin)
