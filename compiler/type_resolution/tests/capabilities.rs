@@ -2688,3 +2688,120 @@ fn generic_disjunctive_type_premises_discharge_matching_requirements() {
         );
     }
 }
+
+#[test]
+fn trait_proposition_reuses_budget_after_formation_and_given_checks() {
+    use nir::program::TypePredicate as Q;
+    use type_resolution::ptc::{Formula, Outcome};
+    let rigid = |n| Term::Rigid {
+        declaration: id(n),
+        sort: Sort::Type,
+    };
+    let mut scalar = implementation(20, 100, var(), vec![id(1)], vec![]);
+    scalar.requirements = vec![Q::Or(vec![
+        Q::Equal(var(), Term::Primitive(Primitive::F16)),
+        Q::Equal(var(), Term::Primitive(Primitive::Bf16)),
+    ])];
+    let wrapper = |error, value| Term::ErrorResult {
+        errors: vec![error],
+        result: Box::new(value),
+    };
+    let mut implementations = vec![
+        scalar,
+        implementation(
+            21,
+            100,
+            wrapper(rigid(2), var()),
+            vec![id(1), id(2)],
+            vec![requirement(100, rigid(2)), requirement(100, var())],
+        ),
+    ];
+    for (n, p) in [
+        Primitive::Bool,
+        Primitive::Char,
+        Primitive::Symbol,
+        Primitive::U8,
+        Primitive::U16,
+        Primitive::U32,
+        Primitive::U64,
+        Primitive::U128,
+        Primitive::I8,
+        Primitive::I16,
+        Primitive::I32,
+        Primitive::I64,
+        Primitive::I128,
+        Primitive::Usize,
+        Primitive::Isize,
+        Primitive::F32,
+        Primitive::F64,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        implementations.push(implementation(
+            200 + n as u32,
+            100,
+            Term::Primitive(p),
+            vec![],
+            vec![],
+        ));
+    }
+    let ix = index(&implementations);
+    let traits = vec![marker(100), marker(101), marker(102)];
+    let assumptions: Vec<_> = [100, 101, 102]
+        .into_iter()
+        .flat_map(|interface| {
+            [
+                requirement(interface, rigid(11)),
+                requirement(interface, rigid(12)),
+            ]
+        })
+        .collect();
+    let mut ctx = context();
+    for assumption in &assumptions {
+        ctx.assume(Formula::from_predicate(&Q::Trait(assumption.clone())));
+    }
+    let world = World {
+        index: &ix,
+        implementations: &implementations,
+        traits: &traits,
+        assumptions: &assumptions,
+        context: &ctx,
+    };
+    let query = requirement(100, wrapper(rigid(11), rigid(12)));
+    let predicate = Q::Trait(query.clone());
+    assert!(matches!(
+        world
+            .resolve_instance(
+                &query.interface_instance(),
+                &query.subject,
+                Budget::default()
+            )
+            .unwrap()
+            .types
+            .selection,
+        Selection::Selected(_)
+    ));
+    let mut exhausted = Budget {
+        steps: 1,
+        ..Budget::default()
+    };
+    assert!(!matches!(
+        world.check_predicate_metered(&predicate, &mut exhausted),
+        Ok(Outcome::Entailed(_))
+    ));
+    assert!(exhausted.steps <= 1);
+    for _ in 0..2 {
+        let mut budget = Budget::default();
+        let before = budget.steps;
+        let outcome = world
+            .check_predicate_metered(&predicate, &mut budget)
+            .unwrap();
+        assert!(matches!(outcome, Outcome::Entailed(_)), "{outcome:?}");
+        assert!(budget.steps < before && budget.steps > 0);
+        let proposition = world
+            .prove_proposition(Formula::from_predicate(&predicate), Budget::default())
+            .unwrap();
+        proposition.verify(&world, Budget::default()).unwrap();
+    }
+}

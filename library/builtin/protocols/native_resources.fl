@@ -4,8 +4,7 @@ use resources.{Clone, Copy};
 impl Clone for T where T, requires T == f16 or T == bf16 {
     fn clone(*self) -> Self { self.* }
 }
-impl Copy for f16 {}
-impl Copy for bf16 {}
+impl Copy for T where T, requires T == f16 or T == bf16 {}
 
 {-
     Copyable payloads allow copying the complete native wrapper. All possible

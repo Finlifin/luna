@@ -164,22 +164,13 @@ impl<'w> World<'w> {
                 _ => {}
             }
         }
-        // Each query gets a disjoint allowance; the final Boolean/theory proof
-        // cannot multiply the budget by the number of atoms.
-        let allowance = Budget {
-            steps: fuel / queries.len().saturating_add(1),
-            ..*budget
-        };
-        if allowance.steps == 0 {
-            return Err("trait proposition budget exhausted".into());
-        }
+        // Metered queries share the remaining allowance. Fixed per-atom
+        // slices stranded the unused work of cheap given assumptions while
+        // the one implementation search returned Pending prematurely.
         let mut context = self.context.fork();
         let mut decisions = Vec::new();
         for query in queries {
-            let mut query_budget = allowance;
-            let decision = self.decide_trait_metered(query, &mut query_budget);
-            budget.steps -= allowance.steps - query_budget.steps;
-            let decision = decision?;
+            let decision = self.decide_trait_metered(query, budget)?;
             let fact = Formula::Trait(query.clone());
             match decision.truth {
                 TraitTruth::Established => context.assume(fact),
@@ -188,9 +179,7 @@ impl<'w> World<'w> {
             }
             decisions.push(decision);
         }
-        let mut proof_budget = allowance;
-        let outcome = context.prove_metered(goal, &mut proof_budget);
-        budget.steps -= allowance.steps - proof_budget.steps;
+        let outcome = context.prove_metered(goal, budget);
         Ok(WorldProposition {
             world: self,
             decisions,
@@ -202,21 +191,17 @@ impl<'w> World<'w> {
     fn proposition_input_views(
         &self,
         query: &TraitQuery,
-        budget: Budget,
+        budget: &mut Budget,
     ) -> Result<(TraitQuery, Vec<crate::ptc::Proof>), String> {
-        let allowance = Budget {
-            steps: budget.steps / query.arguments.len().saturating_add(1),
-            ..budget
-        };
-        if allowance.steps == 0 {
-            return Err("trait proposition input view budget exhausted".into());
-        }
         let mut proofs = Vec::new();
         let mut view = |ty: &Term| -> Result<Term, String> {
+            crate::associated::charge_projection_copy(ty, &mut budget.steps)?;
             if ty.check_scope(&[]).is_ok() {
                 return Ok(ty.clone());
             }
-            match self.context.structural_view(ty, allowance) {
+            let (result, consumed) = self.context.structural_view_metered(ty, *budget);
+            budget.steps -= consumed;
+            match result {
                 Ok(Some((value, proof))) => {
                     proofs.push(proof);
                     Ok(value)
@@ -300,7 +285,8 @@ impl<'w> World<'w> {
                 Some(&self.index.nominal_layouts),
             )?;
             let parameter_binders = contract.parameter_binders(&mut fuel)?;
-            // Reserve separate bounded allowances for every proof/selection query.
+            // Bound formation checks separately; selection below reuses their
+            // unused work through the shared meter.
             let count = contract
                 .requirements
                 .len()
@@ -350,7 +336,7 @@ impl<'w> World<'w> {
                 })
                 .is_none()
                 {
-                    let (formed, _) = reserved(&mut fuel, allowance, |budget| {
+                    let (formed, _) = metered(&mut fuel, allowance, |budget| {
                         self.proposition_input_views(&TraitQuery::from(&requirement), budget)
                     })?;
                     if formed.inputs().any(|ty| ty.check_scope(&[]).is_err()) {
@@ -392,7 +378,7 @@ impl<'w> World<'w> {
                     input_equalities: Vec::new(),
                 });
             }
-            let (selected_query, input_equalities) = reserved(&mut fuel, allowance, |budget| {
+            let (selected_query, input_equalities) = metered(&mut fuel, allowance, |budget| {
                 self.proposition_input_views(query, budget)
             })?;
             if selected_query
@@ -408,7 +394,13 @@ impl<'w> World<'w> {
                     input_equalities,
                 });
             }
-            let resolution = metered(&mut fuel, allowance, |budget| {
+            // Formation and given checks have finished. Let selection use
+            // their returned work; its meter preserves the caller's hard cap.
+            let selection_budget = Budget {
+                steps: fuel,
+                ..budget
+            };
+            let resolution = metered(&mut fuel, selection_budget, |budget| {
                 self.resolve_instance_metered(
                     &InterfaceInstance {
                         declaration: selected_query.interface,
