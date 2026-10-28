@@ -97,6 +97,22 @@ where T, A, c: (.Type'builtin).vars.Closure {
 }
 
 {-
+  Seed from the first element without invoking combine. Later elements visit
+  the callback once in order; empty input has no accumulator. An optional
+  element remains present even when its payload is null.
+-}
+pub comptime fn reduce(values: List<T>, combine: %c comptime fn(T, T) -> T) -> ?T
+where T, c: (.Type'builtin).vars.Closure {
+    let count = length(values);
+    if count == 0 { return null; }
+    var accumulator = values[0];
+    inline for index in 1..count {
+        accumulator = combine(accumulator, values[index]);
+    }
+    accumulator
+}
+
+{-
   Mapping preserves order and calls transform exactly once per input element.
   Append through the output slot to permit buffer reuse. Full immutable data
   validation is still required; this is not yet a linear-time builder.
@@ -169,6 +185,19 @@ where T, c: (.Type'builtin).vars.Closure {
     inline for index in 0..count {
         let value = values[index];
         if pred(value) { return value; }
+    }
+    null
+}
+
+{- Stop at the first present transformed result, preserving inner nulls. -}
+pub comptime fn find_map(values: List<T>, transform: %c comptime fn(T) -> ?U) -> ?U
+where T, U, c: (.Type'builtin).vars.Closure {
+    let count = length(values);
+    inline for index in 0..count {
+        transform(values[index]) match {
+            value? => { return value; },
+            null => {},
+        };
     }
     null
 }

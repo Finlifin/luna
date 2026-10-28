@@ -981,7 +981,78 @@ fn list_transform_collectors_reject_wrong_callback_domains_and_runtime_use() {
         "comptime fn bad()->meta.List<bool> {meta.flat_map([true],|value| value)}",
         "fn callback(value:bool)->?bool {value} comptime fn bad()->meta.List<bool> {meta.filter_map([true],callback)}",
         "fn bad()->meta.List<bool> {meta.flat_map([true],|value| [value])}",
+        "comptime fn bad() {meta.reduce([true],|left,right| [left]);}",
+        "comptime fn bad() {meta.find_map([true],|value| [value]);}",
+        "fn callback(value:bool)->?bool {value} comptime fn bad() {meta.find_map([true],callback);}",
+        "fn bad() {meta.reduce([true],|left,right| right);}",
     ] {
         assert!(compile(source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn list_reduction_and_search_preserve_type_identity() {
+    let package = compile(
+        "typealias Type=.Type'builtin;
+        pure comptime fn Identity<T>->Type {T}
+        comptime fn select(value:Type)->?Type {value}
+        comptime fn run()->bool {
+            let values:meta.List<Type> = [Identity<bool>,bool];
+            let reduced=meta.reduce(values,|left,right|left);
+            let found=meta.find_map(values,select);
+            (reduced match {value?=>value == Identity<bool>,null=>false})
+                and (found match {value?=>value == Identity<bool>,null=>false})
+        }",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_reduction_and_search_abort_failed_callbacks_and_recover() {
+    for (callback, invocation) in [
+        (
+            "comptime fn transform(left:Integer,right:Integer)->Integer {let values:meta.List<Integer> = [10];values[right]}",
+            "meta.reduce(values,transform)",
+        ),
+        (
+            "comptime fn transform(value:Integer)->?Integer {let values:meta.List<Integer> = [10];let checked=values[value];null}",
+            "meta.find_map(values,transform)",
+        ),
+    ] {
+        let package = compile(&format!(
+            "typealias Integer=.Integer'builtin; {callback}
+            comptime fn fail()->?Integer {{let values:meta.List<Integer> = [0,0,2,0];{invocation}}}
+            comptime fn recover()->?Integer {{let values:meta.List<Integer> = [0,0];{invocation}}}"
+        ))
+        .unwrap();
+        let mut vm = comptime_interpretor::Interpreter::for_comptime(
+            &package,
+            comptime_interpretor::Budget {
+                steps: 1_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, "fail"), vec![])
+                .unwrap_err()
+                .kind,
+            comptime_interpretor::ErrorKind::IndexOutOfBounds
+        );
+        let expected_calls = if invocation.contains("reduce") { 2 } else { 3 };
+        assert_eq!(
+            support::calls(&package, &vm)
+                .iter()
+                .filter(|name| **name == "transform")
+                .count(),
+            expected_calls
+        );
+        let recovered = vm.invoke(support::id(&package, "recover"), vec![]).unwrap();
+        let expected = luna::invocation::invoke(&package, "recover", 1_000_000).unwrap();
+        assert_eq!(recovered, expected);
     }
 }

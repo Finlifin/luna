@@ -350,6 +350,36 @@ comptime fn example() -> bool {
 该阶段在 host 测试中通过 inline if 消费 comptime 结果，检查器要求实际执行
 一项测试且没有失败，不将仅成功编译视为通过。
 
+### 首项归约与转换后查找
+
+`reduce(values, combine) -> ?T` 使用首项作为累积值，对后续元素按顺序调用
+`combine(accumulator, item) -> T`。空输入返回 null，单项输入不调用回调；
+非空输入调用次数为元素数减一，不要求调用方构造单位元。
+
+`find_map(values, transform) -> ?U` 按顺序执行返回 `?U` 的 comptime 回调，
+遇到第一个存在结果立即返回，不执行后续回调。所有结果均为空或输入为空时返回 null。
+两个接口均保留嵌套 optional 层：归约的首项为 null，或查找到的存在结果内含 null，
+都不会变成外层的缺失结果。
+
+```flurry
+comptime fn first_positive(value: Integer) -> ?Integer {
+    if value > 0 { value } else { null }
+}
+
+comptime fn example() -> bool {
+    let values: meta.List<Integer> = [1, 2, 3];
+    let reduced = meta.reduce(values, |left, right| left * 10 + right);
+    let found = meta.find_map(values, first_positive);
+    (reduced match { value? => value == 123, null => false })
+        and (found match { value? => value == 1, null => false })
+}
+```
+
+遍历固定输入快照；回调修改调用方保存的列表不会改变本次遍历。回调失败立即中止，
+不会跳过失败项继续处理。返回的 Type 元素保留原身份，不展开 normal-form 头。
+这两个接口只用于 comptime；现有不可变数据检查和 invocation 预算仍然生效。
+完整 sysroot 用例已纳入 `sysroot-meta` 检查入口。
+
 ### 显式生成 Symbol 编码 enum
 
 `EnumBuilder.BuildSymbol(codes: List<Symbol>) -> Type` 按叶变体声明顺序指定编码。
