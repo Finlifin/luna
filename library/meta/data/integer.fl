@@ -1,14 +1,16 @@
+use builtin.{Integer, usize};
+
 {-
   Exact host-pipeline size conversion during comptime invocation. to_usize
   rejects negatives and values outside the configured target width; from_usize
   retains the complete value. Neither operation guesses the compiler's width.
 -}
-pub pure comptime fn to_usize(value: .Integer'builtin) -> .usize'builtin {
-    .comptime_integer_convert'builtin(.usize'builtin, value)
+pub pure comptime fn to_usize(value: Integer) -> usize {
+    .comptime_integer_convert'builtin(usize, value)
 }
 
-pub pure comptime fn from_usize(value: .usize'builtin) -> .Integer'builtin {
-    .comptime_integer_convert'builtin(.Integer'builtin, value)
+pub pure comptime fn from_usize(value: usize) -> Integer {
+    .comptime_integer_convert'builtin(Integer, value)
 }
 
 {-
@@ -17,12 +19,12 @@ pub pure comptime fn from_usize(value: .usize'builtin) -> .Integer'builtin {
     Zero divisors fail the invocation. These functions do not install an
     implicit rounding policy for Integer operators.
 -}
-pub pure comptime fn div_trunc(left: .Integer'builtin, right: .Integer'builtin)
-    -> .Integer'builtin {
+pub pure comptime fn div_trunc(left: Integer, right: Integer)
+    -> Integer {
     .comptime_integer_div_trunc'builtin(left, right)
 }
 
-pub pure comptime fn rem_trunc(left: .Integer'builtin, right: .Integer'builtin)
-    -> .Integer'builtin {
+pub pure comptime fn rem_trunc(left: Integer, right: Integer)
+    -> Integer {
     .comptime_integer_rem_trunc'builtin(left, right)
 }

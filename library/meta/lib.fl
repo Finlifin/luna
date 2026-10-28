@@ -1,5 +1,7 @@
+use builtin.{Type};
+
 {- Keep the compiler-bound normal-form head at the public meta.List path. -}
-pub pure comptime fn List<T> -> .Type'builtin {
+pub pure comptime fn List<T> -> Type {
     List<T>
 }
 

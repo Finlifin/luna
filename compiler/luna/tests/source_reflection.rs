@@ -158,6 +158,22 @@ fn ordinary_package_observes_fields_through_meta_without_builtin_access() {
         .arg(&input)
         .args(["--package", "2", "202", "meta"])
         .arg(&library)
+        .args(["--package", "3", "303", "builtin"])
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../library/builtin/primitives.fl"),
+        )
+        .args(["--dependency", "2", "builtin", "3"])
+        .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
+            [
+                "--comptime-intrinsic".to_owned(),
+                format!(
+                    "{}=meta.numeric.scalar_math.target.Scalar.{}",
+                    op.name(),
+                    op.name()
+                ),
+            ]
+        }))
         .args([
             "--dependency",
             "1",

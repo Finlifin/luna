@@ -1,3 +1,5 @@
+use builtin.{Integer, Symbol, Type};
+
 pub typealias Object = .Object'builtin;
 
 {-
@@ -5,19 +7,19 @@ pub typealias Object = .Object'builtin;
   checked; an out-of-range index fails the invocation. A positional entry has
   no key. Typed reads return an absent optional only for a domain mismatch.
 -}
-pub pure comptime fn object_length(value: Object) -> .Integer'builtin {
+pub pure comptime fn object_length(value: Object) -> Integer {
     .object_length'builtin(value)
 }
 
-pub pure comptime fn object_key(value: Object, index: .Integer'builtin) -> ?.Symbol'builtin {
+pub pure comptime fn object_key(value: Object, index: Integer) -> ?Symbol {
     .object_key'builtin(value, index)
 }
 
-pub pure comptime fn ObjectEntryType(value: Object, index: .Integer'builtin) -> .Type'builtin {
+pub pure comptime fn ObjectEntryType(value: Object, index: Integer) -> Type {
     .object_entry_type'builtin(value, index)
 }
 
-pub pure comptime fn object_value(value: Object, index: .Integer'builtin) -> ?T where T {
+pub pure comptime fn object_value(value: Object, index: Integer) -> ?T where T {
     .object_value'builtin(T, value, index)
 }
 
@@ -25,7 +27,7 @@ pub pure comptime fn object_value(value: Object, index: .Integer'builtin) -> ?T 
   Read the last named entry. A missing key or a different stored domain returns
   null; a mismatched last entry never falls back to an earlier duplicate.
 -}
-pub pure comptime fn object_get(value: Object, key: .Symbol'builtin) -> ?T where T {
+pub pure comptime fn object_get(value: Object, key: Symbol) -> ?T where T {
     .object_get'builtin(T, value, key)
 }
 
@@ -37,14 +39,14 @@ pub pure comptime fn object_concat(left: Object, right: Object) -> Object {
     .object_concat'builtin(left, right)
 }
 
-pub pure comptime fn object_append(object: Object, value: T, .key: ?.Symbol'builtin = null) -> Object where T {
+pub pure comptime fn object_append(object: Object, value: T, .key: ?Symbol = null) -> Object where T {
     .object_append'builtin(object, key, value)
 }
 
-pub pure comptime fn object_replace(object: Object, index: .Integer'builtin, value: T) -> Object where T {
+pub pure comptime fn object_replace(object: Object, index: Integer, value: T) -> Object where T {
     .object_replace'builtin(object, index, value)
 }
 
-pub pure comptime fn object_remove(object: Object, index: .Integer'builtin) -> Object {
+pub pure comptime fn object_remove(object: Object, index: Integer) -> Object {
     .object_remove'builtin(object, index)
 }

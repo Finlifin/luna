@@ -1,5 +1,7 @@
 # meta
 
+数据与 definition builder 模块通过 `builtin` 的公开绑定引用 `Type`、`Integer`、`Symbol` 和 `usize`，不在签名或方法体中重复访问原始类型符号。操作 intrinsic 的集中绑定与旧式 comptime 指针接收者迁移仍待完成。
+
 源码目录与待实现领域见 [六包结构](../STRUCTURE.md)。
 
 [`meta.math`](math.md) 提供 `builtin.math` 的编译期对应接口，由 VM 执行；

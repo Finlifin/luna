@@ -1,14 +1,16 @@
+use builtin.{Integer, Symbol, Type};
+
 use List;
 
 {-
   Observe an applied struct in declaration order. Reflection grants neither
   field access nor layout permission, and never unfolds opaque type factories.
 -}
-pub pure comptime fn struct_field_types(subject: .Type'builtin) -> List<.Type'builtin> {
+pub pure comptime fn struct_field_types(subject: Type) -> List<Type> {
     .struct_field_types'builtin(subject)
 }
 
-pub pure comptime fn struct_field_names(subject: .Type'builtin) -> List<.Symbol'builtin> {
+pub pure comptime fn struct_field_names(subject: Type) -> List<Symbol> {
     .struct_field_names'builtin(subject)
 }
 
@@ -18,17 +20,17 @@ pub pure comptime fn struct_field_names(subject: .Type'builtin) -> List<.Symbol'
   the compiler's checked definition service; drafts are not observable Types.
 -}
 pub struct StructBuilder {
-    name: .Symbol'builtin,
-    field_names: List<.Symbol'builtin>,
-    field_types: List<.Type'builtin>,
+    name: Symbol,
+    field_names: List<Symbol>,
+    field_types: List<Type>,
 }
 
 impl StructBuilder {
-    pub comptime fn new(.name: .Symbol'builtin = .Generated) -> Self {
+    pub comptime fn new(.name: Symbol = .Generated) -> Self {
         Self { name: name, field_names: [], field_types: [] }
     }
 
-    pub comptime fn from_type(subject: .Type'builtin, .name: .Symbol'builtin = .Generated) -> Self {
+    pub comptime fn from_type(subject: Type, .name: Symbol = .Generated) -> Self {
         Self {
             name: name,
             field_names: struct_field_names(subject),
@@ -36,7 +38,7 @@ impl StructBuilder {
         }
     }
 
-    pub comptime fn add_field(*self, name: .Symbol'builtin, field_type: .Type'builtin) {
+    pub comptime fn add_field(*self, name: Symbol, field_type: Type) {
         self.field_names.*.append(name);
         self.field_types.*.append(field_type);
     }
@@ -46,22 +48,22 @@ impl StructBuilder {
         unchanged. Names and Types are prepared together before either write;
         Build remains responsible for duplicate names and layout admission.
     -}
-    pub comptime fn insert_field(*self, index: .Integer'builtin,
-        name: .Symbol'builtin, field_type: .Type'builtin) -> bool {
+    pub comptime fn insert_field(*self, index: Integer,
+        name: Symbol, field_type: Type) -> bool {
         self.edit_fields(index, index, [name], [field_type])
     }
 
-    pub comptime fn replace_field(*self, index: .Integer'builtin,
-        name: .Symbol'builtin, field_type: .Type'builtin) -> bool {
+    pub comptime fn replace_field(*self, index: Integer,
+        name: Symbol, field_type: Type) -> bool {
         self.edit_fields(index, index + 1, [name], [field_type])
     }
 
-    pub comptime fn remove_field(*self, index: .Integer'builtin) -> bool {
+    pub comptime fn remove_field(*self, index: Integer) -> bool {
         self.edit_fields(index, index + 1, [], [])
     }
 
-    comptime fn edit_fields(*self, start: .Integer'builtin, end: .Integer'builtin,
-        names: List<.Symbol'builtin>, types: List<.Type'builtin>) -> bool {
+    comptime fn edit_fields(*self, start: Integer, end: Integer,
+        names: List<Symbol>, types: List<Type>) -> bool {
         let next_names = self.field_names.*.replace_range(start, end, names) match {
             value? => value,
             null => return false,
@@ -75,7 +77,7 @@ impl StructBuilder {
         true
     }
 
-    pub comptime fn Build(self) -> .Type'builtin {
+    pub comptime fn Build(self) -> Type {
         .build_struct'builtin(self.name, self.field_names, self.field_types)
     }
 }

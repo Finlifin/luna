@@ -1,0 +1,17 @@
+{- Exercise meta signatures through the shared builtin primitive bindings. -}
+struct Source {
+    enabled: bool,
+}
+
+comptime fn double(value: Integer) -> Integer { value * 2 }
+
+comptime fn run() -> bool {
+    let input: meta.List<Integer> = [1, 2, 3];
+    let output = input.map(double);
+    let generated = meta.StructBuilder.from_type(Source).Build();
+    output[2] == 6
+        and meta.div_trunc(7, 2) == 3
+        and meta.from_usize(meta.to_usize(17)) == 17
+        and meta.struct_field_names(generated)[0] == .enabled
+        and meta.struct_field_types(generated)[0] == bool
+}

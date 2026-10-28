@@ -348,18 +348,42 @@ impl Fixture {
             name: "meta".into(),
             entry: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/meta/lib.fl"),
         });
+        packages.push(SourcePackage {
+            resolution_id: 43,
+            identity: 902,
+            name: "builtin".into(),
+            entry: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../library/builtin/primitives.fl"),
+        });
+        let intrinsics: Vec<_> = nir::intrinsics::Operation::ALL
+            .iter()
+            .map(|op| {
+                (
+                    *op,
+                    format!("meta.numeric.scalar_math.target.Scalar.{}", op.name()),
+                )
+            })
+            .collect();
         compile_and_invoke_with_struct_builders(
             &packages,
-            &[resolve::DependencyEdge {
-                requester: 17,
-                alias: "meta".into(),
-                provider: 42,
-            }],
+            &[
+                resolve::DependencyEdge {
+                    requester: 17,
+                    alias: "meta".into(),
+                    provider: 42,
+                },
+                resolve::DependencyEdge {
+                    requester: 42,
+                    alias: "builtin".into(),
+                    provider: 43,
+                },
+            ],
             17,
             None,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
                 meta_list: Some("meta.List"),
+                comptime_intrinsics: &intrinsics,
                 ..Default::default()
             },
             None,
@@ -464,6 +488,22 @@ fn package_cli_invokes_public_builders_with_observed_inputs() {
             .arg(fixture.0.join("lib.fl"))
             .args(["--package", "42", "901", "meta"])
             .arg(&meta)
+            .args(["--package", "43", "902", "builtin"])
+            .arg(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../library/builtin/primitives.fl"),
+            )
+            .args(["--dependency", "42", "builtin", "43"])
+            .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
+                [
+                    "--comptime-intrinsic".to_owned(),
+                    format!(
+                        "{}=meta.numeric.scalar_math.target.Scalar.{}",
+                        op.name(),
+                        op.name()
+                    ),
+                ]
+            }))
             .args([
                 "--dependency",
                 "17",

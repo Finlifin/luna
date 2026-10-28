@@ -1,6 +1,9 @@
 // These isolated fixtures exercise meta data/builders without a scalar VM registry.
 // Keep the real package root and omit only the separately tested math facade.
+// Embed the real primitive bindings for this single-package fixture; production
+// resolves the same names through the builtin package dependency.
 concat!(
+    "mod builtin {\n", include_str!("../../../../library/builtin/primitives.fl"), "\n}\n",
     "mod data {\n",
     "mod integer {\n", include_str!("../../../../library/meta/data/integer.fl"), "\n}\n",
     "mod object {\n", include_str!("../../../../library/meta/data/object.fl"), "\n}\n",
