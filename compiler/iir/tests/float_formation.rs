@@ -69,3 +69,41 @@ fn staged_overflow_has_the_same_source_aware_diagnostic_as_normal_completion() {
     source.ty = Term::Primitive(P::F64);
     assert!(iir::staging::fold_value(&source, &mut 10000).is_ok());
 }
+
+#[test]
+fn half_comparison_folding_preserves_zero_and_unordered_nan() {
+    for (ty, literal, nan) in [
+        (P::F16, Literal::Float16 as fn(u16) -> Literal, 0x7e01),
+        (P::Bf16, Literal::BFloat16 as fn(u16) -> Literal, 0x7fc1),
+    ] {
+        for (left, right, equal) in [(0, 0x8000, true), (nan, nan, false), (nan, 0, false)] {
+            for (kind, expected) in [
+                (K::ScalarEqual as fn(Box<Expr>, Box<Expr>) -> K, equal),
+                (K::ScalarLessEqual as fn(Box<Expr>, Box<Expr>) -> K, equal),
+                (
+                    K::ScalarGreaterEqual as fn(Box<Expr>, Box<Expr>) -> K,
+                    equal,
+                ),
+            ] {
+                let value = |bits| {
+                    Box::new(Expr {
+                        source: SourceRange { start: 1, end: 2 },
+                        ty: Term::Primitive(ty),
+                        kind: K::Literal(literal(bits)),
+                    })
+                };
+                let expression = Expr {
+                    source: SourceRange { start: 1, end: 2 },
+                    ty: Term::Primitive(P::Bool),
+                    kind: kind(value(left), value(right)),
+                };
+                assert_eq!(
+                    iir::staging::fold_value(&expression, &mut 10000)
+                        .unwrap()
+                        .kind,
+                    K::Literal(Literal::Bool(expected))
+                );
+            }
+        }
+    }
+}

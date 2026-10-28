@@ -194,3 +194,50 @@ fn bfloat16_subnormal_and_finite_overflow_midpoints() {
         Err(Error::OutOfRange)
     );
 }
+
+#[test]
+fn comparisons_cover_every_encoding_against_an_exact_widening_oracle() {
+    fn oracle(bits: u16, fraction: u32, exponent_bits: u32, bias: i32) -> f64 {
+        let exponent = (u32::from(bits) >> fraction) & ((1 << exponent_bits) - 1);
+        let mantissa = u32::from(bits) & ((1 << fraction) - 1);
+        let value = if exponent == (1 << exponent_bits) - 1 {
+            if mantissa == 0 {
+                f64::INFINITY
+            } else {
+                f64::NAN
+            }
+        } else if exponent == 0 {
+            f64::from(mantissa) * 2.0f64.powi(1 - bias - fraction as i32)
+        } else {
+            f64::from((1 << fraction) | mantissa)
+                * 2.0f64.powi(exponent as i32 - bias - fraction as i32)
+        };
+        if bits & 0x8000 == 0 { value } else { -value }
+    }
+    for (format, fraction, exponent, bias, infinity) in [
+        (F::Binary16, 10, 5, 15, 0x7c00),
+        (F::BFloat16, 7, 8, 127, 0x7f80),
+    ] {
+        for bits in 0..=u16::MAX {
+            for other in [
+                bits,
+                bits ^ 0x8000,
+                bits.wrapping_add(1),
+                bits.wrapping_mul(40503).wrapping_add(17),
+                0,
+                0x8000,
+                infinity,
+                infinity | 0x8000,
+                infinity | 1,
+                infinity | 0x8001,
+            ] {
+                assert_eq!(
+                    format.compare(bits, other),
+                    oracle(bits, fraction, exponent, bias)
+                        .partial_cmp(&oracle(other, fraction, exponent, bias)),
+                    "{format} {bits:04x} {other:04x}"
+                );
+            }
+        }
+    }
+}

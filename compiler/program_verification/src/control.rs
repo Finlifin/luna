@@ -170,6 +170,12 @@ fn literal_matches(expected: &n::Literal, actual: &n::Literal, fuel: &mut usize)
             *fuel = fuel.checked_sub(a.len().max(b.len()))?;
             a == b
         }
+        (L::Float16(a), L::Float16(b)) => comptime_runtime::float16::Float16Format::Binary16
+            .compare(*a, *b)
+            .is_some_and(|o| o.is_eq()),
+        (L::BFloat16(a), L::BFloat16(b)) => comptime_runtime::float16::Float16Format::BFloat16
+            .compare(*a, *b)
+            .is_some_and(|o| o.is_eq()),
         (L::Float32(a), L::Float32(b)) => f32::from_bits(*a) == f32::from_bits(*b),
         (L::Float64(a), L::Float64(b)) => f64::from_bits(*a) == f64::from_bits(*b),
         (
@@ -410,6 +416,13 @@ mod tests {
         let nan = L::Float64(f64::NAN.to_bits());
         assert_eq!(literal_matches(&zero, &negative_zero, &mut 100), Some(true));
         assert_eq!(literal_matches(&nan, &nan, &mut 100), Some(false));
+        for (zero, negative_zero, nan) in [
+            (L::Float16(0), L::Float16(0x8000), L::Float16(0x7e01)),
+            (L::BFloat16(0), L::BFloat16(0x8000), L::BFloat16(0x7fc1)),
+        ] {
+            assert_eq!(literal_matches(&zero, &negative_zero, &mut 100), Some(true));
+            assert_eq!(literal_matches(&nan, &nan, &mut 100), Some(false));
+        }
         let text = L::String("hello".into());
         assert_eq!(literal_matches(&text, &text, &mut 4), None);
         assert_eq!(literal_matches(&text, &text, &mut 5), Some(true));

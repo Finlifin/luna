@@ -9645,3 +9645,79 @@ fn run() -> {ty} {{
         }
     }
 }
+
+#[test]
+fn sysroot_half_float_comparisons_preserve_ieee_ordering() {
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    for ty in ["f16", "bf16"] {
+        sandbox.write(
+            "input.fl",
+            format!(
+                r#"
+fn ordered(a:T,b:T)->bool
+where T, requires T == f16 or T == bf16
+{{ a < b and a <= b and b > a and b >= a and a != b and not (a == b) }}
+fn equal(a:T,b:T)->bool
+where T, requires T == f16 or T == bf16
+{{ a == b and a <= b and a >= b and not (a != b) and not (a < b) and not (a > b) }}
+fn unordered(a:T,b:T)->bool
+where T, requires T == f16 or T == bf16
+{{ a != b and not (a == b) and not (a < b) and not (a <= b) and not (a > b) and not (a >= b) }}
+fn zero(value:{ty})->bool {{ value match {{ 0.0 => true, _ => false }} }}
+comptime fn staged()->bool {{
+    let a:{ty} = -1.0;
+    let b:{ty} = 0.0;
+    let nan:{ty} = {ty}.NaN;
+    a < b and nan != nan and not (nan <= b)
+}}
+fn folded()->bool {{ const result = staged(); result }}
+fn run()->bool {{
+    let nan:{ty} = {ty}.NaN;
+    let infinity:{ty} = {ty}.Infinity;
+    ordered<{ty}>(-1.0, 0.0) and ordered<{ty}>(0.0, 1.0)
+    and ordered<{ty}>(1.0, infinity) and equal<{ty}>(infinity, infinity)
+    and equal<{ty}>(-0.0, 0.0) and unordered<{ty}>(nan, nan)
+    and unordered<{ty}>(nan, 0.0) and unordered<{ty}>(0.0, nan)
+    and zero(-0.0) and not zero(nan)
+}}
+"#
+            ),
+        );
+        let base = [
+            "input.fl",
+            "--sysroot",
+            root.to_str().unwrap(),
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+        ];
+        assert_eq!(
+            success(&sandbox.run(&[base.as_slice(), &["--invoke-comptime", "staged"]].concat()))
+                .trim(),
+            "(bool true)"
+        );
+        for entry in ["run", "folded"] {
+            assert_eq!(
+                success(&sandbox.run(&[base.as_slice(), &["--interpret", entry]].concat())).trim(),
+                "(bool true)"
+            );
+            for level in ["0", "3"] {
+                success(
+                    &sandbox.run(
+                        &[
+                            base.as_slice(),
+                            &["--build", entry, "--opt-level", level, "--output", "native"],
+                        ]
+                        .concat(),
+                    ),
+                );
+                assert_eq!(
+                    success(&Command::new(sandbox.path("native")).output().unwrap()).trim(),
+                    "(bool true)"
+                );
+            }
+        }
+    }
+}

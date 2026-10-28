@@ -1431,7 +1431,10 @@ impl Emitter<'_> {
                 if self.terminated {
                     return Ok(Value::unit());
                 }
-                if matches!(a.ty.clone(), Ty::Float32 | Ty::Float64) {
+                if matches!(
+                    a.ty.clone(),
+                    Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
+                ) {
                     if a.ty != b.ty {
                         return Err("host floating comparison mismatch".into());
                     }

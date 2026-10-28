@@ -7315,23 +7315,30 @@ impl Checker<'_, '_> {
         // Membership needs positive type-equality evidence. An unresolved
         // opaque head must remain available to ordinary member lookup, not
         // become a failed attempt to obtain a structural float view.
-        let ty = if matches!(ty, Term::Primitive(P::F32 | P::F64)) {
+        let ty = if matches!(ty, Term::Primitive(P::F16 | P::Bf16 | P::F32 | P::F64)) {
             ty.clone()
         } else {
-            let Some(ty) = [p(P::F32), p(P::F64)].into_iter().find(|candidate| {
-                matches!(
-                    self.context.prove(
-                        crate::ptc::Formula::equal(ty.clone(), candidate.clone()),
-                        crate::ptc::Budget::default(),
-                    ),
-                    crate::ptc::Outcome::Entailed(_)
-                )
-            }) else {
+            let Some(ty) = [p(P::F16), p(P::Bf16), p(P::F32), p(P::F64)]
+                .into_iter()
+                .find(|candidate| {
+                    matches!(
+                        self.context.prove(
+                            crate::ptc::Formula::equal(ty.clone(), candidate.clone()),
+                            crate::ptc::Budget::default(),
+                        ),
+                        crate::ptc::Outcome::Entailed(_)
+                    )
+                })
+            else {
                 return Ok(None);
             };
             ty
         };
         let literal = match (&ty, name) {
+            (Term::Primitive(P::F16), "NaN") => n::Literal::Float16(0x7e00),
+            (Term::Primitive(P::F16), "Infinity") => n::Literal::Float16(0x7c00),
+            (Term::Primitive(P::Bf16), "NaN") => n::Literal::BFloat16(0x7fc0),
+            (Term::Primitive(P::Bf16), "Infinity") => n::Literal::BFloat16(0x7f80),
             (Term::Primitive(P::F32), "NaN") => n::Literal::Float32(0x7fc00000),
             (Term::Primitive(P::F32), "Infinity") => n::Literal::Float32(0x7f800000),
             (Term::Primitive(P::F64), "NaN") => n::Literal::Float64(0x7ff8000000000000),
@@ -7347,7 +7354,7 @@ impl Checker<'_, '_> {
 
     fn native_equality_shape(&self, shape: &Term) -> bool {
         matches!(shape, Term::Primitive(p) if matches!(p,
-            P::Type | P::Integer | P::BitVec(_) | P::Bool | P::Char | P::Str | P::Symbol | P::Float | P::F32 | P::F64 | P::Usize | P::Isize
+            P::Type | P::Integer | P::BitVec(_) | P::Bool | P::Char | P::Str | P::Symbol | P::Float | P::F16 | P::Bf16 | P::F32 | P::F64 | P::Usize | P::Isize
         ) || self.integer_layout(*p).is_some())
             || self.proved_primitive_family(
                 shape,
@@ -7358,6 +7365,8 @@ impl Checker<'_, '_> {
                     P::Char,
                     P::Str,
                     P::Symbol,
+                    P::F16,
+                    P::Bf16,
                     P::F32,
                     P::F64,
                     P::U8,
@@ -7404,6 +7413,8 @@ impl Checker<'_, '_> {
                         | P::Str
                         | P::Symbol
                         | P::Float
+                        | P::F16
+                        | P::Bf16
                         | P::F32
                         | P::F64
                         | P::Usize

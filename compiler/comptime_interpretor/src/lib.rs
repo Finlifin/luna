@@ -5809,7 +5809,7 @@ impl<'a> Interpreter<'a> {
         } else {
             Term::Primitive(Primitive::Bool)
         };
-        let supported = |ty: &Term| matches!(ty, Term::Primitive(p) if matches!(p, Primitive::Bool | Primitive::Char | Primitive::Str | Primitive::Symbol | Primitive::Float | Primitive::F32 | Primitive::F64 | Primitive::Never) || self.integer_layout(*p).is_some());
+        let supported = |ty: &Term| matches!(ty, Term::Primitive(p) if matches!(p, Primitive::Bool | Primitive::Char | Primitive::Str | Primitive::Symbol | Primitive::Float | Primitive::F16 | Primitive::Bf16 | Primitive::F32 | Primitive::F64 | Primitive::Never) || self.integer_layout(*p).is_some());
         if expr.ty != result_ty
             || !supported(&left.ty)
             || !supported(&right.ty)
@@ -5848,6 +5848,12 @@ impl<'a> Interpreter<'a> {
             (Value::Float(a), Value::Float(b)) => compare(Some(
                 self.integer_operation(Some(expr.source), |budget| a.compare(b, budget))?,
             )),
+            (Value::Float16(a), Value::Float16(b)) => {
+                compare(comptime_runtime::float16::Float16Format::Binary16.compare(*a, *b))
+            }
+            (Value::BFloat16(a), Value::BFloat16(b)) => {
+                compare(comptime_runtime::float16::Float16Format::BFloat16.compare(*a, *b))
+            }
             (Value::Float32(a), Value::Float32(b)) => {
                 compare(f32::from_bits(*a).partial_cmp(&f32::from_bits(*b)))
             }
@@ -9137,6 +9143,12 @@ impl Interpreter<'_> {
                 } else {
                     false
                 }
+            }
+            Pattern::Literal(Literal::Float16(expected)) => {
+                matches!(input, Value::Float16(actual) if comptime_runtime::float16::Float16Format::Binary16.compare(*actual, *expected).is_some_and(|o| o.is_eq()))
+            }
+            Pattern::Literal(Literal::BFloat16(expected)) => {
+                matches!(input, Value::BFloat16(actual) if comptime_runtime::float16::Float16Format::BFloat16.compare(*actual, *expected).is_some_and(|o| o.is_eq()))
             }
             Pattern::Literal(Literal::Float32(expected)) => {
                 matches!(input, Value::Float32(actual) if f32::from_bits(*actual) == f32::from_bits(*expected))

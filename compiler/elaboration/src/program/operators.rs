@@ -54,6 +54,8 @@ impl Checker<'_, '_> {
                 P::Usize,
                 P::Isize,
                 P::Char,
+                P::F16,
+                P::Bf16,
                 P::F32,
                 P::F64,
                 P::I8,
@@ -586,7 +588,7 @@ impl Checker<'_, '_> {
                 } else {
                     // Comparing two already-typed platform integers does not
                     // select a layout. Concrete execution still requires a target.
-                    if !matches!(shape, Term::Primitive(primitive) if matches!(primitive, P::Char | P::Float | P::F32 | P::F64 | P::Usize | P::Isize | P::Never) || self.integer_layout(primitive).is_some())
+                    if !matches!(shape, Term::Primitive(primitive) if matches!(primitive, P::Char | P::Float | P::F16 | P::Bf16 | P::F32 | P::F64 | P::Usize | P::Isize | P::Never) || self.integer_layout(primitive).is_some())
                         && !self.proved_ordered_scalar_family(&shape)
                     {
                         let protocol = self.protocols.ordering.ok_or_else(|| {

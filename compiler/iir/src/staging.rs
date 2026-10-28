@@ -2006,6 +2006,12 @@ fn fold_scalar_comparison<'layout>(
             *fuel = budget.steps;
             Some(ordering.map_err(|e| e.to_string())?)
         }
+        (Term::Float16(a), Term::Float16(b)) => {
+            comptime_runtime::float16::Float16Format::Binary16.compare(*a, *b)
+        }
+        (Term::BFloat16(a), Term::BFloat16(b)) => {
+            comptime_runtime::float16::Float16Format::BFloat16.compare(*a, *b)
+        }
         (Term::Float32(a), Term::Float32(b)) => f32::from_bits(*a).partial_cmp(&f32::from_bits(*b)),
         (Term::Float64(a), Term::Float64(b)) => f64::from_bits(*a).partial_cmp(&f64::from_bits(*b)),
         (Term::Integer(a), Term::Integer(b)) if matches!(left.ty,Term::Primitive(p) if heads.integer_layout(p).is_some()) => {

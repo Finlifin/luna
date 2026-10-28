@@ -31,6 +31,27 @@ impl Float16Format {
         }
     }
 
+    /// IEEE ordered comparison. NaNs (quiet or signaling) are unordered;
+    /// signed zeros compare equal. This never rounds or canonicalizes payloads.
+    pub fn compare(self, left: u16, right: u16) -> Option<Ordering> {
+        let a = left & 0x7fff;
+        let b = right & 0x7fff;
+        if a > self.infinity() || b > self.infinity() {
+            return None;
+        }
+        if a == 0 && b == 0 {
+            return Some(Ordering::Equal);
+        }
+        let key = |bits: u16| {
+            if bits & 0x8000 != 0 {
+                !bits
+            } else {
+                bits ^ 0x8000
+            }
+        };
+        Some(key(left).cmp(&key(right)))
+    }
+
     // Finite positive encodings are ordered by their unsigned representation.
     fn parts(self, bits: u16) -> (u32, i32) {
         let fraction_bits = self.fraction_bits();

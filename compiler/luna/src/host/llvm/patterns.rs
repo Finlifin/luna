@@ -120,7 +120,10 @@ impl Emitter<'_> {
             Pattern::Unit if value.ty == Ty::Unit => {}
             Pattern::Literal(literal) => {
                 let other = self.literal(literal, value.ty.clone())?;
-                let equal = if matches!(value.ty.clone(), Ty::Float32 | Ty::Float64) {
+                let equal = if matches!(
+                    value.ty.clone(),
+                    Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
+                ) {
                     self.instruction(
                         Ty::Bool,
                         format!(

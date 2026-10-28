@@ -239,3 +239,25 @@ fn float_arithmetic_checks_nir_precision_and_result_types() {
         );
     }
 }
+
+#[test]
+fn half_comparisons_reject_cross_format_operands() {
+    for (left, right) in [(P::F16, P::Bf16), (P::Bf16, P::F16)] {
+        let value = |ty| {
+            expr(
+                ty,
+                K::Literal(if ty == P::F16 {
+                    Literal::Float16(0)
+                } else {
+                    Literal::BFloat16(0)
+                }),
+            )
+        };
+        let package = package(equal(value(left), value(right)));
+        let mut interpreter = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let error = interpreter
+            .invoke(package.functions[0].declaration, vec![])
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Type);
+    }
+}
