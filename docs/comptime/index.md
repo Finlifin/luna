@@ -57,6 +57,23 @@ comptime fn select_flag(flag: bool) -> bool {
 
 这里两个分支的 T 都是 bool，而 value 仍由本次调用的条件决定。合并逐字段保留共同证据；不同 Type 或不同聚合形状不会被当作相同。观察不调用条件、guard 或分支函数，也不改变它们在 invocation 中的顺序与次数。已知条件仍可使用所选分支的证据。这不允许 runtime 条件进入要求 comptime 执行的 initializer，也不代替尚未接通的动态 Type 标注。
 
+局部代码块也可通过不可变声明、解构和别名传递这些部分已知的信息：
+
+~~~flurry
+comptime fn observed_flag(flag: bool) -> bool { flag }
+
+comptime fn block_local_type() -> bool {
+    let (T, flag) = do {
+        let descriptor = (bool, observed_flag(true));
+        descriptor
+    };
+    let result: T = flag;
+    result
+}
+~~~
+
+块内临时变量离开作用域后，已检查出的 Type 信息仍可随结果交付；它不携带 VM 存储。嵌套块和分支中的同名绑定各自独立。上例的 `observed_flag` 在每次 invocation 中执行一次，观察不调用它。结构观察不把赋值、控制转移或未知 Type 函数调用当作静态求值步骤；这些情况仍须由相应的编译期执行与类型检查路径处理。
+
 局部 const 也可保存 runtime 函数声明身份、固定的泛型函数实例，以及包含函数值的元组／记录；保存身份本身不调用该函数。闭包拥有的捕获环境可按当前值重建，包含调用后已更新的环境字段。图内同一闭包的多个引用及嵌套共享引用保持共享；分别构造的按值捕获闭包仍有独立环境。每次常量物化重新分配内部局部身份，并建立独立的环境快照。const initializer 中创建的闭包仍属于 comptime，后续 const 可调用它，但不能直接在 runtime 调用。外部活跃指针捕获与循环闭包对象图仍被拒绝。runtime 正文中的数据 const 已支持模式和 guard 的编译期选择；失败时进入 runtime 的发散 else 分支。quoted code 绑定仍要求无条件绑定。这些是实现边界，不缩减后文的完整阶段契约。
 
 ~~~flurry

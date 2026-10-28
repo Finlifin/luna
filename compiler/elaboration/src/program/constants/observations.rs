@@ -82,3 +82,38 @@ impl PartialStagedValue {
         })
     }
 }
+
+/// An observation-only lexical environment. No VM storage or inference state is
+/// copied; known terms are supplied only to the existing structural inspector.
+#[derive(Clone, Default)]
+pub(super) struct ObservationScope {
+    pub(super) values: BTreeMap<n::LocalId, Arc<PartialStagedValue>>,
+    pub(super) known: BTreeMap<n::LocalId, Arc<Term>>,
+}
+impl ObservationScope {
+    pub(super) fn fork(&self, fuel: &mut usize) -> Result<Self, String> {
+        *fuel = fuel
+            .checked_sub(self.values.len().saturating_add(self.known.len()))
+            .ok_or("partial block observation budget exhausted")?;
+        Ok(self.clone())
+    }
+
+    pub(super) fn insert(
+        &mut self,
+        binding: n::LocalId,
+        value: Arc<PartialStagedValue>,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("partial block observation budget exhausted")?;
+        if let PartialStagedData::Known(term) = &value.data {
+            nir::type_computations::charge_term(term, fuel).map_err(|e| e.to_string())?;
+            self.known.insert(binding, Arc::new(term.clone()));
+        } else {
+            self.known.remove(&binding);
+        }
+        self.values.insert(binding, value);
+        Ok(())
+    }
+}

@@ -165,3 +165,61 @@ fn match_common_evidence_does_not_execute_guards_during_observation() {
     }
     assert!(compile("fn choose(flag:bool)->bool {const T=if flag {bool} else {bool}; let result:T=true; result}").is_err());
 }
+
+#[test]
+fn local_blocks_preserve_partial_types_without_replaying_initializers() {
+    for body in [
+        "let (T,flag)=do {let descriptor=(bool,observe(true)); descriptor}; let result:T=flag; result",
+        "let (T,flag)=do {let T=bool; let flag=observe(true); let Alias=T; (Alias,flag)}; let result:T=flag; result",
+        "let (T,flag)=do {let (T,flag)=(bool,observe(true)); (T,flag)}; let result:T=flag; result",
+        "let descriptor=do {let descriptor=Descriptor {ty:bool,flag:observe(true)}; descriptor}; let result:descriptor.ty=descriptor.flag; result",
+        "let (T,flag)=do {let selected=true; let T=if selected {bool} else {Byte}; let flag=observe(true); (T,flag)}; let result:T=flag; result",
+        "let (T,flag)=do {let T=bool; let flag=do {let T=Byte; let value:T=7; observe(value==7)}; (T,flag)}; let result:T=flag; result",
+    ] {
+        let source = format!(
+            "struct Descriptor {{ty:Type,flag:bool}} comptime fn observe(flag:bool)->bool {{flag}} comptime fn run()->bool {{{body}}}"
+        );
+        let package = compile(&source).unwrap_or_else(|e| panic!("{source}: {e}"));
+        let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+        let observed = support::id(&package, "observe");
+        for expected_count in [1, 2] {
+            assert_eq!(
+                vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+                Value::Bool(true),
+                "{source}"
+            );
+            assert_eq!(
+                vm.events()
+                    .iter()
+                    .filter(|event| matches!(event, Event::EnterFunction(id) if *id == observed))
+                    .count(),
+                expected_count,
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn branch_local_aliases_preserve_common_type_fields() {
+    let source = "comptime fn observe(flag:bool)->bool {flag} comptime fn choose(flag:bool)->bool {
+        let (T,value)=if flag {let descriptor=(bool,observe(true));descriptor} else {let T=bool;let value=observe(false);(T,value)};
+        let result:T=value;result
+    } comptime fn run()->bool {choose(true) and not choose(false)}";
+    let package = compile(source).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn block_observation_does_not_replay_mutation_or_promote_unknown_calls() {
+    for source in [
+        "comptime fn run()->bool {let T=do {var T=bool;T=Byte;T};let result:T=true;result}",
+        "comptime fn Choose(flag:bool)->Type {if flag {bool} else {Byte}} comptime fn run()->bool {let T=do {let T=Choose(true);T};let result:T=true;result}",
+        "fn run(flag:bool)->bool {const T=do {let flag=flag; if flag {bool} else {bool}}; let result:T=true;result}",
+    ] {
+        assert!(compile(source).is_err(), "unexpectedly accepted {source}");
+    }
+}

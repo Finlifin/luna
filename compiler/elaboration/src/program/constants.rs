@@ -3,6 +3,7 @@
 use super::*;
 use comptime_interpretor::Value;
 mod observations;
+use observations::ObservationScope;
 
 #[derive(Default)]
 struct Materialization {
@@ -1305,6 +1306,16 @@ impl Checker<'_, '_> {
         depth: usize,
         fuel: &mut usize,
     ) -> Result<std::sync::Arc<PartialStagedValue>, String> {
+        self.partial_staged_value_in(value, depth, fuel, &ObservationScope::default())
+    }
+
+    fn partial_staged_value_in(
+        &self,
+        value: &n::Expr,
+        depth: usize,
+        fuel: &mut usize,
+        scope: &ObservationScope,
+    ) -> Result<std::sync::Arc<PartialStagedValue>, String> {
         *fuel = fuel
             .checked_sub(1)
             .ok_or("partial pattern evidence budget exhausted")?;
@@ -1312,6 +1323,9 @@ impl Checker<'_, '_> {
             return Ok(PartialStagedValue::unknown());
         }
         if let K::Local(binding) = value.kind {
+            if let Some(value) = scope.values.get(&binding) {
+                return Ok(value.clone());
+            }
             if self.locals.contains_key(&binding)
                 && let Some(value) = self.partial_staged_bindings.get(&binding)
             {
@@ -1321,7 +1335,7 @@ impl Checker<'_, '_> {
         // Follow the already checked field route. This inspects a snapshot,
         // never a pointer or a replay of the initializer that produced it.
         if let K::Field { value: base, .. } | K::AnonymousField { value: base, .. } = &value.kind {
-            let base = self.partial_staged_value(base, depth + 1, fuel)?;
+            let base = self.partial_staged_value_in(base, depth + 1, fuel, scope)?;
             let known = match (&value.kind, &base.data) {
                 (
                     K::Field {
@@ -1393,7 +1407,7 @@ impl Checker<'_, '_> {
             steps: *fuel,
             max_limbs: 4096,
         };
-        let symbol = self.known_normal_input(value, 0, &mut budget);
+        let symbol = self.known_normal_input_in(value, 0, &mut budget, &scope.known);
         *fuel = budget.steps;
         if let Some(symbol) = symbol {
             return Ok(PartialStagedValue::known(symbol));
@@ -1404,14 +1418,15 @@ impl Checker<'_, '_> {
                 else_branch: Some(other),
                 ..
             } => {
-                let left = self.partial_staged_value(then_branch, depth + 1, fuel)?;
-                let right = self.partial_staged_value(other, depth + 1, fuel)?;
+                let left = self.partial_staged_value_in(then_branch, depth + 1, fuel, scope)?;
+                let right = self.partial_staged_value_in(other, depth + 1, fuel, scope)?;
                 return PartialStagedValue::common(&left, &right, depth + 1, fuel);
             }
             K::Match { arms, .. } if !arms.is_empty() => {
-                let mut common = self.partial_staged_value(&arms[0].body, depth + 1, fuel)?;
+                let mut common =
+                    self.partial_staged_value_in(&arms[0].body, depth + 1, fuel, scope)?;
                 for arm in &arms[1..] {
-                    let next = self.partial_staged_value(&arm.body, depth + 1, fuel)?;
+                    let next = self.partial_staged_value_in(&arm.body, depth + 1, fuel, scope)?;
                     common = PartialStagedValue::common(&common, &next, depth + 1, fuel)?;
                 }
                 return Ok(common);
@@ -1419,8 +1434,40 @@ impl Checker<'_, '_> {
             K::Block {
                 statements,
                 result: Some(result),
-            } if statements.is_empty() => {
-                return self.partial_staged_value(result, depth + 1, fuel);
+            } => {
+                let mut scoped = scope.fork(fuel)?;
+                for statement in statements {
+                    match &statement.kind {
+                        K::Let { binding, value } if self.immutable.contains(binding) => {
+                            let observed =
+                                self.partial_staged_value_in(value, depth + 1, fuel, &scoped)?;
+                            scoped.insert(*binding, observed, fuel)?;
+                        }
+                        K::LetPattern {
+                            pattern,
+                            value,
+                            guard: None,
+                            otherwise: None,
+                        } => {
+                            let observed =
+                                self.partial_staged_value_in(value, depth + 1, fuel, &scoped)?;
+                            let (_, bindings) = self.known_staged_pattern_bindings(
+                                pattern,
+                                &observed,
+                                depth + 1,
+                                fuel,
+                            )?;
+                            if bindings.keys().any(|id| !self.immutable.contains(id)) {
+                                return Ok(PartialStagedValue::unknown());
+                            }
+                            for (binding, value) in bindings {
+                                scoped.insert(binding, value, fuel)?;
+                            }
+                        }
+                        _ => return Ok(PartialStagedValue::unknown()),
+                    }
+                }
+                return self.partial_staged_value_in(result, depth + 1, fuel, &scoped);
             }
             _ => {}
         }
@@ -1464,7 +1511,7 @@ impl Checker<'_, '_> {
         let mut children = Vec::new();
         let mut height = 1;
         for field in fields {
-            let child = self.partial_staged_value(field, depth + 1, fuel)?;
+            let child = self.partial_staged_value_in(field, depth + 1, fuel, scope)?;
             height = height.max(child.depth + 1);
             children.push(child);
         }
