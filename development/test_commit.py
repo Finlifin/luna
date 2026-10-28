@@ -58,6 +58,31 @@ class CommitTests(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             return entry.main()
 
+    def test_preserved_rename_commits_base_and_keeps_edits(self):
+        (self.root / 'shared').rename(self.root / 'moved')
+        self.manifest.write_text('shared\nmoved\n')
+        args = ('--preserve-renamed-edit', 'shared', 'moved')
+        self.run_entry(*args, '--dry-run', partial=False)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
+        self.assertEqual(self.git('diff', '--cached'), '')
+        self.run_entry(*args, partial=False)
+        self.assertEqual(self.git('show', 'HEAD:moved'), self.original)
+        self.assertEqual((self.root / 'moved').read_text(), self.working)
+        self.assertIn('other feature', self.git('diff'))
+        self.assertNotIn('shared', self.git('ls-tree', '--name-only', 'HEAD'))
+
+    def test_preserved_rename_rejects_invalid_paths_before_staging(self):
+        (self.root / 'shared').rename(self.root / 'moved')
+        self.manifest.write_text('shared\nmoved\n')
+        for old, new in [('outside', 'moved'), ('shared', 'shared'), ('moved', 'shared')]:
+            with self.assertRaises(SystemExit):
+                self.run_entry('--preserve-renamed-edit', old, new, partial=False)
+            self.assertEqual(self.git('diff', '--cached'), '')
+            self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
+        with self.assertRaises(SystemExit):
+            self.run_entry('--preserve-renamed-edit', 'shared', 'moved')
+        self.assertEqual((self.root / 'moved').read_text(), self.working)
+
     def test_partial_commit_preserves_other_hunks_and_working_files(self):
         self.assertEqual(self.run_entry(), 0)
         self.assertEqual(self.git('show', 'HEAD:shared'), self.selected)

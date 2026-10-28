@@ -33,6 +33,9 @@ def main():
                         help='preserve and include already staged manifest paths; reject other staged work')
     parser.add_argument('--restage', action='append', default=[], metavar='PATH',
                         help='with --include-staged, explicitly refresh this staged manifest file from the worktree')
+    parser.add_argument('--preserve-renamed-edit', nargs=2, action='append', default=[],
+                        metavar=('OLD', 'NEW'),
+                        help='commit a pure rename of the HEAD blob, leaving edits at NEW unstaged')
     args = parser.parse_args()
     if git('branch', '--show-current', capture=True).stdout.strip() != 'dev':
         parser.error('this entrypoint commits only on dev')
@@ -59,6 +62,25 @@ def main():
         parser.error('--restage requires --include-staged')
     if len(restage) != len(args.restage) or not restage.issubset(staged):
         parser.error('--restage paths must be unique already staged manifest paths')
+    renames = []
+    renamed_paths = set()
+    if args.preserve_renamed_edit and (args.patch_file or args.include_staged):
+        parser.error('--preserve-renamed-edit cannot combine with patch or staged selections')
+    for old, new in args.preserve_renamed_edit:
+        if old == new or not {old, new}.issubset(paths) or renamed_paths.intersection((old, new)):
+            parser.error('preserved renames require distinct, unique manifest paths')
+        if (ROOT / old).exists() or not (ROOT / new).is_file() or (ROOT / new).is_symlink():
+            parser.error('preserved rename requires an absent source and a regular destination')
+        source = git('ls-tree', 'HEAD', '--', old, capture=True).stdout.strip()
+        destination = git('ls-tree', 'HEAD', '--', new, capture=True).stdout.strip()
+        if not source or destination:
+            parser.error('preserved rename requires a HEAD source and a new destination')
+        metadata, source_path = source.split('\t', 1)
+        mode, kind, blob = metadata.split()
+        if source_path != old or kind != 'blob' or mode not in ('100644', '100755'):
+            parser.error('preserved rename source must be a regular tracked file')
+        renames.append((mode, blob, new))
+        renamed_paths.update((old, new))
     message = args.message_file.resolve()
     if not message.read_text().strip():
         parser.error('commit message is empty')
@@ -86,6 +108,8 @@ def main():
             for name in paths:
                 if name in restage:
                     print(f'  {name}')
+        for mode, blob, new in renames:
+            print(f'Preserve worktree edits at {new}; stage HEAD blob {blob}')
         print('Commit message:')
         print(message.read_text())
         git('--literal-pathspecs', 'status', '--short', '--', *paths)
@@ -103,6 +127,8 @@ def main():
         unstaged = [name for name in paths if name not in staged or name in restage]
         if unstaged:
             git('--literal-pathspecs', 'add', '--', *unstaged)
+    for mode, blob, new in renames:
+        git('update-index', '--add', '--cacheinfo', mode, blob, new)
     git('diff', '--cached', '--check')
     git('diff', '--cached', '--stat')
     git('commit', '--file', str(message))
