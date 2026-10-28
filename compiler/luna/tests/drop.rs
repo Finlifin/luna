@@ -22191,13 +22191,13 @@ fn scheduled_handler_borrowed_scalar_pointer_supports_nested_closure_writes() {
 #[test]
 fn scheduled_handler_borrowed_scalar_pointer_rejects_slot_mutation_and_exposure() {
     for body in [
-        "pointer=other.ref;pointer.*",
+        "pointer=other_pointer;pointer.*",
         "let slot=pointer.ref;pointer.*",
     ] {
         let package = compile(&format!(
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
             effect poll()->bool;fn subject()->#poll bool {{poll()#}}
-            fn entry()->bool {{var value=false;var other=true;var pointer=value.ref;
+            fn entry()->bool {{var value=false;var other=true;var pointer=value.ref;let other_pointer=other.ref;
                 subject()# {{poll()=>do {{{body}}},}}
             }}"
         ));
@@ -39574,4 +39574,103 @@ fn scheduled_handler_restored_owner_cleanup_matches_exit() {
         expected.extend(std::iter::repeat_n("drop State".to_owned(), expected_drops));
         assert_eq!(executed_names(&package, &executable, vm.events()), expected);
     }
+}
+
+#[test]
+fn cleanup_acquisition_lookup_does_not_rescan_unrelated_layouts() {
+    use elaboration::verification::{drop::CleanupSession, moves::CleanupPolicy};
+    let mut source = String::from(
+        "trait Retire {fn drop(*self);}\n\
+         struct Wanted {}\n\
+         impl Retire for Wanted {fn drop(*self) {}}\n\
+         struct Container {payload:?Wanted}\n",
+    );
+    for index in 0..64 {
+        source.push_str(&format!("struct Unrelated{index} {{value:bool}}\n"));
+    }
+    let package = compile(&source);
+    world(&package, |world, _| {
+        let protocol = package.traits[0].declaration;
+        let wanted = nominal(&package, "Wanted", vec![]);
+        let container = nominal(&package, "Container", vec![]);
+        let measure = |unrelated: usize| {
+            let mut session = CleanupSession::new(&package, world, protocol, Budget::default());
+            for index in 0..unrelated {
+                session
+                    .acquire(
+                        &nominal(&package, &format!("Unrelated{index}"), vec![]),
+                        &mut 100_000,
+                    )
+                    .unwrap();
+            }
+            session.acquire(&container, &mut 100_000).unwrap();
+            // Wanted is indexed through both a record field and a variant
+            // payload. Finding it must reuse the originally acquired subtree.
+            assert!(!session.is_trivial(&wanted, &mut 100_000).unwrap());
+            assert!(session.acquire(&wanted, &mut 0).is_err());
+            let mut fuel = 100_000;
+            for _ in 0..16 {
+                session.acquire(&wanted, &mut fuel).unwrap();
+            }
+            100_000 - fuel
+        };
+        let small = measure(0);
+        let large = measure(64);
+        println!("cleanup indexed lookup work: small={small}, large={large}");
+        assert_eq!(small, large);
+    });
+}
+
+#[test]
+fn failed_cleanup_indexing_does_not_publish_partial_bindings() {
+    use elaboration::verification::{
+        PlaceId,
+        drop::CleanupSession,
+        moves::CleanupPolicy,
+        ownership::{Place, Shape, State},
+    };
+    let package =
+        compile("trait Retire {fn drop(*self);}struct Wanted {}struct Container {payload:?Wanted}");
+    world(&package, |world, _| {
+        let protocol = package.traits[0].declaration;
+        let wanted = nominal(&package, "Wanted", vec![]);
+        let container = nominal(&package, "Container", vec![]);
+        let receiver = Place {
+            root: PlaceId {
+                owner: 991,
+                local: 0,
+            },
+            fields: vec![],
+        };
+        let mut state = State::default();
+        state
+            .declare(receiver.root, &Shape::Fields(vec![]), true, &mut 1000)
+            .unwrap();
+        let mut saw_index_failure = false;
+        for budget in 1..128 {
+            let mut session = CleanupSession::new(&package, world, protocol, Budget::default());
+            if let Err(error) = session.acquire(&container, &mut { budget }) {
+                assert!(
+                    session
+                        .plan(&wanted, &state, &receiver, &[], &mut 1000)
+                        .unwrap_err()
+                        .contains("no acquired binding")
+                );
+                if error.contains("cleanup index budget exhausted") {
+                    saw_index_failure = true;
+                    session.acquire(&container, &mut 100_000).unwrap();
+                    assert!(
+                        session
+                            .plan(&wanted, &state, &receiver, &[], &mut 1000)
+                            .is_ok()
+                    );
+                    break;
+                }
+            }
+        }
+        assert!(
+            saw_index_failure,
+            "exercise indexing failure after acquisition completes"
+        );
+    });
 }

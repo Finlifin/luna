@@ -4059,3 +4059,47 @@ python3 -B development/library_check.py --release --stage sysroot-iteration
   (`/tmp/luna-tools-acl2ss8y/result.json`，退出 0)。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
   退出 0 (`/tmp/luna-tools-019x59q3/result.json`)；`git diff --check` 通过。
+
+## 按类型索引已取得的清理责任
+
+CleanupSession 原先每次查找责任，都深度遍历全部已取得布局。现在为同一不可变
+包和 Drop world 建立 `type -> acquired root + layout path` 索引。路径区分记录
+字段和 variant payload，保留原来的首次取得顺序，复用已选定的子树；不重新
+选择析构器，不缓存运行时构造状态或清理计划。索引只在整个新增布局完成计费和
+登记准备后一次发布，索引中途耗尽预算不能留下部分责任。
+
+规模回归先取得 0 或 64 个无关布局，再重复查询记录中 optional payload 的
+自定义析构责任，要求查询工作量相同。另一回归刻意耗尽索引预算，确认未取得的
+子字段不能参与规划，并验证补足预算后恢复。原 handler 槽位拒绝用例在 handler
+外先取得替换指针，避免 `other.ref` 先触发另一个变量的 lexical capture 取址
+拒绝，继续分别检验槽位重绑和对槽位取址的原有保护。
+
+当前限制：完整 sysroot 的长组合链仍超出默认 100,000 预算，本次复测失败于
+后续 `memory summary type budget exhausted`
+(`/tmp/luna-tools-qd578au_/result.json`，退出 1)。不能据此宣称默认预算问题已经
+解决。显式 200,000 预算的 O3 复测通过三个用例
+(`/tmp/luna-tools-m7q35ygy/result.json`，退出 0)，命令：
+
+```sh
+python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-iteration.fl --sysroot library --test-native --inline-functions --fuel 200000 --opt-level 3
+```
+
+一次构建期间的直接复测因编译器二进制正在替换而未能启动
+(`/tmp/luna-tools-xmvceaj3/result.json`，退出 125)，以上 O3 结果来自构建完成后
+的实际重跑。首轮 Drop 回归中 995 项通过、一项诊断断言失败
+(`/tmp/luna-tools-ijt43qcm/result.json`，退出 101)；第一次拆分仍误判槽位取址
+诊断 (`/tmp/luna-tools-es4cwxhr/result.json`，退出 101)，随后保留槽位诊断并
+消除替换指针取址的干扰，没有放宽源码拒绝行为。
+
+最终验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test drop --test library_iteration --test conditional_capture_cleanup --test temporary_method_cleanup --test match_cleanup`：
+  共 1052 项通过 (`/tmp/luna-tools-lw95sqly/result.json`，退出 0)，包含 996 项
+  Drop、41 项迭代、13 项匹配清理，以及条件捕获与临时方法清理各一项。
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test drop cleanup_acquisition_lookup_does_not_rescan_unrelated_layouts -- --nocapture`：
+  通过 (`/tmp/luna-tools-ojeeav00/result.json`)，重复查询 16 次在 0/64 个无关
+  布局下均消耗 64 个预算单位。这是分析工作量，不是 wall-clock 测量。
+- `python3 -B development/library_check.py --release --stage sysroot-iteration`：
+  O0 三项实际 native 用例通过 (`/tmp/luna-library-8r07_5wz/summary.json`)。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过 (`/tmp/luna-tools-qz6pk0nk/result.json`)；`git diff --check` 通过。

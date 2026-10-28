@@ -981,6 +981,8 @@ pub struct CleanupSession<'a, 'w> {
     protocol: DeclarationId,
     budget: Budget,
     bindings: Vec<AcquiredCleanup>,
+    // Paths refer only to immutable acquired trees, never runtime positions.
+    binding_paths: std::collections::HashMap<Term, (usize, Vec<usize>)>,
     rejection_stack: Vec<Term>,
     memory_inert_stack: Vec<Term>,
     read_footprint_stack: Vec<Term>,
@@ -1003,6 +1005,7 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
             protocol,
             budget,
             bindings: vec![],
+            binding_paths: Default::default(),
             rejection_stack: vec![],
             memory_inert_stack: vec![],
             read_footprint_stack: vec![],
@@ -1016,45 +1019,27 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
         ty: &Term,
         fuel: &mut usize,
     ) -> Result<Option<&'b AcquiredCleanup>, String> {
-        fn search<'b>(
-            binding: &'b AcquiredCleanup,
-            ty: &Term,
-            fuel: &mut usize,
-            depth: usize,
-        ) -> Result<Option<&'b AcquiredCleanup>, String> {
-            step(fuel, depth)?;
-            crate::verification::memory::bound_type(&binding.ty, fuel)?;
-            if &binding.ty == ty {
-                return Ok(Some(binding));
-            }
-            match &binding.layout {
-                Layout::Atomic => (),
-                Layout::Fields(fields) => {
-                    for field in fields {
-                        if let Some(found) = search(field, ty, fuel, depth + 1)? {
-                            return Ok(Some(found));
-                        }
-                    }
-                }
-                Layout::Variants(variants) => {
-                    for fields in variants {
-                        for field in fields {
-                            if let Some(found) = search(field, ty, fuel, depth + 1)? {
-                                return Ok(Some(found));
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(None)
-        }
         crate::verification::memory::bound_type(ty, fuel)?;
-        for binding in &self.bindings {
-            if let Some(found) = search(binding, ty, fuel, 0)? {
-                return Ok(Some(found));
-            }
+        step(fuel, 0)?;
+        let Some((root, path)) = self.binding_paths.get(ty) else {
+            return Ok(None);
+        };
+        let mut binding = &self.bindings[*root];
+        let mut indices = path.iter();
+        while let Some(index) = indices.next() {
+            step(fuel, 0)?;
+            binding = match &binding.layout {
+                Layout::Fields(fields) => &fields[*index],
+                Layout::Variants(variants) => {
+                    let field = indices
+                        .next()
+                        .ok_or("invalid acquired cleanup variant path")?;
+                    &variants[*index][*field]
+                }
+                Layout::Atomic => return Err("invalid acquired cleanup atomic path".into()),
+            };
         }
-        Ok(None)
+        Ok(Some(binding))
     }
 }
 impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
@@ -1212,7 +1197,52 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
                 self.budget,
                 fuel,
             )?;
+            // Build the index transactionally: an exhausted indexing budget
+            // must not publish a partially registered acquisition.
+            fn index(
+                binding: &AcquiredCleanup,
+                path: &mut Vec<usize>,
+                output: &mut Vec<(Term, Vec<usize>)>,
+                fuel: &mut usize,
+                depth: usize,
+            ) -> Result<(), String> {
+                step(fuel, depth)?;
+                crate::verification::memory::bound_type(&binding.ty, fuel)?;
+                *fuel = fuel
+                    .checked_sub(path.len())
+                    .ok_or("cleanup index budget exhausted")?;
+                output.push((binding.ty.clone(), path.clone()));
+                match &binding.layout {
+                    Layout::Atomic => (),
+                    Layout::Fields(fields) => {
+                        for (field, child) in fields.iter().enumerate() {
+                            path.push(field);
+                            index(child, path, output, fuel, depth + 1)?;
+                            path.pop();
+                        }
+                    }
+                    Layout::Variants(variants) => {
+                        for (variant, fields) in variants.iter().enumerate() {
+                            step(fuel, depth)?;
+                            path.push(variant);
+                            for (field, child) in fields.iter().enumerate() {
+                                path.push(field);
+                                index(child, path, output, fuel, depth + 1)?;
+                                path.pop();
+                            }
+                            path.pop();
+                        }
+                    }
+                }
+                Ok(())
+            }
+            let mut paths = vec![];
+            index(&binding, &mut vec![], &mut paths, fuel, 0)?;
+            let root = self.bindings.len();
             self.bindings.push(binding);
+            for (ty, path) in paths {
+                self.binding_paths.entry(ty).or_insert((root, path));
+            }
         }
         Ok(())
     }
