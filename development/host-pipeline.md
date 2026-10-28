@@ -4288,3 +4288,34 @@ enum 回归在同一 VM 里先提交重复 payload 字段，要求发布回调�
   包装，虽保留结构化原因但尚未统一为直接 invocation 的 Display 形式。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
   通过 (`/tmp/luna-tools-m2pgbfd3/result.json`)；`git diff --check` 通过。
+
+## build 包的定义来源快照基础
+
+`luna::build_context` 建立版本 1 的显式构建输入 API：按 SourcePackage 的语义
+identity 保存 mode、执行宿主与 host pipeline 目标，拒绝缺失/重复输入和未知
+身份。resolution ID 与语义 identity 分别校验，查询接收原始 DeclarationId，
+不会按包名、路径或当前调用者猜配置。TargetData 继续提供校验过的指针宽度。
+
+每次读取返回 Observation，保留 owner、query 和 value；新快照只比较被读取
+的字段。目标 feature 缺失与 false 不混同，其他包或其他字段变化不使该读失效，
+来源包消失则失效。快照与读取证据采用稳定、转义的 S-expression Display。
+
+本阶段仅交付驱动 API，未接通源码 build.mode/target、comptime 查询或缓存。
+没有创建虚假的 build 常量来掩盖这一缺口。package_metadata、构建脚本工具及
+anar 传输同样尚待实现。下一步应接通定义来源查询与缓存证据，而不是将当前
+单元测试当作完整 build 包验收。详见 `development/build-context.md`。
+
+本阶段验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test build_context`：
+  四项契约测试通过 (`/tmp/luna-tools-he7t4eq9/result.json`)，覆盖来源包、宿主/
+  目标差异、精确失效、缺失与关闭 feature、输入拒绝、稳定转义与括号平衡。
+- `python3 -B development/library_check.py --release --stage manifest --stage sysroot-meta`：
+  manifest 阶段通过，但 sysroot-meta 最初失败
+  (`/tmp/luna-library-gobmpzd0/summary.json`)：仅放 README 的 library/build 目录
+  也会被识别为已安装包，缺少 lib.fl。已将说明移到 development/build-context.md，
+  删除本次创建的空目录；没有添加假实现绕过加载约束。
+- 重新执行 `python3 -B development/library_check.py --release --stage sysroot-meta`：
+  实际原生用例通过 (`/tmp/luna-library-p5ubztct/summary.json`)。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过 (`/tmp/luna-tools-3lhqzidf/result.json`)；`git diff --check` 通过。

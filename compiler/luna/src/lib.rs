@@ -26,3 +26,5 @@ pub mod compilation_cache;
 pub mod package_stream;
 
 pub mod host;
+
+pub mod build_context;
