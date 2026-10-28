@@ -9523,6 +9523,47 @@ impl Checker<'_, '_> {
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "list_length" | "list_concat")) => {
                     self.list_builtin(expr, callee, args, expected)
                 }
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "comptime_integer_div_trunc" | "comptime_integer_rem_trunc")) =>
+                {
+                    if self.runtime_value_context() || self.in_code_body {
+                        return Err(error(
+                            expr.span,
+                            "explicit Integer division requires comptime invocation",
+                        ));
+                    }
+                    let [Arg::Positional(left), Arg::Positional(right)] = args else {
+                        return Err(error(
+                            expr.span,
+                            "explicit Integer division requires two positional Integer operands",
+                        ));
+                    };
+                    let H::Builtin(name) = &callee.kind else {
+                        unreachable!()
+                    };
+                    let left = self.expr(left, Some(&p(P::Integer)))?;
+                    let right = self.expr(right, Some(&p(P::Integer)))?;
+                    let ty = if is_never(&left.ty) || is_never(&right.ty) {
+                        p(P::Never)
+                    } else {
+                        p(P::Integer)
+                    };
+                    if let Some(expected) = expected {
+                        self.require_expression(&ty, expected, expr.span)?;
+                    }
+                    Ok(n::Expr {
+                        source: source(expr.span),
+                        ty,
+                        kind: K::IntegerBinary {
+                            op: if name.as_str() == "comptime_integer_div_trunc" {
+                                n::IntegerOp::DivideTrunc
+                            } else {
+                                n::IntegerOp::RemainderTrunc
+                            },
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                    })
+                }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "comptime_integer_convert") =>
                 {
                     if self.runtime_value_context() || self.in_code_body {

@@ -14,6 +14,23 @@ comptime fn checked_size(value: Integer) -> bool {
 }
 ```
 
+`div_trunc(left: Integer, right: Integer) -> Integer` 与
+`rem_trunc(left: Integer, right: Integer) -> Integer` 提供显式向零截断的
+任意精度除法和余数，均为 pure comptime 函数。商向零舍入，非零余数与被除数
+同号，始终满足 `left == quotient * right + remainder`。除数为零使 invocation
+失败并保留源码位置；不存在固定宽度的最小负数溢出或按主机位宽截断。
+
+```flurry
+comptime fn signed_division() -> bool {
+    meta.div_trunc(-7, 3) == -2 and meta.rem_trunc(-7, 3) == -1
+        and meta.div_trunc(7, -3) == -2 and meta.rem_trunc(7, -3) == 1
+}
+```
+
+两个操作数按普通调用顺序各求值一次，大整数工作消耗 invocation 预算。
+它们不为 Integer 的 `/` 或 `%` 安装默认协议，也不引入 runtime Integer 表示。
+需要其他舍入方式时不能把这两个函数当作对应操作。
+
 完整 sysroot 已为 `List<T>` 提供 `ListPatternView` 的 comptime contribution。
 `[a, b]`、`[a, ..._]` 与 `[]` 可直接用于编译期列表，提取的元素保持 T 的身份；
 列表自身仍没有 runtime 表示或 runtime 迭代承诺。

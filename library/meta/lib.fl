@@ -21,6 +21,22 @@ pub pure comptime fn from_usize(value: .usize'builtin) -> .Integer'builtin {
 }
 
 {-
+    Explicit arbitrary-precision division toward zero. The remainder has the
+    dividend's sign (or is zero), and a == div_trunc(a,b) * b + rem_trunc(a,b).
+    Zero divisors fail the invocation. These functions do not install an
+    implicit rounding policy for Integer operators.
+-}
+pub pure comptime fn div_trunc(left: .Integer'builtin, right: .Integer'builtin)
+    -> .Integer'builtin {
+    .comptime_integer_div_trunc'builtin(left, right)
+}
+
+pub pure comptime fn rem_trunc(left: .Integer'builtin, right: .Integer'builtin)
+    -> .Integer'builtin {
+    .comptime_integer_rem_trunc'builtin(left, right)
+}
+
+{-
   Observe ordered Object entries without merging duplicate keys. Indices are
   checked; an out-of-range index fails the invocation. A positional entry has
   no key. Typed reads return an absent optional only for a domain mismatch.

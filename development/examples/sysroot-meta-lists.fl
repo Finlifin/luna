@@ -46,13 +46,22 @@ comptime fn run() -> bool {
         and (nested[0] match { null => true, _? => false })
         and meta.length(unused) == 0 and meta.length(unused_filter) == 0
         and reducers_and_searches() and named_metadata() and stable_sorting()
+        and exact_integer_division()
+}
+
+comptime fn exact_integer_division() -> bool {
+    let q: Integer = 1606938044258990275541962092341162602522202993782792835301376;
+    let dividend = q * 17 + 9;
+    meta.div_trunc(dividend, 17) == q and meta.rem_trunc(dividend, 17) == 9
+        and meta.div_trunc(-dividend, 17) == -q and meta.rem_trunc(-dividend, 17) == -9
+        and meta.div_trunc(dividend, -17) == -q and meta.rem_trunc(dividend, -17) == 9
 }
 
 comptime fn stable_sorting() -> bool {
     let input: meta.List<Integer> = [12, 1, 11, 3, 2];
     let ordered = meta.sort_by(input, |a, b| {
-        let left = if a > 10 {a - 10} else {a};
-        let right = if b > 10 {b - 10} else {b};
+        let left = meta.rem_trunc(a, 10);
+        let right = meta.rem_trunc(b, 10);
         left < right
     });
     let types: meta.List<Type> = [bool, u32, bool];
