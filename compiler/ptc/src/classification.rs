@@ -44,7 +44,7 @@ impl TypeKind {
                 }
                 Self::Integer
             }
-            Term::Primitive(P::Float | P::F32 | P::F64) => Self::FloatingPoint,
+            Term::Primitive(P::Float | P::F16 | P::Bf16 | P::F32 | P::F64) => Self::FloatingPoint,
             Term::Primitive(P::Unit) => return None, // legacy representation
             Term::Primitive(_) => return Some(false),
             Term::Tuple(_) => Self::Tuple,
