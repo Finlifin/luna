@@ -31,6 +31,45 @@ fn total_boolean_observation(expr: &Expr, limits: &mut Limits) -> Result<bool, U
     Ok(true)
 }
 
+/*
+ * Unlike total observations, these expressions may need path-local overflow
+ * proofs. They still cannot write storage or change a binding. Analyze their
+ * short-circuit paths normally, then retain the entry state instead of joining
+ * two unchanged stores and reconstructing all their relational evidence.
+ */
+fn guarded_scalar_observation(expr: &Expr, limits: &mut Limits) -> Result<bool, Unknown> {
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        limits.step(1)?;
+        match &expr.kind {
+            K::Local(_) | K::Literal(_) => {}
+            K::Not(value) | K::IntegerNegate(value) => pending.push(value),
+            K::And(a, b)
+            | K::Or(a, b)
+            | K::ScalarEqual(a, b)
+            | K::ScalarLess(a, b)
+            | K::ScalarLessEqual(a, b)
+            | K::ScalarGreater(a, b)
+            | K::ScalarGreaterEqual(a, b) => {
+                pending.push(b);
+                pending.push(a);
+            }
+            K::IntegerBinary { op, left, right }
+                if op.is_comparison()
+                    || matches!(
+                        op,
+                        IntegerOp::Add | IntegerOp::Subtract | IntegerOp::Multiply
+                    ) =>
+            {
+                pending.push(right);
+                pending.push(left);
+            }
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
 impl Walker<'_> {
     // Only called after the complete tree passed total_boolean_observation.
     // Internal nodes construct evidence; the enclosing inner() evaluates it
@@ -389,6 +428,11 @@ impl Walker<'_> {
                 self.prime_fields(a, state, depth)?;
                 self.prime_fields(b, state, depth)?;
                 let a = self.child(a, state, depth)?.condition;
+                let unchanged = if guarded_scalar_observation(expr, self.limits)? {
+                    Some(state.fork(self.limits)?)
+                } else {
+                    None
+                };
                 let mut short = state.fork(self.limits)?;
                 let continue_truth = matches!(expr.kind, K::And(..));
                 if let Some(a) = &a {
@@ -423,8 +467,12 @@ impl Walker<'_> {
                 };
                 let mut a = a;
                 let mut b = b.condition;
-                state.join_aggregates(&short, self.limits)?;
-                state.join_paths_and_facts(&short, self.limits)?;
+                if let Some(unchanged) = unchanged {
+                    *state = unchanged;
+                } else {
+                    state.join_aggregates(&short, self.limits)?;
+                    state.join_paths_and_facts(&short, self.limits)?;
+                }
                 // A computed operand can have no surviving predicate, while
                 // its sibling still describes current input observations.
                 // Keep that sibling without pretending it equals the result:

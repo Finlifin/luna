@@ -375,3 +375,77 @@ fn residual_contract_validation_avoids_report_snapshots_without_losing_checks() 
     assert!(flow::validate_residual_contracts(&package, function, &mut exhausted).is_err());
     flow::validate_residual_contracts(&package, function, &mut Limits::default()).unwrap();
 }
+
+#[test]
+fn wrapping_absolute_contract_uses_bounded_in_place_proof() {
+    use elaboration::verification::{Limits, flow};
+    let source = "^intrinsic_enum enum Ops {absolute}
+        fn magnitude(value: T) -> result: T
+        where T, requires T == .i8'builtin or T == .i128'builtin,
+        ensures result == value'old or result == -value'old {
+            unsafe { Ops.absolute'intrinsic(value).as(T) }
+        }
+        fn run(value: .i8'builtin) -> .i8'builtin { magnitude(value) }";
+    let package = support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            host_intrinsics: &[(
+                nir::intrinsics::Operation::WrappingAbsoluteValue,
+                "input.Ops.absolute".into(),
+            )],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let graph = luna::instantiation::instantiate(&package, "run", 2_000_000).unwrap();
+    let function = &graph
+        .functions
+        .iter()
+        .find(|f| f.function.name == "magnitude")
+        .unwrap()
+        .function;
+    let mut limits = Limits::default();
+    limits.arithmetic.steps = 2_000_000;
+    flow::validate_residual_contracts(&package, function, &mut limits).unwrap();
+    let used = 2_000_000 - limits.arithmetic.steps;
+    eprintln!("wrapping_abs residual proof steps: {used}");
+    // The original path consumed 135634 steps for this concrete instance.
+    assert!(used < 130_000, "proof consumed {used} steps");
+}
+
+#[test]
+fn observational_short_circuit_keeps_guarded_overflow_and_effect_order() {
+    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+        typealias Byte = .u8'builtin;
+        impl Duplicate for bool {} impl Duplicate for Byte {}
+        fn guarded(value: Byte) -> bool {value == 255 or value + 1 > 0}
+        fn guarded_and(value: Byte) -> bool {value < 255 and value + 1 > 0}
+        fn run() -> bool {
+            var value: Byte = 254;
+            let changed = value == 255 or do {value = value + 1; true};
+            changed and value == 255 and guarded(255) and guarded(0)
+                and not guarded_and(255) and guarded_and(254)
+        }";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            2_000_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    for expression in [
+        "value != 255 or value + 1 > 0",
+        "value == 255 and value + 1 > 0",
+    ] {
+        let source =
+            format!("typealias Byte = .u8'builtin; fn bad(value: Byte) -> bool {{ {expression} }}");
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains("range"), "{error}");
+    }
+}

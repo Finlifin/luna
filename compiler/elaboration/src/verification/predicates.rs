@@ -14,6 +14,23 @@ pub struct PredicateProof {
 }
 
 impl Facts {
+    /// Discharge an obligation in this exact immutable state. No evidence is
+    /// exported: callers retaining a proof across state changes must use
+    /// prove_condition and replay instead. Keep the same bounded admission and
+    /// refutation procedure as proof construction.
+    pub(super) fn check_condition(
+        &self,
+        condition: &Condition,
+        truth: bool,
+        limits: &mut Limits,
+    ) -> Result<(), Unknown> {
+        if !self.is_reachable() {
+            return Err(Unknown::UnreachablePath);
+        }
+        let condition = condition.copy_bounded(limits, 0)?;
+        self.refute_opposite(&condition, truth, limits)
+    }
+
     pub fn prove_condition(
         &self,
         condition: &Condition,
@@ -464,6 +481,55 @@ mod interval_fast_path_tests {
         assert_eq!(
             stale.truth_by_enclosure(&facts, &mut limits, 0),
             Err(Unknown::StaleValue(id))
+        );
+    }
+}
+
+#[cfg(test)]
+mod in_place_tests {
+    use super::*;
+
+    #[test]
+    fn immediate_checks_preserve_proof_admission_and_stale_value_rejection() {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let place = PlaceId { owner: 1, local: 0 };
+        let id = facts
+            .assign(place, Interval::machine(8, false, &mut limits).unwrap())
+            .unwrap();
+        let bounded = Condition::Compare {
+            value: id,
+            relation: Comparison::LessEqual,
+            constant: Integer::from_u128(255),
+        };
+        let unknown = Condition::Compare {
+            value: id,
+            relation: Comparison::Equal,
+            constant: Integer::from_u128(7),
+        };
+        for condition in [&bounded, &unknown] {
+            for truth in [false, true] {
+                let checked = facts.check_condition(condition, truth, &mut Limits::default());
+                let replayed = facts
+                    .prove_condition(condition, truth, &mut Limits::default())
+                    .and_then(|proof| proof.replay(&facts, &mut Limits::default()));
+                assert_eq!(checked, replayed);
+            }
+        }
+        let proof = facts.prove_condition(&bounded, true, &mut limits).unwrap();
+        let mut empty = Limits::default();
+        empty.arithmetic.steps = 0;
+        assert!(facts.check_condition(&bounded, true, &mut empty).is_err());
+        facts.check_condition(&bounded, true, &mut limits).unwrap();
+        facts.invalidate(place).unwrap();
+        assert!(facts.check_condition(&bounded, true, &mut limits).is_err());
+        assert!(proof.replay(&facts, &mut limits).is_err());
+        facts
+            .assume(&Condition::Bool(false), true, &mut limits)
+            .unwrap();
+        assert_eq!(
+            facts.check_condition(&Condition::Bool(true), true, &mut limits),
+            Err(Unknown::UnreachablePath)
         );
     }
 }

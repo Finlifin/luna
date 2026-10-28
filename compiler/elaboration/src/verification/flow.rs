@@ -3163,12 +3163,9 @@ impl Walker<'_> {
             self.failure_source = Some(predicate.source);
             let checked = self.child(predicate, state, depth)?;
             let condition = checked.condition.ok_or(Reason::MissingPostconditionProof)?;
-            let proof = state
+            state
                 .facts
-                .prove_condition(&condition, true, self.limits)
-                .map_err(|_| Reason::MissingPostconditionProof)?;
-            proof
-                .replay(&state.facts, self.limits)
+                .check_condition(&condition, true, self.limits)
                 .map_err(|_| Reason::MissingPostconditionProof)?;
             state.facts.assume(&condition, true, self.limits)?;
             self.record(predicate, state, PointKind::Postcondition, None)?;
@@ -4148,12 +4145,9 @@ impl Walker<'_> {
             for predicate in &preconditions {
                 let checked = self.child(predicate, &mut defaults, depth)?;
                 let condition = checked.condition.ok_or(Reason::MissingPreconditionProof)?;
-                let proof = defaults
+                defaults
                     .facts
-                    .prove_condition(&condition, true, self.limits)
-                    .map_err(|_| Reason::MissingPreconditionProof)?;
-                proof
-                    .replay(&defaults.facts, self.limits)
+                    .check_condition(&condition, true, self.limits)
                     .map_err(|_| Reason::MissingPreconditionProof)?;
                 defaults.facts.assume(&condition, true, self.limits)?;
             }
@@ -5341,12 +5335,9 @@ impl Walker<'_> {
                     let existing = state.domains.keys().copied().collect();
                     let checked = self.child(predicate, state, depth)?;
                     let condition = checked.condition.ok_or_else(&failure)?;
-                    let proof = state
+                    state
                         .facts
-                        .prove_condition(&condition, true, self.limits)
-                        .map_err(|_| failure())?;
-                    proof
-                        .replay(&state.facts, self.limits)
+                        .check_condition(&condition, true, self.limits)
                         .map_err(|_| failure())?;
                     state.facts.assume(&condition, true, self.limits)?;
                     state.keep(&existing, self.limits)?;
