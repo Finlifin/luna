@@ -112,3 +112,71 @@ fn list_and_index_initializers_run_once_in_source_order() {
         .collect::<Vec<_>>();
     assert_eq!(calls, [0, 1]);
 }
+
+#[test]
+fn branches_intersect_known_and_partial_list_elements() {
+    for body in [
+        "let types:meta.List<Type> = if flag {[bool,Byte]} else {[bool,Integer]};let T=types[0];let result:T=flag;result",
+        "let types:meta.List<Type> = if flag {[bool,Byte]} else {[bool,Other()]};let T=types[0];let result:T=flag;result",
+        "let types:meta.List<Type> = flag match {true=>[bool,Other()],false=>[bool,Byte]};let T=types[0];let result:T=flag;result",
+        "let lists:meta.List<meta.List<Type>> = if flag {[[bool,Byte]]} else {[[bool,Integer]]};let T=lists[0][0];let result:T=flag;result",
+        "let records:meta.List<Descriptor> = if flag {[Descriptor {ty:bool,flag:true}]} else {[Descriptor {ty:bool,flag:observe(false)}]};let d=records[0];let result:d.ty=d.flag;result",
+    ] {
+        let source = format!(
+            "struct Descriptor {{ty:Type,flag:bool}} comptime fn Other()->Type {{Byte}} comptime fn observe(flag:bool)->bool {{flag}} comptime fn choose(flag:bool)->bool {{{body}}}"
+        );
+        let package = compile(&source).unwrap_or_else(|e| panic!("{source}: {e}"));
+        for flag in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+            assert_eq!(
+                vm.invoke(support::id(&package, "choose"), vec![Value::Bool(flag)])
+                    .unwrap(),
+                Value::Bool(flag),
+                "{source}"
+            );
+        }
+    }
+    for body in [
+        "if flag {[bool]} else {[Byte]}",
+        "if flag {[bool]} else {[]}",
+        "flag match {true=>[bool],false=>[Byte]}",
+    ] {
+        let source = format!(
+            "comptime fn choose(flag:bool)->bool {{let types:meta.List<Type> = {body};let T=types[0];let result:T=true;result}}"
+        );
+        assert!(compile(&source).is_err(), "unexpectedly accepted {source}");
+    }
+}
+
+#[test]
+fn list_branch_observation_preserves_condition_and_selected_initializer() {
+    let source = "comptime fn condition(flag:bool)->bool {flag}
+        comptime fn Left()->Type {Byte} comptime fn Right()->Type {Integer}
+        comptime fn choose(flag:bool)->bool {
+            let types:meta.List<Type> = if condition(flag) {[bool,Left()]} else {[bool,Right()]};
+            let T=types[0];let result:T=flag;result
+        }";
+    let package = compile(source).unwrap();
+    let ids = [
+        support::id(&package, "condition"),
+        support::id(&package, "Left"),
+        support::id(&package, "Right"),
+    ];
+    for flag in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, "choose"), vec![Value::Bool(flag)])
+                .unwrap(),
+            Value::Bool(flag)
+        );
+        let calls = vm
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                Event::EnterFunction(id) => ids.iter().position(|expected| id == expected),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(calls, vec![0, if flag { 1 } else { 2 }]);
+    }
+}

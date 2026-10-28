@@ -1,0 +1,19 @@
+{-
+    A branch-dependent list can retain a common Type at a known index.
+    The list keeps its meta.List identity; its differing elements remain
+    branch-dependent, and normal-form type heads are not unfolded.
+-}
+comptime fn choose(flag: bool) -> bool {
+    let types: meta.List<Type> = if flag {
+        [bool, u8]
+    } else {
+        [bool, u16]
+    };
+    let T = types[0];
+    let value: T = flag;
+    value
+}
+
+comptime fn run() -> bool {
+    choose(true) and not choose(false)
+}

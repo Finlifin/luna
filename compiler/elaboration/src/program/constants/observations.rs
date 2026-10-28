@@ -6,6 +6,7 @@ impl PartialStagedValue {
     pub(super) fn common(
         left: &Arc<Self>,
         right: &Arc<Self>,
+        meta_list: Option<DeclarationId>,
         depth: usize,
         fuel: &mut usize,
     ) -> Result<Arc<Self>, String> {
@@ -19,10 +20,10 @@ impl PartialStagedValue {
         if left == right {
             return Ok(left.clone());
         }
-        let Some((left_shape, left_fields)) = left.aggregate() else {
+        let Some((left_shape, left_fields)) = left.aggregate(meta_list) else {
             return Ok(Self::unknown());
         };
-        let Some((right_shape, right_fields)) = right.aggregate() else {
+        let Some((right_shape, right_fields)) = right.aggregate(meta_list) else {
             return Ok(Self::unknown());
         };
         if left_shape != right_shape || left_fields.len() != right_fields.len() {
@@ -31,7 +32,7 @@ impl PartialStagedValue {
         let mut fields = Vec::with_capacity(left_fields.len());
         let mut height = 1;
         for (a, b) in left_fields.iter().zip(&right_fields) {
-            let field = Self::common(a, b, depth + 1, fuel)?;
+            let field = Self::common(a, b, meta_list, depth + 1, fuel)?;
             height = height.max(field.depth + 1);
             fields.push(field);
         }
@@ -46,10 +47,33 @@ impl PartialStagedValue {
 
     // The caller charges the complete evidence before cloning. Decompose only
     // for comparison: fully known constants retain their normal representation.
-    fn aggregate(&self) -> Option<(PartialStagedShape, Vec<Arc<Self>>)> {
+    fn aggregate(
+        &self,
+        meta_list: Option<DeclarationId>,
+    ) -> Option<(PartialStagedShape, Vec<Arc<Self>>)> {
         let known_fields = |fields: &[Term]| fields.iter().cloned().map(Self::known).collect();
         Some(match &self.data {
             PartialStagedData::Aggregate(shape, fields) => (shape.clone(), fields.clone()),
+            PartialStagedData::Known(Term::TypeListValue(fields)) => (
+                PartialStagedShape::List(Term::NormalForm {
+                    head: meta_list?,
+                    sort: Sort::Type,
+                    arguments: vec![Term::Primitive(nir::Primitive::Type)],
+                }),
+                known_fields(fields),
+            ),
+            PartialStagedData::Known(Term::NominalValue {
+                ty,
+                variant: None,
+                fields,
+            }) if matches!(ty.as_ref(), Term::NormalForm { head, sort: Sort::Type, arguments }
+                if Some(*head) == meta_list && matches!(arguments.as_slice(), [element] if element.sort() == Sort::Type)) =>
+            {
+                (
+                    PartialStagedShape::List(ty.as_ref().clone()),
+                    known_fields(fields),
+                )
+            }
             PartialStagedData::Known(Term::TupleValue(fields)) => {
                 (PartialStagedShape::Tuple, known_fields(fields))
             }

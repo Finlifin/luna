@@ -1483,14 +1483,26 @@ impl Checker<'_, '_> {
             } => {
                 let left = self.partial_staged_value_in(then_branch, depth + 1, fuel, scope)?;
                 let right = self.partial_staged_value_in(other, depth + 1, fuel, scope)?;
-                return PartialStagedValue::common(&left, &right, depth + 1, fuel);
+                return PartialStagedValue::common(
+                    &left,
+                    &right,
+                    self.protocols.meta_list,
+                    depth + 1,
+                    fuel,
+                );
             }
             K::Match { arms, .. } if !arms.is_empty() => {
                 let mut common =
                     self.partial_staged_value_in(&arms[0].body, depth + 1, fuel, scope)?;
                 for arm in &arms[1..] {
                     let next = self.partial_staged_value_in(&arm.body, depth + 1, fuel, scope)?;
-                    common = PartialStagedValue::common(&common, &next, depth + 1, fuel)?;
+                    common = PartialStagedValue::common(
+                        &common,
+                        &next,
+                        self.protocols.meta_list,
+                        depth + 1,
+                        fuel,
+                    )?;
                 }
                 return Ok(common);
             }
