@@ -579,16 +579,30 @@ fn list_query_callback_failure_stops_and_vm_recovers() {
 }
 
 #[test]
-fn list_queries_reject_runtime_or_nonboolean_predicates() {
+fn list_queries_reject_incompatible_predicates_even_for_empty_inputs() {
     for query in ["any", "all", "find", "filter"] {
         for pred in [
             "fn pred(value:bool)->bool {value}",
-            "comptime fn pred(value:bool)->Char {'x'}",
+            "comptime fn pred(value:bool)->.char'builtin {'x'}",
+            "comptime fn pred(value:.char'builtin)->bool {true}",
         ] {
-            let source = format!(
-                "{pred} comptime fn bad() {{let input:meta.List<bool> = [true]; meta.{query}(input,pred);}}"
-            );
-            assert!(compile(&source).is_err(), "accepted {source}");
+            // A valid declaration must fail at the call contract, not earlier
+            // because the fixture contains an unresolved name such as Char.
+            compile(pred).expect("predicate declaration is independently valid");
+            for values in ["[]", "[true]"] {
+                let call = format!(
+                    "comptime fn run() {{let input:meta.List<bool> = {values}; meta.{query}(input,pred);}}"
+                );
+                compile(&format!(
+                    "comptime fn pred(value:bool)->bool {{value}} {call}"
+                ))
+                .expect("the same call accepts a compatible predicate");
+                let error = compile(&format!("{pred} {call}")).unwrap_err();
+                assert!(
+                    error.starts_with("elaboration failed:"),
+                    "{query} with {values} and {pred}: {error}"
+                );
+            }
         }
     }
 }
@@ -987,6 +1001,66 @@ fn list_transform_collectors_reject_wrong_callback_domains_and_runtime_use() {
         "fn bad() {meta.reduce([true],|left,right| right);}",
     ] {
         assert!(compile(source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn list_collectors_check_named_callback_contracts_before_iteration() {
+    for (query, valid, invalid) in [
+        (
+            "filter_map",
+            "comptime fn callback(value:bool)->?bool {value}",
+            [
+                "fn callback(value:bool)->?bool {value}",
+                "comptime fn callback(value:.char'builtin)->?bool {true}",
+                "comptime fn callback(value:bool)->meta.List<bool> {[value]}",
+            ],
+        ),
+        (
+            "flat_map",
+            "comptime fn callback(value:bool)->meta.List<bool> {[value]}",
+            [
+                "comptime fn callback()->meta.List<bool> {[true]}",
+                "comptime fn callback(value:.char'builtin)->meta.List<bool> {[true]}",
+                "comptime fn callback(value:bool)->bool {value}",
+            ],
+        ),
+        (
+            "find_map",
+            "comptime fn callback(value:bool)->?bool {value}",
+            [
+                "fn callback(value:bool)->?bool {value}",
+                "comptime fn callback(value:.char'builtin)->?bool {true}",
+                "comptime fn callback(value:bool)->meta.List<bool> {[value]}",
+            ],
+        ),
+        (
+            "reduce",
+            "comptime fn callback(left:bool,right:bool)->bool {right}",
+            [
+                "fn callback(left:bool,right:bool)->bool {right}",
+                "comptime fn callback(left:bool,right:.char'builtin)->bool {left}",
+                "comptime fn callback(left:bool,right:bool)->.char'builtin {'x'}",
+            ],
+        ),
+    ] {
+        for callback in invalid {
+            compile(callback).expect("callback declaration is independently valid");
+            // Empty and singleton reductions need no callback invocation, but
+            // must still enforce the declared callback contract.
+            for values in ["[]", "[true]", "[true,false]"] {
+                let call = format!(
+                    "comptime fn run() {{let input:meta.List<bool> = {values}; meta.{query}(input,callback);}}"
+                );
+                compile(&format!("{valid} {call}"))
+                    .expect("the same call accepts a compatible callback");
+                let error = compile(&format!("{callback} {call}")).unwrap_err();
+                assert!(
+                    error.starts_with("elaboration failed:"),
+                    "{query} with {values} and {callback}: {error}"
+                );
+            }
+        }
     }
 }
 
