@@ -14,6 +14,42 @@ const RESOURCES: &str = include_str!("../../../library/builtin/resources.fl");
 const TUPLE_RESOURCES: &str = include_str!("../../../library/builtin/tuple_resources.fl");
 
 #[test]
+fn repository_list_pattern_protocol_retains_observation_write_checks() {
+    let fixture = include_str!("../../../development/examples/sysroot-list-patterns.fl").replace(
+        "        self.value.*",
+        "        self.value.* = true; self.value.*",
+    );
+    let source = format!(
+        "{PRIMITIVES} mod resources {{ {RESOURCES} }} use resources.*;
+        mod patterns {{ {} }} use patterns.*;
+        {fixture}
+        fn run()->bool {{exact(Repeated {{length:2,value:false}})}}",
+        include_str!("../../../library/builtin/patterns.fl"),
+    );
+    let target = luna::host::Toolchain::default()
+        .target_layout()
+        .unwrap()
+        .semantic_target()
+        .unwrap();
+    let package = support::compile_with_source_bindings_for_target(
+        &source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            copy: Some("input.resources.Copy"),
+            drop: Some("input.resources.Drop"),
+            list_pattern: Some("input.patterns.ListPatternView"),
+            ..Default::default()
+        },
+        Some(target),
+    )
+    .unwrap();
+    let error =
+        luna::execution::interpret_with_protocols(&package, "run", "Copy", "Drop", 1_000_000)
+            .unwrap_err();
+    assert!(error.contains("guard pointer observation"), "{error}");
+}
+
+#[test]
 fn repository_meta_lists_carry_homogeneous_comptime_values() {
     let source = format!(
         "{PRIMITIVES} mod meta {{ {META} }}

@@ -1,0 +1,60 @@
+{- Public list-pattern protocol, with host-sized indices and affine owners. -}
+struct Repeated { length: usize, value: bool }
+
+impl ListPatternView for Repeated {
+    assoc Element: Type = bool;
+    fn list_pattern_view_get_len(*self) -> usize { self.length.* }
+    fn list_pattern_view_get_element(*self, comptime index: usize) -> bool {
+        self.value.*
+    }
+}
+
+fn exact(value: Repeated) -> bool {
+    value match { [a, (b if a == b)] => a, _ => false }
+}
+
+fn prefix(value: Repeated) -> bool {
+    value match { [true, true, ..._] => true, _ => false }
+}
+
+test exact_lengths_and_prefixes {
+    let exact_pair = exact(Repeated {length: 2, value: true});
+    let short = exact(Repeated {length: 1, value: true});
+    let long = exact(Repeated {length: 3, value: true});
+    let accepts_prefix = prefix(Repeated {length: 9, value: true});
+    let rejects_prefix = prefix(Repeated {length: 1, value: true});
+    assumes exact_pair and not short and not long and accepts_prefix and not rejects_prefix;
+}
+
+fn retry(value: Repeated) -> bool {
+    value match { [true, true] => false, [false, false] => true, _ => false }
+}
+
+test failed_candidate_keeps_subject {
+    let matched = retry(Repeated {length: 2, value: false});
+    let empty = Repeated {length: 0, value: true} match { [] => true, _ => false };
+    assumes matched and empty;
+}
+
+struct Tracked { retired: *bool }
+impl Drop for Tracked {
+    fn drop(*self) {
+        assumes not self.retired.*.*;
+        self.retired.*.* = true;
+    }
+}
+impl ListPatternView for Tracked {
+    assoc Element: Type = bool;
+    fn list_pattern_view_get_len(*self) -> usize { 2 }
+    fn list_pattern_view_get_element(*self, comptime index: usize) -> bool { false }
+}
+
+fn tracked(value: Tracked) -> bool {
+    value match { [true, _] => false, [false, false] => true, _ => false }
+}
+
+test failed_observation_retires_owner_once {
+    var retired = false;
+    let matched = tracked(Tracked {retired: retired.ref});
+    assumes matched and retired;
+}

@@ -843,9 +843,15 @@ fn same_pair(value: Repeated) -> bool {
 }
 ```
 
-驱动通过 `Protocols.list_pattern` 或包限定的 `Selectors.list_pattern` 绑定 trait 身份；sysroot 配置键为 `list-pattern-protocol`。仅将 trait 命名为 ListPatternView 不会自动注册。检查器验证 `Element`、两个方法的引用接收者以及编译期索引参数。当前驱动入口允许长度与索引使用同一个固定宽度无符号类型，生成索引和长度常量时按该类型检查范围。这是当前实现入口的适配能力；原设计使用 `usize`，原生 `.usize'builtin` 的字面量转换仍等待目标指针宽度接线。
+驱动通过 `Protocols.list_pattern` 或包限定的 `Selectors.list_pattern` 绑定 trait 身份；sysroot 配置键为 `list-pattern-protocol`。仅将 trait 命名为 ListPatternView 不会自动注册。检查器验证 `Element`、两个方法的引用接收者以及编译期索引参数。完整 sysroot 已提供并默认绑定 `builtin.ListPatternView`，同时经 builtin.prelude 导出；其长度与索引使用 `usize`，主机编译路径提供实际目标宽度。用户只需实现该协议，不必重复声明或传入绑定参数。显式驱动绑定仍可选择替代协议，长度与索引须使用同一个受支持的无符号类型，生成常量时按该类型检查范围；没有目标宽度依据时，不能猜测 `usize` 的布局。
 
 这些方法仍是普通受检调用。资源检查要求候选中的指针输入具有已知来源，调用的内存摘要不能写入调用者内存，也不能包含尚未验证的清理；规格拒绝不能被吞成“模式不匹配”。主体在候选失败后保持可用，成功或退出后按正常规则清理。覆盖检查不会执行用户方法，使用该协议的值匹配通常仍需 `_` 后备臂。
+
+使用默认协议的完整示例见 [sysroot-list-patterns.fl](../../../development/examples/sysroot-list-patterns.fl)，
+通过 `python3 -B development/library_check.py --release --stage sysroot-patterns` 执行。
+该用例覆盖精确长度、`..._` 前缀、前项绑定用于后项守卫、空列表、失败候选重试，
+以及带 Drop 的仿射主体只清理一次。协议不自动授予主体或提取结果 Copy，
+也不代表尚未实现的 TuplePatternView、映射或字符串模式协议已经可用。
 
 列表模式的内部主体观察名只在本次候选匹配中可见，不是成功分支导出的变量。or-pattern 可以据此独立尝试各分支；成功后只统一导出用户绑定。该规则也适用于嵌套 tuple、`as whole` 和 inline／quote 展开。内部主体地址不得通过提取绑定逃逸，候选失败不清理原主体。
 
