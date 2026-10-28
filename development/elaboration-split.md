@@ -374,3 +374,34 @@ flow、memory、moves、copy、drop、effect_usage、contracts 和 optimization�
   与 `git diff --check` 通过；格式报告 `/tmp/luna-tools-54m_vx0q/result.json`。
   未运行全 workspace 测试。原 moves/effects.rs 的既有格式修改随迁移留在工作区，
   本提交仅迁移其 HEAD 内容，未混入先前的未提交修改。
+
+## 将纯度分析归入程序验证层
+
+将 program/purity 的约 5,000 行 NIR 行为分析、约 300 行默认值稳定性快速检查，
+以及约 590 行 NIR 控制流查询移入 program_verification。elaboration/src 现约
+95,081 行。源码侧保留 HIR 字面布尔树观察、Span 转换和诊断适配，没有复制分析器。
+
+新纯度入口仅接收 NIR 包、Copy/Drop 声明身份和借用的默认值义务迭代器；
+不依赖 HIR、rustc_span、完整前端 Protocols 或源码 Checker。树复制预算直接
+调用原有 nir::copy_budget，实现、消耗顺序和失败行为不变。有限类型域仍由
+PTC 检查类型覆盖，P3/P4 的程序行为、终止性和资源义务仍由程序验证层承担。
+
+原纯度和控制流单元测试跟随迁移。新增外部 crate 接口测试验证不终止的私有
+循环可以满足 P4，但不能满足默认值要求的 P3；错误位置使用调用者提供的默认值
+范围，后续合法检查能够恢复。原内部行为状态的 S-expression Display 保持不变。
+
+本阶段验证在 `/home/fin/luna` 执行：
+
+- `python3 -B development/check.py --timeout 900 -- test --release
+  -p program_verification --lib`：99 项通过，退出 0，
+  `/tmp/luna-tools-kf5zfeo7/result.json`。
+- 同一入口的 `test --release -p program_verification --test purity`：新增接口
+  测试通过，退出 0，`/tmp/luna-tools-kf8faypi/result.json`。
+- 同一入口的 `test --release -p luna --test runtime_purity --test optional_purity
+  --test trait_purity --test associated_purity --test inline_control --test default_calls`：
+  383 项通过，退出 0，`/tmp/luna-tools-v_rc1qqm/result.json`。
+- `python3 -B development/library_check.py --release --timeout 900
+  --stage native-math --stage native-comparison --stage sysroot-resources`：全部通过，
+  退出 0，`/tmp/luna-library-sctw_o84/summary.json`。
+- 最终按 cargo fmt 调整 import 顺序；`git diff --check` 通过。
+  未运行全 workspace 测试，也未以本次结果宣称所有纯度层级或内置包均已实现。
