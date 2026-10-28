@@ -506,6 +506,35 @@ comptime fn sorted_numbers() -> meta.List<Integer> {
 [sysroot-meta-lists.fl](../../development/examples/sysroot-meta-lists.fl)；运行
 `python3 -B development/library_check.py --release --stage sysroot-meta`。
 
+### 分区点与二分边界查找
+
+`partition_point(values, pred) -> Integer` 返回 true 前缀之后第一个 false
+元素的下标；全为 true 返回列表长度，全为 false 或空列表返回 0。调用者负责
+保证谓词把列表分为 true 前缀、false 后缀；实现不会先线性扫描验证这个前提。
+
+`lower_bound(values, needle, less)` 返回第一个不严格小于 needle 的位置；
+`upper_bound(values, needle, less)` 返回第一个严格大于 needle 的位置。
+列表必须按同一个严格弱序比较器排序。相等元素的区间为 `[lower, upper)`，
+缺失时两者给出相同的插入位置。降序或按字段排序同样由 less 定义。
+
+```flurry
+comptime fn duplicate_range() -> bool {
+    let values: meta.List<Integer> = [1, 2, 2, 2, 4];
+    meta.lower_bound(values, 2, |a, b| a < b) == 1
+        and meta.upper_bound(values, 2, |a, b| a < b) == 4
+}
+```
+
+这些函数都是 comptime 函数，位置使用目标宽度无关的 Integer。每一步检查
+当前半开区间的向下取整中点；lower 的比较参数为 `(候选, needle)`，upper
+为 `(needle, 候选)`。比较器必须返回 bool，空列表也检查回调类型与阶段，但
+不调用它。非空列表最多调用 `floor(log2(n)) + 1` 次回调；不承诺包含输入复制
+和资源检查的整个 invocation 也是对数成本。
+
+输入、needle 和回调按普通调用顺序求值；搜索读取固定输入快照。回调失败立即
+中止，已发生的显式副作用不回滚。非单调谓词或与列表不相容的比较器不保证
+得到有意义的边界，接口不会把它们当成已验证的排序证明。
+
 ### 显式生成 Symbol 编码 enum
 
 `EnumBuilder.BuildSymbol(codes: List<Symbol>) -> Type` 按叶变体声明顺序指定编码。

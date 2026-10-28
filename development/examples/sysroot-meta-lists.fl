@@ -70,6 +70,9 @@ comptime fn stable_sorting() -> bool {
         and ordered[0] == 1 and ordered[1] == 11 and ordered[2] == 12
         and ordered[3] == 2 and ordered[4] == 3
         and retained[0] == bool and retained[1] == u32 and retained[2] == bool
+        and meta.partition_point(ordered, |value| meta.rem_trunc(value, 10) < 2) == 2
+        and meta.lower_bound(ordered, 2, |a, b| meta.rem_trunc(a, 10) < meta.rem_trunc(b, 10)) == 2
+        and meta.upper_bound(ordered, 2, |a, b| meta.rem_trunc(a, 10) < meta.rem_trunc(b, 10)) == 4
 }
 
 comptime fn named_metadata() -> bool {

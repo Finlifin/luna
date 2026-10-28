@@ -24,6 +24,127 @@ fn compile_bound(source: &str, splice: bool) -> Result<nir::program::Package, St
 }
 
 #[test]
+fn binary_bounds_preserve_duplicate_ranges_and_custom_ordering() {
+    let package = compile(
+        "typealias Integer=.Integer'builtin;typealias Type=.Type'builtin;
+        pure comptime fn Identity<T>->Type {T}
+        comptime fn less(a:Integer,b:Integer)->bool {a < b}
+        comptime fn run()->bool {
+            let values:meta.List<Integer> = [1,2,2,2,4];
+            let reverse:meta.List<Integer> = [4,2,2,1];
+            let empty:meta.List<Integer> = [];
+            let types:meta.List<Type> = [Identity<bool>,bool];
+            meta.lower_bound(values,2,less) == 1 and meta.upper_bound(values,2,less) == 4
+                and meta.lower_bound(values,0,less) == 0 and meta.upper_bound(values,5,less) == 5
+                and meta.lower_bound(values,3,less) == 4 and meta.upper_bound(values,3,less) == 4
+                and meta.lower_bound(reverse,2,|a,b|a > b) == 1
+                and meta.upper_bound(reverse,2,|a,b|a > b) == 3
+                and meta.lower_bound(empty,2,|a,b|{let bad:meta.List<bool> = [];bad[0]}) == 0
+                and meta.upper_bound(empty,2,|a,b|{let bad:meta.List<bool> = [];bad[0]}) == 0
+                and meta.lower_bound(types,bool,|a,b|false) == 0
+                and meta.upper_bound(types,bool,|a,b|false) == 2
+                and types[0] == Identity<bool>
+        }",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn partition_point_checks_all_boundaries_with_logarithmic_callback_counts() {
+    for count in [0usize, 1, 2, 3, 7, 8, 9, 31, 32, 33] {
+        let values = (0..count)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let bound = if count == 0 {
+            0
+        } else {
+            usize::BITS - count.leading_zeros()
+        };
+        let package = compile(&format!(
+            "typealias Integer=.Integer'builtin;
+            comptime fn run()->bool {{
+                let values:meta.List<Integer> = [{values}];
+                inline for cut in 0..{end} {{
+                    var calls:Integer=0;let counter=calls.ref;
+                    let index=meta.partition_point(values,|value|{{counter.* += 1;value < cut}});
+                    if index != cut or calls > {bound} {{return false;}}
+                }}
+                true
+            }}",
+            end = count + 1
+        ))
+        .unwrap();
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 5_000_000).unwrap(),
+            Value::Bool(true),
+            "length {count}"
+        );
+    }
+}
+
+#[test]
+fn binary_search_uses_fixed_input_snapshots_and_midpoint_order() {
+    let package = compile(
+        "typealias Integer=.Integer'builtin;
+        comptime fn run()->bool {
+            var input:meta.List<Integer> = [0,1,2,3,4,5,6,7];
+            let saved=input;let source=input.ref;
+            var visits:Integer=0;let trace=visits.ref;
+            let result=meta.partition_point(input,|value| {
+                trace.* = trace.* * 10 + value;source.* = [];value < 3
+            });
+            result == 3 and visits == 423 and meta.length(input) == 0 and meta.length(saved) == 8
+        }",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn partition_callback_failure_stops_search_and_vm_recovers() {
+    let package=compile(
+        "typealias Integer=.Integer'builtin;
+        comptime fn in_prefix(value:Integer)->bool {let flags:meta.List<bool> = [true];flags[value]}
+        comptime fn fail()->Integer {meta.partition_point([0,0,0,1,3],in_prefix)}
+        comptime fn recover()->Integer {let values:meta.List<Integer> = [1,2,2,4];meta.upper_bound(values,2,|a,b|a < b)}"
+    ).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "fail"), vec![])
+            .unwrap_err()
+            .kind,
+        comptime_interpretor::ErrorKind::IndexOutOfBounds
+    );
+    assert_eq!(
+        support::calls(&package, &vm)
+            .iter()
+            .filter(|name| **name == "in_prefix")
+            .count(),
+        2
+    );
+    let result = vm.invoke(support::id(&package, "recover"), vec![]).unwrap();
+    assert_eq!(
+        result,
+        Value::Integer(comptime_runtime::Integer::from_u128(3))
+    );
+}
+
+#[test]
 fn stable_sort_retains_type_identity_snapshots_and_equal_item_order() {
     let package = compile(
         "typealias Type=.Type'builtin;
@@ -91,26 +212,32 @@ fn sort_callback_failure_stops_comparisons_and_vm_recovers() {
 }
 
 #[test]
-fn sort_checks_callback_contracts_even_without_comparisons() {
+fn ordered_list_queries_check_callback_contracts_even_without_comparisons() {
     for callback in [
         "fn compare(a:bool,b:bool)->bool {a and not b}",
         "comptime fn compare(a:bool,b:bool)->.char'builtin {'x'}",
         "comptime fn compare(a:bool,b:.char'builtin)->bool {a}",
     ] {
         compile(callback).unwrap();
-        for values in ["[]", "[true]"] {
-            let call = format!(
-                "comptime fn run() {{let values:meta.List<bool> = {values};meta.sort_by(values,compare);}}"
-            );
-            compile(&format!(
-                "comptime fn compare(a:bool,b:bool)->bool {{a and not b}} {call}"
-            ))
-            .unwrap();
-            assert!(
-                compile(&format!("{callback} {call}"))
-                    .unwrap_err()
-                    .starts_with("elaboration failed:")
-            );
+        for call in [
+            "sort_by(values,compare)",
+            "lower_bound(values,true,compare)",
+            "upper_bound(values,true,compare)",
+        ] {
+            for values in ["[]", "[true]"] {
+                let call = format!(
+                    "comptime fn run() {{let values:meta.List<bool> = {values};meta.{call};}}"
+                );
+                compile(&format!(
+                    "comptime fn compare(a:bool,b:bool)->bool {{a and not b}} {call}"
+                ))
+                .unwrap();
+                assert!(
+                    compile(&format!("{callback} {call}"))
+                        .unwrap_err()
+                        .starts_with("elaboration failed:")
+                );
+            }
         }
     }
 }
@@ -712,7 +839,7 @@ fn list_query_callback_failure_stops_and_vm_recovers() {
 
 #[test]
 fn list_queries_reject_incompatible_predicates_even_for_empty_inputs() {
-    for query in ["any", "all", "find", "filter"] {
+    for query in ["any", "all", "find", "filter", "partition_point"] {
         for pred in [
             "fn pred(value:bool)->bool {value}",
             "comptime fn pred(value:bool)->.char'builtin {'x'}",

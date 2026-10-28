@@ -333,6 +333,45 @@ pub comptime fn sort_by(values: List<T>, less: %c comptime fn(T, T) -> bool) -> 
 }
 
 {-
+    Find the first false item in a true-prefix/false-suffix partition. The
+    caller supplies this monotonic predicate contract; the search does not
+    scan the list to verify it. Empty input returns zero without invoking pred.
+    Bounds and the result are exact Integers, independent of target width.
+-}
+pub comptime fn partition_point(values: List<T>, pred: %c comptime fn(T) -> bool)
+    -> .Integer'builtin where T, c: (.Type'builtin).vars.Closure {
+    var first: .Integer'builtin = 0;
+    var last = length(values);
+    while first < last {
+        let middle = first + div_trunc(last - first, 2);
+        if pred(values[middle]) {
+            first = middle + 1;
+        } else {
+            last = middle;
+        }
+    }
+    first
+}
+
+{-
+    On a list sorted by less, lower_bound selects the first item not less than
+    needle; upper_bound selects the first item strictly greater than needle.
+    Equal items occupy [lower_bound, upper_bound). Missing items yield an
+    insertion position, including length(values) after the final item.
+-}
+pub comptime fn lower_bound(values: List<T>, needle: T,
+    less: %c comptime fn(T, T) -> bool) -> .Integer'builtin
+    where T, c: (.Type'builtin).vars.Closure {
+    partition_point(values, |value| less(value, needle))
+}
+
+pub comptime fn upper_bound(values: List<T>, needle: T,
+    less: %c comptime fn(T, T) -> bool) -> .Integer'builtin
+    where T, c: (.Type'builtin).vars.Closure {
+    partition_point(values, |value| not less(needle, value))
+}
+
+{-
   Observe an applied struct in declaration order. Reflection grants neither
   field access nor layout permission, and never unfolds opaque type factories.
 -}
