@@ -1,3 +1,4 @@
+mod bfloat;
 mod bits;
 mod callables;
 mod cleanup;
@@ -105,7 +106,8 @@ impl Ty {
             Self::Pointer | Self::FunctionPointer => "ptr".into(),
             Self::TemplateIdentity(_) => "i64".into(),
             Self::Float16 => "half".into(),
-            Self::BFloat16 => "bfloat".into(),
+            // Keep bf16 transport bit-exact across LLVM target legalization.
+            Self::BFloat16 => "i16".into(),
             Self::Float32 => "float".into(),
             Self::Float64 => "double".into(),
             Self::Unit => "void".into(),
@@ -1115,10 +1117,14 @@ impl Emitter<'_> {
                 if self.terminated {
                     return Ok(Value::unit());
                 }
-                self.instruction(
-                    value.ty.clone(),
-                    format!("fneg {} {}", value.ty.llvm(), value.text),
-                )
+                if value.ty == Ty::BFloat16 {
+                    self.instruction(Ty::BFloat16, format!("xor i16 {}, 32768", value.text))
+                } else {
+                    self.instruction(
+                        value.ty.clone(),
+                        format!("fneg {} {}", value.ty.llvm(), value.text),
+                    )
+                }
             }
             K::Intrinsic { inputs, .. } => {
                 let checked = nir::intrinsics::checked(expr).map_err(str::to_owned)?;
@@ -1144,19 +1150,7 @@ impl Emitter<'_> {
                         return Err("host float predicate representation mismatch".into());
                     }
                     if checked.operation() == nir::intrinsics::Operation::SignBit {
-                        // LLVM 21's bfloat-to-i16 legalization can erase the
-                        // sign test. Exact widening preserves the sign of all
-                        // classes, including zero and NaNs; unlike magnitude
-                        // classification, sign classification permits widening.
-                        let sign_input = if input.ty == Ty::BFloat16 {
-                            self.instruction(
-                                Ty::Float32,
-                                format!("fpext bfloat {} to float", input.text),
-                            )
-                        } else {
-                            input.clone()
-                        };
-                        let bits = self.to_bits(sign_input)?;
+                        let bits = self.to_bits(input.clone())?;
                         let width =
                             bits::bit_width(&bits.ty).ok_or("float sign has no bit width")?;
                         return Ok(self
@@ -1208,6 +1202,9 @@ impl Emitter<'_> {
                 }
                 if values.iter().any(|value| value.ty != ty) {
                     return Err("host intrinsic operand representation mismatch".into());
+                }
+                if ty == Ty::BFloat16 {
+                    return self.bfloat_intrinsic(checked.operation(), &values);
                 }
                 // These target operations lower to LLVM instructions, not to
                 // fictitious llvm.bit_* functions. Both inputs above are
@@ -1271,7 +1268,7 @@ impl Emitter<'_> {
                     operation => operation.name(),
                 };
                 let suffix = match &ty {
-                    Ty::Float32 | Ty::Float64 => format!("f{width}"),
+                    Ty::Float16 | Ty::Float32 | Ty::Float64 => format!("f{width}"),
                     Ty::Int(bits, _) if *bits == width => format!("i{width}"),
                     _ => return Err("host intrinsic scalar representation mismatch".into()),
                 };
@@ -1363,6 +1360,9 @@ impl Emitter<'_> {
                     nir::program::FloatOp::Multiply => "fmul",
                     nir::program::FloatOp::Divide => "fdiv",
                 };
+                if a.ty == Ty::BFloat16 {
+                    return Ok(self.bfloat_arithmetic(operation, &a, &b));
+                }
                 let value = self.instruction(
                     a.ty.clone(),
                     format!("{operation} {} {}, {}", a.ty.llvm(), a.text, b.text),
@@ -1380,7 +1380,6 @@ impl Emitter<'_> {
                 );
                 let canonical = match a.ty {
                     Ty::Float16 => "bitcast (i16 32256 to half)",
-                    Ty::BFloat16 => "bitcast (i16 32704 to bfloat)",
                     Ty::Float32 => "bitcast (i32 2143289344 to float)",
                     _ => "bitcast (i64 9221120237041090560 to double)",
                 };
@@ -1459,10 +1458,7 @@ impl Emitter<'_> {
                         K::ScalarGreater(..) => "ogt",
                         _ => "oge",
                     };
-                    return Ok(self.instruction(
-                        Ty::Bool,
-                        format!("fcmp {predicate} {} {}, {}", a.ty.llvm(), a.text, b.text),
-                    ));
+                    return Ok(self.float_compare(predicate, &a, &b));
                 }
                 let tag = if a.ty.signed() { "s" } else { "u" };
                 let op = match expr.kind {
@@ -2170,9 +2166,13 @@ pub(super) fn emit(
             (
                 format,
                 format!(
-                    "  %value = call {} @flurry_{root}()\n  %bits = bitcast {} %value to i16\n  %wide = zext i16 %bits to i32\n  %output_write = call i32 (ptr, ...) @printf(ptr @result_format, i32 %wide)\n",
+                    "  %value = call {} @flurry_{root}()\n  %bits = {}\n  %wide = zext i16 %bits to i32\n  %output_write = call i32 (ptr, ...) @printf(ptr @result_format, i32 %wide)\n",
                     result.llvm(),
-                    result.llvm()
+                    if result == Ty::BFloat16 {
+                        "or i16 %value, 0".to_owned()
+                    } else {
+                        format!("bitcast {} %value to i16", result.llvm())
+                    }
                 ),
             )
         }
@@ -2285,7 +2285,7 @@ pub(super) fn emit(
 fn literal_value(literal: &Literal, ty: Ty) -> Result<Value, String> {
     let text = match literal {
         Literal::Float16(bits) => format!("bitcast (i16 {bits} to half)"),
-        Literal::BFloat16(bits) => format!("bitcast (i16 {bits} to bfloat)"),
+        Literal::BFloat16(bits) => bits.to_string(),
         Literal::Float32(bits) => format!("bitcast (i32 {bits} to float)"),
         Literal::Float64(bits) => format!("bitcast (i64 {bits} to double)"),
         Literal::BitVec { width: 0, .. } => "zeroinitializer".into(),

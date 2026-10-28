@@ -9546,7 +9546,7 @@ fn sysroot_half_float_literals_keep_direct_rounding_through_vm_and_llvm() {
         ),
         (
             "bf16",
-            "bfloat",
+            "i16",
             "bfloat16",
             "1.00390625000000000000000000000001",
             "3f81",
@@ -10013,6 +10013,198 @@ fn sysroot_half_float_math_classifies_original_format_in_both_phases() {
                     panic!("{ty} {entry} O{level}: {}", success(&diagnostic));
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn sysroot_half_float_math_preserves_signs_payloads_and_extrema() {
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    for (ty, infinity, one, signaling) in [
+        ("f16", 0x7c00u16, 0x3c00u16, 0x7c01u16),
+        ("bf16", 0x7f80, 0x3f80, 0x7f81),
+    ] {
+        let mut source = String::new();
+        for (phase, module, entry) in [("", "math", "run"), ("comptime ", "meta.math", "staged")] {
+            let mut checks = vec![
+                format!("{module}.abs(negative_zero)'bitvec.as(u16) == 0"),
+                format!("{module}.abs(nan)'bitvec.as(u16) == {signaling}"),
+                format!("{module}.copysign(nan, zero)'bitvec.as(u16) == {signaling}"),
+                format!(
+                    "{module}.copysign(one, negative_zero)'bitvec.as(u16) == {}",
+                    one | 0x8000
+                ),
+                format!("{module}.copysign(zero, nan)'bitvec.as(u16) == 32768"),
+                format!("{module}.copysign(tiny, nan)'bitvec.as(u16) == 32769"),
+            ];
+            for (op, minimum) in [
+                ("minimum", true),
+                ("maximum", false),
+                ("minimumnum", true),
+                ("maximumnum", false),
+            ] {
+                let zero = if minimum { 32768 } else { 0 };
+                checks.push(format!(
+                    "{module}.{op}(zero, negative_zero)'bitvec.as(u16) == {zero}"
+                ));
+                checks.push(format!(
+                    "{module}.{op}(negative_zero, zero)'bitvec.as(u16) == {zero}"
+                ));
+                let extreme = if minimum { infinity | 0x8000 } else { infinity };
+                checks.push(format!("{module}.{op}(positive_infinity, negative_infinity)'bitvec.as(u16) == {extreme}"));
+                let numeric = if minimum { 1 } else { one };
+                checks.push(format!(
+                    "{module}.{op}(one, tiny)'bitvec.as(u16) == {numeric}"
+                ));
+                checks.push(format!(
+                    "{module}.{op}(tiny, one)'bitvec.as(u16) == {numeric}"
+                ));
+                checks.push(format!("{module}.isnan({module}.{op}(nan, nan))"));
+                if op.ends_with("num") {
+                    checks.push(format!("{module}.{op}(nan, one)'bitvec.as(u16) == {one}"));
+                    checks.push(format!("{module}.{op}(one, nan)'bitvec.as(u16) == {one}"));
+                } else {
+                    checks.push(format!("{module}.isnan({module}.{op}(nan, one))"));
+                    checks.push(format!("{module}.isnan({module}.{op}(one, nan))"));
+                }
+            }
+            let definition = format!(
+                r#"
+{phase}fn {entry}()->bool {{
+    let raw_nan: u16 = {nan_bits}; let raw_inf: u16 = {infinity};
+    let raw_negative_inf: u16 = {negative_inf}; let raw_tiny: u16 = 1;
+    let nan = raw_nan'bitvec.as({ty}); let tiny = raw_tiny'bitvec.as({ty});
+    let positive_infinity = raw_inf'bitvec.as({ty});
+    let negative_infinity = raw_negative_inf'bitvec.as({ty});
+    let zero:{ty} = 0.0; let negative_zero:{ty} = -0.0; let one:{ty} = 1.0;
+    {checks}
+}}
+"#,
+                nan_bits = signaling | 0x8000,
+                negative_inf = infinity | 0x8000,
+                checks = checks.join(" and ")
+            );
+            if phase.is_empty() {
+                let diagnostics = checks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| format!("if not ({c}) {{return {i};}} "))
+                    .collect::<String>()
+                    + "65535";
+                source.push_str(
+                    &definition
+                        .replace("fn run()->bool", "fn diagnose()->u16")
+                        .replace(&checks.join(" and "), &diagnostics),
+                );
+            }
+            source.push_str(&definition);
+        }
+        source.push_str("fn folded()->bool {const result = staged(); result}");
+        sandbox.write("input.fl", source);
+        let base = [
+            "input.fl",
+            "--sysroot",
+            root.to_str().unwrap(),
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+        ];
+        assert_eq!(
+            success(&sandbox.run(&[base.as_slice(), &["--invoke-comptime", "staged"]].concat()))
+                .trim(),
+            "(bool true)"
+        );
+        for entry in ["run", "folded"] {
+            for level in ["0", "3"] {
+                success(
+                    &sandbox.run(
+                        &[
+                            base.as_slice(),
+                            &["--build", entry, "--opt-level", level, "--output", "native"],
+                        ]
+                        .concat(),
+                    ),
+                );
+                let output = Command::new(sandbox.path("native")).output().unwrap();
+                if success(&output).trim() != "(bool true)" {
+                    success(
+                        &sandbox.run(
+                            &[
+                                base.as_slice(),
+                                &[
+                                    "--build",
+                                    "diagnose",
+                                    "--opt-level",
+                                    level,
+                                    "--output",
+                                    "diagnostic",
+                                ],
+                            ]
+                            .concat(),
+                        ),
+                    );
+                    panic!(
+                        "{ty} {entry} O{level}: {}",
+                        success(&Command::new(sandbox.path("diagnostic")).output().unwrap())
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn sysroot_bfloat_internal_calls_preserve_all_payload_classes() {
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let patterns = [
+        0u16, 0x8000, 0x7f81, 0xff81, 0x7fc2, 0xffc2, 1, 0x8001, 0x7f7f, 0xff7f,
+    ];
+    let mut source =
+        "struct Stored {value: bf16}\nfn identity(value:bf16)->bf16 {value}\n".to_string();
+    for (i, bits) in patterns.iter().enumerate() {
+        source.push_str(&format!("fn entry{i}()->u16 {{let raw:u16={bits};let f=identity;let stored=Stored {{value:f(raw'bitvec.as(bf16))}}; stored.value'bitvec.as(u16)}}\n"));
+    }
+    sandbox.write("input.fl", source);
+    let base = [
+        "input.fl",
+        "--sysroot",
+        root.to_str().unwrap(),
+        "--build-target",
+        "x86_64",
+        "linux",
+        "64",
+    ];
+    for (i, bits) in patterns.iter().enumerate() {
+        let entry = format!("entry{i}");
+        assert_eq!(
+            success(&sandbox.run(&[base.as_slice(), &["--interpret", &entry]].concat())).trim(),
+            format!("(unsigned-integer {bits})")
+        );
+        for level in ["0", "3"] {
+            success(
+                &sandbox.run(
+                    &[
+                        base.as_slice(),
+                        &[
+                            "--build",
+                            &entry,
+                            "--opt-level",
+                            level,
+                            "--output",
+                            "native",
+                        ],
+                    ]
+                    .concat(),
+                ),
+            );
+            assert_eq!(
+                success(&Command::new(sandbox.path("native")).output().unwrap()).trim(),
+                format!("(unsigned-integer {bits})"),
+                "{entry} O{level}"
+            );
         }
     }
 }

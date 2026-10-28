@@ -124,15 +124,7 @@ impl Emitter<'_> {
                     value.ty.clone(),
                     Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
                 ) {
-                    self.instruction(
-                        Ty::Bool,
-                        format!(
-                            "fcmp oeq {} {}, {}",
-                            value.ty.llvm(),
-                            value.text,
-                            other.text
-                        ),
-                    )
+                    self.float_compare("oeq", value, &other)
                 } else {
                     self.compare("eq", value.clone(), other)?
                 };

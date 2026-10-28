@@ -48,3 +48,8 @@ python3 -B development/check.py --timeout 900 -- run --release -p luna -- develo
 分类不会改变，符号位检查能识别负零与带符号 NaN。对应的 `meta.math`
 函数遵循相同规则。半精度分类的 sysroot 集成测试覆盖 comptime 与 LLVM O0/O3；
 这不代表其余半精度数学包装已实现。
+
+半精度还支持 `abs`、`copysign` 和四种极值操作。前两者只修改符号位，
+保留 NaN 载荷与 signaling 位。`minimum/maximum` 传播 NaN；
+`minimumnum/maximumnum` 在仅一侧为 NaN 时选择数值。最小值选择负零，
+最大值选择正零。`meta.math` 提供相同的 comptime 行为。

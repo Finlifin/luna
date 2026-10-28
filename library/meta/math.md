@@ -63,4 +63,9 @@ The six floating classification functions also accept `f16` and `bf16`.
 They classify the original representation: a half subnormal stays subnormal
 for `issubnormal`, even though widening it could produce a normal value.
 `signbit` observes negative zero and signed NaNs without changing the payload.
-Other floating math wrappers do not yet admit half precision.
+`abs`, `copysign`, `minimum`, `maximum`, `minimumnum`, and `maximumnum`
+also accept both half formats. Sign operations preserve all non-sign bits,
+including signaling NaN payloads. Extrema order negative zero below positive
+zero; propagating variants return NaN if either operand is NaN, while number
+variants choose the number when exactly one operand is NaN. Other floating
+math wrappers do not yet admit half precision.

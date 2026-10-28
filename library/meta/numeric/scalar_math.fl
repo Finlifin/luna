@@ -35,7 +35,7 @@ where T, requires T == f32 or T == f64
 
 -- Preserve magnitude bits from magnitude, taking only the sign bit from sign.
 pub pure comptime fn copysign(magnitude: T, sign: T) -> T
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.copysign'intrinsic(magnitude, sign).as(T) }
 }
@@ -126,7 +126,7 @@ where T, requires T == f32 or T == f64
 
 -- Clear only the sign bit, including for negative zero, infinity and NaN.
 pub pure comptime fn abs(value: T) -> T
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.fabs'intrinsic(value).as(T) }
 }
@@ -143,12 +143,12 @@ where T, requires T == f32 or T == f64
   These are LLVM minimum/maximum, not minimumnum/maximumnum.
 -}
 pub pure comptime fn minimum(a: T, b: T) -> T
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.minimum'intrinsic(a, b).as(T) }
 }
 pub pure comptime fn maximum(a: T, b: T) -> T
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.maximum'intrinsic(a, b).as(T) }
 }
@@ -230,13 +230,13 @@ where T, requires T == u8 or T == u16 or T == u32 or T == u64 or T == u128 or T 
   Signed zeros are ordered -0.0 < +0.0. No fast-math flags are requested.
 -}
 pub pure comptime fn minimumnum(a: T, b: T) -> T
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.minimumnum'intrinsic(a, b).as(T) }
 }
 
 pub pure comptime fn maximumnum(a: T, b: T) -> T
-where T, requires T == f32 or T == f64
+where T, requires T == f16 or T == bf16 or T == f32 or T == f64
 {
     unsafe { target.Scalar.maximumnum'intrinsic(a, b).as(T) }
 }

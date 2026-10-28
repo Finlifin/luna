@@ -256,13 +256,11 @@ impl Operation {
             | Self::FunnelShiftRight => &[U8, U16, U32, U64, U128, Usize],
             Self::FusedMultiplyAdd
             | Self::SquareRoot
-            | Self::CopySign
             | Self::Floor
             | Self::Ceiling
             | Self::Truncate
             | Self::RoundEven
             | Self::RoundAway
-            | Self::AbsoluteValue
             | Self::Sine
             | Self::Cosine
             | Self::Exponential
@@ -272,12 +270,14 @@ impl Operation {
             | Self::Log10
             | Self::Power
             | Self::IntegerPower
-            | Self::ScaleByPowerOfTwo
+            | Self::ScaleByPowerOfTwo => &[F32, F64],
+            Self::CopySign
+            | Self::AbsoluteValue
             | Self::Minimum
             | Self::Maximum
             | Self::MinimumNumber
-            | Self::MaximumNumber => &[F32, F64],
-            Self::IsNan
+            | Self::MaximumNumber
+            | Self::IsNan
             | Self::IsInfinite
             | Self::IsNormal
             | Self::IsSubnormal

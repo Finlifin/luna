@@ -37,10 +37,7 @@ impl Emitter<'_> {
     pub(super) fn to_bits(&mut self, value: Value) -> Result<Value, String> {
         let width = bit_width(&value.ty)
             .ok_or("host bit view is not implemented for this representation")?;
-        if matches!(
-            value.ty,
-            Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
-        ) {
+        if matches!(value.ty, Ty::Float16 | Ty::Float32 | Ty::Float64) {
             Ok(self.instruction(
                 Ty::Int(width, false),
                 format!("bitcast {} {} to i{width}", value.ty.llvm(), value.text),
@@ -58,10 +55,7 @@ impl Emitter<'_> {
         if width != target_width {
             return Err("host reinterpretation changes width".into());
         }
-        if matches!(
-            target,
-            Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
-        ) {
+        if matches!(target, Ty::Float16 | Ty::Float32 | Ty::Float64) {
             Ok(self.instruction(
                 target.clone(),
                 format!("bitcast i{width} {} to {}", value.text, target.llvm()),

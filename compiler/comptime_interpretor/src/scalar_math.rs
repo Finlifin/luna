@@ -141,8 +141,8 @@ macro_rules! float_math {
 
 fn scalar(op: Op, values: &[Value], width: Option<u32>) -> Option<Value> {
     match values.first()? {
-        Value::Float16(bits) => half_predicate(op, *bits, 0x7c00),
-        Value::BFloat16(bits) => half_predicate(op, *bits, 0x7f80),
+        Value::Float16(_) => half_scalar(op, values, false),
+        Value::BFloat16(_) => half_scalar(op, values, true),
         Value::Float32(_) => float_math!(
             Float32,
             f32,
@@ -253,4 +253,63 @@ fn half_predicate(op: Op, bits: u16, exponent_mask: u16) -> Option<Value> {
         Op::SignBit => bits & 0x8000 != 0,
         _ => return None,
     }))
+}
+
+fn half_scalar(op: Op, values: &[Value], bfloat: bool) -> Option<Value> {
+    use comptime_runtime::float16::Float16Format;
+    let bits = |value: &Value| match (bfloat, value) {
+        (false, Value::Float16(bits)) | (true, Value::BFloat16(bits)) => Some(*bits),
+        _ => None,
+    };
+    let a = bits(values.first()?)?;
+    let (format, infinity, quiet) = if bfloat {
+        (Float16Format::BFloat16, 0x7f80, 0x0040)
+    } else {
+        (Float16Format::Binary16, 0x7c00, 0x0200)
+    };
+    if op.is_float_predicate() {
+        return half_predicate(op, a, infinity);
+    }
+    let result = if op == Op::AbsoluteValue {
+        a & 0x7fff
+    } else {
+        let b = bits(values.get(1)?)?;
+        match op {
+            Op::CopySign => (a & 0x7fff) | (b & 0x8000),
+            Op::Minimum | Op::Maximum | Op::MinimumNumber | Op::MaximumNumber => {
+                let minimum = matches!(op, Op::Minimum | Op::MinimumNumber);
+                let propagate = matches!(op, Op::Minimum | Op::Maximum);
+                let a_nan = a & 0x7fff > infinity;
+                let b_nan = b & 0x7fff > infinity;
+                if a_nan {
+                    if propagate || b_nan { a | quiet } else { b }
+                } else if b_nan {
+                    if propagate { b | quiet } else { a }
+                } else {
+                    match format.compare(a, b)? {
+                        std::cmp::Ordering::Equal => {
+                            if minimum {
+                                a | b
+                            } else {
+                                a & b
+                            }
+                        }
+                        ordering => {
+                            if (ordering == std::cmp::Ordering::Less) == minimum {
+                                a
+                            } else {
+                                b
+                            }
+                        }
+                    }
+                }
+            }
+            _ => return None,
+        }
+    };
+    Some(if bfloat {
+        Value::BFloat16(result)
+    } else {
+        Value::Float16(result)
+    })
 }

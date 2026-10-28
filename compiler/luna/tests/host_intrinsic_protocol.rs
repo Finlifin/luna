@@ -2164,3 +2164,42 @@ fn powi_requires_float_base_and_signed_i32_exponent_including_pending_templates(
 fn ldexp_requires_float_base_and_signed_i32_exponent_including_pending_templates() {
     check_integer_exponent_signature(Operation::ScaleByPowerOfTwo);
 }
+
+#[test]
+fn half_sign_and_extrema_bindings_preserve_format_identity() {
+    let package = support::compile("^intrinsic_enum enum Ops {operation}");
+    let tag = tag(&package, "Ops", 0);
+    for op in [
+        Operation::AbsoluteValue,
+        Operation::CopySign,
+        Operation::Minimum,
+        Operation::Maximum,
+        Operation::MinimumNumber,
+        Operation::MaximumNumber,
+    ] {
+        let registry = Registry::new(&package, &[(tag, op)]).unwrap();
+        for primitive in [P::F16, P::Bf16] {
+            let ty = Term::Primitive(primitive);
+            let mut inputs = vec![ty.clone(); op.operand_count()];
+            let checked = registry.check(tag, &inputs, &ty).unwrap();
+            assert_eq!(checked.width(), Some(16));
+            let other = Term::Primitive(if primitive == P::F16 { P::Bf16 } else { P::F16 });
+            assert!(registry.check(tag, &inputs, &other).is_err());
+            inputs[0] = other;
+            assert!(registry.check(tag, &inputs, &ty).is_err());
+            inputs[0] = Term::Primitive(P::U16);
+            assert!(registry.check(tag, &inputs, &ty).is_err());
+        }
+    }
+    for op in [Operation::SquareRoot, Operation::FusedMultiplyAdd] {
+        let registry = Registry::new(&package, &[(tag, op)]).unwrap();
+        for primitive in [P::F16, P::Bf16] {
+            let ty = Term::Primitive(primitive);
+            assert!(
+                registry
+                    .check(tag, &vec![ty.clone(); op.operand_count()], &ty)
+                    .is_err()
+            );
+        }
+    }
+}
