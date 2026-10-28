@@ -8,6 +8,8 @@ comptime impl ListPatternView for meta.List<T> where T {
         meta.to_usize(meta.length(self))
     }
     comptime fn list_pattern_view_get_element_comptime(self, index: .usize'builtin) -> T {
-        self[meta.from_usize(index)]
+        -- A local index lets the VM copy only the selected element.
+        let position = meta.from_usize(index);
+        self[position]
     }
 }

@@ -21,6 +21,48 @@ without dispatching empty cleanup hooks. Effect-control transfer still passes
 through its scope handler. Scheduled IIR continues through the existing delivery
 and cleanup machinery.
 
+## Builtin list-pattern extraction (2026-10-28)
+
+The shipped `meta.List` comptime pattern contribution now binds the converted
+usize index before indexing `self`. This uses the VM's existing local-list leaf
+read: only the selected element is copied at the indexing operation. Passing
+the list to the contribution and immutable input validation still have costs;
+this does not make the entire pattern match constant-time. Index conversion
+retains its target-width check and ordinary once-only evaluation.
+
+The `meta_list_pattern_cost` integration test elaborates the actual shipped
+contribution and a baseline with its previous inline conversion expression.
+For `[first, ..._]` over a `List<Type>`, invocation steps are identical on the
+32- and 64-bit targets tested:
+
+| Elements | Previous | Local index |
+| --- | --- | --- |
+| 1 | 304 | 309 |
+| 512 | 11,546 | 10,529 |
+
+The large case saves 1,017 charged steps (8.8%); the small case pays five steps
+for the extra binding. These are deterministic VM work counters, not elapsed
+time or a general compiler speedup. The regression checks a size-dependent
+saving rather than pinning exact tick totals. Empty input and budget exhaustion
+are also covered. No copy admission, resource check or general index evaluator
+was disabled.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test meta_list_pattern_cost --test comptime_integer_conversion --test list_patterns -- --nocapture`:
+  exit 0, 2 cost tests, 5 conversion tests and 41 pattern tests passed;
+  `/tmp/luna-tools-0l2xu64l/result.json`.
+- `python3 -B development/library_check.py --release --timeout 900 --stage sysroot-meta-patterns`:
+  exit 0, three real-sysroot native tests passed, including optional payloads,
+  failed pattern candidates and preserved normal-form Type heads;
+  `/tmp/luna-library-rbz7j2wc/summary.json`.
+
+An initial test attempted an ordinary method call on a `meta.List<Type>` receiver
+instead of pattern syntax. That path currently reports an unresolved structural
+type view (`UnvalidatedModel`); this change does not repair ordinary method
+lookup on that normal-form receiver. The cost test deliberately exercises the
+working language-level pattern protocol, not a claim that both paths work.
+
 ## Repeatable measurement
 
 From the repository root:
