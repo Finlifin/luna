@@ -1459,6 +1459,79 @@ fn reduce_preserves_a_present_null_item() {
 }
 
 #[test]
+fn selection_stops_nth_and_preserves_last_and_optional_layers() {
+    let source = format!(
+        r#"{}
+{}
+        fn run()->bool {{
+            var calls:.u32'builtin=0;
+            let counter=calls.ref;
+            let a:?bool=false;let b:?bool=true;let c:?bool=false;
+            let selected=a.as(Iterator).chain(b).as(Iterator).chain(c).as(Iterator)
+                .inspect(|value| {{assumes counter.* < 2;counter.* = counter.* + 1;}})
+                .as(Iterator).nth(1);
+            let d:?bool=true;let e:?bool=false;
+            let final_item=d.as(Iterator).chain(e).as(Iterator).last();
+            let empty:?bool=null;
+            let missing=empty.as(Iterator).last();
+            let singleton:?bool=true;
+            let beyond=singleton.as(Iterator).nth(99);
+            let payload:?bool=null;let nested:??bool=payload;
+            let nested_last=nested.as(Iterator).last();
+            let payload2:?bool=null;let nested2:??bool=payload2;
+            let nested_nth=nested2.as(Iterator).nth(0);
+            calls == 2 and (selected matches true?) and (final_item matches false?)
+                and (missing matches null) and (beyond matches null)
+                and (nested_last match {{inner?=>inner matches null,null=>false}})
+                and (nested_nth match {{inner?=>inner matches null,null=>false}})
+        }}
+        fn verify() {{let passed=run();assumes passed;}}
+        "#,
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl")
+    );
+    check_iteration_with_budget(&source, None, 4_000_000);
+}
+
+#[test]
+fn selection_retires_affine_prefix_and_remainder_without_copying_result() {
+    for (method, expected) in [
+        ("nth(1)", "first and not second and third"),
+        ("last()", "first and second and not third"),
+    ] {
+        let source = format!(
+            r#"{}
+{}
+            struct Watch {{seen:*bool}}
+            impl Drop for Watch {{fn drop(*self) {{assumes not self.seen.*.*;self.seen.*.* = true;}}}}
+            fn run()->bool {{
+                var first=false;var second=false;var third=false;
+                {{
+                    let a:?Watch=Watch {{seen:first.ref}};
+                    let b:?Watch=Watch {{seen:second.ref}};
+                    let c:?Watch=Watch {{seen:third.ref}};
+                    let result=a.as(Iterator).chain(b).as(Iterator).chain(c).as(Iterator).{method};
+                    assumes {expected};
+                }}
+                first and second and third
+            }}
+            fn verify() {{let passed=run();assumes passed;}}
+            "#,
+            include_str!("../../../library/builtin/iterator.fl"),
+            include_str!("../../../library/builtin/resources.fl")
+        );
+        check_iteration_with_contract_limit(
+            &source,
+            Some(if method == "nth(1)" {
+                "handler pointer return lacks request-side provenance evidence"
+            } else {
+                "captured pointer rebinding requires an environment writeback contract"
+            }),
+        );
+    }
+}
+
+#[test]
 fn reduce_moves_affine_items_and_retires_only_replaced_accumulators() {
     let source = format!(
         r#"{}

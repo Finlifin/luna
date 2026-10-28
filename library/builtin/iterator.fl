@@ -107,6 +107,34 @@ pub trait Iterator {
     }
 
     {-
+        Select the zero-based item and stop production immediately. Skipped
+        items and the unproduced source remainder are retired normally. A
+        missing position returns null; a present null payload stays present.
+    -}
+    inline fn nth(self, index: .usize'builtin) -> ?Item {
+        var remaining = index;
+        self.iterate()# {
+            emit_item<Item>(value) => {
+                if remaining == 0 {return value;}
+                remaining = remaining - 1;
+            },
+        }
+        null
+    }
+
+    {-
+        Consume the whole stream, retiring each replaced item. The final
+        item moves to the caller without requiring Clone or Copy.
+    -}
+    inline fn last(self) -> ?Item {
+        var result: ?Item = null;
+        self.iterate()# {
+            emit_item<Item>(value) => {result = value;},
+        }
+        result
+    }
+
+    {-
         The first item becomes the accumulator without calling f. Each later
         item and the previous accumulator move into f exactly once. Empty
         input returns null; a null item inside an optional item type remains
