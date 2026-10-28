@@ -45,7 +45,22 @@ comptime fn run() -> bool {
         and meta.length(nested) == 1
         and (nested[0] match { null => true, _? => false })
         and meta.length(unused) == 0 and meta.length(unused_filter) == 0
-        and reducers_and_searches() and named_metadata()
+        and reducers_and_searches() and named_metadata() and stable_sorting()
+}
+
+comptime fn stable_sorting() -> bool {
+    let input: meta.List<Integer> = [12, 1, 11, 3, 2];
+    let ordered = meta.sort_by(input, |a, b| {
+        let left = if a > 10 {a - 10} else {a};
+        let right = if b > 10 {b - 10} else {b};
+        left < right
+    });
+    let types: meta.List<Type> = [bool, u32, bool];
+    let retained = meta.sort_by(types, |a, b| false);
+    input[0] == 12 and input[1] == 1
+        and ordered[0] == 1 and ordered[1] == 11 and ordered[2] == 12
+        and ordered[3] == 2 and ordered[4] == 3
+        and retained[0] == bool and retained[1] == u32 and retained[2] == bool
 }
 
 comptime fn named_metadata() -> bool {

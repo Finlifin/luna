@@ -24,6 +24,138 @@ fn compile_bound(source: &str, splice: bool) -> Result<nir::program::Package, St
 }
 
 #[test]
+fn stable_sort_retains_type_identity_snapshots_and_equal_item_order() {
+    let package = compile(
+        "typealias Type=.Type'builtin;
+        typealias Integer=.Integer'builtin;
+        pure comptime fn Identity<T>->Type {T}
+        comptime fn run()->bool {
+            let types:meta.List<Type> = [Identity<bool>,bool,Identity<bool>];
+            let sorted_types=meta.sort_by(types,|a,b| false);
+            var input:meta.List<Integer> = [12,1,11,3,2];
+            let saved=input;
+            let target=input.ref;
+            let sorted=meta.sort_by(input,|a,b| {target.* = [];let left=if a > 10 {a - 10} else {a};let right=if b > 10 {b - 10} else {b};left < right});
+            let empty:meta.List<Integer> = [];
+            let no_calls=meta.sort_by(empty,|a,b| {let bad:meta.List<bool> = [];bad[0]});
+            let singles:meta.List<Integer> = [7];let single=meta.sort_by(singles,|a,b| {let bad:meta.List<bool> = [];bad[0]});
+            meta.length(input) == 0 and saved[0] == 12 and saved[4] == 2
+                and sorted[0] == 1 and sorted[1] == 11 and sorted[2] == 12
+                and sorted[3] == 2 and sorted[4] == 3
+                and sorted_types[0] == Identity<bool> and sorted_types[1] == bool
+                and sorted_types[2] == Identity<bool> and types[0] == Identity<bool>
+                and meta.length(no_calls) == 0 and single[0] == 7
+        }",
+    ).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 2_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn sort_callback_failure_stops_comparisons_and_vm_recovers() {
+    let package = compile(
+        "typealias Integer=.Integer'builtin;
+        comptime fn compare(a:Integer,b:Integer)->bool {
+            let flags:meta.List<bool> = [true];flags[a]
+        }
+        comptime fn fail()->meta.List<Integer> {meta.sort_by([0,0,0,2],compare)}
+        comptime fn recover()->bool {let input:meta.List<Integer> = [3,1,2];let values=meta.sort_by(input,|a,b|a < b);values[0] == 1 and values[1] == 2 and values[2] == 3}",
+    ).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "fail"), vec![])
+            .unwrap_err()
+            .kind,
+        comptime_interpretor::ErrorKind::IndexOutOfBounds
+    );
+    assert_eq!(
+        support::calls(&package, &vm)
+            .iter()
+            .filter(|name| **name == "compare")
+            .count(),
+        2
+    );
+    assert_eq!(
+        vm.invoke(support::id(&package, "recover"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn sort_checks_callback_contracts_even_without_comparisons() {
+    for callback in [
+        "fn compare(a:bool,b:bool)->bool {a and not b}",
+        "comptime fn compare(a:bool,b:bool)->.char'builtin {'x'}",
+        "comptime fn compare(a:bool,b:.char'builtin)->bool {a}",
+    ] {
+        compile(callback).unwrap();
+        for values in ["[]", "[true]"] {
+            let call = format!(
+                "comptime fn run() {{let values:meta.List<bool> = {values};meta.sort_by(values,compare);}}"
+            );
+            compile(&format!(
+                "comptime fn compare(a:bool,b:bool)->bool {{a and not b}} {call}"
+            ))
+            .unwrap();
+            assert!(
+                compile(&format!("{callback} {call}"))
+                    .unwrap_err()
+                    .starts_with("elaboration failed:")
+            );
+        }
+    }
+}
+
+#[test]
+fn sort_handles_incomplete_runs_with_bounded_comparison_counts() {
+    for count in [0usize, 1, 2, 3, 7, 8, 9, 31, 32, 33] {
+        let values = (0..count)
+            .rev()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let checks = (0..count)
+            .map(|n| format!("ordered[{n}] == {n}"))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let levels = if count < 2 {
+            0
+        } else {
+            usize::BITS - (count - 1).leading_zeros()
+        };
+        let bound = count * levels as usize;
+        let package = compile(&format!(
+            "typealias Integer=.Integer'builtin;
+            comptime fn run()->bool {{
+                var comparisons:Integer=0;let counter=comparisons.ref;
+                let values:meta.List<Integer> = [{values}];
+                let ordered=meta.sort_by(values,|a,b| {{counter.* += 1;a < b}});
+                meta.length(ordered) == {count} and comparisons <= {bound} and {checks}
+            }}",
+            checks = if checks.is_empty() { "true" } else { &checks }
+        ))
+        .unwrap();
+        if count == 33 {
+            assert!(luna::invocation::invoke(&package, "run", 100).is_err());
+        }
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 5_000_000).unwrap(),
+            Value::Bool(true),
+            "length {count}"
+        );
+    }
+}
+
+#[test]
 fn indexed_scalars_establish_domain_bounds_without_inventing_contents() {
     let package = compile(
         "typealias Byte=.u8'builtin;
@@ -919,7 +1051,7 @@ fn list_ranges_reject_incompatible_inputs_and_propagate_invocation_limits() {
 #[test]
 fn list_transform_collectors_preserve_order_snapshots_and_optional_layers() {
     let source = include_str!("../../../development/examples/sysroot-meta-lists.fl");
-    let package = compile(&format!("typealias Integer=.Integer'builtin;{source}")).unwrap();
+    let package = compile(&format!("typealias Integer=.Integer'builtin;typealias Type=.Type'builtin;typealias u32=.u32'builtin;{source}")).unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
         Value::Bool(true)

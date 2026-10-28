@@ -279,6 +279,44 @@ comptime fn append_range(target: *List<T>, values: List<T>,
 }
 
 {-
+    Stable ascending merge sort. less(a, b) describes a strict ordering; equal
+    items retain input order. Each comparison receives the right candidate
+    first: only a strict right-before-left result displaces the left item.
+    Input snapshots remain unchanged, including when a callback fails.
+-}
+pub comptime fn sort_by(values: List<T>, less: %c comptime fn(T, T) -> bool) -> List<T>
+    where T, c: (.Type'builtin).vars.Closure {
+    let count = length(values);
+    var ordered = values;
+    var width: .Integer'builtin = 1;
+    while width < count {
+        var output: List<T> = [];
+        var start: .Integer'builtin = 0;
+        while start < count {
+            let middle = if start + width < count {start + width} else {count};
+            let end = if middle + width < count {middle + width} else {count};
+            var left = start;
+            var right = middle;
+            while left < middle and right < end {
+                if less(ordered[right], ordered[left]) {
+                    append(output.ref, ordered[right]);
+                    right = right + 1;
+                } else {
+                    append(output.ref, ordered[left]);
+                    left = left + 1;
+                }
+            }
+            append_range(output.ref, ordered, left, middle);
+            append_range(output.ref, ordered, right, end);
+            start = end;
+        }
+        ordered = output;
+        width = width * 2;
+    }
+    ordered
+}
+
+{-
   Observe an applied struct in declaration order. Reflection grants neither
   field access nor layout permission, and never unfolds opaque type factories.
 -}

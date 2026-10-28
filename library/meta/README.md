@@ -461,6 +461,34 @@ comptime fn example() -> bool {
 这两个接口只用于 comptime；现有不可变数据检查和 invocation 预算仍然生效。
 完整 sysroot 用例已纳入 `sysroot-meta` 检查入口。
 
+### 稳定排序
+
+`meta.sort_by(values, less) -> List<T>` 返回新列表，不修改输入快照。
+`less` 是接收两个 T 并返回 bool 的 comptime 回调，表示严格先后关系；
+等价元素保留原来的相对顺序。空列表与单元素列表不调用比较器，但仍检查其
+参数、结果和执行阶段。Type 元素保持原有身份，不展开 normal-form 头。
+
+```flurry
+comptime fn sorted_numbers() -> meta.List<Integer> {
+    let input: meta.List<Integer> = [3, 1, 2];
+    meta.sort_by(input, |a, b| a < b)
+}
+```
+
+实现从宽度 1 开始逐轮归并相邻段，按左到右顺序处理段。每次比较调用
+`less(右段候选, 左段候选)`；仅 true 选择右项，false 选择左项。某段耗尽后
+直接追加另一段的剩余内容。比较器应提供一致的严格弱序；带副作用的比较器
+仍按上述顺序执行，异常立即停止，不继续调用后续比较。
+
+比较次数为 O(n log n)，但当前 VM 的列表复制、参数传递及资源检查仍有额外
+成本，因此不把整个 invocation 的时间或预算消耗宣称为 O(n log n)。所有工作
+消耗通常的 invocation 预算。失败不会发布部分排序结果，也不会回滚比较器
+已经执行的显式副作用。来源变量被比较器替换时，已传入的输入快照仍然有效。
+
+真实 sysroot 示例见
+[sysroot-meta-lists.fl](../../development/examples/sysroot-meta-lists.fl)；运行
+`python3 -B development/library_check.py --release --stage sysroot-meta`。
+
 ### 显式生成 Symbol 编码 enum
 
 `EnumBuilder.BuildSymbol(codes: List<Symbol>) -> Type` 按叶变体声明顺序指定编码。
