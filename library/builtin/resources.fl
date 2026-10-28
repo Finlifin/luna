@@ -4,17 +4,14 @@
 
 pub trait Once {}
 
--- #[lang = "clone"]
 pub trait Clone :- Once {
     fn clone(*self) -> Self;
 }
 
--- #[lang = "copy"]
 pub trait Copy :- Clone {}
 
 -- ── Drop ───────────────────────────────────────────────────────────────────
 
--- #[lang = "drop"]
 pub trait Drop {
     fn drop(*self);
 }

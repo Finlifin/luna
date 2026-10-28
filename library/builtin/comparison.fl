@@ -2,7 +2,6 @@
 
 -- ── Equality ───────────────────────────────────────────────────────────────
 
--- #[lang = "eq"]
 pub trait Eq {
     fn eq(self, other: Self) -> bool;
     fn ne(self, other: Self) -> bool = not self.eq(other);
@@ -15,7 +14,6 @@ pub trait Eq {
 
 -- ── Ordering ───────────────────────────────────────────────────────────────
 
--- #[lang = "ord"]
 pub trait Ord :- Eq {
     fn cmp(self, other: Self) -> Ordering;
     fn lt(self, other: Self) -> bool = self.cmp(other) match {

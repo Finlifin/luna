@@ -2,8 +2,7 @@
 -- builtin/traits – fundamental traits
 -- ==========================================================================
 --
--- These traits form the core protocol system of Flurry. Many of them are
--- lang items that the compiler desugars syntax into.
+-- Fundamental protocols exposed through ordinary trait declarations.
 
 -- Comparison protocols can be loaded without formatting/owned strings.
 pub use comparison.{Eq, Ord, Ordering};
@@ -13,7 +12,6 @@ pub use resources.{Once, Clone, Copy, Drop};
 
 -- ── Hash ───────────────────────────────────────────────────────────────────
 
--- #[lang = "hash"]
 pub trait Hash {
     fn hash(self) -> u64;
     ^{comptime_phase: true}
