@@ -90,3 +90,46 @@ fn writes_check_old_new_and_inactive_payload_domains() {
         assert!(error.contains("Unsupported"), "{body}: {error}");
     }
 }
+
+#[test]
+fn list_storage_cannot_bypass_object_payload_permissions() {
+    for body in [
+        "var values:meta.List<Item> = [Item {flag:true}]; let copied=values.ref.*;",
+        "var values:meta.List<Item> = [Item {flag:true}]; values.ref.* = [];",
+        "var values:meta.List<Item> = []; values.ref.* = [Item {flag:true}];",
+        "var values:meta.List<Item> = []; meta.append(values.ref,Item {flag:true});",
+        "var values:meta.List<meta.Object> = [{item:Item {flag:true}}]; let copied=values.ref.*;",
+        "var values:meta.List<meta.Object> = []; let item={item:Item {flag:true}}; meta.append(values.ref,item);",
+        "let absent:?Item=null; var values:meta.List<?Item> = [absent]; let copied=values.ref.*;",
+    ] {
+        let package = compile(&format!(
+            "struct Item {{flag:bool}} comptime fn run()->bool {{{body} true}}"
+        ));
+        let error = invoke(&package).unwrap_err();
+        assert!(error.contains("Unsupported"), "{body}: {error}");
+    }
+}
+
+#[test]
+fn list_storage_copy_payloads_preserve_snapshots_and_reject_drop() {
+    let source = "struct Item {flag:bool} impl Duplicate for Item {} DROP
+        comptime fn run()->bool {
+            var items:meta.List<Item> = [Item {flag:true}];
+            let pointer=items.ref;
+            let saved=pointer.*;
+            meta.append(pointer,Item {flag:false});
+            let extended=pointer.*;
+            pointer.* = [];
+            meta.length(items)==0 and meta.length(saved)==1 and saved[0].flag
+                and meta.length(extended)==2 and not extended[1].flag
+        }";
+    assert_eq!(
+        invoke(&compile(&source.replace("DROP", ""))).unwrap(),
+        Value::Bool(true)
+    );
+    let error = invoke(&compile(
+        &source.replace("DROP", "impl Retire for Item {fn drop(*self) {}}"),
+    ))
+    .unwrap_err();
+    assert!(error.contains("Unsupported"), "{error}");
+}

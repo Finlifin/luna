@@ -13,6 +13,7 @@ mod dynamic_instances;
 mod environment;
 mod field_access;
 mod iir_execution;
+mod immutable_storage;
 mod invocation_contracts;
 mod list_index;
 mod list_operations;
@@ -20,7 +21,6 @@ mod memory;
 mod normal_inputs;
 mod object_edits;
 mod object_queries;
-mod object_storage;
 #[cfg(test)]
 mod object_values;
 mod objects;
@@ -3688,17 +3688,17 @@ impl<'a> Interpreter<'a> {
                 {
                     return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
                 }
-                if immutable_object {
+                if immutable_object || immutable_list {
                     pointer
-                        .inspect(|value| self.validate_object_storage(value, expr.source))
+                        .inspect(|value| {
+                            self.validate_immutable_storage(value, &expr.ty, expr.source)
+                        })
                         .map_err(|kind| self.failure(kind, Some(expr.source)))??;
                 }
                 let value = pointer
                     .inspect(|value| self.copy_representation(value, expr.source, 0))
                     .map_err(|kind| self.failure(kind, Some(expr.source)))??;
-                if immutable_list {
-                    self.validate_immutable_input(&value, &expr.ty)?;
-                } else if !self.has_type(&value, &expr.ty) {
+                if !self.has_type(&value, &expr.ty) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
                 value
@@ -3719,17 +3719,14 @@ impl<'a> Interpreter<'a> {
                 {
                     return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
                 }
-                if immutable_object {
-                    self.validate_object_storage(&value, expr.source)?;
+                if immutable_object || immutable_list {
+                    // Representation admission alone does not authorize copying
+                    // or discarding nominal resources inside a data container.
+                    self.validate_immutable_storage(&value, &pointer.pointee, expr.source)?;
                     pointer
-                        .inspect(|old| self.validate_object_storage(old, expr.source))
-                        .map_err(|kind| self.failure(kind, Some(expr.source)))??;
-                } else if immutable_list {
-                    // Validate both representations before mutation. Admission
-                    // is budgeted and cannot invoke user code or follow pointers.
-                    self.validate_immutable_input(&value, &pointer.pointee)?;
-                    pointer
-                        .inspect(|old| self.validate_immutable_input(old, &pointer.pointee))
+                        .inspect(|old| {
+                            self.validate_immutable_storage(old, &pointer.pointee, expr.source)
+                        })
                         .map_err(|kind| self.failure(kind, Some(expr.source)))??;
                 } else if !self.has_type(&value, &pointer.pointee) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));

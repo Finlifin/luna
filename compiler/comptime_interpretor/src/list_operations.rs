@@ -57,13 +57,13 @@ impl Interpreter<'_> {
             self.tick(Some(left.source))?;
             self.tick(Some(input.source))?;
             pointer
-                .inspect(|old| self.validate_immutable_input(old, &value.ty))
+                .inspect(|old| self.validate_immutable_storage(old, &value.ty, expr.source))
                 .map_err(|kind| self.failure(kind, Some(expr.source)))??;
             let suffix = match self.eval(right, environment)? {
                 Flow::Value(value) => value,
                 flow => return Ok(flow),
             };
-            self.validate_immutable_input(&suffix, &value.ty)?;
+            self.validate_immutable_storage(&suffix, &value.ty, expr.source)?;
             pointer
                 .append_list_checked(suffix, |combined| {
                     let work = combined

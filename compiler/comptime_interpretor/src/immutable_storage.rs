@@ -1,23 +1,25 @@
-//! Object slot transfers validate data and resource permission before mutation.
+//! Comptime container transfers validate data and permission before mutation.
 use super::*;
 
 impl Interpreter<'_> {
-    pub(super) fn validate_object_storage(
+    pub(super) fn validate_immutable_storage(
         &mut self,
         value: &Value,
+        ty: &Term,
         source: SourceRange,
     ) -> Result<(), Error> {
-        self.validate_immutable_input(value, &Term::Primitive(Primitive::Object))
+        self.validate_immutable_input(value, ty)
             .map_err(|mut error| {
                 if error.source.is_none() {
                     error.source = Some(source);
                 }
                 error
             })?;
-        self.object_storage_contents(value, source, 0)
+        self.immutable_storage_domain(ty, source, 0)?;
+        self.immutable_storage_contents(value, source, 0)
     }
 
-    fn object_storage_domain(
+    fn immutable_storage_domain(
         &mut self,
         ty: &Term,
         source: SourceRange,
@@ -31,22 +33,22 @@ impl Interpreter<'_> {
             // Object entries are checked by their retained domains below.
             // Type descriptions are immutable comptime data, not runtime Copy.
             Term::Primitive(Primitive::Object | Primitive::Type | Primitive::Never) => Ok(()),
-            Term::Optional(inner) => self.object_storage_domain(inner, source, depth + 1),
+            Term::Optional(inner) => self.immutable_storage_domain(inner, source, depth + 1),
             Term::Tuple(fields) => {
                 for field in fields {
-                    self.object_storage_domain(field, source, depth + 1)?;
+                    self.immutable_storage_domain(field, source, depth + 1)?;
                 }
                 Ok(())
             }
             Term::ErrorResult { errors, result } => {
                 for field in errors.iter().chain(std::iter::once(result.as_ref())) {
-                    self.object_storage_domain(field, source, depth + 1)?;
+                    self.immutable_storage_domain(field, source, depth + 1)?;
                 }
                 Ok(())
             }
             _ => {
                 if let Some(element) = self.list_element(ty).cloned() {
-                    return self.object_storage_domain(&element, source, depth + 1);
+                    return self.immutable_storage_domain(&element, source, depth + 1);
                 }
                 if self.is_type_list_input(ty) || self.permits_pointer_copy(ty) {
                     Ok(())
@@ -57,7 +59,7 @@ impl Interpreter<'_> {
         }
     }
 
-    fn object_storage_contents(
+    fn immutable_storage_contents(
         &mut self,
         value: &Value,
         source: SourceRange,
@@ -71,8 +73,8 @@ impl Interpreter<'_> {
             Value::Object(object) => {
                 for entry in object.entries() {
                     let entry = entry.value();
-                    self.object_storage_domain(&entry.ty, source, depth + 1)?;
-                    self.object_storage_contents(&entry.value, source, depth + 1)?;
+                    self.immutable_storage_domain(&entry.ty, source, depth + 1)?;
+                    self.immutable_storage_contents(&entry.value, source, depth + 1)?;
                 }
             }
             Value::List { values, .. }
@@ -80,12 +82,12 @@ impl Interpreter<'_> {
             | Value::Record { fields: values, .. }
             | Value::Variant { fields: values, .. } => {
                 for value in values {
-                    self.object_storage_contents(value, source, depth + 1)?;
+                    self.immutable_storage_contents(value, source, depth + 1)?;
                 }
             }
             Value::AnonymousRecord(fields) => {
                 for (_, value) in fields {
-                    self.object_storage_contents(value, source, depth + 1)?;
+                    self.immutable_storage_contents(value, source, depth + 1)?;
                 }
             }
             Value::Optional {
@@ -93,7 +95,7 @@ impl Interpreter<'_> {
             }
             | Value::ErrorResult { value, .. }
             | Value::Newtype { value, .. } => {
-                self.object_storage_contents(value, source, depth + 1)?;
+                self.immutable_storage_contents(value, source, depth + 1)?;
             }
             _ => {}
         }
@@ -215,5 +217,108 @@ mod tests {
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         assert!(vm.eval(&write(), &mut env).is_err());
         assert_eq!(storage.read().unwrap(), object(false));
+    }
+
+    #[test]
+    fn fused_list_append_checks_budget_before_committing_and_can_retry() {
+        use nir::normal_forms::{Head, Kind, Parameter as Input, Role};
+        let head = DeclarationId {
+            package: 1,
+            local: 1,
+        };
+        let ty = Term::NormalForm {
+            head,
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        };
+        let package = Package {
+            normal_forms: vec![Head {
+                role: Role::TypeList,
+                declaration: head,
+                requirements: vec![],
+                parameters: vec![Input {
+                    declaration: DeclarationId {
+                        package: 1,
+                        local: 2,
+                    },
+                    binding: LocalId { owner: 1, index: 0 },
+                    kind: Kind::Type,
+                    ty: Term::Primitive(Primitive::Type),
+                }],
+            }],
+            ..Default::default()
+        };
+        let source = SourceRange { start: 1, end: 2 };
+        let pointer = Expr {
+            source,
+            ty: Term::Pointer(Box::new(ty.clone())),
+            kind: K::Local(LocalId { owner: 1, index: 0 }),
+        };
+        let expr = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::WritePointer {
+                pointer: Box::new(pointer.clone()),
+                value: Box::new(Expr {
+                    source,
+                    ty: ty.clone(),
+                    kind: K::ListConcat(
+                        Box::new(Expr {
+                            source,
+                            ty: ty.clone(),
+                            kind: K::ReadPointer(Box::new(pointer)),
+                        }),
+                        Box::new(Expr {
+                            source,
+                            ty: ty.clone(),
+                            kind: K::TypeList(vec![Expr {
+                                source,
+                                ty: Term::Primitive(Primitive::Bool),
+                                kind: K::Literal(Literal::Bool(true)),
+                            }]),
+                        }),
+                    ),
+                }),
+            },
+        };
+        let original = Value::List {
+            ty: ty.clone(),
+            values: vec![Value::Bool(false)],
+        };
+        let expected = Value::List {
+            ty: ty.clone(),
+            values: vec![Value::Bool(false), Value::Bool(true)],
+        };
+        let mut failures = 0;
+        let mut successes = 0;
+        for steps in 1..200 {
+            let storage = Storage::new(original.clone());
+            let mut env = Environment::new();
+            env.insert(
+                LocalId { owner: 1, index: 0 },
+                Value::Pointer(storage.pointer(ty.clone(), vec![])),
+            );
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            vm.budget.steps = steps;
+            match vm
+                .eval_list_append(&expr, &mut env)
+                .expect("fused append path")
+            {
+                Ok(Flow::Value(Value::Unit)) => {
+                    successes += 1;
+                    assert_eq!(storage.read().unwrap(), expected);
+                }
+                Err(error) => {
+                    failures += 1;
+                    assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                    assert_eq!(storage.read().unwrap(), original);
+                    vm.budget.steps = 1000;
+                    vm.eval_list_append(&expr, &mut env).unwrap().unwrap();
+                    assert_eq!(storage.read().unwrap(), expected);
+                }
+                other => panic!("unexpected append: {other:?}"),
+            }
+        }
+        assert!(failures > 0 && successes > 0);
     }
 }

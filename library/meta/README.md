@@ -116,9 +116,14 @@ comptime fn configured() -> bool {
 }
 ```
 
-读取产生独立快照；写回前检查旧值与新值，校验或预算失败时槽位保持原值。
+读取产生独立快照；写回前检查旧值与新值，校验或预算失败时不提交本次写入。
+这不回滚实参求值中已经发生的副作用，也不将整个 invocation 变成事务。
 这不授予 Object 全局 Copy 实现或 runtime 表示，带活动引用的 Object 也不会
 因此获得复制或常量逃逸权限。真实 sysroot 用例已纳入 `sysroot-meta` 检查。
+
+`*List<T>` 的读取、整体替换和 `meta.append` 使用同一套传送检查。元素的声明域
+必须允许复制；空列表、缺失 optional 以及 `List<Object>` 内的条目也不能绕过
+资源权限。纯 Type 描述保持 comptime 数据身份，不因这些检查展开 normal-form 头。
 
 CMTT 生成器也可以保存和查询局部 Object，再据此选择 quoted code。其物化
 保留每个条目的类型、顺序与键，不把对象伪装成 normal term；嵌套 Object
