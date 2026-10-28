@@ -84,7 +84,24 @@ pub enum Error {
     Inference(crate::InferenceError),
     Match(MatchError),
     Obligations(ObligationError),
+    UnsettledRequirement {
+        cause: ObligationError,
+        requirement: String,
+        status: &'static str,
+    },
     TypeView(String),
+}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsettledRequirement {
+                requirement,
+                status,
+                ..
+            } => write!(f, "required type constraint {requirement}: {status}"),
+            other => write!(f, "{other:?}"),
+        }
+    }
 }
 impl From<TypeError> for Error {
     fn from(e: TypeError) -> Self {
@@ -1340,10 +1357,18 @@ impl CallCandidate {
         if self.engine.waits_only_for_inference() {
             return Err(Error::NeedsContext);
         }
-        let signature = self
-            .engine
-            .freeze(&self.signature)
-            .map_err(Error::Obligations)?;
+        let signature = self.engine.freeze(&self.signature).map_err(|cause| {
+            if let ObligationError::Unsettled(id) = &cause {
+                if let Some((requirement, status)) = self.engine.describe_requirement(*id) {
+                    return Error::UnsettledRequirement {
+                        cause,
+                        requirement,
+                        status,
+                    };
+                }
+            }
+            Error::Obligations(cause)
+        })?;
         let result = self
             .engine
             .freeze(&self.result)

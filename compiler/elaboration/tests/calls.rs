@@ -833,7 +833,7 @@ fn pending_context_does_not_hide_an_independent_type_conflict() {
         .unwrap();
     assert!(matches!(
         candidate.finish(),
-        Err(elaboration::calls::Error::Obligations(_))
+        Err(elaboration::calls::Error::UnsettledRequirement { .. })
     ));
 }
 

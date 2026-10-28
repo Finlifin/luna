@@ -144,6 +144,10 @@ fn stable_unknown_requires_explicit_retry_and_cannot_escape_freezing() {
         engine.state(obligation),
         Some(State::Solved(Outcome::Unknown { .. }))
     ));
+    let before = engine.to_string();
+    let (_, status) = engine.describe_requirement(obligation).unwrap();
+    assert_eq!(status, "solver inconclusive");
+    assert_eq!(engine.to_string(), before);
     assert_eq!(
         engine.freeze(&stable(P::Bool)),
         Err(Error::Unsettled(obligation))
@@ -155,6 +159,42 @@ fn stable_unknown_requires_explicit_retry_and_cannot_escape_freezing() {
         engine.freeze(&stable(P::Bool)),
         Ok(Term::Primitive(P::Bool))
     );
+}
+
+#[test]
+fn requirement_diagnostics_resolve_types_without_publishing_candidates() {
+    let mut engine = Engine::default();
+    let variable = engine.fresh(Sort::Type);
+    let id = engine.require(R::Equal(T::Meta(variable), stable(P::Bool)));
+    run(&mut engine);
+    assert_eq!(
+        engine.describe_requirement(id).unwrap().1,
+        "waiting for inference"
+    );
+    engine.assign(variable, stable(P::Char)).unwrap();
+    run(&mut engine);
+    let before = engine.to_string();
+    let (requirement, status) = engine.describe_requirement(id).unwrap();
+    assert!(
+        requirement.contains("char") && requirement.contains("bool"),
+        "{requirement}"
+    );
+    assert_eq!(status, "not entailed");
+    assert_eq!(engine.to_string(), before);
+    assert_eq!(engine.freeze(&stable(P::Bool)), Err(Error::Unsettled(id)));
+}
+
+#[test]
+fn oversized_requirement_diagnostics_do_not_expand_or_run_the_solver() {
+    let mut engine = Engine::default();
+    let id = engine.require(R::And(vec![R::Stable(F::False); 5000]));
+    let before = engine.to_string();
+    assert_eq!(
+        engine.describe_requirement(id),
+        Some(("(requirement-unavailable Budget)".into(), "not checked"))
+    );
+    assert_eq!(engine.to_string(), before);
+    assert_eq!(engine.attempts(id), Some(0));
 }
 
 #[test]

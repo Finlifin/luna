@@ -134,7 +134,7 @@ fn call_inference_error(span: Span, cause: crate::calls::Error) -> Error {
     );
     Error {
         needs_context: pending,
-        ..error(span, format!("generic call inference failed: {cause:?}"))
+        ..error(span, format!("generic call inference failed: {cause}"))
     }
 }
 fn p(value: P) -> Term {

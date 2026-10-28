@@ -504,6 +504,34 @@ impl Engine {
     pub fn state(&self, id: ObligationId) -> Option<&State> {
         self.obligations.get(&id).map(|o| &o.state)
     }
+    /// Read-only diagnostic snapshot, with a separate bounded expansion budget.
+    /// Reporting cannot retry a proof or turn an unknown outcome into refutation.
+    pub fn describe_requirement(&self, id: ObligationId) -> Option<(String, &'static str)> {
+        let obligation = self.obligations.get(&id)?;
+        let status = match &obligation.state {
+            State::Ready => "not checked",
+            State::Waiting(_) => "waiting for inference",
+            State::Solved(Outcome::Entailed(_)) => "proven",
+            State::Solved(Outcome::NotEntailed(_)) => "not entailed",
+            State::Solved(Outcome::Unknown { .. }) => "solver inconclusive",
+            State::Solved(Outcome::IllFormed(_)) => "ill-formed constraint",
+            State::InvalidInference(_) => "invalid inference",
+        };
+        let requirement = match obligation.requirement.freeze_metered(
+            &self.inference,
+            &self.scope,
+            self.context.scope() == scope_frames(&self.scope).as_slice(),
+            &mut Budget {
+                steps: 4096,
+                max_depth: 64,
+            },
+            0,
+        ) {
+            Ok(formula) => formula.to_string(),
+            Err(error) => format!("(requirement-unavailable {error:?})"),
+        };
+        Some((requirement, status))
+    }
     /// A proved counterexample can discard a candidate; waiting or Unknown
     /// obligations cannot. This does not turn refutation into an assumption.
     pub fn has_refuted_obligation(&self) -> bool {

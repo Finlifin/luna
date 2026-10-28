@@ -599,7 +599,7 @@ fn list_queries_reject_incompatible_predicates_even_for_empty_inputs() {
                 .expect("the same call accepts a compatible predicate");
                 let error = compile(&format!("{pred} {call}")).unwrap_err();
                 assert!(
-                    error.starts_with("elaboration failed:"),
+                    error.contains("required type constraint") && !error.contains("ObligationId"),
                     "{query} with {values} and {pred}: {error}"
                 );
             }
