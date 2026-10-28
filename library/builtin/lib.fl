@@ -10,7 +10,7 @@ pub use traits.*;
 pub use option.OptionalOps;
 pub use result.ErrorResultOps;
 pub use patterns.ListPatternView;
-pub use iterator.{Iterator, IntoIterator, FromIterator, emit_item, MapIterator, FilterIterator, FilterMapIterator, FlatMapIterator, TakeWhileIterator, SkipWhileIterator, TakeIterator, SkipIterator, ChainIterator, InspectIterator};
+pub use iterator.{Iterator, IntoIterator, FromIterator, emit_item, MapIterator, FilterIterator, FilterMapIterator, FlatMapIterator, FlattenIterator, TakeWhileIterator, SkipWhileIterator, TakeIterator, SkipIterator, ChainIterator, InspectIterator};
 pub use ops.*;
 
 pub mod text {

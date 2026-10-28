@@ -62,6 +62,11 @@ pub trait Iterator {
         FlatMapIterator<Self, J, c> {iter: self, f: f}
     }
 
+    inline fn flatten(self) -> FlattenIterator<Self>
+        where requires Item :- Iterator {
+        FlattenIterator<Self> {iter: self}
+    }
+
     inline fn chain(self, next: J) -> ChainIterator<Self, J>
         where J :- Iterator, requires J.as(Iterator).Item == Item {
         ChainIterator<Self, J> {first: self, second: next}
@@ -245,6 +250,27 @@ impl Iterator for FlatMapIterator<I, J, c>
         let f = self.f;
         self.iter.as(Iterator).iterate()# {
             emit_item<I.as(Iterator).Item>(value) => f(value).as(Iterator).iterate(),
+        }
+    }
+}
+
+{-
+    Consume one nested iterator layer. Finish each inner source before asking
+    the outer source for another item. A downstream exit retires both pending
+    inner items and the outer remainder through ordinary resource cleanup.
+-}
+pub struct FlattenIterator where I :- Iterator,
+    requires I.as(Iterator).Item :- Iterator {
+    iter: I,
+}
+
+impl Iterator for FlattenIterator<I> where I :- Iterator,
+    requires I.as(Iterator).Item :- Iterator {
+    assoc Item: (.Type'builtin) = I.as(Iterator).Item.as(Iterator).Item;
+
+    inline fn iterate(self) -> #emit_item<Item> IterationUnit {
+        self.iter.as(Iterator).iterate()# {
+            emit_item<I.as(Iterator).Item>(inner) => inner.as(Iterator).iterate(),
         }
     }
 }

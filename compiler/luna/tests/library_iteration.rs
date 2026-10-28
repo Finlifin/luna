@@ -1560,3 +1560,77 @@ fn reduce_moves_affine_items_and_retires_only_replaced_accumulators() {
         Some("captured pointer rebinding requires an environment writeback contract"),
     );
 }
+
+#[test]
+fn flatten_short_circuit_cleans_inner_and_outer_remainders() {
+    let source = format!(
+        "{}\n{}\n
+        typealias GroupUnit=.void'builtin;
+        struct Watch {{seen:*bool}}
+        impl Drop for Watch {{fn drop(*self) {{
+            assumes not self.seen.*.*;
+            self.seen.*.* = true;
+        }}}}
+        struct Group {{first:Watch,second:Watch}}
+        impl Iterator for Group {{
+            assoc Item:(.Type'builtin)=Watch;
+            inline fn iterate(self)->#emit_item<Watch> GroupUnit {{
+                emit_item<Watch>(self.first)#;emit_item<Watch>(self.second)#;
+            }}
+        }}
+        fn run()->bool {{
+            var a=false;var b=false;var c=false;var d=false;
+            let first:?Group=Group {{first:Watch {{seen:a.ref}},second:Watch {{seen:b.ref}}}};
+            let second:?Group=Group {{first:Watch {{seen:c.ref}},second:Watch {{seen:d.ref}}}};
+            let found=first.as(Iterator).chain(second).as(Iterator).flatten().as(Iterator).any(|value| {{
+                assumes not value.seen.*.*;
+                true
+            }});
+            found and a and b and c and d
+        }}
+        fn verify() {{let passed=run();assumes passed;}}",
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl"),
+    );
+    check_iteration_with_budget(&source, None, 4_000_000);
+}
+
+#[test]
+fn flatten_rejects_noniterable_items() {
+    let source = format!(
+        "{}\nfn run() {{let value:?bool=true;value.as(Iterator).flatten();}}",
+        include_str!("../../../library/builtin/iterator.fl"),
+    );
+    assert!(compile_iteration_unbound(&source).is_err());
+}
+
+#[test]
+fn flatten_preserves_order_empty_sources_and_one_optional_layer() {
+    let source = format!(
+        r#"{}
+{}
+        fn run()->bool {{
+            var count:.u32'builtin=0;
+            let counter=count.ref;
+            let a:?bool=false;let b:?bool=null;let c:?bool=true;
+            let first:??bool=a;let empty:??bool=b;let last:??bool=c;
+            first.as(Iterator).chain(empty).as(Iterator).chain(last).as(Iterator)
+                .flatten().as(Iterator).foreach(|value| {{
+                    assumes counter.* == if value {{1}} else {{0}};
+                    counter.* = counter.* + 1;
+                }});
+            let absent:??bool=null;
+            absent.as(Iterator).flatten().as(Iterator).foreach(|value| {{assumes false;}});
+            let inner:?bool=null;
+            let middle:??bool=inner;
+            let outer:???bool=middle;
+            let result=outer.as(Iterator).flatten().as(Iterator).last();
+            count == 2 and (result match {{value? => value matches null, null => false}})
+        }}
+        fn verify() {{let passed=run();assumes passed;}}
+        "#,
+        include_str!("../../../library/builtin/iterator.fl"),
+        include_str!("../../../library/builtin/resources.fl"),
+    );
+    check_iteration_with_budget(&source, None, 4_000_000);
+}

@@ -157,3 +157,38 @@ test last_retires_replaced_items_and_transfers_final_item {
     }
     assumes third_retired;
 }
+
+test flatten_consumes_exactly_one_nested_optional_layer {
+    var count: usize = 0;
+    let counter = count.ref;
+    let first_item: ?bool = false;
+    let empty_item: ?bool = null;
+    let last_item: ?bool = true;
+    let first: ??bool = first_item;
+    let empty: ??bool = empty_item;
+    let last: ??bool = last_item;
+    first.as(Iterator).chain(empty).as(Iterator).chain(last).as(Iterator)
+        .flatten().as(Iterator).foreach(|value| {
+            assumes counter.* == if value {1} else {0};
+            counter.* = counter.* + 1;
+        });
+    assumes count == 2;
+    let inner: ?bool = null;
+    let middle: ??bool = inner;
+    let outer: ???bool = middle;
+    let result = outer.as(Iterator).flatten().as(Iterator).last();
+    let preserved = result match {value? => value matches null, null => false};
+    assumes preserved;
+}
+
+test flatten_short_circuit_retires_outer_remainder {
+    var first_retired = false;
+    var second_retired = false;
+    let first_item: ?Watch = Watch {seen: first_retired.ref, value: true};
+    let second_item: ?Watch = Watch {seen: second_retired.ref, value: false};
+    let first: ??Watch = first_item;
+    let second: ??Watch = second_item;
+    let found = first.as(Iterator).chain(second).as(Iterator).flatten()
+        .as(Iterator).any(|item| item.value);
+    assumes found and first_retired and second_retired;
+}
