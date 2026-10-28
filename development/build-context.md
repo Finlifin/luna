@@ -217,3 +217,20 @@ handle 不可传输；effect-row/associated-type 描述符暂未分配 wire tag�
   修复：符号与无符号 lexical integer 的解析分别处理。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
   通过，报告 `/tmp/luna-tools-7hs7bhpk/result.json`；`git diff --check` 通过。
+
+### Effect 与 associated Type 描述符
+
+wire v1 新增保留 tag 33/34，编码 Computation 与 AssociatedType。effect row
+保留有序的完整操作身份、实例参数及重复项；错误结果继续使用独立 wrapper。
+associated query 保留 interface/member/arguments/subject，不选择实现，也不
+把 query 当作可展开的 nominal 头。已有 v1 数据的字节编码不变，旧读端会
+拒绝新增 tag；格式表已同步更新。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test metadata_wire --test build_context metadata`：
+  8 项源码/驻留 metadata 测试通过，报告 `/tmp/luna-tools-nd9djm7b/result.json`。
+  此过滤器没有选中 wire 用例，因此随后单独运行 wire 检查。
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test metadata_wire`：
+  6 项通过，报告 `/tmp/luna-tools-9sckwx6p/result.json`；新增用例检查 effect
+  重复与顺序、跨包成员身份、错误结果独立表示和原始字节中未绑定主体的拒绝。

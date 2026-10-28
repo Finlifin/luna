@@ -177,3 +177,92 @@ fn wire_v1_matches_an_independent_boolean_packet() {
             .contains("unknown descriptor tag")
     );
 }
+
+#[test]
+fn wire_preserves_effect_order_repetition_and_associated_query_origins() {
+    let id = |package, local| DeclarationId { package, local };
+    let query = |package| T::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(package, 1),
+            member: id(package, 2),
+        }),
+        arguments: vec![T::Primitive(P::U32)],
+        subject: Box::new(T::Nominal {
+            declaration: id(200, 3),
+            arguments: vec![],
+        }),
+    };
+    let first = nir::effects::Operation {
+        declaration: id(200, 4),
+        arguments: vec![query(200)],
+    };
+    let second = nir::effects::Operation {
+        declaration: id(300, 4),
+        arguments: vec![query(300)],
+    };
+    let signature = T::Function {
+        parameters: vec![],
+        result: Box::new(T::Computation {
+            effects: vec![first.clone(), second.clone(), first.clone()],
+            result: Box::new(T::ErrorResult {
+                errors: vec![T::Nominal {
+                    declaration: id(200, 5),
+                    arguments: vec![],
+                }],
+                result: Box::new(query(200)),
+            }),
+        }),
+    };
+    let inputs = packet(vec![(
+        "signature".into(),
+        entry(T::Primitive(P::Type), signature),
+    )]);
+    let decoded = decode_hex(&encode_hex(&inputs).unwrap()).unwrap();
+    assert_eq!(decoded, inputs);
+    let T::Function { result, .. } = decoded[0].fields[0].1.value() else {
+        panic!("expected function Type")
+    };
+    let T::Computation { effects, result } = result.as_ref() else {
+        panic!("effect row was erased")
+    };
+    assert_eq!(effects, &[first.clone(), second, first]);
+    assert!(
+        matches!(result.as_ref(), T::ErrorResult { .. }),
+        "error-result ABI must remain separate"
+    );
+    let other = packet(vec![(
+        "query".into(),
+        entry(T::Primitive(P::Type), query(300)),
+    )]);
+    let own = packet(vec![(
+        "query".into(),
+        entry(T::Primitive(P::Type), query(200)),
+    )]);
+    assert_ne!(encode_hex(&own).unwrap(), encode_hex(&other).unwrap());
+}
+
+#[test]
+fn wire_checks_scope_inside_associated_subjects() {
+    // Replace a closed query subject by a free Type variable in the raw packet.
+    // Transport must not silently turn an unbound input into a closed Type.
+    let query = T::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: DeclarationId {
+                package: 200,
+                local: 1,
+            },
+            member: DeclarationId {
+                package: 200,
+                local: 2,
+            },
+        }),
+        arguments: vec![],
+        subject: Box::new(T::Primitive(P::Bool)),
+    };
+    let input = packet(vec![("query".into(), entry(T::Primitive(P::Type), query))]);
+    let mut encoded = encode_hex(&input).unwrap();
+    assert!(encoded.ends_with("0002"));
+    encoded.truncate(encoded.len() - 4);
+    encoded.push_str(concat!("1b", "0000000000000000", "0000000000000000", "00"));
+    assert!(decode_hex(&encoded).is_err());
+}

@@ -96,6 +96,8 @@ means a flag followed by a term only when the flag is 1. Field sequences use
 | 30 | Closure-context value | Type sequence |
 | 31 | Contextual closure Type | context term, signature term |
 | 32 | Type-list concatenation | term sequence |
+| 33 | Computation Type | operation sequence of (declaration, argument term sequence), result Type term |
+| 34 | Associated Type query | interface declaration, member declaration, argument term sequence, subject Type term |
 
 Primitive tags 0 through 24, in order:
 `Type Object Bool Char Str Symbol Integer Float Unit Void Never I8 I16 I32 I64
@@ -111,10 +113,16 @@ Type-list input. Object is transported using its existing typed nominal-value
 entry packets; keys, original field domains and values all survive transport.
 
 Runtime references, store handles, free variables, callable values and closure
-factory snapshots are not transportable. Computation/effect-row and associated
-Type descriptors currently have no wire tags and are explicitly rejected by
-the encoder. This is not a general NIR serializer. Future additions require
-explicit tag/version compatibility work; diagnostic Display is not a parser.
+factory snapshots are not transportable. Effect operations retain their ordered
+occurrences, including repetitions, declaration identities and instantiation
+arguments. Error-result Types remain separate wrappers; no effect ABI is inferred
+from an error label. Associated queries retain their interface, member, subject
+and arguments without selecting an implementation or unfolding the query.
+
+Tags 33 and 34 extend the previously reserved v1 tag space. Existing encodings
+remain unchanged; earlier readers reject these new tags instead of misreading
+them. This is not a general NIR serializer. Future additions require explicit
+tag/version compatibility work; diagnostic Display is not a parser.
 
 ## Cache and failure behavior
 

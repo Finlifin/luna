@@ -359,6 +359,26 @@ impl Writer {
                 self.byte(32)?;
                 self.terms(values, d)?;
             }
+            T::Computation { effects, result } => {
+                self.byte(33)?;
+                self.number(effects.len() as u64)?;
+                for operation in effects {
+                    self.id(operation.declaration)?;
+                    self.terms(&operation.arguments, d)?;
+                }
+                self.term(result, d)?;
+            }
+            T::AssociatedType {
+                origin,
+                arguments,
+                subject,
+            } => {
+                self.byte(34)?;
+                self.id(origin.interface)?;
+                self.id(origin.member)?;
+                self.terms(arguments, d)?;
+                self.term(subject, d)?;
+            }
             _ => {
                 return Err(failure(
                     "descriptor is not supported by metadata wire v1; executable and store-backed values are not transportable",
@@ -594,6 +614,28 @@ impl<'a> Reader<'a> {
                 signature: Box::new(self.term(d)?),
             },
             32 => T::TypeListConcat(self.terms(d)?),
+            33 => {
+                let count = self.count()?;
+                let mut effects = Vec::new();
+                for _ in 0..count {
+                    effects.push(nir::effects::Operation {
+                        declaration: self.id()?,
+                        arguments: self.terms(d)?,
+                    });
+                }
+                T::Computation {
+                    effects,
+                    result: Box::new(self.term(d)?),
+                }
+            }
+            34 => T::AssociatedType {
+                origin: Box::new(nir::AssociatedTypeOrigin {
+                    interface: self.id()?,
+                    member: self.id()?,
+                }),
+                arguments: self.terms(d)?,
+                subject: Box::new(self.term(d)?),
+            },
             _ => return Err(failure("unknown descriptor tag")),
         })
     }
