@@ -108,6 +108,13 @@ impl DecimalLiteral {
         })
     }
 
+    pub fn to_f16_bits(&self, budget: &mut Budget) -> Result<u16, Error> {
+        self.exact_value(budget)?.to_f16_bits(budget)
+    }
+    pub fn to_bf16_bits(&self, budget: &mut Budget) -> Result<u16, Error> {
+        self.exact_value(budget)?.to_bf16_bits(budget)
+    }
+
     /// Share target rounding with computed exact values.
     pub fn to_f32_bits(&self, budget: &mut Budget) -> Result<u32, Error> {
         self.exact_value(budget)?.to_f32_bits(budget)
@@ -180,6 +187,13 @@ impl DecimalValue {
     }
     pub fn is_zero(&self) -> bool {
         self.digits.as_ref() == "0"
+    }
+
+    pub fn to_f16_bits(&self, budget: &mut Budget) -> Result<u16, Error> {
+        crate::float16::Float16Format::Binary16.round(self, budget)
+    }
+    pub fn to_bf16_bits(&self, budget: &mut Budget) -> Result<u16, Error> {
+        crate::float16::Float16Format::BFloat16.round(self, budget)
     }
 
     /// IEEE nearest, ties-to-even conversion directly to the target format.
