@@ -1,8 +1,13 @@
 # Explicit package compilation, version 1
 
+The product is one `luna` CLI binary. Independent anar development is cancelled;
+future project configuration, dependency management and build scheduling belong
+to luna. The explicit package and resident stdio modes remain interfaces of that
+same executable, not separate products.
+
 `luna --packages-v1` exposes the existing multi-package frontend as a process
 interface. A build tool supplies identities and direct dependencies explicitly;
-luna does not infer package identities from paths or discover an anar project.
+luna does not infer package identities from paths or discover a project configuration.
 
 ```sh
 luna --packages-v1 \
@@ -134,7 +139,7 @@ use `Action::Build { output: BinaryOutput::Bitcode, .. }`. Existing executable a
 object outputs use the corresponding enum variants. Publication preserves previous
 files on failure and does not add executable permissions.
 
-This entry does not implement anar configuration,
+This entry does not yet implement project configuration evaluation,
 package resolution, dependency fetching or incremental build scheduling.
 
 Exit status is 0 for successful compilation, 2 for malformed/unsupported
@@ -176,7 +181,7 @@ matching primary-package labels after frontend validation.
 `packages::compile_with_inputs` accepts the explicit package/dependency set,
 primary/builtin identities and protocol selectors and returns the NIR artifact
 with `CompilationInputs`. The process interface exposes the same observations through
-`--with-inputs`; neither interface implements anar. Existing compile entry points do not retain copies of
+`--with-inputs`; neither interface implements project orchestration. Existing compile entry points do not retain copies of
 source text.
 
 Each `SourceInput` records the resolution ID, semantic identity, absolute
@@ -277,7 +282,7 @@ independent. These checks do not create an atomic filesystem transaction.
 
 The ordinary single-shot CLI still compiles each request. The resident stdio
 entry below uses this cache. Neither entry implements on-disk cache persistence
-or anar configuration discovery.
+or project configuration discovery.
 
 ## Resident stdio compiler, version 1
 

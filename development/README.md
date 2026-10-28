@@ -1,5 +1,7 @@
 # 开发入口
 
+当前产品方向：取消独立 anar 计划，保持 `luna` 单二进制 CLI。包、工程、依赖、构建任务与缓存由 luna 统一推进；内部 crate 仍可按职责拆分。下文带日期的 anar 记录仅为历史，不再构成开发依赖。
+
 Comptime invocation 性能基准：`python3 -B development/comptime_bench.py --repeat 5`。测量边界、调用帧重构数据及 definition builder 的当前缺口见 [comptime-vm.md](comptime-vm.md)。
 
 类型列表索引基准：`python3 -B development/comptime_bench.py --bench type_list_index --iterations 100 --repeat 5`。每份报告记录字面量、局部索引与通用求值路径的耗时、分配次数、申请字节数及 VM steps；申请字节数是累计分配请求，不是峰值内存。
@@ -146,7 +148,7 @@ python3 -B development/command.py --timeout 10 -- /tmp/flurry-direct
 
 ## 多包进程接口
 
-`luna --packages-v1` 接收显式包身份、源码入口和依赖别名，复用多包 HIR/NIR 编译、源码输出保护和 source protocol 选择。参数、退出码、版本边界与构建工具调用示例见 [package-cli.md](package-cli.md)。它不自动加载 sysroot，也不代替 anar 的项目配置与依赖获取。
+`luna --packages-v1` 接收显式包身份、源码入口和依赖别名，复用多包 HIR/NIR 编译、源码输出保护和 source protocol 选择。参数、退出码、版本边界与构建工具调用示例见 [package-cli.md](package-cli.md)。它不自动加载 sysroot；项目配置与依赖获取尚待在 luna 内实现。
 
 ## 无人值守工具入口
 
@@ -239,7 +241,7 @@ python3 -B development/command.py --timeout 10 -- /tmp/flurry-direct
 | `compiler/` | Rust workspace；包含前端、query、middle、interface、luna、comptime 与 IIR 等 crate；具体成员以根 Cargo.toml 为准 |
 | 后端旧目录 | typeck、mir、mir_build、codegen 当前未列为启用成员；workspace 检查不覆盖它们，不由目录存在推定后端完整 |
 | `library/` | 当前有 builtin 与 std 源码；文档定义的其他内置包不代表已经实现 |
-| anar | 未在当前 checkout 或 /home/fin/anar 发现；第一次任务先定位真实仓库、协议、工具链与测试入口，再分配写入范围 |
+| CLI 与构建 | 在 luna 内实现包、工程、依赖、任务调度和缓存，不再寻找或创建 anar 仓库 |
 | `compiler/query/tests/query_engine.rs` | 已有行为断言，覆盖缓存、环、panic 恢复及键隔离，可作为现成局部测试入口 |
 | `compiler/luna/tests/frontend_cli.rs` | 独立进程的 CLI 回归测试，覆盖参数、阶段失败、输出通道、文件保护及重复 dump；每个子进程有超时与回收 |
 | `compiler/hir/tests/display.rs` | 直接构造 HIR，检查现有变体的载荷、转义、节点关系与输出顺序 |
@@ -249,7 +251,7 @@ python3 -B development/command.py --timeout 10 -- /tmp/flurry-direct
 
 luna driver 接收显式输入文件，默认把 HIR dump 写到 stdout。`--emit ast` 在解析成功后导出 AST，`--output <path>` 显式指定文件输出，`--sysroot <path>` 指定库目录。它不会隐式读取 test.fl 或写入 ast.lisp、hir.lisp。诊断写到 stderr；成功退出 0，编译阶段或 I/O 错误退出 1，用法错误退出 2。
 
-输入为 `main.fl` 或 `lib.fl` 时，HIR/NIR 阶段把该输入的父目录作为选定源码根，按排序后的目录快照发现 `.fl` 文件；其他文件名保持单文件模式，`--emit ast` 仍导出选定文件。文件模块、无入口目录、`mod.fl` 及内联模块进入同一 HIR 包，未引用文件的语法失败不会隐藏。源码目录中的符号链接目前明确拒绝。此 driver 入口尚不代替 anar 的 package 根选择、额外源码根和生成输入协议。
+输入为 `main.fl` 或 `lib.fl` 时，HIR/NIR 阶段把该输入的父目录作为选定源码根，按排序后的目录快照发现 `.fl` 文件；其他文件名保持单文件模式，`--emit ast` 仍导出选定文件。文件模块、无入口目录、`mod.fl` 及内联模块进入同一 HIR 包，未引用文件的语法失败不会隐藏。源码目录中的符号链接目前明确拒绝。package 根选择、额外源码根和生成输入协议由 luna 的构建层继续完善。
 
 限定静态调用、模块内词法查找、跨文件类型别名、具名/通配导入与再导出已接通。导入按声明身份去重；直接声明和显式导入遮蔽通配候选，内部通配歧义在使用处报告，公开出口歧义由提供者检查。带种子的导入环和空通配环可以收敛。别名、嵌套分组、`private use` 及 `@`/前导点定位已接通。名称入口的权限与原始声明权限分开保留和检查；显式再导出可以使用合法可访问的内部别名，公开通配仅传播公开入口。权限核心有两个 package 作用域的单元验证，但实际多 package 输入/导入接线与增量源码失效尚未完成。带共同前缀的分组内部再写定位锚点目前明确拒绝。
 
@@ -388,7 +390,7 @@ Emacs 仅用于这项编辑器兼容性检查，Rust 测试没有该依赖。首
 
 离线依赖不足、工具链不兼容和代码失败分别报告。需要下载依赖时按实际权限处理，不能把网络失败写成代码失败，也不能为了获得绿色结果擅自更新 lockfile。
 
-library 与 anar 没有本轮已核实的独立测试命令。它们的首项开发工作应建立可复现入口或接入已有真实运行器，再承诺可执行覆盖。
+library 与 luna 构建层按各自已有检查入口验证；尚未接通的工程能力需建立可复现的 CLI 用例，再承诺可执行覆盖。
 
 模式矩阵实现位于 `compiler/elaboration/src/coverage.rs`，仅接收已检查的运行时模式，不进入 PTC。四项算法测试含 128 组模式集合与独立布尔值域穷举结果对照，并检验 64 字段 or 模式、关联字段中的缺口、空载荷域和预算 Unknown。源码回归覆盖 64 字段完整/不完整匹配。2026-10-07 从 `/home/fin/luna` 执行 `cargo test -p elaboration --locked --offline --target-dir /tmp/luna-dev-002/target` 退出 0（60 项，`/tmp/luna-matrix-unit.log`）；`cargo test -p luna --test execution --test elaboration --test modules --test frontend_cli --locked --offline --target-dir /tmp/luna-dev-002/target` 退出 0（54/56/27/32 项，`/tmp/luna-matrix-integration.log`）。未运行全 workspace 测试，改动保留工作区。
 
@@ -666,7 +668,7 @@ comptime_runtime 的占位加法已替换为真正的任意精度 Integer 值内
 
 用户已停用 graph engineering。默认单代理在 dev 直接开发，复用工作区与构建缓存，围绕真实功能完成实现和相关测试。按需规划语言语义和接口，不再创建任务图、调度记录或独立评分流程。
 
-luna、anar、library 和测试仍是需要推进的工作范围；依赖未就绪时推进独立部分。已有 runs 目录保留历史证据，不要求后续开发沿用其格式。
+luna 编译器、CLI 与构建、library 和测试仍是需要推进的工作范围；依赖未就绪时推进独立部分。已有 runs 目录保留历史证据，不要求后续开发沿用其格式。
 
 ## 文档交接
 

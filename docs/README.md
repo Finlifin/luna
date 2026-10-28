@@ -43,7 +43,7 @@ Flurry 是一门面向系统级编程的语言，在正确性、性能、抽象�
 | [导入与再导出](code-organization/imports-and-reexports.md) | 通配、别名、来源身份、循环与歧义 |
 | [可见性](code-organization/visibility.md) | 默认包内、private、pub 与公开入口 |
 | [内置包](code-organization/builtin-packages.md) | 六个内置包、prelude、属性与 build 上下文 |
-| [配置与脚本](code-organization/configuration-and-scripts.md) | comptime 配置、anar 调度、宏准备与生成源码 |
+| [配置与脚本](code-organization/configuration-and-scripts.md) | comptime 配置、luna 调度、宏准备与生成源码 |
 
 ---
 

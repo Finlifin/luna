@@ -21,7 +21,7 @@ macro_import -> @use path
 
 ### 配置计算
 
-配置文件使用 comptime Flurry，可以抽取函数、复用值并按输入选择结果。anar 消费工程描述和任务关系，luna 完成所需语言检查与编译。
+配置文件使用 comptime Flurry，可以抽取函数、复用值并按输入选择结果。luna 的构建层消费工程描述和任务关系，并在同一 CLI 中完成所需语言检查与编译。
 
 配置程序计算工程安排，与被编译的定义读取自身 build 上下文是两个方向。前者组织某次任务的输入，后者观察已经绑定给该构建实例的信息；不能用一份不断变化的全局对象替代所有实例。
 
@@ -142,7 +142,7 @@ Cargo 使用 TOML 描述包，并可执行 build.rs 完成准备工作；Flurry 
 
 Zig 的 build.zig 也是用语言编写构建图的实际对应物；Flurry 还需要把构造宏交付与消费者解析的先后关系纳入调度。[Zig 构建系统](https://ziglang.org/learn/build-system/)
 
-C/C++ 工程可以通过 CMake 自定义命令声明生成物和依赖。这是生成源码任务的实际替代手段；Flurry 用自己的 comptime 配置与 anar 组织相应任务。[CMake 自定义命令](https://cmake.org/cmake/help/latest/command/add_custom_command.html)
+C/C++ 工程可以通过 CMake 自定义命令声明生成物和依赖。这是生成源码任务的实际替代手段；Flurry 用自己的 comptime 配置与 luna 构建层 组织相应任务。[CMake 自定义命令](https://cmake.org/cmake/help/latest/command/add_custom_command.html)
 
 ## 运行时实现设计引导
 
