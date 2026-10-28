@@ -1706,6 +1706,109 @@ fn callable_value_flow_replaces_assignments_and_rejects_unknown_joins() {
 }
 
 #[test]
+fn closure_alternatives_keep_reads_returns_and_higher_order_calls() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn choose(flag:bool,value:str)->%{value:str} fn()->str {
+            if flag {||value} else {||{let read=value == \"static\";\"static\"}}
+        }
+        fn invoke(action:%{value:str} fn()->str)->str {action()}
+        fn selected(flag:bool,value:str)->str {let action=choose(flag,value);action()}
+        fn forwarded(flag:bool,value:str)->str {invoke(choose(flag,value))}
+        fn unknown(flag:bool,value:str,other:%{value:str} fn()->str)->str {
+            let action=if flag {choose(flag,value)} else {other};action()
+        }",
+    );
+    for name in ["selected", "forwarded"] {
+        let summary = infer(&package, name, 500_000).unwrap();
+        let expected = BTreeSet::from([Origin::Static, parameter(1, &[])]);
+        assert_eq!(summary.reads, expected);
+        assert_eq!(summary.returned.unwrap()[&vec![]], expected);
+    }
+    assert!(
+        infer(&package, "unknown", 500_000)
+            .unwrap_err()
+            .contains("stable local callable")
+    );
+    assert!(infer(&package, "selected", 1).is_err());
+    assert!(infer(&package, "selected", 500_000).is_ok());
+}
+
+#[test]
+fn closure_alternatives_evaluate_arguments_once_before_independent_storage_updates() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn run(flag:bool,a:str,b:str,c:str)->str {
+            var slot=a;let pointer=slot.ref;
+            let action:%{pointer:*str} fn(str)->str = if flag {
+                |value| {pointer.* = value;pointer.*}
+            } else {
+                |value| {let observed=value == \"read\";pointer.*}
+            };
+            let result=action(do {slot=b;c});
+            slot
+        }",
+    );
+    let summary = infer(&package, "run", 500_000).unwrap();
+    assert_eq!(
+        summary.reads,
+        BTreeSet::from([Origin::Static, parameter(3, &[])])
+    );
+    assert_eq!(
+        summary.returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(2, &[]), parameter(3, &[])])
+    );
+}
+
+#[test]
+fn closure_alternatives_conservatively_join_distinct_captures_and_diverging_reads() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn choose(flag:bool,a:str,b:str)->%{value:str} fn()->str {
+            if flag {let value=a;||value} else {let value=b;||value}
+        }
+        fn captured(flag:bool,a:str,b:str)->str {choose(flag,a,b)()}
+        fn forever()->str {forever()}
+        fn diverging(flag:bool,value:str)->str {
+            let action:%{value:str} fn()->str = if flag {||value}
+                else {||{let read=value == \"read\";forever()}};
+            action()
+        }",
+    );
+    assert_eq!(
+        infer(&package, "captured", 500_000)
+            .unwrap()
+            .returned
+            .unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[]), parameter(2, &[])])
+    );
+    let summary = infer(&package, "diverging", 500_000).unwrap();
+    assert_eq!(
+        summary.reads,
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
+    );
+    assert_eq!(
+        summary.returned.unwrap()[&vec![]],
+        BTreeSet::from([parameter(1, &[])])
+    );
+}
+
+#[test]
+fn a_valid_closure_alternative_cannot_hide_unknown_descriptor_access() {
+    let package = support::compile(
+        "typealias str=.str'builtin;
+        fn run(flag:bool,pointer:*str)->str {
+            let action:%{pointer:*str} fn()->str = if flag {
+                ||{let saved=pointer;\"static\"}
+            } else {||pointer.*};
+            action()
+        }",
+    );
+    let error = infer(&package, "run", 500_000).unwrap_err();
+    assert!(error.contains("descriptor"), "{error}");
+}
+
+#[test]
 fn aggregate_callbacks_specialize_named_calls_by_parameter_and_field_path() {
     let package = support::compile(
         "typealias str=.str'builtin;

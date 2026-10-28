@@ -141,12 +141,20 @@ enum CallbackKey {
     Named(iir::InstanceKey),
     Closure(usize),
     Alternatives(Vec<iir::InstanceKey>),
+    ClosureAlternatives(Vec<usize>),
 }
 impl fmt::Display for CallbackKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Named(key) => key.fmt(f),
             Self::Closure(id) => write!(f, "(closed-text-callback {id})"),
+            Self::ClosureAlternatives(ids) => {
+                f.write_str("(closed-text-callback-alternatives")?;
+                for id in ids {
+                    write!(f, " {id}")?;
+                }
+                f.write_str(")")
+            }
             Self::Alternatives(keys) => {
                 f.write_str("(text-callback-alternatives")?;
                 for key in keys {
@@ -341,6 +349,10 @@ fn charge_callback(code: &CallbackKey, fuel: &mut usize) -> Result<(), String> {
     let keys = match code {
         CallbackKey::Named(key) => std::slice::from_ref(key),
         CallbackKey::Alternatives(keys) => keys.as_slice(),
+        CallbackKey::ClosureAlternatives(ids) => {
+            charge(fuel, ids.len().saturating_add(1))?;
+            return Ok(());
+        }
         CallbackKey::Closure(_) => {
             charge(fuel, 1)?;
             return Ok(());
@@ -398,6 +410,21 @@ fn merge_known(
             charge_callback(key, fuel)?;
         }
         if *previous == code {
+            continue;
+        }
+        let closures = |key: &Option<CallbackKey>| match key {
+            Some(CallbackKey::Closure(id)) => Some(vec![*id]),
+            Some(CallbackKey::ClosureAlternatives(ids)) => Some(ids.clone()),
+            _ => None,
+        };
+        if let (Some(mut left), Some(right)) = (closures(previous), closures(&code)) {
+            for id in right {
+                charge(fuel, left.len().saturating_add(1))?;
+                if !left.contains(&id) {
+                    left.push(id);
+                }
+            }
+            *previous = Some(CallbackKey::ClosureAlternatives(left));
             continue;
         }
         let names = |key: &Option<CallbackKey>| match key {
@@ -946,7 +973,9 @@ impl Query<'_, '_> {
 
     fn code_value(&self, key: &CallbackKey, expr: &Expr) -> Result<CodeValue, String> {
         match key {
-            CallbackKey::Alternatives(_) => Err("multiple text callees require dispatch".into()),
+            CallbackKey::Alternatives(_) | CallbackKey::ClosureAlternatives(_) => {
+                Err("multiple text callees require dispatch".into())
+            }
             CallbackKey::Closure(id) => {
                 let code = self
                     .closed_closures
@@ -976,7 +1005,12 @@ impl Query<'_, '_> {
             .code
             .get(&vec![])
             .and_then(Option::as_ref)
-            .filter(|key| !matches!(key, CallbackKey::Alternatives(_)))
+            .filter(|key| {
+                !matches!(
+                    key,
+                    CallbackKey::Alternatives(_) | CallbackKey::ClosureAlternatives(_)
+                )
+            })
             .map(|key| self.code_value(key, expr))
             .transpose()
     }
@@ -1219,7 +1253,7 @@ impl Query<'_, '_> {
                             kind,
                         })
                     }
-                    CallbackKey::Alternatives(_) => continue,
+                    CallbackKey::Alternatives(_) | CallbackKey::ClosureAlternatives(_) => continue,
                     CallbackKey::Closure(id) => {
                         let closed = self
                             .closed_closures
@@ -1776,6 +1810,222 @@ impl Query<'_, '_> {
         }
         Ok(output)
     }
+    fn invoke_closed_callback(
+        &mut self,
+        resolved: &CodeValue,
+        environment: &Regions,
+        actual: &[(usize, Regions, Option<CodeValue>)],
+        locals: &mut Locals,
+        depth: usize,
+    ) -> Result<Option<Regions>, String> {
+        let K::Closure {
+            parameters,
+            captures,
+            body,
+        } = &resolved.expression.kind
+        else {
+            return Err("text closure alternative has no closure body".into());
+        };
+        charge(self.fuel, parameters.len().saturating_add(captures.len()))?;
+        let mut scope = Locals::new();
+        for (index, capture) in captures.iter().enumerate() {
+            charge_regions(environment, self.fuel)?;
+            let value = project(environment.clone(), &[index], self.fuel)?;
+            if scope.insert(capture.binding, value).is_some() {
+                return Err("duplicate text closure capture binding".into());
+            }
+        }
+        let mut input_code = Vec::new();
+        for (parameter, value, callable) in actual {
+            charge_regions(value, self.fuel)?;
+            if scope
+                .insert(parameters[*parameter], value.clone())
+                .is_some()
+            {
+                return Err("text closure parameter overlaps another binding".into());
+            }
+            input_code.push((parameters[*parameter], callable.clone()));
+        }
+        let mut storage_map = BTreeMap::new();
+        let mut storage_restore = BTreeMap::new();
+        // Start at pointer-bearing inputs, then follow descriptor
+        // addresses transitively. Unrelated caller locals are not
+        // part of the closure's storage footprint.
+        let mut reachable = VecDeque::new();
+        for value in scope.values() {
+            charge_regions(value, self.fuel)?;
+            reachable.extend(
+                value
+                    .places
+                    .values()
+                    .flatten()
+                    .flatten()
+                    .map(|(root, _)| *root),
+            );
+        }
+        while let Some(source) = reachable.pop_front() {
+            charge(self.fuel, 1)?;
+            if storage_map.contains_key(&source) {
+                continue;
+            }
+            let value = locals
+                .get_storage(&source)
+                .ok_or("text closure descriptor storage is no longer live")?;
+            charge_regions(value, self.fuel)?;
+            let id = self.next_storage_frame;
+            self.next_storage_frame = id
+                .checked_add(1)
+                .ok_or("text storage frame identity exhausted")?;
+            let target = DescriptorRoot::Frame(id);
+            storage_map.insert(source, target);
+            storage_restore.insert(target, source);
+            reachable.extend(
+                value
+                    .places
+                    .values()
+                    .flatten()
+                    .flatten()
+                    .map(|(root, _)| *root),
+            );
+            scope.frames.insert(id, value.clone());
+        }
+        for value in scope.bindings.values_mut().chain(scope.frames.values_mut()) {
+            charge_regions(value, self.fuel)?;
+            remap_descriptor_roots(value, &storage_map);
+        }
+        let closed_context = resolved.closure;
+        let previous_context = if let Some(id) = closed_context {
+            let context = &self.closed_closures[id];
+            charge(self.fuel, context.cost)?;
+            Some((
+                std::mem::replace(&mut self.local_callables, context.definitions.clone()),
+                std::mem::replace(&mut self.changed_callables, context.changed.clone()),
+            ))
+        } else {
+            None
+        };
+        // Install invocation-local code only after every input has
+        // been evaluated in the caller's environment.
+        for (binding, callable) in &mut input_code {
+            let old = if self.changed_callables.contains(binding) {
+                self.local_callables.remove(binding)
+            } else if let Some(code) = callable.take() {
+                self.local_callables.insert(*binding, code)
+            } else {
+                self.local_callables.remove(binding)
+            };
+            *callable = old;
+        }
+        let outer_loops = std::mem::take(&mut self.loops);
+        self.exits.push(Some(ExitRegions {
+            bindings: scope.keys().copied().collect(),
+            locals: None,
+        }));
+        let mut closure_returns = None;
+        let completed = self.expr(body, &mut scope, &mut closure_returns, depth);
+        let completed = completed.and_then(|value| {
+            if value.is_some() {
+                self.record_exit(&scope)?;
+            }
+            Ok(value)
+        });
+        let exit = self.exits.pop().unwrap().unwrap().locals;
+        self.loops = outer_loops;
+        for (binding, previous) in input_code {
+            self.local_callables.remove(&binding);
+            if let Some(previous) = previous {
+                self.local_callables.insert(binding, previous);
+            }
+        }
+        if let Some((definitions, changed)) = previous_context {
+            self.local_callables = definitions;
+            self.changed_callables = changed;
+        }
+        merge(&mut closure_returns, completed?, self.fuel)?;
+        if let Some(value) = &mut closure_returns {
+            let mut exit = exit.ok_or("text closure has no normal exit storage")?;
+            for value in std::iter::once(&mut *value).chain(exit.frames.values_mut()) {
+                charge_regions(value, self.fuel)?;
+                for (root, _) in value.places.values().flatten().flatten() {
+                    if !storage_restore.contains_key(root) {
+                        return Err("text descriptor address escapes its closure frame".into());
+                    }
+                }
+                remap_descriptor_roots(value, &storage_restore);
+            }
+            for (target, source) in &storage_restore {
+                let DescriptorRoot::Frame(id) = target else {
+                    unreachable!()
+                };
+                let value = exit
+                    .frames
+                    .remove(id)
+                    .ok_or("text closure lost caller storage")?;
+                *locals
+                    .get_storage_mut(source)
+                    .ok_or("text closure caller storage is no longer live")? = value;
+            }
+        }
+        Ok(closure_returns)
+    }
+
+    fn closed_callback_choices(
+        &mut self,
+        candidates: &[usize],
+        environment: &Regions,
+        callee: &Expr,
+        arguments: &[nir::program::CallArgument],
+        parameter_bindings: &[LocalId],
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        depth: usize,
+    ) -> Result<Option<Regions>, String> {
+        if candidates.is_empty() {
+            return Err("text closure candidates are empty".into());
+        }
+        if arguments.iter().any(|argument| argument.is_default) {
+            return Err("text closure default arguments are not supported".into());
+        }
+        for id in candidates {
+            charge(self.fuel, 1)?;
+            let code = self.code_value(&CallbackKey::Closure(*id), callee)?;
+            let K::Closure { parameters, .. } = &code.expression.kind else {
+                return Err("text closure candidate is invalid".into());
+            };
+            validate_argument_plan(arguments, parameter_bindings, parameters.len())?;
+        }
+        let mut actual = Vec::new();
+        for argument in arguments {
+            let Some(value) = self.expr(&argument.value, locals, returned, depth)? else {
+                return Ok(None);
+            };
+            let code = self.result_code(&value, &argument.value)?;
+            actual.push((argument.parameter, value, code));
+        }
+        if candidates.len() == 1 {
+            let resolved = self.code_value(&CallbackKey::Closure(candidates[0]), callee)?;
+            return self.invoke_closed_callback(&resolved, environment, &actual, locals, depth);
+        }
+        let bindings = locals.keys().copied().collect::<Vec<_>>();
+        let mut exits = None;
+        let mut output = None;
+        for id in candidates {
+            charge(self.fuel, 1)?;
+            let resolved = self.code_value(&CallbackKey::Closure(*id), callee)?;
+            let mut scope = self.locals_copy(locals)?;
+            let result =
+                self.invoke_closed_callback(&resolved, environment, &actual, &mut scope, depth)?;
+            if result.is_some() {
+                join_locals(&mut exits, &scope, &bindings, self.fuel)?;
+            }
+            merge(&mut output, result, self.fuel)?;
+        }
+        if let Some(exits) = exits {
+            *locals = exits;
+        }
+        Ok(output)
+    }
+
     fn expr(
         &mut self,
         expr: &Expr,
@@ -2304,173 +2554,38 @@ impl Query<'_, '_> {
                         next,
                     );
                 }
+                if let Some(Some(CallbackKey::ClosureAlternatives(candidates))) =
+                    callee_value.code.get(&vec![])
+                {
+                    return self.closed_callback_choices(
+                        candidates,
+                        &callee_value,
+                        callee,
+                        arguments,
+                        parameter_bindings,
+                        locals,
+                        returned,
+                        next,
+                    );
+                }
                 let resolved = self.result_code(&callee_value, callee)?.ok_or(
                     "text region call requires a named concrete callee or stable local callable",
                 )?;
                 let code = resolved.expression.as_ref();
-                if let K::Closure {
-                    parameters,
-                    captures,
-                    body,
-                } = &code.kind
-                {
-                    charge(self.fuel, parameters.len().saturating_add(captures.len()))?;
-                    validate_argument_plan(arguments, parameter_bindings, parameters.len())?;
-                    if arguments.iter().any(|argument| argument.is_default) {
-                        return Err("text closure default arguments are not supported".into());
-                    }
-                    // Construct the environment before evaluating inputs: an
-                    // argument may replace a caller slot already captured here.
-                    let environment = callee_value;
-                    let mut scope = Locals::new();
-                    for (index, capture) in captures.iter().enumerate() {
-                        charge_regions(&environment, self.fuel)?;
-                        let value = project(environment.clone(), &[index], self.fuel)?;
-                        if scope.insert(capture.binding, value).is_some() {
-                            return Err("duplicate text closure capture binding".into());
-                        }
-                    }
-                    let mut input_code = Vec::new();
-                    for argument in arguments {
-                        let Some(value) = self.expr(&argument.value, locals, returned, next)?
-                        else {
-                            return Ok(None);
-                        };
-                        let callable = self.result_code(&value, &argument.value)?;
-                        if scope
-                            .insert(parameters[argument.parameter], value)
-                            .is_some()
-                        {
-                            return Err("text closure parameter overlaps another binding".into());
-                        }
-                        input_code.push((parameters[argument.parameter], callable));
-                    }
-                    let mut storage_map = BTreeMap::new();
-                    let mut storage_restore = BTreeMap::new();
-                    // Start at pointer-bearing inputs, then follow descriptor
-                    // addresses transitively. Unrelated caller locals are not
-                    // part of the closure's storage footprint.
-                    let mut reachable = VecDeque::new();
-                    for value in scope.values() {
-                        charge_regions(value, self.fuel)?;
-                        reachable.extend(
-                            value
-                                .places
-                                .values()
-                                .flatten()
-                                .flatten()
-                                .map(|(root, _)| *root),
-                        );
-                    }
-                    while let Some(source) = reachable.pop_front() {
-                        charge(self.fuel, 1)?;
-                        if storage_map.contains_key(&source) {
-                            continue;
-                        }
-                        let value = locals
-                            .get_storage(&source)
-                            .ok_or("text closure descriptor storage is no longer live")?;
-                        charge_regions(value, self.fuel)?;
-                        let id = self.next_storage_frame;
-                        self.next_storage_frame = id
-                            .checked_add(1)
-                            .ok_or("text storage frame identity exhausted")?;
-                        let target = DescriptorRoot::Frame(id);
-                        storage_map.insert(source, target);
-                        storage_restore.insert(target, source);
-                        reachable.extend(
-                            value
-                                .places
-                                .values()
-                                .flatten()
-                                .flatten()
-                                .map(|(root, _)| *root),
-                        );
-                        scope.frames.insert(id, value.clone());
-                    }
-                    for value in scope.bindings.values_mut().chain(scope.frames.values_mut()) {
-                        charge_regions(value, self.fuel)?;
-                        remap_descriptor_roots(value, &storage_map);
-                    }
-                    let closed_context = resolved.closure;
-                    let previous_context = if let Some(id) = closed_context {
-                        let context = &self.closed_closures[id];
-                        charge(self.fuel, context.cost)?;
-                        Some((
-                            std::mem::replace(
-                                &mut self.local_callables,
-                                context.definitions.clone(),
-                            ),
-                            std::mem::replace(&mut self.changed_callables, context.changed.clone()),
-                        ))
-                    } else {
-                        None
-                    };
-                    // Install invocation-local code only after every input has
-                    // been evaluated in the caller's environment.
-                    for (binding, callable) in &mut input_code {
-                        let old = if self.changed_callables.contains(binding) {
-                            self.local_callables.remove(binding)
-                        } else if let Some(code) = callable.take() {
-                            self.local_callables.insert(*binding, code)
-                        } else {
-                            self.local_callables.remove(binding)
-                        };
-                        *callable = old;
-                    }
-                    let outer_loops = std::mem::take(&mut self.loops);
-                    self.exits.push(Some(ExitRegions {
-                        bindings: scope.keys().copied().collect(),
-                        locals: None,
-                    }));
-                    let mut closure_returns = None;
-                    let completed = self.expr(body, &mut scope, &mut closure_returns, next);
-                    let completed = completed.and_then(|value| {
-                        if value.is_some() {
-                            self.record_exit(&scope)?;
-                        }
-                        Ok(value)
-                    });
-                    let exit = self.exits.pop().unwrap().unwrap().locals;
-                    self.loops = outer_loops;
-                    for (binding, previous) in input_code {
-                        self.local_callables.remove(&binding);
-                        if let Some(previous) = previous {
-                            self.local_callables.insert(binding, previous);
-                        }
-                    }
-                    if let Some((definitions, changed)) = previous_context {
-                        self.local_callables = definitions;
-                        self.changed_callables = changed;
-                    }
-                    merge(&mut closure_returns, completed?, self.fuel)?;
-                    if let Some(value) = &mut closure_returns {
-                        let mut exit = exit.ok_or("text closure has no normal exit storage")?;
-                        for value in std::iter::once(&mut *value).chain(exit.frames.values_mut()) {
-                            charge_regions(value, self.fuel)?;
-                            for (root, _) in value.places.values().flatten().flatten() {
-                                if !storage_restore.contains_key(root) {
-                                    return Err(
-                                        "text descriptor address escapes its closure frame".into(),
-                                    );
-                                }
-                            }
-                            remap_descriptor_roots(value, &storage_restore);
-                        }
-                        for (target, source) in &storage_restore {
-                            let DescriptorRoot::Frame(id) = target else {
-                                unreachable!()
-                            };
-                            let value = exit
-                                .frames
-                                .remove(id)
-                                .ok_or("text closure lost caller storage")?;
-                            *locals
-                                .get_storage_mut(source)
-                                .ok_or("text closure caller storage is no longer live")? = value;
-                        }
-                    }
-                    return Ok(closure_returns);
+                if matches!(code.kind, K::Closure { .. }) {
+                    let id = resolved
+                        .closure
+                        .ok_or("text closure has no closed identity")?;
+                    return self.closed_callback_choices(
+                        &[id],
+                        &callee_value,
+                        callee,
+                        arguments,
+                        parameter_bindings,
+                        locals,
+                        returned,
+                        next,
+                    );
                 }
                 let (declaration, types) = match &code.kind {
                     K::Function(id) => (*id, &[][..]),

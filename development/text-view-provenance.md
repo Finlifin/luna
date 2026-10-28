@@ -1,5 +1,24 @@
 # Text iteration prerequisite: borrowed storage provenance
 
+## Finite closure alternatives
+
+Text dependency analysis retains finite alternatives of closed closure code.
+These alternatives can pass through return values and higher-order parameters.
+The callee environment is fixed before argument evaluation, and explicit inputs
+are evaluated once. Each candidate runs from the same post-input caller storage;
+normally returning storage states join, while all candidates contribute reads.
+Unknown code and failed candidates still reject the query.
+
+Capture-field dependencies use conservative unions at branch joins. This can
+overapproximate code/environment correlations; it never picks one branch's
+origin as the sole origin of another branch's captured value. Descriptor aliases
+continue to use the existing weak-update rules. Mixed named/closure alternatives
+remain unsupported, as do closure defaults. Single-candidate calls keep their
+reachable-storage path instead of copying every caller local.
+
+This extends dependency inference only. It does not grant runtime Copy,
+authorize descriptor writes, or establish backing-character lifetimes.
+
 ## Analyzing joint inline expansion
 
 `--analyze-text-regions <entry> --inline-functions` jointly expands inline
@@ -1257,7 +1276,8 @@ replacement, unknown alternatives, escapes and budget recovery. Formatting
 passed (`/tmp/luna-tools-eltwc440/result.json`, exit 0), as did the diff check.
 This extends dependency analysis; runtime Copy legality, cleanup and backing
 character lifetime certification remain separate requirements. Callable code
-identity joins still require a single known identity for invocation.
+identity joins at that stage required a single known identity; the later
+alternative analyses below and at the top of this document extend that path.
 
 ## Finite named callable alternatives
 
@@ -1265,8 +1285,9 @@ Branch joins now preserve deduplicated alternatives of concrete named function
 instances instead of replacing every differing identity with unknown code.
 These identities travel through returns, aggregate fields, closure captures and
 higher-order parameter summaries. Unknown code remains absorbing. Different
-closure identities still require correlated code/environment alternatives and
-are not enabled by this change.
+closure identities were not enabled by the named-candidate change. The finite
+closure extension above now retains their code and conservatively joins capture
+dependencies; precise branch correlations remain a separate refinement.
 
 Named invocation has a shared input-preparation path. The callee value is fixed
 before input evaluation, and arguments are evaluated once in source order.
