@@ -1039,6 +1039,9 @@ fn fold_bit_representation<'layout>(
                     let raw = match value.kind {
                         K::Literal(Literal::SignedInteger(value)) => value as u128,
                         K::Literal(Literal::UnsignedInteger(value)) => value,
+                        K::Literal(Literal::Float16(value) | Literal::BFloat16(value)) => {
+                            u128::from(value)
+                        }
                         K::Literal(Literal::Float32(value)) => u128::from(value),
                         K::Literal(Literal::Float64(value)) => u128::from(value),
                         K::Literal(Literal::Char(value)) => u128::from(u32::from(value)),
@@ -1076,6 +1079,8 @@ fn fold_bit_representation<'layout>(
                         .rev()
                         .fold(0u128, |raw, word| (raw << 32) | u128::from(*word));
                     return Ok(match primitive {
+                        Primitive::F16 => Literal::Float16(raw as u16),
+                        Primitive::Bf16 => Literal::BFloat16(raw as u16),
                         Primitive::F32 => Literal::Float32(raw as u32),
                         Primitive::F64 => Literal::Float64(raw as u64),
                         _ => {
@@ -4117,6 +4122,10 @@ mod tests {
     #[test]
     fn staged_bit_representations_preserve_payloads_and_reject_invalid_domains() {
         for (literal, primitive, width, words) in [
+            (Literal::Float16(0x7c01), Primitive::F16, 16, vec![0x7c01]),
+            (Literal::Float16(0x8000), Primitive::F16, 16, vec![0x8000]),
+            (Literal::BFloat16(0xffc2), Primitive::Bf16, 16, vec![0xffc2]),
+            (Literal::BFloat16(0x8000), Primitive::Bf16, 16, vec![0x8000]),
             (Literal::SignedInteger(-1), Primitive::I8, 8, vec![255]),
             (
                 Literal::SignedInteger(i128::MIN),

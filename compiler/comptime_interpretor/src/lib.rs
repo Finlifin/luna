@@ -7298,6 +7298,8 @@ impl<'a> Interpreter<'a> {
             ),
             Value::SignedInteger(_)
             | Value::UnsignedInteger(_)
+            | Value::Float16(_)
+            | Value::BFloat16(_)
             | Value::Float32(_)
             | Value::Float64(_) => {
                 let Term::Primitive(primitive) = storage_type else {
@@ -7309,6 +7311,7 @@ impl<'a> Interpreter<'a> {
                 let raw = match target {
                     Value::SignedInteger(value) => *value as u128,
                     Value::UnsignedInteger(value) => *value,
+                    Value::Float16(bits) | Value::BFloat16(bits) => u128::from(*bits),
                     Value::Float32(bits) => u128::from(*bits),
                     Value::Float64(bits) => u128::from(*bits),
                     _ => unreachable!(),
@@ -7329,7 +7332,11 @@ impl<'a> Interpreter<'a> {
                         .rev()
                         .fold(0u128, |acc, word| (acc << 32) | u128::from(*word)))
                 })?;
-                if *primitive == Primitive::F32 {
+                if *primitive == Primitive::F16 {
+                    Value::Float16(raw as u16)
+                } else if *primitive == Primitive::Bf16 {
+                    Value::BFloat16(raw as u16)
+                } else if *primitive == Primitive::F32 {
                     Value::Float32(raw as u32)
                 } else if *primitive == Primitive::F64 {
                     Value::Float64(raw as u64)
@@ -8173,6 +8180,8 @@ impl<'a> Interpreter<'a> {
                                 .fold(0u128, |acc, word| (acc << 32) | u128::from(*word)))
                         })?;
                         match primitive {
+                            Primitive::F16 => Value::Float16(value as u16),
+                            Primitive::Bf16 => Value::BFloat16(value as u16),
                             Primitive::F32 => Value::Float32(value as u32),
                             Primitive::F64 => Value::Float64(value as u64),
                             _ if self
@@ -8314,6 +8323,8 @@ impl<'a> Interpreter<'a> {
                     }
                     Value::SignedInteger(_)
                     | Value::UnsignedInteger(_)
+                    | Value::Float16(_)
+                    | Value::BFloat16(_)
                     | Value::Float32(_)
                     | Value::Float64(_)
                     | Value::Char(_) => {
@@ -8331,6 +8342,7 @@ impl<'a> Interpreter<'a> {
                         let raw = match value {
                             Value::SignedInteger(v) => v as u128,
                             Value::UnsignedInteger(v) => v,
+                            Value::Float16(bits) | Value::BFloat16(bits) => u128::from(bits),
                             Value::Float32(bits) => u128::from(bits),
                             Value::Float64(bits) => u128::from(bits),
                             Value::Char(value) => u128::from(u32::from(value)),

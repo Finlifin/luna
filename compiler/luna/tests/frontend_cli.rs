@@ -9814,3 +9814,91 @@ fn tie()->{ty} {{ let one:{ty} = 1.0; one + {midpoint} }}
         }
     }
 }
+
+#[test]
+fn sysroot_half_float_bit_views_preserve_payloads_and_write_back() {
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    for (ty, nan) in [("f16", "0x7c01"), ("bf16", "0x7f81")] {
+        sandbox.write(
+            "input.fl",
+            format!(
+                r#"
+fn roundtrip(bits: u16) -> u16 {{ bits'bitvec.as({ty})'bitvec.as(u16) }}
+fn run() -> bool {{
+    let raw: u16 = {nan};
+    var value = raw'bitvec.as({ty});
+    let snapshot = value'bitvec;
+    value'bitvec[15] = 1;
+    value'bitvec[0..4] = 0b0010;
+    roundtrip(0) == 0 and roundtrip(0x8000) == 0x8000
+        and roundtrip({nan}) == {nan}
+        and roundtrip(0xffff) == 0xffff
+        and snapshot.as(u16) == {nan}
+        and value'bitvec.as(u16) == ({nan} + 0x8001)
+}}
+comptime fn staged() -> u16 {{
+    let raw: u16 = {nan};
+    var value = raw'bitvec.as({ty});
+    value'bitvec[15] = 1;
+    value'bitvec.as(u16)
+}}
+fn folded() -> bool {{ const bits = staged(); bits == ({nan} + 0x8000) }}
+"#
+            ),
+        );
+        let base = [
+            "input.fl",
+            "--sysroot",
+            root.to_str().unwrap(),
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+        ];
+        for entry in ["run", "folded"] {
+            assert_eq!(
+                success(&sandbox.run(&[base.as_slice(), &["--interpret", entry]].concat())).trim(),
+                "(bool true)"
+            );
+            for level in ["0", "3"] {
+                success(
+                    &sandbox.run(
+                        &[
+                            base.as_slice(),
+                            &["--build", entry, "--opt-level", level, "--output", "native"],
+                        ]
+                        .concat(),
+                    ),
+                );
+                assert_eq!(
+                    success(&Command::new(sandbox.path("native")).output().unwrap()).trim(),
+                    "(bool true)"
+                );
+            }
+        }
+        for (source, diagnostic) in [
+            (
+                format!("fn bad(value: BitVec<8>) -> {ty} {{ value.as({ty}) }}"),
+                "requires exactly the target width",
+            ),
+            (
+                format!("fn bad(value: {ty}) -> u8 {{ value'bitvec.as(u8) }}"),
+                "narrowing requires an explicit slice",
+            ),
+            (
+                format!("fn bad() {{ let value: {ty} = 1.0; value'bitvec[0] = 1; }}"),
+                "cannot reassign a let binding",
+            ),
+        ] {
+            sandbox.write("input.fl", source);
+            let output = sandbox.run(&[base.as_slice(), &["--emit", "nir"]].concat());
+            failure(&output, 1);
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+                "{}",
+                details(&output)
+            );
+        }
+    }
+}

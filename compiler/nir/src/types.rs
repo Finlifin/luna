@@ -88,6 +88,7 @@ impl Primitive {
     /// must be established separately. Pointer-sized types need target data.
     pub fn unrestricted_scalar_width(self) -> Option<u32> {
         match self {
+            Self::F16 | Self::Bf16 => Some(16),
             Self::F32 => Some(32),
             Self::F64 => Some(64),
             _ => self.fixed_integer_layout().map(|(_, width)| width),
