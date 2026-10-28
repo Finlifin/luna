@@ -227,7 +227,7 @@ fn example() -> bool {
 这两种生成声明。`add_group` 声明分组，`.parent = [.net]` 指定父组路径；variant 方法用
 `.group = [.net, .nested]` 指定所属组。路径片段按顺序保存，不改变 nominal Type。
 父组必须声明；重复路径、group 与 variant 同名都会被拒绝。
-固定宽度编码、symbol 编码、泛型参数、字段默认值和属性的 enum 构造尚未接通。
+固定宽度编码、泛型参数、字段默认值和属性的 enum 构造尚未接通。
 
 可运行的 native 示例见 [host-generated-enum.fl](../../development/examples/host-generated-enum.fl)。
 
@@ -349,3 +349,37 @@ comptime fn example() -> bool {
 `python3 -B development/library_check.py --release --stage sysroot-meta`。
 该阶段在 host 测试中通过 inline if 消费 comptime 结果，检查器要求实际执行
 一项测试且没有失败，不将仅成功编译视为通过。
+
+### 显式生成 Symbol 编码 enum
+
+`EnumBuilder.BuildSymbol(codes: List<Symbol>) -> Type` 按叶变体声明顺序指定编码。
+分组不占据编码位置。变体必须是 unit 形状；即使空的 tuple/named payload 也不能
+用这个入口构造。编码数量必须匹配，重复 Symbol 在发布前拒绝。空变体列表与空编码
+列表可以构造无可用变体的 enum。
+
+```flurry
+comptime fn Protocol() -> Type {
+    var builder = meta.EnumBuilder.new(.name = .Protocol);
+    builder.add_group(.net);
+    builder.add_unit(.ready, .group = [.net]);
+    builder.add_unit(.closed);
+    builder.BuildSymbol([.wire_ready, .wire_closed])
+}
+
+typealias Message = Protocol();
+
+fn is_ready(message: Message) -> bool {
+    message match { .net.ready => true, .closed => false }
+}
+```
+
+生成类型有独立 nominal 身份，编码不会成为类型名称或 variant 的声明名称；同一草稿
+调用 `Build()` 仍生成普通 enum。`from_type` 仍只复制逻辑结构；要生成 Symbol 编码
+类型，必须显式给出 `BuildSymbol` 的编码列表，不能把它当成 ABI 克隆。
+编码表在 invocation 发布后保留到 NIR/IIR，并复用既有 Symbol enum 的构造与匹配。
+它没有额外整数判别值，也不承诺 FFI 存储形式；任意 runtime Symbol 到 enum 的受检
+转换仍未接通。
+
+真实 sysroot 示例：
+[sysroot-symbol-enum.fl](../../development/examples/sysroot-symbol-enum.fl)。
+运行 `python3 -B development/library_check.py --release --stage sysroot-symbol-enum`。

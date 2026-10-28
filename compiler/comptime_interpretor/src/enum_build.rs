@@ -2,12 +2,13 @@
 use super::*;
 
 /// Ordinary concrete variants preserve their source shape and payload order.
-/// Generic and encoded enum construction require separate publication contracts.
+/// Symbol encoding is explicit; fixed-width and generic construction remain separate.
 #[derive(Debug)]
 pub struct EnumBuildRequest {
     pub name: String,
     pub groups: Vec<String>,
     pub variants: Vec<nir::program::Variant>,
+    pub symbol_encoding: Option<nir::enum_encoding::SymbolRepresentation>,
     pub source: SourceRange,
 }
 impl EnumBuildRequest {
@@ -16,14 +17,31 @@ impl EnumBuildRequest {
         name: &str,
         groups: &[String],
         variants: &[nir::program::Variant],
+        symbol_encoding: Option<&nir::enum_encoding::SymbolRepresentation>,
         fuel: &mut usize,
     ) -> Result<(), ()> {
-        charge_enum_parts(name, groups, variants, fuel)
+        charge_enum_parts(name, groups, variants, fuel)?;
+        charge_symbol_encoding(symbol_encoding, fuel)
     }
     /// Charge descriptor assembly before cloning names or nested payload types.
     pub fn charge_assembly(&self, fuel: &mut usize) -> Result<(), ()> {
-        charge_enum_parts(&self.name, &self.groups, &self.variants, fuel)
+        charge_enum_parts(&self.name, &self.groups, &self.variants, fuel)?;
+        charge_symbol_encoding(self.symbol_encoding.as_ref(), fuel)
     }
+}
+pub(super) fn charge_symbol_encoding(
+    encoding: Option<&nir::enum_encoding::SymbolRepresentation>,
+    fuel: &mut usize,
+) -> Result<(), ()> {
+    if let Some(encoding) = encoding {
+        *fuel = fuel.checked_sub(encoding.variants().len()).ok_or(())?;
+        for variant in encoding.variants() {
+            *fuel = fuel
+                .checked_sub(variant.name.len().saturating_add(variant.value.len()))
+                .ok_or(())?;
+        }
+    }
+    Ok(())
 }
 fn charge_enum_parts(
     name: &str,
@@ -87,7 +105,11 @@ impl fmt::Display for EnumBuildRequest {
             }
             f.write_str("))")?;
         }
-        f.write_str("))")
+        f.write_str(")")?;
+        if let Some(encoding) = &self.symbol_encoding {
+            write!(f, " {encoding}")?;
+        }
+        f.write_str(")")
     }
 }
 
@@ -145,8 +167,10 @@ impl<'a> Interpreter<'a> {
             Some(shapes),
             Some(field_names),
             Some(field_types),
+            codes,
             None,
         ) = (
+            values.next(),
             values.next(),
             values.next(),
             values.next(),
@@ -242,10 +266,59 @@ impl<'a> Interpreter<'a> {
                 fields,
             });
         }
+        let symbol_encoding = if let Some(codes) = codes {
+            let codes = self.enum_symbols(codes, expr.source)?;
+            if codes.len() != variants.len() {
+                return Err(self.failure(
+                    ErrorKind::InvalidDefinition(DefinitionBuildError::SymbolCodeCount {
+                        variants: variants.len(),
+                        codes: codes.len(),
+                    }),
+                    Some(expr.source),
+                ));
+            }
+            let mut entries = Vec::with_capacity(variants.len());
+            for (variant, code) in variants.iter().zip(codes) {
+                if variant.shape != nir::program::VariantShape::Unit {
+                    return Err(self.failure(
+                        ErrorKind::InvalidDefinition(DefinitionBuildError::SymbolPayload {
+                            name: variant.name.clone(),
+                        }),
+                        Some(expr.source),
+                    ));
+                }
+                self.integer_operation(Some(expr.source), |budget| {
+                    budget.consume(variant.name.len())
+                })?;
+                entries.push(nir::enum_encoding::SymbolVariant {
+                    name: variant.name.clone(),
+                    value: code,
+                });
+            }
+            let result = self.integer_operation(Some(expr.source), |budget| {
+                match nir::enum_encoding::SymbolRepresentation::new(entries, budget) {
+                    Err(nir::enum_encoding::Error::Bits(
+                        comptime_runtime::bitvec::Error::Resource(error),
+                    )) => Err(error),
+                    other => Ok(other),
+                }
+            })?;
+            Some(result.map_err(|error| {
+                self.failure(
+                    ErrorKind::InvalidDefinition(DefinitionBuildError::SymbolEncoding {
+                        reason: error.to_string(),
+                    }),
+                    Some(expr.source),
+                )
+            })?)
+        } else {
+            None
+        };
         let request = EnumBuildRequest {
             name: name.to_string(),
             groups,
             variants,
+            symbol_encoding,
             source: expr.source,
         };
         let builder = self.enum_builder.ok_or_else(fail)?;
@@ -272,10 +345,12 @@ impl<'a> Interpreter<'a> {
             &definition.variants,
             &mut fuel,
         );
+        let charged = charged
+            .and_then(|()| charge_symbol_encoding(definition.symbol_encoding.as_ref(), &mut fuel));
         self.budget.steps -= (before - fuel) as u64;
         charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(expr.source)))?;
-        // This request describes an ordinary concrete enum. Additional ABI or
-        // generic metadata is a different descriptor, even if admission accepts it.
+        // Only the encoding explicitly requested by the caller is authorized.
+        // Generic metadata is a different descriptor, even if admission accepts it.
         if definition.name != request.name
             || definition.is_intrinsic
             || !definition.type_parameters.is_empty()
@@ -283,7 +358,7 @@ impl<'a> Interpreter<'a> {
             || !definition.requirements.is_empty()
             || !definition.capabilities.is_empty()
             || definition.encoding.is_some()
-            || definition.symbol_encoding.is_some()
+            || definition.symbol_encoding != request.symbol_encoding
             || definition.groups != request.groups
             || definition.variants != request.variants
         {

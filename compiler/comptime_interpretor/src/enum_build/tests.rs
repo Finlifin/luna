@@ -96,7 +96,7 @@ fn prepared<'a>(
             groups: request.groups.clone(),
             variants: request.variants.clone(),
             encoding: None,
-            symbol_encoding: None,
+            symbol_encoding: request.symbol_encoding.clone(),
         }]
         .into(),
         commit,
@@ -495,4 +495,110 @@ fn ordinary_struct_builder_rejects_host_added_metadata_before_commit() {
         );
         assert_eq!(commits.get(), 1);
     }
+}
+
+fn symbol_input(codes: &[&str]) -> Value {
+    let Value::Tuple(mut values) = input("unit") else {
+        unreachable!()
+    };
+    values[4] = Value::List {
+        ty: list(list(p(Primitive::Symbol))),
+        values: vec![symbols(&[])],
+    };
+    values[5] = Value::List {
+        ty: list(list(p(Primitive::Type))),
+        values: vec![Value::TypeList(vec![])],
+    };
+    values.push(symbols(codes));
+    Value::Tuple(values)
+}
+fn symbol_expression() -> Expr {
+    let mut expr = expression();
+    let K::BuildEnum(inner) = &mut expr.kind else {
+        unreachable!()
+    };
+    let Term::Tuple(types) = &mut inner.ty else {
+        unreachable!()
+    };
+    types.push(list(p(Primitive::Symbol)));
+    expr
+}
+#[test]
+fn symbol_enum_builder_installs_encoding_and_rejects_host_replacement() {
+    let world = world();
+    let commits = Cell::new(0);
+    let tamper = Cell::new(true);
+    let builder = |request: &EnumBuildRequest, _: &mut u64| {
+        assert!(request.to_string().contains("(symbol-encoding"));
+        let mut result = prepared(
+            request,
+            Box::new(|| {
+                commits.set(commits.get() + 1);
+                Ok(())
+            }),
+        );
+        if tamper.get() {
+            Arc::make_mut(&mut result.definitions)[0].symbol_encoding = Some(
+                nir::enum_encoding::SymbolRepresentation::new(
+                    vec![nir::enum_encoding::SymbolVariant {
+                        name: "Group.Data".into(),
+                        value: "wrong".into(),
+                    }],
+                    &mut comptime_runtime::Budget::default(),
+                )
+                .unwrap(),
+            );
+        }
+        Ok(result)
+    };
+    let mut vm = Interpreter::for_comptime(&world, Budget::default())
+        .unwrap()
+        .with_enum_builder(&builder);
+    let error = vm
+        .eval(&symbol_expression(), &mut env(symbol_input(&["wire"])))
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Type);
+    assert_eq!(commits.get(), 0);
+    assert!(!vm.enums.contains_key(&id(10)));
+    tamper.set(false);
+    vm.eval(&symbol_expression(), &mut env(symbol_input(&["wire"])))
+        .unwrap();
+    assert_eq!(commits.get(), 1);
+    assert_eq!(
+        vm.enums[&id(10)]
+            .symbol_encoding
+            .as_ref()
+            .unwrap()
+            .encode(0),
+        Some("wire")
+    );
+}
+#[test]
+fn symbol_enum_builder_rejects_code_count_before_calling_host() {
+    let world = world();
+    let calls = Cell::new(0);
+    let builder = |request: &EnumBuildRequest, _: &mut u64| {
+        calls.set(calls.get() + 1);
+        Ok(prepared(request, Box::new(|| Ok(()))))
+    };
+    let mut vm = Interpreter::for_comptime(&world, Budget::default())
+        .unwrap()
+        .with_enum_builder(&builder);
+    for codes in [&[][..], &["a", "b"][..]] {
+        let error = vm
+            .eval(&symbol_expression(), &mut env(symbol_input(codes)))
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            ErrorKind::InvalidDefinition(DefinitionBuildError::SymbolCodeCount {
+                variants: 1,
+                codes: codes.len()
+            })
+        );
+        assert_eq!(error.source, Some(symbol_expression().source));
+        assert_eq!(calls.get(), 0);
+    }
+    vm.eval(&symbol_expression(), &mut env(symbol_input(&["wire"])))
+        .unwrap();
+    assert_eq!(calls.get(), 1);
 }

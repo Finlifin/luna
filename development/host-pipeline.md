@@ -4563,3 +4563,37 @@ checks reflexive Type identity and inspects the preserved NIR head instead.
 Enum ABI encodings, generic declaration builders, field defaults, attributes,
 and function/trait/impl builders remain separate incomplete work. These editor
 methods do not claim complete SoA/definition-builder support.
+
+
+### Symbol-encoded enum construction through meta builders
+
+`meta.EnumBuilder.BuildSymbol(codes)` now publishes a fresh nominal enum using
+an explicit Symbol encoding for each leaf in declaration order. Groups do not
+consume code entries. Unit shape, code count and disjoint codes are checked
+before the host callback; the returned encoding must match the request before
+commit. Ordinary `Build` remains unencoded. Both VM admission and elaboration
+registration account for encoding data when copying or comparing descriptors.
+Fixed-width and generic enum construction remain unimplemented.
+
+Validation (working directory `/home/fin/luna`):
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations`:
+  65 passed, `/tmp/luna-tools-_o2iz6vd/result.json`. Covers code preservation,
+  fresh identities, ordinary/symbol builds from one draft, empty definitions,
+  mismatched counts, duplicate codes and payload rejection.
+- `python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib`:
+  173 passed, `/tmp/luna-tools-_3zzx9si/result.json`. Includes host replacement
+  rejection before commit and a successful same-VM retry.
+- `python3 -B development/library_check.py --release --timeout 900 --stage sysroot-symbol-enum --stage sysroot-enum-builder`:
+  both selected stages passed, two native cases each;
+  `/tmp/luna-library-zqi754hb/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-symbol-enum.fl --sysroot library --test-native --opt-level 3`:
+  two passed, `/tmp/luna-tools-q43hojwv/result.json`. Exercises generated enum
+  values, parameter/return transport, grouped matching and reflection.
+- `python3 -B -m unittest discover -s development -p test_library_check.py`:
+  13 passed, including exact native case counts for the new stage.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed, `/tmp/luna-tools-o2tbts4d/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test allocated_definition_publisher`:
+  four passed, `/tmp/luna-tools-sb2jgs_8/result.json`; allocation, abandoned/stale
+  publication, budget exhaustion and request dump regressions remain intact.

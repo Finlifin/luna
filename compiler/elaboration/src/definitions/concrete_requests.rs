@@ -70,7 +70,7 @@ impl CheckedDefinitionPublisher<'_> {
                 groups: request.groups.clone(),
                 variants: request.variants.clone(),
                 encoding: None,
-                symbol_encoding: None,
+                symbol_encoding: request.symbol_encoding.clone(),
             }]
             .into();
             let prepared =

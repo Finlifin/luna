@@ -20,6 +20,16 @@ pub enum DefinitionBuildError {
         names: usize,
         types: usize,
     },
+    SymbolCodeCount {
+        variants: usize,
+        codes: usize,
+    },
+    SymbolPayload {
+        name: String,
+    },
+    SymbolEncoding {
+        reason: String,
+    },
     InvalidPath,
 }
 
@@ -49,6 +59,14 @@ impl fmt::Display for DefinitionBuildError {
                 Q(name),
                 Q(shape)
             )?,
+            Self::SymbolCodeCount { variants, codes } => write!(
+                f,
+                "(symbol-code-count (variants {variants}) (codes {codes}))"
+            )?,
+            Self::SymbolPayload { name } => write!(f, "(symbol-payload (name {}))", Q(name))?,
+            Self::SymbolEncoding { reason } => {
+                write!(f, "(symbol-encoding (reason {}))", Q(reason))?
+            }
             Self::InvalidPath => {
                 f.write_str("(invalid-path (expected nonempty-symbol-segments-without-dots))")?
             }

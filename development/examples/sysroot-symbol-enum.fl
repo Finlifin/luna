@@ -1,0 +1,39 @@
+{- Build a nominal Symbol-encoded protocol with grouped entry points. -}
+comptime fn Protocol() -> Type {
+    var builder = meta.EnumBuilder.new(.name = .Protocol);
+    builder.add_group(.net);
+    builder.add_unit(.ready, .group = [.net]);
+    builder.add_unit(.waiting, .group = [.net]);
+    builder.add_unit(.closed);
+    builder.BuildSymbol([.wire_ready, .wire_waiting, .wire_closed])
+}
+
+typealias Message = Protocol();
+
+fn is_ready(message: Message) -> bool {
+    message match {
+        .net.ready => true,
+        .net.waiting => false,
+        .closed => false,
+    }
+}
+
+fn relay(message: Message) -> Message { message }
+
+test generated_symbol_enum_values {
+    let ready = is_ready(relay(Message.net.ready));
+    let waiting = is_ready(relay(Message.net.waiting));
+    let closed = is_ready(relay(Message.closed));
+    assumes ready and not waiting and not closed;
+}
+
+comptime fn inspect() -> bool {
+    let paths = meta.enum_variant_paths(Message);
+    let shapes = meta.enum_variant_shapes(Message);
+    meta.length(paths) == 3 and paths[0][0] == .net and paths[0][1] == .ready
+        and paths[2][0] == .closed and shapes[0] == .unit
+}
+
+test generated_symbol_enum_reflection {
+    inline if inspect() { assumes true; } else { assumes false; };
+}

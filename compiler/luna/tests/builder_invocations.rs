@@ -2282,3 +2282,97 @@ fn enum_builder_nested_group_edits_preserve_opaque_payload_types() {
         assert_eq!(arguments, &vec![nir::Term::Primitive(nir::Primitive::Bool)]);
     }
 }
+
+#[test]
+fn symbol_enum_builder_preserves_requested_codes_and_fresh_identity() {
+    let fixture = Fixture::new(
+        "comptime fn inspect()->bool {
+        var builder=meta.EnumBuilder.new(.name=.Wire);
+        builder.add_group(.net);
+        builder.add_unit(.ready,.group=[.net]); builder.add_unit(.closed);
+        let first=builder.BuildSymbol([.wire_ready,.wire_closed]);
+        let second=builder.BuildSymbol([.other_ready,.other_closed]);
+        let ordinary=builder.Build();
+        let paths=meta.enum_variant_paths(first);
+        first != second and first != ordinary and paths[0][0]==.net and paths[0][1]==.ready
+    }",
+    );
+    let (Artifact::Nir(package), value, _) = fixture.invoke_meta("inspect").unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(value, Value::Bool(true));
+    let generated: Vec<_> = package
+        .enums
+        .iter()
+        .filter(|item| item.name == "Wire")
+        .collect();
+    assert_eq!(generated.len(), 3);
+    let codes: Vec<_> = generated
+        .iter()
+        .filter_map(|item| item.symbol_encoding.as_ref())
+        .collect();
+    assert_eq!(codes.len(), 2);
+    assert!(
+        codes
+            .iter()
+            .any(|item| item.encode(0) == Some("wire_ready")
+                && item.encode(1) == Some("wire_closed"))
+    );
+    assert!(
+        codes
+            .iter()
+            .any(|item| item.encode(0) == Some("other_ready"))
+    );
+    assert!(
+        codes
+            .iter()
+            .all(|item| item.variants()[0].name == "net.ready")
+    );
+}
+
+#[test]
+fn symbol_enum_builder_rejects_mismatched_codes_duplicates_and_payloads() {
+    for (members, codes) in [
+        ("builder.add_unit(.one);", "[]"),
+        ("builder.add_unit(.one);", "[.a,.b]"),
+        (
+            "builder.add_unit(.one);builder.add_unit(.two);",
+            "[.same,.same]",
+        ),
+        ("builder.add_tuple(.one,[bool]);", "[.a]"),
+        ("builder.add_named(.one,[.flag],[bool]);", "[.a]"),
+        ("builder.add_tuple(.one,[]);", "[.a]"),
+    ] {
+        let fixture = Fixture::new(&format!(
+            "comptime fn Make()->.Type'builtin {{var builder=meta.EnumBuilder.new();{members}builder.BuildSymbol({codes})}}"
+        ));
+        assert!(
+            fixture.invoke_meta("Make").is_err(),
+            "accepted {members} {codes}"
+        );
+    }
+}
+
+#[test]
+fn symbol_enum_builder_accepts_empty_definition() {
+    let fixture =
+        Fixture::new("comptime fn Make()->.Type'builtin {meta.EnumBuilder.new().BuildSymbol([])}");
+    let (Artifact::Nir(package), Value::Type(nir::Term::Nominal { declaration, .. }), _) =
+        fixture.invoke_meta("Make").unwrap()
+    else {
+        panic!("expected generated Type")
+    };
+    let generated = package
+        .enums
+        .iter()
+        .find(|item| item.declaration == declaration)
+        .unwrap();
+    assert!(
+        generated
+            .symbol_encoding
+            .as_ref()
+            .unwrap()
+            .variants()
+            .is_empty()
+    );
+}

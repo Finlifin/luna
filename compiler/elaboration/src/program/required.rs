@@ -1178,6 +1178,7 @@ impl Checker<'_, '_> {
                     &definition.name,
                     &definition.groups,
                     &definition.variants,
+                    definition.symbol_encoding.as_ref(),
                     &mut fuel,
                 );
                 self.required_steps -= (before - fuel) as u64;

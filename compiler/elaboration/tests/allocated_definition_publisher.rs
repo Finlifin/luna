@@ -33,6 +33,7 @@ fn structure(field: Term) -> StructBuildRequest {
 }
 fn enumeration(field: Term) -> EnumBuildRequest {
     EnumBuildRequest {
+        symbol_encoding: None,
         name: "GeneratedEnum".into(),
         groups: vec!["Group".into()],
         source: source(),

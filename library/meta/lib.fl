@@ -478,6 +478,14 @@ impl EnumBuilder {
     pub comptime fn Build(self) -> .Type'builtin {
         .build_enum_paths'builtin(self.name, self.groups, self.variant_names, self.shapes, self.field_names, self.field_types)
     }
+
+    {- Codes correspond to leaf variants in declaration order. Symbol encoding
+       requires unit variants and rejects repeated codes during BuildSymbol. -}
+    pub comptime fn BuildSymbol(self, codes: List<.Symbol'builtin>) -> .Type'builtin {
+        .build_symbol_enum_paths'builtin(self.name, self.groups, self.variant_names,
+            self.shapes, self.field_names, self.field_types, codes)
+    }
+
 }
 
 pub mod prelude {

@@ -314,6 +314,7 @@ impl Checker<'_, '_> {
         args: &[Arg<'_>],
         expected: Option<&Term>,
         segmented_paths: bool,
+        symbol_encoding: bool,
     ) -> Result<n::Expr, Error> {
         if self.runtime_value_context() || self.in_code_body {
             return Err(error(
@@ -321,6 +322,17 @@ impl Checker<'_, '_> {
                 "enum construction requires comptime invocation",
             ));
         }
+        let (args, codes) = if symbol_encoding {
+            let Some((Arg::Positional(codes), args)) = args.split_last() else {
+                return Err(error(
+                    expr.span,
+                    "Symbol enum construction requires an encoding list",
+                ));
+            };
+            (args, Some(codes))
+        } else {
+            (args, None)
+        };
         let [
             Arg::Positional(name),
             Arg::Positional(groups),
@@ -350,7 +362,7 @@ impl Checker<'_, '_> {
         } else {
             list(p(P::Symbol))
         };
-        let values = vec![
+        let mut values = vec![
             self.expr(name, Some(&p(P::Symbol)))?,
             self.expr(groups, Some(&paths))?,
             self.expr(names, Some(&paths))?,
@@ -358,6 +370,9 @@ impl Checker<'_, '_> {
             self.expr(field_names, Some(&list(list(p(P::Symbol)))))?,
             self.expr(field_types, Some(&list(list(p(P::Type)))))?,
         ];
+        if let Some(codes) = codes {
+            values.push(self.expr(codes, Some(&list(p(P::Symbol))))?);
+        }
         let ty = p(if values.iter().any(|value| is_never(&value.ty)) {
             P::Never
         } else {
