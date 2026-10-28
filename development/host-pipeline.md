@@ -4132,3 +4132,40 @@ python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/rele
   预算问题，不以局部缓存收益代替端到端结论。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
   通过 (`/tmp/luna-tools-kfmq_kk9/result.json`)；`git diff --check` 通过。
+
+## 内置包阶段集成与 Hash 的资源边界
+
+在 `/home/fin/luna` 执行
+`python3 -B development/library_check.py --release --timeout 900`：当时已有的
+15 个阶段全部通过，`scope=all`、退出 0，报告为
+`/tmp/luna-library-dkmraev2/summary.json`。这些阶段验证既有接口，不代表六个
+内置包的全部能力已经完成；例如 std 的分配、拥有型字符串及 I/O 仍未实现。
+
+本次将 `hash-protocols` 与 `sysroot-hash` 加入独立可选阶段及默认检查集。
+前者运行 library_hash 的双相、碰撞与边界回归；后者运行完整 sysroot 的三个
+实际 native 测试，覆盖布尔、字符、整数表示、128 位折叠、编译期/运行时整数
+Hash 一致性及 Symbol 的编译期 Hash。检查器拒绝零测试、遗漏用例或失败结果。
+数值 Hash 的既有原生回归同时改为带 Copy/Drop 的资源检查入口。
+
+实际发现的未完成路径：runtime Symbol Hash 通过 tag_name 调用字符串 Hash，
+因此在资源检查下同样需要字符串视图的 backing provenance，不能用未检查的
+LLVM 执行成功来宣称支持。新增回归要求 Symbol/str Hash 在这条资源路径明确
+拒绝；没有给 str 添加 Copy 或省略内存检查。相关实际 sysroot 失败证据为
+`/tmp/luna-tools-ezav4h8q/result.json`（退出 1）。完整 runtime Symbol Hash
+仍待字符串视图资源契约接通，不计入三个通过的 sysroot Hash 用例。
+
+第一版 fixture 直接将 comptime 函数结果交给 runtime let，被阶段检查拒绝
+(`/tmp/luna-tools-8w8c1f1m/result.json`)。最终用 inline if 消费编译期结果，
+再验证对应 runtime 数值，不将 CMTT 或隐式 Splice 当作绕过阶段边界的办法。
+
+新增检查的验证：
+
+- `python3 -B development/library_check.py --release --timeout 900 --stage hash-protocols --stage sysroot-hash`：
+  10 项协议回归、3 项实际 native 用例通过，退出 0，报告
+  `/tmp/luna-library-grolyol8/summary.json`（scope=selected）。
+- `python3 -B development/command.py --timeout 120 -- /tmp/luna-dev-002/target/release/luna development/examples/sysroot-hash.fl --sysroot library --test-native --opt-level 3`：
+  三项 O3 用例通过 (`/tmp/luna-tools-j4d819d9/result.json`)。
+- `python3 -B -m unittest discover -s development -p test_library_check.py`：
+  13 项检查器测试通过。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
+  通过 (`/tmp/luna-tools-8p4i_uik/result.json`)；`git diff --check` 通过。

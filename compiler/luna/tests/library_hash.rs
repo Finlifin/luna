@@ -103,7 +103,22 @@ fn scalar_hashes_lower_to_host_code_without_comptime_dispatch() {
     let package = support::compile(&source(
         "fn verify() {\nlet wide:u128=18446744073709551616;\nlet signed:i128=-170141183460469231731687303715884105728;\nlet wide_hash=wide.as(Hash).hash();assumes wide_hash == 1;\nlet signed_hash=signed.as(Hash).hash();assumes signed_hash == 9223372036854775808;\nlet bool_hash=true.as(Hash).hash();assumes bool_hash == 1;\n}",
     ));
-    let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
+    let protocol = |name: &str| {
+        package
+            .traits
+            .iter()
+            .find(|item| item.name == name)
+            .unwrap()
+            .declaration
+    };
+    let ir = luna::host::llvm_ir_with_protocols(
+        &package,
+        "verify",
+        1_000_000,
+        protocol("Copy"),
+        protocol("Drop"),
+    )
+    .unwrap();
     for optimization in [
         luna::host::OptimizationLevel::O0,
         luna::host::OptimizationLevel::O3,
@@ -358,4 +373,31 @@ fn text_hashes_and_equality_observe_complete_utf8_contents() {
     luna::host::Toolchain::default()
         .execute_test(&ir, std::time::Duration::from_secs(5))
         .unwrap();
+}
+
+#[test]
+fn text_backed_hashes_do_not_bypass_resource_provenance_checks() {
+    for body in [
+        "fn run()->u64 {let value:Symbol=.foobar;value.as(Hash).hash()}",
+        "fn run()->u64 {let value:str=\"foobar\";value.as(Hash).hash()}",
+    ] {
+        let package = support::compile(&source(body));
+        let protocol = |name: &str| {
+            package
+                .traits
+                .iter()
+                .find(|item| item.name == name)
+                .unwrap()
+                .declaration
+        };
+        let error = luna::host::llvm_ir_with_protocols(
+            &package,
+            "run",
+            1_000_000,
+            protocol("Copy"),
+            protocol("Drop"),
+        )
+        .unwrap_err();
+        assert!(error.contains("string-view memory provenance"), "{error}");
+    }
 }
