@@ -7,14 +7,26 @@ comptime fn values() -> bool {
     let empty_match = empty match { [] => true, _ => false };
     let optional: meta.List<?Integer> = [null, 3];
     let layers = optional match { [null, number?] => number == 3, _ => false };
-    prefix and exact and empty_match and layers
+    let first = input.as(ListPatternView).list_pattern_view_get_element_comptime(0);
+    let last = input.as(ListPatternView).list_pattern_view_get_element_comptime(2);
+    var calls: Integer = 0;
+    let produced = produce(calls.ref).as(ListPatternView).list_pattern_view_get_element_comptime(0);
+    prefix and exact and empty_match and layers and first == 1 and last == 3
+        and input.as(ListPatternView).list_pattern_view_get_len_comptime() == 3
+        and produced == 9 and calls == 1
+}
+
+comptime fn produce(calls: *Integer) -> meta.List<Integer> {
+    calls.* += 1;
+    [9]
 }
 
 pure comptime fn Identity<T> -> Type { T }
 
 comptime fn types() -> bool {
     let input: meta.List<Type> = [Identity<bool>, bool];
-    input match { [first, second] => first == Identity<bool> and second == bool, _ => false }
+    let matched = input match { [first, second] => first == Identity<bool> and second == bool, _ => false };
+    matched and input.as(ListPatternView).list_pattern_view_get_element_comptime(0) == Identity<bool>
 }
 
 test comptime_list_value_patterns {

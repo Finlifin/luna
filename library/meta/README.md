@@ -21,6 +21,21 @@ comptime fn checked_size(value: Integer) -> bool {
 例子见 [sysroot-meta-list-patterns.fl](../../development/examples/sysroot-meta-list-patterns.fl)，
 通过 `python3 -B development/library_check.py --release --stage sysroot-meta-patterns` 检查。
 
+需要直接调用模式协议方法时，用实现视角明确指定来源：
+
+```flurry
+comptime fn first() -> Integer {
+    let values: meta.List<Integer> = [10, 20];
+    values.as(ListPatternView).list_pattern_view_get_element_comptime(0)
+}
+```
+
+这里的索引是目标平台的 usize。空列表或越界索引使 invocation 失败；普通方法
+调用不会先匹配长度。仅导入 trait 不等于在当前命题上下文中声明该能力，因此
+不能把省略 `.as(ListPatternView)` 的拼写当作自动搜索所有 trait 的承诺。
+方法查找保留 List 的 normal-form 头，不要求将其展开成底层结构；实现适用性、
+参数及结果域检查仍然执行，接收者生成表达式仍只求值一次。
+
 `Object` 是编译期异构对象的公开类型别名，经 `meta.prelude` 导出。
 用户代码无需直接引用编译器内置符号：
 

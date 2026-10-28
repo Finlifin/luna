@@ -57,11 +57,29 @@ Validation from `/home/fin/luna`:
   failed pattern candidates and preserved normal-form Type heads;
   `/tmp/luna-library-rbz7j2wc/summary.json`.
 
-An initial test attempted an ordinary method call on a `meta.List<Type>` receiver
-instead of pattern syntax. That path currently reports an unresolved structural
-type view (`UnvalidatedModel`); this change does not repair ordinary method
-lookup on that normal-form receiver. The cost test deliberately exercises the
-working language-level pattern protocol, not a claim that both paths work.
+The initial unqualified method-call probe was not a valid interface-selection
+test: importing `ListPatternView` alone does not supply its capability in the
+current proposition context. Direct calls must use `.as(ListPatternView)` or
+an appropriate capability assumption. The subsequent method-subject repair
+keeps the original normal-form type when structural probing returns
+`UnvalidatedModel`, then performs ordinary implementation selection. Other
+solver failures still propagate; no normal-form body is unfolded.
+
+The regression now covers explicit interface calls, out-of-bounds errors and
+recovery on both target widths. `normal_form_methods` covers static trait
+selection and rejects inheriting bool's interface through `Identity<bool>`.
+Real-sysroot tests also verify a generated receiver runs exactly once. This
+does not grant arbitrary opaque heads implementation eligibility or permit
+inherent implementations outside the existing local-nominal ownership rule.
+
+Method-subject repair validation, from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test meta_list_pattern_cost --test normal_form_methods --test trait_phases --test extended_calls --test enum_groups --test temporary_method_cleanup -- --nocapture`:
+  exit 0, all 80 tests passed; `/tmp/luna-tools-yll_25h1/result.json`.
+- `python3 -B development/library_check.py --release --timeout 900 --stage sysroot-meta-patterns`:
+  exit 0, all three native tests passed; `/tmp/luna-library-pm4k_j92/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-ue6oyl1g/result.json`. `git diff --check` passed.
 
 ## Repeatable measurement
 

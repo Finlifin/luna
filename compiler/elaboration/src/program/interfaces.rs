@@ -21,6 +21,38 @@ pub(super) struct PendingProjection {
 }
 
 impl Checker<'_, '_> {
+    // Member selection can use the declared subject without proving a storage
+    // shape. Unknown structural evidence is not evidence of a different type;
+    // the implementation resolver must still prove its own applicability.
+    fn method_subject_view(&self, ty: &Term, span: Span) -> Result<Term, Error> {
+        if self.bound_tuple_elements(ty).is_some()
+            || !matches!(
+                ty,
+                Term::Bound { .. }
+                    | Term::AssociatedType { .. }
+                    | Term::Rigid { .. }
+                    | Term::NormalForm { .. }
+                    | Term::Hole { .. }
+            )
+        {
+            return Ok(ty.clone());
+        }
+        match self
+            .context
+            .structural_view_with_heads_metered(ty, Budget::default(), |head| {
+                Some(head) == self.protocols.tuple
+            })
+            .0
+        {
+            Ok(view) => Ok(view.map(|(ty, _)| ty).unwrap_or_else(|| ty.clone())),
+            Err(crate::ptc::UnknownReason::UnvalidatedModel) => Ok(ty.clone()),
+            Err(reason) => Err(error(
+                span,
+                format!("method subject view remains unresolved: {reason:?}; type {ty}"),
+            )),
+        }
+    }
+
     fn defer_contract_projection(
         &mut self,
         requirement: n::TraitRequirement,
@@ -1452,7 +1484,7 @@ impl Checker<'_, '_> {
         {
             subject
         } else {
-            self.type_identity_view(&subject, span)?
+            self.method_subject_view(&subject, span)?
         };
         let selected = self.selected_method(subject, interface, name, span)?;
         self.check_selected_method_access(selected.as_ref(), projection, span)?;
@@ -2230,7 +2262,7 @@ impl Checker<'_, '_> {
         {
             receiver.ty.clone()
         } else {
-            self.type_identity_view(&receiver.ty, base.span)?
+            self.method_subject_view(&receiver.ty, base.span)?
         };
         let mut depth = 0;
         let method = loop {
@@ -2281,7 +2313,7 @@ impl Checker<'_, '_> {
                 return Err(error(expr.span, "receiver dereference depth exhausted"));
             }
             depth += 1;
-            subject = self.type_identity_view(&inner, base.span)?;
+            subject = self.method_subject_view(&inner, base.span)?;
         };
         self.check_selected_method_access(Some(&method), callee.hir_id, expr.span)?;
         let has_receiver = match &method.kind {

@@ -25,7 +25,9 @@ fn compile(width: u32, legacy: bool) -> nir::program::Package {
         &format!(
             "mod meta {{ {} }} mod patterns {{ {} }} {contribution}
              comptime fn First(values:meta.List<.Type'builtin>)
-                 ->.Type'builtin {{values match {{[first, ..._] => first, _ => bool}}}}",
+                 ->.Type'builtin {{values match {{[first, ..._] => first, _ => bool}}}}
+             comptime fn Read(values:meta.List<.Type'builtin>, index:.usize'builtin)
+                 ->.Type'builtin {{values.as(ListPatternView).list_pattern_view_get_element_comptime(index)}}",
             include_str!("../../../library/meta/lib.fl"),
             include_str!("../../../library/builtin/patterns.fl"),
         ),
@@ -111,5 +113,26 @@ fn staged_list_pattern_handles_empty_input_and_budget_exhaustion() {
                 .kind,
             ErrorKind::StepsExhausted,
         );
+    }
+}
+
+#[test]
+fn ordinary_list_method_checks_indices_and_recovers_after_failure() {
+    for width in [32, 64] {
+        let package = compile(width, false);
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        for (length, index) in [(0, 0), (3, 3), (3, u32::MAX)] {
+            let mut args = arguments(length);
+            args.push(Value::UnsignedInteger(index as u128));
+            let error = vm.invoke(support::id(&package, "Read"), args).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::IndexOutOfBounds);
+            assert!(error.source.is_some());
+            let mut args = arguments(3);
+            args.push(Value::UnsignedInteger(2));
+            assert_eq!(
+                vm.invoke(support::id(&package, "Read"), args).unwrap(),
+                Value::Type(Term::Primitive(Primitive::Bool)),
+            );
+        }
     }
 }
