@@ -365,6 +365,19 @@ fn charge_node(
                         );
                         0
                     }
+                    K::BuildMetadata {
+                        selector, entries, ..
+                    } => {
+                        charge_width(steps, entries.len())?;
+                        work.push((Node::Expr(selector), depth + 1));
+                        for (alias, _, value) in entries {
+                            charge_width(steps, alias.len())?;
+                            if let Some(value) = value {
+                                work.push((Node::Type(value), depth + 1));
+                            }
+                        }
+                        0
+                    }
                     K::TypeValue(ty) | K::ComptimeValue(ty) => {
                         work.push((Node::Type(ty), depth + 1));
                         0

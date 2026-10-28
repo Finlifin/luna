@@ -120,3 +120,24 @@ python3 -B development/check.py --timeout 900 -- test --release -p luna --test b
   Object 条目类型不匹配，以及失败后的正常接纳。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`：
   通过，报告 `/tmp/luna-tools-f10axxfp/result.json`；`git diff --check` 通过。
+
+### 源码调用前的 NIR 读取操作
+
+`BuildMetadata` 保存原始 owner、显式依赖别名与 provider 身份、可选的不可变
+描述符。selector 只求值一次；VM 仅接纳选中的描述符，未选择的条目不执行。
+缺失别名和已知 provider 未提供输入分别诊断。读取只能发生在 comptime，
+进入 IIR 前必须完成物化；节点的遍历、类型替换、复制预算与 S-expression
+输出已接入。它不读取进程环境，也不展开 normal-form 头。
+
+这是源码 API 的内部执行支持，尚未把公开 `build.package_metadata` 声明和
+驱动快照连接起来，也未接入 CLI 传输与缓存失效。不能据此宣称库 API 可用。
+
+本阶段验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- check --release -p luna`：
+  通过，报告 `/tmp/luna-tools-f5gxd9ur/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --test immutable_normal_inputs`：
+  6 项通过，报告 `/tmp/luna-tools-3sc7zzyy/result.json`。覆盖 selector 单次调用、
+  未选中工厂不执行、缺失分类、错误后恢复、阶段拒绝、重复别名及 dump 转义。
+- `python3 -B development/check.py --timeout 900 -- test --release -p nir --lib`：
+  5 项通过，报告 `/tmp/luna-tools-hi_pujgu/result.json`。

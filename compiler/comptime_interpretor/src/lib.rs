@@ -1135,6 +1135,11 @@ impl Default for Budget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     InvalidDefinition(DefinitionBuildError),
+    BuildMetadataUnavailable {
+        owner: u64,
+        provider: Option<u64>,
+        alias: String,
+    },
     DivisionByZero,
     IndexOutOfBounds,
     MachineOverflow,
@@ -3972,6 +3977,50 @@ impl<'a> Interpreter<'a> {
             K::TypeList(..) => self.eval_type_list(expr, environment),
             K::BitVecType(..) => self.eval_bit_vec_type(expr, environment),
             K::Literal(..) => self.eval_literal(expr, environment),
+            K::BuildMetadata {
+                owner,
+                selector,
+                entries,
+            } => {
+                if !self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
+                }
+                let Value::String(alias) = value!(self.eval(selector, environment)) else {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                };
+                for (name, provider, value) in entries {
+                    self.integer_operation(Some(expr.source), |budget| {
+                        budget.consume(name.len().min(alias.len()).saturating_add(1))
+                    })?;
+                    if name == alias.as_ref() {
+                        let value = value.as_ref().ok_or_else(|| {
+                            self.failure(
+                                ErrorKind::BuildMetadataUnavailable {
+                                    owner: *owner,
+                                    provider: Some(*provider),
+                                    alias: alias.to_string(),
+                                },
+                                Some(expr.source),
+                            )
+                        })?;
+                        return self
+                            .decode_immutable_input(value, &expr.ty)
+                            .map(Flow::Value)
+                            .map_err(|mut error| {
+                                error.source = Some(expr.source);
+                                error
+                            });
+                    }
+                }
+                Err(self.failure(
+                    ErrorKind::BuildMetadataUnavailable {
+                        owner: *owner,
+                        provider: None,
+                        alias: alias.to_string(),
+                    },
+                    Some(expr.source),
+                ))
+            }
             K::Variant { .. } => self.eval_variant(expr, environment),
             K::Record { .. } | K::AnonymousRecord { .. } => self.eval_record(expr, environment),
             K::Object { .. } => self.eval_object(expr, environment),

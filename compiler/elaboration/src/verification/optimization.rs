@@ -147,6 +147,7 @@ fn visit(
     action(expr, limits)?;
     let depth = depth + 1;
     match &mut expr.kind {
+        K::BuildMetadata { selector, .. } => visit(selector, limits, depth, action)?,
         K::EffectHandle {
             computation,
             handlers,

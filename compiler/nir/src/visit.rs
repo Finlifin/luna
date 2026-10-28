@@ -412,6 +412,9 @@ fn walk_roots<'a>(
                     | K::ListLength(value)
                     | K::StructFieldTypes(value)
                     | K::BuildStruct(value)
+                    | K::BuildMetadata {
+                        selector: value, ..
+                    }
                     | K::BuildEnum(value)
                     | K::EnumStructure { subject: value, .. }
                     | K::ObjectQuery { subject: value, .. }
@@ -823,6 +826,9 @@ fn walk_mut(
                     | K::ListLength(value)
                     | K::StructFieldTypes(value)
                     | K::BuildStruct(value)
+                    | K::BuildMetadata {
+                        selector: value, ..
+                    }
                     | K::BuildEnum(value)
                     | K::EnumStructure { subject: value, .. }
                     | K::ObjectQuery { subject: value, .. }

@@ -3433,6 +3433,19 @@ impl Builder<'_> {
                 self.expr(a, depth + 1)?;
                 self.expr(b, depth + 1)?;
             }
+            K::BuildMetadata {
+                selector, entries, ..
+            } => {
+                if self.instances.is_some() {
+                    return Err("IIR requires package metadata materialization".into());
+                }
+                self.expr(selector, depth + 1)?;
+                for (_, _, value) in entries {
+                    if let Some(value) = value {
+                        self.queue.push_back(Task::Type(value.clone()));
+                    }
+                }
+            }
             K::ComptimeValue(ty) | K::TypeValue(ty) => {
                 if self.instances.is_some() {
                     iir::completed_type(ty, &self.runtime_bindings, &mut self.fuel)?;

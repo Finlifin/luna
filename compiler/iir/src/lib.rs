@@ -373,7 +373,7 @@ impl Package {
                         })
                     }
 
-                    K::ComptimeValue(_) => {
+                    K::ComptimeValue(_) | K::BuildMetadata { .. } => {
                         return Err("IIR requires captured comptime value materialization".into());
                     }
                     K::AssociatedValue { .. } => {

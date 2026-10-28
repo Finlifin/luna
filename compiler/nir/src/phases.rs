@@ -1531,6 +1531,37 @@ pub fn machine_arithmetic_functions(
                                 work.push(Work::Expr(e, false, ct));
                             }
                         }
+                        K::BuildMetadata {
+                            selector, entries, ..
+                        } => {
+                            if !ct {
+                                return Err(fail(
+                                    expr.source,
+                                    "package metadata requires comptime invocation",
+                                ));
+                            }
+                            if selector.ty != Term::Primitive(crate::Primitive::Str) {
+                                return Err(fail(
+                                    expr.source,
+                                    "package metadata requires a str selector",
+                                ));
+                            }
+                            let mut aliases = std::collections::BTreeSet::new();
+                            for (alias, _, value) in entries {
+                                if alias.is_empty() || !aliases.insert(alias) {
+                                    return Err(fail(
+                                        expr.source,
+                                        "ambiguous package metadata aliases",
+                                    ));
+                                }
+                                if let Some(value) = value {
+                                    value.check_scope(&[]).map_err(|_| {
+                                        fail(expr.source, "package metadata has invalid scope")
+                                    })?;
+                                }
+                            }
+                            work.push(Work::Expr(selector, false, ct));
+                        }
                         K::ComptimeValue(value) => {
                             crate::comptime_values::validate_in(
                                 value,

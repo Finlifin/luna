@@ -183,3 +183,159 @@ fn immutable_decode_requires_comptime_and_consumes_budget() {
         ErrorKind::StepsExhausted
     );
 }
+
+#[test]
+fn metadata_lookup_evaluates_selector_once_and_admits_only_selected_input() {
+    let source = SourceRange { start: 40, end: 50 };
+    let string = Term::Primitive(Primitive::Str);
+    let selector = function(
+        10,
+        vec![],
+        Expr {
+            source,
+            ty: string.clone(),
+            kind: K::Literal(Literal::String("dep".into())),
+        },
+    );
+    let lookup = function(
+        11,
+        vec![],
+        Expr {
+            source,
+            ty: boolean(),
+            kind: K::BuildMetadata {
+                owner: 5,
+                selector: Box::new(Expr {
+                    source,
+                    ty: string.clone(),
+                    kind: K::Call {
+                        parameter_bindings: vec![],
+                        arguments: vec![],
+                        callee: Box::new(Expr {
+                            source,
+                            ty: Term::Function {
+                                parameters: vec![],
+                                result: Box::new(string),
+                            }
+                            .with_comptime_phase(true),
+                            kind: K::Function(id(10)),
+                        }),
+                    },
+                }),
+                entries: vec![
+                    (
+                        "unused".into(),
+                        8,
+                        Some(Term::ClosureSnapshot {
+                            factory: id(1),
+                            arguments: vec![],
+                        }),
+                    ),
+                    ("dep".into(), 9, Some(Term::Bool(true))),
+                ],
+            },
+        },
+    );
+    let mut package = world();
+    package.functions.extend([selector, lookup]);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(vm.invoke(id(11), vec![]).unwrap(), Value::Bool(true));
+    assert_eq!(
+        vm.events()
+            .iter()
+            .filter(
+                |event| matches!(event, Event::EnterFunction(declaration) if *declaration == id(10))
+            )
+            .count(),
+        1
+    );
+    assert!(
+        !vm.events().iter().any(
+            |event| matches!(event, Event::EnterFunction(declaration) if *declaration == id(1))
+        )
+    );
+}
+
+#[test]
+fn metadata_lookup_distinguishes_missing_alias_input_and_bad_value() {
+    let source = SourceRange { start: 40, end: 50 };
+    let mut package = Package::default();
+    for (index, alias) in ["unknown", "missing", "invalid", "valid"]
+        .into_iter()
+        .enumerate()
+    {
+        package.functions.push(function(
+            20 + index as u32,
+            vec![],
+            Expr {
+                source,
+                ty: boolean(),
+                kind: K::BuildMetadata {
+                    owner: 5,
+                    selector: Box::new(Expr {
+                        source,
+                        ty: Term::Primitive(Primitive::Str),
+                        kind: K::Literal(Literal::String(alias.into())),
+                    }),
+                    entries: vec![
+                        ("missing".into(), 8, None),
+                        ("invalid".into(), 9, Some(Term::Symbol("wrong".into()))),
+                        ("valid".into(), 10, Some(Term::Bool(false))),
+                    ],
+                },
+            },
+        ));
+    }
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for (index, provider, alias) in [(20, None, "unknown"), (21, Some(8), "missing")] {
+        let error = vm.invoke(id(index), vec![]).unwrap_err();
+        assert_eq!(error.source, Some(source));
+        assert_eq!(
+            error.kind,
+            ErrorKind::BuildMetadataUnavailable {
+                owner: 5,
+                provider,
+                alias: alias.into()
+            }
+        );
+    }
+    assert_eq!(vm.invoke(id(22), vec![]).unwrap_err().kind, ErrorKind::Type);
+    assert_eq!(vm.invoke(id(23), vec![]).unwrap(), Value::Bool(false));
+}
+
+#[test]
+fn metadata_ir_checks_phase_aliases_and_escaped_dump() {
+    let source = SourceRange { start: 40, end: 50 };
+    let mut package = Package {
+        functions: vec![function(
+            30,
+            vec![],
+            Expr {
+                source,
+                ty: boolean(),
+                kind: K::BuildMetadata {
+                    owner: 5,
+                    selector: Box::new(Expr {
+                        source,
+                        ty: Term::Primitive(Primitive::Str),
+                        kind: K::Literal(Literal::String("a\\b".into())),
+                    }),
+                    entries: vec![("a\\b".into(), 9, Some(Term::Bool(true)))],
+                },
+            },
+        )],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    let dump = package.functions[0].body.to_string();
+    assert!(dump.contains("(build-metadata (owner 5)"));
+    assert!(dump.contains(r#"(alias "a\\b")"#));
+    package.functions[0].phase = FunctionPhase::Runtime;
+    assert!(nir::phases::validate(&package).is_err());
+    package.functions[0].phase = FunctionPhase::Comptime;
+    let K::BuildMetadata { entries, .. } = &mut package.functions[0].body.kind else {
+        unreachable!()
+    };
+    entries.push(entries[0].clone());
+    assert!(nir::phases::validate(&package).is_err());
+}

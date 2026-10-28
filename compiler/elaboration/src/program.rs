@@ -12174,6 +12174,7 @@ fn stable_default(expr: &n::Expr) -> bool {
     }
     match &expr.kind {
         K::Object { .. }
+        | K::BuildMetadata { .. }
         | K::Intrinsic { .. }
         | K::ErrorConvert { .. }
         | K::NewtypeConvert(_)

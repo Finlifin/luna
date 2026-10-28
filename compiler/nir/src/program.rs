@@ -988,6 +988,12 @@ pub enum ExprKind {
     /// A captured comptime value. Invocation substitutes its declaration identity;
     /// reading it never invokes or unfolds a normal-form head.
     ComptimeValue(Term),
+    /// Origin-bound host metadata. Only the selected immutable descriptor is admitted.
+    BuildMetadata {
+        owner: u64,
+        selector: Box<Expr>,
+        entries: Vec<(String, u64, Option<Term>)>,
+    },
     /// Completed immutable meta.List<Type> data, distinct from Type and tuple data.
     TypeListValue(Vec<Term>),
     /// Ordered comptime construction of immutable meta.List<T> data.
@@ -3122,6 +3128,30 @@ impl fmt::Display for ExprKind {
             }
             Self::TypeValue(ty) => write!(f, "(type-value {ty})"),
             Self::ComptimeValue(value) => write!(f, "(comptime-value {value})"),
+            Self::BuildMetadata {
+                owner,
+                selector,
+                entries,
+            } => {
+                write!(
+                    f,
+                    "(build-metadata (owner {owner}) (selector {selector}) (entries"
+                )?;
+                for (alias, provider, value) in entries {
+                    write!(
+                        f,
+                        " (entry (alias {}) (provider {provider}) (value",
+                        crate::QuotedDisplay(alias)
+                    )?;
+                    if let Some(value) = value {
+                        write!(f, " {value}")?;
+                    } else {
+                        f.write_str(" unavailable")?;
+                    }
+                    f.write_str("))")?;
+                }
+                f.write_str("))")
+            }
             Self::TypeListValue(types) => {
                 f.write_str("(type-list-value")?;
                 for ty in types {
@@ -3714,6 +3744,9 @@ impl Expr {
                 | ExprKind::ListLength(value)
                 | ExprKind::StructFieldTypes(value)
                 | ExprKind::BuildStruct(value)
+                | ExprKind::BuildMetadata {
+                    selector: value, ..
+                }
                 | ExprKind::BuildEnum(value)
                 | ExprKind::EnumStructure { subject: value, .. }
                 | ExprKind::ObjectQuery { subject: value, .. }
@@ -3924,6 +3957,13 @@ impl Expr {
                     *argument = rewriter.ty(argument)?;
                 }
             }
+            ExprKind::BuildMetadata { entries, .. } => {
+                for (_, _, value) in entries {
+                    if let Some(value) = value {
+                        *value = rewriter.ty(value)?;
+                    }
+                }
+            }
             ExprKind::TypeValue(ty) | ExprKind::ComptimeValue(ty) => {
                 *ty = rewriter.ty(ty)?;
             }
@@ -4101,6 +4141,9 @@ impl Expr {
             | ExprKind::ListLength(value)
             | ExprKind::StructFieldTypes(value)
             | ExprKind::BuildStruct(value)
+            | ExprKind::BuildMetadata {
+                selector: value, ..
+            }
             | ExprKind::BuildEnum(value)
             | ExprKind::EnumStructure { subject: value, .. }
             | ExprKind::ObjectQuery { subject: value, .. }
