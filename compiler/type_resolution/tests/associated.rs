@@ -906,3 +906,118 @@ fn declaration_world_queries_keep_caches_private_and_failure_fuel_spent() {
     );
     assert_eq!(unknown, 0, "failed selection cannot replenish fuel");
 }
+
+#[test]
+fn prepared_methods_preserve_default_binders_and_pending_contracts() {
+    use nir::program::{DispatchInstance, MethodContract};
+    use type_resolution::dispatch::DeclarationWorld;
+    let make = |use_default| {
+        let mut interface = contract();
+        interface.methods.push(MethodContract {
+            phase: Default::default(),
+            is_quote: false,
+            pure: false,
+            is_unsafe: false,
+            declaration: id(20),
+            name: "convert".into(),
+            type_parameters: vec![id(6)],
+            type_arguments: vec![],
+            signature: Term::Function {
+                parameters: vec![nir::Parameter {
+                    sort: Sort::Runtime,
+                    ty: rigid(3),
+                }],
+                result: Box::new(rigid(6)),
+            }
+            .into(),
+            // Preparation retains this obligation; it does not prove it.
+            requirements: vec![TypePredicate::Equal(rigid(6), ty(P::Char))],
+            capabilities: vec![],
+            program: Default::default(),
+            parameter_bindings: vec![],
+            by_value_receiver: false,
+            by_reference_receiver: false,
+            default: Some(id(30)),
+        });
+        let mut selected = implementation(ty(P::Bool), ty(P::U8));
+        selected.methods = vec![("convert".into(), if use_default { id(30) } else { id(31) })];
+        nir::program::Package {
+            traits: vec![interface],
+            implementations: vec![selected],
+            ..Default::default()
+        }
+    };
+    for use_default in [false, true] {
+        let package = make(use_default);
+        let budget = Budget::default();
+        let (world, mut fuel) = DeclarationWorld::new(&package, budget, None).unwrap();
+        let interface = nir::program::InterfaceInstance {
+            declaration: id(1),
+            arguments: vec![],
+        };
+        let (selected, arguments) = world
+            .select_interface(&interface, &ty(P::Bool), budget)
+            .unwrap();
+        let instance = DispatchInstance {
+            interface: id(1),
+            interface_arguments: vec![],
+            subject: ty(P::Bool),
+            implementation: selected,
+            arguments,
+            methods: vec![],
+            associated: vec![],
+            associated_initializers: vec![],
+        };
+        assert!(
+            world
+                .prepare_method(&instance, id(20), &[], false, &mut fuel)
+                .unwrap_err()
+                .contains("count mismatch")
+        );
+        assert!(
+            world
+                .prepare_method(&instance, id(99), &[ty(P::U8)], false, &mut fuel)
+                .unwrap_err()
+                .contains("unknown dispatch member")
+        );
+        let (method, specialized) = world
+            .prepare_method(&instance, id(20), &[ty(P::U8)], false, &mut fuel)
+            .unwrap();
+        assert_eq!(method.body, if use_default { id(30) } else { id(31) });
+        assert_eq!(
+            method.arguments,
+            if use_default {
+                vec![ty(P::Bool), ty(P::U8)]
+            } else {
+                vec![ty(P::U8)]
+            }
+        );
+        assert_eq!(
+            specialized.signature.ordinary().unwrap(),
+            &Term::Function {
+                parameters: vec![nir::Parameter {
+                    sort: Sort::Runtime,
+                    ty: ty(P::Bool)
+                }],
+                result: Box::new(ty(P::U8)),
+            }
+        );
+        assert_eq!(
+            specialized.requirements,
+            vec![TypePredicate::Equal(ty(P::U8), ty(P::Char))]
+        );
+        assert!(specialized.type_parameters.is_empty());
+        assert_eq!(specialized.type_arguments, vec![ty(P::U8)]);
+        assert_eq!(specialized.default, None);
+        assert!(
+            world
+                .prepare_method(&instance, id(20), &[ty(P::U8)], false, &mut 0)
+                .is_err()
+        );
+        assert!(
+            world
+                .prepare_method(&instance, id(20), &[ty(P::U8)], false, &mut 1000)
+                .is_ok()
+        );
+    }
+}

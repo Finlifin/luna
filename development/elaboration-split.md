@@ -221,3 +221,37 @@ python3 -B development/check.py --timeout 900 -- test --release -p elaboration -
   `/tmp/luna-library-6ibvyint/summary.json`。
 - 格式检查 `/tmp/luna-tools-g_bq7w8a/result.json` 与 `git diff --check` 通过。
   没有运行全 workspace 测试。
+
+## 接口选择与方法契约实例化
+
+共享 DeclarationWorld 进一步提供 select_interface 与 prepare_method：前者在
+已规范化的接口输入上选择 implementation，后者按选中实例替换方法签名、
+程序契约、条件和 capability 中的声明参数。默认方法的 body 参数来自
+Self/接口参数；覆盖方法使用 implementation 参数，两者最后都追加方法参数。
+
+prepare_method 的结果仍含待证明的 requirements 和待遍历的依赖。它不表示
+闭包已通过检查，不是内存访问许可，也不能直接发布到执行表。materialization
+仍按原顺序进行 runtime 契约规范化、条件证明、capability 排队、方法发布、
+签名/参数类型遍历和程序契约表达式遍历；quote 方法仍禁止进入 runtime dispatch。
+缓存命中路径、默认实现映射和诊断保持原行为。
+
+新增下层用例覆盖默认/覆盖方法的不同参数映射、参数数量与未知成员拒绝、
+条件实例化后仍待证明，以及预算耗尽后的恢复。返回的条件故意包含不成立的
+类型等式，确保“准备契约”和“证明契约”没有混淆。源码层 method 测试负责验证
+上层是否继续完成这些义务，而不是只验证准备结果的字段。
+
+这一步将选择与替换算法从队列遍历中分出，但剩余两处 verification 到
+materialization 的方法选择调用仍在。完整依赖闭包的服务边界尚未完成。
+
+本阶段检查均在 `/home/fin/luna` 执行，退出 0：
+
+- `python3 -B development/check.py --timeout 900 -- test --release
+  -p type_resolution --test associated`：23 项通过，
+  `/tmp/luna-tools-w_8zlmmz/result.json`。
+- 同一入口的 `test --release -p luna --test execution method`：112 项通过，
+  `/tmp/luna-tools-rjsnqq6y/result.json`。
+- `python3 -B development/library_check.py --release --timeout 900
+  --stage native-comparison --stage native-math --stage sysroot-meta
+  --stage sysroot-builders`：全部通过，`/tmp/luna-library-soaqno93/summary.json`。
+- 格式检查 `/tmp/luna-tools-bco9j_sg/result.json` 与 `git diff --check` 通过。
+  未运行全 workspace 测试。

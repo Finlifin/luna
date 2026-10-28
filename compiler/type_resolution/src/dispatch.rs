@@ -1,7 +1,7 @@
 //! Checked declaration world shared by annotation queries and dispatch closure.
 //! This service never traverses or invokes function bodies.
 use crate::{
-    implementation::{ImplementationHead, Index},
+    implementation::{ImplementationHead, Index, Selection, TypeAssessment},
     ptc::{Budget, Context},
 };
 use nir::{DeclarationId as Id, Term, program as n};
@@ -157,4 +157,131 @@ pub fn normalize_concrete_type(
         *fuel = 0;
     }
     result
+}
+
+impl DeclarationWorld<'_> {
+    /// Select the implementation relationship for already normalized inputs.
+    /// This does not close its executable dependencies or grant memory access.
+    pub fn select_interface(
+        &self,
+        interface: &n::InterfaceInstance,
+        subject: &Term,
+        budget: Budget,
+    ) -> Result<(Id, Vec<Term>), String> {
+        let resolution = crate::capabilities::World {
+            index: &self.index,
+            implementations: &self.package.implementations,
+            traits: &self.package.traits,
+            assumptions: &self.assumptions,
+            context: &self.context,
+        }
+        .resolve_instance(interface, subject, budget)?
+        .types;
+        let Selection::Selected(id) = resolution.selection else {
+            return Err(format!(
+                "dispatch selection is unresolved for {subject}: {}; candidates: {}",
+                resolution.selection,
+                resolution
+                    .assessments
+                    .iter()
+                    .map(|(id, assessment)| format!("{id}: {assessment}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        };
+        let Some(TypeAssessment::Applicable(evidence)) = resolution.assessments.get(&id) else {
+            return Err("dispatch selection lacks evidence".into());
+        };
+        Ok((id, evidence.type_arguments.clone()))
+    }
+
+    /// Substitute a selected member's complete declaration-side contract.
+    /// The caller must still discharge requirements and close capabilities,
+    /// signature types, predicate expressions and the selected body.
+    pub fn prepare_method(
+        &self,
+        instance: &n::DispatchInstance,
+        member: Id,
+        method_arguments: &[Term],
+        runtime: bool,
+        fuel: &mut usize,
+    ) -> Result<(n::MethodInstance, n::MethodContract), String> {
+        let contract = self
+            .package
+            .traits
+            .iter()
+            .find(|t| t.declaration == instance.interface)
+            .ok_or("missing method interface")?;
+        let template = contract
+            .methods
+            .iter()
+            .find(|m| m.declaration == member)
+            .ok_or("unknown dispatch member")?;
+        if template.is_quote && runtime {
+            return Err("trait quote method requires deterministic expansion after implementation selection; runtime dispatch is not permitted".into());
+        }
+        if template.type_parameters.len() != method_arguments.len() {
+            return Err("dispatch method type argument count mismatch".into());
+        }
+        let parameters: Vec<_> = contract
+            .binders_with_self(fuel)?
+            .into_iter()
+            .chain(self.input_binders(&template.type_parameters))
+            .collect();
+        let arguments: Vec<_> = std::iter::once(instance.subject.clone())
+            .chain(instance.interface_arguments.iter().cloned())
+            .chain(method_arguments.iter().cloned())
+            .collect();
+        let implementation = self
+            .package
+            .implementations
+            .iter()
+            .find(|i| i.declaration == instance.implementation)
+            .ok_or("missing selected implementation")?;
+        let body = implementation
+            .methods
+            .iter()
+            .find(|(name, _)| name == &template.name)
+            .ok_or("missing selected method body")?
+            .1;
+        let mut body_arguments = if template.default == Some(body) {
+            std::iter::once(instance.subject.clone())
+                .chain(instance.interface_arguments.iter().cloned())
+                .collect::<Vec<_>>()
+        } else {
+            instance.arguments.clone()
+        };
+        body_arguments.extend(method_arguments.iter().cloned());
+        let mut specialized = template.clone();
+        specialized.type_arguments = method_arguments.to_vec();
+        specialized.type_parameters.clear();
+        specialized.default = None;
+        specialized.signature = template
+            .signature
+            .instantiate_parameters(&parameters, &arguments)
+            .map_err(|e| e.to_string())?;
+        specialized.program = template
+            .program
+            .instantiate_parameters(&parameters, &arguments)
+            .map_err(|e| e.to_string())?;
+        specialized.requirements = template
+            .requirements
+            .iter()
+            .map(|r| r.instantiate_parameters(&parameters, &arguments))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        specialized.capabilities = template
+            .capabilities
+            .iter()
+            .map(|r| r.instantiate_parameters(&parameters, &arguments))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        let method = n::MethodInstance {
+            member,
+            body,
+            arguments: body_arguments,
+            method_arguments: method_arguments.to_vec(),
+        };
+        Ok((method, specialized))
+    }
 }

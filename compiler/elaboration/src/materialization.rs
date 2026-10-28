@@ -9,10 +9,7 @@ mod mutable_callbacks;
 mod recursive_factories;
 mod staged;
 mod template_factories;
-use crate::{
-    implementation::{Selection, TypeAssessment},
-    ptc::{Budget, Context},
-};
+use crate::ptc::{Budget, Context};
 use nir::program::{self as n, ExprKind as K, Pattern as P};
 use nir::{DeclarationId as Id, Term};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -812,30 +809,9 @@ impl Builder<'_> {
         if let Some(index) = self.interfaces.get(&(interface.clone(), subject.clone())) {
             return Ok(*index);
         }
-        let resolution = crate::capabilities::World {
-            index: self.world.index(),
-            implementations: &self.package.implementations,
-            traits: &self.package.traits,
-            assumptions: self.world.assumptions(),
-            context: self.world.context(),
-        }
-        .resolve_instance(&interface, &subject, self.budget)?
-        .types;
-        let Selection::Selected(id) = resolution.selection else {
-            return Err(format!(
-                "dispatch selection is unresolved for {subject}: {}; candidates: {}",
-                resolution.selection,
-                resolution
-                    .assessments
-                    .iter()
-                    .map(|(id, assessment)| format!("{id}: {assessment}"))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ));
-        };
-        let Some(TypeAssessment::Applicable(evidence)) = resolution.assessments.get(&id) else {
-            return Err("dispatch selection lacks evidence".into());
-        };
+        let (id, implementation_arguments) =
+            self.world
+                .select_interface(&interface, &subject, self.budget)?;
         let implementation = self
             .package
             .implementations
@@ -848,7 +824,7 @@ impl Builder<'_> {
                     &implementation
                         .parameter_binders()
                         .map_err(|e| e.to_string())?,
-                    &evidence.type_arguments,
+                    &implementation_arguments,
                 )
                 .map_err(|e| e.to_string())?;
             self.queue.push_back(Task::Interface(
@@ -965,7 +941,7 @@ impl Builder<'_> {
             interface_arguments: interface.arguments.clone(),
             subject: subject.clone(),
             implementation: id,
-            arguments: evidence.type_arguments.clone(),
+            arguments: implementation_arguments,
             associated: vec![],
             methods: vec![],
         });
@@ -1000,76 +976,13 @@ impl Builder<'_> {
         {
             return Ok(method.clone());
         }
-        let contract = self
-            .package
-            .traits
-            .iter()
-            .find(|t| t.declaration == interface.declaration)
-            .ok_or("missing method interface")?;
-        let template = contract
-            .methods
-            .iter()
-            .find(|m| m.declaration == member)
-            .ok_or("unknown dispatch member")?;
-        if template.is_quote && self.instances.is_some() {
-            return Err("trait quote method requires deterministic expansion after implementation selection; runtime dispatch is not permitted".into());
-        }
-        if template.type_parameters.len() != method_arguments.len() {
-            return Err("dispatch method type argument count mismatch".into());
-        }
-        let parameters: Vec<_> = contract
-            .binders_with_self(&mut self.fuel)?
-            .into_iter()
-            .chain(self.input_binders(&template.type_parameters))
-            .collect();
-        let arguments: Vec<_> = std::iter::once(subject.clone())
-            .chain(interface.arguments.iter().cloned())
-            .chain(method_arguments.iter().cloned())
-            .collect();
-        let implementation = self
-            .package
-            .implementations
-            .iter()
-            .find(|i| i.declaration == self.output[slot].implementation)
-            .ok_or("missing selected implementation")?;
-        let body = implementation
-            .methods
-            .iter()
-            .find(|(name, _)| name == &template.name)
-            .ok_or("missing selected method body")?
-            .1;
-        let mut body_arguments = if template.default == Some(body) {
-            std::iter::once(subject.clone())
-                .chain(interface.arguments.iter().cloned())
-                .collect::<Vec<_>>()
-        } else {
-            self.output[slot].arguments.clone()
-        };
-        body_arguments.extend(method_arguments.iter().cloned());
-        let mut specialized = template.clone();
-        specialized.type_arguments = method_arguments.to_vec();
-        specialized.type_parameters.clear();
-        specialized.default = None;
-        specialized.signature = template
-            .signature
-            .instantiate_parameters(&parameters, &arguments)
-            .map_err(|e| e.to_string())?;
-        specialized.program = template
-            .program
-            .instantiate_parameters(&parameters, &arguments)
-            .map_err(|e| e.to_string())?;
-        specialized.requirements = template
-            .requirements
-            .iter()
-            .map(|r| r.instantiate_parameters(&parameters, &arguments))
-            .collect::<Result<_, _>>()
-            .map_err(|e| e.to_string())?;
-        specialized.capabilities = template
-            .capabilities
-            .iter()
-            .map(|r| r.instantiate_parameters(&parameters, &arguments))
-            .collect::<Result<_, _>>()
-            .map_err(|e| e.to_string())?;
+        let (method, mut specialized) = self.world.prepare_method(
+            &self.output[slot],
+            member,
+            method_arguments,
+            self.instances.is_some(),
+            &mut self.fuel,
+        )?;
         if self.instances.is_some() {
             self.normalize_method_contract(&mut specialized)?;
         }
@@ -1080,12 +993,6 @@ impl Builder<'_> {
                 capability.subject.clone(),
             ));
         }
-        let method = n::MethodInstance {
-            member,
-            body,
-            arguments: body_arguments,
-            method_arguments: method_arguments.to_vec(),
-        };
         self.output[slot].methods.push(method.clone());
         self.queue.push_back(Task::Type(
             specialized
