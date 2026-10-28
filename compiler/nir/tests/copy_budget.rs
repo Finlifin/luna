@@ -448,6 +448,7 @@ fn struct_reflection_charges_subject_copy_before_allocation() {
         nir::program::ObjectQueryKind::Key,
         nir::program::ObjectQueryKind::EntryType,
         nir::program::ObjectQueryKind::Value,
+        nir::program::ObjectQueryKind::NamedValue,
     ] {
         let expression = expr(K::ObjectQuery {
             subject: Box::new(large()),

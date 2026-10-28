@@ -22,7 +22,7 @@ impl Interpreter<'_> {
             Q::Length => Term::Primitive(Primitive::Integer),
             Q::Key => Term::Optional(Box::new(Term::Primitive(Primitive::Symbol))),
             Q::EntryType => Term::Primitive(Primitive::Type),
-            Q::Value => {
+            Q::Value | Q::NamedValue => {
                 if !matches!(
                     expr.ty,
                     Term::Optional(_) | Term::Primitive(Primitive::Never)
@@ -57,6 +57,35 @@ impl Interpreter<'_> {
                 comptime_runtime::Integer::from_u128(object.entries().len() as u128),
             )));
         }
+        if *query == Q::NamedValue {
+            let Some(Value::Symbol(key)) = packet.next() else {
+                return Err(failure());
+            };
+            if packet.next().is_some() {
+                return Err(failure());
+            }
+            let Term::Optional(target) = &expr.ty else {
+                return Err(failure());
+            };
+            let property =
+                self.lookup_object_property(&object, &key, target)
+                    .map_err(|mut error| {
+                        if error.source.is_none() {
+                            error.source = Some(expr.source);
+                        }
+                        error
+                    })?;
+            let value = match property {
+                ObjectProperty::Found(entry) => Some(Box::new(
+                    self.checkpoint_representation(&entry.value, expr.source)?,
+                )),
+                ObjectProperty::Missing | ObjectProperty::TypeMismatch(_) => None,
+            };
+            return Ok(Flow::Value(Value::Optional {
+                ty: expr.ty.clone(),
+                value,
+            }));
+        }
         let Some(Value::Integer(index)) = packet.next() else {
             return Err(failure());
         };
@@ -71,7 +100,7 @@ impl Interpreter<'_> {
             .ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(expr.source)))?;
         let entry = &object.entries()[index];
         let value = match query {
-            Q::Length => unreachable!(),
+            Q::Length | Q::NamedValue => unreachable!(),
             Q::Key => {
                 if let Some(key) = entry.key() {
                     self.integer_operation(Some(expr.source), |budget| {
@@ -189,5 +218,47 @@ mod tests {
             vm.eval(&expr, &mut Environment::new()).unwrap_err().kind,
             ErrorKind::PhaseMismatch
         );
+    }
+
+    #[test]
+    fn named_lookup_rejects_invalid_unselected_payloads() {
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut env = Environment::new();
+        env.insert(
+            LocalId { owner: 1, index: 0 },
+            Value::Object(Object::from_entries(vec![
+                ObjectEntry::Property {
+                    key: "hidden".into(),
+                    value: ObjectValue {
+                        ty: Term::Primitive(Primitive::Bool),
+                        value: Value::Char('x'),
+                    },
+                },
+                ObjectEntry::Property {
+                    key: "flag".into(),
+                    value: ObjectValue {
+                        ty: Term::Primitive(Primitive::Bool),
+                        value: Value::Bool(true),
+                    },
+                },
+            ])),
+        );
+        let mut expr = expression(
+            Q::NamedValue,
+            Term::Optional(Box::new(Term::Primitive(Primitive::Bool))),
+        );
+        let K::ObjectQuery { subject, .. } = &mut expr.kind else {
+            unreachable!()
+        };
+        let K::Tuple(fields) = &mut subject.kind else {
+            unreachable!()
+        };
+        fields[1].ty = Term::Primitive(Primitive::Symbol);
+        fields[1].kind = K::Literal(nir::program::Literal::Symbol("flag".into()));
+        subject.ty = Term::Tuple(fields.iter().map(|field| field.ty.clone()).collect());
+        let failure = vm.eval(&expr, &mut env).unwrap_err();
+        assert_eq!(failure.kind, ErrorKind::Type);
+        assert!(failure.source.is_some());
     }
 }

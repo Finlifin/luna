@@ -920,6 +920,7 @@ pub enum ObjectQueryKind {
     Key,
     EntryType,
     Value,
+    NamedValue,
 }
 impl fmt::Display for ObjectQueryKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -928,6 +929,7 @@ impl fmt::Display for ObjectQueryKind {
             Self::Key => "key",
             Self::EntryType => "entry-type",
             Self::Value => "value",
+            Self::NamedValue => "named-value",
         })
     }
 }

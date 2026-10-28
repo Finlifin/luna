@@ -45,7 +45,19 @@ comptime fn run() -> bool {
         and meta.length(nested) == 1
         and (nested[0] match { null => true, _? => false })
         and meta.length(unused) == 0 and meta.length(unused_filter) == 0
-        and reducers_and_searches()
+        and reducers_and_searches() and named_metadata()
+}
+
+comptime fn named_metadata() -> bool {
+    let absent: ?Integer = null;
+    let input = {enabled: true, 'x', enabled: false, limit: absent};
+    let shadowed = {enabled: true, enabled: 'x'};
+    (meta.object_get<bool>(input, .enabled) matches false?)
+        and (meta.object_get<bool>(input, .missing) matches null)
+        and (meta.object_get<bool>(shadowed, .enabled) matches null)
+        and (meta.object_get<?Integer>(input, .limit) match {
+            value? => value matches null, null => false,
+        })
 }
 
 comptime fn reducers_and_searches() -> bool {

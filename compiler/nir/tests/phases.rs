@@ -1468,7 +1468,7 @@ fn declaration_responsibility_survives_specialization_without_wrapping_its_teles
 
 #[test]
 fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annotation() {
-    for operation in 0..17 {
+    for operation in 0..18 {
         let mut f = function(1, Phase::Runtime, &[]);
         let subject = Box::new(Expr {
             source: f.body.source,
@@ -1490,13 +1490,14 @@ fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annot
                     nir::program::EnumStructureQuery::FieldTypes,
                 ][operation - 4],
             },
-            9..=12 => K::ObjectQuery {
+            9..=13 => K::ObjectQuery {
                 subject,
                 query: [
                     nir::program::ObjectQueryKind::Length,
                     nir::program::ObjectQueryKind::Key,
                     nir::program::ObjectQueryKind::EntryType,
                     nir::program::ObjectQueryKind::Value,
+                    nir::program::ObjectQueryKind::NamedValue,
                 ][operation - 9],
             },
             _ => K::ObjectEdit {
@@ -1506,7 +1507,7 @@ fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annot
                     nir::program::ObjectEditKind::Append,
                     nir::program::ObjectEditKind::Replace,
                     nir::program::ObjectEditKind::Remove,
-                ][operation - 13],
+                ][operation - 14],
             },
         };
         let mut package = Package {

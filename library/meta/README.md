@@ -80,6 +80,23 @@ payload 保留其独立层。输入按普通调用顺序各求值一次，查询
 预算限制。当前查询沿用普通值复制路径，不承诺常数时间访问大型对象。
 由可冻结条目构成的 Object 也能作为 normal-form 和普通函数的 clause 参数。
 
+按名称读取使用 `object_get<T>(object, key: Symbol) -> ?T`。它选择最后一个同名
+条目，忽略普通项；缺失 key 或最后一项的域与 T 不同，均返回 null，不向前寻找
+类型相符的旧值。它不改写 Object，也不合并重复键。
+
+```flurry
+comptime fn configured() -> bool {
+    let settings = { enabled: true, enabled: false };
+    meta.object_get<bool>(settings, .enabled) matches false?
+}
+```
+
+查询检查所有条目的类型和值，包括被重复键遮住的条目；非法数据导致 invocation
+失败，不能伪装成 key 缺失。返回值保留原始 Type 身份与 optional 层，不做隐式
+转换或 normal-form 展开。Object 和 key 依次求值一次，key 的计算即使替换调用者
+保存的 Object，也不改变已经求值的输入快照。查询和结果复制计入预算。
+该实现一次扫描 Object，仍沿用普通参数复制路径，不承诺常数时间查找。
+
 CMTT 生成器也可以保存和查询局部 Object，再据此选择 quoted code。其物化
 保留每个条目的类型、顺序与键，不把对象伪装成 normal term；嵌套 Object
 使用同一路径。对象中的活动存储指针不能借此成为可物化的数据快照。

@@ -28,6 +28,138 @@ fn invoke(source: &str) -> Result<Value, String> {
 }
 
 #[test]
+fn named_object_reads_use_the_last_domain_and_preserve_optional_layers() {
+    let value = invoke("
+        pure comptime fn Identity<T>->.Type'builtin {T}
+        comptime fn run()->bool {
+            let absent:?bool=null;
+            let object={flag:true, 'x', flag:false, empty:absent, nested:{flag:true}, kind:Identity<bool>};
+            let shadowed={flag:true, flag:'x'};
+            (meta.object_get<bool>(object,.flag) matches false?)
+                and (meta.object_get<bool>(object,.missing) matches null)
+                and (meta.object_get<bool>(shadowed,.flag) matches null)
+                and (meta.object_get<.char'builtin>(shadowed,.flag) matches 'x'?)
+                and (meta.object_get<?bool>(object,.empty) match {value?=>value matches null,null=>false})
+                and (meta.object_get<meta.Object>(object,.nested) match {
+                    nested?=>meta.object_get<bool>(nested,.flag) matches true?,null=>false})
+                and (meta.object_get<.Type'builtin>(object,.kind) match {
+                    T?=>T==Identity<bool>,null=>false})
+                and (meta.object_get<bool>({},.missing) matches null)
+        }
+    ").unwrap();
+    assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn named_object_reads_keep_argument_order_early_return_and_snapshot() {
+    let value = invoke(
+        "
+        comptime fn make(state:*.Integer'builtin)->meta.Object {
+            state.* = state.* * 10 + 1; let object={flag:true}; object
+        }
+        comptime fn key(state:*.Integer'builtin)->.Symbol'builtin {
+            state.* = state.* * 10 + 2; .flag
+        }
+        comptime fn run()->bool {
+            var state:.Integer'builtin=0;
+            let value=meta.object_get<bool>(make(state.ref),key(state.ref));
+            var original={flag:true};
+            let saved=meta.object_get<bool>(original,do {original = {flag:false}; .flag});
+            state==12 and (value matches true?) and (saved matches true?)
+                and (meta.object_get<bool>(original,.flag) matches false?)
+        }
+    ",
+    )
+    .unwrap();
+    assert_eq!(value, Value::Bool(true));
+    assert_eq!(
+        invoke(
+            "comptime fn run()->bool {
+        meta.object_get<bool>(do {return true;},do {while true {} .flag}); false
+    }"
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn named_object_queries_reject_wrong_keys_and_runtime_use() {
+    for source in [
+        "comptime fn bad()->?bool {meta.object_get<bool>({flag:true},0)}",
+        "fn bad()->?bool {meta.object_get<bool>({flag:true},.flag)}",
+        "comptime fn bad()->?bool {.object_get'builtin(bool,{flag:true})}",
+    ] {
+        assert!(
+            compile(&format!("mod meta {{ {META} }} {source}")).is_err(),
+            "{source}"
+        );
+    }
+    let package = compile(&format!(
+        "mod meta {{ {META} }} comptime fn run()->bool {{
+        meta.object_get<bool>({{flag:true}},.flag) matches true?
+    }}"
+    ))
+    .unwrap();
+    assert!(package.to_string().contains("named-value"));
+    assert!(luna::invocation::invoke(&package, "run", 1).is_err());
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn named_lookup_avoids_repeated_object_transport_during_feature_search() {
+    let fields = (0..64)
+        .map(|index| format!("f{index}:true"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let package = compile(&format!(
+        "mod meta {{ {META} }}
+        comptime fn previous(object:meta.Object,key:.Symbol'builtin)->?bool {{
+            let count=meta.object_length(object);
+            var index:.Integer'builtin=0;
+            while index < count {{
+                if meta.object_key(object,index) match {{name?=>name==key,null=>false}} {{
+                    return meta.object_value<bool>(object,index);
+                }}
+                index += 1;
+            }}
+            null
+        }}
+        comptime fn previous_entry()->?bool {{previous({{{fields}}},.f63)}}
+        comptime fn named_entry()->?bool {{meta.object_get<bool>({{{fields}}},.f63)}}
+    "
+    ))
+    .unwrap();
+    let mut costs = Vec::new();
+    let mut values = Vec::new();
+    for entry in ["previous_entry", "named_entry"] {
+        let mut vm = Interpreter::for_comptime(
+            &package,
+            comptime_interpretor::Budget {
+                steps: 1_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let before = vm.remaining_steps();
+        values.push(vm.invoke(support::id(&package, entry), vec![]).unwrap());
+        costs.push(before - vm.remaining_steps());
+    }
+    assert_eq!(values[0], values[1]);
+    assert!(
+        matches!(&values[1],Value::Optional{value:Some(value),..} if **value==Value::Bool(true))
+    );
+    eprintln!(
+        "64 unique features, last key: previous={} named={}",
+        costs[0], costs[1]
+    );
+    assert!(costs[1] * 2 < costs[0], "{costs:?}");
+}
+
+#[test]
 fn indexed_object_queries_preserve_order_domains_and_optional_layers() {
     let value = invoke(
         "

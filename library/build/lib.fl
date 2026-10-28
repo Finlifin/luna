@@ -22,14 +22,7 @@ pub struct TargetFeatures {
 impl TargetFeatures {
     -- Missing is null; an explicitly disabled feature is false?.
     pub pure comptime fn get(self, name: .Symbol'builtin) -> ?bool {
-        let count = .object_length'builtin(self.entries);
-        inline for index in 0..count {
-            let key = .object_key'builtin(self.entries, index);
-            if key match { value? => value == name, null => false } {
-                return .object_value'builtin(bool, self.entries, index);
-            }
-        }
-        null
+        .object_get'builtin(bool, self.entries, name)
     }
 }
 
@@ -46,16 +39,7 @@ pub struct MetadataFeatures {
 impl MetadataFeatures {
     -- Missing fields and mismatched domains return null.
     pub pure comptime fn get(self, name: .Symbol'builtin, comptime T: .Type'builtin) -> ?T {
-        let count = .object_length'builtin(self.entries);
-        var index: .Integer'builtin = 0;
-        while index < count {
-            let key = .object_key'builtin(self.entries, index);
-            if key match { value? => value == name, null => false } {
-                return .object_value'builtin(T, self.entries, index);
-            }
-            index += 1;
-        }
-        null
+        .object_get'builtin(T, self.entries, name)
     }
 }
 

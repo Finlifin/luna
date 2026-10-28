@@ -94,20 +94,21 @@ impl Checker<'_, '_> {
             "object_key" => Q::Key,
             "object_entry_type" => Q::EntryType,
             "object_value" => Q::Value,
+            "object_get" => Q::NamedValue,
             _ => unreachable!(),
         };
         let count = match query {
             Q::Length => 1,
-            Q::Value => 3,
+            Q::Value | Q::NamedValue => 3,
             _ => 2,
         };
         if args.len() != count || args.iter().any(|arg| !matches!(arg, Arg::Positional(_))) {
             return Err(error(
                 expr.span,
-                "Object query requires positional inputs: optional target Type, Object, and index",
+                "Object query requires positional inputs: optional target Type, Object, and index or key",
             ));
         }
-        let (target, args) = if query == Q::Value {
+        let (target, args) = if matches!(query, Q::Value | Q::NamedValue) {
             let Arg::Positional(target) = &args[0] else {
                 unreachable!()
             };
@@ -122,14 +123,20 @@ impl Checker<'_, '_> {
             };
             fields.push(self.expr(
                 value,
-                Some(&p(if index == 0 { P::Object } else { P::Integer })),
+                Some(&p(if index == 0 {
+                    P::Object
+                } else if query == Q::NamedValue {
+                    P::Symbol
+                } else {
+                    P::Integer
+                })),
             )?);
         }
         let result = match query {
             Q::Length => p(P::Integer),
             Q::Key => Term::Optional(Box::new(p(P::Symbol))),
             Q::EntryType => p(P::Type),
-            Q::Value => Term::Optional(Box::new(target.unwrap())),
+            Q::Value | Q::NamedValue => Term::Optional(Box::new(target.unwrap())),
         };
         let ty = if fields.iter().any(|field| is_never(&field.ty)) {
             p(P::Never)

@@ -42,6 +42,14 @@ pub pure comptime fn object_value(value: Object, index: .Integer'builtin) -> ?T 
 }
 
 {-
+  Read the last named entry. A missing key or a different stored domain returns
+  null; a mismatched last entry never falls back to an earlier duplicate.
+-}
+pub pure comptime fn object_get(value: Object, key: .Symbol'builtin) -> ?T where T {
+    .object_get'builtin(T, value, key)
+}
+
+{-
   Editing returns a new ordered Object. Duplicate keys remain distinct entries.
   Replacement preserves the entry key and position, and records the new domain.
 -}

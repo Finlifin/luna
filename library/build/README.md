@@ -47,6 +47,10 @@ Rust 驱动仍可构造 `luna::build_context::Snapshot`，调用
 和 `features: TargetFeatures`。后者的 `get(Symbol) -> ?bool` 在 comptime 查询：
 未配置返回 null，显式关闭返回 false?，开启返回 true?。
 
+feature 的 typed lookup 使用编译期 Object 的按名查询入口，一次扫描已经取得的
+输入快照，避免在库循环中为每个索引重复传送整个 Object。驱动快照仍检查唯一
+feature 名称；这个查询优化不改变包归属、缓存键或缺失配置的诊断。
+
 ```flurry
 const target = build.target;
 const vector_enabled = target.features.get(.avx2) matches true?;
@@ -102,6 +106,10 @@ comptime {
 返回 `null`。元数据在提供者类型世界中接纳，不展开 normal-form 头、不执行
 闭包工厂，也不授予资源复制权限。示例中的 `cuda` 是调用包的显式依赖，
 `TargetArch` 由该依赖提供。
+
+它与 TargetFeatures 共用按名 Object 查询。若手工构造 entries 并包含重复 key，
+最后一项决定结果；最后一项类型不符时返回 null，不回退至此前同名项。普通位置
+条目不参加名称匹配，非法的条目数据仍导致查询失败。
 
 Rust 包编译请求可通过 `Request::metadata` 安装输入，完整请求缓存键包含
 字段名称、类型、值及依赖映射，配置变化会保守地使缓存失效。显式 package CLI
