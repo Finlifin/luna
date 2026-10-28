@@ -97,6 +97,29 @@ comptime fn configured() -> bool {
 保存的 Object，也不改变已经求值的输入快照。查询和结果复制计入预算。
 该实现一次扫描 Object，仍沿用普通参数复制路径，不承诺常数时间查找。
 
+编译期可以通过 `*Object` 读取或替换由不可变数据构成的快照，适合将可编辑草稿
+传给辅助函数。新旧条目都必须通过表示与域检查；名义资源仍需 Copy 且无 Drop
+的证据。缺失 optional 和空 List 也检查其声明的 payload 域，不能隐藏非 Copy
+资源。活动指针、存储和 callable 不通过这条不可变数据传送路径。
+
+```flurry
+comptime fn set_enabled(output: *meta.Object, enabled: bool) {
+    output.* = meta.object_replace(output.*, 0, enabled);
+}
+
+comptime fn configured() -> bool {
+    var draft = {enabled: false};
+    let saved = draft.ref.*;
+    set_enabled(draft.ref, true);
+    (meta.object_get<bool>(saved, .enabled) matches false?)
+        and (meta.object_get<bool>(draft, .enabled) matches true?)
+}
+```
+
+读取产生独立快照；写回前检查旧值与新值，校验或预算失败时槽位保持原值。
+这不授予 Object 全局 Copy 实现或 runtime 表示，带活动引用的 Object 也不会
+因此获得复制或常量逃逸权限。真实 sysroot 用例已纳入 `sysroot-meta` 检查。
+
 CMTT 生成器也可以保存和查询局部 Object，再据此选择 quoted code。其物化
 保留每个条目的类型、顺序与键，不把对象伪装成 normal term；嵌套 Object
 使用同一路径。对象中的活动存储指针不能借此成为可物化的数据快照。

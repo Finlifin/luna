@@ -61,6 +61,7 @@ Working directory: `/home/fin/luna`. All final commands below exited 0.
 
 Initial failures were in new test fixtures: operator spacing, a nonunique
 `new` entry name that selected StructBuilder's method, and whole-Object pointer
-writeback, which remains unsupported. The snapshot test uses local replacement;
-this change does not extend pointer writeback support. The final checks above
-supersede those failed runs.
+writeback, which was unsupported at that stage. The named-query snapshot test
+uses local replacement. Subsequent checked Object-slot transfers are documented
+in [object-storage.md](object-storage.md); they do not admit arbitrary payload
+copying. The final checks above supersede the initial named-query failures.

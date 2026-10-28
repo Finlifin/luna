@@ -1,0 +1,219 @@
+//! Object slot transfers validate data and resource permission before mutation.
+use super::*;
+
+impl Interpreter<'_> {
+    pub(super) fn validate_object_storage(
+        &mut self,
+        value: &Value,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        self.validate_immutable_input(value, &Term::Primitive(Primitive::Object))
+            .map_err(|mut error| {
+                if error.source.is_none() {
+                    error.source = Some(source);
+                }
+                error
+            })?;
+        self.object_storage_contents(value, source, 0)
+    }
+
+    fn object_storage_domain(
+        &mut self,
+        ty: &Term,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<(), Error> {
+        self.tick(Some(source))?;
+        if depth >= 128 {
+            return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
+        }
+        match ty {
+            // Object entries are checked by their retained domains below.
+            // Type descriptions are immutable comptime data, not runtime Copy.
+            Term::Primitive(Primitive::Object | Primitive::Type | Primitive::Never) => Ok(()),
+            Term::Optional(inner) => self.object_storage_domain(inner, source, depth + 1),
+            Term::Tuple(fields) => {
+                for field in fields {
+                    self.object_storage_domain(field, source, depth + 1)?;
+                }
+                Ok(())
+            }
+            Term::ErrorResult { errors, result } => {
+                for field in errors.iter().chain(std::iter::once(result.as_ref())) {
+                    self.object_storage_domain(field, source, depth + 1)?;
+                }
+                Ok(())
+            }
+            _ => {
+                if let Some(element) = self.list_element(ty).cloned() {
+                    return self.object_storage_domain(&element, source, depth + 1);
+                }
+                if self.is_type_list_input(ty) || self.permits_pointer_copy(ty) {
+                    Ok(())
+                } else {
+                    Err(self.failure(ErrorKind::Unsupported, Some(source)))
+                }
+            }
+        }
+    }
+
+    fn object_storage_contents(
+        &mut self,
+        value: &Value,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<(), Error> {
+        self.tick(Some(source))?;
+        if depth >= 128 {
+            return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
+        }
+        match value {
+            Value::Object(object) => {
+                for entry in object.entries() {
+                    let entry = entry.value();
+                    self.object_storage_domain(&entry.ty, source, depth + 1)?;
+                    self.object_storage_contents(&entry.value, source, depth + 1)?;
+                }
+            }
+            Value::List { values, .. }
+            | Value::Tuple(values)
+            | Value::Record { fields: values, .. }
+            | Value::Variant { fields: values, .. } => {
+                for value in values {
+                    self.object_storage_contents(value, source, depth + 1)?;
+                }
+            }
+            Value::AnonymousRecord(fields) => {
+                for (_, value) in fields {
+                    self.object_storage_contents(value, source, depth + 1)?;
+                }
+            }
+            Value::Optional {
+                value: Some(value), ..
+            }
+            | Value::ErrorResult { value, .. }
+            | Value::Newtype { value, .. } => {
+                self.object_storage_contents(value, source, depth + 1)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn object(value: bool) -> Value {
+        Value::Object(Object::from_entries(vec![ObjectEntry::Property {
+            key: "flag".into(),
+            value: ObjectValue {
+                ty: Term::Primitive(Primitive::Bool),
+                value: Value::Bool(value),
+            },
+        }]))
+    }
+
+    fn write() -> Expr {
+        let source = SourceRange { start: 3, end: 9 };
+        let ty = Term::Primitive(Primitive::Object);
+        Expr {
+            source,
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::WritePointer {
+                pointer: Box::new(Expr {
+                    source,
+                    ty: Term::Pointer(Box::new(ty.clone())),
+                    kind: K::Local(LocalId { owner: 1, index: 0 }),
+                }),
+                value: Box::new(Expr {
+                    source,
+                    ty,
+                    kind: K::Local(LocalId { owner: 1, index: 1 }),
+                }),
+            },
+        }
+    }
+
+    fn environment(storage: &Storage, value: Value) -> Environment {
+        let mut env = Environment::new();
+        env.insert(
+            LocalId { owner: 1, index: 0 },
+            Value::Pointer(storage.pointer(Term::Primitive(Primitive::Object), vec![])),
+        );
+        env.insert(LocalId { owner: 1, index: 1 }, value);
+        env
+    }
+
+    #[test]
+    fn invalid_old_or_new_object_cannot_mutate_storage() {
+        let invalid = Value::Object(Object::from_entries(vec![ObjectEntry::Value(
+            ObjectValue {
+                ty: Term::Primitive(Primitive::Bool),
+                value: Value::Char('x'),
+            },
+        )]));
+        let target = Storage::new(Value::Bool(false));
+        let active = Value::Object(Object::from_entries(vec![ObjectEntry::Value(
+            ObjectValue {
+                ty: Term::Pointer(Box::new(Term::Primitive(Primitive::Bool))),
+                value: Value::Pointer(target.pointer(Term::Primitive(Primitive::Bool), vec![])),
+            },
+        )]));
+        let package = Package::default();
+        for (old, new) in [
+            (object(false), invalid.clone()),
+            (invalid, object(true)),
+            (object(false), active.clone()),
+            (active, object(true)),
+        ] {
+            let storage = Storage::new(old.clone());
+            let mut env = environment(&storage, new);
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let error = vm.eval(&write(), &mut env).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Type);
+            assert!(error.source.is_some());
+            assert_eq!(storage.read().unwrap(), old);
+        }
+    }
+
+    #[test]
+    fn exhausted_object_transfer_keeps_old_value_and_can_retry() {
+        let package = Package::default();
+        let mut failures = 0;
+        let mut successes = 0;
+        for steps in 1..100 {
+            let storage = Storage::new(object(false));
+            let mut env = environment(&storage, object(true));
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            vm.budget.steps = steps;
+            match vm.eval(&write(), &mut env) {
+                Ok(Flow::Value(Value::Unit)) => {
+                    successes += 1;
+                    assert_eq!(storage.read().unwrap(), object(true));
+                }
+                Err(error) => {
+                    failures += 1;
+                    assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                    assert_eq!(storage.read().unwrap(), object(false));
+                    vm.budget.steps = 1000;
+                    vm.eval(&write(), &mut env).unwrap();
+                    assert_eq!(storage.read().unwrap(), object(true));
+                }
+                other => panic!("unexpected transfer: {other:?}"),
+            }
+        }
+        assert!(failures > 0 && successes > 0);
+    }
+
+    #[test]
+    fn object_transfer_remains_comptime_only() {
+        let package = Package::default();
+        let storage = Storage::new(object(false));
+        let mut env = environment(&storage, object(true));
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        assert!(vm.eval(&write(), &mut env).is_err());
+        assert_eq!(storage.read().unwrap(), object(false));
+    }
+}

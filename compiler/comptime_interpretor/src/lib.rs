@@ -20,6 +20,7 @@ mod memory;
 mod normal_inputs;
 mod object_edits;
 mod object_queries;
+mod object_storage;
 #[cfg(test)]
 mod object_values;
 mod objects;
@@ -3678,10 +3679,19 @@ impl<'a> Interpreter<'a> {
                 };
                 let immutable_list = self.comptime_only
                     && (self.list_element(&expr.ty).is_some() || self.is_type_list_input(&expr.ty));
+                let immutable_object =
+                    self.comptime_only && expr.ty == Term::Primitive(Primitive::Object);
                 if pointer.pointee != expr.ty
-                    || (!immutable_list && !self.permits_pointer_copy(&expr.ty))
+                    || (!immutable_list
+                        && !immutable_object
+                        && !self.permits_pointer_copy(&expr.ty))
                 {
                     return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
+                }
+                if immutable_object {
+                    pointer
+                        .inspect(|value| self.validate_object_storage(value, expr.source))
+                        .map_err(|kind| self.failure(kind, Some(expr.source)))??;
                 }
                 let value = pointer
                     .inspect(|value| self.copy_representation(value, expr.source, 0))
@@ -3701,10 +3711,20 @@ impl<'a> Interpreter<'a> {
                 let immutable_list = self.comptime_only
                     && (self.list_element(&pointer.pointee).is_some()
                         || self.is_type_list_input(&pointer.pointee));
-                if !immutable_list && !self.permits_pointer_copy(&pointer.pointee) {
+                let immutable_object =
+                    self.comptime_only && pointer.pointee == Term::Primitive(Primitive::Object);
+                if !immutable_list
+                    && !immutable_object
+                    && !self.permits_pointer_copy(&pointer.pointee)
+                {
                     return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
                 }
-                if immutable_list {
+                if immutable_object {
+                    self.validate_object_storage(&value, expr.source)?;
+                    pointer
+                        .inspect(|old| self.validate_object_storage(old, expr.source))
+                        .map_err(|kind| self.failure(kind, Some(expr.source)))??;
+                } else if immutable_list {
                     // Validate both representations before mutation. Admission
                     // is budgeted and cannot invoke user code or follow pointers.
                     self.validate_immutable_input(&value, &pointer.pointee)?;
