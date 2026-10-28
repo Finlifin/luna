@@ -140,6 +140,7 @@ impl Builder<'_> {
             BTreeSet::new(),
             &[],
             Some((self.world.context(), self.world.assumptions())),
+            None,
         )?;
         snapshot.dispatch_instances = prepared.0;
         self.fuel = prepared.4;

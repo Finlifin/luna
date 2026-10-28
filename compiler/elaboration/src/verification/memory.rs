@@ -7802,9 +7802,9 @@ fn selected_method_callee(
         return Err("interface predicates require a composed memory contract".into());
     }
     let method = if contract.is_quote {
-        crate::materialization::resolve_quote_method_instance(package, callee, fuel)?
+        ::materialization::resolve_quote_method_instance(package, callee, fuel)?
     } else {
-        crate::materialization::resolve_method_instance(package, callee, fuel)?
+        ::materialization::resolve_method_instance(package, callee, fuel)?
     };
     // Use the same residual body as memory inference. Selecting the original
     // generic signature here reintroduces associated projections that the

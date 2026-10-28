@@ -230,6 +230,7 @@ dependencies = [
  "comptime_runtime",
  "hir",
  "iir",
+ "materialization",
  "nir",
  "ptc",
  "rustc_span",
@@ -504,6 +505,17 @@ dependencies = [
  "resolve",
  "rustc_span",
  "vfs",
+]
+
+[[package]]
+name = "materialization"
+version = "0.1.0"
+dependencies = [
+ "comptime_interpretor",
+ "comptime_runtime",
+ "iir",
+ "nir",
+ "type_resolution",
 ]
 
 [[package]]
@@ -1003,6 +1015,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
+name = "verification_core"
+version = "0.1.0"
+dependencies = [
+ "comptime_runtime",
+ "nir",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1221,11 +1241,3 @@ name = "yansi"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
-
-[[package]]
-name = "verification_core"
-version = "0.1.0"
-dependencies = [
- "comptime_runtime",
- "nir",
-]

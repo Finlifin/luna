@@ -38,15 +38,15 @@ python3 -B development/check.py --timeout 900 -- test --release -p ptc
 | --- | --- | --- | --- |
 | 1，已完成 | `ptc` | 类型公式、有限理论、证明与反例 | 保留 opaque normal-form 头、预算及 Unknown 语义 |
 | 2，已完成 | `type_resolution` | inference store、obligations、matching、implementation、capabilities、associated 查询 | 把通用 Term 结构计量从 memory 模块移到 NIR 或类型基础层；候选事务和证据保持同一所有者 |
-| 3，逻辑核心已完成 | 实例语义与程序验证 | 将类型视图和方法选择与执行依赖闭包区分；随后迁出 flow、memory、moves、drop 等验证 | 消除验证对完整 materialization 调度器的反向依赖；先证明选中方法、预算及失败行为与原路径一致 |
-| 4 | staging / materialization | quoted code、inline 展开和具体调用闭包 | 将已检查 NIR 上的展开与源码 Checker 分开，明确预算、fresh identity、来源映射和候选发布接口 |
+| 3，逻辑核心已完成 | 实例语义与程序验证 | 将类型视图和方法选择与执行依赖闭包区分；随后迁出 flow、memory、moves、drop 等验证 | 下移 materialization，保留完整方法闭包检查；解除对源码展开器的反向 Cargo 依赖 |
+| 4，materialization 已完成 | staging / materialization | quoted code、inline 展开和具体调用闭包 | 将已检查 NIR 上的展开与源码 Checker 分开，明确预算、fresh identity、来源映射和候选发布接口 |
 | 5 | 剩余 elaboration | HIR 到 NIR 的检查、协议接线、阶段交织与顶层协调 | 依赖上述稳定服务，不把活动推断状态冻结或交给全局缓存 |
 
-第三步已创建 verification_core，完整程序验证的边界仍在拆解；第四、第五步
-仍是后续方向。不能把表格当作已经完成全部拆分。
+第三步已创建 verification_core，完整程序验证的边界仍在拆解；第四步已拆出
+materialization，源码展开器仍在 elaboration。第五步尚未完成。
 最值得继续移出的体量是 verification，而不是无限增加只有几个工具函数的小 crate。
 
-## 已确认的依赖环
+## 最初确认的依赖环
 
 ```mermaid
 flowchart LR
@@ -294,3 +294,47 @@ materialization 对 program 的调用由九处降为四处，剩余是真正的 
 剩余四个展开入口均由 IIR 路径的 `instances.is_some()` 控制，含两处
 stage_direct_call 的入口。下一阶段可引入显式的 IIR 展开服务，把普通 dispatch
 闭包保留为无需源码展开器的下层服务；仍需以实际调用与失败检查证明边界。
+
+## 独立 materialization crate
+
+约 7,300 行依赖闭包、实例化和 staging 调度实现已迁到 `compiler/materialization`。
+其生产依赖只有 NIR、IIR、type_resolution 和 comptime runtime/interpreter，
+不依赖 elaboration、源码 program 或 verification。原 callable 单元测试跟随迁移。
+
+普通 dispatch、comptime invocation、annotation view 与方法选择入口都不接受
+源码展开器，保留原来的完整传递依赖检查。IIR instantiate 则必须显式传入
+`Expansion` 服务，提供 quote 批量展开、绑定后 quote/inline 展开和 inline effect
+展开四种操作。服务接收当前候选、共享 fuel、fresh identity 和来源/布局产物，
+调用结束后不存入全局注册表。意外在非 IIR 路径请求展开会报错，不会默默忽略。
+
+elaboration 原 materialization 模块缩为约 100 行适配器：保持公开 Rust 调用
+入口，把四项操作委托到原 program 实现。verification 的两个方法查询直接
+调用新 crate，不再经 elaboration 的适配器；类型查询继续走 type_resolution。
+原正常调用闭包、quote 方法不作为可执行函数入队、预算归零与失败不发布规则
+均保留。trait/关联类型证据不被替换为仅按名称找到的方法。
+
+新增边界测试证明：缺失的传递函数仍被普通 dispatch 拒绝；IIR 展开服务可以
+在局部候选内消耗 fuel/身份并生成 provenance；注入失败不会发布部分 IIR，
+不会改动输入包，新的调用可以恢复完成。测试 provider 仅用于验证边界，生产
+始终使用原源码展开实现，没有用空展开器代替语言功能。
+
+当前 Cargo 层次为：elaboration 协调源码检查与展开，verification 调用
+materialization，materialization 使用 type_resolution/NIR/IIR。源码 CMTT 展开
+过程中需要的方法选择仍是对下层的普通调用，因此无需反向 Cargo 依赖。
+接下来可以整体迁出剩余的 flow、memory、moves 与 cleanup。
+
+本阶段验证在 `/home/fin/luna` 执行，全部退出 0：
+
+- `python3 -B development/check.py --timeout 900 -- test --release
+  -p materialization`：18 项通过，`/tmp/luna-tools-lsjpfe51/result.json`。
+- 同一入口的 `test --release -p luna --test cmtt --test cmtt_methods
+  --test quote_functions --test inline_control --test test_templates`：1,104 项通过，
+  `/tmp/luna-tools-9hi616t3/result.json`。
+- `test --release -p luna --test execution method`：112 项通过，
+  `/tmp/luna-tools-2qt5w0j9/result.json`。
+- `python3 -B development/library_check.py --release --timeout 900
+  --stage native-comparison --stage native-math --stage sysroot-resources
+  --stage sysroot-meta --stage sysroot-builders`：全部通过，
+  `/tmp/luna-library-knqvfdll/summary.json`。
+- 格式检查 `/tmp/luna-tools-dalejusj/result.json` 与 `git diff --check` 通过。
+  未运行全 workspace 测试。
