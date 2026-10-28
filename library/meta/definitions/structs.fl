@@ -1,3 +1,4 @@
+use bindings;
 use builtin.{Integer, Symbol, Type};
 
 use List;
@@ -6,13 +7,9 @@ use List;
   Observe an applied struct in declaration order. Reflection grants neither
   field access nor layout permission, and never unfolds opaque type factories.
 -}
-pub pure comptime fn struct_field_types(subject: Type) -> List<Type> {
-    .struct_field_types'builtin(subject)
-}
+pub use bindings.struct_field_types;
 
-pub pure comptime fn struct_field_names(subject: Type) -> List<Symbol> {
-    .struct_field_names'builtin(subject)
-}
+pub use bindings.struct_field_names;
 
 {-
   Private construction data for a concrete struct. Fields retain their supplied
@@ -78,6 +75,6 @@ impl StructBuilder {
     }
 
     pub comptime fn Build(self) -> Type {
-        .build_struct'builtin(self.name, self.field_names, self.field_types)
+        bindings.BuildStruct(self.name, self.field_names, self.field_types)
     }
 }

@@ -1,3 +1,4 @@
+use bindings;
 use builtin.{Integer, Type};
 
 use List;
@@ -9,11 +10,11 @@ impl List<T> where T {
       element domain and order, including empty lists and nested List values.
     -}
     pub pure comptime fn length(self) -> Integer {
-        .list_length'builtin(self)
+        bindings.list_length(self)
     }
 
     pub pure comptime fn concat(self, right: List<T>) -> List<T> {
-        .list_concat'builtin(self, right)
+        bindings.list_concat(self, right)
     }
 
     {-
@@ -22,7 +23,7 @@ impl List<T> where T {
       element admission and representation limits still apply before completion.
     -}
     pub comptime fn append(*self, value: T) {
-        self.* = .list_concat'builtin(self.*, [value]);
+        self.* = bindings.list_concat(self.*, [value]);
     }
 
     {-

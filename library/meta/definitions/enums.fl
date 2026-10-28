@@ -1,3 +1,4 @@
+use bindings;
 use builtin.{Integer, Symbol, Type};
 
 use List;
@@ -6,25 +7,15 @@ use List;
   Logical enum structure in declaration order. Paths are lists of Symbol
   segments; indices do not describe discriminant values or storage encoding.
 -}
-pub pure comptime fn enum_group_paths(subject: Type) -> List<List<Symbol>> {
-    .enum_group_paths'builtin(subject)
-}
+pub use bindings.enum_group_paths;
 
-pub pure comptime fn enum_variant_paths(subject: Type) -> List<List<Symbol>> {
-    .enum_variant_paths'builtin(subject)
-}
+pub use bindings.enum_variant_paths;
 
-pub pure comptime fn enum_variant_shapes(subject: Type) -> List<Symbol> {
-    .enum_variant_shapes'builtin(subject)
-}
+pub use bindings.enum_variant_shapes;
 
-pub pure comptime fn enum_variant_field_names(subject: Type) -> List<List<Symbol>> {
-    .enum_variant_field_names'builtin(subject)
-}
+pub use bindings.enum_variant_field_names;
 
-pub pure comptime fn enum_variant_field_types(subject: Type) -> List<List<Type>> {
-    .enum_variant_field_types'builtin(subject)
-}
+pub use bindings.enum_variant_field_types;
 
 {-
   A concrete enum draft. Variant paths and groups retain declaration order;
@@ -170,13 +161,13 @@ impl EnumBuilder {
     }
 
     pub comptime fn Build(self) -> Type {
-        .build_enum_paths'builtin(self.name, self.groups, self.variant_names, self.shapes, self.field_names, self.field_types)
+        bindings.BuildEnum(self.name, self.groups, self.variant_names, self.shapes, self.field_names, self.field_types)
     }
 
     {- Codes correspond to leaf variants in declaration order. Symbol encoding
        requires unit variants and rejects repeated codes during BuildSymbol. -}
     pub comptime fn BuildSymbol(self, codes: List<Symbol>) -> Type {
-        .build_symbol_enum_paths'builtin(self.name, self.groups, self.variant_names,
+        bindings.BuildSymbolEnum(self.name, self.groups, self.variant_names,
             self.shapes, self.field_names, self.field_types, codes)
     }
 
@@ -187,7 +178,7 @@ impl EnumBuilder {
     pub comptime fn BuildBits(self, width: Integer,
         masks: List<Integer>, values: List<Integer>,
         offsets: List<List<Integer>>, .base_type: ?Type = null) -> Type {
-        .build_bits_enum_paths'builtin(self.name, self.groups, self.variant_names,
+        bindings.BuildBitsEnum(self.name, self.groups, self.variant_names,
             self.shapes, self.field_names, self.field_types, width, base_type, masks, values, offsets)
     }
 

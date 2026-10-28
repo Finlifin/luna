@@ -1,17 +1,13 @@
-use builtin.{Integer, usize};
+use bindings;
 
 {-
   Exact host-pipeline size conversion during comptime invocation. to_usize
   rejects negatives and values outside the configured target width; from_usize
   retains the complete value. Neither operation guesses the compiler's width.
 -}
-pub pure comptime fn to_usize(value: Integer) -> usize {
-    .comptime_integer_convert'builtin(usize, value)
-}
+pub use bindings.to_usize;
 
-pub pure comptime fn from_usize(value: usize) -> Integer {
-    .comptime_integer_convert'builtin(Integer, value)
-}
+pub use bindings.from_usize;
 
 {-
     Explicit arbitrary-precision division toward zero. The remainder has the
@@ -19,12 +15,5 @@ pub pure comptime fn from_usize(value: usize) -> Integer {
     Zero divisors fail the invocation. These functions do not install an
     implicit rounding policy for Integer operators.
 -}
-pub pure comptime fn div_trunc(left: Integer, right: Integer)
-    -> Integer {
-    .comptime_integer_div_trunc'builtin(left, right)
-}
-
-pub pure comptime fn rem_trunc(left: Integer, right: Integer)
-    -> Integer {
-    .comptime_integer_rem_trunc'builtin(left, right)
-}
+pub use bindings.div_trunc;
+pub use bindings.rem_trunc;

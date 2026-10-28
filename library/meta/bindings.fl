@@ -1,0 +1,122 @@
+use builtin.{Integer, Symbol, Type, usize};
+use List;
+
+pub typealias Object = .Object'builtin;
+
+{-
+    Named compiler-operation bindings for comptime data and definitions.
+    Library algorithms use these ordinary functions; raw compiler symbols stay
+    at this boundary. Type parameters retain the List normal-form identity.
+-}
+pub pure comptime fn list_length(values: List<T>) -> Integer where T {
+    .list_length'builtin(values)
+}
+
+pub pure comptime fn list_concat(left: List<T>, right: List<T>) -> List<T> where T {
+    .list_concat'builtin(left, right)
+}
+
+pub pure comptime fn to_usize(value: Integer) -> usize {
+    .comptime_integer_convert'builtin(usize, value)
+}
+
+pub pure comptime fn from_usize(value: usize) -> Integer {
+    .comptime_integer_convert'builtin(Integer, value)
+}
+
+pub pure comptime fn div_trunc(left: Integer, right: Integer) -> Integer {
+    .comptime_integer_div_trunc'builtin(left, right)
+}
+
+pub pure comptime fn rem_trunc(left: Integer, right: Integer) -> Integer {
+    .comptime_integer_rem_trunc'builtin(left, right)
+}
+
+pub pure comptime fn object_length(value: Object) -> Integer {
+    .object_length'builtin(value)
+}
+
+pub pure comptime fn object_key(value: Object, index: Integer) -> ?Symbol {
+    .object_key'builtin(value, index)
+}
+
+pub pure comptime fn ObjectEntryType(value: Object, index: Integer) -> Type {
+    .object_entry_type'builtin(value, index)
+}
+
+pub pure comptime fn object_value(value: Object, index: Integer) -> ?T where T {
+    .object_value'builtin(T, value, index)
+}
+
+pub pure comptime fn object_get(value: Object, key: Symbol) -> ?T where T {
+    .object_get'builtin(T, value, key)
+}
+
+pub pure comptime fn object_concat(left: Object, right: Object) -> Object {
+    .object_concat'builtin(left, right)
+}
+
+pub pure comptime fn object_append(object: Object, value: T, .key: ?Symbol = null) -> Object where T {
+    .object_append'builtin(object, key, value)
+}
+
+pub pure comptime fn object_replace(object: Object, index: Integer, value: T) -> Object where T {
+    .object_replace'builtin(object, index, value)
+}
+
+pub pure comptime fn object_remove(object: Object, index: Integer) -> Object {
+    .object_remove'builtin(object, index)
+}
+
+pub pure comptime fn struct_field_types(subject: Type) -> List<Type> {
+    .struct_field_types'builtin(subject)
+}
+
+pub pure comptime fn struct_field_names(subject: Type) -> List<Symbol> {
+    .struct_field_names'builtin(subject)
+}
+
+pub pure comptime fn enum_group_paths(subject: Type) -> List<List<Symbol>> {
+    .enum_group_paths'builtin(subject)
+}
+
+pub pure comptime fn enum_variant_paths(subject: Type) -> List<List<Symbol>> {
+    .enum_variant_paths'builtin(subject)
+}
+
+pub pure comptime fn enum_variant_shapes(subject: Type) -> List<Symbol> {
+    .enum_variant_shapes'builtin(subject)
+}
+
+pub pure comptime fn enum_variant_field_names(subject: Type) -> List<List<Symbol>> {
+    .enum_variant_field_names'builtin(subject)
+}
+
+pub pure comptime fn enum_variant_field_types(subject: Type) -> List<List<Type>> {
+    .enum_variant_field_types'builtin(subject)
+}
+
+pub comptime fn BuildStruct(name: Symbol, names: List<Symbol>, types: List<Type>) -> Type {
+    .build_struct'builtin(name, names, types)
+}
+
+pub comptime fn BuildEnum(name: Symbol, groups: List<List<Symbol>>,
+    paths: List<List<Symbol>>, shapes: List<Symbol>,
+    names: List<List<Symbol>>, types: List<List<Type>>) -> Type {
+    .build_enum_paths'builtin(name, groups, paths, shapes, names, types)
+}
+
+pub comptime fn BuildSymbolEnum(name: Symbol, groups: List<List<Symbol>>,
+    paths: List<List<Symbol>>, shapes: List<Symbol>,
+    names: List<List<Symbol>>, types: List<List<Type>>, codes: List<Symbol>) -> Type {
+    .build_symbol_enum_paths'builtin(name, groups, paths, shapes, names, types, codes)
+}
+
+pub comptime fn BuildBitsEnum(name: Symbol, groups: List<List<Symbol>>,
+    paths: List<List<Symbol>>, shapes: List<Symbol>,
+    names: List<List<Symbol>>, types: List<List<Type>>, width: Integer,
+    base_type: ?Type, masks: List<Integer>, values: List<Integer>,
+    offsets: List<List<Integer>>) -> Type {
+    .build_bits_enum_paths'builtin(name, groups, paths, shapes, names, types,
+        width, base_type, masks, values, offsets)
+}

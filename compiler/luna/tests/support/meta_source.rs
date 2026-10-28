@@ -4,6 +4,7 @@
 // resolves the same names through the builtin package dependency.
 concat!(
     "mod builtin {\n", include_str!("../../../../library/builtin/primitives.fl"), "\n}\n",
+    "mod bindings {\n", include_str!("../../../../library/meta/bindings.fl"), "\n}\n",
     "mod data {\n",
     "mod integer {\n", include_str!("../../../../library/meta/data/integer.fl"), "\n}\n",
     "mod object {\n", include_str!("../../../../library/meta/data/object.fl"), "\n}\n",

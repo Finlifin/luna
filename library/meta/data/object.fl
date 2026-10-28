@@ -1,52 +1,34 @@
-use builtin.{Integer, Symbol, Type};
+use bindings;
 
-pub typealias Object = .Object'builtin;
+pub use bindings.Object;
 
 {-
   Observe ordered Object entries without merging duplicate keys. Indices are
   checked; an out-of-range index fails the invocation. A positional entry has
   no key. Typed reads return an absent optional only for a domain mismatch.
 -}
-pub pure comptime fn object_length(value: Object) -> Integer {
-    .object_length'builtin(value)
-}
+pub use bindings.object_length;
 
-pub pure comptime fn object_key(value: Object, index: Integer) -> ?Symbol {
-    .object_key'builtin(value, index)
-}
+pub use bindings.object_key;
 
-pub pure comptime fn ObjectEntryType(value: Object, index: Integer) -> Type {
-    .object_entry_type'builtin(value, index)
-}
+pub use bindings.ObjectEntryType;
 
-pub pure comptime fn object_value(value: Object, index: Integer) -> ?T where T {
-    .object_value'builtin(T, value, index)
-}
+pub use bindings.object_value;
 
 {-
   Read the last named entry. A missing key or a different stored domain returns
   null; a mismatched last entry never falls back to an earlier duplicate.
 -}
-pub pure comptime fn object_get(value: Object, key: Symbol) -> ?T where T {
-    .object_get'builtin(T, value, key)
-}
+pub use bindings.object_get;
 
 {-
   Editing returns a new ordered Object. Duplicate keys remain distinct entries.
   Replacement preserves the entry key and position, and records the new domain.
 -}
-pub pure comptime fn object_concat(left: Object, right: Object) -> Object {
-    .object_concat'builtin(left, right)
-}
+pub use bindings.object_concat;
 
-pub pure comptime fn object_append(object: Object, value: T, .key: ?Symbol = null) -> Object where T {
-    .object_append'builtin(object, key, value)
-}
+pub use bindings.object_append;
 
-pub pure comptime fn object_replace(object: Object, index: Integer, value: T) -> Object where T {
-    .object_replace'builtin(object, index, value)
-}
+pub use bindings.object_replace;
 
-pub pure comptime fn object_remove(object: Object, index: Integer) -> Object {
-    .object_remove'builtin(object, index)
-}
+pub use bindings.object_remove;

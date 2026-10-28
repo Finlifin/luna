@@ -1,6 +1,6 @@
 # meta
 
-数据与 definition builder 模块通过 `builtin` 的公开绑定引用 `Type`、`Integer`、`Symbol` 和 `usize`，不在签名或方法体中重复访问原始类型符号。操作 intrinsic 的集中绑定与旧式 comptime 指针接收者迁移仍待完成。
+数据与 definition builder 模块通过 `builtin` 的公开绑定引用 `Type`、`Integer`、`Symbol` 和 `usize`，不在签名或方法体中重复访问原始类型符号。`bindings.fl` 集中定义 Object 类型与操作 intrinsic 的具名绑定；数据及 builder 模块通过调用或再导出复用它们。旧式 comptime 指针接收者迁移仍待完成。
 
 源码目录与待实现领域见 [六包结构](../STRUCTURE.md)。
 

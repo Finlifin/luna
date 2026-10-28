@@ -21,6 +21,7 @@
 - Tuple、资源协议和迭代协议继续由 builtin 根及相应 prelude 导出。
   `types/option.fl`、`types/result.fl` 操作原生可选／错误结果，不定义枚举替身。
 - `meta.List` 的 normal-form 定义保留在包根；列表方法位于 `data/list.fl`。
+  `meta/bindings.fl` 是编译器操作的集中具名绑定层，公开领域接口在各模块中再导出。
   Object、整数操作、StructBuilder、EnumBuilder 的根入口保持可用。
 - `attrs.abi`、`attrs.comptime_phase` 由领域实现再导出；build 的 mode、target、
   package_metadata 及相应类型由 `info/` 再导出。
