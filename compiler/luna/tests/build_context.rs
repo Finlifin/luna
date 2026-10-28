@@ -994,3 +994,116 @@ fn resident_target_inputs_recompile_changes_and_recover_after_missing_config() {
     );
     assert!(replies[4].contains("(reused true)"));
 }
+
+#[test]
+fn template_defaults_keep_provider_context_and_instance_bodies_keep_consumer_context() {
+    for category in ["fn", "inline fn", "quote fn"] {
+        let fixture = SourceFixture::new(
+            &format!(
+                "{category} selected use dependency.signature {{
+                value and (inline if build.mode matches .debug {{true}} else {{false}})
+            }}
+            fn run()->bool {{ selected() }}"
+            ),
+            "pub template fn signature(.value:bool=inline if build.mode matches .release {true}else{false})->bool;",
+        );
+        let luna::frontend::Artifact::Nir(package) = fixture
+            .compile(&[(100, "debug"), (200, "release")])
+            .unwrap_or_else(|error| panic!("{category}: {error}"))
+        else {
+            panic!("expected NIR")
+        };
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true),
+            "{category}"
+        );
+        let error = fixture
+            .compile(&[(100, "debug"), (300, "release")])
+            .err()
+            .unwrap();
+        assert!(error.contains("source package 200"), "{category}: {error}");
+    }
+}
+
+#[test]
+fn template_target_defaults_keep_source_configuration() {
+    let fixture = SourceFixture::new(
+        "fn selected use dependency.signature {value} fn run()->bool {selected()}",
+        "pub template fn signature(.value:bool=inline if build.target.arch matches .wasm32 {true}else{false})->bool;",
+    );
+    let luna::frontend::Artifact::Nir(package) = fixture
+        .compile_configured(&target_protocols(), None)
+        .unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn quote_functions_and_generated_code_keep_provider_configuration() {
+    for (app, dependency) in [
+        (
+            "fn run()->bool {dependency.selected()}",
+            "pub quote fn selected()->bool {inline if build.mode matches .release {true}else{false}}",
+        ),
+        (
+            "fn run()->bool {const generated=dependency.code(); ~<generated>}",
+            "pub comptime fn code()-><|-bool> {'(inline if build.mode matches .release {true}else{false})}",
+        ),
+        (
+            "fn run()->bool {dependency.selected(inline if build.mode matches .debug {true}else{false})}",
+            "pub quote fn selected(value:bool)->bool {inline if build.mode matches .release {value}else{false}}",
+        ),
+        (
+            "fn run()->bool {const generated=dependency.code('(inline if build.mode matches .debug {true}else{false})); ~<generated>}",
+            "pub comptime fn code(input:<|-bool>)-><|-bool> {'(~<input> and (inline if build.mode matches .release {true}else{false}))}",
+        ),
+    ] {
+        let fixture = SourceFixture::new(app, dependency);
+        let luna::frontend::Artifact::Nir(package) = fixture
+            .compile(&[(100, "debug"), (200, "release")])
+            .unwrap()
+        else {
+            panic!("expected NIR")
+        };
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+        let error = fixture.compile(&[(100, "debug")]).err().unwrap();
+        assert!(error.contains("source package 200"), "{error}");
+    }
+}
+
+#[test]
+fn derived_members_keep_generator_source_configuration() {
+    let fixture = SourceFixture::new(
+        "use dependency.Flag; use dependency.enabled;
+        struct Subject {} derive Flag.use(enabled) for Subject;
+        fn run()->bool {Subject.as(Flag).flag()}",
+        "pub trait Flag {fn flag()->bool;}
+        pub derive fn enabled for Flag {
+            fn flag()->bool {
+                inline if (build.mode matches .release) and (build.target.arch matches .wasm32) {true}else{false}
+            }
+        }");
+    let protocols = target_protocols();
+    let luna::frontend::Artifact::Nir(package) =
+        fixture.compile_configured(&protocols, None).unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let mut missing = protocols;
+    missing.build_modes.remove(&200);
+    let error = fixture.compile_configured(&missing, None).err().unwrap();
+    assert!(error.contains("source package 200"), "{error}");
+}

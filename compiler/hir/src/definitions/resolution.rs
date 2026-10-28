@@ -7,6 +7,8 @@ use std::sync::Arc;
 /// candidate lists must already refer to the generated or external definitions.
 #[derive(Clone, Debug, Default)]
 pub struct ResolutionEvidence {
+    /// Original definition, intentionally not remapped to a generated owner.
+    pub source_origin: Option<DefId>,
     pub projection: Option<DefId>,
     pub deferred: Option<Arc<[(DefId, DefId)]>>,
     pub access: Option<Arc<[(DefId, DefId)]>>,
@@ -39,8 +41,12 @@ impl DefinitionBatch<'_, '_> {
             if self.package.member_projections.contains_key(id)
                 || self.package.deferred_member_projections.contains_key(id)
                 || self.package.member_access.contains_key(id)
+                || self.package.source_origins.contains_key(id)
             {
                 return Err(error("resolution target already published", id.owner));
+            }
+            if evidence.source_origin.is_some_and(|id| !id.is_valid()) {
+                return Err(error("invalid source origin", id.owner));
             }
             if evidence.projection.is_some_and(|id| !id.is_valid()) {
                 return Err(error("invalid resolution definition", id.owner));
@@ -59,6 +65,9 @@ impl DefinitionBatch<'_, '_> {
 
     pub(super) fn publish_resolution(&mut self) {
         for (id, evidence) in self.resolution.drain(..) {
+            if let Some(origin) = evidence.source_origin {
+                self.package.source_origins.insert(id, origin);
+            }
             if let Some(value) = evidence.projection {
                 self.package.member_projections.insert(id, value);
             }
@@ -76,6 +85,11 @@ impl fmt::Display for ResolutionEvidence {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(resolution-evidence (projection ")?;
         match self.projection {
+            Some(id) => write!(f, "(def {} {})", id.pkg, id.index)?,
+            None => f.write_str("none")?,
+        }
+        f.write_str(") (source-origin ")?;
+        match self.source_origin {
             Some(id) => write!(f, "(def {} {})", id.pkg, id.index)?,
             None => f.write_str("none")?,
         }

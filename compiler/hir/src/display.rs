@@ -214,6 +214,17 @@ impl Display for Package<'_> {
                 f.write_str("))")?;
             }
         }
+        f.write_str(") (source-origins")?;
+        let mut origins: Vec<_> = self.source_origins.iter().collect();
+        origins.sort_unstable_by_key(|(id, _)| (id.owner.def_id.raw(), id.local_id.raw()));
+        for (expression, definition) in origins {
+            write!(
+                f,
+                " (origin (expression {}) (definition {}))",
+                Id(*expression),
+                Definition(*definition)
+            )?;
+        }
         f.write_str(") (lexical-parents")?;
         let mut parents = self.lexical_parents.iter().collect::<Vec<_>>();
         parents.sort_unstable_by_key(|(child, _)| child.def_id.raw());

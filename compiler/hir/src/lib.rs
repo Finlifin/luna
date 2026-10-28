@@ -86,6 +86,9 @@ pub struct Package<'hir> {
     pub definition_attributes: Vec<DeferredDefinitionAttribute<'hir>>,
     /// Resolver-selected members whose parameterized base must survive lowering.
     pub member_projections: FxHashMap<HirId, symbol::DefId>,
+    /// Original source definition for cloned syntax. Fresh lexical binding
+    /// identities must not change which package supplies contextual build data.
+    pub source_origins: FxHashMap<HirId, symbol::DefId>,
     /// Accessible static members for a base whose container is known only after
     /// elaboration. Each pair is (container, member), resolved at the use site.
     pub deferred_member_projections:
@@ -111,6 +114,7 @@ impl<'hir> Package<'hir> {
             pending_semantics: Vec::new(),
             definition_attributes: Vec::new(),
             member_projections: FxHashMap::default(),
+            source_origins: FxHashMap::default(),
             deferred_member_projections: FxHashMap::default(),
             member_access: FxHashMap::default(),
             definitions: FxHashMap::default(),
@@ -140,6 +144,15 @@ impl<'hir> Package<'hir> {
 
     pub fn owner_definition(&self, owner: OwnerId) -> Option<symbol::DefId> {
         self.owner_definitions.get(&owner).copied()
+    }
+
+    /// Follow already recorded provenance when cloning a clone; otherwise the
+    /// syntax still belongs to its original owner definition.
+    pub fn source_origin(&self, expression: HirId) -> Option<symbol::DefId> {
+        self.source_origins
+            .get(&expression)
+            .copied()
+            .or_else(|| self.owner_definition(expression.owner))
     }
 
     pub fn definition_owner(&self, definition: symbol::DefId) -> Option<OwnerId> {

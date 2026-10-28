@@ -4473,3 +4473,48 @@ Observation-selective reuse, typed package metadata and build scripts remain
 pending. No cross-compilation backend selection is claimed. Options literals
 across the existing tests received the new default target field; unrelated
 suites were not rerun for that mechanical API update.
+
+
+### Source provenance through templates and generated members (2026-10-28)
+
+Cross-package signature-template defaults previously acquired fresh HIR IDs
+without source provenance. Reading build.mode/build.target from such a default
+looked up semantic package 0 rather than the template provider. Reproduced both
+failures in `/tmp/luna-tools-rsqbti6k/result.json` (21 passed, 2 failed).
+
+HIR now records source origins separately from binding/declaration identities.
+Rebind carries the original DefId without remapping it to generated definitions,
+including when cloning a clone. Signature expansion installs this evidence;
+generated members publish it through the existing checked DefinitionBatch.
+Rejected/prepared drafts do not leak provenance. Package copies charge its
+allocated map capacity, and both HIR and resolution evidence expose it in stable
+S-expression dumps. Contextual reads without a source definition now reject
+rather than silently falling back to package 0.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p hir --test definitions`
+  exited 0: 23 tests passed, including provenance publication, rejected draft
+  isolation, invalid identity rejection and dump visibility.
+  Evidence: `/tmp/luna-tools-h_48v5gs/result.json`.
+  An earlier compile (`/tmp/luna-tools-4_vigymk/result.json`) caught the new table
+  missing from exhaustive copy-budget accounting; accounting was added before
+  this successful run.
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test build_context --test test_templates --test quote_functions --test derivation_attributes`
+  exited 0: 24 build-context, 81 template, 104 quote-function and 10 derivation
+  attribute tests passed (219 total). The build tests distinguish provider
+  defaults from consumer bodies across fn/inline fn/quote fn instances, check
+  target defaults and derived members, and compose provider quotes with caller
+  code while checking missing-provider diagnostics. Existing real sysroot
+  target tests execute at O0/O3 in the same suite.
+  Evidence: `/tmp/luna-tools-_hgf52wr/result.json`, `stdout.log`.
+- `python3 -B development/check.py --timeout 900 -- test --release -p elaboration --lib function_templates::member_clone`
+  exited 0: 9 tests passed, including cloning a published clone while retaining
+  its original source despite generated declaration remapping.
+  Evidence: `/tmp/luna-tools-bnxufup5/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+  exited 0: `/tmp/luna-tools-rz0_j3nr/result.json`. `git diff --check` passed.
+
+This fixes implemented signature-template and member-cloning paths; shared-body
+function templates and all remaining generation features are not thereby
+implemented. Build observations still use conservative request-wide cache keys.

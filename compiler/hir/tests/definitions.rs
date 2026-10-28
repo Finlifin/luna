@@ -846,15 +846,18 @@ fn resolution_evidence_is_checked_before_atomic_publication() {
     let member = DefId::new(2, 9);
     let container = DefId::new(2, 8);
     let evidence = ResolutionEvidence {
+        source_origin: Some(container),
         projection: Some(member),
         deferred: Some(vec![(container, member)].into()),
         access: Some(Vec::new().into()),
     };
     batch.set_resolution(vec![(site, evidence)]);
     assert!(batch.to_string().contains("(access (candidates))"));
+    assert!(batch.to_string().contains("(source-origin (def 2 8))"));
     assert!(batch.publish(&mut 0).is_err());
     assert!(batch.published().member_projections.is_empty());
     let result = batch.publish_checked(&mut 1000, |candidate| {
+        assert_eq!(candidate.source_origin(site), Some(container));
         assert_eq!(candidate.member_projections[&site], member);
         assert_eq!(
             &*candidate.deferred_member_projections[&site],
@@ -866,15 +869,24 @@ fn resolution_evidence_is_checked_before_atomic_publication() {
     assert!(matches!(result, Err(PublicationError::Check(_))));
     assert_eq!(batch.published().num_defs(), 0);
     assert!(batch.published().member_access.is_empty());
+    assert!(batch.published().source_origins.is_empty());
     let prepared = batch
         .prepare_checked(&mut 1000, |_| Ok::<_, ()>(()))
         .unwrap();
+    assert_eq!(prepared.candidate().source_origin(site), Some(container));
     assert_eq!(prepared.candidate().member_projections[&site], member);
     drop(prepared);
     assert!(batch.published().member_projections.is_empty());
     batch
         .publish_checked(&mut 1000, |_| Ok::<_, ()>(()))
         .unwrap();
+    assert_eq!(batch.published().source_origin(site), Some(container));
+    assert!(
+        batch
+            .published()
+            .to_string()
+            .contains("(source-origins (origin")
+    );
     assert_eq!(batch.published().member_projections[&site], member);
     assert!(batch.published().member_access[&site].is_empty());
     // Committing consumes evidence, so an empty later transaction cannot replay it.
@@ -914,6 +926,16 @@ fn resolution_evidence_rejects_foreign_duplicate_and_invalid_entries() {
                 },
             )],
             "invalid resolution definition",
+        ),
+        (
+            vec![(
+                site,
+                ResolutionEvidence {
+                    source_origin: Some(DefId::INVALID),
+                    ..Default::default()
+                },
+            )],
+            "invalid source origin",
         ),
         (
             vec![(

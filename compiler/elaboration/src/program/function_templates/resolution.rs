@@ -56,10 +56,16 @@ impl Rebind<'_, '_> {
                 .map(|id| self.definitions.get(id).copied().unwrap_or(*id));
             let deferred = self.candidates(self.source.deferred_member_projections.get(&old))?;
             let access = self.candidates(self.source.member_access.get(&old))?;
-            if projection.is_some() || deferred.is_some() || access.is_some() {
+            let source_origin = self.source.source_origin(old);
+            if source_origin.is_some()
+                || projection.is_some()
+                || deferred.is_some()
+                || access.is_some()
+            {
                 evidence.push((
                     new,
                     ResolutionEvidence {
+                        source_origin,
                         projection,
                         deferred,
                         access,

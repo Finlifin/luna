@@ -62,6 +62,7 @@ pub(super) fn charge_package(package: &Package<'_>, fuel: &mut usize) -> Result<
         pending_semantics,
         definition_attributes,
         member_projections,
+        source_origins,
         deferred_member_projections,
         member_access,
         definitions,
@@ -86,6 +87,7 @@ pub(super) fn charge_package(package: &Package<'_>, fuel: &mut usize) -> Result<
     attributes(definition_attributes, fuel)?;
     for count in [
         member_projections.capacity(),
+        source_origins.capacity(),
         deferred_member_projections.capacity(),
         member_access.capacity(),
         definitions.capacity(),

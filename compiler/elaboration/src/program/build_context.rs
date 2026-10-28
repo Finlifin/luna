@@ -26,6 +26,16 @@ impl std::fmt::Display for Target {
 }
 
 impl Checker<'_, '_> {
+    fn build_context_origin(&self, expr: &Expr<'_>) -> Result<u64, Error> {
+        let original = self.package.source_origin(expr.hir_id).ok_or_else(|| {
+            error(
+                expr.span,
+                "build context read has no originating source definition",
+            )
+        })?;
+        Ok(semantic_package(&self.package_identities, original.pkg))
+    }
+
     pub(super) fn is_build_context(&self, owner: OwnerId) -> bool {
         matches!(self.package.item(owner).map(|item| &item.kind),
             Some(ItemKind::Const(_, initializer))
@@ -69,19 +79,16 @@ impl Checker<'_, '_> {
         {
             return self.build_target(expr, owner);
         }
-        let origin = declaration(self.package, &self.package_identities, expr.hir_id.owner);
+        let origin = self.build_context_origin(expr)?;
         let mode = self
             .protocols
             .build_modes
-            .get(&origin.package)
+            .get(&origin)
             .filter(|mode| !mode.is_empty())
             .ok_or_else(|| {
                 error(
                     expr.span,
-                    format!(
-                        "build mode is unavailable for source package {}",
-                        origin.package
-                    ),
+                    format!("build mode is unavailable for source package {}", origin),
                 )
             })?;
         Ok(n::Expr {
@@ -149,19 +156,16 @@ impl Checker<'_, '_> {
     }
 
     fn build_target(&mut self, expr: &Expr<'_>, owner: OwnerId) -> Result<n::Expr, Error> {
-        let origin = declaration(self.package, &self.package_identities, expr.hir_id.owner);
+        let origin = self.build_context_origin(expr)?;
         let target = self
             .protocols
             .build_targets
-            .get(&origin.package)
+            .get(&origin)
             .cloned()
             .ok_or_else(|| {
                 error(
                     expr.span,
-                    format!(
-                        "build target is unavailable for source package {}",
-                        origin.package
-                    ),
+                    format!("build target is unavailable for source package {}", origin),
                 )
             })?;
         if target.arch.is_empty() || target.os.is_empty() || target.features.contains_key("") {

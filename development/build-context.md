@@ -22,6 +22,10 @@
 
 `configure_modes(&mut protocols)` 将快照中的 mode 绑定到源码 elaboration，读取
 位置按原始 HIR 定义归属取值，产物保留已选中的 Symbol。
+克隆语法用 `Package::source_origins` 保存原始定义；新 HIR 绑定身份不改变
+构建配置来源。签名 template 的默认值保留提供者上下文，实例主体保留实例
+定义上下文。生成成员的原始身份随 ResolutionEvidence 原子发布，继续克隆时
+沿用既有来源而不重映射到新声明。无来源的上下文读取拒绝，不回退到包 0。
 `configure(&mut protocols)` 同时替换 modes 和 targets。目标使用真实 build 包的
 Target/TargetFeatures 声明，编译器校验 marker 的字段布局后生成 nominal 值；
 features 保存排序后的 Object，公开 get 方法是库中的普通 comptime 代码。

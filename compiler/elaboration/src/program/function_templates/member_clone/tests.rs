@@ -164,6 +164,8 @@ fn cloned_resolution_remaps_both_candidate_roles_and_publishes_atomically() {
     let generated_container = DefId::new(0, 18);
     let generated_member = DefId::new(0, 19);
     let external = DefId::new(1, 9);
+    source.bind_definition(DefId::new(3, 4), member);
+    source.source_origins.insert(site, original_member);
     source.member_projections.insert(site, original_member);
     source.deferred_member_projections.insert(
         site,
@@ -215,6 +217,31 @@ fn cloned_resolution_remaps_both_candidate_roles_and_publishes_atomically() {
             );
             assert!(candidate.member_access[&generated_site].is_empty());
             assert_eq!(candidate.member_projections[&site], original_member);
+            // Binding identities move; original source configuration does not.
+            assert_eq!(
+                candidate.source_origin(generated_site),
+                Some(original_member)
+            );
+            let second = clone_member(
+                candidate,
+                &arena,
+                owner,
+                OwnerId::new(hir::LocalDefId::new(999)),
+                &HashMap::from([(original_member, generated_member)]),
+                &mut 1000,
+            )
+            .unwrap();
+            let second_site = second.bindings[&generated_site];
+            assert_eq!(
+                second
+                    .resolution
+                    .iter()
+                    .find(|(id, _)| *id == second_site)
+                    .unwrap()
+                    .1
+                    .source_origin,
+                Some(original_member)
+            );
             Ok::<_, ()>(())
         })
         .unwrap();

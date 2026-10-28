@@ -12,7 +12,9 @@ comptime fn tracing_enabled() -> bool {
 
 调用依赖包中的 tracing_enabled 时，读取的是该依赖的构建输入。`const saved =
 build.mode` 同样保存自身定义来源的 mode，不在调用时改取调用者或 build 包的
-配置。缺少该来源包的 mode 会报错，没有隐式 debug/release 或进程环境默认值。
+配置。签名 template 的默认值仍读取 template 提供者的配置，实例主体则读取
+实例自身的配置；quote fn 和已生成 quoted code 也保留其代码来源。缺少该来源
+包的 mode 会报错，没有隐式 debug/release 或进程环境默认值。
 普通 runtime 使用仍须满足 Splice 契约；可以在 inline if 中消费构建条件。
 
 命令行通过 `--build-mode debug` 配置主源码包，依赖包不会继承此值。
