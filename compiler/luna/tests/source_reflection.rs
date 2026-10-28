@@ -10,7 +10,7 @@ fn compile(source: &str) -> Result<nir::program::Package, String> {
             "mod meta {{ {} }} {source}",
             include!("support/meta_source.rs")
         ),
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             meta_list: Some("input.meta.List"),
             ..Default::default()
@@ -156,6 +156,7 @@ fn ordinary_package_observes_fields_through_meta_without_builtin_access() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
         .args(["--packages-v1", "--package", "1", "101", "app"])
         .arg(&input)
+        .args(["--builtin-impl-package", "2"])
         .args(["--package", "2", "202", "meta"])
         .arg(&library)
         .args(["--package", "3", "303", "builtin"])

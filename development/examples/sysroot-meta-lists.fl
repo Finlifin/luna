@@ -82,18 +82,18 @@ comptime fn named_metadata() -> bool {
     var draft = {enabled: false};
     let saved = draft.ref.*;
     update_metadata(draft.ref, true);
-    (meta.object_get<bool>(input, .enabled) matches false?)
-        and (meta.object_get<bool>(input, .missing) matches null)
-        and (meta.object_get<bool>(shadowed, .enabled) matches null)
-        and (meta.object_get<?Integer>(input, .limit) match {
+    (meta.Object.get<bool>(input, .enabled) matches false?)
+        and (meta.Object.get<bool>(input, .missing) matches null)
+        and (meta.Object.get<bool>(shadowed, .enabled) matches null)
+        and (meta.Object.get<?Integer>(input, .limit) match {
             value? => value matches null, null => false,
         })
-        and (meta.object_get<bool>(saved, .enabled) matches false?)
-        and (meta.object_get<bool>(draft, .enabled) matches true?)
+        and (meta.Object.get<bool>(saved, .enabled) matches false?)
+        and (meta.Object.get<bool>(draft, .enabled) matches true?)
 }
 
 comptime fn update_metadata(output: *meta.Object, enabled: bool) {
-    output.* = meta.object_replace(output.*, 0, enabled);
+    output.* = meta.Object.replace(output.*, 0, enabled);
 }
 
 comptime fn reducers_and_searches() -> bool {

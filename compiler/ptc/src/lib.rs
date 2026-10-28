@@ -1483,6 +1483,20 @@ impl Search<'_> {
                         {
                             return Ok(None);
                         }
+                        // The compiler-bound List family is distinct from
+                        // established structural constructors. This says nothing
+                        // about arbitrary opaque normal-form heads or List input
+                        // injectivity, and never unfolds a factory body.
+                        let non_list = |term: &Term| {
+                            constructor(term).is_some()
+                                || self.context.is_tuple_type(term)
+                                || matches!(term, Term::Record(_))
+                        };
+                        if (self.context.is_list_type(ta) && non_list(tb))
+                            || (self.context.is_list_type(tb) && non_list(ta))
+                        {
+                            return Ok(None);
+                        }
                         if self.error_result_distinct(a, b, &classes, assignment)? {
                             return Ok(None);
                         }

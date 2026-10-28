@@ -197,3 +197,44 @@ fn designated_builtin_package_can_implement_a_foreign_trait() {
     luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn package_cli_grants_are_explicit_validated_and_part_of_request_identity() {
+    let path = std::env::temp_dir().join(format!("luna-impl-provider-{}.fl", std::process::id()));
+    std::fs::write(
+        &path,
+        "typealias Object=.Object'builtin;impl Object {pub comptime fn ready(self)->bool {true}}
+        comptime fn run()->bool {let value:Object={};value.ready()}",
+    )
+    .unwrap();
+    let args: Vec<std::ffi::OsString> = vec![
+        "--package".into(),
+        "7".into(),
+        "99".into(),
+        "provider".into(),
+        path.clone().into(),
+        "--primary".into(),
+        "7".into(),
+        "--invoke-comptime".into(),
+        "run".into(),
+    ];
+    let plain = luna::package_cli::parse(args.clone()).unwrap();
+    assert!(plain.run().is_err());
+    let mut granted_args = args.clone();
+    granted_args.extend(["--builtin-impl-package".into(), "7".into()]);
+    let granted = luna::package_cli::parse(granted_args.clone()).unwrap();
+    assert_ne!(plain, granted);
+    assert_eq!(granted.run().unwrap().trim(), "(bool true)");
+    granted_args.extend(["--builtin-impl-package".into(), "7".into()]);
+    assert!(luna::package_cli::parse(granted_args).is_err());
+    let mut missing = args;
+    missing.extend(["--builtin-impl-package".into(), "8".into()]);
+    assert!(
+        luna::package_cli::parse(missing)
+            .unwrap()
+            .run()
+            .unwrap_err()
+            .contains("is absent")
+    );
+    std::fs::remove_file(path).unwrap();
+}

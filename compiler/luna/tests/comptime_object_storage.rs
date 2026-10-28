@@ -12,7 +12,7 @@ fn compile(source: &str) -> nir::program::Package {
             {source}",
             include!("support/meta_source.rs")
         ),
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             meta_list: Some("input.meta.List"),
             copy: Some("input.Duplicate"),
@@ -37,15 +37,15 @@ fn object_pointer_reads_and_writes_preserve_nested_snapshots() {
             var object={flag:true, flag:false, absent:absent, nested:{flag:true}, types:types};
             let pointer=object.ref;
             let saved=pointer.*;
-            let earlier=meta.object_get<bool>(object,do {pointer.* = {flag:true}; .flag});
+            let earlier=meta.Object.get<bool>(object,do {pointer.* = {flag:true}; .flag});
             let read_back=pointer.*;
             pointer.* = {};
-            (earlier matches false?) and meta.object_length(object)==0
-                and (meta.object_get<bool>(read_back,.flag) matches true?)
-                and meta.object_length(saved)==5
-                and (meta.object_get<?bool>(saved,.absent) match {v?=>v matches null,null=>false})
-                and (meta.object_get<meta.Object>(saved,.nested) match {v?=>meta.object_get<bool>(v,.flag) matches true?,null=>false})
-                and (meta.object_get<meta.List<.Type'builtin>>(saved,.types) match {v?=>v[0]==Identity<bool>,null=>false})
+            (earlier matches false?) and meta.Object.length(object)==0
+                and (meta.Object.get<bool>(read_back,.flag) matches true?)
+                and meta.Object.length(saved)==5
+                and (meta.Object.get<?bool>(saved,.absent) match {v?=>v matches null,null=>false})
+                and (meta.Object.get<meta.Object>(saved,.nested) match {v?=>meta.Object.get<bool>(v,.flag) matches true?,null=>false})
+                and (meta.Object.get<meta.List<.Type'builtin>>(saved,.types) match {v?=>v[0]==Identity<bool>,null=>false})
         }
     ");
     assert_eq!(invoke(&package).unwrap(), Value::Bool(true));
@@ -60,7 +60,7 @@ fn nominal_object_payloads_require_copy_without_drop() {
             let pointer=object.ref;
             let saved=pointer.*;
             pointer.* = {flag:false};
-            meta.object_get<Item>(saved,.item) match {value?=>value.flag,null=>false}
+            meta.Object.get<Item>(saved,.item) match {value?=>value.flag,null=>false}
         }";
     let package = compile(&source.replace("IMPL", "impl Duplicate for Item {}"));
     assert_eq!(invoke(&package).unwrap(), Value::Bool(true));

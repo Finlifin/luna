@@ -6,11 +6,11 @@ use primitives.Type;
 
 comptime fn configured() -> <|-bool> {
     let metadata = {enabled:true, .example, enabled:false};
-    let first = meta.object_value<bool>(metadata, 0);
-    let last = meta.object_value<bool>(metadata, 2);
-    let result = meta.object_length(metadata) == 3
-        and meta.ObjectEntryType(metadata, 0) == bool
-        and (meta.object_key(metadata, 1) match {_? => false, null => true})
+    let first = meta.Object.value<bool>(metadata, 0);
+    let last = meta.Object.value<bool>(metadata, 2);
+    let result = meta.Object.length(metadata) == 3
+        and meta.Object.EntryType(metadata, 0) == bool
+        and (meta.Object.key(metadata, 1) match {_? => false, null => true})
         and (first match {value? => value, null => false})
         and (last match {value? => not value, null => false});
     '(result)

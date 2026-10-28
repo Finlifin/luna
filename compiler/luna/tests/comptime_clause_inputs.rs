@@ -10,7 +10,7 @@ fn compile(source: &str) -> Result<nir::program::Package, String> {
             "mod meta {{{}}} {source}",
             include!("support/meta_source.rs")
         ),
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             meta_list: Some("input.meta.List"),
             ..Default::default()
@@ -89,12 +89,12 @@ fn object_and_list_clauses_retain_domains_and_edited_snapshots() {
         invoke(
             "
         comptime fn enabled()->bool where metadata:meta.Object {
-            meta.object_value<bool>(metadata,0) match {value?=>value,null=>false}
+            meta.Object.value<bool>(metadata,0) match {value?=>value,null=>false}
         }
         comptime fn first()->bool where values:meta.List<bool> {values[0]}
         comptime fn run()->bool {
             let original={flag:true};
-            let changed=meta.object_replace(original,0,false);
+            let changed=meta.Object.replace(original,0,false);
             let values:meta.List<bool> = [true,false];
             enabled<original>() and not enabled<changed>() and first<values>()
         }

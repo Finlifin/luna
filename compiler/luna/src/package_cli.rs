@@ -12,6 +12,7 @@ pub struct Request {
     pub dependencies: Vec<(u32, String, u32)>,
     pub primary: u32,
     pub builtin: Option<u32>,
+    pub builtin_implementation_packages: std::collections::BTreeSet<u32>,
     pub options: Options,
     pub action: Action,
     pub with_inputs: bool,
@@ -118,6 +119,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
     let mut dependencies = Vec::new();
     let mut primary = None;
     let mut builtin = None;
+    let mut builtin_implementation_packages = std::collections::BTreeSet::new();
     let mut forwarded = Vec::new();
     let mut with_inputs = false;
     let mut metadata = None;
@@ -154,6 +156,12 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                     .is_some()
                 {
                     return Err("--primary supplied more than once".into());
+                }
+            }
+            Some("--builtin-impl-package") => {
+                let id = number(&mut args, "builtin implementation package ID")?;
+                if !builtin_implementation_packages.insert(id) {
+                    return Err("duplicate --builtin-impl-package".into());
                 }
             }
             Some("--builtin") => {
@@ -417,6 +425,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
         dependencies,
         primary,
         builtin,
+        builtin_implementation_packages,
         options,
         action,
         with_inputs,
@@ -627,6 +636,16 @@ impl Request {
             &configured,
         )?;
         let mut configured = configured;
+        for id in &self.builtin_implementation_packages {
+            let package = self
+                .packages
+                .iter()
+                .find(|package| package.resolution_id == *id)
+                .ok_or_else(|| format!("builtin implementation package {id} is absent"))?;
+            configured
+                .builtin_implementation_packages
+                .insert(package.identity);
+        }
         if let Some(inputs) = &self.metadata {
             if options.emit != Emit::Nir {
                 return Err("package metadata requires --emit nir".into());

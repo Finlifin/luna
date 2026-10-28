@@ -9,7 +9,7 @@ use nir::{Primitive, Term};
 fn compile(source: &str) -> Result<nir::program::Package, String> {
     support::compile_with_source_bindings(
         source,
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             meta_list: Some("input.meta.List"),
             ..Default::default()
@@ -34,16 +34,16 @@ fn named_object_reads_use_the_last_domain_and_preserve_optional_layers() {
             let absent:?bool=null;
             let object={flag:true, 'x', flag:false, empty:absent, nested:{flag:true}, kind:Identity<bool>};
             let shadowed={flag:true, flag:'x'};
-            (meta.object_get<bool>(object,.flag) matches false?)
-                and (meta.object_get<bool>(object,.missing) matches null)
-                and (meta.object_get<bool>(shadowed,.flag) matches null)
-                and (meta.object_get<.char'builtin>(shadowed,.flag) matches 'x'?)
-                and (meta.object_get<?bool>(object,.empty) match {value?=>value matches null,null=>false})
-                and (meta.object_get<meta.Object>(object,.nested) match {
-                    nested?=>meta.object_get<bool>(nested,.flag) matches true?,null=>false})
-                and (meta.object_get<.Type'builtin>(object,.kind) match {
+            (meta.Object.get<bool>(object,.flag) matches false?)
+                and (meta.Object.get<bool>(object,.missing) matches null)
+                and (meta.Object.get<bool>(shadowed,.flag) matches null)
+                and (meta.Object.get<.char'builtin>(shadowed,.flag) matches 'x'?)
+                and (meta.Object.get<?bool>(object,.empty) match {value?=>value matches null,null=>false})
+                and (meta.Object.get<meta.Object>(object,.nested) match {
+                    nested?=>meta.Object.get<bool>(nested,.flag) matches true?,null=>false})
+                and (meta.Object.get<.Type'builtin>(object,.kind) match {
                     T?=>T==Identity<bool>,null=>false})
-                and (meta.object_get<bool>({},.missing) matches null)
+                and (meta.Object.get<bool>({},.missing) matches null)
         }
     ").unwrap();
     assert_eq!(value, Value::Bool(true));
@@ -61,11 +61,11 @@ fn named_object_reads_keep_argument_order_early_return_and_snapshot() {
         }
         comptime fn run()->bool {
             var state:.Integer'builtin=0;
-            let value=meta.object_get<bool>(make(state.ref),key(state.ref));
+            let value=meta.Object.get<bool>(make(state.ref),key(state.ref));
             var original={flag:true};
-            let saved=meta.object_get<bool>(original,do {original = {flag:false}; .flag});
+            let saved=meta.Object.get<bool>(original,do {original = {flag:false}; .flag});
             state==12 and (value matches true?) and (saved matches true?)
-                and (meta.object_get<bool>(original,.flag) matches false?)
+                and (meta.Object.get<bool>(original,.flag) matches false?)
         }
     ",
     )
@@ -74,7 +74,7 @@ fn named_object_reads_keep_argument_order_early_return_and_snapshot() {
     assert_eq!(
         invoke(
             "comptime fn run()->bool {
-        meta.object_get<bool>(do {return true;},do {while true {} .flag}); false
+        meta.Object.get<bool>(do {return true;},do {while true {} .flag}); false
     }"
         )
         .unwrap(),
@@ -86,8 +86,8 @@ fn named_object_reads_keep_argument_order_early_return_and_snapshot() {
 fn named_object_queries_reject_wrong_keys_and_runtime_use() {
     let meta = include!("support/meta_source.rs");
     for source in [
-        "comptime fn bad()->?bool {meta.object_get<bool>({flag:true},0)}",
-        "fn bad()->?bool {meta.object_get<bool>({flag:true},.flag)}",
+        "comptime fn bad()->?bool {meta.Object.get<bool>({flag:true},0)}",
+        "fn bad()->?bool {meta.Object.get<bool>({flag:true},.flag)}",
         "comptime fn bad()->?bool {.object_get'builtin(bool,{flag:true})}",
     ] {
         assert!(
@@ -97,7 +97,7 @@ fn named_object_queries_reject_wrong_keys_and_runtime_use() {
     }
     let package = compile(&format!(
         "mod meta {{ {meta} }} comptime fn run()->bool {{
-        meta.object_get<bool>({{flag:true}},.flag) matches true?
+        meta.Object.get<bool>({{flag:true}},.flag) matches true?
     }}"
     ))
     .unwrap();
@@ -119,18 +119,18 @@ fn named_lookup_avoids_repeated_object_transport_during_feature_search() {
     let package = compile(&format!(
         "mod meta {{ {meta} }}
         comptime fn previous(object:meta.Object,key:.Symbol'builtin)->?bool {{
-            let count=meta.object_length(object);
+            let count=meta.Object.length(object);
             var index:.Integer'builtin=0;
             while index < count {{
-                if meta.object_key(object,index) match {{name?=>name==key,null=>false}} {{
-                    return meta.object_value<bool>(object,index);
+                if meta.Object.key(object,index) match {{name?=>name==key,null=>false}} {{
+                    return meta.Object.value<bool>(object,index);
                 }}
                 index += 1;
             }}
             null
         }}
         comptime fn previous_entry()->?bool {{previous({{{fields}}},.f63)}}
-        comptime fn named_entry()->?bool {{meta.object_get<bool>({{{fields}}},.f63)}}
+        comptime fn named_entry()->?bool {{meta.Object.get<bool>({{{fields}}},.f63)}}
     "
     ))
     .unwrap();
@@ -168,21 +168,21 @@ fn indexed_object_queries_preserve_order_domains_and_optional_layers() {
             let absent:?bool=null;
             let nested={enabled:true};
             let object={flag:true, 'x', flag:false, absent, nested};
-            let first=meta.object_value<bool>(object,0);
-            let last=meta.object_value<bool>(object,2);
-            let missing=meta.object_value<bool>(object,1);
-            let layered=meta.object_value<?bool>(object,3);
-            let inner=meta.object_value<meta.Object>(object,4);
-            meta.object_length(object)==5
-                and (meta.object_key(object,0) match {key?=>key==.flag,null=>false})
-                and (meta.object_key(object,1) match {_?=>false,null=>true})
-                and (meta.object_key(object,2) match {key?=>key==.flag,null=>false})
-                and meta.ObjectEntryType(object,1)==.char'builtin
+            let first=meta.Object.value<bool>(object,0);
+            let last=meta.Object.value<bool>(object,2);
+            let missing=meta.Object.value<bool>(object,1);
+            let layered=meta.Object.value<?bool>(object,3);
+            let inner=meta.Object.value<meta.Object>(object,4);
+            meta.Object.length(object)==5
+                and (meta.Object.key(object,0) match {key?=>key==.flag,null=>false})
+                and (meta.Object.key(object,1) match {_?=>false,null=>true})
+                and (meta.Object.key(object,2) match {key?=>key==.flag,null=>false})
+                and meta.Object.EntryType(object,1)==.char'builtin
                 and (first match {value?=>value,null=>false})
                 and (last match {value?=>not value,null=>false})
                 and (missing match {_?=>false,null=>true})
                 and (layered match {value?=>value match {_?=>false,null=>true},null=>false})
-                and (inner match {value?=>meta.object_length(value)==1,null=>false})
+                and (inner match {value?=>meta.Object.length(value)==1,null=>false})
         }
     ",
     )
@@ -200,12 +200,12 @@ fn object_queries_preserve_type_identity_and_evaluate_inputs_once_in_order() {
         }
         comptime fn run()->bool {
             var state=false;
-            let got=meta.object_value<A>(make(state.ref),index(state.ref));
+            let got=meta.Object.value<A>(make(state.ref),index(state.ref));
             let item=A {};
             let object={stored:item, kind:.u8'builtin};
             not state and (got match {_?=>true,null=>false})
-                and (meta.object_value<B>(object,0) match {_?=>false,null=>true})
-                and (meta.object_value<.Type'builtin>(object,1) match {T?=>T==.u8'builtin,null=>false})
+                and (meta.Object.value<B>(object,0) match {_?=>false,null=>true})
+                and (meta.Object.value<.Type'builtin>(object,1) match {T?=>T==.u8'builtin,null=>false})
         }
     ").unwrap();
     assert_eq!(value, Value::Bool(true));
@@ -215,7 +215,7 @@ fn object_queries_preserve_type_identity_and_evaluate_inputs_once_in_order() {
 fn object_queries_reject_bounds_and_runtime_transport() {
     let meta = include!("support/meta_source.rs");
     for index in ["-1", "1", "99999999999999999999999999999999999"] {
-        for query in ["object_key", "ObjectEntryType", "object_value<bool>"] {
+        for query in ["Object.key", "Object.EntryType", "Object.value<bool>"] {
             let error = invoke(&format!(
                 "comptime fn run()->bool {{let value={{true}}; meta.{query}(value,{index}); true}}"
             ))
@@ -224,7 +224,7 @@ fn object_queries_reject_bounds_and_runtime_transport() {
         }
     }
     let error = compile(&format!(
-        "mod meta {{ {meta} }} fn bad()->.Integer'builtin {{meta.object_length({{true}})}}"
+        "mod meta {{ {meta} }} fn bad()->.Integer'builtin {{meta.Object.length({{true}})}}"
     ))
     .unwrap_err();
     assert!(
@@ -232,7 +232,7 @@ fn object_queries_reject_bounds_and_runtime_transport() {
         "{error}"
     );
     assert_eq!(
-        invoke("comptime fn run()->bool {meta.object_length({})==0}").unwrap(),
+        invoke("comptime fn run()->bool {meta.Object.length({})==0}").unwrap(),
         Value::Bool(true)
     );
 }
@@ -242,7 +242,7 @@ fn object_query_argument_return_skips_later_inputs() {
     assert_eq!(
         invoke(
             "comptime fn run()->bool {
-        meta.object_key(do {return true;}, do {while true {} 0}); false
+        meta.Object.key(do {return true;}, do {while true {} 0}); false
     }"
         )
         .unwrap(),
@@ -258,9 +258,9 @@ fn code_generators_can_reconstruct_nested_object_data_without_normal_term_erasur
         comptime fn generate()-><|-bool> {{
             let nested={{flag:true}};
             let object={{nested:nested, tag:.sample}};
-            let selected=meta.object_value<meta.Object>(object,0);
+            let selected=meta.Object.value<meta.Object>(object,0);
             let answer=selected match {{
-                inner?=>meta.object_value<bool>(inner,0) match {{flag?=>flag,null=>false}},
+                inner?=>meta.Object.value<bool>(inner,0) match {{flag?=>flag,null=>false}},
                 null=>false,
             }};
             '(answer)
@@ -305,6 +305,7 @@ fn repository_package_exports_object_for_user_attribute_constructors() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
         .args(["--packages-v1", "--package", "1", "101", "app"])
         .arg(&input)
+        .args(["--builtin-impl-package", "2"])
         .args(["--package", "2", "202", "meta"])
         .arg(&library)
         .args(["--package", "3", "303", "builtin"])
@@ -415,23 +416,23 @@ fn object_edits_preserve_snapshots_order_keys_and_replacement_domains() {
         comptime fn run()->bool {
             let original={flag:true, 'x', flag:false};
             let key:.Symbol'builtin=.flag;
-            let appended=meta.object_append(original,.u8'builtin,.key = key);
-            let positional=meta.object_append(appended,false);
-            let replaced=meta.object_replace(positional,0,'z');
-            let removed=meta.object_remove(replaced,1);
-            let joined=meta.object_concat(removed,original);
-            meta.object_length(original)==3
-                and meta.object_length(joined)==7
-                and meta.ObjectEntryType(original,0)==bool
-                and meta.ObjectEntryType(replaced,0)==.char'builtin
-                and meta.ObjectEntryType(joined,2)==.Type'builtin
-                and (meta.object_key(joined,0) match {v?=>v==.flag,null=>false})
-                and (meta.object_key(joined,2) match {v?=>v==.flag,null=>false})
-                and (meta.object_key(joined,3) match {_?=>false,null=>true})
-                and (meta.object_value<.char'builtin>(joined,0) match {v?=>v=='z',null=>false})
-                and (meta.object_value<.Type'builtin>(joined,2) match {T?=>T==.u8'builtin,null=>false})
-                and (meta.object_value<bool>(joined,4) match {v?=>v,null=>false})
-                and (meta.object_value<bool>(replaced,0) match {_?=>false,null=>true})
+            let appended=meta.Object.append(original,.u8'builtin,.key = key);
+            let positional=meta.Object.append(appended,false);
+            let replaced=meta.Object.replace(positional,0,'z');
+            let removed=meta.Object.remove(replaced,1);
+            let joined=meta.Object.concat(removed,original);
+            meta.Object.length(original)==3
+                and meta.Object.length(joined)==7
+                and meta.Object.EntryType(original,0)==bool
+                and meta.Object.EntryType(replaced,0)==.char'builtin
+                and meta.Object.EntryType(joined,2)==.Type'builtin
+                and (meta.Object.key(joined,0) match {v?=>v==.flag,null=>false})
+                and (meta.Object.key(joined,2) match {v?=>v==.flag,null=>false})
+                and (meta.Object.key(joined,3) match {_?=>false,null=>true})
+                and (meta.Object.value<.char'builtin>(joined,0) match {v?=>v=='z',null=>false})
+                and (meta.Object.value<.Type'builtin>(joined,2) match {T?=>T==.u8'builtin,null=>false})
+                and (meta.Object.value<bool>(joined,4) match {v?=>v,null=>false})
+                and (meta.Object.value<bool>(replaced,0) match {_?=>false,null=>true})
         }
     ").unwrap();
     assert_eq!(value, Value::Bool(true));
@@ -442,8 +443,8 @@ fn object_edits_check_indices_and_runtime_phase() {
     let meta = include!("support/meta_source.rs");
     for index in ["-1", "1", "9999999999999999999999999999999999"] {
         for operation in [
-            format!("meta.object_remove(object,{index})"),
-            format!("meta.object_replace(object,{index},false)"),
+            format!("meta.Object.remove(object,{index})"),
+            format!("meta.Object.replace(object,{index},false)"),
         ] {
             let error = invoke(&format!(
                 "comptime fn run()->meta.Object {{let object={{flag:true}}; {operation}}}"
@@ -452,7 +453,7 @@ fn object_edits_check_indices_and_runtime_phase() {
             assert!(error.contains("IndexOutOfBounds"), "{error}");
         }
     }
-    let error=compile(&format!("mod meta {{{meta}}} fn run()->meta.Object {{let object={{flag:true}};meta.object_remove(object,0)}}")).unwrap_err();
+    let error=compile(&format!("mod meta {{{meta}}} fn run()->meta.Object {{let object={{flag:true}};meta.Object.remove(object,0)}}")).unwrap_err();
     assert!(error.contains("comptime"), "{error}");
 }
 
@@ -464,11 +465,11 @@ fn object_edits_evaluate_once_in_order_and_keep_optional_payloads() {
         comptime fn run()->bool {
             var state=false;
             let absent:?bool=null;
-            let replaced=meta.object_replace(make(state.ref),index(state.ref),absent);
-            let empty=meta.object_remove(replaced,0);
-            let combined=meta.object_concat(empty,replaced);
-            not state and meta.object_length(empty)==0
-                and (meta.object_value<?bool>(combined,0) match {v?=>v match {_?=>false,null=>true},null=>false})
+            let replaced=meta.Object.replace(make(state.ref),index(state.ref),absent);
+            let empty=meta.Object.remove(replaced,0);
+            let combined=meta.Object.concat(empty,replaced);
+            not state and meta.Object.length(empty)==0
+                and (meta.Object.value<?bool>(combined,0) match {v?=>v match {_?=>false,null=>true},null=>false})
         }
     ").unwrap();
     assert_eq!(value, Value::Bool(true));
@@ -476,7 +477,7 @@ fn object_edits_evaluate_once_in_order_and_keep_optional_payloads() {
 
 #[test]
 fn object_edit_return_skips_later_inputs() {
-    assert_eq!(invoke("comptime fn run()->bool {meta.object_replace(do {return true;},do {while true {} 0},false);false}").unwrap(),Value::Bool(true));
+    assert_eq!(invoke("comptime fn run()->bool {meta.Object.replace(do {return true;},do {while true {} 0},false);false}").unwrap(),Value::Bool(true));
 }
 
 #[test]
@@ -488,8 +489,8 @@ fn literal_keys_receive_optional_symbol_context_without_enum_resolution() {
         }
         comptime fn run()->bool {
             let base={true};
-            let object=meta.object_append(base,false,.key = .flag);
-            nested(.flag) and (meta.object_key(object,1) match {v?=>v==.flag,null=>false})
+            let object=meta.Object.append(base,false,.key = .flag);
+            nested(.flag) and (meta.Object.key(object,1) match {v?=>v==.flag,null=>false})
         }
     ",
     )
@@ -503,11 +504,11 @@ fn objects_are_frozen_normal_form_inputs_with_ordered_typed_identity() {
         "
         pure comptime fn Tagged<metadata:meta.Object>->.Type'builtin {bool}
         comptime fn read()->bool where metadata:meta.Object {
-            meta.object_length(metadata)==3
-                and (meta.object_value<bool>(metadata,0) match {v?=>v,null=>false})
-                and meta.ObjectEntryType(metadata,1)==.Type'builtin
-                and (meta.object_value<.Type'builtin>(metadata,1) match {T?=>T==bool,null=>false})
-                and (meta.object_key(metadata,2) match {v?=>v==.flag,null=>false})
+            meta.Object.length(metadata)==3
+                and (meta.Object.value<bool>(metadata,0) match {v?=>v,null=>false})
+                and meta.Object.EntryType(metadata,1)==.Type'builtin
+                and (meta.Object.value<.Type'builtin>(metadata,1) match {T?=>T==bool,null=>false})
+                and (meta.Object.key(metadata,2) match {v?=>v==.flag,null=>false})
         }
         const checked=read<{flag:true, kind:bool, flag:false}>();
         comptime fn run()->bool {
@@ -588,7 +589,7 @@ fn object_clause_inputs_reconstruct_nested_trusted_lists() {
         const FLAGS:meta.List<bool> = [true,false];
         const METADATA={flags:FLAGS};
         comptime fn read()->bool where metadata:meta.Object {
-            meta.object_value<meta.List<bool>>(metadata,0) match {
+            meta.Object.value<meta.List<bool>>(metadata,0) match {
                 values?=>values.length()==2 and values[0] and not values[1],
                 null=>false,
             }
@@ -599,4 +600,71 @@ fn object_clause_inputs_reconstruct_nested_trusted_lists() {
     )
     .unwrap();
     assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn inherent_object_methods_preserve_domains_duplicates_and_snapshots() {
+    let value = invoke(
+        "comptime fn run()->bool {
+            let absent:?bool=null;
+            let original={flag:true, 'x', flag:false, empty:absent};
+            let added=original.append(true,.key=.flag);
+            let changed=added.replace(1,false);
+            let removed=changed.remove(0);
+            let joined=removed.concat({tail:true});
+            original.length()==4 and joined.length()==5
+                and (original.get<bool>(.flag) matches false?)
+                and (added.get<bool>(.flag) matches true?)
+                and (original.key(1) matches null)
+                and (original.value<bool>(1) matches null)
+                and (changed.value<bool>(1) matches false?)
+                and changed.EntryType(1)==bool
+                and (original.get<?bool>(.empty) match {value?=>value matches null,null=>false})
+                and (joined.get<bool>(.tail) matches true?)
+        }",
+    )
+    .unwrap();
+    assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn inherent_object_methods_evaluate_receiver_and_arguments_once() {
+    let meta = include!("support/meta_source.rs");
+    let source = format!(
+        "mod meta {{{meta}}}
+        comptime fn make()->meta.Object {{let value={{flag:true}};value}}
+        comptime fn produce_key()->meta.builtin.Symbol {{.flag}}
+        comptime fn run()->bool {{make().get<bool>(produce_key()) matches true?}}"
+    );
+    let package = compile(&source).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let ids = [
+        support::id(&package, "make"),
+        support::id(&package, "produce_key"),
+    ];
+    let calls = vm
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            comptime_interpretor::Event::EnterFunction(id) => {
+                ids.iter().position(|expected| id == expected)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls, [0, 1]);
+    for source in [
+        "fn bad(value:meta.Object)->bool {value.get<bool>(.flag) matches true?}",
+        "comptime fn bad()->?bool {let value={flag:true};value.get<bool>(0)}",
+        "comptime fn bad()->bool {let value={flag:true};value.get(.flag)}",
+    ] {
+        assert!(
+            compile(&format!("mod meta {{{meta}}}{source}")).is_err(),
+            "{source}"
+        );
+    }
 }

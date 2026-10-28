@@ -23460,6 +23460,8 @@ fn quoted_tuple_contract_requires_explicit_copy_and_preserves_caller() {
                 .current_dir(&w.0)
                 .args([
                     "--packages-v1",
+                    "--builtin-impl-package",
+                    "3",
                     "--package",
                     "1",
                     "101",

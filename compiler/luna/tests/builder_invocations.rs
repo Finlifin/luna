@@ -380,7 +380,10 @@ impl Fixture {
             ],
             17,
             None,
-            &Default::default(),
+            &elaboration::program::Protocols {
+                builtin_implementation_packages: [901].into(),
+                ..Default::default()
+            },
             luna::protocols::type_constructors::Selectors {
                 meta_list: Some("meta.List"),
                 comptime_intrinsics: &intrinsics,
@@ -486,6 +489,7 @@ fn package_cli_invokes_public_builders_with_observed_inputs() {
         command
             .args(["--packages-v1", "--package", "17", "900", "app"])
             .arg(fixture.0.join("lib.fl"))
+            .args(["--builtin-impl-package", "42"])
             .args(["--package", "42", "901", "meta"])
             .arg(&meta)
             .args(["--package", "43", "902", "builtin"])
@@ -540,7 +544,7 @@ fn package_cli_invokes_public_builders_with_observed_inputs() {
 }
 
 #[test]
-fn standalone_cli_executes_builders_and_preserves_source_output_protection() {
+fn isolated_library_cli_executes_builders_and_preserves_source_output_protection() {
     let fixture = Fixture::new(&format!(
         "mod meta {{ {} }}
         comptime fn Generate() -> bool {{
@@ -550,7 +554,9 @@ fn standalone_cli_executes_builders_and_preserves_source_output_protection() {
         include!("support/meta_source.rs")
     ));
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .args(["--packages-v1", "--package", "0", "0", "input"])
         .arg(fixture.0.join("lib.fl"))
+        .args(["--primary", "0", "--builtin-impl-package", "0"])
         .args([
             "--meta-list-type",
             "input.meta.List",
@@ -571,7 +577,9 @@ fn standalone_cli_executes_builders_and_preserves_source_output_protection() {
     let source = fixture.0.join("lib.fl");
     let before = std::fs::read(&source).unwrap();
     let rejected = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .args(["--packages-v1", "--package", "0", "0", "input"])
         .arg(&source)
+        .args(["--primary", "0", "--builtin-impl-package", "0"])
         .args([
             "--meta-list-type",
             "input.meta.List",

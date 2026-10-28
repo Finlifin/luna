@@ -1,34 +1,56 @@
+use builtin.{Integer, Symbol, Type};
 use bindings;
 
 pub use bindings.Object;
 
-{-
-  Observe ordered Object entries without merging duplicate keys. Indices are
-  checked; an out-of-range index fails the invocation. A positional entry has
-  no key. Typed reads return an absent optional only for a domain mismatch.
--}
-pub use bindings.object_length;
+impl Object {
+    {-
+        Observe ordered entries without merging duplicate keys. Indices are
+        checked; an out-of-range index fails the invocation. A positional entry
+        has no key. Typed reads return null only for a domain mismatch.
+    -}
+    pub pure comptime fn length(self) -> Integer {
+        bindings.object_length(self)
+    }
 
-pub use bindings.object_key;
+    pub pure comptime fn key(self, index: Integer) -> ?Symbol {
+        bindings.object_key(self, index)
+    }
 
-pub use bindings.ObjectEntryType;
+    pub pure comptime fn EntryType(self, index: Integer) -> Type {
+        bindings.ObjectEntryType(self, index)
+    }
 
-pub use bindings.object_value;
+    pub pure comptime fn value(self, index: Integer) -> ?T where T {
+        bindings.object_value<T>(self, index)
+    }
 
-{-
-  Read the last named entry. A missing key or a different stored domain returns
-  null; a mismatched last entry never falls back to an earlier duplicate.
--}
-pub use bindings.object_get;
+    {-
+        Read the last named entry. A missing key or a different stored domain
+        returns null; a mismatched last entry never reveals an earlier duplicate.
+    -}
+    pub pure comptime fn get(self, key: Symbol) -> ?T where T {
+        bindings.object_get<T>(self, key)
+    }
 
-{-
-  Editing returns a new ordered Object. Duplicate keys remain distinct entries.
-  Replacement preserves the entry key and position, and records the new domain.
--}
-pub use bindings.object_concat;
+    {-
+        Editing returns a new ordered Object and preserves the input snapshot.
+        Duplicate keys remain distinct entries. Replacement retains the entry's
+        key and position while recording the new value's domain.
+    -}
+    pub pure comptime fn concat(self, right: Object) -> Object {
+        bindings.object_concat(self, right)
+    }
 
-pub use bindings.object_append;
+    pub pure comptime fn append(self, value: T, .key: ?Symbol = null) -> Object where T {
+        bindings.object_append<T>(self, value, .key = key)
+    }
 
-pub use bindings.object_replace;
+    pub pure comptime fn replace(self, index: Integer, value: T) -> Object where T {
+        bindings.object_replace<T>(self, index, value)
+    }
 
-pub use bindings.object_remove;
+    pub pure comptime fn remove(self, index: Integer) -> Object {
+        bindings.object_remove(self, index)
+    }
+}

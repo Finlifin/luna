@@ -19,7 +19,7 @@ fn compile(source: &str) -> Result<nir::program::Package, String> {
             "mod meta {{ {} }} {source}",
             include!("support/meta_source.rs")
         ),
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             meta_list: Some("input.meta.List"),
             ..Default::default()

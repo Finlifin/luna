@@ -425,3 +425,13 @@ argument. See [the versioned format](metadata-wire.md) for encoding, limits and
 unsupported descriptors. The decoder produces the same typed request inputs;
 hex spelling does not participate in cache identity. Observation-selective
 reuse remains separate work.
+
+### Builtin implementation providers
+
+`--builtin-impl-package <resolution-id>` explicitly authorizes a supplied library
+package to implement compiler builtin types. It is repeatable for distinct IDs;
+missing providers and duplicate flags are errors. The driver translates the
+request-local IDs to semantic package identities. Names alone grant nothing.
+The authorization set participates in resident request equality/cache identity.
+`--builtin` still authorizes its designated package; sysroot loading supplies the
+six selected library identities automatically.

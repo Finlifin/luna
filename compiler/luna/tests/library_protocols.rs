@@ -76,7 +76,9 @@ fn repository_meta_lists_carry_homogeneous_comptime_values() {
         meta_list: Some("input.meta.List"),
         ..Default::default()
     };
-    let package = compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
+    let package =
+        compile_with_source_bindings(&source, &support::meta_fixture_protocols(), selectors)
+            .unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -107,7 +109,10 @@ fn repository_meta_lists_carry_homogeneous_comptime_values() {
             "fn run() -> meta.List<bool> { [true] }",
         ),
     ] {
-        assert!(compile_with_source_bindings(&bad, &Default::default(), selectors).is_err());
+        assert!(
+            compile_with_source_bindings(&bad, &support::meta_fixture_protocols(), selectors)
+                .is_err()
+        );
     }
 }
 
@@ -128,7 +133,9 @@ fn repository_meta_list_clause_inputs_preserve_value_and_type_identity() {
         meta_list: Some("input.meta.List"),
         ..Default::default()
     };
-    let package = compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
+    let package =
+        compile_with_source_bindings(&source, &support::meta_fixture_protocols(), selectors)
+            .unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -147,7 +154,10 @@ fn repository_meta_list_clause_inputs_preserve_value_and_type_identity() {
         source.replace("first<[true,false]>()", "first<[]>()"),
         source.replace("first<[true,false]>()", "first<[true,42]>()"),
     ] {
-        assert!(compile_with_source_bindings(&bad, &Default::default(), selectors).is_err());
+        assert!(
+            compile_with_source_bindings(&bad, &support::meta_fixture_protocols(), selectors)
+                .is_err()
+        );
     }
 }
 
@@ -170,7 +180,9 @@ fn repository_meta_list_clauses_substitute_element_domains_and_defaults() {
         meta_list: Some("input.meta.List"),
         ..Default::default()
     };
-    let package = compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
+    let package =
+        compile_with_source_bindings(&source, &support::meta_fixture_protocols(), selectors)
+            .unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -183,10 +195,15 @@ fn repository_meta_list_clauses_substitute_element_domains_and_defaults() {
         source.replace("first<Type, [bool]>()", "first<Type, [true]>()"),
         source.replace("first<bool, [true, false]>()", "first<bool, [bool]>()"),
     ] {
-        assert!(compile_with_source_bindings(&bad, &Default::default(), selectors).is_err());
+        assert!(
+            compile_with_source_bindings(&bad, &support::meta_fixture_protocols(), selectors)
+                .is_err()
+        );
     }
     let empty = source.replace("defaulted<>()", "defaulted<.values = []>()");
-    let package = compile_with_source_bindings(&empty, &Default::default(), selectors).unwrap();
+    let package =
+        compile_with_source_bindings(&empty, &support::meta_fixture_protocols(), selectors)
+            .unwrap();
     assert!(luna::invocation::invoke(&package, "run", 100_000).is_err());
 }
 
@@ -225,7 +242,9 @@ fn repository_meta_value_list_variadics_preserve_order_and_identity() {
         meta_list: Some("input.meta.List"),
         ..Default::default()
     };
-    let package = compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
+    let package =
+        compile_with_source_bindings(&source, &support::meta_fixture_protocols(), selectors)
+            .unwrap();
     let invoke = |name| luna::invocation::invoke(&package, name, 100_000).unwrap();
     assert_eq!(invoke("GenericDirect"), invoke("GenericSpread"));
     assert_eq!(invoke("NestedDirect"), invoke("NestedSpread"));
@@ -280,7 +299,10 @@ fn repository_meta_value_list_variadics_preserve_order_and_identity() {
             "Packet<true, .values = [false]>",
         ),
     ] {
-        assert!(compile_with_source_bindings(&bad, &Default::default(), selectors).is_err());
+        assert!(
+            compile_with_source_bindings(&bad, &support::meta_fixture_protocols(), selectors)
+                .is_err()
+        );
     }
 }
 
@@ -316,7 +338,9 @@ fn repository_meta_dependent_collectors_share_defaulted_argument_plans() {
         meta_list: Some("input.meta.List"),
         ..Default::default()
     };
-    let package = compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
+    let package =
+        compile_with_source_bindings(&source, &support::meta_fixture_protocols(), selectors)
+            .unwrap();
     let invoke = |name| luna::invocation::invoke(&package, name, 100_000).unwrap();
     assert_eq!(invoke("Direct"), invoke("Spread"));
     assert_eq!(invoke("Direct"), invoke("Whole"));
@@ -519,7 +543,16 @@ fn repository_tuple_once_native_preserves_affine_fields() {
         let output = Command::new(env!("CARGO_BIN_EXE_luna"))
             .current_dir(&directory)
             .args([
+                "--packages-v1",
+                "--package",
+                "0",
+                "0",
+                "input",
                 "source.fl",
+                "--primary",
+                "0",
+                "--builtin-impl-package",
+                "0",
                 "--build",
                 "run",
                 "--output",
@@ -572,7 +605,7 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
     };
     let metadata = compile_with_source_bindings(
         &source.replace("forward((true,(false,),()))", "(true,(false,),())"),
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         selectors,
     )
     .unwrap();
@@ -707,7 +740,9 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
         elaboration::implementation::Selection::Selected(_)
     ));
     assert!(index.to_string().contains("(normal-form-head"));
-    let package = compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
+    let package =
+        compile_with_source_bindings(&source, &support::meta_fixture_protocols(), selectors)
+            .unwrap();
     assert_eq!(
         luna::execution::interpret_with_protocols(&package, "run", "Copy", "Drop", 100_000)
             .unwrap(),
@@ -720,7 +755,7 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
                     "where T:-TupleMarker",
                     &format!("where T:-resources.{capability}")
                 ),
-                &Default::default(),
+                &support::meta_fixture_protocols(),
                 selectors
             )
             .is_err()
@@ -734,7 +769,8 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
         fn run()->bool {{let (flag,)=only((true,));flag}}"
     );
     let package =
-        compile_with_source_bindings(&constrained, &Default::default(), selectors).unwrap();
+        compile_with_source_bindings(&constrained, &support::meta_fixture_protocols(), selectors)
+            .unwrap();
     assert_eq!(
         luna::execution::interpret_with_protocols(&package, "run", "Copy", "Drop", 100_000)
             .unwrap(),
@@ -744,7 +780,10 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
         constrained.replace("only((true,))", "only((true,false))"),
         constrained.replace("only((true,))", "only(())"),
     ] {
-        assert!(compile_with_source_bindings(&invalid, &Default::default(), selectors).is_err());
+        assert!(
+            compile_with_source_bindings(&invalid, &support::meta_fixture_protocols(), selectors)
+                .is_err()
+        );
     }
 }
 
@@ -811,7 +850,7 @@ fn repository_tuple_and_meta_definitions_preserve_identity_and_execute() {
     );
     let package = compile_with_source_bindings(
         &source,
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             meta_list: Some("input.meta.List"),
             tuple: Some("input.Tuple"),
@@ -1006,7 +1045,7 @@ fn repository_tuple_head_preserves_type_identity_and_value_layout() {
     );
     let package = compile_with_source_bindings(
         &source,
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             meta_list: Some("input.meta.List"),
             tuple: Some("input.Tuple"),

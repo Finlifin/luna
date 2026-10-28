@@ -186,3 +186,13 @@ pub(crate) fn run_iir_with_tuple(
 mod library;
 #[allow(unused_imports)]
 pub(crate) use library::with_attrs;
+
+/// These isolated fixtures embed the real meta package in semantic package 0.
+/// Explicitly designate that test provider; never infer authority from source
+/// text or a type-constructor selector in production compilation.
+pub(crate) fn meta_fixture_protocols() -> elaboration::program::Protocols {
+    elaboration::program::Protocols {
+        builtin_implementation_packages: [0].into(),
+        ..Default::default()
+    }
+}

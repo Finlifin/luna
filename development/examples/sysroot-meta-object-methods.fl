@@ -1,0 +1,14 @@
+{- Object methods preserve duplicate entries, payload domains, and old values. -}
+comptime fn run() -> bool {
+    let source: Object = {flag: true, 'x', flag: false};
+    let appended = source.append(true, .key = .flag);
+    let changed = appended.replace(1, false);
+    let result = changed.remove(0).concat({tail: true});
+    source.length() == 3 and result.length() == 4
+        and (source.get<bool>(.flag) matches false?)
+        and (appended.get<bool>(.flag) matches true?)
+        and (source.key(1) matches null)
+        and changed.EntryType(1) == bool
+        and (changed.value<bool>(1) matches false?)
+        and (result.get<bool>(.tail) matches true?)
+}

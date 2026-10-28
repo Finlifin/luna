@@ -26,8 +26,8 @@ Embedding callers can supply additional selected library identities through
 Elaboration carries the same set into early and final trait/inherent indexes.
 NIR retains the set, including required-invocation and resource snapshots, and
 later VM/type/resource worlds reuse it when rebuilding indexes. VM world-table
-construction charges the extra metadata. The proposed meta.Object inherent API
-is a separate library migration; existing public free functions remain for now.
+construction charges the extra metadata. The meta.Object public API now uses inherent methods; its raw operations remain
+in the centralized binding layer.
 
 Verification: type_resolution integration suites builtin_ownership,
 implementation, implementation_phases, and inherent. The new suite checks
@@ -37,4 +37,4 @@ coherence, and deterministic dumps. The luna builtin_implementations suite
 covers explicit driver grants, early Type methods, optional generic receivers,
 all six sysroot providers, application rejection, duplicate inherent methods,
 and a foreign-trait implementation through runtime instantiation. This verifies
-the source admission path; it does not migrate the library Object facade.
+the source admission path; the library Object facade is covered by library_meta_objects.

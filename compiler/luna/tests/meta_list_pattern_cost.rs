@@ -31,7 +31,7 @@ fn compile(width: u32, legacy: bool) -> nir::program::Package {
             include!("support/meta_source.rs"),
             support::with_attrs(include_str!("../../../library/builtin/protocols/patterns.fl")),
         ),
-        &Default::default(),
+        &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             meta_list: Some("input.meta.List"),
             list_pattern: Some("input.patterns.ListPatternView"),

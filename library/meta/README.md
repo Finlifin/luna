@@ -1,5 +1,7 @@
 # meta
 
+Object 的查询与编辑定义在固有 `impl Object` 中，可以通过接收者或 `meta.Object` 调用；旧的 `meta.object_*` 自由函数不再导出。编辑方法返回新 Object，保留输入快照。
+
 数据与 definition builder 模块通过 `builtin` 的公开绑定引用 `Type`、`Integer`、`Symbol` 和 `usize`，不在签名或方法体中重复访问原始类型符号。`bindings.fl` 集中定义 Object 类型与操作 intrinsic 的具名绑定；数据及 builder 模块通过调用或再导出复用它们。旧式 comptime 指针接收者迁移仍待完成。
 
 源码目录与待实现领域见 [六包结构](../STRUCTURE.md)。
@@ -93,15 +95,15 @@ fn example() {}
 
 | 接口 | 结果 |
 | --- | --- |
-| `object_length(object)` | 条目总数，包括重复键和普通项 |
-| `object_key(object, index)` | 命名项返回 `?Symbol` 的存在值，普通项返回 null |
-| `ObjectEntryType(object, index)` | 条目原始 Type 身份 |
-| `object_value<T>(object, index)` | 类型与 T 相同时返回存在的值，否则返回 null |
+| `Object.length(object)` | 条目总数，包括重复键和普通项 |
+| `Object.key(object, index)` | 命名项返回 `?Symbol` 的存在值，普通项返回 null |
+| `Object.EntryType(object, index)` | 条目原始 Type 身份 |
+| `Object.value<T>(object, index)` | 类型与 T 相同时返回存在的值，否则返回 null |
 
 ```flurry
 comptime fn enabled() -> bool {
     let config = { flag: true, 'x', flag: false };
-    let first = meta.object_value<bool>(config, 0);
+    let first = meta.Object.value<bool>(config, 0);
     first match { value? => value, null => false }
 }
 ```
@@ -114,14 +116,14 @@ payload 保留其独立层。输入按普通调用顺序各求值一次，查询
 预算限制。当前查询沿用普通值复制路径，不承诺常数时间访问大型对象。
 由可冻结条目构成的 Object 也能作为 normal-form 和普通函数的 clause 参数。
 
-按名称读取使用 `object_get<T>(object, key: Symbol) -> ?T`。它选择最后一个同名
+按名称读取使用 `Object.get<T>(object, key: Symbol) -> ?T`。它选择最后一个同名
 条目，忽略普通项；缺失 key 或最后一项的域与 T 不同，均返回 null，不向前寻找
 类型相符的旧值。它不改写 Object，也不合并重复键。
 
 ```flurry
 comptime fn configured() -> bool {
     let settings = { enabled: true, enabled: false };
-    meta.object_get<bool>(settings, .enabled) matches false?
+    meta.Object.get<bool>(settings, .enabled) matches false?
 }
 ```
 
@@ -138,15 +140,15 @@ comptime fn configured() -> bool {
 
 ```flurry
 comptime fn set_enabled(output: *meta.Object, enabled: bool) {
-    output.* = meta.object_replace(output.*, 0, enabled);
+    output.* = meta.Object.replace(output.*, 0, enabled);
 }
 
 comptime fn configured() -> bool {
     var draft = {enabled: false};
     let saved = draft.ref.*;
     set_enabled(draft.ref, true);
-    (meta.object_get<bool>(saved, .enabled) matches false?)
-        and (meta.object_get<bool>(draft, .enabled) matches true?)
+    (meta.Object.get<bool>(saved, .enabled) matches false?)
+        and (meta.Object.get<bool>(draft, .enabled) matches true?)
 }
 ```
 
@@ -168,20 +170,20 @@ CMTT 生成器也可以保存和查询局部 Object，再据此选择 quoted cod
 
 | 接口 | 行为 |
 | --- | --- |
-| `object_concat(left, right)` | 按左、右顺序拼接，保留重复键 |
-| `object_append(object, value, .key = null)` | 追加普通项；提供 Symbol key 时追加命名项 |
-| `object_replace(object, index, value)` | 保留原位置和 key，改用新值及其类型 |
-| `object_remove(object, index)` | 删除指定项，后续条目向前移动 |
+| `Object.concat(left, right)` | 按左、右顺序拼接，保留重复键 |
+| `Object.append(object, value, .key = null)` | 追加普通项；提供 Symbol key 时追加命名项 |
+| `Object.replace(object, index, value)` | 保留原位置和 key，改用新值及其类型 |
+| `Object.remove(object, index)` | 删除指定项，后续条目向前移动 |
 
 ```flurry
 comptime fn configured() -> bool {
     let source = { flag: true, 'x' };
-    let extended = meta.object_append(source, false, .key = .flag);
-    let replaced = meta.object_replace(extended, 1, true);
-    let result = meta.object_remove(replaced, 2);
-    meta.object_length(result) == 2
-        and meta.ObjectEntryType(source, 1) == char
-        and meta.ObjectEntryType(result, 1) == bool
+    let extended = meta.Object.append(source, false, .key = .flag);
+    let replaced = meta.Object.replace(extended, 1, true);
+    let result = meta.Object.remove(replaced, 2);
+    meta.Object.length(result) == 2
+        and meta.Object.EntryType(source, 1) == char
+        and meta.Object.EntryType(result, 1) == bool
 }
 ```
 
@@ -199,7 +201,7 @@ Object 的稳定输入编码保留每一项的 key、原始 Type 和值，因此
 pure comptime fn Tagged<metadata: meta.Object> -> Type { bool }
 
 comptime fn enabled() -> bool where metadata: meta.Object {
-    meta.object_value<bool>(metadata, 0) match { value? => value, null => false }
+    meta.Object.value<bool>(metadata, 0) match { value? => value, null => false }
 }
 ```
 
