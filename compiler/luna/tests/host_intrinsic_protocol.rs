@@ -15,7 +15,7 @@ fn bind_fma(package: nir::program::Package) -> nir::program::Package {
 fn repository_math_generic_wrapper_specializes_both_float_widths() {
     let source=format!("mod math {{
 {}
-}} fn min_single()->bool {{math.minimumnum<.f32'builtin>(3.0,-2.0)==-2.0}} fn min_double()->bool {{math.minimumnum<.f64'builtin>(3.0,-2.0)==-2.0}} fn max_single()->bool {{math.maximumnum<.f32'builtin>(3.0,-2.0)==3.0}} fn max_double()->bool {{math.maximumnum<.f64'builtin>(3.0,-2.0)==3.0}} fn abs_single()->bool {{math.abs<.f32'builtin>(-3.5)==3.5}} fn abs_double()->bool {{math.abs<.f64'builtin>(-3.5)==3.5}} fn single()->.f32'builtin {{math.fma<.f32'builtin>(3.0,4.0,5.0)}} fn double()->.f64'builtin {{math.fma<.f64'builtin>(3.0,4.0,5.0)}}",include_str!("../../../library/builtin/numeric/math_intrinsics.fl"));
+}} fn min_single()->bool {{math.minimumnum<.f32'builtin>(3.0,-2.0)==-2.0}} fn min_double()->bool {{math.minimumnum<.f64'builtin>(3.0,-2.0)==-2.0}} fn max_single()->bool {{math.maximumnum<.f32'builtin>(3.0,-2.0)==3.0}} fn max_double()->bool {{math.maximumnum<.f64'builtin>(3.0,-2.0)==3.0}} fn abs_single()->bool {{math.abs<.f32'builtin>(-3.5)==3.5}} fn abs_double()->bool {{math.abs<.f64'builtin>(-3.5)==3.5}} fn single()->.f32'builtin {{math.fma<.f32'builtin>(3.0,4.0,5.0)}} fn double()->.f64'builtin {{math.fma<.f64'builtin>(3.0,4.0,5.0)}}",include!("support/math_source.rs"));
     let package = support::compile_with_source_bindings(
         &source,
         &Default::default(),
@@ -173,7 +173,7 @@ fn repository_math_generic_wrapper_specializes_both_float_widths() {
 fn math_float_domain_rejects_nonfloat_instantiation() {
     let source = format!(
         "mod math {{\n{}\n}} fn run()->bool {{math.fma<bool>(true,true,true)}}",
-        include_str!("../../../library/builtin/numeric/math_intrinsics.fl")
+        include!("support/math_source.rs")
     );
     let error = support::compile_with_source_bindings(
         &source,

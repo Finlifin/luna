@@ -3907,6 +3907,11 @@ fn field_pointer_reads_require_a_target_and_copy_payload() {
 #[test]
 fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     let sandbox = Sandbox::new();
+    fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
+    sandbox.write(
+        "library/builtin/primitives.fl",
+        include_str!("../../../library/builtin/primitives.fl"),
+    );
     for name in [
         "builtin/protocols",
         "builtin/types",
@@ -3916,7 +3921,7 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     ] {
         fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();
     }
-    sandbox.write("library/builtin/lib.fl","use protocols.ops; use types.tuple; use numeric.{comparison,math_intrinsics}; pub typealias Type=.Type'builtin;pub use tuple.Tuple;pub use ops.*;pub use comparison.*;pub mod math {pub use math_intrinsics.*;} pub mod prelude {pub use tuple.Tuple;}");
+    sandbox.write("library/builtin/lib.fl","use protocols.ops; use types.tuple; use numeric.{comparison,math_intrinsics}; pub use primitives.*;pub use tuple.Tuple;pub use ops.*;pub use comparison.*;pub mod math {pub use math_intrinsics.*;} pub mod prelude {pub use tuple.Tuple;}");
     sandbox.write(
         "library/builtin/protocols/resources.fl",
         include_str!("../../../library/builtin/protocols/resources.fl"),
@@ -8753,7 +8758,7 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
     }
     sandbox.write(
         "library/builtin/lib.fl",
-        "use numeric.{comparison,math_intrinsics}; pub mod math {pub use comparison.{Eq,Ord,Order};pub use math_intrinsics.*;} pub mod prelude {pub use math;pub use primitives.*;pub use math.{Eq,Ord,Order};}",
+        "use numeric.{comparison,math_intrinsics}; pub use primitives.*; pub mod math {pub use comparison.{Eq,Ord,Order};pub use math_intrinsics.*;} pub mod prelude {pub use math;pub use primitives.*;pub use math.{Eq,Ord,Order};}",
     );
     sandbox.write(
         "library/builtin/protocols/resources.fl",

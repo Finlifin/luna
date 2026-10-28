@@ -10456,7 +10456,7 @@ fn native_integer_math_wrappers_cover_widths_bits_and_once_only_inputs() {
         impl Duplicate for .u32'builtin {{}} impl Duplicate for .u64'builtin {{}}
         impl Duplicate for .u128'builtin {{}}
         fn run()->bool {{{body} true}}",
-        include_str!("../../../library/builtin/numeric/math_intrinsics.fl")
+        include!("support/math_source.rs")
     );
     let w = Work::new(&source);
     let mut dump = w.command();
@@ -14192,7 +14192,7 @@ fn native_funnel_shifts_and_rotations_cover_modulo_width_and_argument_order() {
         impl Duplicate for .u32'builtin {{}} impl Duplicate for .u64'builtin {{}}
         impl Duplicate for .u128'builtin {{}}
         fn run()->bool {{{body} true}}",
-        include_str!("../../../library/builtin/numeric/math_intrinsics.fl")
+        include!("support/math_source.rs")
     );
     let w = Work::new(&source);
     let mut dump = w.command();
@@ -15319,7 +15319,7 @@ fn native_float_classification_generic_library_preserves_ieee_classes() {
 {}
 }} typealias F=.f{width}'builtin;impl Duplicate for F {{}}impl Duplicate for .BitVec'builtin<{width}> {{}}
             fn verify(value:F,n:bool,i:bool,f:bool,normal:bool,subnormal:bool,sign:bool)->bool {{math.isnan(value)==n and math.isinf(value)==i and math.isfinite(value)==f and math.isnormal(value)==normal and math.issubnormal(value)==subnormal and math.signbit(value)==sign}}
-            fn run()->bool {{{checks}true}}", include_str!("../../../library/builtin/numeric/math_intrinsics.fl"));
+            fn run()->bool {{{checks}true}}", include!("support/math_source.rs"));
         let w = Work::new(&source);
         for level in ["0", "3"] {
             let mut command = w.command();
@@ -15766,7 +15766,7 @@ fn native_saturating_integer_math_covers_all_widths_and_signs() {
             let source = format!("{RESOURCE_HEADER}mod math {{\n{}\n}}
                 typealias Number=.{prefix}{width}'builtin;impl Duplicate for Number {{}}
                 fn verify(a:Number,b:Number,added:Number,subtracted:Number)->bool {{math.saturating_add(a,b)==added and math.saturating_sub(a,b)==subtracted}}
-                fn run()->bool {{{}}}",include_str!("../../../library/builtin/numeric/math_intrinsics.fl"),cases.join(" and "));
+                fn run()->bool {{{}}}",include!("support/math_source.rs"),cases.join(" and "));
             let w = Work::new(&source);
             for level in ["0", "3"] {
                 let mut command = w.command();
@@ -15968,7 +15968,7 @@ fn native_integer_minmax_math_covers_all_widths_and_signs() {
             let source = format!("{RESOURCE_HEADER}mod math {{\n{}\n}}
                 typealias Number=.{prefix}{width}'builtin;impl Duplicate for Number {{}}
                 fn verify(a:Number,b:Number,smaller:Number,larger:Number)->bool {{math.min(a,b)==smaller and math.max(a,b)==larger}}
-                fn run()->bool {{{}}}",include_str!("../../../library/builtin/numeric/math_intrinsics.fl"),cases.join(" and "));
+                fn run()->bool {{{}}}",include!("support/math_source.rs"),cases.join(" and "));
             let w = Work::new(&source);
             for level in ["0", "3"] {
                 let mut command = w.command();
@@ -19647,7 +19647,7 @@ fn native_wrapping_absolute_value_all_widths_and_argument_once() {
                 seen and actual==expected
             }}
             fn run()->bool {{{cases}true}}",
-            include_str!("../../../library/builtin/numeric/math_intrinsics.fl")
+            include!("support/math_source.rs")
         ));
         for level in ["0", "3"] {
             let mut command = work.command();
@@ -20964,7 +20964,7 @@ fn comparison_nonreturning_right_keeps_left_evaluation() {
 
 #[test]
 fn native_bitwise_library_operations_preserve_width_sign_and_operand_order() {
-    let library = include_str!("../../../library/builtin/numeric/math_intrinsics.fl");
+    let library = include!("support/math_source.rs");
     for width in [8, 16, 32, 64, 128] {
         for signed in [false, true] {
             let primitive = format!("{}{}", if signed { 'i' } else { 'u' }, width);

@@ -31,7 +31,7 @@ fn real_ord_defaults_drive_nominal_and_generic_operators() {
                 and Rank {{value:2}} >= Rank {{value:2}}
                 and not (Rank {{value:3}} < Rank {{value:2}})
                 and numeric(1.0,2.0)
-        }} fn numeric(a:.f64'builtin,b:.f64'builtin)->bool {{a < b}} fn verify() {{let valid=run();assumes valid;}}",support::with_attrs(include_str!("../../../library/builtin/numeric/comparison.fl")));
+        }} fn numeric(a:.f64'builtin,b:.f64'builtin)->bool {{a < b}} fn verify() {{let valid=run();assumes valid;}}",support::with_attrs(include!("support/comparison_source.rs")));
     let source = format!(
         "mod resources {{\n{}\n}}\n{source}",
         include_str!("../../../library/builtin/protocols/resources.fl")

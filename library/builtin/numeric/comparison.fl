@@ -1,21 +1,5 @@
 -- Equality and total ordering, independent of formatting and allocation.
 
-typealias u8 = .u8'builtin;
-typealias u16 = .u16'builtin;
-typealias u32 = .u32'builtin;
-typealias u64 = .u64'builtin;
-typealias u128 = .u128'builtin;
-typealias i8 = .i8'builtin;
-typealias i16 = .i16'builtin;
-typealias i32 = .i32'builtin;
-typealias i64 = .i64'builtin;
-typealias i128 = .i128'builtin;
-typealias char = .char'builtin;
-typealias Symbol = .Symbol'builtin;
-typealias usize = .usize'builtin;
-typealias isize = .isize'builtin;
-typealias str = .str'builtin;
-
 -- ── Equality ───────────────────────────────────────────────────────────────
 
 pub trait Eq {

@@ -23,9 +23,7 @@ fn source() -> String {
         }}
         fn compare_runtime()->bool {{true.as(Eq).eq(true) and true.as(Eq).ne(false)}}
         "#,
-        support::with_attrs(include_str!(
-            "../../../library/builtin/numeric/comparison.fl"
-        ))
+        support::with_attrs(include!("support/comparison_source.rs"))
     )
 }
 

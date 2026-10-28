@@ -1261,9 +1261,7 @@ fn repository_comparison_protocols_execute_integer_boundaries_and_defaults() {
     entries.push("check_all".into());
     let source = format!(
         "{}\n{}\n{checks}",
-        support::with_attrs(include_str!(
-            "../../../library/builtin/numeric/comparison.fl"
-        )),
+        support::with_attrs(include!("support/comparison_source.rs")),
         include_str!("../../../library/builtin/protocols/resources.fl")
     );
     let package = compile_with_source_bindings(
@@ -1342,9 +1340,7 @@ fn run() {{
     let lt = 'a'.as(Ord).lt(character); assumes lt;
 }}
 "#,
-        support::with_attrs(include_str!(
-            "../../../library/builtin/numeric/comparison.fl"
-        )),
+        support::with_attrs(include!("support/comparison_source.rs")),
         include_str!("../../../library/builtin/protocols/resources.fl")
     );
     let package = compile_with_source_bindings(
