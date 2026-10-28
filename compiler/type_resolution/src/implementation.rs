@@ -387,6 +387,7 @@ struct Entry {
     phases: [Option<DeclarationId>; 2],
 }
 pub struct Index {
+    builtin_packages: BTreeSet<u64>,
     pub(crate) parameter_domains: BTreeMap<DeclarationId, Term>,
     pub(crate) nominal_layouts: nir::program::Package,
     identity: u64,
@@ -398,6 +399,7 @@ pub struct Index {
 impl Default for Index {
     fn default() -> Self {
         Self {
+            builtin_packages: BTreeSet::new(),
             parameter_domains: BTreeMap::new(),
             nominal_layouts: Default::default(),
             identity: crate::fresh_identity(),
@@ -409,6 +411,40 @@ impl Default for Index {
     }
 }
 impl Index {
+    /// Construct a declaration world with explicitly authorized builtin package
+    /// identities. The grant is immutable for the lifetime of this index.
+    pub fn for_builtin_packages(
+        target: Option<nir::target::TargetData>,
+        packages: impl IntoIterator<Item = u64>,
+    ) -> Self {
+        let mut index = Self::for_target(target);
+        index.builtin_packages.extend(packages);
+        index
+    }
+
+    fn check_ownership(
+        &self,
+        head: &ImplementationHead,
+        fuel: &mut usize,
+        depth: usize,
+    ) -> Result<Ownership, Error> {
+        if self.builtin_packages.contains(&head.declaration.package)
+            && ownership::builtin_subject(&head.subject)
+        {
+            spend(fuel)?;
+            Ok(Ownership::BuiltinPackage(head.declaration.package))
+        } else {
+            head.ownership_with_fuel(fuel, depth)
+        }
+    }
+
+    fn fmt_builtin_packages(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(" (builtin-packages")?;
+        for package in &self.builtin_packages {
+            write!(f, " {package}")?;
+        }
+        f.write_str(")")
+    }
     pub fn parameter_domains(&self) -> &BTreeMap<DeclarationId, Term> {
         &self.parameter_domains
     }
@@ -549,7 +585,7 @@ impl Index {
         let mut fuel = budget.steps;
         // Open interfaces remain provisional in the supplemental bucket. Once
         // fixed, declarations must pass ownership before becoming observable.
-        head.ownership_with_fuel(&mut fuel, budget.max_depth)?;
+        self.check_ownership(&head, &mut fuel, budget.max_depth)?;
         let key = Key::with_fuel(&head.subject, &mut fuel, budget.max_depth)?;
         let precision = key.precision();
         let arguments = head
@@ -759,6 +795,7 @@ impl fmt::Display for Key {
 impl fmt::Display for Index {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(implementation-index (revision {})", self.revision)?;
+        self.fmt_builtin_packages(f)?;
         self.fmt_nominal_layouts(f)?;
         for (id, domain) in &self.parameter_domains {
             write!(f, " (parameter-domain {id} {domain})")?;

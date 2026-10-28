@@ -207,7 +207,7 @@ impl Index {
         if self.contributions.contains(&head.declaration) {
             return Err(Error::DuplicateDeclaration(head.declaration));
         }
-        head.ownership_with_fuel(&mut budget.steps, budget.max_depth)?;
+        self.check_ownership(&head, &mut budget.steps, budget.max_depth)?;
         let identity = Relationship::new(&head, &mut budget)?;
         let wanted = slot(phase);
         let mut complement = None;

@@ -11,6 +11,7 @@ pub enum Ownership {
     LocalNominal(DeclarationId),
     LocalNormalForm(DeclarationId),
     UnresolvedInterface,
+    BuiltinPackage(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,7 +204,23 @@ impl fmt::Display for Ownership {
             Self::LocalInterface(id) => write!(f, "(local-interface {id})"),
             Self::LocalNominal(id) => write!(f, "(local-nominal {id})"),
             Self::LocalNormalForm(id) => write!(f, "(local-normal-form {id})"),
+            Self::BuiltinPackage(id) => write!(f, "(builtin-package {id})"),
             Self::UnresolvedInterface => write!(f, "(unresolved-interface)"),
         }
     }
+}
+
+/// The driver grants this capability by semantic package identity. Looking at
+/// an alias, a namespace spelling, or a local type argument cannot grant it.
+pub(super) fn builtin_subject(subject: &Term) -> bool {
+    matches!(
+        subject,
+        Term::Primitive(_)
+            | Term::Pointer(_)
+            | Term::Optional(_)
+            | Term::ErrorResult { .. }
+            | Term::Function { .. }
+            | Term::ComptimeFunction(_)
+            | Term::UnsafeFunction(_)
+    )
 }

@@ -34,6 +34,24 @@ pub struct InherentIndex {
     heads: BTreeMap<DeclarationId, InherentHead>,
 }
 impl InherentIndex {
+    pub fn for_builtin_packages(
+        target: Option<nir::target::TargetData>,
+        packages: impl IntoIterator<Item = u64>,
+    ) -> Self {
+        Self {
+            index: Index::for_builtin_packages(target, packages),
+            heads: BTreeMap::new(),
+        }
+    }
+
+    pub fn check_ownership(&self, subject: &Term, package: u64) -> Result<Ownership, Error> {
+        if self.index.builtin_packages.contains(&package) && ownership::builtin_subject(subject) {
+            Ok(Ownership::BuiltinPackage(package))
+        } else {
+            inherent_ownership(subject, package)
+        }
+    }
+
     pub fn for_target(target: Option<nir::target::TargetData>) -> Self {
         Self {
             index: Index::for_target(target),
@@ -75,7 +93,7 @@ impl InherentIndex {
     }
 
     pub fn insert(&mut self, head: InherentHead, budget: Budget) -> Result<(), Error> {
-        inherent_ownership(&head.subject, head.declaration.package)?;
+        self.check_ownership(&head.subject, head.declaration.package)?;
         if head.members.len() > budget.steps {
             return Err(Error::BudgetExhausted);
         }
@@ -293,6 +311,7 @@ impl fmt::Display for InherentIndex {
             write!(f, " {head}")?;
         }
         f.write_str(")")?;
+        self.index.fmt_builtin_packages(f)?;
         self.index.fmt_nominal_layouts(f)?;
         for (id, domain) in &self.index.parameter_domains {
             write!(f, " (parameter-domain {id} {domain})")?;
