@@ -860,3 +860,49 @@ fn distinct_projection_sequences_share_work_without_discarding_unused_allowances
         expected
     );
 }
+
+#[test]
+fn declaration_world_queries_keep_caches_private_and_failure_fuel_spent() {
+    use type_resolution::dispatch::{DeclarationWorld, normalize_concrete_type};
+    let package = |result| nir::program::Package {
+        traits: vec![contract()],
+        implementations: vec![implementation(ty(P::Bool), result)],
+        ..Default::default()
+    };
+    let first = package(ty(P::U8));
+    let second = package(ty(P::Char));
+    let query = projection(ty(P::Bool), vec![]);
+    let budget = Budget::default();
+    let (mut a, mut fuel_a) = DeclarationWorld::new(&first, budget, None).unwrap();
+    let (mut b, mut fuel_b) = DeclarationWorld::new(&second, budget, None).unwrap();
+    assert_eq!(
+        a.normalized_type(&query, budget, &mut fuel_a).unwrap(),
+        ty(P::U8)
+    );
+    let before = fuel_a;
+    assert_eq!(
+        a.normalized_type(&query, budget, &mut fuel_a).unwrap(),
+        ty(P::U8)
+    );
+    assert!(
+        fuel_a < before,
+        "cached copies still consume their work budget"
+    );
+    assert_eq!(
+        b.normalized_type(&query, budget, &mut fuel_b).unwrap(),
+        ty(P::Char)
+    );
+    let mut exhausted = 1;
+    assert!(normalize_concrete_type(&first, &query, &mut exhausted).is_err());
+    assert_eq!(exhausted, 0);
+    let mut fresh = budget.steps;
+    assert_eq!(
+        normalize_concrete_type(&first, &query, &mut fresh).unwrap(),
+        ty(P::U8)
+    );
+    let mut unknown = budget.steps;
+    assert!(
+        normalize_concrete_type(&first, &projection(ty(P::I32), vec![]), &mut unknown).is_err()
+    );
+    assert_eq!(unknown, 0, "failed selection cannot replenish fuel");
+}

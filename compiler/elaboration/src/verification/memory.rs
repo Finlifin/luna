@@ -2677,7 +2677,7 @@ impl<'a> Infer<'a, '_> {
         let allowance = *self.fuel / 2;
         *self.fuel -= allowance;
         let mut remaining = allowance;
-        let value = crate::materialization::normalize_concrete_type(package, ty, &mut remaining);
+        let value = type_resolution::dispatch::normalize_concrete_type(package, ty, &mut remaining);
         *self.fuel += remaining;
         let value = value?;
         // This evidence comes only from immutable package dispatch, without

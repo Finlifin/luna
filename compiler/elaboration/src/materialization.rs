@@ -10,12 +10,13 @@ mod recursive_factories;
 mod staged;
 mod template_factories;
 use crate::{
-    implementation::{ImplementationHead, Index, Selection, TypeAssessment},
+    implementation::{Selection, TypeAssessment},
     ptc::{Budget, Context},
 };
 use nir::program::{self as n, ExprKind as K, Pattern as P};
 use nir::{DeclarationId as Id, Term};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use type_resolution::dispatch::DeclarationWorld;
 
 // Interface defaults use interface parameter identities, independently of the
 // selected body's parameter names. Only their free references move to the body
@@ -81,16 +82,13 @@ enum Task {
     Type(Term),
 }
 struct Builder<'a> {
-    declaration_parameter_sorts: std::collections::BTreeMap<Id, nir::Sort>,
     quote_cursor: u32,
     inline_effects: BTreeSet<Id>,
     active_staged_inlines: BTreeSet<Id>,
     quote_sources: Vec<n::ExpansionSource>,
     retain_templates: bool,
     package: &'a n::Package,
-    index: Index,
-    context: Context,
-    assumptions: Vec<n::TraitRequirement>,
+    world: DeclarationWorld<'a>,
     queue: VecDeque<Task>,
     functions: HashSet<(Id, Vec<Term>)>,
     staged_functions: HashMap<(Id, Vec<Term>), n::Function>,
@@ -98,7 +96,6 @@ struct Builder<'a> {
     recursive_factories: HashMap<iir::InstanceKey, recursive_factories::Selection>,
     invocation_snapshot: Option<staged::Snapshot>,
     types: HashSet<Term>,
-    normalized_types: HashMap<Term, Term>,
     // Definition-side views may retain abstract projections. Never feed this
     // cache into strict normalization or publish it as completed IIR evidence.
     staging_views: HashMap<Term, Term>,
@@ -350,41 +347,10 @@ pub fn instantiate_with_types(
     output.validate(&mut validation_fuel)?;
     Ok(output)
 }
-/// Resolve associated-type annotations in the package's immutable dispatch
-/// world. This does not unfold normal-form heads or execute function bodies.
-pub(crate) fn normalize_concrete_type(
-    package: &n::Package,
-    ty: &Term,
-    fuel: &mut usize,
-) -> Result<Term, String> {
-    let mut normalized = None;
-    let result = build(
-        package,
-        Budget {
-            steps: *fuel,
-            ..Default::default()
-        },
-        Roots::TypeAnnotation(ty, &mut normalized),
-        BTreeSet::new(),
-        &[],
-        None,
-    );
-    match result {
-        Ok((_, _, _, _, remaining, _, _)) => {
-            *fuel = remaining;
-            normalized.ok_or_else(|| "type normalization produced no annotation".into())
-        }
-        Err(reason) => {
-            *fuel = 0;
-            Err(reason)
-        }
-    }
-}
 
 enum Roots<'a> {
     All,
     AllWithMethods(&'a [comptime_interpretor::TraitMethodIdentity]),
-    TypeAnnotation(&'a Term, &'a mut Option<Term>),
     Annotations(&'a mut n::Function),
     Dispatch(&'a [iir::InstanceKey]),
     Invocation(&'a [iir::InstanceKey]),
@@ -412,54 +378,7 @@ fn build(
     String,
 > {
     let quote_selection = matches!(roots, Roots::QuoteMethod(..));
-    let assumptions = context
-        .map(|(_, assumptions)| assumptions.to_vec())
-        .unwrap_or_default();
-    let context = match context {
-        Some((context, _)) => context.clone(),
-        None => Context::from_package(package)
-            .map_err(|reason| format!("dispatch type context: {reason}"))?,
-    };
-    let mut index = Index::for_target(package.target);
-    index.set_normal_form_metadata(package.normal_forms.clone());
-    index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
-
-    for implementation in &package.implementations {
-        if implementation.interface.is_some() {
-            index
-                .insert(
-                    ImplementationHead {
-                        parameter_types: implementation.parameter_types.clone(),
-                        declaration: implementation.declaration,
-                        interface: implementation.interface,
-                        interface_arguments: implementation.interface_arguments.clone(),
-                        subject: implementation.subject.clone(),
-                        type_parameters: implementation.type_parameters.clone(),
-                        requirements: implementation.requirements.clone(),
-                    },
-                    budget,
-                )
-                .map_err(|e| format!("dispatch index: {e:?}"))?;
-        }
-    }
-    let mut input_fuel = budget.steps;
-    let domains = package.declaration_parameter_domains(&mut input_fuel)?;
-    let declaration_parameter_sorts = domains
-        .iter()
-        .map(|(id, domain)| {
-            (
-                *id,
-                if *domain == Term::Primitive(nir::Primitive::Type) {
-                    nir::Sort::Type
-                } else {
-                    nir::Sort::ComptimeValue
-                },
-            )
-        })
-        .collect();
-    for (id, domain) in domains {
-        index.register_parameter_domain(id, domain)?;
-    }
+    let (world, mut input_fuel) = DeclarationWorld::new(package, budget, context)?;
     let inline_effects = if matches!(roots, Roots::Iir(_)) {
         input_fuel = input_fuel
             .checked_sub(package.effects.len())
@@ -487,9 +406,7 @@ fn build(
             Roots::All | Roots::AllWithMethods(_) | Roots::Invocation(_)
         ),
         package,
-        index,
-        context,
-        assumptions,
+        world,
         queue: VecDeque::new(),
         functions: HashSet::new(),
         staged_functions: HashMap::new(),
@@ -497,7 +414,6 @@ fn build(
         recursive_factories: HashMap::new(),
         invocation_snapshot: None,
         types: HashSet::new(),
-        normalized_types: HashMap::new(),
         staging_views: HashMap::new(),
         interfaces: HashMap::new(),
         output: vec![],
@@ -509,15 +425,12 @@ fn build(
         interface_contracts: vec![],
         effect_contracts: vec![],
         effect_instances: HashSet::new(),
-        declaration_parameter_sorts,
     };
     for ty in type_roots {
         let ty = builder.normalized_type(ty)?;
         builder.queue.push_back(Task::Type(ty));
     }
-    if let Roots::TypeAnnotation(ty, output) = roots {
-        *output = Some(builder.normalized_type(ty)?);
-    } else if let Roots::Annotations(function) = roots {
+    if let Roots::Annotations(function) = roots {
         function.signature = builder.staging_type_view(&function.signature)?;
         for expression in std::iter::once(&mut function.body)
             .chain(function.defaults.iter_mut().map(|(_, value)| value))
@@ -624,11 +537,11 @@ fn build(
                 // A given obligation has no executable dispatch identity.
                 // Method/value demands still call interface() directly.
                 let given = crate::capabilities::World {
-                    index: &builder.index,
+                    index: builder.world.index(),
                     implementations: &package.implementations,
                     traits: &package.traits,
-                    assumptions: &builder.assumptions,
-                    context: &builder.context,
+                    assumptions: builder.world.assumptions(),
+                    context: builder.world.context(),
                 }
                 .given(
                     &n::TraitRequirement {
@@ -674,17 +587,7 @@ impl Builder<'_> {
         Ok(())
     }
     fn input_binders(&self, parameters: &[Id]) -> Vec<nir::DeclarationParameter> {
-        parameters
-            .iter()
-            .map(|id| nir::DeclarationParameter {
-                declaration: *id,
-                sort: self
-                    .declaration_parameter_sorts
-                    .get(id)
-                    .copied()
-                    .unwrap_or(nir::Sort::Type),
-            })
-            .collect()
+        self.world.input_binders(parameters)
     }
     fn function(&mut self, id: Id, arguments: Vec<Term>) -> Result<(), String> {
         // Dispatch-only traversal can encounter ever-growing generic recursion
@@ -910,11 +813,11 @@ impl Builder<'_> {
             return Ok(*index);
         }
         let resolution = crate::capabilities::World {
-            index: &self.index,
+            index: self.world.index(),
             implementations: &self.package.implementations,
             traits: &self.package.traits,
-            assumptions: &self.assumptions,
-            context: &self.context,
+            assumptions: self.world.assumptions(),
+            context: self.world.context(),
         }
         .resolve_instance(&interface, &subject, self.budget)?
         .types;
@@ -1255,11 +1158,11 @@ impl Builder<'_> {
         requirement: &n::TypePredicate,
     ) -> Result<crate::ptc::Outcome, String> {
         crate::capabilities::World {
-            index: &self.index,
+            index: self.world.index(),
             implementations: &self.package.implementations,
             traits: &self.package.traits,
-            assumptions: &self.assumptions,
-            context: &self.context,
+            assumptions: self.world.assumptions(),
+            context: self.world.context(),
         }
         .check_predicate(requirement, self.budget)
     }
@@ -1437,11 +1340,11 @@ impl Builder<'_> {
                 let subject = self.normalized_type(subject)?;
                 let expected = self.normalized_type(&expr.ty)?;
                 let (selected, remaining) = crate::capabilities::World {
-                    index: &self.index,
+                    index: self.world.index(),
                     implementations: &self.package.implementations,
                     traits: &self.package.traits,
-                    assumptions: &self.assumptions,
-                    context: &self.context,
+                    assumptions: self.world.assumptions(),
+                    context: self.world.context(),
                 }
                 .resolve_associated_value_plan_budgeted(
                     &interface,
@@ -2243,31 +2146,7 @@ impl Builder<'_> {
         Err("interface value input normalization requires domain evidence".into())
     }
     fn normalized_type(&mut self, ty: &Term) -> Result<Term, String> {
-        crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
-        if let Some(value) = self.normalized_types.get(ty) {
-            crate::associated::charge_projection_copy(value, &mut self.fuel)?;
-            return Ok(value.clone());
-        }
-        let (normalized, remaining) = crate::capabilities::World {
-            index: &self.index,
-            implementations: &self.package.implementations,
-            traits: &self.package.traits,
-            assumptions: &self.assumptions,
-            context: &self.context,
-        }
-        .normalize_associated_types_cached(
-            ty,
-            Budget {
-                steps: self.fuel,
-                ..self.budget
-            },
-            &mut self.normalized_types,
-        )?;
-        self.fuel = remaining;
-        crate::associated::charge_projection_copy(&normalized.value, &mut self.fuel)?;
-        self.normalized_types
-            .insert(ty.clone(), normalized.value.clone());
-        Ok(normalized.value)
+        self.world.normalized_type(ty, self.budget, &mut self.fuel)
     }
     fn staging_type_view(&mut self, ty: &Term) -> Result<Term, String> {
         // The annotation walker also visits complete interface identity inputs.
@@ -2276,11 +2155,11 @@ impl Builder<'_> {
             return Ok(ty.clone());
         }
         let (view, remaining) = crate::capabilities::World {
-            index: &self.index,
+            index: self.world.index(),
             implementations: &self.package.implementations,
             traits: &self.package.traits,
-            assumptions: &self.assumptions,
-            context: &self.context,
+            assumptions: self.world.assumptions(),
+            context: self.world.context(),
         }
         .associated_type_view_cached(
             ty,
@@ -2654,11 +2533,11 @@ impl Builder<'_> {
                     .any(|(member, _)| *member == origin.member)
                 {
                     let (selected, remaining) = crate::capabilities::World {
-                        index: &self.index,
+                        index: self.world.index(),
                         implementations: &self.package.implementations,
                         traits: &self.package.traits,
-                        assumptions: &self.assumptions,
-                        context: &self.context,
+                        assumptions: self.world.assumptions(),
+                        context: self.world.context(),
                     }
                     .resolve_associated_value_plan_budgeted(
                         &selected_interface,
@@ -2994,11 +2873,11 @@ impl Builder<'_> {
                         .any(|(id, _)| id == member)
                 {
                     let (selected, remaining) = crate::capabilities::World {
-                        index: &self.index,
+                        index: self.world.index(),
                         implementations: &self.package.implementations,
                         traits: &self.package.traits,
-                        assumptions: &self.assumptions,
-                        context: &self.context,
+                        assumptions: self.world.assumptions(),
+                        context: self.world.context(),
                     }
                     .resolve_associated_value_plan_budgeted(
                         &interface,

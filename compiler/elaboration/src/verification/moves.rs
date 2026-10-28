@@ -17151,7 +17151,7 @@ fn import_callable_evidence(
                     let allowance = *fuel / 2;
                     *fuel -= allowance;
                     let mut remaining = allowance;
-                    let view = crate::materialization::normalize_concrete_type(
+                    let view = type_resolution::dispatch::normalize_concrete_type(
                         package,
                         expected,
                         &mut remaining,

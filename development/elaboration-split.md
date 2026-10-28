@@ -57,7 +57,7 @@ flowchart LR
     A --> N[NIR 的 Term 结构计量]
 ```
 
-具体来源：
+最初审计时的具体来源（后续解除情况见各阶段记录）：
 
 - `verification/memory.rs` 与 `moves.rs` 使用 materialization 的类型规范化和
   方法实例选择。`resolve_method_instance` 当前调用完整 `build` 闭包流程，
@@ -147,7 +147,7 @@ type_resolution、materialization 或源码检查器。NIR 依赖用于已有的
 
 elaboration 的 verification 模块重导出原有公共类型。NIR 控制流遍历、内存
 视图、移动/清理和效应检查仍在上层；它们调用逻辑核心检查程序规格，而不是
-把程序命题交给 PTC。验证器对 materialization 的四处调用仍在，不能把本阶段
+把程序命题交给 PTC。此阶段完成时验证器仍有四处 materialization 调用，不能把本阶段
 称为整个 verification 已独立。
 
 迁移时收紧了跨层存储访问：区间使用只读端点或消耗自身的 into_bounds；
@@ -187,3 +187,37 @@ python3 -B development/check.py --timeout 900 -- test --release -p elaboration -
   `/tmp/luna-library-rfqqre7x/summary.json`。
 - 格式检查通过，`/tmp/luna-tools-hhmb2wzf/result.json`；
   `git diff --check` 通过。未运行全 workspace 测试。
+
+## 声明世界与具体类型查询
+
+`type_resolution::dispatch::DeclarationWorld` 统一建立目标相关的 implementation
+索引、声明参数域/排序、PTC 上下文和 given assumptions。materialization 使用
+同一服务建立自己的世界；不另建一套验证专用索引。缓存由 world 私有持有，
+只暴露只读索引/上下文和查询操作，避免不同包快照串用关联类型规范化结果。
+
+`normalize_concrete_type` 已直接使用这个服务，memory/moves 的两处调用不再
+经过 materialization::build。原 TypeAnnotation 分支只规范化类型、没有加入
+执行队列；现在保留同一建索引顺序、规范化算法与复制计量，失败仍把外部
+剩余预算设为零。normal-form 头保持 opaque，定义侧的宽松 staging view 缓存
+仍在 materialization，不会进入严格规范化缓存。
+
+普通方法与 quote 方法的选择仍调用 materialization，保留其接口 specialization
+和传递依赖检查。当前四处反向调用已消除两处，不能据此认为整个环已消失。
+下一步可以在共享声明世界之上提取选择证据与实例契约，继续保留闭包验证。
+
+新增的独立回归用例检查包快照缓存隔离、缓存命中消耗、查询失败预算归零和
+重试恢复。现有 materialization/关联资源及真实 sysroot 检查覆盖上层接线。
+
+本阶段验证在 `/home/fin/luna` 执行，全部退出 0：
+
+- `python3 -B development/check.py --timeout 900 -- test --release
+  -p type_resolution --test associated`：22 项通过，
+  `/tmp/luna-tools-sfdl5t39/result.json`。
+- 同一入口的 `test --release -p elaboration --lib
+  --test associated_resources --test ptc`：241 项通过，
+  `/tmp/luna-tools-d51l59g9/result.json`。
+- `python3 -B development/library_check.py --release --timeout 900
+  --stage native-math --stage sysroot-meta --stage sysroot-builders`：全部通过，
+  `/tmp/luna-library-6ibvyint/summary.json`。
+- 格式检查 `/tmp/luna-tools-g_bq7w8a/result.json` 与 `git diff --check` 通过。
+  没有运行全 workspace 测试。

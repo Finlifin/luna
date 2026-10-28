@@ -139,17 +139,17 @@ impl Builder<'_> {
             Roots::Dispatch(&roots),
             BTreeSet::new(),
             &[],
-            Some((&self.context, &self.assumptions)),
+            Some((self.world.context(), self.world.assumptions())),
         )?;
         snapshot.dispatch_instances = prepared.0;
         self.fuel = prepared.4;
         let solver = |predicate: &n::TypePredicate| {
             let world = crate::capabilities::World {
-                index: &self.index,
+                index: self.world.index(),
                 implementations: &snapshot.implementations,
                 traits: &snapshot.traits,
-                assumptions: &self.assumptions,
-                context: &self.context,
+                assumptions: self.world.assumptions(),
+                context: self.world.context(),
             };
             match world.check_predicate(predicate, self.budget) {
                 Ok(crate::ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,
@@ -159,7 +159,7 @@ impl Builder<'_> {
         };
         let mut interpreter = Interpreter::for_comptime_with_assumptions(
             snapshot,
-            &self.assumptions,
+            self.world.assumptions(),
             comptime_interpretor::Budget {
                 steps: self.fuel as u64,
                 depth: 128,
