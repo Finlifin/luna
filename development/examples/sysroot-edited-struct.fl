@@ -66,8 +66,8 @@ struct Row { active: bool, count: u8 }
 struct Column where T { first: T, second: T }
 
 comptime fn Columns(subject: Type) -> Type {
-    let names = subject.struct_field_names();
-    let types = subject.struct_field_types().map(|field| Column<field>);
+    let names = (if true {subject} else {bool}).struct_field_names();
+    let types = (do {subject}).struct_field_types().map(|field| Column<field>);
     var builder = meta.StructBuilder.new(.name = .Columns);
     let added = builder.add_fields(names, types);
     assumes added;

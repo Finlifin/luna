@@ -2,6 +2,9 @@
 
 `structure.fl` 为 builtin `Type` 提供 comptime 固有方法。通过真实 sysroot
 加载 meta 后，可以直接在命名类型、泛型应用或局部 Type 值上调用。
+已知结果域为 Type 的条件、match、代码块和调用表达式也可以作为接收者，例如
+`(if flag {left} else {right}).struct_field_names()`。接收者照常求值一次，
+不为选择反射方法提前执行；若执行接收者时返回，则跳过反射调用。
 
 | 方法 | 返回值 |
 | --- | --- |

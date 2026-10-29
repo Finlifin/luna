@@ -2229,10 +2229,24 @@ impl Checker<'_, '_> {
             H::Cast(base, _) => computed_subject(&base.kind),
             kind => computed_subject(kind),
         };
+        // A computed Type receiver can select a method from its known domain
+        // without evaluating its identity. Retain the expression for ordinary
+        // call preparation, including invocation-time inputs and side effects.
+        let mut domain_method = if projected_subject
+            && !matches!(view.kind, H::Cast(..))
+            && self.local_field_domain(view)? == Some(p(P::Type))
+        {
+            let domain = p(P::Type);
+            let interface =
+                self.context_member_interface(&domain, name.name.as_str(), expr.span)?;
+            self.selected_method(domain, interface, name.name.as_str(), expr.span)?
+        } else {
+            None
+        };
         // A named Type first exposes methods of the represented subject.
         // When none matches, the Type value itself may have an inherent
         // receiver method (for example checked structural reflection).
-        if projected_subject || self.is_static_method_subject(view) {
+        if domain_method.is_none() && (projected_subject || self.is_static_method_subject(view)) {
             if let Some(method) =
                 self.static_method(view, name.name.as_str(), callee.span, callee.hir_id)?
             {
@@ -2296,6 +2310,9 @@ impl Checker<'_, '_> {
         };
         let mut depth = 0;
         let method = loop {
+            if let Some(method) = domain_method.take() {
+                break method;
+            }
             let candidate_interface = match &interface {
                 Some(interface) if subject == receiver.ty => Some(interface.clone()),
                 Some(_) => Some(self.interface_expr_for(interface_source.unwrap(), &subject)?),

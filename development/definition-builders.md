@@ -52,6 +52,50 @@ is reflection/structure. These methods retain existing reflection permissions,
 nominal identities and phase checks. They do not transport field-default code
 or copy generated methods, attributes or implementations.
 
+### Computed Type receivers
+
+Receiver dispatch can select a method on the known Type domain of a computed
+receiver before asking for the concrete represented type. It retains the
+receiver expression and the selected method for normal call preparation. This
+avoids requiring ordinary invocation-time Type inputs during definition checking
+and avoids executing receiver effects merely to choose a reflection method.
+Explicit trait views retain their existing routing; named static subjects and
+computed receivers without an applicable Type method retain subject lookup.
+
+The regression exercises if, match, block and method-call receivers with a
+comptime value-reference counter: two calls increment it exactly twice. A
+parameter-controlled branch returns before reflection. The initial constant
+return-only fixture instead folded to Never and had no method-bearing domain;
+it was corrected to retain a Type-producing alternative. This change does not
+infer methods for an arbitrary expression whose only known domain is Never.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test source_reflection --test builder_invocations --test enum_groups --test newtypes
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test source_reflection
+python3 -B development/reproduce.py --timeout 120 --binary /tmp/luna-dev-002/target/release/luna -- development/examples/sysroot-edited-struct.fl --sysroot library --test-native
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+The first command passed 72 builder, seven enum-group and 211 newtype tests but
+failed the new reflection fixture (`/tmp/luna-tools-ukqji9xj/result.json`, exit
+101). After correcting its return-only receiver, all 13 reflection tests passed
+(`/tmp/luna-tools-y5gke1tw/result.json`, exit 0); production code was unchanged
+between these runs. The intermediate constant-condition variant still folded
+to Never and failed in `/tmp/luna-tools-x4zcim3n/result.json`.
+All four real sysroot struct tests passed (`/tmp/luna-tools-srkvm184/result.json`)
+with conditional/block receivers feeding the column builder. Formatting passed
+(`/tmp/luna-tools-w9hgnar6/result.json`) and diff checks passed.
+
+The original small source reproduction failed before the dispatch fix with an
+unavailable comptime input (`/tmp/luna-tools-yzcz3_wf/result.json`). Afterward its
+full sysroot invocation needed explicit target facts for an unrelated numeric
+runtime proxy; with `--build-target x86_64 linux 64 --invoke-comptime run` it
+returned `(bool true)` (`/tmp/luna-tools-ntvyy3j_/result.json`). The durable source
+regression and sysroot builder example carry the same dynamic receiver case.
+
 ## CMTT and builder integration boundary
 
 ### Ordered Object observation from source

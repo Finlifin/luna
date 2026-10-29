@@ -624,3 +624,41 @@ fn source_builds_chain_through_the_compiler_publisher_and_keep_final_nir() {
         nir::Term::Primitive(nir::Primitive::Bool)
     );
 }
+
+#[test]
+fn computed_type_receivers_keep_dynamic_inputs_and_evaluate_once() {
+    let package = compile(
+        "
+        use meta.builtin.{Type, Integer};
+        struct Row {flag:bool}
+        struct Counter {calls:Integer}
+        impl Counter {
+            comptime fn Select(self, subject:Type)->Type {
+                self.calls = self.calls + 1;
+                subject
+            }
+        }
+        comptime fn inspect(subject:Type)->bool {
+            let counter = Counter {calls:0};
+            let a = (if true {subject} else {bool}).struct_field_names();
+            let b = (do {counter.Select(subject)}).struct_field_types();
+            let c = counter.Select(subject).struct_field_names();
+            let d = (true match {true=>subject,false=>bool}).struct_field_types();
+            a[0] == .flag and b[0] == bool and c[0] == .flag and d[0] == bool
+                and counter.calls == 2
+        }
+        comptime fn run()->bool {inspect(Row)}
+        comptime fn returning(flag:bool)->bool {
+            (if flag {return true;} else {Row}).struct_field_names(); false
+        }
+        comptime fn early()->bool {returning(true)}
+        ",
+    )
+    .unwrap();
+    for entry in ["run", "early"] {
+        assert_eq!(
+            luna::invocation::invoke(&package, entry, 500_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
