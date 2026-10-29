@@ -23,7 +23,9 @@ copy/visit/type-rewrite/phase/materialization coverage. Runtime queries reject.
 CMTT data reconstruction now uses the existing typed Object constant path rather
 than attempting unsupported normal-term encoding. Nested entries retain their
 types; active pointer payloads still reject. Functional editing is described
-below, together with stable input encoding. A cheap borrowed query path remains unfinished.
+below, together with stable input encoding. Local Object queries now avoid
+discarded snapshots; eligibility, retained validation costs and measurements are
+recorded in [comptime-object-queries.md](comptime-object-queries.md).
 
 Validation in `/home/fin/luna`:
 

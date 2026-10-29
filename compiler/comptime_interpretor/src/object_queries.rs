@@ -35,6 +35,115 @@ impl Interpreter<'_> {
         if expr.ty != expected && expr.ty != Term::Primitive(Primitive::Never) {
             return Err(failure());
         }
+        if let Some(result) = self.eval_borrowed_object_query(expr, subject, environment) {
+            return result;
+        }
+        self.eval_object_query_packet(expr, subject, environment)
+    }
+
+    // Leaf selectors cannot mutate an owned Object while it is observed. For
+    // references, only length is eligible: no selector or payload read runs
+    // under the storage lock. Other cases retain ordinary snapshot evaluation.
+    fn eval_borrowed_object_query(
+        &mut self,
+        expr: &Expr,
+        subject: &Expr,
+        environment: &Environment,
+    ) -> Option<Result<Flow, Error>> {
+        use nir::program::ObjectQueryKind as Q;
+        if self.cleanup_schedule.is_some() || expr.ty == Term::Primitive(Primitive::Never) {
+            return None;
+        }
+        let K::ObjectQuery { query, .. } = &expr.kind else {
+            return None;
+        };
+        let K::Tuple(fields) = &subject.kind else {
+            return None;
+        };
+        let length = *query == Q::Length;
+        if fields.len() != if length { 1 } else { 2 } {
+            return None;
+        }
+        let K::Local(binding) = fields[0].kind else {
+            return None;
+        };
+        let local = environment.get(&binding)?;
+        if !matches!(local, Value::Object(_))
+            && !(length && matches!(local, Value::Storage(_) | Value::ComptimeReference(_)))
+        {
+            return None;
+        }
+        if !length && !matches!(fields[1].kind, K::Local(_) | K::Literal(_)) {
+            return None;
+        }
+        let depth = self.depth;
+        let result = (|| {
+            // Reproduce tuple and local evaluation boundaries, including depth
+            // failures and the complete representation-checking fuel charge.
+            self.tick(Some(subject.source))?;
+            self.depth += 1;
+            self.tick(Some(fields[0].source))?;
+            self.depth += 1;
+            let root;
+            let reference = match local {
+                Value::Storage(storage) => {
+                    root = value_reference::ValueReference::root(storage.clone());
+                    Some(&root)
+                }
+                Value::ComptimeReference(reference) => Some(reference),
+                _ => None,
+            };
+            let contents = reference
+                .map(|reference| {
+                    reference
+                        .borrow(&mut self.budget.steps)
+                        .map_err(|kind| Error {
+                            kind,
+                            source: Some(fields[0].source),
+                        })
+                })
+                .transpose()?;
+            let value = contents.as_ref().map_or(local, |contents| contents.value());
+            self.check_borrowed_representation(value, fields[0].source, 0)?;
+            self.depth -= 1;
+            let selector = if length {
+                None
+            } else {
+                let selector = &fields[1];
+                Some(match selector.kind {
+                    K::Local(binding) => {
+                        self.tick(Some(selector.source))?;
+                        self.depth += 1;
+                        let value = self.local_value(environment, binding, Some(selector.source));
+                        self.depth -= 1;
+                        value?
+                    }
+                    _ => match self.eval(selector, &mut Environment::new())? {
+                        Flow::Value(value) => value,
+                        flow => return Ok(flow),
+                    },
+                })
+            };
+            self.depth = depth;
+            let Value::Object(object) = value else {
+                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            };
+            self.query_object(expr, object, selector)
+        })();
+        self.depth = depth;
+        Some(result)
+    }
+
+    fn eval_object_query_packet(
+        &mut self,
+        expr: &Expr,
+        subject: &Expr,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let failure = || Error {
+            kind: ErrorKind::Type,
+            source: Some(expr.source),
+        };
         let packet = match self.eval(subject, environment)? {
             Flow::Value(value) => value,
             flow => return Ok(flow),
@@ -49,8 +158,29 @@ impl Interpreter<'_> {
         let Some(Value::Object(object)) = packet.next() else {
             return Err(failure());
         };
+        let selector = packet.next();
+        if packet.next().is_some() {
+            return Err(failure());
+        }
+        self.query_object(expr, &object, selector)
+    }
+
+    fn query_object(
+        &mut self,
+        expr: &Expr,
+        object: &Object<ObjectValue>,
+        selector: Option<Value>,
+    ) -> Result<Flow, Error> {
+        use nir::program::ObjectQueryKind as Q;
+        let K::ObjectQuery { query, .. } = &expr.kind else {
+            unreachable!()
+        };
+        let failure = || Error {
+            kind: ErrorKind::Type,
+            source: Some(expr.source),
+        };
         if *query == Q::Length {
-            if packet.next().is_some() {
+            if selector.is_some() {
                 return Err(failure());
             }
             return Ok(Flow::Value(Value::Integer(
@@ -58,17 +188,14 @@ impl Interpreter<'_> {
             )));
         }
         if *query == Q::NamedValue {
-            let Some(Value::Symbol(key)) = packet.next() else {
+            let Some(Value::Symbol(key)) = selector else {
                 return Err(failure());
             };
-            if packet.next().is_some() {
-                return Err(failure());
-            }
             let Term::Optional(target) = &expr.ty else {
                 return Err(failure());
             };
             let property =
-                self.lookup_object_property(&object, &key, target)
+                self.lookup_object_property(object, &key, target)
                     .map_err(|mut error| {
                         if error.source.is_none() {
                             error.source = Some(expr.source);
@@ -86,12 +213,9 @@ impl Interpreter<'_> {
                 value,
             }));
         }
-        let Some(Value::Integer(index)) = packet.next() else {
+        let Some(Value::Integer(index)) = selector else {
             return Err(failure());
         };
-        if packet.next().is_some() {
-            return Err(failure());
-        }
         let index = index
             .to_u128()
             .ok()
@@ -181,6 +305,231 @@ mod tests {
                 }),
             },
         }
+    }
+
+    fn observation(query: Q) -> Expr {
+        let ty = match query {
+            Q::Length => Term::Primitive(Primitive::Integer),
+            Q::Key => Term::Optional(Box::new(Term::Primitive(Primitive::Symbol))),
+            Q::EntryType => Term::Primitive(Primitive::Type),
+            _ => Term::Optional(Box::new(Term::Primitive(Primitive::Bool))),
+        };
+        let mut expr = expression(query, ty);
+        let K::ObjectQuery { subject, .. } = &mut expr.kind else {
+            unreachable!()
+        };
+        let K::Tuple(fields) = &mut subject.kind else {
+            unreachable!()
+        };
+        if query == Q::Length {
+            fields.truncate(1);
+        } else if query == Q::NamedValue {
+            fields[1].ty = Term::Primitive(Primitive::Symbol);
+            fields[1].kind = K::Literal(nir::program::Literal::Symbol("flag".into()));
+        }
+        subject.ty = Term::Tuple(fields.iter().map(|field| field.ty.clone()).collect());
+        expr
+    }
+
+    fn object() -> Value {
+        Value::Object(Object::from_entries(vec![
+            ObjectEntry::Property {
+                key: "flag".into(),
+                value: ObjectValue {
+                    ty: Term::Primitive(Primitive::Bool),
+                    value: Value::Bool(true),
+                },
+            },
+            ObjectEntry::Value(ObjectValue {
+                ty: Term::Optional(Box::new(Term::Primitive(Primitive::Bool))),
+                value: Value::Optional {
+                    ty: Term::Optional(Box::new(Term::Primitive(Primitive::Bool))),
+                    value: Some(Box::new(Value::Bool(false))),
+                },
+            }),
+        ]))
+    }
+
+    fn value(result: Result<Flow, Error>) -> Result<Value, Error> {
+        result.map(|flow| match flow {
+            Flow::Value(value) => value,
+            _ => panic!("unexpected flow"),
+        })
+    }
+
+    #[test]
+    fn borrowed_queries_preserve_fuel_depth_errors_and_recovery() {
+        let package = Package::default();
+        for query in [Q::Length, Q::Key, Q::EntryType, Q::Value, Q::NamedValue] {
+            let expr = observation(query);
+            let K::ObjectQuery { subject, .. } = &expr.kind else {
+                unreachable!()
+            };
+            for depth in [1, 2, 3, 4, 8, 128] {
+                for steps in 0..180 {
+                    let mut fast = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                    let mut slow = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                    fast.budget = Budget { steps, depth };
+                    slow.budget = fast.budget;
+                    let mut env = Environment::new();
+                    env.insert(LocalId { owner: 1, index: 0 }, object());
+                    let result = fast
+                        .eval_borrowed_object_query(&expr, subject, &env)
+                        .unwrap();
+                    let expected = slow.eval_object_query_packet(&expr, subject, &mut env);
+                    assert_eq!(
+                        value(result),
+                        value(expected),
+                        "{query:?} depth={depth} steps={steps}"
+                    );
+                    assert_eq!(fast.budget.steps, slow.budget.steps);
+                    assert_eq!(fast.depth, 0);
+                    fast.budget = Budget {
+                        steps: 1000,
+                        depth: 128,
+                    };
+                    slow.budget = fast.budget;
+                    assert_eq!(
+                        value(fast.eval_object_query(&expr, &mut env)),
+                        value(slow.eval_object_query_packet(&expr, subject, &mut env))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_length_handles_storage_and_value_references() {
+        let package = Package::default();
+        let expr = observation(Q::Length);
+        let K::ObjectQuery { subject, .. } = &expr.kind else {
+            unreachable!()
+        };
+        let storage = Storage::new(object());
+        for local in [
+            Value::Storage(storage.clone()),
+            Value::ComptimeReference(value_reference::ValueReference::root(storage.clone())),
+        ] {
+            for steps in 0..90 {
+                let budget = Budget { steps, depth: 128 };
+                let mut fast = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let mut slow = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                fast.budget = budget;
+                slow.budget = budget;
+                let mut env = Environment::new();
+                env.insert(LocalId { owner: 1, index: 0 }, local.clone());
+                let result = fast
+                    .eval_borrowed_object_query(&expr, subject, &env)
+                    .unwrap();
+                assert_eq!(
+                    value(result),
+                    value(slow.eval_object_query_packet(&expr, subject, &mut env))
+                );
+                assert_eq!(fast.budget.steps, slow.budget.steps);
+                assert_eq!(fast.depth, 0);
+            }
+        }
+        let _locked = storage.0.lock().unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut env = Environment::new();
+        env.insert(
+            LocalId { owner: 1, index: 0 },
+            Value::Storage(storage.clone()),
+        );
+        assert_eq!(
+            vm.eval(&expr, &mut env).unwrap_err().kind,
+            ErrorKind::InvalidValueReference
+        );
+    }
+
+    #[test]
+    fn borrowed_local_selectors_preserve_bounds_missing_bindings_and_domains() {
+        let package = Package::default();
+        for query in [Q::Key, Q::EntryType, Q::Value, Q::NamedValue] {
+            let mut expr = observation(query);
+            let K::ObjectQuery { subject, .. } = &mut expr.kind else {
+                unreachable!()
+            };
+            let K::Tuple(fields) = &mut subject.kind else {
+                unreachable!()
+            };
+            fields[1].kind = K::Local(LocalId { owner: 1, index: 1 });
+            let selectors = vec![
+                None,
+                Some(Value::Integer(comptime_runtime::Integer::from_u128(0))),
+                Some(Value::Integer(comptime_runtime::Integer::from_u128(1))),
+                Some(Value::Integer(comptime_runtime::Integer::from_u128(99))),
+                Some(Value::Symbol("flag".into())),
+                Some(Value::Symbol("missing".into())),
+            ];
+            let K::ObjectQuery { subject, .. } = &expr.kind else {
+                unreachable!()
+            };
+            for selector in selectors {
+                let mut env = Environment::new();
+                env.insert(LocalId { owner: 1, index: 0 }, object());
+                if let Some(selector) = selector {
+                    env.insert(LocalId { owner: 1, index: 1 }, selector);
+                }
+                let mut fast = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let mut slow = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let result = fast
+                    .eval_borrowed_object_query(&expr, subject, &env)
+                    .unwrap();
+                assert_eq!(
+                    value(result),
+                    value(slow.eval_object_query_packet(&expr, subject, &mut env))
+                );
+                assert_eq!(fast.budget.steps, slow.budget.steps);
+            }
+        }
+    }
+
+    #[test]
+    fn computed_selectors_and_reference_payload_queries_retain_snapshot_evaluation() {
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut env = Environment::new();
+        env.insert(LocalId { owner: 1, index: 0 }, object());
+        let mut expr = observation(Q::Value);
+        let K::ObjectQuery { subject, .. } = &mut expr.kind else {
+            unreachable!()
+        };
+        let K::Tuple(fields) = &mut subject.kind else {
+            unreachable!()
+        };
+        fields[1] = Expr {
+            source: fields[1].source,
+            ty: fields[1].ty.clone(),
+            kind: K::Block {
+                statements: vec![],
+                result: Some(Box::new(fields[1].clone())),
+            },
+        };
+        let K::ObjectQuery { subject, .. } = &expr.kind else {
+            unreachable!()
+        };
+        assert!(
+            vm.eval_borrowed_object_query(&expr, subject, &env)
+                .is_none()
+        );
+        let expected = value(vm.eval_object_query(&expr, &mut env)).unwrap();
+        let expr = observation(Q::Value);
+        let K::ObjectQuery { subject, .. } = &expr.kind else {
+            unreachable!()
+        };
+        env.insert(
+            LocalId { owner: 1, index: 0 },
+            Value::Storage(Storage::new(object())),
+        );
+        assert!(
+            vm.eval_borrowed_object_query(&expr, subject, &env)
+                .is_none()
+        );
+        assert_eq!(
+            value(vm.eval_object_query(&expr, &mut env)).unwrap(),
+            expected
+        );
     }
 
     #[test]

@@ -27,3 +27,7 @@ harness = false
 [[bench]]
 name = "borrowed_aggregate"
 harness = false
+
+[[bench]]
+name = "object_queries"
+harness = false
