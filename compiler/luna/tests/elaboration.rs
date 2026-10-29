@@ -469,8 +469,8 @@ fn unprocessed_stage_and_attribute_information_blocks_nir() {
     let pure = accepted("pure fn checked() { }");
     assert!(pure.contains("(phase runtime) (inline false) (pure true)"));
     rejected(
-        "^unknown fn pending() { }",
-        "definition attribute or modifier",
+        "const unknown = {unknown:true}; ^unknown fn pending() { }",
+        "definition attribute or modifier `unknown`",
     );
     rejected("fn pending() { comptime { true; } }", "ComptimeBlock");
 }
@@ -2623,7 +2623,7 @@ fn float_runtime_proxies_reject_unsupported_targets_and_finite_overflow() {
     );
     rejected(
         "fn entry() -> .i32'builtin { 1.0 }",
-        "float literal requires a Float, f32 or f64 target",
+        "float literal requires a Float, f16, bf16, f32 or f64 target",
     );
     rejected(
         "fn entry() -> 0.1'type { 0.1 }",
@@ -4381,7 +4381,7 @@ fn interface_methods_require_matching_execution_phases() {
     );
     rejected(
         "trait Read { comptime fn read(self) -> true'type; } struct S {} impl Read for S { comptime fn read(self) -> true'type { true } } fn bad(value: S) -> true'type { value.as(Read).read() }",
-        "callable type is unavailable in this execution phase",
+        "value-reference transport requires an explicit comptime receiver",
     );
 }
 
@@ -5328,7 +5328,7 @@ fn method_properties_require_a_collector_and_validate_declared_fields() {
     );
     rejected(
         &format!("{head} fn run() {{Holder {{}}.take {{missing:true}};}}"),
-        "type equality",
+        "property argument fields do not match the expected record shape",
     );
 }
 
@@ -8454,7 +8454,7 @@ fn symbol_indexed_default_method_delegates_to_selected_member() {
 }
 
 #[test]
-fn unresolved_abi_attributes_cannot_publish_default_abi_functions() {
+fn unsupported_abi_attributes_cannot_publish_default_abi_functions() {
     for source in [
         "^attrs.abi(.c) fn identity(value:bool)->bool {value}",
         "^attrs.abi(.c) inline fn identity(value:bool)->bool {value}",
@@ -8464,7 +8464,11 @@ fn unresolved_abi_attributes_cannot_publish_default_abi_functions() {
         "trait Foreign { ^attrs.abi(.c) fn identity(value:bool)->bool; }",
         "mod foreign { ^attrs.abi(.c) fn identity(value:bool)->bool {value} }",
     ] {
-        rejected(source, "definition attribute or modifier");
+        let source = format!(
+            "mod attrs {{{}}} {source}",
+            include!("support/attrs_source.rs")
+        );
+        rejected(&source, "definition attribute or modifier `abi`");
     }
 }
 
