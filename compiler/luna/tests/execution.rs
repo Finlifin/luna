@@ -34138,7 +34138,7 @@ fn variadic_normal_heads_collect_type_lists_without_replacing_the_head() {
         .iter()
         .find(|h| h.declaration != list)
         .unwrap();
-    assert_eq!(tuple.parameters[0].kind, nir::normal_forms::Kind::TypeList);
+    assert_eq!(tuple.parameters[0].kind, nir::normal_forms::Kind::Value);
     assert!(package.to_string().contains("(type-list-input"));
     let expected = |elements| {
         Value::Type(Term::NormalForm {

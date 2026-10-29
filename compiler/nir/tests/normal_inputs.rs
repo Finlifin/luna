@@ -32,6 +32,74 @@ fn value(name: &str, value: Term) -> Term {
 }
 
 #[test]
+fn dependent_list_parameters_use_the_same_value_contract_for_types_and_bools() {
+    let list = |element| Term::NormalForm {
+        head: id(90),
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
+    let descriptor = Head {
+        role: nir::normal_forms::Role::Opaque,
+        declaration: id(0),
+        parameters: vec![
+            parameter(1, Kind::Type, primitive(P::Type)),
+            parameter(
+                2,
+                Kind::Value,
+                list(Term::Rigid {
+                    declaration: id(1),
+                    sort: Sort::Type,
+                }),
+            ),
+        ],
+        requirements: vec![],
+    };
+    let check = |arguments: &[Term], trusted: bool, fuel: &mut usize| {
+        descriptor.check_arguments_in_scope_with_collections_budgeted_in(
+            arguments,
+            |_| false,
+            |head| trusted && head == id(90),
+            |_, _, _| None,
+            |_, _| false,
+            &[],
+            fuel,
+            None,
+        )
+    };
+    let types = vec![
+        primitive(P::Type),
+        Term::TypeListValue(vec![primitive(P::Bool)]),
+    ];
+    let bools = vec![
+        primitive(P::Bool),
+        Term::NominalValue {
+            ty: Box::new(list(primitive(P::Bool))),
+            variant: None,
+            fields: vec![Term::Bool(true)],
+        },
+    ];
+    for arguments in [&types, &bools] {
+        assert!(check(arguments, true, &mut 10_000).is_ok());
+        assert!(check(arguments, false, &mut 10_000).is_err());
+        assert!(check(arguments, true, &mut 0).is_err());
+        assert!(check(arguments, true, &mut 10_000).is_ok());
+    }
+    assert!(check(&[primitive(P::Bool), types[1].clone()], true, &mut 10_000).is_err());
+    assert!(check(&[primitive(P::Type), bools[1].clone()], true, &mut 10_000).is_err());
+    assert!(
+        check(
+            &[
+                primitive(P::Type),
+                Term::TypeListValue(vec![Term::Bool(true)])
+            ],
+            true,
+            &mut 10_000
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn frozen_collection_inputs_require_identity_authority_and_element_domains() {
     let list = |element| Term::NormalForm {
         head: id(90),

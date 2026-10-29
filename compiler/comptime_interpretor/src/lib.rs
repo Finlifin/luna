@@ -9238,12 +9238,10 @@ impl Interpreter<'_> {
 
     fn is_type_list_input(&self, ty: &Term) -> bool {
         nir::normal_forms::type_list_input_type(ty)
-            && self.normal_forms.values().any(|head| {
-                head.is_type_list_instance(ty)
-                    || head.parameters.iter().any(|parameter| {
-                        parameter.kind == nir::normal_forms::Kind::TypeList && parameter.ty == *ty
-                    })
-            })
+            && self
+                .normal_forms
+                .values()
+                .any(|head| head.is_type_list_instance(ty))
     }
 
     fn list_element<'a>(&self, ty: &'a Term) -> Option<&'a Term> {

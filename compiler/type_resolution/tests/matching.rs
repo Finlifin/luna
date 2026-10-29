@@ -32,26 +32,46 @@ fn tuple_pack_inference_preserves_head_proofs_and_transaction_isolation() {
         arguments: vec![input],
     };
     let package = nir::program::Package {
-        normal_forms: vec![Head {
-            declaration: head,
-            role: Role::Tuple,
-            requirements: vec![],
-            parameters: vec![Parameter {
-                declaration: nir::DeclarationId {
-                    package: 55,
-                    local: 2,
-                },
-                binding: nir::program::LocalId { owner: 1, index: 0 },
-                kind: Kind::TypeList,
-                ty: Term::Nominal {
+        normal_forms: vec![
+            Head {
+                declaration: head,
+                role: Role::Tuple,
+                requirements: vec![],
+                parameters: vec![Parameter {
                     declaration: nir::DeclarationId {
                         package: 55,
-                        local: 3,
+                        local: 2,
                     },
-                    arguments: vec![Term::Primitive(P::Type)],
+                    binding: nir::program::LocalId { owner: 1, index: 0 },
+                    kind: Kind::Value,
+                    ty: Term::NormalForm {
+                        head: nir::DeclarationId {
+                            package: 55,
+                            local: 3,
+                        },
+                        sort: nir::Sort::Type,
+                        arguments: vec![Term::Primitive(P::Type)],
+                    },
+                }],
+            },
+            Head {
+                declaration: nir::DeclarationId {
+                    package: 55,
+                    local: 3,
                 },
-            }],
-        }],
+                role: nir::normal_forms::Role::TypeList,
+                requirements: vec![],
+                parameters: vec![Parameter {
+                    declaration: nir::DeclarationId {
+                        package: 55,
+                        local: 4,
+                    },
+                    binding: nir::program::LocalId { owner: 3, index: 0 },
+                    kind: nir::normal_forms::Kind::Type,
+                    ty: Term::Primitive(nir::Primitive::Type),
+                }],
+            },
+        ],
         ..Default::default()
     };
     let context = type_resolution::ptc::Context::from_package(&package).unwrap();

@@ -1916,36 +1916,34 @@ impl Checker<'_, '_> {
                 }
                 if let hir::clause::ClauseParamKind::Positional(_, ty) = parameter.kind {
                     let ty = self.type_expr(ty)?;
-                    if !self.is_type_list_type(&ty)
-                        && !nir::normal_forms::supported_input_type_with_collections_in(
-                            &ty,
-                            &type_parameters
-                                .iter()
-                                .map(|declaration| nir::DeclarationParameter {
-                                    declaration: *declaration,
-                                    sort: Sort::Type,
-                                })
-                                .chain(
-                                    normal_parameters
-                                        .iter()
-                                        .filter(|(_, _, ty)| *ty != p(P::Type))
-                                        .map(|(declaration, _, _)| nir::DeclarationParameter {
-                                            declaration: *declaration,
-                                            sort: Sort::ComptimeValue,
-                                        }),
-                                )
-                                .collect::<Vec<_>>(),
-                            |head| Some(head) == self.protocols.tuple,
-                            |head| Some(head) == self.protocols.meta_list,
-                            |id| {
-                                self.structs.contains_key(&id)
-                                    || self.enums.contains_key(&id)
-                                    || self.newtypes.contains_key(&id)
-                                    || self.context.is_nominal_constructor(id)
-                            },
-                            self.target,
-                        )
-                    {
+                    if !nir::normal_forms::supported_input_type_with_collections_in(
+                        &ty,
+                        &type_parameters
+                            .iter()
+                            .map(|declaration| nir::DeclarationParameter {
+                                declaration: *declaration,
+                                sort: Sort::Type,
+                            })
+                            .chain(
+                                normal_parameters
+                                    .iter()
+                                    .filter(|(_, _, ty)| *ty != p(P::Type))
+                                    .map(|(declaration, _, _)| nir::DeclarationParameter {
+                                        declaration: *declaration,
+                                        sort: Sort::ComptimeValue,
+                                    }),
+                            )
+                            .collect::<Vec<_>>(),
+                        |head| Some(head) == self.protocols.tuple,
+                        |head| Some(head) == self.protocols.meta_list,
+                        |id| {
+                            self.structs.contains_key(&id)
+                                || self.enums.contains_key(&id)
+                                || self.newtypes.contains_key(&id)
+                                || self.context.is_nominal_constructor(id)
+                        },
+                        self.target,
+                    ) {
                         return Err(error(
                             parameter.span,
                             "normal-form parameter type is not yet supported",
@@ -1974,36 +1972,34 @@ impl Checker<'_, '_> {
                 } else if let hir::clause::ClauseParamKind::Optional(_, ty, _) = parameter.kind {
                     let ty = self.type_expr(ty)?;
                     if ty != p(P::Type) {
-                        if !self.is_type_list_type(&ty)
-                            && !nir::normal_forms::supported_input_type_with_collections_in(
-                                &ty,
-                                &type_parameters
-                                    .iter()
-                                    .map(|declaration| nir::DeclarationParameter {
-                                        declaration: *declaration,
-                                        sort: Sort::Type,
-                                    })
-                                    .chain(
-                                        normal_parameters
-                                            .iter()
-                                            .filter(|(_, _, ty)| *ty != p(P::Type))
-                                            .map(|(declaration, _, _)| nir::DeclarationParameter {
-                                                declaration: *declaration,
-                                                sort: Sort::ComptimeValue,
-                                            }),
-                                    )
-                                    .collect::<Vec<_>>(),
-                                |head| Some(head) == self.protocols.tuple,
-                                |head| Some(head) == self.protocols.meta_list,
-                                |id| {
-                                    self.structs.contains_key(&id)
-                                        || self.enums.contains_key(&id)
-                                        || self.newtypes.contains_key(&id)
-                                        || self.context.is_nominal_constructor(id)
-                                },
-                                self.target,
-                            )
-                        {
+                        if !nir::normal_forms::supported_input_type_with_collections_in(
+                            &ty,
+                            &type_parameters
+                                .iter()
+                                .map(|declaration| nir::DeclarationParameter {
+                                    declaration: *declaration,
+                                    sort: Sort::Type,
+                                })
+                                .chain(
+                                    normal_parameters
+                                        .iter()
+                                        .filter(|(_, _, ty)| *ty != p(P::Type))
+                                        .map(|(declaration, _, _)| nir::DeclarationParameter {
+                                            declaration: *declaration,
+                                            sort: Sort::ComptimeValue,
+                                        }),
+                                )
+                                .collect::<Vec<_>>(),
+                            |head| Some(head) == self.protocols.tuple,
+                            |head| Some(head) == self.protocols.meta_list,
+                            |id| {
+                                self.structs.contains_key(&id)
+                                    || self.enums.contains_key(&id)
+                                    || self.newtypes.contains_key(&id)
+                                    || self.context.is_nominal_constructor(id)
+                            },
+                            self.target,
+                        ) {
                             return Err(error(
                                 parameter.span,
                                 "normal-form parameter type is not yet supported",

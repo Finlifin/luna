@@ -31,7 +31,7 @@ fn package() -> Package {
     Package {
         normal_forms: vec![
             Head {
-                role: nir::normal_forms::Role::Opaque,
+                role: nir::normal_forms::Role::TypeList,
                 declaration: id(1),
                 requirements: vec![],
                 parameters: vec![Input {
@@ -48,7 +48,7 @@ fn package() -> Package {
                 parameters: vec![Input {
                     declaration: id(20),
                     binding: LocalId { owner: 2, index: 0 },
-                    kind: Kind::TypeList,
+                    kind: Kind::Value,
                     ty: list_type(),
                 }],
             },
@@ -295,7 +295,7 @@ fn type_list_constant_nodes_validate_elements_domain_and_substitution() {
             .is_err()
     );
     package.functions[0].body.ty = list_type();
-    package.normal_forms.pop();
+    package.normal_forms.clear();
     assert!(
         Interpreter::new(&package, Budget::default())
             .unwrap()
@@ -334,21 +334,18 @@ fn list_input_contract_rejects_tuple_wrong_elements_and_recovers() {
 }
 
 #[test]
-fn list_domain_metadata_is_explicit_and_preserves_declared_type_identity() {
+fn list_domain_uses_ordinary_value_metadata_and_registered_layout() {
     let mut package = package();
     assert!(nir::normal_forms::validate(&package).is_ok());
-    assert!(
-        package.normal_forms[1]
-            .to_string()
-            .contains("(kind type-list)")
-    );
-    package.normal_forms[1].parameters[0].kind = Kind::Value;
+    assert_eq!(package.normal_forms[1].parameters[0].kind, Kind::Value);
+    assert!(package.normal_forms[1].to_string().contains("(kind value)"));
+    // A parameter cannot grant a made-up declaration the list representation.
+    package.normal_forms[0].role = nir::normal_forms::Role::Opaque;
     assert!(nir::normal_forms::validate(&package).is_err());
-    package.normal_forms[1].parameters[0].kind = Kind::TypeList;
-    for invalid in [ty(P::Type), ty(P::Bool), Term::Tuple(vec![ty(P::Type)])] {
-        package.normal_forms[1].parameters[0].ty = invalid;
-        assert!(nir::normal_forms::validate(&package).is_err());
-    }
+    package.normal_forms[0].role = nir::normal_forms::Role::TypeList;
+    assert!(nir::normal_forms::validate(&package).is_ok());
+    package.normal_forms[1].parameters[0].kind = Kind::Type;
+    assert!(nir::normal_forms::validate(&package).is_err());
 }
 
 #[test]

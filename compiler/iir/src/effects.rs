@@ -919,7 +919,7 @@ mod tuple_tests {
                         local: 1,
                     },
                     binding: LocalId { owner: 0, index: 0 },
-                    kind: Kind::TypeList,
+                    kind: Kind::Value,
                     ty: Term::Nominal {
                         declaration: DeclarationId {
                             package: 1,

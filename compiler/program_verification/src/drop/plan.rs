@@ -1334,26 +1334,46 @@ mod tuple_layout_tests {
             arguments: vec![Term::TypeListValue(fields.clone())],
         };
         let mut package = Package {
-            normal_forms: vec![Head {
-                declaration: id,
-                role: Role::Tuple,
-                parameters: vec![nir::normal_forms::Parameter {
-                    declaration: nir::DeclarationId {
-                        package: 9,
-                        local: 3,
-                    },
-                    binding: nir::program::LocalId { owner: 1, index: 0 },
-                    kind: nir::normal_forms::Kind::TypeList,
-                    ty: Term::Nominal {
+            normal_forms: vec![
+                Head {
+                    declaration: id,
+                    role: Role::Tuple,
+                    parameters: vec![nir::normal_forms::Parameter {
                         declaration: nir::DeclarationId {
                             package: 9,
-                            local: 2,
+                            local: 3,
                         },
-                        arguments: vec![Term::Primitive(nir::Primitive::Type)],
+                        binding: nir::program::LocalId { owner: 1, index: 0 },
+                        kind: nir::normal_forms::Kind::Value,
+                        ty: Term::NormalForm {
+                            head: nir::DeclarationId {
+                                package: 9,
+                                local: 2,
+                            },
+                            sort: nir::Sort::Type,
+                            arguments: vec![Term::Primitive(nir::Primitive::Type)],
+                        },
+                    }],
+                    requirements: vec![],
+                },
+                Head {
+                    declaration: nir::DeclarationId {
+                        package: 9,
+                        local: 2,
                     },
-                }],
-                requirements: vec![],
-            }],
+                    role: nir::normal_forms::Role::TypeList,
+                    requirements: vec![],
+                    parameters: vec![nir::normal_forms::Parameter {
+                        declaration: nir::DeclarationId {
+                            package: 9,
+                            local: 4,
+                        },
+                        binding: nir::program::LocalId { owner: 2, index: 0 },
+                        kind: nir::normal_forms::Kind::Type,
+                        ty: Term::Primitive(nir::Primitive::Type),
+                    }],
+                },
+            ],
             ..Default::default()
         };
         nir::normal_forms::validate(&package).unwrap();

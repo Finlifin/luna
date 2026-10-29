@@ -224,7 +224,7 @@ fn bound_tuple_preparation_uses_only_the_declared_layout_role() {
                 local: 42,
             },
             binding: local(42),
-            kind: Kind::TypeList,
+            kind: Kind::Value,
             ty: Term::NormalForm {
                 head: DeclarationId {
                     package: 1,

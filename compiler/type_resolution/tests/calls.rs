@@ -1068,26 +1068,46 @@ fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
         arguments: vec![Term::TypeListValue(fields)],
     };
     let mut package = nir::program::Package {
-        normal_forms: vec![Head {
-            declaration: head,
-            role: Role::Tuple,
-            requirements: vec![],
-            parameters: vec![Input {
-                declaration: DeclarationId {
-                    package: 55,
-                    local: 2,
-                },
-                binding: nir::program::LocalId { owner: 1, index: 0 },
-                kind: Kind::TypeList,
-                ty: Term::Nominal {
+        normal_forms: vec![
+            Head {
+                declaration: head,
+                role: Role::Tuple,
+                requirements: vec![],
+                parameters: vec![Input {
                     declaration: DeclarationId {
                         package: 55,
-                        local: 3,
+                        local: 2,
                     },
-                    arguments: vec![primitive(P::Type)],
+                    binding: nir::program::LocalId { owner: 1, index: 0 },
+                    kind: Kind::Value,
+                    ty: Term::NormalForm {
+                        head: DeclarationId {
+                            package: 55,
+                            local: 3,
+                        },
+                        sort: nir::Sort::Type,
+                        arguments: vec![primitive(P::Type)],
+                    },
+                }],
+            },
+            Head {
+                declaration: DeclarationId {
+                    package: 55,
+                    local: 3,
                 },
-            }],
-        }],
+                role: nir::normal_forms::Role::TypeList,
+                requirements: vec![],
+                parameters: vec![Input {
+                    declaration: DeclarationId {
+                        package: 55,
+                        local: 4,
+                    },
+                    binding: nir::program::LocalId { owner: 3, index: 0 },
+                    kind: nir::normal_forms::Kind::Type,
+                    ty: Term::Primitive(nir::Primitive::Type),
+                }],
+            },
+        ],
         ..Default::default()
     };
     let context = Context::from_package(&package).unwrap();

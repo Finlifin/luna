@@ -437,7 +437,7 @@ pub(crate) fn validate(
         } else {
             head.role == Role::Tuple
                 && head.parameters.len() == 1
-                && head.parameters[0].kind == Kind::TypeList
+                && head.parameters[0].kind == Kind::Value
                 && matches!(&head.parameters[0].ty, nir::Term::NormalForm {head, ..} if Some(*head) == protocols.meta_list)
         };
         if !valid {

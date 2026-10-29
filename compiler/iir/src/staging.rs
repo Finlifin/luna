@@ -3080,11 +3080,6 @@ fn constant<'layout>(
             for head in heads {
                 charge(fuel, 1)?;
                 admitted |= head.is_type_list_instance(ty);
-                for parameter in &head.parameters {
-                    charge(fuel, 1)?;
-                    admitted |=
-                        parameter.kind == nir::normal_forms::Kind::TypeList && parameter.ty == *ty;
-                }
             }
             if !admitted || !nir::normal_forms::type_list_input_type(ty) {
                 return Err("staged type list requires trusted meta.List<Type> metadata".into());
@@ -3418,26 +3413,46 @@ mod tests {
             package: 3,
             local: 0,
         };
-        let mut heads = vec![Head {
-            declaration: id,
-            role: Role::Tuple,
-            requirements: vec![],
-            parameters: vec![Parameter {
-                declaration: nir::DeclarationId {
-                    package: 3,
-                    local: 1,
-                },
-                binding: LocalId { owner: 0, index: 0 },
-                kind: Kind::TypeList,
-                ty: Term::Nominal {
+        let mut heads = vec![
+            Head {
+                declaration: id,
+                role: Role::Tuple,
+                requirements: vec![],
+                parameters: vec![Parameter {
                     declaration: nir::DeclarationId {
                         package: 3,
-                        local: 2,
+                        local: 1,
                     },
-                    arguments: vec![Term::Primitive(Primitive::Type)],
+                    binding: LocalId { owner: 0, index: 0 },
+                    kind: Kind::Value,
+                    ty: Term::NormalForm {
+                        sort: Sort::Type,
+                        head: nir::DeclarationId {
+                            package: 3,
+                            local: 2,
+                        },
+                        arguments: vec![Term::Primitive(Primitive::Type)],
+                    },
+                }],
+            },
+            Head {
+                declaration: nir::DeclarationId {
+                    package: 3,
+                    local: 2,
                 },
-            }],
-        }];
+                role: Role::TypeList,
+                requirements: vec![],
+                parameters: vec![Parameter {
+                    declaration: nir::DeclarationId {
+                        package: 3,
+                        local: 3,
+                    },
+                    binding: LocalId { owner: 2, index: 0 },
+                    kind: Kind::Type,
+                    ty: Term::Primitive(Primitive::Type),
+                }],
+            },
+        ];
         let tuple = |values: Vec<Expr>| Expr {
             ty: Term::NormalForm {
                 head: id,

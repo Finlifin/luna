@@ -1836,20 +1836,34 @@ mod tuple_context_tests {
         let id = |local| DeclarationId { package: 71, local };
         let scalar = Term::Primitive(Primitive::Bool);
         let mut package = Package {
-            normal_forms: vec![Head {
-                declaration: id(1),
-                role: Role::Tuple,
-                requirements: vec![],
-                parameters: vec![Input {
-                    declaration: id(2),
-                    binding: LocalId { owner: 1, index: 0 },
-                    kind: Kind::TypeList,
-                    ty: Term::Nominal {
-                        declaration: id(3),
-                        arguments: vec![Term::Primitive(Primitive::Type)],
-                    },
-                }],
-            }],
+            normal_forms: vec![
+                Head {
+                    declaration: id(1),
+                    role: Role::Tuple,
+                    requirements: vec![],
+                    parameters: vec![Input {
+                        declaration: id(2),
+                        binding: LocalId { owner: 1, index: 0 },
+                        kind: Kind::Value,
+                        ty: Term::NormalForm {
+                            head: id(3),
+                            sort: nir::Sort::Type,
+                            arguments: vec![Term::Primitive(Primitive::Type)],
+                        },
+                    }],
+                },
+                Head {
+                    declaration: id(3),
+                    role: nir::normal_forms::Role::TypeList,
+                    requirements: vec![],
+                    parameters: vec![Input {
+                        declaration: id(4),
+                        binding: nir::program::LocalId { owner: 3, index: 0 },
+                        kind: nir::normal_forms::Kind::Type,
+                        ty: Term::Primitive(nir::Primitive::Type),
+                    }],
+                },
+            ],
             ..Default::default()
         };
         let tuple = |fields| Term::NormalForm {

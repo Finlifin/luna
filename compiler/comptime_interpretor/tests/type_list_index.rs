@@ -25,7 +25,7 @@ fn package() -> Package {
     Package {
         normal_forms: vec![
             Head {
-                role: nir::normal_forms::Role::Opaque,
+                role: nir::normal_forms::Role::TypeList,
                 declaration: id(1),
                 requirements: vec![],
                 parameters: vec![Input {
@@ -42,7 +42,7 @@ fn package() -> Package {
                 parameters: vec![Input {
                     declaration: id(20),
                     binding: LocalId { owner: 2, index: 0 },
-                    kind: Kind::TypeList,
+                    kind: Kind::Value,
                     ty: list_type(),
                 }],
             },

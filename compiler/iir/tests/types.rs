@@ -272,7 +272,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
         normal_forms: vec![
             Head {
                 declaration: id(1),
-                role: Role::Opaque,
+                role: Role::TypeList,
                 requirements: vec![],
                 parameters: vec![Input {
                     declaration: id(10),
@@ -288,7 +288,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
                 parameters: vec![Input {
                     declaration: id(20),
                     binding: LocalId { owner: 2, index: 0 },
-                    kind: Kind::TypeList,
+                    kind: Kind::Value,
                     ty: list.clone(),
                 }],
             },
@@ -364,6 +364,8 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
     );
     package.functions[0].function.body.ty = list;
     package.normal_forms.pop();
+    package.validate(&mut 10_000).unwrap();
+    package.normal_forms[0].role = Role::Opaque;
     assert!(
         package
             .validate(&mut 10_000)

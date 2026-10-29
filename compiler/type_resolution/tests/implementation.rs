@@ -949,20 +949,40 @@ fn tuple_kind_conflict_excludes_uninferable_generic_candidates() {
     use nir::normal_forms::{Head, Kind, Parameter, Role};
     use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let mut package = nir::program::Package {
-        normal_forms: vec![Head {
-            declaration: id(990),
-            role: Role::Tuple,
-            requirements: vec![],
-            parameters: vec![Parameter {
-                declaration: id(991),
-                binding: nir::program::LocalId {
-                    owner: 990,
-                    index: 0,
-                },
-                kind: Kind::TypeList,
-                ty: node(992, vec![ty(P::Type)]),
-            }],
-        }],
+        normal_forms: vec![
+            Head {
+                declaration: id(990),
+                role: Role::Tuple,
+                requirements: vec![],
+                parameters: vec![Parameter {
+                    declaration: id(991),
+                    binding: nir::program::LocalId {
+                        owner: 990,
+                        index: 0,
+                    },
+                    kind: Kind::Value,
+                    ty: Term::NormalForm {
+                        head: id(992),
+                        sort: Sort::Type,
+                        arguments: vec![ty(P::Type)],
+                    },
+                }],
+            },
+            Head {
+                declaration: id(992),
+                role: nir::normal_forms::Role::TypeList,
+                requirements: vec![],
+                parameters: vec![Parameter {
+                    declaration: id(993),
+                    binding: nir::program::LocalId {
+                        owner: 992,
+                        index: 0,
+                    },
+                    kind: nir::normal_forms::Kind::Type,
+                    ty: Term::Primitive(nir::Primitive::Type),
+                }],
+            },
+        ],
         ..Default::default()
     };
     let tuple = |field| Term::NormalForm {
@@ -1029,20 +1049,40 @@ fn tuple_subject_eligibility_requires_trusted_metadata_at_selection_and_replay()
     use nir::normal_forms::{Head, Kind, Parameter, Role};
     use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let mut package = nir::program::Package {
-        normal_forms: vec![Head {
-            declaration: id(990),
-            role: Role::Tuple,
-            requirements: vec![],
-            parameters: vec![Parameter {
-                declaration: id(991),
-                binding: nir::program::LocalId {
-                    owner: 990,
-                    index: 0,
-                },
-                kind: Kind::TypeList,
-                ty: node(992, vec![ty(P::Type)]),
-            }],
-        }],
+        normal_forms: vec![
+            Head {
+                declaration: id(990),
+                role: Role::Tuple,
+                requirements: vec![],
+                parameters: vec![Parameter {
+                    declaration: id(991),
+                    binding: nir::program::LocalId {
+                        owner: 990,
+                        index: 0,
+                    },
+                    kind: Kind::Value,
+                    ty: Term::NormalForm {
+                        head: id(992),
+                        sort: Sort::Type,
+                        arguments: vec![ty(P::Type)],
+                    },
+                }],
+            },
+            Head {
+                declaration: id(992),
+                role: nir::normal_forms::Role::TypeList,
+                requirements: vec![],
+                parameters: vec![Parameter {
+                    declaration: id(993),
+                    binding: nir::program::LocalId {
+                        owner: 992,
+                        index: 0,
+                    },
+                    kind: nir::normal_forms::Kind::Type,
+                    ty: Term::Primitive(nir::Primitive::Type),
+                }],
+            },
+        ],
         ..Default::default()
     };
     let subject = Term::NormalForm {

@@ -2452,8 +2452,7 @@ impl Builder<'_> {
                             declaration: p.declaration,
                             sort: match p.kind {
                                 nir::normal_forms::Kind::Type => nir::Sort::Type,
-                                nir::normal_forms::Kind::Value
-                                | nir::normal_forms::Kind::TypeList => nir::Sort::ComptimeValue,
+                                nir::normal_forms::Kind::Value => nir::Sort::ComptimeValue,
                             },
                         })
                         .collect();

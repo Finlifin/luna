@@ -10,9 +10,6 @@ use std::{
 pub enum Kind {
     Type,
     Value,
-    /// Trusted declaration-side representation contract for meta.List<Type>.
-    /// The declared type remains in Parameter::ty; no head is unfolded.
-    TypeList,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Parameter {
@@ -51,7 +48,6 @@ impl fmt::Display for Kind {
         f.write_str(match self {
             Self::Type => "type",
             Self::Value => "value",
-            Self::TypeList => "type-list",
         })
     }
 }
@@ -260,9 +256,8 @@ pub fn supported_input_type_with_collections_in(
     true
 }
 
-/// Representation-shape guard for trusted Type-list metadata. This alone does
-/// not designate a language item: only the producer may attach Role::TypeList
-/// or a Kind::TypeList input contract after resolving its trusted identity.
+/// Representation-shape guard for the list layout. A matching shape alone
+/// does not establish a list declaration; consult its registered layout role.
 pub fn type_list_input_type(ty: &Term) -> bool {
     let arguments = match ty {
         Term::NormalForm {
@@ -292,7 +287,12 @@ pub fn validate(package: &Package) -> Result<(), &'static str> {
             return Err("duplicate normal-form head metadata");
         }
         if head.role == Role::Tuple
-            && (head.parameters.len() != 1 || head.parameters[0].kind != Kind::TypeList)
+            && (head.parameters.len() != 1
+                || head.parameters[0].kind != Kind::Value
+                || !package
+                    .normal_forms
+                    .iter()
+                    .any(|list| list.is_type_list_instance(&head.parameters[0].ty)))
         {
             return Err("Tuple head requires exactly one Type-list input");
         }
@@ -322,14 +322,6 @@ pub fn validate(package: &Package) -> Result<(), &'static str> {
                         return Err("normal-form Type input must have Type type");
                     }
                     types.push(parameter.declaration);
-                }
-                Kind::TypeList => {
-                    if !type_list_input_type(&parameter.ty) {
-                        return Err(
-                            "normal-form type-list input requires a declared Type-list instance",
-                        );
-                    }
-                    values.push(parameter);
                 }
                 Kind::Value => {
                     let supported = supported_input_type_with_collections_in(
@@ -658,21 +650,6 @@ impl Head {
             {
                 crate::type_computations::charge_term(argument, &mut remaining)
                     .map_err(|_| ApplicationError::InputType { index })?;
-                if parameter.kind == Kind::TypeList {
-                    if !type_list_input_type(&parameter.ty) {
-                        return Err(ApplicationError::InputType { index });
-                    }
-                    let Term::TypeListValue(elements) = argument else {
-                        return Err(ApplicationError::InputType { index });
-                    };
-                    if elements.len() > 100_000
-                        || elements.iter().any(|element| element.sort() != Sort::Type)
-                    {
-                        return Err(ApplicationError::InputType { index });
-                    }
-                    types.insert(parameter.declaration, (Sort::ComptimeValue, argument));
-                    continue;
-                }
                 let before_template = remaining;
                 crate::type_computations::charge_term(&parameter.ty, &mut remaining)
                     .map_err(|_| ApplicationError::InputType { index })?;

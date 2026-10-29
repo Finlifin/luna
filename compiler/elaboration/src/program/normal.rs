@@ -745,9 +745,7 @@ impl Checker<'_, '_> {
                         declaration: *declaration,
                         binding: *binding,
                         ty: ty.clone(),
-                        kind: if self.is_type_list_type(ty) {
-                            nir::normal_forms::Kind::TypeList
-                        } else if *ty == p(P::Type) {
+                        kind: if *ty == p(P::Type) {
                             nir::normal_forms::Kind::Type
                         } else {
                             nir::normal_forms::Kind::Value

@@ -611,13 +611,6 @@ impl Package {
                         .checked_sub(1)
                         .ok_or("IIR type-list metadata budget exhausted")?;
                     admitted |= head.is_type_list_instance(&expr.ty);
-                    for parameter in &head.parameters {
-                        *fuel = fuel
-                            .checked_sub(1)
-                            .ok_or("IIR type-list metadata budget exhausted")?;
-                        admitted |= parameter.kind == nir::normal_forms::Kind::TypeList
-                            && parameter.ty == expr.ty;
-                    }
                 }
                 if !admitted || !nir::normal_forms::type_list_input_type(&expr.ty) {
                     return Err(

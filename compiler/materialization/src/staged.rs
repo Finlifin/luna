@@ -393,13 +393,11 @@ impl Builder<'_> {
             }
             Value::TypeList(types) => {
                 if !nir::normal_forms::type_list_input_type(ty)
-                    || !self.package.normal_forms.iter().any(|head| {
-                        head.is_type_list_instance(ty)
-                            || head.parameters.iter().any(|parameter| {
-                                parameter.kind == nir::normal_forms::Kind::TypeList
-                                    && parameter.ty == *ty
-                            })
-                    })
+                    || !self
+                        .package
+                        .normal_forms
+                        .iter()
+                        .any(|head| head.is_type_list_instance(ty))
                 {
                     return Err("staged type-list result requires trusted meta.List<Type>".into());
                 }
