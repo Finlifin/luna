@@ -129,6 +129,8 @@ Cargo 构建与测试统一使用 `python3 -B development/cargo.py <test|check|b
 
 无人值守时优先通过 `python3 -B development/check.py --timeout 900 -- test ...` 调用上述 cargo.py；已有二进制复现使用 `development/reproduce.py`，可选批量回溯使用 `development/backtrace.py`，证据读取使用 `development/report.py`。入口关闭标准输入，设置超时并保存日志。可选回溯遇到 ptrace 限制时保存 unavailable 后继续独立工作，不为可选诊断反复等待用户；脚本不提供权限绕过，真正必需的受限操作仍遵守环境授权规则。详见 development/README.md。
 
+开发迭代不要机械使用 `--release`。先按现有缓存和任务需求选定 dev/test 或 release profile，并在同一阶段保持一致；频繁修改编译器时优先使用无优化、无 debuginfo 的 dev/test 构建，release 留给性能测量、原生验收或确有必要的优化行为检查。切换 profile 会产生一次新的构建，不能在已有构建运行时另启一套。先完成同一依赖链的修改和格式化，再启动检查；构建期间发现必须修改的相关源码时，明确将该轮结果视作旧版本证据，不把重复完整编译当作默认反馈循环。可用已有二进制或测试 harness 定位问题时，先复现再决定重建范围。
+
 按变更选择最小充分检查：局部行为测试、相关 crate 检查、接口／端到端验收。检查通过后，只有新改动、失败或尚未解除的疑点才扩大或重复测试。
 
 测试集规模可以充分扩展，按语言构造、IR 阶段和回归场景组织可独立运行的测试组。日常修改运行受影响的测试组；全量测试用于阶段性集成、广泛影响的改动或确有必要的回归核验，避免每个小改动都重复全量执行。
