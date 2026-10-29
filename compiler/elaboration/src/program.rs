@@ -3500,6 +3500,7 @@ impl Checker<'_, '_> {
             | H::TyClosure(..)
             | H::TyFn(_)
             | H::TyComptimeFn(_)
+            | H::TyNFFn(_)
             | H::TyModifiedFn(..)
             | H::TyFnArrow(..) => true,
             H::TySelf => {
@@ -4170,6 +4171,7 @@ impl Checker<'_, '_> {
                 })
             }
             H::TyModifiedFn(modifiers, params) => self.form_modified_callable_type(*modifiers, params, None, expr.span),
+            H::TyNFFn(_) => Err(error(expr.span, "normal-form callable value types are not implemented")),
             H::TyFn(params) | H::TyComptimeFn(params) => {
                 self.form_callable_type(params, None, matches!(expr.kind, H::TyComptimeFn(_)), expr.span)
             }

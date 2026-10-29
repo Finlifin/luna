@@ -583,6 +583,8 @@ pub const FN_MOD_INLINE: u32 = 1 << 2;
 pub const FN_MOD_UNSAFE: u32 = 1 << 3;
 pub const FN_MOD_SPEC: u32 = 1 << 4;
 pub const FN_MOD_VERIFIED: u32 = 1 << 5;
+// Angle-bracket inputs distinguish an opaque normal-form callable type.
+pub const FN_MOD_NORMAL_FORM: u32 = 1 << 6;
 pub const FN_MOD_ATOMIC: u32 = 1 << 7; // only for function definitions, not fn_type
 
 pub fn fn_mod_flags_to_string(flags: u32) -> String {
@@ -607,6 +609,9 @@ pub fn fn_mod_flags_to_string(flags: u32) -> String {
     }
     if flags & FN_MOD_ATOMIC != 0 {
         parts.push("atomic");
+    }
+    if flags & FN_MOD_NORMAL_FORM != 0 {
+        parts.push("normal-form");
     }
     parts.join(" ")
 }

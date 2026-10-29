@@ -138,6 +138,53 @@ fn function_type_visitors_keep_flags_separate_from_parameter_nodes() {
 }
 
 #[test]
+fn normal_form_callable_types_preserve_angle_inputs_and_arrow_scope() {
+    for source in [
+        "pure comptime fn<...Es: meta.List<Type>> -> Type",
+        "pure comptime fn<T: Type, value: T> -> T",
+        "pure comptime fn<> -> Type",
+        "pure comptime fn<T: Type> -> pure comptime fn<value: T> -> T",
+    ] {
+        let map = SourceMap::new(FilePathMapping::empty());
+        let file = map.new_source_file(FileName::Custom("nf-callable.fl".into()), source.into());
+        let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
+        assert!(errors.is_empty(), "{source}");
+        let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+        let root = parser
+            .try_expr()
+            .unwrap_or_else(|e| panic!("{source}: {e:?}"));
+        assert_eq!(parser.peek_next_token().kind, TokenKind::Eof, "{source}");
+        let ast = parser.finalize();
+        assert_eq!(ast.get_node_kind(root), Some(NodeKind::Arrow));
+        let input = ast.get_children(root)[0];
+        assert_eq!(ast.get_node_kind(input), Some(NodeKind::FnType));
+        assert_eq!(
+            ast.get_children(input)[0],
+            ast::FN_MOD_PURE | ast::FN_MOD_COMPTIME | ast::FN_MOD_NORMAL_FORM
+        );
+        let direct = ast.dump_to_s_expression(root, &map);
+        assert_eq!(
+            direct,
+            ast::ast_visitor::dump_ast_to_s_expression(&ast, root, &map)
+        );
+        assert!(direct.contains("normal-form"), "{direct}");
+    }
+    for source in [
+        "fn<Type>",
+        "comptime fn<Type>",
+        "pure fn<Type>",
+        "pure comptime fn<...Es: meta.List<Type>",
+    ] {
+        let map = SourceMap::new(FilePathMapping::empty());
+        let file =
+            map.new_source_file(FileName::Custom("bad-nf-callable.fl".into()), source.into());
+        let (tokens, symbols, _) = lex::lex(source, file.start_pos);
+        let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+        assert!(parser.try_expr().is_err(), "{source}");
+    }
+}
+
+#[test]
 fn postfix_ranges_include_the_receiver_and_preserve_inner_ranges() {
     for source in [
         "module.factory(value).field[index]",

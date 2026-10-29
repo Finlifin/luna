@@ -2711,7 +2711,13 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         };
 
         let flags = children[0]; // raw u32 bitmask
-        if flags & !(ast::FN_MOD_COMPTIME | ast::FN_MOD_UNSAFE) != 0 {
+        let normal_form = flags & ast::FN_MOD_NORMAL_FORM != 0;
+        let supported = if normal_form {
+            ast::FN_MOD_NORMAL_FORM | ast::FN_MOD_PURE | ast::FN_MOD_COMPTIME
+        } else {
+            ast::FN_MOD_COMPTIME | ast::FN_MOD_UNSAFE
+        };
+        if flags & !supported != 0 {
             self.package
                 .pending_semantics
                 .push((span, "function type modifiers".into()));
@@ -2788,7 +2794,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let params_slice = self.arena.alloc_ty_param_slice(ty_params);
         Expr {
             hir_id: self.next_hir_id(),
-            kind: if flags & !ast::FN_MOD_COMPTIME != 0 {
+            kind: if normal_form {
+                ExprKind::TyNFFn(params_slice)
+            } else if flags & !ast::FN_MOD_COMPTIME != 0 {
                 ExprKind::TyModifiedFn(
                     hir::expr::FnTypeModifiers {
                         is_pure: flags & ast::FN_MOD_PURE != 0,

@@ -10,6 +10,7 @@
 
 ~~~text
 fn_type -> pure? comptime? inline? (unsafe | spec | verified)? fn(parameter_type*) (-> expr)?
+    | pure comptime fn<parameter_type*> (-> expr)?
 closure_type -> %closure_context expr
 closure_context -> expr | { environment_binding* }
 environment_binding -> id : expr (= expr)?
@@ -22,6 +23,18 @@ lambda_param -> lambda parameter
 函数返回类型中的 `->` 向右结合：`fn() -> fn() -> bool` 表示返回一个
 `fn() -> bool` 函数值的无参函数，即 `fn() -> (fn() -> bool)`。
 `comptime fn` 使用相同的分组规则；括号可以显式划定类型表达式的范围。
+
+`pure comptime fn<...> -> Type` 描述范式 callable；尖括号输入属于这个
+函数值的类型，不能改写成圆括号的普通 comptime 函数类型。内置包集中绑定层
+中的 Tuple 声明使用这一形式：
+
+```flurry
+pub const Tuple: pure comptime fn<...Es: meta.List<Type>> -> Type = .Tuple'builtin;
+```
+
+命名输入按顺序进入作用域，后续输入及结果类型可引用前面的绑定；嵌套函数
+类型建立自己的参数作用域。当前实现已接通该语法、AST 与 HIR，NIR callable
+值表示和上述 builtin 绑定的执行路径仍待接通；不能据此宣称 Tuple 已迁移。
 
 ## 正式定义
 

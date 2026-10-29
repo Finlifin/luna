@@ -213,6 +213,7 @@ closure_qualified_type -> %closure_context expr
 trait_object_type -> dyn expr
 pointer_type -> *expr
 fn_type -> pure? comptime? inline? (unsafe | spec | verified)? fn(parameter_type*) (-> expr)?
+    | pure comptime fn<parameter_type*> (-> expr)?
 refinement_type -> refines { expr } expr
 for_type -> for<parameter*> expr
 lift_type -> lift expr

@@ -148,6 +148,62 @@ fn inline_control_flow_keeps_its_expansion_requirement_in_hir() {
 }
 
 #[test]
+fn normal_form_callable_bindings_preserve_scoped_inputs_in_hir() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "
+        typealias Type = .Type'builtin;
+        mod meta { pure comptime fn List<T> -> Type { T } }
+        pub const Tuple: pure comptime fn<...Es: meta.List<Type>> -> Type = .Tuple'builtin;
+        typealias Factory = pure comptime fn<T: Type, value: T>
+            -> pure comptime fn<T: Type, other: T> -> T;
+    ",
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = success(&output);
+    assert_eq!(dump.matches("(ty-nf-fn ").count(), 3, "{dump}");
+    assert!(
+        dump.contains("(variadic (name (ident (name \"Es\")"),
+        "{dump}"
+    );
+    assert!(!dump.contains("function type modifiers"), "{dump}");
+    let targets = dump
+        .split("(resolved-local (name \"T\") (target ")
+        .skip(1)
+        .map(|tail| tail.split("))").next().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 3, "{dump}");
+    assert_ne!(targets[0], targets[1], "{dump}");
+    assert_eq!(targets[1], targets[2], "{dump}");
+    sandbox.write(
+        "input.fl",
+        "typealias F = pure comptime fn<T: .Type'builtin> -> T;",
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+    failure(&output, 1);
+    assert!(
+        details(&output).contains("normal-form callable value types"),
+        "{}",
+        details(&output)
+    );
+    for source in [
+        "typealias F = pure comptime fn<T: .Type'builtin> -> T; typealias Leaked = T;",
+        "typealias F = pure comptime fn<value: T, T: .Type'builtin> -> T;",
+        "typealias F = pure comptime fn<T: .Type'builtin, T: .Type'builtin> -> T;",
+    ] {
+        sandbox.write("input.fl", source);
+        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        failure(&output, 1);
+        assert!(
+            !details(&output).contains("panicked"),
+            "{}",
+            details(&output)
+        );
+    }
+}
+
+#[test]
 fn function_type_telescope_bindings_are_ordered_nested_and_scoped() {
     let sandbox = Sandbox::new();
     sandbox.write(

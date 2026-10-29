@@ -480,10 +480,24 @@ impl Parser<'_> {
                 ));
             }
 
-            // Parse parameter types: (parameter_type*)
+            // Keep the calling form in the AST; a normal-form callable is not
+            // an ordinary comptime function with different punctuation.
+            let brackets = if p.peek_next_token().kind == TokenKind::Lt {
+                if flags != (ast::FN_MOD_PURE | ast::FN_MOD_COMPTIME) {
+                    return Err(ParseError::invalid_syntax(
+                        "normal-form function types require `pure comptime fn<...>`".into(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+                flags |= ast::FN_MOD_NORMAL_FORM;
+                (TokenKind::Lt, TokenKind::Gt)
+            } else {
+                (TokenKind::LParen, TokenKind::RParen)
+            };
             let params = p.try_multi_with_bracket(
                 &[Rule::comma("parameter type", |p| p.try_param_type())],
-                (TokenKind::LParen, TokenKind::RParen),
+                brackets,
             )?;
 
             Ok(NodeBuilder::new(NodeKind::FnType, p.current_span())
