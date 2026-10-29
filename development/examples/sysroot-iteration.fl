@@ -444,3 +444,50 @@ test scan_replaces_copy_substructure_of_affine_state {
         });
     assumes count == 2 and retired;
 }
+
+inline effect state_tick();
+inline fn state_tick_twice() -> #state_tick void {
+    state_tick()#;
+    state_tick()#;
+}
+
+fn return_from_state_handler(retired: *bool) -> bool {
+    let state = Watch {seen: retired, value: false};
+    let pointer = state.ref;
+    state_tick_twice()# {
+        state_tick() => {
+            assumes not pointer.value.*;
+            pointer.value.* = true;
+            return true;
+        },
+    };
+    false
+}
+
+test handler_lexical_return_retires_borrowed_state {
+    var retired = false;
+    let returned = return_from_state_handler(retired.ref);
+    assumes returned and retired;
+}
+
+fn error_from_state_handler(retired: *bool) -> !bool void {
+    let state = Watch {seen: retired, value: false};
+    let pointer = state.ref;
+    state_tick_twice()# {
+        state_tick() => {
+            assumes not pointer.value.*;
+            pointer.value.* = true;
+            return error true;
+        },
+    };
+}
+
+test handler_error_return_retires_state_before_catch {
+    var retired = false;
+    var caught = false;
+    error_from_state_handler(retired.ref)! {
+        true => {assumes retired; caught = true;},
+        false => {assumes false;},
+    };
+    assumes caught and retired;
+}

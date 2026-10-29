@@ -5166,3 +5166,91 @@ fn handler_rejects_pointer_rebinding_hidden_in_copy_aggregate() {
     .unwrap_err();
     assert!(error.contains("move-error"), "{error}");
 }
+
+#[test]
+fn affine_handler_state_is_retired_on_lexical_return() {
+    let prefix = "trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        typealias Unit=.void'builtin;
+        struct State {seen:*bool,value:bool}
+        impl Retire for State {fn drop(*self) {
+            assumes not self.seen.*.*;self.seen.*.* = true;
+        }}
+        inline effect tick();
+        inline fn twice()->#tick Unit {tick()#;tick()#;}";
+    for action in ["pointer.value.* = true;", "let stolen=pointer.*;"] {
+        let package = support::compile(&format!(
+            "{prefix}
+            fn install(retired:*bool)->bool {{
+                let state=State{{seen:retired,value:false}};
+                let pointer=state.ref;
+                twice()# {{tick()=>{{{action} return true;}},}};
+                false
+            }}
+            fn run()->bool {{
+                var retired=false;
+                let result=install(retired.ref);
+                result and retired
+            }}"
+        ));
+        let result = luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000,
+        );
+        if action.starts_with("let stolen") {
+            assert!(result.is_err(), "borrowed state was consumed on return");
+        } else {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        }
+    }
+}
+
+#[test]
+fn affine_handler_state_is_retired_before_error_catch() {
+    let prefix = "trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        typealias Unit=.void'builtin;
+        struct State {seen:*bool,value:bool}
+        impl Retire for State {fn drop(*self) {
+            assumes not self.seen.*.*;self.seen.*.* = true;
+        }}
+        inline effect tick();
+        inline fn twice()->#tick Unit {tick()#;tick()#;}";
+    for action in ["pointer.value.* = true;", "let stolen=pointer.*;"] {
+        let package = support::compile(&format!(
+            "{prefix}
+            fn install(retired:*bool)->!bool Unit {{
+                let state=State{{seen:retired,value:false}};
+                let pointer=state.ref;
+                twice()# {{tick()=>{{{action} return error true;}},}};
+            }}
+            fn run()->bool {{
+                var retired=false;
+                var caught=false;
+                install(retired.ref)! {{
+                    true=>{{assumes retired;caught=true;}},
+                    false=>{{assumes false;}},
+                }};
+                caught and retired
+            }}"
+        ));
+        let result = luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000,
+        );
+        if action.starts_with("let stolen") {
+            assert!(
+                result.is_err(),
+                "borrowed state was consumed on error return"
+            );
+        } else {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        }
+    }
+}
