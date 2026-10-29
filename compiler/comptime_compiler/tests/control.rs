@@ -224,3 +224,46 @@ fn reference_dump_preserves_field_ownership_and_rebind_permission() {
     assert!(dump.contains("(rebind false)"));
     assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
 }
+
+#[test]
+fn variant_dump_retains_nested_heads_and_selected_members() {
+    let source = SourceRange { start: 1, end: 2 };
+    let inner = nir::DeclarationId {
+        package: 1,
+        local: 0,
+    };
+    let outer = nir::DeclarationId {
+        package: 1,
+        local: 1,
+    };
+    let inner_type = Term::Nominal {
+        declaration: inner,
+        arguments: vec![],
+    };
+    let body = Expr {
+        source,
+        ty: Term::Nominal {
+            declaration: outer,
+            arguments: vec![inner_type.clone()],
+        },
+        kind: K::Variant {
+            declaration: outer,
+            index: 2,
+            fields: vec![Expr {
+                source,
+                ty: inner_type,
+                kind: K::Variant {
+                    declaration: inner,
+                    index: 0,
+                    fields: vec![],
+                },
+            }],
+        },
+    };
+    let code = compile(&body, &mut 1000).unwrap();
+    let dump = code.to_string();
+    assert_eq!(dump.matches("(variant ").count(), 2);
+    assert!(dump.contains("(index 2)"));
+    assert!(dump.contains("(index 0)"));
+    assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+}

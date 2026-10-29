@@ -21,7 +21,7 @@ package-body code can be reused within one interpreter.
 No opcode delegates a child expression tree back to `eval`.
 
 Supported bodies include existing literal/frozen-value/Type leaves, reads,
-record construction, local initialization, whole-slot/record-field assignment and
+record/variant construction, local initialization, whole-slot/record-field assignment and
 field reads, blocks,
 boolean short circuit,
 boolean/BitVec negation, branches, loops, break/continue and return. Integer
@@ -1391,3 +1391,46 @@ Validation from `/home/fin/luna`, all commands exited 0:
   empty-record cases; report `/tmp/luna-tools-4nq1larg/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   report `/tmp/luna-tools-dgyabdvq/result.json`.
+
+## Compiled enum variant construction (2026-10-30)
+
+Enum payload computations now lower to registers and a checked variant
+construction instruction. The instruction retains the declaration, generic
+arguments, selected member index and payload values. Its completion path shares
+associated-type selection and complete-value validation with tree interpretation.
+The member index is logical identity; target encoding and layout continue to
+follow the existing enum representation rules.
+
+Payload evaluation preserves the checked initialization plan and ordinary early
+control flow. An early return from one payload expression skips the remaining
+payloads and construction. Invalid member indices, missing payloads and wrong
+payload domains are rejected; failure does not poison subsequent invocations.
+Source tests check nullary, positional and named variants, generic arguments,
+initialization order and actual bytecode routing alongside tree results.
+
+Record and variant evaluators and their completion checks now live together in
+`compiler/comptime_interpretor/src/aggregate_values.rs`. Tree evaluation retains
+its prepared-value cleanup scopes; the compiled path reuses assembly without
+re-entering expression-tree evaluation. S-expression dumps preserve nested enum
+heads and selected members.
+
+Enum matching, remaining aggregate/collection operations, trait call plans and
+active effect environments are still separate migration work. This step does not
+change their semantics or claim new layout/ABI support.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_variants --test comptime_bytecode_records --test comptime_bytecode_references --test builder_invocations --test execution`:
+  variant, record, reference, 73 builder and 1,365 execution cases passed before
+  extracting the shared aggregate module;
+  report `/tmp/luna-tools-zd8ngqu6/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  227 tests passed after extraction; report `/tmp/luna-tools-mgjfv38d/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_variants --test comptime_bytecode_records --test builder_invocations`:
+  both variant tests, three record tests and 73 builder tests passed after
+  extraction; report `/tmp/luna-tools-j_hnb38s/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  nine tests passed, including nested variant dumps;
+  report `/tmp/luna-tools-l7w0hi25/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-o3owwu6c/result.json`.

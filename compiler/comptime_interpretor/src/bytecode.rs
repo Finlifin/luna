@@ -335,6 +335,21 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::Variant {
+                    destination,
+                    declaration,
+                    index,
+                    ty,
+                    fields,
+                } => {
+                    let values = fields
+                        .iter()
+                        .map(|field| frame.slots[*field].take().ok_or_else(missing))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    frame.slots[*destination] =
+                        Some(self.construct_variant(ty, *declaration, *index, values, source)?);
+                }
+
                 Op::Record {
                     destination,
                     declaration,

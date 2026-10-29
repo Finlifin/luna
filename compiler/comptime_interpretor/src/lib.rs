@@ -8,6 +8,7 @@
 //! NIR and validated IIR occurrence environments; scheduled effect cleanup is
 //! not yet admitted. Limits are resource outcomes, not language type errors.
 mod admission;
+mod aggregate_values;
 mod bytecode;
 mod cleanup;
 mod code_values;
@@ -5364,111 +5365,6 @@ impl<'a> Interpreter<'a> {
             _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
         };
         Ok(Flow::Value(result))
-    }
-
-    #[inline(never)]
-    fn eval_variant(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
-        self.with_prepared_frame(expr.source, |this| {
-            let result = match &expr.kind {
-                K::Variant {
-                    declaration,
-                    index,
-                    fields,
-                } => {
-                    let mut values = Vec::new();
-                    for (slot, field) in fields.iter().enumerate() {
-                        let value = value!(this.eval(field, environment));
-                        this.retain_prepared(slot, field.source, &value)?;
-                        values.push(value);
-                    }
-                    let selected = if this.associated_values.is_empty() {
-                        None
-                    } else {
-                        Some(this.selected_type_view(&expr.ty, Some(expr.source))?)
-                    };
-                    let Term::Nominal { arguments, .. } = selected.as_ref().unwrap_or(&expr.ty)
-                    else {
-                        return Err(this.failure(ErrorKind::Type, Some(expr.source)));
-                    };
-                    let value = Value::Variant {
-                        arguments: arguments.clone(),
-                        declaration: *declaration,
-                        index: *index,
-                        fields: values,
-                    };
-                    if !this.has_type(&value, &expr.ty) {
-                        return Err(this.failure(ErrorKind::Type, Some(expr.source)));
-                    }
-                    value
-                }
-                _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
-            };
-            Ok(Flow::Value(result))
-        })
-    }
-
-    #[inline(never)]
-    fn eval_record(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
-        self.with_prepared_frame(expr.source, |this| {
-            let (declaration, fields) = match &expr.kind {
-                K::AnonymousRecord { fields } => (None, fields),
-                K::Record {
-                    declaration,
-                    fields,
-                } => (Some(*declaration), fields),
-                _ => unreachable!("record evaluator"),
-            };
-            let mut values = Vec::new();
-            for (slot, field) in fields.iter().enumerate() {
-                let value = value!(this.eval(field, environment));
-                this.retain_prepared(slot, field.source, &value)?;
-                values.push(value);
-            }
-            this.construct_record(&expr.ty, declaration, values, expr.source)
-                .map(Flow::Value)
-        })
-    }
-
-    fn construct_record(
-        &mut self,
-        ty: &Term,
-        declaration: Option<DeclarationId>,
-        values: Vec<Value>,
-        source: SourceRange,
-    ) -> Result<Value, Error> {
-        let value = if let Some(declaration) = declaration {
-            let selected = if self.associated_values.is_empty() {
-                None
-            } else {
-                Some(self.selected_type_view(ty, Some(source))?)
-            };
-            let Term::Nominal { arguments, .. } = selected.as_ref().unwrap_or(ty) else {
-                return Err(self.failure(ErrorKind::Type, Some(source)));
-            };
-            Value::Record {
-                arguments: arguments.clone(),
-                declaration,
-                fields: values,
-            }
-        } else {
-            let Term::Record(types) = ty else {
-                return Err(self.failure(ErrorKind::Type, Some(source)));
-            };
-            if types.len() != values.len() {
-                return Err(self.failure(ErrorKind::Type, Some(source)));
-            }
-            Value::AnonymousRecord(
-                types
-                    .iter()
-                    .map(|(name, _)| name.clone())
-                    .zip(values)
-                    .collect(),
-            )
-        };
-        if !self.has_type(&value, ty) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
-        Ok(value)
     }
 
     #[inline(never)]

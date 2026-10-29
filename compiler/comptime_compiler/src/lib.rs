@@ -12,6 +12,14 @@ pub type Register = usize;
 
 #[derive(Debug)]
 pub enum Op {
+    Variant {
+        destination: Register,
+        declaration: nir::DeclarationId,
+        index: usize,
+        ty: Term,
+        fields: Vec<Register>,
+    },
+
     Record {
         destination: Register,
         declaration: Option<nir::DeclarationId>,
@@ -175,6 +183,23 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::Variant {
+                    destination,
+                    declaration,
+                    index,
+                    ty,
+                    fields,
+                } => {
+                    write!(
+                        f,
+                        "(variant {destination} (declaration {declaration}) (index {index}) (type {ty}) (fields"
+                    )?;
+                    for field in fields {
+                        write!(f, " {field}")?;
+                    }
+                    write!(f, "))")?;
+                }
+
                 Op::Record {
                     destination,
                     declaration,
@@ -618,6 +643,29 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                             Op::Record {
                                 destination: dst,
                                 declaration,
+                                ty: copy_term(&expr.ty, fuel, source)?,
+                                fields: slots.clone(),
+                            },
+                        );
+                        for (field, slot) in fields.iter().zip(slots).rev() {
+                            work.push(Work::Expression(field, slot));
+                        }
+                    }
+                    K::Variant {
+                        declaration,
+                        index,
+                        fields,
+                    } => {
+                        *fuel = fuel
+                            .checked_sub(fields.len())
+                            .ok_or(Error::Budget(source))?;
+                        let slots: Vec<_> = fields.iter().map(|_| fresh()).collect();
+                        emit(
+                            &mut work,
+                            Op::Variant {
+                                destination: dst,
+                                declaration: *declaration,
+                                index: *index,
                                 ty: copy_term(&expr.ty, fuel, source)?,
                                 fields: slots.clone(),
                             },
