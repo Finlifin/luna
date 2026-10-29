@@ -1077,3 +1077,32 @@ Validation from `/home/fin/luna` (all exit 0):
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test elaboration generic`: 51 passed, including explicit method-value missing-bound and conflicting-context rejection; `/tmp/luna-tools-fgr183pf/result.json`.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_methods --test normal_form_inference --test comptime_clause_inputs`: passed, `/tmp/luna-tools-rzby59po/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed, `/tmp/luna-tools-k0c6a58s/result.json`; `git diff --check` passed.
+
+## Resumable linear execution frames (2026-10-30)
+
+Bytecode frames now retain their code reference, PC, register slots, lexical
+scopes, imported-binding map and remaining environment across returns from the
+instruction driver. Initialization, bounded instruction execution and environment
+restoration are separate operations. The ordinary invocation path uses the same
+resume API in 1,024-instruction batches; this is an internal execution boundary,
+not language-level yielding, asynchronous cancellation or an effect handler.
+
+Completion and errors make the frame terminal. Resuming a terminal frame fails
+without executing instructions or charging more work. Earlier storage writes
+remain observable after environment restoration; introduced locals do not leak.
+A zero-sized batch makes no progress or budget charge. Tests compare execution
+in batches of 1, 2, 7 and 1,024 instructions, requiring identical final values,
+restored bindings, scope cleanup and remaining budgets. Failed frames retain
+their state unchanged on a rejected resume. Frame dumps use S-expressions with
+PC, terminal state, live slots, scopes and imported bindings.
+
+This is a resumable instruction driver, not yet a bytecode CALL/RETURN stack.
+Code references still obey their existing package or invocation-body lifetime;
+no active frame is frozen or entered in a query cache. Invocation contracts and
+runtime scheduled cleanup remain on their established paths.
+
+Validation from `/home/fin/luna` (all exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: 220 passed, `/tmp/luna-tools-gchzklmu/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test library_meta_math --test comptime_receivers --test comptime_local_types`: passed, `/tmp/luna-tools-avfhkxz7/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed, `/tmp/luna-tools-vas6rugn/result.json`; `git diff --check` passed.

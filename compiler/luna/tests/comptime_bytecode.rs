@@ -30,6 +30,7 @@ fn arithmetic_loop_executes_bytecode_with_ordered_operand_effects() {
     for (entry, args, expected) in [
         ("sum", vec![integer(0)], integer(0)),
         ("sum", vec![integer(10)], integer(-385)),
+        ("sum", vec![integer(100)], integer(-338350)),
         ("order", vec![], Value::Bool(true)),
     ] {
         let before = vm.bytecode_invocations();

@@ -3,10 +3,59 @@
 use super::*;
 use comptime_compiler::{Op, Program};
 
-struct Frame {
+struct Frame<'code, 'nir> {
+    code: &'code Program<'nir>,
+    environment: Environment,
+    imported: Vec<(LocalId, usize)>,
+    terminal: bool,
     pc: usize,
     slots: Vec<Option<Value>>,
     scopes: Vec<Vec<usize>>,
+}
+
+#[derive(Debug)]
+enum Progress {
+    Suspended,
+    Complete(Flow),
+}
+
+impl fmt::Display for Frame<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(bytecode-frame (pc {}) (terminal {}) (registers",
+            self.pc, self.terminal
+        )?;
+        for (slot, value) in self.slots.iter().enumerate() {
+            if let Some(value) = value {
+                write!(f, " (slot {slot} {value})")?;
+            }
+        }
+        write!(f, ") (scopes")?;
+        for scope in &self.scopes {
+            write!(f, " (scope")?;
+            for slot in scope {
+                write!(f, " {slot}")?;
+            }
+            write!(f, ")")?;
+        }
+        write!(f, ") (imported")?;
+        for (binding, slot) in &self.imported {
+            write!(f, " ({binding} {slot})")?;
+        }
+        write!(f, ") (environment-bindings {}))", self.environment.len())
+    }
+}
+
+impl Frame<'_, '_> {
+    fn restore_environment(mut self) -> Environment {
+        for (binding, slot) in self.imported {
+            if let Some(value) = self.slots[slot].take() {
+                self.environment.insert(binding, value);
+            }
+        }
+        self.environment
+    }
 }
 
 /// Only immutable package bodies are admitted. Neither invocation results nor
@@ -101,216 +150,330 @@ impl<'a> Interpreter<'a> {
         code: &Program<'_>,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
+        let mut frame = self.start_frame(code, environment)?;
+        let result = loop {
+            match self.resume_frame(&mut frame, 1024) {
+                Ok(Progress::Suspended) => continue,
+                Ok(Progress::Complete(flow)) => break Ok(flow),
+                Err(error) => break Err(error),
+            }
+        };
+        // Delivery contracts observe input mutations on both success and error.
+        *environment = frame.restore_environment();
+        result
+    }
+
+    fn start_frame<'code, 'nir>(
+        &mut self,
+        code: &'code Program<'nir>,
+        environment: &mut Environment,
+    ) -> Result<Frame<'code, 'nir>, Error> {
         self.effect_charge(
             code.registers(),
             code.instructions().first().map(|i| i.source),
         )?;
         let mut frame = Frame {
+            code,
+            environment: std::mem::take(environment),
+            imported: Vec::new(),
+            terminal: false,
             pc: 0,
             scopes: Vec::new(),
             slots: (0..code.registers()).map(|_| None).collect(),
         };
-        let mut imported = Vec::new();
         for &(binding, slot) in code.locals() {
-            if let Some(value) = environment.remove(&binding) {
-                imported.push((binding, slot));
+            if let Some(value) = frame.environment.remove(&binding) {
+                frame.imported.push((binding, slot));
                 frame.slots[slot] = Some(value);
             }
         }
-        let result = (|| {
-            loop {
-                let instruction = code
-                    .instructions()
-                    .get(frame.pc)
-                    .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))?;
-                let source = instruction.source;
-                self.tick(Some(source))?;
-                frame.pc += 1;
-                let missing = || Error {
-                    kind: ErrorKind::MissingBinding,
-                    source: Some(source),
-                };
-                match &instruction.op {
-                    Op::PrepareIntrinsic {
-                        tag,
-                        binding,
-                        inputs,
-                        output,
-                    } => {
-                        let binding = binding
-                            .filter(|binding| binding.is_comptime())
-                            .ok_or_else(|| self.failure(ErrorKind::Unsupported, Some(source)))?;
-                        binding
-                            .validate_types(*tag, inputs.iter().copied(), output)
-                            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+        Ok(frame)
+    }
+
+    fn resume_frame(
+        &mut self,
+        frame: &mut Frame<'_, '_>,
+        quantum: usize,
+    ) -> Result<Progress, Error> {
+        if frame.terminal {
+            return Err(self.failure(ErrorKind::InvalidControlFlow, None));
+        }
+        let result = self.run_frame(frame, quantum);
+        // A failed instruction may have consumed operands or changed storage.
+        // Such a frame is terminal; resumption must never replay that work.
+        if !matches!(result, Ok(Progress::Suspended)) {
+            frame.terminal = true;
+        }
+        result
+    }
+
+    fn run_frame(&mut self, frame: &mut Frame<'_, '_>, quantum: usize) -> Result<Progress, Error> {
+        let code = frame.code;
+        for _ in 0..quantum {
+            let instruction = code
+                .instructions()
+                .get(frame.pc)
+                .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))?;
+            let source = instruction.source;
+            self.tick(Some(source))?;
+            frame.pc += 1;
+            let missing = || Error {
+                kind: ErrorKind::MissingBinding,
+                source: Some(source),
+            };
+            match &instruction.op {
+                Op::PrepareIntrinsic {
+                    tag,
+                    binding,
+                    inputs,
+                    output,
+                } => {
+                    let binding = binding
+                        .filter(|binding| binding.is_comptime())
+                        .ok_or_else(|| self.failure(ErrorKind::Unsupported, Some(source)))?;
+                    binding
+                        .validate_types(*tag, inputs.iter().copied(), output)
+                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                }
+                Op::Intrinsic {
+                    destination,
+                    binding,
+                    inputs,
+                } => {
+                    let binding = binding
+                        .ok_or_else(|| self.failure(ErrorKind::Unsupported, Some(source)))?;
+                    let values: Vec<_> = inputs
+                        .iter()
+                        .map(|slot| frame.slots[*slot].take().ok_or_else(missing))
+                        .collect::<Result<_, _>>()?;
+                    frame.slots[*destination] =
+                        Some(self.scalar_math_values(binding, &values, source)?);
+                }
+                Op::Constant { destination, value } => {
+                    let flow = match value.kind {
+                        K::Literal(_) => self.eval_literal(value, &mut frame.environment)?,
+                        _ => self.eval_type_value(value, &mut frame.environment)?,
+                    };
+                    let Flow::Value(value) = flow else {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    };
+                    frame.slots[*destination] = Some(value);
+                }
+                Op::EnterScope => frame.scopes.push(Vec::new()),
+                Op::LeaveScope => {
+                    let locals = frame
+                        .scopes
+                        .pop()
+                        .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, Some(source)))?;
+                    for slot in locals {
+                        frame.slots[slot] = None;
                     }
-                    Op::Intrinsic {
-                        destination,
-                        binding,
-                        inputs,
-                    } => {
-                        let binding = binding
-                            .ok_or_else(|| self.failure(ErrorKind::Unsupported, Some(source)))?;
-                        let values: Vec<_> = inputs
-                            .iter()
-                            .map(|slot| frame.slots[*slot].take().ok_or_else(missing))
-                            .collect::<Result<_, _>>()?;
-                        frame.slots[*destination] =
-                            Some(self.scalar_math_values(binding, &values, source)?);
+                }
+                Op::Unwind(depth) => {
+                    if *depth > frame.scopes.len() {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
                     }
-                    Op::Constant { destination, value } => {
-                        let flow = match value.kind {
-                            K::Literal(_) => self.eval_literal(value, environment)?,
-                            _ => self.eval_type_value(value, environment)?,
-                        };
-                        let Flow::Value(value) = flow else {
-                            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
-                        };
-                        frame.slots[*destination] = Some(value);
-                    }
-                    Op::EnterScope => frame.scopes.push(Vec::new()),
-                    Op::LeaveScope => {
-                        let locals = frame.scopes.pop().ok_or_else(|| {
-                            self.failure(ErrorKind::InvalidControlFlow, Some(source))
-                        })?;
-                        for slot in locals {
+                    while frame.scopes.len() > *depth {
+                        for slot in frame.scopes.pop().unwrap() {
                             frame.slots[slot] = None;
                         }
                     }
-                    Op::Unwind(depth) => {
-                        if *depth > frame.scopes.len() {
-                            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
-                        }
-                        while frame.scopes.len() > *depth {
-                            for slot in frame.scopes.pop().unwrap() {
-                                frame.slots[slot] = None;
+                }
+                Op::PrepareScalar(scalar) => {
+                    self.prepare_scalar(*scalar, source)?;
+                }
+                Op::CheckScalarOperand { scalar, value } => {
+                    let plan = self.prepare_scalar(*scalar, source)?;
+                    self.scalar_operand(
+                        plan,
+                        frame.slots[*value].as_ref().ok_or_else(missing)?,
+                        source,
+                    )?;
+                }
+                Op::Scalar {
+                    destination,
+                    scalar,
+                    left,
+                    right,
+                } => {
+                    let plan = self.prepare_scalar(*scalar, source)?;
+                    let a = frame.slots[*left].take().ok_or_else(missing)?;
+                    let b = right
+                        .map(|slot| frame.slots[slot].take().ok_or_else(missing))
+                        .transpose()?;
+                    frame.slots[*destination] =
+                        Some(self.scalar_values(*scalar, plan, a, b, source)?);
+                }
+                Op::Unit(dst) => frame.slots[*dst] = Some(Value::Unit),
+                Op::Read { destination, local } => {
+                    let input = frame.slots[*local].as_ref().ok_or_else(missing)?;
+                    let value = self.invocation_slot_value(input, Some(source))?;
+                    frame.slots[*destination] = Some(value);
+                }
+                Op::Store {
+                    local,
+                    value,
+                    initialize,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    if *initialize {
+                        if frame.slots[*local].is_none() {
+                            if let Some(scope) = frame.scopes.last_mut() {
+                                scope.push(*local);
                             }
                         }
-                    }
-                    Op::PrepareScalar(scalar) => {
-                        self.prepare_scalar(*scalar, source)?;
-                    }
-                    Op::CheckScalarOperand { scalar, value } => {
-                        let plan = self.prepare_scalar(*scalar, source)?;
-                        self.scalar_operand(
-                            plan,
-                            frame.slots[*value].as_ref().ok_or_else(missing)?,
-                            source,
-                        )?;
-                    }
-                    Op::Scalar {
-                        destination,
-                        scalar,
-                        left,
-                        right,
-                    } => {
-                        let plan = self.prepare_scalar(*scalar, source)?;
-                        let a = frame.slots[*left].take().ok_or_else(missing)?;
-                        let b = right
-                            .map(|slot| frame.slots[slot].take().ok_or_else(missing))
-                            .transpose()?;
-                        frame.slots[*destination] =
-                            Some(self.scalar_values(*scalar, plan, a, b, source)?);
-                    }
-                    Op::Unit(dst) => frame.slots[*dst] = Some(Value::Unit),
-                    Op::Read { destination, local } => {
-                        let input = frame.slots[*local].as_ref().ok_or_else(missing)?;
-                        let value = self.invocation_slot_value(input, Some(source))?;
-                        frame.slots[*destination] = Some(value);
-                    }
-                    Op::Store {
-                        local,
-                        value,
-                        initialize,
-                    } => {
-                        let value = frame.slots[*value].take().ok_or_else(missing)?;
-                        if *initialize {
-                            if frame.slots[*local].is_none() {
-                                if let Some(scope) = frame.scopes.last_mut() {
-                                    scope.push(*local);
-                                }
-                            }
-                            frame.slots[*local] = Some(value);
-                        } else {
-                            let target = frame.slots[*local].as_mut().ok_or_else(missing)?;
-                            match target {
-                                Value::ComptimeReference(reference) => reference
+                        frame.slots[*local] = Some(value);
+                    } else {
+                        let target = frame.slots[*local].as_mut().ok_or_else(missing)?;
+                        match target {
+                            Value::ComptimeReference(reference) => reference
+                                .replace(value, &mut self.budget.steps)
+                                .map_err(|kind| self.failure(kind, Some(source)))?,
+                            Value::Storage(storage) => {
+                                value_reference::ValueReference::root(storage.clone())
                                     .replace(value, &mut self.budget.steps)
-                                    .map_err(|kind| self.failure(kind, Some(source)))?,
-                                Value::Storage(storage) => {
-                                    value_reference::ValueReference::root(storage.clone())
-                                        .replace(value, &mut self.budget.steps)
-                                        .map_err(|kind| self.failure(kind, Some(source)))?
-                                }
-                                target => *target = value,
+                                    .map_err(|kind| self.failure(kind, Some(source)))?
                             }
+                            target => *target = value,
                         }
-                    }
-                    Op::Not {
-                        destination,
-                        value,
-                        ty,
-                    } => {
-                        let value = Self::concrete_value(
-                            frame.slots[*value].take().ok_or_else(missing)?,
-                            source,
-                        )?;
-                        let result = match value {
-                            Value::Bool(value) => Value::Bool(!value),
-                            Value::BitVec(value)
-                                if **ty == Term::Primitive(Primitive::BitVec(value.width())) =>
-                            {
-                                Value::BitVec(
-                                    self.bit_operation(source, |budget| value.not(budget))?,
-                                )
-                            }
-                            _ => return Err(self.failure(ErrorKind::Type, Some(source))),
-                        };
-                        frame.slots[*destination] = Some(result);
-                    }
-                    Op::Jump(target) => frame.pc = *target,
-                    Op::Branch {
-                        condition,
-                        when,
-                        target,
-                    } => match frame.slots[*condition].as_ref().ok_or_else(missing)? {
-                        Value::Bool(value) => {
-                            if value == when {
-                                frame.pc = *target;
-                            }
-                        }
-                        Value::AbstractValue { .. } => {
-                            return Err(
-                                self.failure(ErrorKind::AbstractValueUnresolved, Some(source))
-                            );
-                        }
-                        _ => return Err(self.failure(ErrorKind::Type, Some(source))),
-                    },
-                    Op::Finish { value, explicit } => {
-                        let value = frame.slots[*value].take().ok_or_else(missing)?;
-                        return Ok(if *explicit {
-                            Flow::Return(value)
-                        } else {
-                            Flow::Value(value)
-                        });
                     }
                 }
-            }
-        })();
-        // Contracts run after the body and can observe updated input storage.
-        // Locals introduced by the body never escape into the caller frame.
-        for (binding, slot) in imported {
-            if let Some(value) = frame.slots[slot].take() {
-                environment.insert(binding, value);
+                Op::Not {
+                    destination,
+                    value,
+                    ty,
+                } => {
+                    let value = Self::concrete_value(
+                        frame.slots[*value].take().ok_or_else(missing)?,
+                        source,
+                    )?;
+                    let result = match value {
+                        Value::Bool(value) => Value::Bool(!value),
+                        Value::BitVec(value)
+                            if **ty == Term::Primitive(Primitive::BitVec(value.width())) =>
+                        {
+                            Value::BitVec(self.bit_operation(source, |budget| value.not(budget))?)
+                        }
+                        _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+                    };
+                    frame.slots[*destination] = Some(result);
+                }
+                Op::Jump(target) => frame.pc = *target,
+                Op::Branch {
+                    condition,
+                    when,
+                    target,
+                } => match frame.slots[*condition].as_ref().ok_or_else(missing)? {
+                    Value::Bool(value) => {
+                        if value == when {
+                            frame.pc = *target;
+                        }
+                    }
+                    Value::AbstractValue { .. } => {
+                        return Err(self.failure(ErrorKind::AbstractValueUnresolved, Some(source)));
+                    }
+                    _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+                },
+                Op::Finish { value, explicit } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    return Ok(Progress::Complete(if *explicit {
+                        Flow::Return(value)
+                    } else {
+                        Flow::Value(value)
+                    }));
+                }
             }
         }
-        result
+        Ok(Progress::Suspended)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_slices_preserve_values_scopes_and_work_charges() {
+        let package = Package::default();
+        let input = LocalId { owner: 1, index: 0 };
+        let temporary = LocalId { owner: 1, index: 1 };
+        let unrelated = LocalId { owner: 2, index: 0 };
+        let expr = |primitive, kind| Expr {
+            source: SourceRange { start: 1, end: 2 },
+            ty: Term::Primitive(primitive),
+            kind,
+        };
+        let mut statements = vec![expr(
+            Primitive::Void,
+            K::Let {
+                binding: temporary,
+                value: Box::new(expr(Primitive::Void, K::Unit)),
+            },
+        )];
+        for _ in 0..3 {
+            statements.push(expr(
+                Primitive::Void,
+                K::Assign {
+                    place: nir::program::Place {
+                        root: input,
+                        fields: vec![],
+                    },
+                    value: Box::new(expr(
+                        Primitive::Bool,
+                        K::Not(Box::new(expr(Primitive::Bool, K::Local(input)))),
+                    )),
+                },
+            ));
+        }
+        let body = expr(
+            Primitive::Bool,
+            K::Block {
+                statements,
+                result: Some(Box::new(expr(Primitive::Bool, K::Local(input)))),
+            },
+        );
+        let code = comptime_compiler::compile(&body, &mut 1000).unwrap();
+        let mut remaining = None;
+        for quantum in [1, 2, 7, 1024] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut environment = Environment::new();
+            environment.insert(input, Value::Bool(true));
+            environment.insert(unrelated, Value::Bool(true));
+            let mut frame = vm.start_frame(&code, &mut environment).unwrap();
+            assert!(environment.is_empty());
+            let initial = frame.to_string();
+            let before = vm.budget.steps;
+            assert!(matches!(
+                vm.resume_frame(&mut frame, 0).unwrap(),
+                Progress::Suspended
+            ));
+            assert_eq!(frame.to_string(), initial);
+            assert_eq!(vm.budget.steps, before);
+            loop {
+                match vm.resume_frame(&mut frame, quantum).unwrap() {
+                    Progress::Suspended => assert!(!frame.terminal),
+                    Progress::Complete(Flow::Value(Value::Bool(false))) => break,
+                    progress => panic!("unexpected progress: {progress:?}"),
+                }
+            }
+            assert!(frame.scopes.is_empty());
+            assert!(frame.to_string().contains("(terminal true)"));
+            let before = vm.budget.steps;
+            assert_eq!(
+                vm.resume_frame(&mut frame, quantum).unwrap_err().kind,
+                ErrorKind::InvalidControlFlow
+            );
+            assert_eq!(vm.budget.steps, before);
+            environment = frame.restore_environment();
+            assert_eq!(environment.get(&input), Some(&Value::Bool(false)));
+            assert_eq!(environment.get(&unrelated), Some(&Value::Bool(true)));
+            assert!(!environment.contains_key(&temporary));
+            if let Some(remaining) = remaining {
+                assert_eq!(vm.budget.steps, remaining);
+            }
+            remaining = Some(vm.budget.steps);
+        }
+    }
 
     #[test]
     fn unbound_intrinsic_rejects_before_operand_effects() {
@@ -512,10 +675,22 @@ mod tests {
         );
         let mut environment = Environment::new();
         environment.insert(input, Value::Bool(true));
+        let mut frame = vm.start_frame(&code, &mut environment).unwrap();
+        let failure = loop {
+            match vm.resume_frame(&mut frame, 1) {
+                Ok(Progress::Suspended) => continue,
+                Ok(Progress::Complete(_)) => panic!("malformed operation completed"),
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(failure.kind, ErrorKind::Type);
+        let stopped = frame.to_string();
         assert_eq!(
-            vm.execute_code(&code, &mut environment).unwrap_err().kind,
-            ErrorKind::Type
+            vm.resume_frame(&mut frame, 1).unwrap_err().kind,
+            ErrorKind::InvalidControlFlow
         );
+        assert_eq!(frame.to_string(), stopped);
+        environment = frame.restore_environment();
         assert_eq!(environment.get(&input), Some(&Value::Bool(false)));
         assert!(!environment.contains_key(&temporary));
         let recovered = expr(boolean, K::Local(input));
