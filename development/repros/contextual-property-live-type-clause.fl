@@ -1,0 +1,21 @@
+{-
+    Valid intended behavior: run returns true. The explicit Type clause toggles
+    flag once, before the property fields are evaluated. Current elaboration
+    rejects the local input because Type evaluation lacks the generator frame.
+-}
+comptime fn schema(...fields: T) -> T where T { fields }
+const SAMPLE = schema { enabled: true };
+typealias Options = SAMPLE'type;
+
+comptime fn pack(code: <|-bool>, ...props: T) -> T where T { props }
+
+comptime fn forward(code: <|-bool>) -> bool {
+    var flag = false;
+    const props = pack<do { flag = not flag; Options }> { code, enabled: true };
+    flag and props.enabled
+}
+
+fn run() -> bool {
+    const value = forward('(true));
+    value
+}

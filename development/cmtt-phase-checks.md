@@ -464,3 +464,48 @@ and heterogeneous collections, direct named supply, literal/computed packets,
 interleaved and empty-packet effects, forwarding, result contracts and rejection
 of duplicate/incorrect inputs. Formatting completed at
 `/tmp/luna-tools-oq8m9olu/result.json`; whitespace checks passed.
+
+
+## Property calls for contextual data results
+
+Contextual data calls now recognize extended application at required boundaries,
+construction statements and definition checking. Code and data result categories
+share the property collector selection in `generators/properties.rs`. This stage
+reuses the prepared clause plan when routing the collected record, rather than
+preparing explicit clauses twice. Named whole-value supply remains distinct from
+colon properties. Calls with only positional extended inputs retain ordinary
+routing; record fields may interleave with code arguments and tuple expansions.
+Defaults and result contracts continue to run on the completed input frame.
+
+Six source regressions cover inferred anonymous records, equivalent named whole
+record supply, interleaved effects, explicit collector selection with tuple
+spreads, numeric field context, postcondition rejection, duplicate/ambiguous or
+missing collectors, and positional-only extended calls.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries --test comptime_memory --test builder_invocations
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+All passed: 562 CMTT, 73 builder, three phase-boundary and 17 memory tests
+(`/tmp/luna-tools-90ckk1k8/result.json`). Formatting completed at
+`/tmp/luna-tools-vjnnpaus/result.json`; whitespace checks passed.
+
+A broader side-effectful explicit Type clause exposed a separate missing path:
+`development/repros/contextual-property-live-type-clause.fl` should return true
+but fails because required Type evaluation does not receive the generator's live
+local frame. It is a valid intended use, not a newly imposed language restriction.
+The failed exploratory regression was retained as this independent reproducer;
+it is not counted among passing tests. The reproduction command:
+
+```sh
+python3 -B development/check.py --timeout 900 -- run -p luna -- development/repros/contextual-property-live-type-clause.fl --interpret run
+```
+
+exited 1 at source 534..566 with unavailable comptime input `(local 5 5)`
+(`/tmp/luna-tools-m4hvmmfw/result.json`). Repairing Type-input live-frame transport
+is the next implementation task. Contextual methods, quoted-code containers and
+arbitrary expression scheduling also remain unfinished.

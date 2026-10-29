@@ -10481,3 +10481,91 @@ fn contextual_data_variadics_forward_collections_with_their_nominal_tuple_head()
         Value::Bool(true)
     );
 }
+
+#[test]
+fn contextual_data_properties_collect_fields_and_preserve_whole_named_supply() {
+    let source = "
+        comptime fn pack(code:<|-bool>, ...properties:T)->T where T {properties}
+        fn run()->bool {
+            const config=pack {'(true), enabled:true, letter:'x'};
+            config.enabled and config.letter == 'x'
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let supplied = source.replace(
+        "const config=pack {'(true), enabled:true, letter:'x'};",
+        "const original=pack {'(true), enabled:true, letter:'x'}; const config=pack('(true), .properties=original);",
+    );
+    assert_eq!(run(&supplied, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_properties_preserve_interleaved_effect_order() {
+    let source = "
+        comptime fn pack(code:<|-bool>, ...properties:T)->T where T {properties}
+        comptime fn forward(code:<|-bool>)->bool {
+            var flag=false;
+            const config=pack {before:flag, do {flag=true; code}, after:flag};
+            not config.before and config.after
+        }
+        fn run()->bool {const result=forward('(true)); result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_properties_combine_tuple_spreads_and_explicit_collector_types() {
+    let source = "
+        comptime fn schema(...fields:T)->T where T {fields}
+        const SAMPLE=schema {enabled:true};
+        typealias Options=SAMPLE'type;
+        comptime fn pair()->Tuple<bool,bool> {(true,false)}
+        comptime fn pack(code:<|-bool>, ...items:A, ...properties:B)->B where A,B {properties}
+        fn run()->bool {
+            const config=pack<Tuple<bool,bool>,Options> {'(true), ...pair(), enabled:true};
+            config.enabled
+        }";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn contextual_data_properties_use_expected_record_field_types_and_result_contracts() {
+    let source = "
+        typealias Byte=.u8'builtin;
+        comptime fn schema(...fields:T)->T where T {fields}
+        comptime fn byte()->Byte {17}
+        const SAMPLE=schema {size:byte(),enabled:true};
+        typealias Options=SAMPLE'type;
+        comptime fn pack(code:<|-bool>, ...properties:Options)->result:Options
+        where ensures result.enabled
+        {properties}
+        fn run()->bool {const config=pack {'(true),size:17,enabled:true}; config.size == 17}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("size:17,enabled:true", "size:17,enabled:false");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(failure.contains("postcondition rejected"), "{failure}");
+}
+
+#[test]
+fn contextual_data_properties_reject_duplicate_ambiguous_and_missing_collectors() {
+    for source in [
+        "comptime fn pack(code:<|-bool>,...props:T)->T where T {props} fn run()->bool {const x=pack {'(true),flag:true,flag:false};true}",
+        "comptime fn pack(code:<|-bool>,...first:T,...second:U)->T where T,U {first} fn run()->bool {const x=pack {'(true),flag:true};true}",
+        "comptime fn pack(code:<|-bool>,.flag:bool=true)->bool {flag} fn run()->bool {const x=pack {'(true),flag:true};x}",
+    ] {
+        let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(failure.contains("property"), "{failure}");
+        assert!(
+            !failure.contains("parsing failed") && !failure.contains("HIR lowering failed"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn contextual_data_properties_preserve_positional_only_extended_calls() {
+    let source = "comptime fn inspect(code:<|-bool>, flag:bool)->bool {flag}
+        fn run()->bool {const value=inspect {'(true),true};value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}

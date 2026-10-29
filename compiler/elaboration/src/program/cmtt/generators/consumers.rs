@@ -106,7 +106,7 @@ impl Checker<'_, '_> {
     }
 
     pub(in crate::program) fn data_consumer_call(&self, value: &Expr<'_>) -> Option<OwnerId> {
-        let H::Application(callee, _) = value.kind else {
+        let (H::Application(callee, _) | H::ExtendedApplication(callee, _)) = value.kind else {
             return None;
         };
         let callee = match callee.kind {
@@ -171,10 +171,62 @@ impl Checker<'_, '_> {
         let template = &self.data_consumers[&owner];
         Self::charge_code_generator(template, &mut self.required_steps, site.span)?;
         let template = template.clone();
-        let H::Application(callee, arguments) = site.kind else {
+        let (H::Application(callee, arguments) | H::ExtendedApplication(callee, arguments)) =
+            site.kind
+        else {
             unreachable!()
         };
-        let (definition, values) = if arguments
+        let (definition, values) = if matches!(site.kind, H::ExtendedApplication(..))
+            && arguments
+                .iter()
+                .any(|argument| matches!(argument, Arg::Named(..)))
+        {
+            let (collector, plan) = self.contextual_property_plan(
+                owner,
+                &template,
+                site,
+                callee,
+                expected,
+                Term::clone,
+            )?;
+            self.with_generator_properties(site, arguments, collector, |this, inputs| {
+                this.prepare_data_consumer_inputs(
+                    owner,
+                    template,
+                    site,
+                    callee,
+                    inputs,
+                    expected,
+                    Some(plan),
+                )
+            })?
+        } else {
+            self.prepare_data_consumer_inputs(
+                owner, template, site, callee, arguments, expected, None,
+            )?
+        };
+        if let Some(expected) = expected {
+            self.require(&definition.output, expected, site.span)?;
+        }
+        if self.checking_code_generator {
+            return Ok((None, definition.output.clone()));
+        }
+        let result =
+            self.generator_frame(owner, |this| this.run_data_consumer(&definition, values))?;
+        Ok((result, definition.signature.output))
+    }
+
+    fn prepare_data_consumer_inputs(
+        &mut self,
+        owner: OwnerId,
+        template: Generator<Term>,
+        site: &Expr<'_>,
+        callee: &Expr<'_>,
+        arguments: &[Arg<'_>],
+        expected: Option<&Term>,
+        type_plan: Option<GeneratorTypePlan>,
+    ) -> Result<(Generator<Term>, Vec<Option<Argument>>), Error> {
+        let prepared = if arguments
             .iter()
             .any(|argument| matches!(argument, Arg::Expand(_)))
         {
@@ -189,7 +241,7 @@ impl Checker<'_, '_> {
                     Term::clone,
                     None,
                     packets,
-                    None,
+                    type_plan,
                 )
             })?
         } else {
@@ -203,18 +255,10 @@ impl Checker<'_, '_> {
                 Term::clone,
                 None,
                 &mut spreads::SpreadPlan::default(),
-                None,
+                type_plan,
             )?
         };
-        if let Some(expected) = expected {
-            self.require(&definition.output, expected, site.span)?;
-        }
-        if self.checking_code_generator {
-            return Ok((None, definition.output.clone()));
-        }
-        let result =
-            self.generator_frame(owner, |this| this.run_data_consumer(&definition, values))?;
-        Ok((result, definition.signature.output))
+        Ok(prepared)
     }
 
     pub(in crate::program) fn check_data_consumer_expression(

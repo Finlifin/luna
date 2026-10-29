@@ -9,6 +9,7 @@ mod inputs;
 mod matches;
 mod methods;
 mod places;
+mod properties;
 pub(in crate::program::cmtt) mod spreads;
 pub(in crate::program::cmtt) mod statements;
 use statements::Control;
@@ -782,83 +783,15 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(callee.span, "property code call requires a code generator"))?;
         self.ensure_code_generator(owner, site.span)?;
         let template = self.copy_code_generator(owner, site.span)?;
-        let type_plan = if let H::NFApplication(_, types) = callee.kind {
-            (
-                vec![],
-                self.type_clause_arguments(owner, types, None, site.span)?,
-                vec![],
-                vec![],
-            )
-        } else {
-            self.generator_clause_plan(owner, site.span)?
-        };
-        let mut definition = self.instantiate_code_generator(&template, &type_plan.1, site.span)?;
-        if !type_plan.0.is_empty()
-            && let Some(expected) = expected
-        {
-            let scheme = crate::calls::Scheme {
-                parameter_sorts: self
-                    .input_binders(&type_plan.0)
-                    .iter()
-                    .map(|p| p.sort)
-                    .collect(),
-                type_parameters: type_plan.0.len(),
-                signature: Term::Function {
-                    parameters: vec![],
-                    result: Box::new(definition.output.result.clone()),
-                }
-                .abstract_parameters(&self.input_binders(&type_plan.0))
-                .map_err(|e| error(site.span, e.to_string()))?,
-            };
-            let candidate = scheme
-                .infer_partial_types_in_context(
-                    &[],
-                    Some(&expected.result),
-                    &self.context,
-                    crate::ptc::Budget::default(),
-                )
-                .map_err(|e| call_inference_error(site.span, e))?;
-            definition = self.generator_inference_view(
-                &template,
-                &type_plan.0,
-                &type_plan.1,
-                &candidate,
-                site.span,
-            )?;
-        }
-        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-            &self.package.item(owner).unwrap().kind
-        else {
-            unreachable!()
-        };
-        let mut collectors = Vec::new();
-        for (index, param) in signature.params.iter().enumerate() {
-            if !matches!(param.ty.kind, TyParamKind::Varadic(..)) {
-                continue;
-            }
-            let Input::Data(ty) = &definition.inputs[index].1 else {
-                continue;
-            };
-            if !matches!(
-                self.structural_type(ty, site.span)?,
-                Term::Record(_)
-                    | Term::Rigid { .. }
-                    | Term::NormalForm { .. }
-                    | Term::AssociatedType { .. }
-                    | Term::Bound { .. }
-                    | Term::Hole { .. }
-            ) {
-                continue;
-            }
-            collectors.push(param.name);
-        }
-        let [collector] = collectors.as_slice() else {
-            return Err(error(
-                site.span,
-                "generator property collection requires one eligible variadic record entrance",
-            ));
-        };
-        self.with_generator_properties(site, arguments, *collector, |this, inputs| {
+        let (collector, type_plan) = self.contextual_property_plan(
+            owner,
+            &template,
+            site,
+            callee,
+            expected.map(|interface| &interface.result),
+            |interface| interface.result.clone(),
+        )?;
+        self.with_generator_properties(site, arguments, collector, |this, inputs| {
             this.invoke_generator_with_plan(
                 site,
                 callee,
