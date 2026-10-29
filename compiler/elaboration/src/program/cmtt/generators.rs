@@ -3,6 +3,7 @@
 //! code witnesses before anything can enter the runtime package.
 use super::*;
 pub(in crate::program::cmtt) mod clauses;
+mod consumers;
 mod inference;
 mod matches;
 mod methods;
@@ -13,22 +14,22 @@ use statements::Control;
 
 use nir::code_interfaces::{CodeFunctionSignature, CodeInput as Input};
 #[derive(Clone)]
-pub(in crate::program) struct Generator {
+pub(in crate::program) struct Generator<O = Interface> {
     captures: Vec<(DeclarationId, Term)>,
     types: Vec<(DeclarationId, Term)>,
-    signature: CodeFunctionSignature,
+    signature: CodeFunctionSignature<O>,
     defaults: Vec<(usize, hir::HirId)>,
     variadics: Vec<usize>,
     body: Option<hir::BodyId>,
     checked: bool,
 }
-impl std::ops::Deref for Generator {
-    type Target = CodeFunctionSignature;
+impl<O> std::ops::Deref for Generator<O> {
+    type Target = CodeFunctionSignature<O>;
     fn deref(&self) -> &Self::Target {
         &self.signature
     }
 }
-impl std::ops::DerefMut for Generator {
+impl<O> std::ops::DerefMut for Generator<O> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.signature
     }
@@ -48,7 +49,7 @@ pub(in crate::program::cmtt) type GeneratorTypePlan = (
     Vec<usize>,
 );
 
-impl fmt::Display for Generator {
+impl<O: fmt::Display> fmt::Display for Generator<O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(code-generator (captures")?;
         for (id, value) in &self.captures {
@@ -104,6 +105,21 @@ impl Checker<'_, '_> {
         if self.code_generators.contains_key(&owner) {
             return Ok(());
         }
+        let definition = self.form_contextual_generator(owner, span, |this, output| {
+            this.code_interface(
+                output.ok_or_else(|| error(span, "code function requires a result annotation"))?,
+            )
+        })?;
+        self.code_generators.insert(owner, definition);
+        Ok(())
+    }
+
+    fn form_contextual_generator<O>(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+        form_output: impl FnOnce(&mut Self, Option<&Expr<'_>>) -> Result<O, Error>,
+    ) -> Result<Generator<O>, Error> {
         if !self.active_signatures.insert(owner) {
             return Err(error(span, "cyclic code generator signature"));
         }
@@ -285,7 +301,7 @@ impl Checker<'_, '_> {
                 }
                 inputs.push((local(parameter.hir_id), input));
             }
-            let output = self.code_interface(sig.return_ty.unwrap())?;
+            let output = form_output(self, sig.return_ty)?;
             Ok(Generator {
                 captures: self
                     .input_binders(
@@ -354,8 +370,7 @@ impl Checker<'_, '_> {
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.active_signatures.remove(&owner);
-        self.code_generators.insert(owner, result?);
-        Ok(())
+        result
     }
 
     pub(in crate::program::cmtt) fn generator_frame<R>(
@@ -580,8 +595,8 @@ impl Checker<'_, '_> {
         Ok((definition.signature, result?))
     }
 
-    fn charge_code_generator(
-        definition: &Generator,
+    fn charge_code_generator<O: nir::code_interfaces::SignatureOutput>(
+        definition: &Generator<O>,
         fuel: &mut u64,
         span: Span,
     ) -> Result<(), Error> {
@@ -648,12 +663,12 @@ impl Checker<'_, '_> {
         Ok(definition)
     }
 
-    fn instantiate_code_generator(
+    fn instantiate_code_generator<O: nir::code_interfaces::SignatureOutput + Clone>(
         &mut self,
-        definition: &Generator,
+        definition: &Generator<O>,
         types: &[Term],
         span: Span,
-    ) -> Result<Generator, Error> {
+    ) -> Result<Generator<O>, Error> {
         Self::charge_code_generator(definition, &mut self.required_steps, span)?;
         for ty in types {
             self.copy_alias_type(ty, span)?;

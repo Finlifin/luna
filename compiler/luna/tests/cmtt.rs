@@ -9984,3 +9984,181 @@ fn generic_code_signatures_substitute_repeated_nested_types_without_losing_conte
     let wrong = source.replace("forward<Tuple<bool,bool>>", "forward<bool>");
     assert!(support::compile_with_tuple_protocols(&wrong, &Default::default()).is_err());
 }
+
+#[test]
+fn contextual_data_consumers_accept_both_code_categories_without_executing_them() {
+    let source = "
+        comptime fn inspect(code:<x:bool|-bool>, pat:<bool -| found:bool>)->bool {
+            const forwarded = code;
+            const matched = pat;
+            true
+        }
+        fn run()->bool {
+            const input:<x:bool|-bool> = '(not x);
+            const result = inspect(input, '<found>);
+            result
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_consumers_execute_selected_branches_and_nested_calls() {
+    let source = "
+        comptime fn leaf(code:<|-bool>, flag:bool)->bool {flag}
+        comptime fn inspect(code:<|-bool>, flag:bool)->bool {
+            if flag {
+                const result = leaf(code, false);
+                return result;
+            } else {
+                const result = leaf(code, true);
+                return result;
+            }
+        }
+        fn run()->bool {
+            const result = inspect('(true), false);
+            result
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_consumers_return_type_values_with_explicit_clause_inputs() {
+    let source = "
+        typealias Type = .Type'builtin;
+        comptime fn Inspect(code:<|-T>)->Type where T {T}
+        fn run()->bool {
+            const Result = Inspect<bool>('(true));
+            let value:Result = true;
+            value
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_consumers_support_defaults_match_and_early_loop_returns() {
+    let source = "
+        comptime fn inspect(.code:<|-bool> = '(true), .flag:bool = false)->bool {
+            while true {
+                if flag { return false; }
+                return flag match {true => false, false => true};
+            }
+        }
+        fn run()->bool {const result = inspect(); result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_consumers_check_unused_bodies_and_unselected_branches() {
+    for source in [
+        "comptime fn bad(code:<|-bool>)->bool {42} fn run()->bool {true}",
+        "comptime fn bad(code:<|-bool>, flag:bool)->bool {if flag {return true;}} fn run()->bool {true}",
+        "comptime fn bad(code:<|-bool>)->bool {if true {true} else {42}} fn run()->bool {true}",
+        "fn bad(code:<|-bool>)->bool {true} fn run()->bool {true}",
+        "comptime fn inspect(code:<|-bool>)->bool {true} fn run()->bool {let f = inspect; true}",
+    ] {
+        let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn contextual_data_consumers_do_not_construct_code_in_unselected_branches() {
+    let source = "
+        comptime fn endless()-><|-bool> {while true {} '(false)}
+        comptime fn inspect(code:<|-bool>, flag:bool)->bool {
+            if flag {true} else {
+                const unused = endless();
+                false
+            }
+        }
+        fn run()->bool {const result = inspect('(true), true); result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_consumers_reject_unscheduled_nested_ordinary_calls() {
+    let source = "comptime fn inspect(code:<|-bool>)->bool {true}
+        fn run()->bool {const value = false and inspect('(true)); value}";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("nested ordinary expression scheduling"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn contextual_data_consumers_preserve_contracts_and_default_evaluation() {
+    let source = "
+        comptime fn endless()-><|-bool> {while true {} '(false)}
+        comptime fn inspect(flag:bool, .code:<|-bool> = endless())->bool
+        where requires flag
+        {flag}
+        fn run()->bool {const result = inspect(true, .code = '(true)); result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let rejected = source.replace("inspect(true, .code", "inspect(false, .code");
+    let failure = support::compile_with_protocols(&rejected, &Default::default()).unwrap_err();
+    assert!(failure.contains("precondition rejected"), "{failure}");
+}
+
+#[test]
+fn contextual_data_consumers_support_finite_recursion_and_bound_infinite_recursion() {
+    let source = "
+        comptime fn inspect(code:<|-bool>, flag:bool)->bool {
+            if flag {return true;}
+            inspect(code, true)
+        }
+        fn run()->bool {const result = inspect('(true), false); result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let rejected = source.replace("inspect(code, true)", "inspect(code, false)");
+    let failure = support::compile_with_protocols(&rejected, &Default::default()).unwrap_err();
+    assert!(failure.contains("invocation depth exhausted"), "{failure}");
+}
+
+#[test]
+fn contextual_data_consumers_evaluate_named_inputs_once_in_source_order() {
+    let source = "
+        comptime fn leaf(code:<|-bool>, .first:bool = true, .second:bool = false)->bool {
+            not first and second
+        }
+        comptime fn inspect(code:<|-bool>)->bool {
+            var flag = false;
+            leaf(code, .second = do {flag = not flag; flag},
+                .first = do {flag = not flag; flag})
+        }
+        fn run()->bool {const result = inspect('(true)); result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_consumers_support_void_results_and_bare_return() {
+    for body in ["const forwarded = code;", "return;", "if true {return;}"] {
+        let source = format!(
+            "
+            comptime fn consume(code:<|-bool>) {{{body}}}
+            comptime fn inspect(code:<|-bool>)->bool {{consume(code); true}}
+            fn run()->bool {{const result = inspect('(true)); result}}"
+        );
+        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+    }
+}
+
+#[test]
+fn contextual_data_consumers_bound_nested_argument_preparation() {
+    for count in [3, 12] {
+        let mut call = "true".to_owned();
+        for _ in 0..count {
+            call = format!("keep('(true), {call})");
+        }
+        let source = format!(
+            "comptime fn keep(code:<|-bool>, value:bool)->bool {{value}}
+            fn run()->bool {{const result = {call}; result}}"
+        );
+        if count == 3 {
+            assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+        } else {
+            let failure =
+                support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+            assert!(failure.contains("invocation depth exhausted"), "{failure}");
+        }
+    }
+}

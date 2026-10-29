@@ -375,6 +375,9 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         context: Option<&crate::calls::InputContext>,
     ) -> Result<(comptime_interpretor::Value, Term), Error> {
+        if self.data_consumer_call(value).is_some() && context.is_none() {
+            return self.required_data_consumer(value, expected);
+        }
         if self.generator_data.is_empty() {
             let Some(context) = context else {
                 return self.required_typed_expression(value, expected);

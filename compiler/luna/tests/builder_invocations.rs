@@ -2668,3 +2668,32 @@ fn reflected_type_methods_reject_wrong_shapes_and_runtime_observation() {
         .expect("runtime reflection");
     assert!(failure.contains("comptime"), "{failure}");
 }
+
+#[test]
+fn contextual_data_consumer_publishes_structs_through_the_complete_sysroot() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(root.join("development/examples/sysroot-contextual-data.fl"))
+        .arg("--sysroot")
+        .arg(root.join("library"))
+        .args([
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+            "--invoke-comptime",
+            "inspect",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "(bool true)"
+    );
+}

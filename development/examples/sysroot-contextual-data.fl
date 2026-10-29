@@ -1,0 +1,32 @@
+{-
+    Contextual code is a comptime input, independent of the function's result
+    category. Build storage for its runtime result through the public meta API.
+    The quote checks the supplied program; constructing the slot does not run
+    that program or install it as a field default.
+-}
+comptime fn SlotFor(code: <|-T>) -> Type
+where T
+{
+    var builder = meta.StructBuilder.new(.name = .CodeResultSlot);
+    builder.add_field(.value, T);
+    builder.Build()
+}
+
+comptime fn ForwardSlot(code: <|-T>) -> Type
+where T
+{
+    SlotFor<T>(code)
+}
+
+typealias BooleanSlot = ForwardSlot<bool>('(true));
+
+test contextual_data_builder {
+    let slot = BooleanSlot { value: true };
+    assumes slot.value;
+}
+
+comptime fn inspect() -> bool {
+    let names = BooleanSlot.struct_field_names();
+    let types = BooleanSlot.struct_field_types();
+    names.length() == 1 and names[0] == .value and types[0] == bool
+}

@@ -1101,6 +1101,9 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         expected: Option<&Term>,
     ) -> Result<(Value, Term), Error> {
+        if self.data_consumer_call(expr).is_some() {
+            return self.required_data_consumer(expr, expected);
+        }
         self.required_expression_with_inputs(expr, expected, None, Vec::new())
     }
 
@@ -2036,8 +2039,13 @@ impl Checker<'_, '_> {
                 .cloned()
                 .unwrap_or_default();
             abstract_parameters.retain(|id| {
-                self.trait_input_domain(*id)
-                    .is_none_or(|domain| domain == p(P::Type))
+                // A completed contextual invocation may already have replaced
+                // the declaration binder. Authorize only remaining binders;
+                // opaque inputs forwarded by substitutions are collected below.
+                !self.alias_substitution.contains_key(id)
+                    && self
+                        .trait_input_domain(*id)
+                        .is_none_or(|domain| domain == p(P::Type))
             });
             abstract_value_parameters.retain(|(id, _)| {
                 inputs.iter().any(|(_, _, value)| {

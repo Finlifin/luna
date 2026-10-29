@@ -6,6 +6,7 @@ use comptime_interpretor::CodeValue as CodeWitness;
 
 #[derive(Clone, Copy)]
 pub(in crate::program::cmtt) enum ResultInterface<'a> {
+    Data(&'a Term),
     Expression(
         Option<&'a Interface>,
         Option<&'a crate::calls::InputContext>,
@@ -19,6 +20,7 @@ pub(in crate::program::cmtt) enum ResultInterface<'a> {
 
 pub(in crate::program::cmtt) enum Control {
     Next,
+    DataReturn(Option<comptime_interpretor::Value>),
     Break(n::LocalId),
     Continue(n::LocalId),
     Return(Arc<ExpressionCode>),
@@ -29,6 +31,7 @@ pub(in crate::program::cmtt) enum Control {
 #[derive(Default)]
 pub(in crate::program::cmtt) struct Flow {
     pub(in crate::program::cmtt) next: bool,
+    data_return: bool,
     breaks: BTreeSet<n::LocalId>,
     continues: BTreeSet<n::LocalId>,
     pub(in crate::program::cmtt) returns: Vec<Arc<ExpressionCode>>,
@@ -38,6 +41,10 @@ pub(in crate::program::cmtt) struct Flow {
 impl Control {
     pub(in crate::program::cmtt) fn flow(self) -> Flow {
         match self {
+            Self::DataReturn(_) => Flow {
+                data_return: true,
+                ..Default::default()
+            },
             Self::Next => Flow {
                 next: true,
                 ..Default::default()
@@ -84,7 +91,7 @@ impl fmt::Display for Flow {
         for code in &self.pattern_returns {
             write!(f, " (pattern {code})")?;
         }
-        f.write_str("))")
+        write!(f, ") (data-return {}))", self.data_return)
     }
 }
 
@@ -142,7 +149,7 @@ fn known_integer_literal(
 }
 
 impl Checker<'_, '_> {
-    fn join_generator_flows(
+    pub(super) fn join_generator_flows(
         &mut self,
         mut left: Flow,
         right: Flow,
@@ -163,6 +170,7 @@ impl Checker<'_, '_> {
             .checked_sub(work as u64)
             .ok_or_else(|| error(span, "generator control-flow budget exhausted"))?;
         left.next |= right.next;
+        left.data_return |= right.data_return;
         left.breaks.extend(right.breaks);
         left.continues.extend(right.continues);
         left.returns.extend(right.returns);
@@ -412,6 +420,7 @@ impl Checker<'_, '_> {
                 })
             }
             H::Return(Some(code)) => match interface {
+                ResultInterface::Data(ty) => self.consumer_result(code, ty, depth + 1),
                 ResultInterface::Expression(interface, result_context) => Ok(Control::Return(
                     self.code_value_in_context(code, interface, result_context, depth + 1)?,
                 )),
@@ -425,6 +434,11 @@ impl Checker<'_, '_> {
                     )?),
                 ),
             },
+            H::Return(None) if matches!(interface, ResultInterface::Data(ty) if *ty == p(P::Void)) => {
+                Ok(Control::DataReturn(
+                    (!self.checking_code_generator).then_some(comptime_interpretor::Value::Unit),
+                ))
+            }
             H::Return(None) => Err(error(
                 value.span,
                 "code generator return requires a code value",

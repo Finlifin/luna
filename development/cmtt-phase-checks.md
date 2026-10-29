@@ -224,3 +224,101 @@ after the shared argument change (`/tmp/luna-tools-5z6ptvxj/result.json`).
 Formatting completed (`/tmp/luna-tools-3vq5nnji/result.json`); whitespace checks
 passed. The earlier source run before the argument unification is not the final
 validation for that change.
+
+## Source contextual functions returning data
+
+Explicit comptime functions with expr/pattern code parameters can now return
+ordinary data, Type, or void. They share signature formation and substitution
+with expression generators (`Generator<O>`), retain contextual input categories,
+and use a separate source declaration registry. They do not become ordinary
+callable Terms or erase code into its runtime result type.
+
+Direct required calls and construction statement/binding calls route supplied
+arguments in source order. Defaults run only for omitted arguments. The existing
+construction frame preserves owned caller cells; code parameters stay checked
+elaboration witnesses rather than ordinary VM data inputs. The shared control
+interpreter now has a data return channel, including bare return and implicit
+void completion. Definition checking checks unused bodies and unselected paths;
+actual calls execute only selected if/when/match branches, loops and returns.
+Preconditions precede the body, and existing entry-snapshot/postcondition handling
+is retained for contracts without result bindings.
+
+`development/examples/sysroot-contextual-data.fl` passes expr code through two
+explicitly specialized functions, uses the public `meta.StructBuilder` methods,
+and returns a generated Type with a usable runtime layout and reflection. This
+also required removing replaced declaration binders from required invocation's
+abstract-Type permissions. Actual opaque binders in forwarded substitutions and
+input graphs are still collected; the builder's rejection of abstract publication
+is unchanged. Constructing the example's slot does not execute the supplied
+quote or install a code field default.
+
+Current implementation limits (not restrictions added to the language):
+
+- Calls must occur at direct required/construction boundaries. Arbitrary calls
+  nested inside ordinary expressions are rejected rather than eagerly run during
+  expression elaboration. Explicit statement locals can separate such calls.
+- Clause arguments must currently be explicit. Contextual data methods, variadic
+  collection, argument packets, and result-bound contracts remain unconnected.
+- The construction evaluator still uses native call frames. This path permits
+  at most eight nested contextual data invocations, rejecting deeper calls with
+  a diagnostic. An explicit invocation stack is required to raise this limit
+  without relying on a larger host/test stack. Infinite recursion is tested at
+  the ordinary dev/test stack setting.
+- Typed code containers, Any transport and definition-builder code defaults are
+  still separate unfinished work. These calls do not enter the ordinary result
+  memoizer; the pure-Type-only cache policy remains unchanged.
+
+Validation from `/home/fin/luna`, all using dev/test profiles:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test builder_invocations contextual_data
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries --test comptime_memory
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+The first command passed 11 source regressions and the complete-sysroot builder
+regression (`/tmp/luna-tools-4paksx16/result.json`). The full CMTT, phase and
+comptime-memory groups passed 538 + 3 + 17 tests
+(`/tmp/luna-tools-es593tf_/result.json`). Cases cover both code categories,
+Type/void results, explicit clauses, defaults, preconditions, recursion limits,
+unused definitions, unselected construction, and source-ordered single evaluation
+of named arguments with owned-state updates. Formatting completed
+(`/tmp/luna-tools-jmrnusxk/result.json`).
+
+Broader builder runs did not pass: existing dev-stack overflows in
+`comptime_list_index_early_return_preserves_prior_effects` and
+`enum_reflection_observes_live_generated_types_and_preserves_nominal_identity`
+aborted the harness (`/tmp/luna-tools-8fe15bxe/result.json` and
+`/tmp/luna-tools-cyo8clmn/result.json`). Both were reproduced individually after
+replacing only this stage's five edited implementation files with their HEAD
+versions at b541c05f, preserving other worktree changes, then restoring the five
+files byte-for-byte. Baseline reports are `/tmp/luna-tools-faf09iva/result.json`
+and `/tmp/luna-tools-xqhw1rp2/result.json`. No release profile or increased host
+stack was used to hide these failures. Commands for individual reproduction:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations comptime_list_index_early_return_preserves_prior_effects
+python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations enum_reflection_observes_live_generated_types_and_preserves_nominal_identity
+```
+
+After extending the depth guard to include argument preparation, the final CMTT,
+phase and memory run passed 539 + 3 + 17 tests
+(`/tmp/luna-tools-atxqk_wh/result.json`). The added regression checks nested
+argument admission separately from recursive bodies. Final formatting completed
+(`/tmp/luna-tools-mmeh7uou/result.json`).
+
+The example also passed its LLVM native test (one test, no failures) with:
+
+```sh
+python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-contextual-data.fl --sysroot library --test-native
+```
+
+Report: `/tmp/luna-tools-7ic2gurt/result.json`. This native run preceded only the
+argument-depth guard extension; it validates generated runtime layout and field
+access, not unlimited construction recursion.
+
+The final complete-sysroot builder regression also passed after the depth guard
+extension: `python3 -B development/check.py --timeout 900 -- test -p luna --test
+builder_invocations contextual_data_consumer_publishes`
+(`/tmp/luna-tools-w7v_28ks/result.json`, one passed).

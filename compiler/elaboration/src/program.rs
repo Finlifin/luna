@@ -500,6 +500,8 @@ fn elaborate_with_attributes(
         pattern_quote_pending: None,
         pattern_generators: BTreeMap::new(),
         code_generators: BTreeMap::new(),
+        data_consumers: BTreeMap::new(),
+        data_consumer_depth: 0,
         code_method_captures: BTreeMap::new(),
         code_method_targets: BTreeMap::new(),
         code_packet_nominals: BTreeSet::new(),
@@ -954,6 +956,10 @@ fn elaborate_candidate<'a, 'h>(
             ItemKind::TestTemplateInstance { .. } => continue,
             ItemKind::Fn(sig, _) if sig.modifiers.is_test_template => continue,
             ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => {
+                if checker.is_data_consumer(owner) {
+                    checker.ensure_data_consumer(owner, item.span)?;
+                    continue;
+                }
                 if checker.is_pattern_generator(owner) {
                     checker.ensure_pattern_generator(owner, item.span)?;
                     continue;
@@ -1036,6 +1042,7 @@ fn elaborate_candidate<'a, 'h>(
         if matches!(&info.node.expect_item().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_test_template)
             || checker.is_code_generator(owner)
             || checker.is_pattern_generator(owner)
+            || checker.is_data_consumer(owner)
         {
             continue;
         }
@@ -1112,6 +1119,7 @@ fn elaborate_candidate<'a, 'h>(
         if matches!(&info.node.expect_item().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_test_template)
             || checker.is_code_generator(owner)
             || checker.is_pattern_generator(owner)
+            || checker.is_data_consumer(owner)
         {
             continue;
         }
@@ -1237,6 +1245,9 @@ fn elaborate_candidate<'a, 'h>(
     }
     for owner in checker.code_generators.keys().copied().collect::<Vec<_>>() {
         checker.check_code_generator(owner)?;
+    }
+    for owner in checker.data_consumers.keys().copied().collect::<Vec<_>>() {
+        checker.check_data_consumer(owner)?;
     }
     for (owner, item, sig, body_id) in functions {
         if checker.open_functions.contains_key(&owner) {
@@ -1610,6 +1621,8 @@ struct Checker<'a, 'h> {
     pattern_quote_pending: Option<bool>,
     pattern_generators: BTreeMap<OwnerId, cmtt::patterns::PatternGenerator>,
     code_generators: BTreeMap<OwnerId, cmtt::Generator>,
+    data_consumers: BTreeMap<OwnerId, cmtt::Generator<Term>>,
+    data_consumer_depth: usize,
     // Invocation-local environments; recursive calls restore the previous entry.
     // The shared generator declaration cache always remains unspecialized.
     code_method_captures: BTreeMap<OwnerId, Vec<(DeclarationId, Term)>>,
@@ -1707,6 +1720,12 @@ impl Checker<'_, '_> {
             ));
         }
         self.validate_quote_function(owner, span)?;
+        if self.is_data_consumer(owner) {
+            return Err(error(
+                span,
+                "contextual data consumers are invoked at comptime construction boundaries, not as ordinary function values",
+            ));
+        }
         if self.is_pattern_generator(owner) {
             return self.ensure_pattern_generator(owner, span);
         }
@@ -9540,6 +9559,9 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
+        if self.data_consumer_call(expr).is_some() {
+            return self.check_data_consumer_expression(expr, expected);
+        }
         if let H::Application(callee, arguments) = &expr.kind
             && let H::ResolvedDef { def_id, .. } = &callee.kind
             && let Some(owner) = self.package.definition_owner(*def_id)
