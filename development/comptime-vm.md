@@ -18,7 +18,9 @@ artifacts. No opcode delegates a child expression tree back to `eval`.
 
 Supported bodies include existing literal/frozen-value/Type leaves, reads,
 local initialization and whole-slot assignment, blocks, boolean short circuit,
-boolean/BitVec negation, branches, loops, break/continue and return. Temporary
+boolean/BitVec negation, branches, loops, break/continue and return. Integer
+arithmetic and scalar comparisons also execute linear instructions,
+using the same checked primitive operations as tree interpretation. Temporary
 registers are allocated densely independent of LocalId values. Scope exit and
 loop transfers clear introduced bindings; imported inputs are restored on both
 success and failure so later contract checks retain prior mutations.
@@ -896,3 +898,27 @@ Final stage checks:
   and native tuple affine-field checks alongside source bytecode assertions.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   passed; `/tmp/luna-tools-1c0hukc1/result.json`. `git diff --check` passed.
+
+## Shared scalar execution (2026-10-30)
+
+Integer arithmetic (arbitrary precision and target machine integers), negation,
+and scalar comparisons now compile into explicit operand registers and checked
+operations. The tree interpreter calls the same signature, operand and value
+implementation. Invalid signatures fail before evaluating operands; integer
+operand validation precedes the next operand's effects. Comparisons preserve
+their evaluate-both-then-check behavior. Target widths, overflow, zero division,
+abstract values and primitive work budgets keep their existing semantics.
+
+The compiler emits operand-free descriptors with S-expression dumps; no scalar
+instruction recursively evaluates a child tree. Source tests assert the actual
+bytecode route for arithmetic loops and ordered operand effects. Target-integer
+checks compare both execution paths and require bytecode even on failed calls.
+This does not yet provide bytecode calls, float arithmetic, container operations
+or a persistent compiled-code cache; no wall-time speedup is claimed.
+
+Validation from `/home/fin/luna` (all exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test target_integers --test scalar_equality --test exact_floats --test abstract_values`: `/tmp/luna-tools-3ukl6uvp/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p luna --test control --test comptime_bytecode --test comptime_integer_division --test comptime_integer_conversion`: `/tmp/luna-tools-918yvt4x/result.json`.
+- After adding explicit failure-order coverage: `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::tests`: `/tmp/luna-tools-ldgagel8/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: `/tmp/luna-tools-e8wc5f09/result.json`. `git diff --check` passed.

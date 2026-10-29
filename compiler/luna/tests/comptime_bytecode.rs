@@ -5,6 +5,42 @@ mod support;
 use comptime_interpretor::{Budget, ErrorKind, Interpreter, Value};
 
 #[test]
+fn arithmetic_loop_executes_bytecode_with_ordered_operand_effects() {
+    let package = support::compile(
+        "typealias Integer = .Integer'builtin;
+        comptime fn sum(limit: Integer) -> Integer {
+            var i: Integer = 0;
+            var total: Integer = 0;
+            while i < limit {
+                i = i + 1;
+                total = total + i * i;
+            }
+            -total
+        }
+        comptime fn order() -> bool {
+            var trace: Integer = 0;
+            let sum = do { trace = trace * 10 + 1; 7 }
+                + do { trace = trace * 10 + 2; 3 };
+            sum == 10 and trace == 12
+        }",
+    );
+    let integer = |value| Value::Integer(comptime_runtime::Integer::from_i128(value));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for (entry, args, expected) in [
+        ("sum", vec![integer(0)], integer(0)),
+        ("sum", vec![integer(10)], integer(-385)),
+        ("order", vec![], Value::Bool(true)),
+    ] {
+        let before = vm.bytecode_invocations();
+        let id = support::id(&package, entry);
+        assert_eq!(vm.invoke(id, args.clone()).unwrap(), expected);
+        assert_eq!(vm.bytecode_invocations(), before + 1);
+        assert_eq!(tree.invoke(id, args).unwrap(), expected);
+    }
+}
+
+#[test]
 fn source_invocation_executes_linear_control_and_preserves_type_values() {
     let package = support::compile(
         "typealias Type = .Type'builtin;

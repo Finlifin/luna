@@ -83,8 +83,16 @@ fn iir_interpreter_preserves_explicit_target() {
 fn evaluate_target(body: Expr, width: u32) -> Result<Value, comptime_interpretor::Error> {
     let mut package = package(body);
     package.target = Some(nir::target::TargetData::new(width).unwrap());
-    Interpreter::for_comptime(&package, Budget::default())?
-        .invoke(package.functions[0].declaration, vec![])
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())?;
+    let result = vm.invoke(package.functions[0].declaration, vec![]);
+    assert_eq!(vm.bytecode_invocations(), 1);
+    let tree = Interpreter::new(&package, Budget::default())?
+        .invoke(package.functions[0].declaration, vec![]);
+    assert_eq!(
+        result.as_ref().map_err(|error| &error.kind),
+        tree.as_ref().map_err(|error| &error.kind)
+    );
+    result
 }
 
 #[test]

@@ -103,6 +103,31 @@ impl Interpreter<'_> {
                             }
                         }
                     }
+                    Op::PrepareScalar(scalar) => {
+                        self.prepare_scalar(*scalar, source)?;
+                    }
+                    Op::CheckScalarOperand { scalar, value } => {
+                        let plan = self.prepare_scalar(*scalar, source)?;
+                        self.scalar_operand(
+                            plan,
+                            frame.slots[*value].as_ref().ok_or_else(missing)?,
+                            source,
+                        )?;
+                    }
+                    Op::Scalar {
+                        destination,
+                        scalar,
+                        left,
+                        right,
+                    } => {
+                        let plan = self.prepare_scalar(*scalar, source)?;
+                        let a = frame.slots[*left].take().ok_or_else(missing)?;
+                        let b = right
+                            .map(|slot| frame.slots[slot].take().ok_or_else(missing))
+                            .transpose()?;
+                        frame.slots[*destination] =
+                            Some(self.scalar_values(*scalar, plan, a, b, source)?);
+                    }
                     Op::Unit(dst) => frame.slots[*dst] = Some(Value::Unit),
                     Op::Read { destination, local } => {
                         let input = frame.slots[*local].as_ref().ok_or_else(missing)?;
@@ -202,6 +227,77 @@ impl Interpreter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_failures_preserve_signature_and_operand_check_order() {
+        let package = Package::default();
+        let trace = LocalId { owner: 1, index: 0 };
+        let expr = |primitive, kind| Expr {
+            ty: Term::Primitive(primitive),
+            kind,
+            source: SourceRange { start: 1, end: 2 },
+        };
+        // Malformed typed values exercise the execution boundary independently
+        // of frontend admission. Integer operands must fail before right-side
+        // effects, while scalar comparisons evaluate both sides before checking.
+        for (comparison, invalid_signature, changed) in [
+            (false, false, false),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let domain = if comparison {
+                Primitive::Bool
+            } else {
+                Primitive::Integer
+            };
+            let left = Box::new(expr(domain, K::Unit));
+            let right = Box::new(expr(
+                domain,
+                K::Block {
+                    statements: vec![expr(
+                        Primitive::Void,
+                        K::Assign {
+                            place: nir::program::Place {
+                                root: trace,
+                                fields: vec![],
+                            },
+                            value: Box::new(expr(Primitive::Bool, K::Literal(Literal::Bool(true)))),
+                        },
+                    )],
+                    result: Some(Box::new(expr(domain, K::Unit))),
+                },
+            ));
+            let body = expr(
+                if invalid_signature {
+                    Primitive::Void
+                } else {
+                    domain
+                },
+                if comparison {
+                    K::ScalarEqual(left, right)
+                } else {
+                    K::IntegerBinary {
+                        op: nir::program::IntegerOp::Add,
+                        left,
+                        right,
+                    }
+                },
+            );
+            let code = comptime_compiler::compile(&body, &mut 1000).unwrap();
+            for compiled in [false, true] {
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let mut environment = Environment::new();
+                environment.insert(trace, Value::Bool(false));
+                let result = if compiled {
+                    vm.execute_code(&code, &mut environment)
+                } else {
+                    vm.eval(&body, &mut environment)
+                };
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                assert_eq!(environment.get(&trace), Some(&Value::Bool(changed)));
+            }
+        }
+    }
 
     #[test]
     fn failed_frame_preserves_prior_writes_and_does_not_leak_locals() {

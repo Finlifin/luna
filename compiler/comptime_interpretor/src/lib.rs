@@ -50,6 +50,7 @@ mod reflection;
 pub use reflection::{
     CallableReflection, EnumReflection, ReflectedField, ReflectedVariant, StructReflection,
 };
+mod scalar_operations;
 #[cfg(test)]
 mod scoped_work;
 mod selected_types;
@@ -3521,7 +3522,7 @@ impl<'a> Interpreter<'a> {
             | K::ScalarLessEqual(..)
             | K::ScalarLess(..)
             | K::ScalarGreater(..)
-            | K::ScalarGreaterEqual(..) => self.eval_scalar_comparison(expr, environment),
+            | K::ScalarGreaterEqual(..) => self.eval_scalar_operation(expr, environment),
             K::TypeEqual(..) => self.eval_type_equal(expr, environment),
             K::TemplateEqual(..) => self.eval_template_equal(expr, environment),
             K::ListLength(_) | K::ListConcat(..) => self.eval_list_operation(expr, environment),
@@ -3622,8 +3623,8 @@ impl<'a> Interpreter<'a> {
             K::FloatNegate(..) | K::FloatBinary { .. } => {
                 self.eval_float_arithmetic(expr, environment)
             }
-            K::IntegerNegate(..) => self.eval_integer_negate(expr, environment),
-            K::IntegerBinary { .. } => self.eval_integer_binary(expr, environment),
+            K::IntegerNegate(..) => self.eval_scalar_operation(expr, environment),
+            K::IntegerBinary { .. } => self.eval_scalar_operation(expr, environment),
             K::BitConvert(..) => self.eval_bit_convert(expr, environment),
             K::ErrorConvert { .. } => self.eval_error_convert(expr, environment),
             K::NewtypeConvert(..) => self.eval_newtype_convert(expr, environment),
@@ -5325,90 +5326,6 @@ impl<'a> Interpreter<'a> {
             declaration: *declaration,
             arguments: types,
         })))
-    }
-
-    #[inline(never)]
-    fn eval_scalar_comparison(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        use nir::program::IntegerOp as Comparison;
-        use std::cmp::Ordering::*;
-        let (left, right, op) = match &expr.kind {
-            K::ScalarEqual(left, right) => (left, right, Comparison::Equal),
-            K::ScalarLessEqual(left, right) => (left, right, Comparison::LessEqual),
-            K::ScalarLess(left, right) => (left, right, Comparison::Less),
-            K::ScalarGreater(left, right) => (left, right, Comparison::Greater),
-            K::ScalarGreaterEqual(left, right) => (left, right, Comparison::GreaterEqual),
-            _ => unreachable!(),
-        };
-        let never = Term::Primitive(Primitive::Never);
-        let result_ty = if left.ty == never || right.ty == never {
-            never.clone()
-        } else {
-            Term::Primitive(Primitive::Bool)
-        };
-        let supported = |ty: &Term| matches!(ty, Term::Primitive(p) if matches!(p, Primitive::Bool | Primitive::Char | Primitive::Str | Primitive::Symbol | Primitive::Float | Primitive::F16 | Primitive::Bf16 | Primitive::F32 | Primitive::F64 | Primitive::Never) || self.integer_layout(*p).is_some());
-        if expr.ty != result_ty
-            || !supported(&left.ty)
-            || !supported(&right.ty)
-            || (op != Comparison::Equal
-                && [left, right].iter().any(|value| {
-                    matches!(
-                        value.ty,
-                        Term::Primitive(Primitive::Bool | Primitive::Str | Primitive::Symbol)
-                    )
-                }))
-            || (left.ty != never && right.ty != never && left.ty != right.ty)
-        {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        let a = value!(self.eval(left, environment));
-        let b = value!(self.eval(right, environment));
-        if !self.has_type(&a, &left.ty) || !self.has_type(&b, &right.ty) {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        if matches!(a, Value::AbstractValue { .. }) || matches!(b, Value::AbstractValue { .. }) {
-            return Err(self.failure(ErrorKind::AbstractValueUnresolved, Some(expr.source)));
-        }
-        let compare = |ordering| match op {
-            Comparison::Equal => matches!(ordering, Some(Equal)),
-            Comparison::Less => matches!(ordering, Some(Less)),
-            Comparison::LessEqual => matches!(ordering, Some(Less | Equal)),
-            Comparison::Greater => matches!(ordering, Some(Greater)),
-            Comparison::GreaterEqual => matches!(ordering, Some(Greater | Equal)),
-            _ => unreachable!(),
-        };
-        let equal = match (&a, &b) {
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Char(a), Value::Char(b)) => compare(a.partial_cmp(b)),
-            (Value::SignedInteger(a), Value::SignedInteger(b)) => compare(a.partial_cmp(b)),
-            (Value::UnsignedInteger(a), Value::UnsignedInteger(b)) => compare(a.partial_cmp(b)),
-            (Value::Float(a), Value::Float(b)) => compare(Some(
-                self.integer_operation(Some(expr.source), |budget| a.compare(b, budget))?,
-            )),
-            (Value::Float16(a), Value::Float16(b)) => {
-                compare(comptime_runtime::float16::Float16Format::Binary16.compare(*a, *b))
-            }
-            (Value::BFloat16(a), Value::BFloat16(b)) => {
-                compare(comptime_runtime::float16::Float16Format::BFloat16.compare(*a, *b))
-            }
-            (Value::Float32(a), Value::Float32(b)) => {
-                compare(f32::from_bits(*a).partial_cmp(&f32::from_bits(*b)))
-            }
-            (Value::Float64(a), Value::Float64(b)) => {
-                compare(f64::from_bits(*a).partial_cmp(&f64::from_bits(*b)))
-            }
-            (Value::String(a), Value::String(b)) | (Value::Symbol(a), Value::Symbol(b)) => {
-                self.integer_operation(Some(expr.source), |budget| {
-                    budget.consume(a.len().min(b.len()).saturating_add(1))
-                })?;
-                a == b
-            }
-            _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
-        };
-        Ok(Flow::Value(Value::Bool(equal)))
     }
 
     #[inline(never)]
@@ -7515,201 +7432,6 @@ impl<'a> Interpreter<'a> {
             }
             _ => unreachable!(),
         }
-    }
-
-    #[inline(never)]
-    fn eval_machine_integer(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-        primitive: Primitive,
-    ) -> Result<Flow, Error> {
-        use comptime_runtime::machine::{Error as MError, MachineInteger};
-        let (signed, width) = self
-            .integer_layout(primitive)
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-        let (left, right, op) = match &expr.kind {
-            K::IntegerNegate(value) => (value.as_ref(), None, None),
-            K::IntegerBinary { op, left, right }
-                if matches!(
-                    op,
-                    nir::program::IntegerOp::Add
-                        | nir::program::IntegerOp::Subtract
-                        | nir::program::IntegerOp::Multiply
-                        | nir::program::IntegerOp::DivideTrunc
-                        | nir::program::IntegerOp::RemainderTrunc
-                ) =>
-            {
-                (left.as_ref(), Some(right.as_ref()), Some(*op))
-            }
-            _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
-        };
-        let target = Term::Primitive(primitive);
-        let never = Term::Primitive(Primitive::Never);
-        let result_type = if left.ty == never || right.is_some_and(|v| v.ty == never) {
-            &never
-        } else {
-            &target
-        };
-        if &expr.ty != result_type
-            || (left.ty != target && left.ty != never)
-            || right.is_some_and(|v| v.ty != target && v.ty != never)
-        {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        let convert = |value: Value| match value {
-            Value::SignedInteger(value) if signed => {
-                MachineInteger::from_signed(value, width as u16)
-            }
-            Value::UnsignedInteger(value) if !signed => {
-                MachineInteger::from_unsigned(value, width as u16)
-            }
-            _ => Err(MError::RepresentationMismatch),
-        };
-        let left = convert(Self::concrete_value(
-            value!(self.eval(left, environment)),
-            expr.source,
-        )?)
-        .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
-        let right = if let Some(right) = right {
-            Some(
-                convert(Self::concrete_value(
-                    value!(self.eval(right, environment)),
-                    expr.source,
-                )?)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?,
-            )
-        } else {
-            None
-        };
-        let value = self
-            .integer_operation(Some(expr.source), |budget| {
-                Ok(match op {
-                    Some(nir::program::IntegerOp::Add) => left.add(right.unwrap(), budget),
-                    Some(nir::program::IntegerOp::Subtract) => {
-                        left.subtract(right.unwrap(), budget)
-                    }
-                    Some(nir::program::IntegerOp::Multiply) => {
-                        left.multiply(right.unwrap(), budget)
-                    }
-                    Some(nir::program::IntegerOp::DivideTrunc) => {
-                        left.div_rem_trunc(right.unwrap(), budget).map(|(q, _)| q)
-                    }
-                    Some(nir::program::IntegerOp::RemainderTrunc) => {
-                        left.div_rem_trunc(right.unwrap(), budget).map(|(_, r)| r)
-                    }
-                    None => left.negate(budget),
-                    _ => unreachable!(),
-                })
-            })?
-            .map_err(|error| {
-                self.failure(
-                    match error {
-                        MError::Overflow => ErrorKind::MachineOverflow,
-                        MError::DivisionByZero => ErrorKind::DivisionByZero,
-                        MError::Resource(comptime_runtime::Error::BudgetExhausted) => {
-                            ErrorKind::StepsExhausted
-                        }
-                        _ => ErrorKind::Type,
-                    },
-                    Some(expr.source),
-                )
-            })?;
-        Ok(Flow::Value(if signed {
-            Value::SignedInteger(value.signed_value().unwrap())
-        } else {
-            Value::UnsignedInteger(value.unsigned_value().unwrap())
-        }))
-    }
-
-    #[inline(never)]
-    fn eval_integer_negate(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        if let Some(primitive) = nir::program::machine_integer_type_in(expr, self.target) {
-            return self.eval_machine_integer(expr, environment, primitive);
-        }
-        let result = match &expr.kind {
-            K::IntegerNegate(value) => {
-                if !matches!(
-                    value.ty,
-                    Term::Primitive(Primitive::Integer | Primitive::Never)
-                ) || value.ty != expr.ty
-                {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                let Value::Integer(value) =
-                    Self::concrete_value(value!(self.eval(value, environment)), expr.source)?
-                else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                };
-                Value::Integer(
-                    self.integer_operation(Some(expr.source), |budget| value.negate(budget))?,
-                )
-            }
-            _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
-        };
-        Ok(Flow::Value(result))
-    }
-
-    #[inline(never)]
-    fn eval_integer_binary(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        if let Some(primitive) = nir::program::machine_integer_type_in(expr, self.target) {
-            return self.eval_machine_integer(expr, environment, primitive);
-        }
-        let result = match &expr.kind {
-            K::IntegerBinary { op, left, right } => {
-                let expected = Term::Primitive(
-                    if left.ty == Term::Primitive(Primitive::Never)
-                        || right.ty == Term::Primitive(Primitive::Never)
-                    {
-                        Primitive::Never
-                    } else if op.is_comparison() {
-                        Primitive::Bool
-                    } else {
-                        Primitive::Integer
-                    },
-                );
-                if expr.ty != expected
-                    || !matches!(
-                        left.ty,
-                        Term::Primitive(Primitive::Integer | Primitive::Never)
-                    )
-                    || !matches!(
-                        right.ty,
-                        Term::Primitive(Primitive::Integer | Primitive::Never)
-                    )
-                {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                let Value::Integer(left) =
-                    Self::concrete_value(value!(self.eval(left, environment)), expr.source)?
-                else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                };
-                let Value::Integer(right) =
-                    Self::concrete_value(value!(self.eval(right, environment)), expr.source)?
-                else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                };
-                let value = self.integer_operation(Some(expr.source), |budget| {
-                    op.evaluate(&left, &right, budget)
-                })?;
-                match value {
-                    Term::Integer(value) => Value::Integer(value),
-                    Term::Bool(value) => Value::Bool(value),
-                    _ => unreachable!("Integer operation returns a canonical scalar"),
-                }
-            }
-            _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
-        };
-        Ok(Flow::Value(result))
     }
 
     #[inline(never)]

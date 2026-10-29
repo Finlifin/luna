@@ -1,7 +1,9 @@
 //! Linear invocation code. Unsupported operations are detected before execution.
 //! Constants borrow immutable typed NIR leaves; no instruction evaluates a tree.
+pub mod scalar;
 use nir::program::{Expr, ExprKind as K, LocalId, SourceRange};
 use nir::{Primitive, Term};
+use scalar::Scalar;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -12,6 +14,17 @@ pub enum Op<'a> {
     Constant {
         destination: Register,
         value: &'a Expr,
+    },
+    PrepareScalar(Scalar<'a>),
+    CheckScalarOperand {
+        scalar: Scalar<'a>,
+        value: Register,
+    },
+    Scalar {
+        destination: Register,
+        scalar: Scalar<'a>,
+        left: Register,
+        right: Option<Register>,
     },
     Unit(Register),
     EnterScope,
@@ -91,6 +104,22 @@ impl fmt::Display for Program<'_> {
                 Op::EnterScope => write!(f, "(enter-scope)")?,
                 Op::LeaveScope => write!(f, "(leave-scope)")?,
                 Op::Unwind(depth) => write!(f, "(unwind {depth})")?,
+                Op::PrepareScalar(scalar) => write!(f, "(prepare-scalar {scalar})")?,
+                Op::CheckScalarOperand { scalar, value } => {
+                    write!(f, "(check-scalar-operand {value} {scalar})")?
+                }
+                Op::Scalar {
+                    destination,
+                    scalar,
+                    left,
+                    right,
+                } => {
+                    write!(f, "(scalar {destination} {scalar} (inputs {left}")?;
+                    if let Some(right) = right {
+                        write!(f, " {right}")?;
+                    }
+                    write!(f, "))")?;
+                }
                 Op::Unit(dst) => write!(f, "(unit {dst})")?,
                 Op::Read { destination, local } => write!(f, "(read {destination} {local})")?,
                 Op::Store {
@@ -167,6 +196,27 @@ pub fn compile<'a>(body: &'a Expr, fuel: &mut usize) -> Result<Program<'a>, Erro
                     slot
                 };
                 let emit = |work: &mut Vec<_>, op| work.push(Work::Emit(source, op));
+                if let Some((scalar, left, right)) = Scalar::expression(expr) {
+                    let a = fresh();
+                    let b = right.map(|_| fresh());
+                    emit(
+                        &mut work,
+                        Op::Scalar {
+                            destination: dst,
+                            scalar,
+                            left: a,
+                            right: b,
+                        },
+                    );
+                    if let Some((right, b)) = right.zip(b) {
+                        emit(&mut work, Op::CheckScalarOperand { scalar, value: b });
+                        work.push(Work::Expression(right, b));
+                    }
+                    emit(&mut work, Op::CheckScalarOperand { scalar, value: a });
+                    work.push(Work::Expression(left, a));
+                    emit(&mut work, Op::PrepareScalar(scalar));
+                    continue;
+                }
                 match &expr.kind {
                     K::Unit => emit(&mut work, Op::Unit(dst)),
                     K::Literal(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::TypeListValue(_) => {
