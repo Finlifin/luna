@@ -1134,6 +1134,9 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn constant_value(&mut self, owner: OwnerId, span: Span) -> Result<n::Expr, Error> {
+        if let Some(value) = self.builtin_normal_form_constant(owner, span)? {
+            return Ok(value);
+        }
         if self.compiler_operation_binding(owner, span)?.is_some() {
             return Err(error(
                 span,

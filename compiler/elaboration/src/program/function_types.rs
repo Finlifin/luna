@@ -2,7 +2,20 @@
 //! publishing the type; names do not become part of callable type identity.
 use super::*;
 
-const INPUT_NAMESPACE: u64 = u64::MAX - 8;
+pub(super) const INPUT_NAMESPACE: u64 = u64::MAX - 8;
+
+pub(super) fn normal_form_inputs<'a, 'h>(
+    expr: &'a Expr<'h>,
+) -> Option<&'h [hir::common::TyParam<'h>]> {
+    let input = match expr.kind {
+        H::TyFnArrow(input, _) => input,
+        _ => expr,
+    };
+    match input.kind {
+        H::TyNFFn(inputs) => Some(inputs),
+        _ => None,
+    }
+}
 
 pub(super) fn has_named_inputs(expr: &Expr<'_>) -> bool {
     let input = if let H::TyFnArrow(input, _) = &expr.kind {

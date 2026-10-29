@@ -67,11 +67,37 @@ The following are implementation work, not features completed by this change:
    design with the report's proposed one, or erase useful partial observations
    merely because they are not full evaluation.
 
-The pending Tuple builtin-binding work remains uncommitted. Its symbol-specific
-bootstrap is not evidence that general builtin callable binding is complete;
-review it against the ordinary callable path before integrating it. The existing
-TypeList term variants, NF domain restrictions, builtin classifications and
-contextual-input evaluator have not been removed by this inference correction.
+The existing TypeList term variants, NF domain restrictions, builtin
+classifications and contextual-input evaluator remain migration work. The
+builtin-binding bootstrap is now integrated as described below; this does not
+complete general VM intrinsic binding.
+
+## Builtin callable bindings
+
+Tuple and meta.List are source constants bound to `.Tuple'builtin` and
+`.List'builtin`, respectively. Both use a shared signature registry and the
+same callable telescope registration, alias resolution, Type application and
+invocation metadata. The registry declares each builtin's signature; it does
+not introduce another NF input category or recognize a public source name.
+The driver selects canonical declaration identities. Rebinding a builtin under
+another constant preserves that identity and validates the annotation.
+
+Named and unnamed fixed signature inputs retain positional slots; an unnamed
+input introduces no public argument label. Collected inputs retain their
+ordinary callable collector position. Checked builtin heads enter the same
+forward congruence path as checked source NF heads, with no body equations.
+Neither List nor Tuple publishes a fake executable function body.
+
+Materialization's annotation visitor also sees invocation identity values.
+Those values now retain their sort and reach the existing domain-aware checks;
+they are not submitted to the associated-Type normalizer or restricted to the
+trait-index value representation. The real-sysroot Tuple/list-input case covers
+this boundary alongside runtime tuple layout.
+
+This closes the earlier bootstrap patch's Tuple-only registration path. Other
+compiler operations still use the old operation-binding path, and Type-list
+values still have specialized internal representations. These are not claimed
+to be solved by replacing the two public bindings.
 
 ## Validation
 
@@ -89,5 +115,28 @@ Working directory: `/home/fin/luna`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   passed; `/tmp/luna-tools-tyiqkze3/result.json`. `git diff --check` passed.
 
-The worktree also contains earlier Tuple migration and unrelated author edits;
-these are not part of this inference change or evidence of VM completion.
+The worktree also contains unrelated author edits; these are excluded from
+both implementation commits. Neither stage is evidence of VM completion.
+
+Builtin-binding validation (same working directory):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli builtin_`:
+  passed; `/tmp/luna-tools-svfsgr15/result.json`. Includes real-sysroot Type
+  invocation/runtime tuple layout, renamed canonical bindings, forward aliases,
+  dynamic callees, unnamed inputs, invalid signatures and recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_protocols`:
+  passed; `/tmp/luna-tools-e7p46nx0/result.json`. Checks real library sources,
+  homogeneous lists, dependent collectors, ordinary values and native affine
+  tuple fields. The later unnamed-signature correction has separate CLI
+  coverage; the library uses named signature inputs.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  passed; `/tmp/luna-tools-nfqsod3i/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_methods --test normal_patterns --test type_lists --test list_patterns --test extended_calls --test default_calls --test tuple_type_syntax`:
+  passed; `/tmp/luna-tools-snqw1qs3/result.json`. The initial run exposed the
+  missing computed NF receiver-domain path. NF applications now use the existing
+  checked expression-domain observation for static methods and associated types;
+  direct and aliased builtin callables have regression coverage.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  final formatting passed; `/tmp/luna-tools-q9iw7jcb/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p materialization --lib`:
+  passed; `/tmp/luna-tools-cn644dhi/result.json`.

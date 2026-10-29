@@ -614,7 +614,12 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
         selectors,
     )
     .unwrap();
-    let tuple_head = support::id(&metadata, "Tuple");
+    let tuple_head = metadata
+        .normal_forms
+        .iter()
+        .find(|head| head.role == nir::normal_forms::Role::Tuple)
+        .unwrap()
+        .declaration;
     let tuple = |fields| nir::Term::NormalForm {
         head: tuple_head,
         sort: nir::Sort::Type,
@@ -863,6 +868,22 @@ fn repository_tuple_and_meta_definitions_preserve_identity_and_execute() {
         },
     )
     .unwrap();
+    for role in [
+        nir::normal_forms::Role::Tuple,
+        nir::normal_forms::Role::TypeList,
+    ] {
+        let head = package
+            .normal_forms
+            .iter()
+            .find(|head| head.role == role)
+            .unwrap();
+        assert!(
+            !package
+                .functions
+                .iter()
+                .any(|function| function.declaration == head.declaration)
+        );
+    }
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -882,7 +903,18 @@ fn repository_tuple_and_meta_definitions_preserve_identity_and_execute() {
         else {
             panic!("{entry}: Tuple lost its normal-form identity");
         };
-        assert_eq!(head, support::id(&package, "Tuple"));
+        let descriptor = package
+            .normal_forms
+            .iter()
+            .find(|head| head.role == nir::normal_forms::Role::Tuple)
+            .unwrap();
+        assert_eq!(head, descriptor.declaration);
+        assert!(
+            !package
+                .functions
+                .iter()
+                .any(|function| function.declaration == head)
+        );
         assert_eq!(arguments, vec![Term::TypeListValue(fields)]);
     }
 }
@@ -1068,7 +1100,18 @@ fn repository_tuple_head_preserves_type_identity_and_value_layout() {
     else {
         panic!("library Tuple identity must retain its declared head")
     };
-    assert_eq!(head, support::id(&package, "Tuple"));
+    let descriptor = package
+        .normal_forms
+        .iter()
+        .find(|head| head.role == nir::normal_forms::Role::Tuple)
+        .unwrap();
+    assert_eq!(head, descriptor.declaration);
+    assert!(
+        !package
+            .functions
+            .iter()
+            .any(|function| function.declaration == head)
+    );
     assert_eq!(
         arguments,
         vec![nir::Term::TypeListValue(vec![

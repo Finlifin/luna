@@ -1,9 +1,7 @@
 use builtin.{Type, bool};
 
 {- Keep the compiler-bound normal-form head at the public meta.List path. -}
-pub pure comptime fn List<T> -> Type {
-    List<T>
-}
+pub const List: pure comptime fn<T: Type> -> Type = .List'builtin;
 
 {- Comptime data, arithmetic, reflection, and checked definition builders. -}
 use data.{object, integer, list, optional, errors};

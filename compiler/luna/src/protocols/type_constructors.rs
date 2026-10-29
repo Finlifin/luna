@@ -312,9 +312,20 @@ pub(crate) fn resolve_source(
         }
         *target = Some(id);
     }
-    for (label, selector, target) in [
-        ("meta.List", selectors.meta_list, &mut result.meta_list),
-        ("Tuple", selectors.tuple, &mut result.tuple),
+    use nir::normal_forms::BuiltinCallable;
+    for (label, builtin, selector, target) in [
+        (
+            "meta.List",
+            BuiltinCallable::List,
+            selectors.meta_list,
+            &mut result.meta_list,
+        ),
+        (
+            "Tuple",
+            BuiltinCallable::Tuple,
+            selectors.tuple,
+            &mut result.tuple,
+        ),
     ] {
         let Some(selector) = selector else {
             continue;
@@ -341,31 +352,18 @@ pub(crate) fn resolve_source(
         let item = hir
             .item(owner)
             .ok_or("type constructor owner is unavailable")?;
-        if label == "optional" {
-            if !matches!(item.kind, hir::ItemKind::Enum(_)) {
-                return Err("optional binding requires an enum".into());
+        let valid = match &item.kind {
+            hir::ItemKind::Fn(signature, _) => {
+                signature.modifiers.is_normal_form_head && signature.modifiers.is_pure
             }
-            let definition = hir
-                .owner_definition(owner)
-                .ok_or("optional has no source identity")?;
-            let id = nir::DeclarationId {
-                package: provider.1,
-                local: definition.index,
-            };
-            if target.is_some_and(|old| old != id) {
-                return Err("optional selector conflicts with the driver's bound identity".into());
+            hir::ItemKind::Const(_, initializer) => {
+                matches!(&initializer.kind, hir::ExprKind::Builtin(symbol) if BuiltinCallable::from_symbol(symbol.as_str()) == Some(builtin))
             }
-            *target = Some(id);
-            continue;
-        }
-        let hir::ItemKind::Fn(signature, _) = &item.kind else {
-            return Err(format!(
-                "{label} selector requires a pure normal-form definition"
-            ));
+            _ => false,
         };
-        if !signature.modifiers.is_normal_form_head || !signature.modifiers.is_pure {
+        if !valid {
             return Err(format!(
-                "{label} selector requires a pure normal-form definition"
+                "{label} selector requires a pure normal-form definition or builtin callable binding"
             ));
         }
         let definition = hir

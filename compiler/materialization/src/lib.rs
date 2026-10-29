@@ -2106,7 +2106,11 @@ impl Builder<'_> {
     }
     fn staging_type_view(&mut self, ty: &Term) -> Result<Term, String> {
         // The annotation walker also visits complete interface identity inputs.
-        if self.admit_nominal_index(ty)? || ty.is_structural_index_value() {
+        if ty.sort() != nir::Sort::Type {
+            // This walker also visits invocation identity inputs. Preserve
+            // values for their domain-aware staging checks; an annotation view
+            // must not submit them to the associated-Type normalizer or impose
+            // the narrower trait-index representation rules on them.
             crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
             return Ok(ty.clone());
         }

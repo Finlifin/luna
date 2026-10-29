@@ -1718,6 +1718,9 @@ impl Checker<'_, '_> {
     /// signatures. Recursive value bodies do not require recursive signatures;
     /// cycles through type observations are diagnosed explicitly.
     fn ensure_signature(&mut self, owner: OwnerId, span: Span) -> Result<(), Error> {
+        if self.builtin_normal_form_constant(owner, span)?.is_some() {
+            return Ok(());
+        }
         if self.package.item(owner).is_some_and(
             |item| matches!(&item.kind, ItemKind::Fn(sig, _) if sig.modifiers.is_test_template),
         ) {
@@ -3841,7 +3844,9 @@ impl Checker<'_, '_> {
                         return Ok(p(P::BitVec(width)));
                     }
                 }
-                if let Some(owner) = self.normal_form_constant_target(head)? {
+                if let Some(owner) = self.normal_form_constant_target(head)?
+                    && !matches!(head.kind, H::ResolvedDef { def_id, .. } if self.package.definition_owner(def_id) == Some(owner))
+                {
                     let definition = self.package.owner_definition(owner).ok_or_else(|| error(expr.span, "normal-form callable has no declaration identity"))?;
                     let target = Expr {
                         kind: H::ResolvedDef { name: self.package.item(owner).unwrap().ident.name, has_clause_param: true, def_id: definition },
@@ -3860,7 +3865,7 @@ impl Checker<'_, '_> {
                     .package
                     .definition_owner(def_id)
                     .ok_or_else(|| error(expr.span, "type definition has no HIR owner"))?;
-                if matches!(&self.package.item(owner).unwrap().kind,
+                if self.normal_parameters.contains_key(&owner) || matches!(&self.package.item(owner).unwrap().kind,
                     ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)
                 {
                     self.ensure_signature(owner, expr.span)?;
@@ -4523,9 +4528,7 @@ impl Checker<'_, '_> {
         // telescope receive forward congruence. No body equation or inverse
         // constructor rule is introduced by this admission.
         for owner in self.normal_parameters.keys() {
-            if matches!(self.package.item(*owner).map(|item| &item.kind),
-                Some(ItemKind::Fn(sig, _)) if sig.modifiers.is_normal_form_head && sig.modifiers.is_pure)
-            {
+            if self.is_registered_normal_form(*owner) {
                 context.admit_congruence(declaration(
                     self.package,
                     &self.package_identities,

@@ -58,8 +58,9 @@ comptime fn Make(flag: bool, input: Type) -> Type {
 
 这里的局部 `const` 在所属 invocation 中初始化，不为了提前识别头而在
 elaboration 时执行。当前动态路径支持位置实参、依赖输入、尾部逐项收集或
-单次完整集合展开；动态 callee 的具名入口和混合展开仍待接通。Tuple 也尚未
-迁移到上述 builtin 绑定。
+单次完整集合展开；动态 callee 的具名入口和混合展开仍待接通。内置包的 Tuple
+与 meta.List 已使用 builtin 常量绑定；其别名和动态调用保留各自的声明身份，
+不需要伪造源码函数体。
 
 ## 正式定义
 

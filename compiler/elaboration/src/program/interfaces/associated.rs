@@ -65,6 +65,7 @@ impl Checker<'_, '_> {
             return Ok(None);
         };
         let mut subject = if self.is_type_head(base)
+            || self.local_field_domain(base)? == Some(p(P::Type))
             || matches!(&base.kind, H::ResolvedFnParam(_, id) if self.type_input_bindings.contains_key(&local(*id)))
         {
             self.type_expr(base)?

@@ -2242,7 +2242,8 @@ impl Checker<'_, '_> {
         let computed_subject = |kind: &H<'_>| {
             matches!(
                 kind,
-                H::Projection(..)
+                H::NFApplication(..)
+                    | H::Projection(..)
                     | H::Block(_)
                     | H::If(..)
                     | H::When(_)

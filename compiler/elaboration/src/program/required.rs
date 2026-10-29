@@ -1722,10 +1722,14 @@ impl Checker<'_, '_> {
                     });
                     continue;
                 }
-                if self.package.item(owner).is_some_and(|item| {
-                    matches!(&item.kind,
+                if self
+                    .builtin_normal_form_constant(owner, expr.span)?
+                    .is_some()
+                    || self.package.item(owner).is_some_and(|item| {
+                        matches!(&item.kind,
                     ItemKind::Fn(signature, _) if signature.modifiers.is_normal_form_head)
-                }) {
+                    })
+                {
                     // Carry the declaration contract, never an executable body.
                     self.ensure_signature(owner, expr.span)?;
                     self.ensure_contract(owner, expr.span)?;

@@ -187,9 +187,9 @@ impl Checker<'_, '_> {
         }
         let admitted = self.normal_parameters.iter().any(|(owner, parameters)| {
             declaration(self.package, &self.package_identities, *owner) == head
-                && parameters.len() == 1 && parameters[0].2 == p(P::Type)
-                && matches!(self.package.item(*owner).map(|item| &item.kind),
-                    Some(ItemKind::Fn(sig, _)) if sig.modifiers.is_normal_form_head && sig.modifiers.is_pure)
+                && parameters.len() == 1
+                && parameters[0].2 == p(P::Type)
+                && self.is_registered_normal_form(*owner)
         });
         if admitted {
             self.context.admit_list_inference_head(head);

@@ -6,6 +6,46 @@ use std::{
     fmt,
 };
 
+/// Compiler-provided callable identities and their ordinary signatures.
+/// This registry describes builtin exports; it does not change NF application,
+/// argument representation, or matching for any declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuiltinCallable {
+    List,
+    Tuple,
+}
+impl BuiltinCallable {
+    pub fn from_symbol(symbol: &str) -> Option<Self> {
+        match symbol {
+            "List" => Some(Self::List),
+            "Tuple" => Some(Self::Tuple),
+            _ => None,
+        }
+    }
+
+    pub fn signature(self, list: Option<DeclarationId>) -> Option<Term> {
+        let (sort, domain, collector) = match self {
+            Self::List => (Sort::Type, Term::Primitive(Primitive::Type), None),
+            Self::Tuple => (
+                Sort::ComptimeValue,
+                Term::NormalForm {
+                    head: list?,
+                    sort: Sort::Type,
+                    arguments: vec![Term::Primitive(Primitive::Type)],
+                },
+                Some(0),
+            ),
+        };
+        Some(Term::NormalFormFunction(
+            Box::new(Term::Function {
+                parameters: vec![crate::Parameter { sort, ty: domain }],
+                result: Box::new(Term::Primitive(Primitive::Type)),
+            }),
+            collector,
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Type,

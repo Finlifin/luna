@@ -35,7 +35,7 @@ for_type -> for<parameter*> expr
 
 范式应用不因函数体返回某个参数，就与该参数建立类型关系。别名指向该应用时也遵守这一规则；alias 的透明性只消除别名本身。
 
-元组也遵循这条规则。`Tuple` 的签名是 `pure comptime fn Tuple<...Es: meta.List<Type>> -> Type`：例如 `Tuple<u32, bool>` 将两个元素类型收集为一个 `meta.List<Type>` 输入，并保留 `Tuple` 的范式头。用于字段访问、解构和布局的元素结构视图不能替代这个类型身份，也不能通过展开 `Tuple` 的函数体建立类型相等关系。
+元组也遵循这条规则。`Tuple` 通过 `pub const Tuple: pure comptime fn<...Es: meta.List<Type>> -> Type = .Tuple'builtin;` 集中绑定：例如 `Tuple<u32, bool>` 将两个元素类型收集为一个 `meta.List<Type>` 输入，并保留 `Tuple` 的范式头。用于字段访问、解构和布局的元素结构视图不能替代这个类型身份，也不能通过展开头或虚构函数体方程建立类型相等关系。
 
 括号不会因目标域是 Type 就构造类型：`(u32, bool)` 是包含两个 Type 值的 tuple，不能代替 `Tuple<u32, bool>`。单元素类型写作 `Tuple<u32>`，空 tuple 类型写作 `Tuple<>`；`(u32)` 只是分组，`(u32,)` 和 `()` 是值。tuple 值的构造与模式解构继续使用括号。
 

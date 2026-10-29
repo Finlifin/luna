@@ -114,7 +114,7 @@ impl Checker<'_, '_> {
                 call_domain = self.comptime_call_result(root)?;
                 call_domain.as_ref()
             }
-            H::Block(_) | H::If(..) | H::When(_) | H::Match(..) => {
+            H::NFApplication(..) | H::Block(_) | H::If(..) | H::When(_) | H::Match(..) => {
                 // Discover only the checked domain. The speculative branch
                 // never publishes local storage, captures or control evidence,
                 // and no invocation is performed to classify this receiver.

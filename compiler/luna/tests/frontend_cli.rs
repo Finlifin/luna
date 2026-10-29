@@ -571,6 +571,156 @@ fn function_type_parameters_keep_names_modifiers_and_optional_syntax() {
 }
 
 #[test]
+fn builtin_tuple_callable_binding_keeps_opaque_identity_without_a_body() {
+    let sandbox = Sandbox::new();
+    let source = "
+        typealias Type = .Type'builtin;
+        const List: pure comptime fn<T:Type> -> Type = .List'builtin;
+        const Product: pure comptime fn<...Es:List<Type>> -> Type = .Tuple'builtin;
+        const Alias = Product;
+        const Again: pure comptime fn<...Es:List<Type>> -> Type = .Tuple'builtin;
+        typealias Pair = Product<.Es = [bool, Type]>;
+        comptime fn Direct() -> Type { Product<bool, Type> }
+        comptime fn Named() -> Type { Alias<.Es = [bool, Type]> }
+        comptime fn Rebound() -> Type { Again<bool, Type> }
+        comptime fn Annotation() -> Type { Pair }
+        comptime fn Dynamic() -> Type {
+            const factory = Product;
+            factory<bool, Type>
+        }
+        comptime fn Literal() -> Type { Product<.Es = [bool, bool]> }
+        fn run() -> bool {
+            let pair:Product<.Es = [bool, bool]> = (true, false);
+            let (first, second) = pair;
+            first and not second
+        }
+    ";
+    sandbox.write("input.fl", source);
+    let base = [
+        "input.fl",
+        "--meta-list-type",
+        "input.List",
+        "--tuple-type",
+        "input.Product",
+    ];
+    let invoke = |name| {
+        let mut args = base.to_vec();
+        args.extend(["--invoke-comptime", name]);
+        sandbox.run(&args)
+    };
+    let direct = invoke("Direct");
+    let expected = success(&direct);
+    assert!(expected.contains("normal-form"));
+    for name in ["Named", "Rebound", "Annotation", "Dynamic"] {
+        assert_eq!(success(&invoke(name)), expected, "{name}");
+    }
+    let mut args = base.to_vec();
+    args.extend(["--interpret", "run"]);
+    assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
+    for signature in [
+        "pure comptime fn<...Es:List<bool>> -> Type",
+        "pure comptime fn<Es:List<Type>> -> Type",
+        "pure comptime fn<...Es:List<Type>> -> bool",
+    ] {
+        sandbox.write("input.fl", format!("typealias Type = .Type'builtin; pure comptime fn List<T> -> Type {{ T }} const Product: {signature} = .Tuple'builtin;"));
+        let mut args = base.to_vec();
+        args.extend(["--emit", "nir"]);
+        let output = sandbox.run(&args);
+        failure(&output, 1);
+        assert!(!details(&output).contains("panicked"));
+    }
+    sandbox.write("input.fl", source);
+    assert_eq!(success(&invoke("Direct")), expected);
+}
+
+#[test]
+fn builtin_list_callable_uses_ordinary_aliases_and_dynamic_application() {
+    let sandbox = Sandbox::new();
+    let source = "
+        typealias Type = .Type'builtin;
+        const Alias = Sequence;
+        const Sequence: pure comptime fn<T:Type> -> Type = .List'builtin;
+        const Rebound: pure comptime fn<Element:Type> -> Type = .List'builtin;
+        comptime fn Direct() -> Type { Sequence<bool> }
+        comptime fn ViaAlias() -> Type { Alias<bool> }
+        comptime fn ViaBinding() -> Type { Rebound<bool> }
+        comptime fn Dynamic() -> Type { const factory = Sequence; factory<bool> }
+    ";
+    sandbox.write("input.fl", source);
+    let invoke = |entry| {
+        sandbox.run(&[
+            "input.fl",
+            "--meta-list-type",
+            "input.Sequence",
+            "--invoke-comptime",
+            entry,
+        ])
+    };
+    let direct = invoke("Direct");
+    let expected = success(&direct);
+    for entry in ["ViaAlias", "ViaBinding", "Dynamic"] {
+        assert_eq!(success(&invoke(entry)), expected, "{entry}");
+    }
+    sandbox.write("input.fl", source.replace("fn<T:Type>", "fn<Type>"));
+    for entry in ["Direct", "ViaAlias", "ViaBinding", "Dynamic"] {
+        assert_eq!(success(&invoke(entry)), expected, "unnamed {entry}");
+    }
+    for signature in [
+        "pure comptime fn<T:bool> -> Type",
+        "pure comptime fn<T:Type> -> bool",
+        "pure comptime fn<T:Type, U:Type> -> Type",
+    ] {
+        sandbox.write(
+            "input.fl",
+            format!("typealias Type = .Type'builtin; const Sequence: {signature} = .List'builtin;"),
+        );
+        let output = sandbox.run(&[
+            "input.fl",
+            "--meta-list-type",
+            "input.Sequence",
+            "--emit",
+            "nir",
+        ]);
+        failure(&output, 1);
+        assert!(!details(&output).contains("panicked"));
+    }
+    sandbox.write("input.fl", source);
+    assert_eq!(success(&invoke("Dynamic")), expected);
+}
+
+#[test]
+fn sysroot_tuple_builtin_constant_supports_symbolic_inputs_and_runtime_layout() {
+    let sandbox = Sandbox::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let source = "
+        comptime fn tuple_factory() -> pure comptime fn<...Es:meta.List<Type>> -> Type { Tuple }
+        comptime fn Check() -> bool {
+            tuple_factory()<bool, u8> == Tuple<.Es = [bool, u8]>
+        }
+        fn identity(value:Tuple<.Es = Es>) -> Tuple<.Es = Es> where Es:meta.List<Type> { value }
+        fn run() -> bool {
+            let (flag, byte) = identity<[bool, u8]>((true, 7));
+            flag and byte == 7
+        }
+    ";
+    sandbox.write("input.fl", source);
+    for (mode, entry) in [("--invoke-comptime", "Check"), ("--interpret", "run")] {
+        let output = sandbox.run(&[
+            "input.fl",
+            "--sysroot",
+            root.to_str().unwrap(),
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+            mode,
+            entry,
+        ]);
+        assert_eq!(success(&output).trim(), "(bool true)");
+    }
+}
+
+#[test]
 fn tuple_types_remain_explicit_through_both_cli_drivers() {
     let sandbox = Sandbox::new();
     let declarations = "typealias Type=.Type'builtin;

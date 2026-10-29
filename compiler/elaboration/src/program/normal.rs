@@ -35,6 +35,20 @@ enum RoutedNormalInput<'a, 'h> {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn is_registered_normal_form(&self, owner: OwnerId) -> bool {
+        self.normal_parameters.contains_key(&owner)
+            && self
+                .package
+                .item(owner)
+                .is_some_and(|item| match &item.kind {
+                    ItemKind::Fn(signature, _) => {
+                        signature.modifiers.is_normal_form_head && signature.modifiers.is_pure
+                    }
+                    ItemKind::Const(..) => self.signatures.contains_key(&owner),
+                    _ => false,
+                })
+    }
+
     pub(super) fn bound_tuple_head(&mut self, span: Span) -> Result<Option<DeclarationId>, Error> {
         let Some(head) = self.protocols.tuple else {
             return Ok(None);

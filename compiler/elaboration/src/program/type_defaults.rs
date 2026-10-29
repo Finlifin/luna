@@ -430,6 +430,35 @@ impl<'h> Checker<'_, 'h> {
             ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) => {
                 sig.clause_params.to_vec()
             }
+            ItemKind::Const(annotation, _) => function_types::normal_form_inputs(annotation)
+                .into_iter()
+                .flatten()
+                .filter_map(|input| {
+                    let (name, kind) = match input.kind {
+                        TyParamKind::Varadic(name, ty) => {
+                            (name, hir::clause::ClauseParamKind::Varadic(name, ty))
+                        }
+                        TyParamKind::PositionalDependencyCatched(name, ty) => {
+                            (name, hir::clause::ClauseParamKind::Positional(name, ty))
+                        }
+                        TyParamKind::Positional(ty) => {
+                            // An unnamed callable input still has a positional
+                            // slot. The empty name cannot be written as a source
+                            // argument label and creates no public named entry.
+                            let name = hir::common::Ident::new("", input.span);
+                            (name, hir::clause::ClauseParamKind::Positional(name, ty))
+                        }
+                        _ => return None,
+                    };
+                    Some(hir::clause::ClauseParam {
+                        hir_id: input.hir_id,
+                        definition: None,
+                        name,
+                        kind,
+                        span: input.span,
+                    })
+                })
+                .collect(),
             _ => Vec::new(),
         }
     }
