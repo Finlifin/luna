@@ -481,3 +481,74 @@ fn dynamic_instance_copy_accounts_for_clause_operands() {
         subject: Box::new(large()),
     }));
 }
+
+#[test]
+fn input_dependency_scan_covers_hidden_types_and_shared_bodies() {
+    use nir::copy_budget::expression_has_contextual_types;
+    let bound = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: nir::Sort::Type,
+    };
+    let hidden = expr(K::TypeValue(bound.clone()));
+    let cases = [
+        hidden.clone(),
+        expr(K::Closure {
+            parameters: vec![],
+            captures: vec![],
+            body: std::sync::Arc::new(hidden.clone()),
+        }),
+        expr(K::Closure {
+            parameters: vec![],
+            captures: vec![nir::program::Capture {
+                binding: nir::program::LocalId { owner: 1, index: 0 },
+                ty: bound.clone(),
+                value: None,
+            }],
+            body: std::sync::Arc::new(small()),
+        }),
+        expr(K::Match {
+            value: Box::new(small()),
+            arms: vec![MatchArm {
+                pattern: Pattern::ErrorResult {
+                    label: Some(bound.clone()),
+                    inner: Box::new(Pattern::Wild),
+                },
+                guard: None,
+                body: small(),
+            }],
+        }),
+        expr(K::NormalFormType {
+            head: DeclarationId {
+                package: 1,
+                local: 9,
+            },
+            plan: None,
+            arguments: vec![nir::program::NormalFormArgument::Value(hidden)],
+        }),
+        expr(K::TypeListValue(vec![Term::NormalForm {
+            head: DeclarationId {
+                package: 1,
+                local: 9,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![bound],
+        }])),
+    ];
+    for case in cases {
+        let before = case.to_string();
+        assert!(expression_has_contextual_types(&case, &mut 1000).unwrap());
+        assert!(expression_has_contextual_types(&case, &mut 0).is_err());
+        assert_eq!(case.to_string(), before);
+    }
+    // Opaque head identities alone do not create a dependency on invocation inputs.
+    let closed = expr(K::TypeValue(Term::NormalForm {
+        head: DeclarationId {
+            package: 1,
+            local: 9,
+        },
+        sort: nir::Sort::Type,
+        arguments: vec![Term::Primitive(P::Bool)],
+    }));
+    assert!(!expression_has_contextual_types(&closed, &mut 1000).unwrap());
+}

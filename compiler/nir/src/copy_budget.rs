@@ -124,6 +124,31 @@ fn charge_node(
     rewrite: bool,
     replacements: Option<&std::collections::BTreeMap<crate::DeclarationId, &Term>>,
 ) -> Result<(), CopyBudgetExhausted> {
+    charge_node_observed(root, steps, rewrite, replacements, &mut |_| {})
+}
+
+/// Conservatively inspect all embedded type terms, including nested binders,
+/// patterns, contracts and shared closure bodies. Holes also require per-call
+/// handling. No normal head is unfolded.
+/// The same exhaustive walk also preflights the body copy that may follow.
+pub fn expression_has_contextual_types(
+    value: &n::Expr,
+    steps: &mut u64,
+) -> Result<bool, CopyBudgetExhausted> {
+    let mut found = false;
+    charge_node_observed(Node::Expr(value), steps, true, None, &mut |term| {
+        found |= matches!(term, Term::Bound { .. } | Term::Hole { .. });
+    })?;
+    Ok(found)
+}
+
+fn charge_node_observed(
+    root: Node<'_>,
+    steps: &mut u64,
+    rewrite: bool,
+    replacements: Option<&std::collections::BTreeMap<crate::DeclarationId, &Term>>,
+    observe: &mut impl FnMut(&Term),
+) -> Result<(), CopyBudgetExhausted> {
     fn charge_width(steps: &mut u64, width: usize) -> Result<(), CopyBudgetExhausted> {
         *steps = steps
             .checked_sub(width as u64)
@@ -153,20 +178,14 @@ fn charge_node(
         if let Node::Type(ty) = node {
             let mut fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
             let before = fuel;
-            let result = if let Some(replacements) = replacements {
-                crate::type_computations::charge_expanded_term(
-                    ty,
-                    &mut fuel,
-                    (MAX_COPY_DEPTH - depth).min(128),
-                    replacements,
-                )
-            } else {
-                crate::type_computations::charge_term_with_depth(
-                    ty,
-                    &mut fuel,
-                    (MAX_COPY_DEPTH - depth).min(128),
-                )
-            };
+            let empty = std::collections::BTreeMap::new();
+            let result = crate::type_computations::visit_expanded_term(
+                ty,
+                &mut fuel,
+                (MAX_COPY_DEPTH - depth).min(128),
+                replacements.unwrap_or(&empty),
+                observe,
+            );
             *steps -= (before - fuel) as u64;
             result.map_err(|_| CopyBudgetExhausted::Steps)?;
             continue;
@@ -241,6 +260,16 @@ fn charge_node(
             }
             Node::Expr(expr) => {
                 work.push((Node::Type(&expr.ty), depth + 1));
+                if let K::Intrinsic {
+                    binding: Some(binding),
+                    ..
+                } = &expr.kind
+                {
+                    charge_width(steps, 1)?;
+                    if let Some(ty) = binding.pending_type() {
+                        work.push((Node::Type(ty), depth + 1));
+                    }
+                }
                 match &expr.kind {
                     K::NominalType {
                         preparations,

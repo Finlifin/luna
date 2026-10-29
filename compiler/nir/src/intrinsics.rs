@@ -676,6 +676,13 @@ impl Checked {
         Ok(width)
     }
 
+    pub(crate) fn pending_type(&self) -> Option<&Term> {
+        match &self.signature {
+            Signature::Pending(ty) => Some(ty),
+            Signature::Concrete(_) => None,
+        }
+    }
+
     /// Concrete evidence is immutable; only a pending type may be substituted.
     pub(crate) fn rewrite_pending<E>(
         &mut self,
@@ -753,5 +760,43 @@ mod operation_names_tests {
         }
         assert_eq!(Operation::RoundAway.name(), "round");
         assert_eq!(Operation::RoundEven.name(), "roundeven");
+    }
+}
+
+#[cfg(test)]
+mod pending_dependency_tests {
+    use super::*;
+    #[test]
+    fn stored_pending_types_participate_in_dependency_and_copy_checks() {
+        let tag = Tag {
+            family: DeclarationId {
+                package: 1,
+                local: 9,
+            },
+            variant: 0,
+        };
+        let expression = crate::program::Expr {
+            source: crate::program::SourceRange { start: 0, end: 1 },
+            ty: Term::Primitive(Primitive::F32),
+            kind: crate::program::ExprKind::Intrinsic {
+                tag,
+                inputs: vec![],
+                binding: Some(Checked {
+                    comptime: true,
+                    tag,
+                    operation: Operation::SquareRoot,
+                    signature: Signature::Pending(Term::Bound {
+                        depth: 0,
+                        index: 0,
+                        sort: crate::Sort::Type,
+                    }),
+                }),
+            },
+        };
+        assert!(
+            crate::copy_budget::expression_has_contextual_types(&expression, &mut 100).unwrap()
+        );
+        assert!(crate::copy_budget::charge_expression(&expression, &mut 2).is_err());
+        crate::copy_budget::charge_expression(&expression, &mut 100).unwrap();
     }
 }

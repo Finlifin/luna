@@ -238,11 +238,9 @@ impl<'a> Interpreter<'a> {
             if let Some(program) = self.bytecode_cache.entries.get(&id) {
                 return Ok(program.clone());
             }
-            let definition = *self
-                .functions
-                .get(&id)
-                .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(body.source)))?;
-            let program = self.compile_body(&definition.body)?.map(Arc::new);
+            // The invocation boundary supplies either immutable package code
+            // or a validated input-independent prepared body of that declaration.
+            let program = self.compile_body(body)?.map(Arc::new);
             self.bytecode_cache.insert(id, program.clone());
             Ok(program)
         } else {

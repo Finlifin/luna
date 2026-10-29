@@ -166,6 +166,11 @@ fn repeated_leaf_reads_do_not_recopy_unrelated_types() {
                 if local {
                     arguments.push(Value::Integer(comptime_runtime::Integer::from_u128(4095)));
                 }
+                // Input-independent preparation and code are reused on this call.
+                assert_eq!(
+                    vm.invoke(id(3), arguments.clone()).unwrap(),
+                    Value::Type(ty(P::Bool))
+                );
                 let before = vm.remaining_steps();
                 let compilation_before = vm.bytecode_compilation_steps();
                 assert_eq!(
@@ -173,8 +178,9 @@ fn repeated_leaf_reads_do_not_recopy_unrelated_types() {
                     Value::Type(ty(P::Bool))
                 );
                 let compilation = vm.bytecode_compilation_steps() - compilation_before;
-                assert!(compilation > 0);
-                assert_eq!(vm.bytecode_invocations(), 1);
+                assert_eq!(compilation, 0);
+                assert_eq!(vm.bytecode_compilations(), 1);
+                assert_eq!(vm.bytecode_invocations(), 2);
                 before - vm.remaining_steps() - compilation
             };
             let single = run(1);

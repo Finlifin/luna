@@ -116,6 +116,7 @@ impl<'a> Interpreter<'a> {
             bytecode_compilations: 0,
             bytecode_compilation_steps: 0,
             bytecode_cache: Default::default(),
+            input_body_cache: Default::default(),
             declaration_world: None,
             // IIR retains occurrence environments, not the source effect world.
             effect_declarations: BTreeMap::new(),

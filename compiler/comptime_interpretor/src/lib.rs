@@ -18,6 +18,7 @@ mod environment;
 mod field_access;
 mod iir_execution;
 mod immutable_storage;
+mod input_bodies;
 mod invocation;
 mod invocation_contracts;
 mod list_append;
@@ -768,6 +769,7 @@ pub struct Interpreter<'a> {
     bytecode_compilations: usize,
     bytecode_compilation_steps: u64,
     bytecode_cache: bytecode::CodeCache,
+    input_body_cache: input_bodies::Cache,
     enum_builder:
         Option<&'a dyn Fn(&EnumBuildRequest, &mut u64) -> Result<PreparedEnumBuild<'a>, Error>>,
     struct_builder:
@@ -1629,6 +1631,7 @@ impl<'a> Interpreter<'a> {
             bytecode_compilations: 0,
             bytecode_compilation_steps: 0,
             bytecode_cache: Default::default(),
+            input_body_cache: Default::default(),
             declaration_world: Some(package),
             effect_declarations,
             effect_state: effects::State::default(),

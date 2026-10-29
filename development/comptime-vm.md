@@ -50,7 +50,7 @@ existing scalar/value operations against the same invocation budget.
 from total work so observation-cost measurements do not hide code generation.
 Cost counts can differ between the two carriers, as
 allowed by docs/comptime/normalization-and-instantiation.md. There is no speedup
-claim: temporary specialized bodies and closure bodies still compile per call;
+claim: input-dependent specialized bodies and closure bodies still compile per call;
 package-body reuse does not establish a persistent cross-query code identity.
 
 `bytecode_invocations()` exposes actual route selection for verification. Tests
@@ -2151,3 +2151,72 @@ This fixes caller-controlled resource accounting; it does not reduce metadata
 copy work. Cold calls can now exhaust their supplied budget earlier because
 compilation is no longer uncharged. Specialization/normal-form bytecode work
 remains outstanding; this is not a completed VM claim.
+
+## Reuse input-independent prepared bodies
+
+A comptime input no longer automatically forces a fresh body clone, type rewrite
+and compilation on every call. A bounded structural scan identifies package
+bodies with no Bound or Hole terms. It enters every embedded type payload,
+patterns, normal-form inputs, captures and shared closure bodies without unfolding
+normal-form heads. Nested binders conservatively count as dependent; this is not
+a complete free-variable minimization pass.
+
+The first preparation still performs the original type rewrite and scope checks,
+including pattern-domain completion. Only its successful immutable result can
+enter the per-interpreter prepared-body cache. Dependencies are recorded as a
+classification only; input-dependent bodies still specialize separately. Bodies
+and classification entries share a 100,000-work storage bound, independent of
+the existing code-cache bound. Eviction cannot invalidate active Arc-owned bodies.
+Closures have no declaration cache key. Parameter admission, signature/result
+binding, requirements, pre/postconditions and actual body effects still run for
+every invocation. This is code reuse, not result memoization.
+
+The bytecode cache compiles the prepared body supplied by the invocation boundary
+rather than reopening the raw declaration. Prepared input-independent package
+bodies are stable code; bodies containing active holes or input references are
+not. Copy preflight now traverses type payloads before cloning input bodies,
+replacing the old expression-only count. The shared walk also exposed a missing
+intrinsic payload: pending scalar evidence is now inspected and charged, so a
+hidden dependent intrinsic cannot become a shared specialization.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --lib --test copy_budget`:
+  8 library and 16 copy-budget tests passed, exit 0,
+  `/tmp/luna-tools-kwo7miiy/result.json`. Includes hidden pattern, closure,
+  normal-form and intrinsic types, traversal failure and non-mutating scans.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  all 457 tests passed (252 library plus integration groups), exit 0,
+  `/tmp/luna-tools-7v6hl52x/result.json`. New cases distinguish shared bodies
+  from dependent Type results, reject publication on failure, and verify eviction
+  with a live body. Repeated observation tests retain their original thresholds,
+  now measure warmed calls, and require zero recompilation plus one cached code
+  decision. The first cold-cost run failed the observation threshold at
+  `/tmp/luna-tools-fi0iibqm/result.json`; no threshold was increased.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_bytecode_lists --test comptime_list_operations --test function_type_dependencies --test execution`:
+  6, 4, 54, 37 and 1365 passed, exit 0,
+  `/tmp/luna-tools-cb1d9e63/result.json`. This preceded the pending-intrinsic
+  traversal addition and explicit comptime annotation in the new source case.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists`:
+  all 4 passed after those changes, exit 0,
+  `/tmp/luna-tools-z8z4p5v4/result.json`. The new case asserts the parameter is
+  ComptimeValue, supplies true/false/true lists, observes distinct results, and
+  requires three executions with one compilation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_math --test comptime_clause_inputs --test function_type_dependencies`:
+  9, 43 and 37 passed on the final implementation, exit 0,
+  `/tmp/luna-tools-i255o4n_/result.json`.
+- `LUNA_BENCH_ITERATIONS=10 python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench type_list_index`:
+  exit 0, `/tmp/luna-tools-c4ccr8z8/result.json`. Five warmups, ten measured
+  invocations, development profile, unchanged benchmark. For 4096 Type elements
+  and 64 literal-index reads: 959,840 allocated bytes and 408.10 allocations per
+  invocation. The earlier indexing-stage log recorded 1,182,656 bytes and
+  1522.10 allocations, but that is a historical revision comparison, not a
+  controlled release timing claim. Input binding and admission costs remain.
+
+Remaining work includes dependent-body specialization/code reuse, reducing
+repeated input binding and type metadata copies, and normal-form plan bytecode.
+The cache deliberately keeps no mutable environments, invocation values or
+active inference state.
+
+- Final managed `cargo fmt --all -- --check` passed, exit 0:
+  `/tmp/luna-tools-r6ezrx36/result.json`; `git diff --check` passed.

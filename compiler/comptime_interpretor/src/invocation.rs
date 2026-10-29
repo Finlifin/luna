@@ -470,17 +470,15 @@ impl<'a> Interpreter<'a> {
         } else {
             self.effect_state.environment.clear();
         }
-        let specialized_body = if let Some(scope) = &type_scope {
-            let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-            let before = fuel;
-            let checked = iir::visit::expression(body, &mut fuel, |_, _| Ok(()));
-            self.budget.steps -= (before - fuel) as u64;
-            checked.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(body.source)))?;
-            let mut body = body.clone();
-            self.specialize_input_types(&mut body, scope)?;
-            Some(body)
+        let (specialized_body, independent_body) = if let Some(scope) = &type_scope {
+            let declaration = match &function {
+                Value::Function(id) => Some(*id),
+                _ => None,
+            };
+            let (prepared, independent) = self.prepare_input_body(body, scope, declaration)?;
+            (Some(prepared), independent)
         } else {
-            None
+            (None, false)
         };
         let origin = match &function {
             Value::Function(id) => Some(*id),
@@ -516,11 +514,11 @@ impl<'a> Interpreter<'a> {
             self.events.push(Event::EnterFunction(id));
         }
         let stable_code = match &function {
-            Value::Function(id) if specialized_body.is_none() => Some(*id),
+            Value::Function(id) if specialized_body.is_none() || independent_body => Some(*id),
             _ => None,
         };
         let body = if let Some(body) = specialized_body {
-            Body::Owned(Arc::new(body))
+            Body::Owned(body)
         } else {
             match &function {
                 Value::Function(id) => Body::Package(&self.functions[id].body),

@@ -589,13 +589,15 @@ fn check_list_read_cost(local_index: bool) {
                 }
             };
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-            let before = vm.remaining_steps();
-            let compilation_before = vm.bytecode_compilation_steps();
             let mut arguments = vec![argument];
             if local_index {
                 arguments.push(Value::Integer(comptime_runtime::Integer::from_u128(511)));
             }
+            let first = vm.invoke(id(3), arguments.clone()).unwrap();
+            let before = vm.remaining_steps();
+            let compilation_before = vm.bytecode_compilation_steps();
             let result = vm.invoke(id(3), arguments).unwrap();
+            assert_eq!(result, first);
             assert_eq!(
                 result,
                 if element == P::Type {
@@ -606,8 +608,9 @@ fn check_list_read_cost(local_index: bool) {
             );
             // This assertion measures reads, separately from code generation.
             let compilation = vm.bytecode_compilation_steps() - compilation_before;
-            assert!(compilation > 0);
-            assert_eq!(vm.bytecode_invocations(), 1);
+            assert_eq!(compilation, 0);
+            assert_eq!(vm.bytecode_compilations(), 1);
+            assert_eq!(vm.bytecode_invocations(), 2);
             before - vm.remaining_steps() - compilation
         };
         let single = run(1);
@@ -924,6 +927,10 @@ fn repeated_list_lengths_charge_the_observation_not_every_element() {
                     },
                 )
                 .unwrap();
+                assert_eq!(
+                    vm.invoke(id(3), vec![argument.clone()]).unwrap(),
+                    Value::Integer(comptime_runtime::Integer::from_u128(length as u128))
+                );
                 let before = vm.remaining_steps();
                 let compilation_before = vm.bytecode_compilation_steps();
                 assert_eq!(
@@ -932,9 +939,10 @@ fn repeated_list_lengths_charge_the_observation_not_every_element() {
                 );
                 // This assertion measures reads, separately from code generation.
                 let compilation = vm.bytecode_compilation_steps() - compilation_before;
-                assert!(compilation > 0);
-                // AddressOf still selects the tree carrier; its probe is charged too.
-                assert_eq!(vm.bytecode_invocations(), usize::from(!storage));
+                assert_eq!(compilation, 0);
+                assert_eq!(vm.bytecode_compilations(), 1);
+                // AddressOf still selects the tree carrier; its lowering decision is reused.
+                assert_eq!(vm.bytecode_invocations(), 2 * usize::from(!storage));
                 before - vm.remaining_steps() - compilation
             };
             let small = run(1, 64, false) - run(1, 1, false);

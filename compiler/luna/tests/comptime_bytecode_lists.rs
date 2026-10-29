@@ -190,3 +190,38 @@ fn repeated_append_keeps_copies_and_callback_snapshots() {
         ])
     );
 }
+
+#[test]
+fn comptime_list_inputs_reuse_code_without_reusing_results() {
+    let package = support::compile_with_tuple(
+        "typealias Type = .Type'builtin;
+        typealias Integer = .Integer'builtin;
+        typealias List<T> = TupleElements<T>;
+        comptime fn yes() -> List<bool> { [true] }
+        comptime fn no() -> List<bool> { [false] }
+        comptime fn first(comptime values: List<bool>) -> bool { values[0] }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let yes = vm.invoke(support::id(&package, "yes"), vec![]).unwrap();
+    let no = vm.invoke(support::id(&package, "no"), vec![]).unwrap();
+    let first = package
+        .functions
+        .iter()
+        .find(|f| f.declaration == support::id(&package, "first"))
+        .unwrap();
+    let Term::Function { parameters, .. } = &first.signature else {
+        panic!("signature")
+    };
+    assert_eq!(parameters[0].sort, nir::Sort::ComptimeValue);
+    let compilations = vm.bytecode_compilations();
+    let invocations = vm.bytecode_invocations();
+    for (value, expected) in [(yes.clone(), true), (no, false), (yes, true)] {
+        assert_eq!(
+            vm.invoke(support::id(&package, "first"), vec![value])
+                .unwrap(),
+            Value::Bool(expected)
+        );
+    }
+    assert_eq!(vm.bytecode_compilations() - compilations, 1);
+    assert_eq!(vm.bytecode_invocations() - invocations, 3);
+}

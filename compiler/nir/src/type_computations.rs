@@ -504,7 +504,7 @@ pub fn nominal_declarations_bounded(
     })
 }
 
-fn visit_expanded_term(
+pub(crate) fn visit_expanded_term(
     root: &Term,
     fuel: &mut usize,
     max_depth: usize,
