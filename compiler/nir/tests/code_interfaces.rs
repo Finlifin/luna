@@ -478,3 +478,123 @@ fn pattern_method_signatures_preserve_output_category_names_and_type_identity() 
     assert!(dump.starts_with("(pattern-function-signature"));
     assert!(dump.contains("value\\\"\\n"), "{dump}");
 }
+
+fn consumer_signature() -> nir::code_interfaces::DataFunctionSignature {
+    use nir::code_interfaces::{CodeInput, DataFunctionSignature, PatternCodeInterface};
+    let code = interface();
+    let subject = code.result.clone();
+    DataFunctionSignature {
+        clause_domains: vec![Term::Primitive(Primitive::Type)],
+        inputs: vec![
+            (
+                LocalId { owner: 9, index: 0 },
+                CodeInput::Data(Term::Primitive(Primitive::Bool)),
+            ),
+            (LocalId { owner: 9, index: 1 }, CodeInput::Code(code)),
+            (
+                LocalId { owner: 9, index: 2 },
+                CodeInput::Pattern(PatternCodeInterface {
+                    subject: subject.clone(),
+                    outputs: BTreeMap::from([("success\"\n".into(), subject)]),
+                }),
+            ),
+        ],
+        output: Term::Primitive(Primitive::Type),
+    }
+}
+
+#[test]
+fn contextual_data_results_do_not_erase_input_categories() {
+    use nir::code_interfaces::CodeInput;
+    let signature = consumer_signature();
+    let before = signature.clone();
+    let mapped = signature
+        .try_map_types(|ty| {
+            ty.instantiate_types(
+                &[DeclarationId {
+                    package: 1,
+                    local: 3,
+                }],
+                &[Term::Primitive(Primitive::Char)],
+            )
+        })
+        .unwrap();
+    assert_eq!(mapped.output, Term::Primitive(Primitive::Type));
+    assert!(matches!(
+        mapped.inputs[0].1,
+        CodeInput::Data(Term::Primitive(Primitive::Bool))
+    ));
+    let CodeInput::Code(expr) = &mapped.inputs[1].1 else {
+        panic!()
+    };
+    let CodeInput::Pattern(pattern) = &mapped.inputs[2].1 else {
+        panic!()
+    };
+    assert_eq!(
+        expr.context[&LocalId { owner: 2, index: 1 }],
+        Term::Primitive(Primitive::Char)
+    );
+    assert!(matches!(expr.result, Term::NormalForm { .. }));
+    assert_eq!(expr.result, pattern.subject);
+    assert_eq!(pattern.outputs.values().next().unwrap(), &expr.result);
+    assert_eq!(expr.ports, interface().ports);
+    assert_eq!(expr.defaults, interface().defaults);
+    assert_eq!(signature, before);
+    let dump = mapped.to_string();
+    assert!(
+        dump.starts_with("(data-consumer-signature (clauses"),
+        "{dump}"
+    );
+    assert!(dump.contains("(code (code-interface"), "{dump}");
+    assert!(dump.contains("(pattern (pattern-interface"), "{dump}");
+    assert!(dump.contains("\"success\\\"\\n\""), "{dump}");
+    assert!(!dump.contains('\n'));
+}
+
+#[test]
+fn data_consumer_transforms_are_atomic_through_the_output() {
+    let signature = consumer_signature();
+    let original = signature.clone();
+    let mut visited = Vec::new();
+    let failure = signature.try_map_types(|ty| {
+        visited.push(ty.clone());
+        if visited.len() == 8 {
+            Err("output rejected")
+        } else {
+            Ok(ty.clone())
+        }
+    });
+    assert_eq!(failure, Err("output rejected"));
+    assert_eq!(visited.last(), Some(&signature.output));
+    assert_eq!(signature, original);
+    assert_eq!(
+        signature
+            .try_map_types(|ty| Ok::<_, ()>(ty.clone()))
+            .unwrap(),
+        original
+    );
+}
+
+#[test]
+fn data_consumer_budgets_and_dependency_walk_include_code_interfaces() {
+    let signature = consumer_signature();
+    let mut fuel = 10_000;
+    signature.charge(&mut fuel).unwrap();
+    let work = 10_000 - fuel;
+    assert_eq!(signature.charge(&mut (work - 1)), Err(Error::Budget));
+    let mut exact = work;
+    signature.charge(&mut exact).unwrap();
+    assert_eq!(exact, 0);
+    let terms: Vec<_> = signature.type_terms().cloned().collect();
+    assert_eq!(terms.len(), 8);
+    assert_eq!(terms[0], Term::Primitive(Primitive::Type));
+    assert_eq!(terms.last(), Some(&Term::Primitive(Primitive::Type)));
+    assert!(terms.iter().any(|ty| matches!(ty, Term::Rigid { .. })));
+    assert_eq!(
+        terms
+            .iter()
+            .filter(|ty| matches!(ty, Term::NormalForm { .. }))
+            .count(),
+        3
+    );
+}

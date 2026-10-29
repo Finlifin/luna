@@ -2,10 +2,7 @@
 //! quote remains ordinary NIR and never targets these construction loops.
 use super::*;
 
-enum CodeWitness {
-    Expression(Arc<ExpressionCode>),
-    Pattern(Arc<patterns::PatternCode>),
-}
+use comptime_interpretor::CodeValue as CodeWitness;
 
 #[derive(Clone, Copy)]
 pub(in crate::program::cmtt) enum ResultInterface<'a> {

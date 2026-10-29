@@ -11,12 +11,7 @@ enum PatternInput {
     Code(Arc<PatternCode>),
 }
 
-enum PatternArgument {
-    Data(Option<n::Expr>),
-    LiveData(comptime_interpretor::Value),
-    Expression(Arc<ExpressionCode>),
-    Code(Arc<PatternCode>),
-}
+use super::super::generators::Argument as PatternArgument;
 
 impl fmt::Display for PatternInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1155,7 +1150,7 @@ impl Checker<'_, '_> {
                                 .chain(code.context.values().cloned())
                                 .collect(),
                         );
-                        (PatternArgument::Expression(code), shape)
+                        (PatternArgument::Code(CodeValue::Expression(code)), shape)
                     }
                     PatternInput::Code(interface) => {
                         if packets.fields.contains_key(&local(value.hir_id)) {
@@ -1187,7 +1182,7 @@ impl Checker<'_, '_> {
                                 .chain(code.outputs.values().map(|(_, ty)| ty.clone()))
                                 .collect(),
                         );
-                        (PatternArgument::Code(code), shape)
+                        (PatternArgument::Code(CodeValue::Pattern(code)), shape)
                     }
                     PatternInput::Data(ty) => {
                         if collected.contains_key(&index)
@@ -1542,12 +1537,15 @@ impl Checker<'_, '_> {
             for (index, (_, input)) in definition.inputs.iter().enumerate() {
                 match (&mut supplied[index], input) {
                     (
-                        Some(PatternArgument::Expression(code)),
+                        Some(PatternArgument::Code(CodeValue::Expression(code))),
                         PatternInput::Expression(expected),
                     ) => {
                         *code = self.ascribe_code(code.clone(), Some(expected), span)?;
                     }
-                    (Some(PatternArgument::Code(code)), PatternInput::Code(expected)) => {
+                    (
+                        Some(PatternArgument::Code(CodeValue::Pattern(code))),
+                        PatternInput::Code(expected),
+                    ) => {
                         self.ascribe_pattern_input(
                             code,
                             &PatternInterface {
@@ -1602,10 +1600,16 @@ impl Checker<'_, '_> {
                         (PatternInput::Data(ty), PatternArgument::LiveData(value)) => {
                             this.install_live_generator_input(*id, ty, value, parameter.span);
                         }
-                        (PatternInput::Expression(_), PatternArgument::Expression(code)) => {
+                        (
+                            PatternInput::Expression(_),
+                            PatternArgument::Code(CodeValue::Expression(code)),
+                        ) => {
                             this.code_values.insert(*id, code);
                         }
-                        (PatternInput::Code(_), PatternArgument::Code(code)) => {
+                        (
+                            PatternInput::Code(_),
+                            PatternArgument::Code(CodeValue::Pattern(code)),
+                        ) => {
                             this.pattern_codes.insert(*id, code);
                         }
                         _ => unreachable!("pattern argument category changed"),
@@ -1773,61 +1777,64 @@ impl Checker<'_, '_> {
         checked?;
         let mut arguments = Vec::new();
         for ((binding, input), (_, expected)) in public.inputs.iter().zip(&definition.inputs) {
-            let argument = match (input, expected) {
-                (PatternInput::Data(actual), PatternInput::Data(expected)) => {
-                    self.require(actual, expected, span)?;
-                    let value = self
-                        .generator_data
-                        .get(binding)
-                        .ok_or_else(|| error(span, "missing trait code data input"))?;
-                    if let Some(value) = value {
-                        constants::charge_copy(value, &mut self.required_steps, span)?;
-                    }
-                    if value
-                        .as_ref()
-                        .is_some_and(|value| matches!(value.kind, K::Local(id) if id == *binding))
-                    {
-                        let cell = self
-                            .generator_cells
+            let argument =
+                match (input, expected) {
+                    (PatternInput::Data(actual), PatternInput::Data(expected)) => {
+                        self.require(actual, expected, span)?;
+                        let value = self
+                            .generator_data
                             .get(binding)
-                            .ok_or_else(|| error(span, "missing live trait code input"))?
-                            .1
-                            .clone();
-                        PatternArgument::LiveData(self.read_generator_cell(&cell, span)?)
-                    } else {
-                        PatternArgument::Data(value.clone())
+                            .ok_or_else(|| error(span, "missing trait code data input"))?;
+                        if let Some(value) = value {
+                            constants::charge_copy(value, &mut self.required_steps, span)?;
+                        }
+                        if value.as_ref().is_some_and(
+                            |value| matches!(value.kind, K::Local(id) if id == *binding),
+                        ) {
+                            let cell = self
+                                .generator_cells
+                                .get(binding)
+                                .ok_or_else(|| error(span, "missing live trait code input"))?
+                                .1
+                                .clone();
+                            PatternArgument::LiveData(self.read_generator_cell(&cell, span)?)
+                        } else {
+                            PatternArgument::Data(value.clone())
+                        }
                     }
-                }
-                (PatternInput::Expression(_), PatternInput::Expression(expected)) => {
-                    let code = self
-                        .code_values
-                        .get(binding)
-                        .cloned()
-                        .ok_or_else(|| error(span, "missing trait expression code input"))?;
-                    PatternArgument::Expression(self.ascribe_code(code, Some(expected), span)?)
-                }
-                (PatternInput::Code(_), PatternInput::Code(expected)) => {
-                    let code = self
-                        .pattern_codes
-                        .get(binding)
-                        .cloned()
-                        .ok_or_else(|| error(span, "missing trait pattern code input"))?;
-                    self.ascribe_pattern_input(
-                        &code,
-                        &PatternInterface {
-                            subject: expected.subject.clone(),
-                            outputs: expected
-                                .outputs
-                                .iter()
-                                .map(|(name, (_, ty))| (name.clone(), ty.clone()))
-                                .collect(),
-                        },
-                        span,
-                    )?;
-                    PatternArgument::Code(code)
-                }
-                _ => return Err(error(span, "selected code method input category mismatch")),
-            };
+                    (PatternInput::Expression(_), PatternInput::Expression(expected)) => {
+                        let code =
+                            self.code_values.get(binding).cloned().ok_or_else(|| {
+                                error(span, "missing trait expression code input")
+                            })?;
+                        PatternArgument::Code(CodeValue::Expression(self.ascribe_code(
+                            code,
+                            Some(expected),
+                            span,
+                        )?))
+                    }
+                    (PatternInput::Code(_), PatternInput::Code(expected)) => {
+                        let code = self
+                            .pattern_codes
+                            .get(binding)
+                            .cloned()
+                            .ok_or_else(|| error(span, "missing trait pattern code input"))?;
+                        self.ascribe_pattern_input(
+                            &code,
+                            &PatternInterface {
+                                subject: expected.subject.clone(),
+                                outputs: expected
+                                    .outputs
+                                    .iter()
+                                    .map(|(name, (_, ty))| (name.clone(), ty.clone()))
+                                    .collect(),
+                            },
+                            span,
+                        )?;
+                        PatternArgument::Code(CodeValue::Pattern(code))
+                    }
+                    _ => return Err(error(span, "selected code method input category mismatch")),
+                };
             arguments.push(argument);
         }
         self.generator_frame(target, |this| {
@@ -1853,10 +1860,13 @@ impl Checker<'_, '_> {
                     (PatternInput::Data(ty), PatternArgument::LiveData(value)) => {
                         this.install_live_generator_input(*binding, ty, value, span);
                     }
-                    (PatternInput::Expression(_), PatternArgument::Expression(code)) => {
+                    (
+                        PatternInput::Expression(_),
+                        PatternArgument::Code(CodeValue::Expression(code)),
+                    ) => {
                         this.code_values.insert(*binding, code);
                     }
-                    (PatternInput::Code(_), PatternArgument::Code(code)) => {
+                    (PatternInput::Code(_), PatternArgument::Code(CodeValue::Pattern(code))) => {
                         this.pattern_codes.insert(*binding, code);
                     }
                     _ => {
@@ -1942,11 +1952,11 @@ impl Checker<'_, '_> {
                 self.locals.extend(interface.context.clone());
                 let code = self.code_value(value, Some(interface), 0);
                 self.locals = locals;
-                code.map(PatternArgument::Expression)
+                code.map(|code| PatternArgument::Code(CodeValue::Expression(code)))
             }
-            PatternInput::Code(interface) => Ok(PatternArgument::Code(
+            PatternInput::Code(interface) => Ok(PatternArgument::Code(CodeValue::Pattern(
                 self.pattern_argument(value, interface)?,
-            )),
+            ))),
             PatternInput::Data(ty) => {
                 if self.checking_code_generator {
                     self.check_generator_data_input(value, Some(ty), None)?;

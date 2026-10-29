@@ -173,3 +173,54 @@ All 208 VM tests passed, including six code-transfer tests
 tests (`/tmp/luna-tools-59p4z5mr/result.json`); the result-cache groups passed 14
 (`/tmp/luna-tools-qc71fxts/result.json`). The earlier dev-stack failure and its
 independent freezing repair are recorded in `development/comptime-vm.md`.
+
+## Contextual inputs independent of result category
+
+Expression and pattern signatures now share `CodeFunctionSignature<O>`.
+`PatternFunctionSignature` specializes the output to `PatternCodeInterface`;
+`DataFunctionSignature` specializes it to an ordinary Term. The input telescope
+continues to distinguish Data, Code and Pattern. A Type-valued data result
+therefore does not turn a code parameter into Type or into its runtime result.
+Shared substitution, budget charging and dependency traversal cover every
+input interface and the actual output domain. Existing expression/pattern dump
+shapes are unchanged; data results use `data-consumer-signature`.
+
+Both source generator categories now use one argument packet and the VM's
+`CodeValue` category tags, including methods, defaults and conditional code
+bindings. Definition-side pending witnesses remain permitted in the elaborator;
+this does not bypass the VM transport rejection of missing executable bodies.
+
+The next source boundary is a data-returning contextual call. Current
+`is_code_generator`/`is_pattern_generator` classification selects functions by
+their contextual return annotation. Ordinary signature formation cannot express
+contextual inputs, and the construction control-flow evaluator currently has
+expression and pattern returns only. Consequently the shared data signature is
+not yet a source-callable feature. Connecting it requires:
+
+- Registering code-consuming data functions separately from ordinary callable
+  Terms, retaining clause domains, captures, defaults and contracts.
+- Reusing code-aware argument routing and generator frames for input admission;
+  ordinary runtime argument evaluation must not be introduced for code values.
+- Extending construction control flow with data returns, checking all definition
+  paths while executing only selected invocation paths. Eagerly elaborating an
+  entire data body and then running its NIR would execute code-construction
+  effects from unselected branches and is not a valid shortcut.
+- Returning the resulting ordinary value through required comptime invocation,
+  before exposing this path to library builder defaults or typed code containers.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p nir --test code_interfaces --test code_values
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+All 20 NIR tests passed (`/tmp/luna-tools-jlgkv_3s/result.json`), including mixed
+input categories with a Type result, substitution failure/recovery and complete
+budget/dependency coverage. All 530 source CMTT and phase-boundary tests passed
+after the shared argument change (`/tmp/luna-tools-5z6ptvxj/result.json`).
+Formatting completed (`/tmp/luna-tools-3vq5nnji/result.json`); whitespace checks
+passed. The earlier source run before the argument unification is not the final
+validation for that change.

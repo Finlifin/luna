@@ -142,15 +142,17 @@ pub enum CodeInput {
     Pattern(PatternCodeInterface),
 }
 
-/// Signature shared by code-producing definitions and method contracts.
+/// A contextual call preserves each input category independently of its result.
+/// The default output is expression code for compatibility with its producers;
+/// pattern producers and data consumers use the same argument telescope.
 /// Clause binders and invocation routing remain on the enclosing declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CodeFunctionSignature {
+pub struct CodeFunctionSignature<O = ExpressionCodeInterface> {
     /// Method-local clause domains in declaration order; Type domains bind
     /// types, all other domains bind comptime values.
     pub clause_domains: Vec<Term>,
     pub inputs: Vec<(LocalId, CodeInput)>,
-    pub output: ExpressionCodeInterface,
+    pub output: O,
 }
 
 impl fmt::Display for CodeInput {
@@ -163,9 +165,67 @@ impl fmt::Display for CodeInput {
     }
 }
 
-impl fmt::Display for CodeFunctionSignature {
+/// Operations shared by code and ordinary-data results. They preserve the
+/// output category; changing a signature result requires an explicit new type.
+pub trait SignatureOutput: Sized + fmt::Display {
+    const DUMP_KIND: &'static str;
+    fn charge_output(&self, fuel: &mut usize) -> Result<(), type_computations::Error>;
+    fn try_map_output<E>(&self, transform: impl FnMut(&Term) -> Result<Term, E>)
+    -> Result<Self, E>;
+    fn output_terms(&self) -> impl Iterator<Item = &Term>;
+}
+
+impl SignatureOutput for ExpressionCodeInterface {
+    const DUMP_KIND: &'static str = "code-function-signature";
+    fn charge_output(&self, fuel: &mut usize) -> Result<(), type_computations::Error> {
+        self.charge(fuel)
+    }
+    fn try_map_output<E>(
+        &self,
+        transform: impl FnMut(&Term) -> Result<Term, E>,
+    ) -> Result<Self, E> {
+        self.try_map_types(transform)
+    }
+    fn output_terms(&self) -> impl Iterator<Item = &Term> {
+        self.context.values().chain(std::iter::once(&self.result))
+    }
+}
+
+impl SignatureOutput for PatternCodeInterface {
+    const DUMP_KIND: &'static str = "pattern-function-signature";
+    fn charge_output(&self, fuel: &mut usize) -> Result<(), type_computations::Error> {
+        self.charge(fuel)
+    }
+    fn try_map_output<E>(
+        &self,
+        transform: impl FnMut(&Term) -> Result<Term, E>,
+    ) -> Result<Self, E> {
+        self.try_map_types(transform)
+    }
+    fn output_terms(&self) -> impl Iterator<Item = &Term> {
+        std::iter::once(&self.subject).chain(self.outputs.values())
+    }
+}
+
+impl SignatureOutput for Term {
+    const DUMP_KIND: &'static str = "data-consumer-signature";
+    fn charge_output(&self, fuel: &mut usize) -> Result<(), type_computations::Error> {
+        type_computations::charge_term(self, fuel)
+    }
+    fn try_map_output<E>(
+        &self,
+        mut transform: impl FnMut(&Term) -> Result<Term, E>,
+    ) -> Result<Self, E> {
+        transform(self)
+    }
+    fn output_terms(&self) -> impl Iterator<Item = &Term> {
+        std::iter::once(self)
+    }
+}
+
+impl<O: SignatureOutput> fmt::Display for CodeFunctionSignature<O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("(code-function-signature (clauses")?;
+        write!(f, "({} (clauses", O::DUMP_KIND)?;
         for domain in &self.clause_domains {
             write!(f, " (domain {domain})")?;
         }
@@ -177,7 +237,15 @@ impl fmt::Display for CodeFunctionSignature {
     }
 }
 
-impl CodeFunctionSignature {
+impl<O: SignatureOutput> CodeFunctionSignature<O> {
+    /// Visit every semantic domain without treating code as its runtime result.
+    pub fn type_terms(&self) -> impl Iterator<Item = &Term> {
+        self.clause_domains
+            .iter()
+            .chain(self.inputs.iter().flat_map(|(_, input)| input.type_terms()))
+            .chain(self.output.output_terms())
+    }
+
     pub fn charge(&self, fuel: &mut usize) -> Result<(), type_computations::Error> {
         for domain in &self.clause_domains {
             type_computations::charge_term(domain, fuel)?;
@@ -192,7 +260,7 @@ impl CodeFunctionSignature {
                 CodeInput::Pattern(interface) => interface.charge(fuel)?,
             }
         }
-        self.output.charge(fuel)
+        self.output.charge_output(fuel)
     }
 
     /// Apply a declaration's completed substitution to every input and result.
@@ -224,85 +292,18 @@ impl CodeFunctionSignature {
                 .map(&mut transform)
                 .collect::<Result<_, E>>()?,
             inputs,
-            output: self.output.try_map_types(transform)?,
+            output: self.output.try_map_output(transform)?,
         })
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PatternFunctionSignature {
-    /// Method-local clause domains in declaration order; Type domains bind
-    /// types, all other domains bind comptime values.
-    pub clause_domains: Vec<Term>,
-    pub inputs: Vec<(LocalId, CodeInput)>,
-    pub output: PatternCodeInterface,
-}
+/// Pattern-producing contextual calls retain named success outputs.
+pub type PatternFunctionSignature = CodeFunctionSignature<PatternCodeInterface>;
 
-impl fmt::Display for PatternFunctionSignature {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("(pattern-function-signature (clauses")?;
-        for domain in &self.clause_domains {
-            write!(f, " (domain {domain})")?;
-        }
-        f.write_str(") (inputs")?;
-        for (binding, input) in &self.inputs {
-            write!(f, " (input {binding} {input})")?;
-        }
-        write!(f, ") (output {}))", self.output)
-    }
-}
-
-impl PatternFunctionSignature {
-    pub fn charge(&self, fuel: &mut usize) -> Result<(), type_computations::Error> {
-        for domain in &self.clause_domains {
-            type_computations::charge_term(domain, fuel)?;
-        }
-        *fuel = fuel
-            .checked_sub(self.inputs.len())
-            .ok_or(type_computations::Error::Budget)?;
-        for (_, input) in &self.inputs {
-            match input {
-                CodeInput::Data(ty) => type_computations::charge_term(ty, fuel)?,
-                CodeInput::Code(interface) => interface.charge(fuel)?,
-                CodeInput::Pattern(interface) => interface.charge(fuel)?,
-            }
-        }
-        self.output.charge(fuel)
-    }
-
-    /// Apply a declaration's completed substitution to every input and result.
-    /// The data/code distinction and all contextual identities are preserved.
-    pub fn try_map_types<E>(
-        &self,
-        mut transform: impl FnMut(&Term) -> Result<Term, E>,
-    ) -> Result<Self, E> {
-        let inputs = self
-            .inputs
-            .iter()
-            .map(|(binding, input)| {
-                let input = match input {
-                    CodeInput::Data(ty) => CodeInput::Data(transform(ty)?),
-                    CodeInput::Pattern(interface) => {
-                        CodeInput::Pattern(interface.try_map_types(&mut transform)?)
-                    }
-                    CodeInput::Code(interface) => {
-                        CodeInput::Code(interface.try_map_types(&mut transform)?)
-                    }
-                };
-                Ok((*binding, input))
-            })
-            .collect::<Result<_, E>>()?;
-        Ok(Self {
-            clause_domains: self
-                .clause_domains
-                .iter()
-                .map(&mut transform)
-                .collect::<Result<_, E>>()?,
-            inputs,
-            output: self.output.try_map_types(transform)?,
-        })
-    }
-}
+/// A comptime call may consume code while returning ordinary data, including
+/// Type. This signature is not an ordinary callable Term: its inputs still
+/// carry contextual interfaces and require code-aware call admission.
+pub type DataFunctionSignature = CodeFunctionSignature<Term>;
 
 /// Interface members with code results retain their contextual signature;
 /// ordinary callable consumers must request an ordinary type explicitly.
@@ -422,31 +423,14 @@ impl MethodSignature {
         };
         ordinary
             .into_iter()
-            .chain(code.into_iter().flat_map(|signature| {
-                signature
-                    .clause_domains
-                    .iter()
-                    .chain(
-                        signature
-                            .inputs
-                            .iter()
-                            .flat_map(|(_, input)| input.type_terms()),
-                    )
-                    .chain(signature.output.context.values())
-                    .chain(std::iter::once(&signature.output.result))
-            }))
-            .chain(pattern.into_iter().flat_map(|signature| {
-                signature
-                    .clause_domains
-                    .iter()
-                    .chain(
-                        signature
-                            .inputs
-                            .iter()
-                            .flat_map(|(_, input)| input.type_terms()),
-                    )
-                    .chain(std::iter::once(&signature.output.subject))
-                    .chain(signature.output.outputs.values())
-            }))
+            .chain(
+                code.into_iter()
+                    .flat_map(|signature| signature.type_terms()),
+            )
+            .chain(
+                pattern
+                    .into_iter()
+                    .flat_map(|signature| signature.type_terms()),
+            )
     }
 }

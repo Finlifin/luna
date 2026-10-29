@@ -37,8 +37,7 @@ impl std::ops::DerefMut for Generator {
 pub(in crate::program::cmtt) enum Argument {
     Data(Option<n::Expr>),
     LiveData(comptime_interpretor::Value),
-    Code(Arc<ExpressionCode>),
-    Pattern(Arc<patterns::PatternCode>),
+    Code(CodeValue),
 }
 // Entry snapshots copy parameter values, not the objects reached through pointers.
 type GeneratorEntryData = BTreeMap<n::LocalId, (n::Expr, Option<comptime_interpretor::Storage>)>;
@@ -491,20 +490,22 @@ impl Checker<'_, '_> {
             .iter()
             .map(|(_, input)| {
                 Ok(match input {
-                    Input::Pattern(interface) => {
-                        Some(Argument::Pattern(self.abstract_pattern_input(
+                    Input::Pattern(interface) => Some(Argument::Code(CodeValue::Pattern(
+                        self.abstract_pattern_input(
                             interface,
                             self.package.item(owner).unwrap().span,
-                        )?))
-                    }
+                        )?,
+                    ))),
                     Input::Data(_) => Some(Argument::Data(None)),
-                    Input::Code(interface) => Some(Argument::Code(Arc::new(ExpressionCode {
-                        body: None,
-                        result: interface.result.clone(),
-                        context: interface.context.clone(),
-                        ports: interface.ports.clone(),
-                        defaults: BTreeMap::new(),
-                    }))),
+                    Input::Code(interface) => Some(Argument::Code(CodeValue::Expression(
+                        Arc::new(ExpressionCode {
+                            body: None,
+                            result: interface.result.clone(),
+                            context: interface.context.clone(),
+                            ports: interface.ports.clone(),
+                            defaults: BTreeMap::new(),
+                        }),
+                    ))),
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -1352,7 +1353,7 @@ impl Checker<'_, '_> {
                             .chain(code.outputs.values().map(|(_, ty)| ty.clone()))
                             .collect(),
                     );
-                    (Argument::Pattern(code), ty)
+                    (Argument::Code(CodeValue::Pattern(code)), ty)
                 }
                 Input::Code(interface) => {
                     if packets.fields.contains_key(&local(argument.hir_id)) {
@@ -1381,7 +1382,7 @@ impl Checker<'_, '_> {
                             .chain(code.context.values().cloned())
                             .collect(),
                     );
-                    (Argument::Code(code), ty)
+                    (Argument::Code(CodeValue::Expression(code)), ty)
                 }
                 Input::Data(ty) => {
                     let property_context = if let Some(fields) = properties[route_index] {
@@ -1726,10 +1727,10 @@ impl Checker<'_, '_> {
         for ((value, actual), (_, input)) in values.iter_mut().zip(&actual).zip(&definition.inputs)
         {
             match (value, input) {
-                (Some(Argument::Pattern(code)), Input::Pattern(interface)) => {
+                (Some(Argument::Code(CodeValue::Pattern(code))), Input::Pattern(interface)) => {
                     self.ascribe_pattern_input(code, interface, site.span)?;
                 }
-                (Some(Argument::Code(code)), Input::Code(interface)) => {
+                (Some(Argument::Code(CodeValue::Expression(code))), Input::Code(interface)) => {
                     *code = self.ascribe_code(code.clone(), Some(interface), site.span)?
                 }
                 (Some(Argument::Data(_) | Argument::LiveData(_)), Input::Data(ty)) => {
@@ -1757,7 +1758,7 @@ impl Checker<'_, '_> {
                 let code =
                     self.pattern_input_value(value, interface, Some(&interface.subject), None)?;
                 self.ascribe_pattern_input(&code, interface, value.span)?;
-                Ok(Argument::Pattern(code))
+                Ok(Argument::Code(CodeValue::Pattern(code)))
             }
             Input::Data(ty) => {
                 if self.checking_code_generator {
@@ -1780,7 +1781,7 @@ impl Checker<'_, '_> {
                 self.locals.extend(interface.context.clone());
                 let code = self.code_value(value, Some(interface), 0);
                 self.locals = locals;
-                code.map(Argument::Code)
+                code.map(|code| Argument::Code(CodeValue::Expression(code)))
             }
         }
     }
@@ -1884,7 +1885,7 @@ impl Checker<'_, '_> {
             })?;
             self.immutable.insert(*id);
             match (input, argument) {
-                (Input::Pattern(interface), Argument::Pattern(code)) => {
+                (Input::Pattern(interface), Argument::Code(CodeValue::Pattern(code))) => {
                     self.ascribe_pattern_input(&code, interface, signature.span)?;
                     self.pattern_codes.insert(*id, code);
                 }
@@ -1895,7 +1896,7 @@ impl Checker<'_, '_> {
                 (Input::Data(ty), Argument::LiveData(value)) => {
                     self.install_live_generator_input(*id, ty, value, signature.params[index].span);
                 }
-                (Input::Code(interface), Argument::Code(code)) => {
+                (Input::Code(interface), Argument::Code(CodeValue::Expression(code))) => {
                     let mut defaults = code.defaults.clone();
                     for (name, from) in &interface.ports {
                         if let Some(to) = definition.output.ports.get(name) {

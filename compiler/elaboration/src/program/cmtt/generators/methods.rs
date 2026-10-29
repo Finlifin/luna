@@ -171,7 +171,7 @@ impl Checker<'_, '_> {
                         .cloned()
                         .ok_or_else(|| error(span, "missing trait pattern code input"))?;
                     self.ascribe_pattern_input(&code, expected, span)?;
-                    Argument::Pattern(code)
+                    Argument::Code(CodeValue::Pattern(code))
                 }
                 (Input::Code(_), Input::Code(expected)) => {
                     let code = self
@@ -179,7 +179,11 @@ impl Checker<'_, '_> {
                         .get(binding)
                         .cloned()
                         .ok_or_else(|| error(span, "missing trait code input"))?;
-                    Argument::Code(self.ascribe_code(code, Some(expected), span)?)
+                    Argument::Code(CodeValue::Expression(self.ascribe_code(
+                        code,
+                        Some(expected),
+                        span,
+                    )?))
                 }
                 _ => return Err(error(span, "selected code method input category mismatch")),
             };

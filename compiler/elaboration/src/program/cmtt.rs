@@ -6,6 +6,7 @@ mod functions;
 mod generators;
 pub(super) mod patterns;
 mod test_templates;
+use comptime_interpretor::CodeValue;
 pub(super) use functions::expand_quote_functions;
 pub(crate) use functions::{expand_bound_quote, expand_materialized_quotes, inline_template};
 pub(super) use generators::Generator;
