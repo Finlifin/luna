@@ -80,11 +80,31 @@ impl<'hir> StructPublisher<'hir> {
         request: &StructBuildRequest,
         invocation_steps: &mut u64,
     ) -> Result<PreparedStructBuild<'s>, Error> {
+        self.prepare_with_defaults(request, invocation_steps, |_, _, _, _| Ok(None))
+    }
+    /// Assemble defaults in the candidate's hygienic field scopes, then run
+    /// ordinary elaboration before publication. The callback shares structural
+    /// fuel and may use CMTT nodes; it must not capture live checker state.
+    /// Defaults remain in the retained HIR returned by `finish`, for subsequent
+    /// constructor elaboration. Installing the returned VM type descriptors
+    /// alone does not install default expressions or suspend a running checker.
+    pub fn prepare_with_defaults<'s>(
+        &'s self,
+        request: &StructBuildRequest,
+        invocation_steps: &mut u64,
+        mut make_default: impl FnMut(
+            usize,
+            hir::HirId,
+            &mut hir::definitions::DefinitionNodes<'hir>,
+            &mut usize,
+        )
+            -> Result<Option<&'hir hir::Expr<'hir>>, hir::definitions::Error>,
+    ) -> Result<PreparedStructBuild<'s>, Error> {
         *self.diagnostic.borrow_mut() = None;
         // Reserve before running any fallible construction; unwind cannot
         // replenish the structural allowance independently of invocation fuel.
         let mut fuel = self.structural_fuel.replace(0);
-        let result = self.prepare_inner(request, invocation_steps, &mut fuel);
+        let result = self.prepare_inner(request, invocation_steps, &mut fuel, &mut make_default);
         self.structural_fuel.set(fuel);
         result
     }
@@ -93,6 +113,13 @@ impl<'hir> StructPublisher<'hir> {
         request: &StructBuildRequest,
         invocation_steps: &mut u64,
         fuel: &mut usize,
+        make_default: impl FnMut(
+            usize,
+            hir::HirId,
+            &mut hir::definitions::DefinitionNodes<'hir>,
+            &mut usize,
+        )
+            -> Result<Option<&'hir hir::Expr<'hir>>, hir::definitions::Error>,
     ) -> Result<PreparedStructBuild<'s>, Error> {
         let published = self.published.borrow();
         let revision = published.revision;
@@ -129,13 +156,14 @@ impl<'hir> StructPublisher<'hir> {
                 span: DUMMY_SP,
             })
             .collect();
-        let info = hir::definitions::assemble_struct(
+        let info = hir::definitions::assemble_struct_with_defaults(
             self.arena,
             owner,
             Ident::new(Symbol::intern(&request.name), DUMMY_SP),
             &fields,
             DUMMY_SP,
             fuel,
+            make_default,
         )
         .map_err(|error| self.failure(request, error))?;
         batch
@@ -159,9 +187,9 @@ impl<'hir> StructPublisher<'hir> {
             .iter()
             .find(|item| item.declaration == result)
             .ok_or_else(|| self.failure(request, "checked builder result is missing"))?;
-        // The current request constructs no clauses or defaults. Copy only the
-        // generated descriptor, preserving the complete checked package for the
-        // consumer rather than repeating semantic work to recover it later.
+        // Copy the layout descriptor for VM admission. Default expressions stay
+        // in candidate HIR for constructor elaboration; neither callbacks nor
+        // active checker state are retained in the descriptor.
         for (_, ty) in &definition.fields {
             nir::type_computations::charge_term(ty, fuel).map_err(|error| {
                 self.failure(request, format!("builder descriptor copy: {error:?}"))

@@ -1217,6 +1217,46 @@ primary entry identity. Targeted rustfmt and `git diff --check` passed.
 
 ## Compiler-owned struct publisher
 
+### Transactional field-default assembly
+
+`StructPublisher::prepare_with_defaults` connects the existing checked HIR field
+assembler to the publisher's candidate/commit boundary. The host callback is
+called in field declaration order with each field's hygienic identity and the
+shared structural allowance. It can supply an ordinary expression or CMTT
+quote/splice expression, or leave the field without a default. Ordinary
+elaboration checks the complete candidate before producing a prepared result.
+
+Rejected, discarded, or stale candidates cannot replace committed definitions.
+Callback failure consumes the structural work already performed; unwind retires
+the reserved structural allowance. Host callback side effects and arena
+allocations are not rolled back. The callback must not capture active inference
+state. The existing `prepare` method uses the same path without defaults.
+
+Defaults remain in the HIR returned by `finish`, so later constructor elaboration
+can instantiate them. The VM's concrete descriptor packet contains field Types,
+not default expressions. This entrypoint does not add a source `add_field`
+default parameter, code-value transport from a running invocation, or generated
+method publication. Those remain necessary for the full SoA example.
+
+The regression constructs a quoted Boolean field default, rejects a Char
+replacement, retries successfully, commits, then elaborates and executes a new
+consumer that omits the field. Additional checks cover field order, optional
+absence, abandoned/stale candidates, callback failure and unwind. A later
+publication re-elaborates the retained default, and misplaced default roots are
+rejected before commit.
+
+Validation from `/home/fin/luna` (2026-10-29):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test struct_publisher_defaults --test struct_publisher --test delivered_types --test generated_methods
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations --test generated_definitions
+```
+
+Both commands exited 0: 18 elaboration tests and 73 source/generated-definition
+tests. Reports: `/tmp/luna-tools-xge6j_e6/result.json` and
+`/tmp/luna-tools-hxw8sc7s/result.json`. Formatting and diff checks passed.
+
+
 `DeferredStructPublisher` borrows the source package and configuration until the
 first request. It then creates one owned `StructPublisher` through budgeted HIR
 forking. Both implement `StructBuildService`, so invocation uses the same checked
@@ -1883,10 +1923,12 @@ original query while fields/payloads use admitted selected descriptions. Opaque
 normal-form heads still do not unfold. This does not admit unresolved inference
 state or establish a source spelling for reflection APIs.
 
-This is **not** a working `StructBuilder.new/add_field/build` API. There is no
-new runtime/VM builder value or source-language reflection/builder method yet.
-The internal reflection query does not execute attribute consumers or reflect
-field defaults. The SoA example still cannot run through this feature.
+The source field-only `StructBuilder.new/add_field/Build` API and concrete enum
+builders are now available (see the source integration sections above). The
+internal reflection query does not execute attribute consumers or reflect field
+defaults. Host field-default assembly is connected to transactional HIR
+publication, but source default-code transport and generated methods remain
+unfinished; the full SoA example still cannot run through these APIs.
 
 The next integration must transport owned, invocation-local definition drafts
 from the VM to a candidate elaboration world. Generated names and use-site
