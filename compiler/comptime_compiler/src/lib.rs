@@ -12,6 +12,24 @@ pub type Register = usize;
 
 #[derive(Debug)]
 pub enum Op {
+    BeginCall {
+        call: Register,
+        callee: Register,
+        parameter_bindings: Vec<LocalId>,
+    },
+    CheckCallArgument {
+        call: Register,
+        parameter: usize,
+    },
+    StoreCallArgument {
+        call: Register,
+        parameter: usize,
+        value: Register,
+    },
+    Invoke {
+        call: Register,
+        destination: Register,
+    },
     PrepareIntrinsic {
         tag: nir::intrinsics::Tag,
         binding: Option<Arc<nir::intrinsics::Checked>>,
@@ -116,6 +134,26 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::BeginCall {
+                    call,
+                    callee,
+                    parameter_bindings,
+                } => {
+                    write!(f, "(begin-call {call} {callee} (parameters")?;
+                    for binding in parameter_bindings {
+                        write!(f, " {binding}")?;
+                    }
+                    write!(f, "))")?;
+                }
+                Op::CheckCallArgument { call, parameter } => {
+                    write!(f, "(check-call-argument {call} {parameter})")?
+                }
+                Op::StoreCallArgument {
+                    call,
+                    parameter,
+                    value,
+                } => write!(f, "(store-call-argument {call} {parameter} {value})")?,
+                Op::Invoke { call, destination } => write!(f, "(invoke {call} {destination})")?,
                 Op::PrepareIntrinsic {
                     tag,
                     binding,
@@ -281,6 +319,60 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                     continue;
                 }
                 match &expr.kind {
+                    K::Call {
+                        callee,
+                        arguments,
+                        parameter_bindings,
+                    } if !callee.ty.is_normal_form_callable()
+                        && matches!(
+                            callee.kind,
+                            K::Function(_) | K::FunctionInstance { .. } | K::Local(_)
+                        )
+                        && arguments.iter().all(|a| {
+                            !a.is_default && a.passing == nir::program::ArgumentPassing::Value
+                        }) =>
+                    {
+                        *fuel = fuel
+                            .checked_sub(arguments.len() + parameter_bindings.len())
+                            .ok_or(Error::Budget(source))?;
+                        let call = fresh();
+                        let target = fresh();
+                        emit(
+                            &mut work,
+                            Op::Invoke {
+                                call,
+                                destination: dst,
+                            },
+                        );
+                        for argument in arguments.iter().rev() {
+                            let value = fresh();
+                            emit(
+                                &mut work,
+                                Op::StoreCallArgument {
+                                    call,
+                                    parameter: argument.parameter,
+                                    value,
+                                },
+                            );
+                            work.push(Work::Expression(&argument.value, value));
+                            emit(
+                                &mut work,
+                                Op::CheckCallArgument {
+                                    call,
+                                    parameter: argument.parameter,
+                                },
+                            );
+                        }
+                        emit(
+                            &mut work,
+                            Op::BeginCall {
+                                call,
+                                callee: target,
+                                parameter_bindings: parameter_bindings.clone(),
+                            },
+                        );
+                        work.push(Work::Expression(callee, target));
+                    }
                     K::UnsafeScope(body) => work.push(Work::Expression(body, dst)),
                     K::Intrinsic {
                         tag,
@@ -325,7 +417,12 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         );
                     }
                     K::Unit => emit(&mut work, Op::Unit(dst)),
-                    K::Literal(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::TypeListValue(_) => {
+                    K::Literal(_)
+                    | K::TypeValue(_)
+                    | K::ComptimeValue(_)
+                    | K::TypeListValue(_)
+                    | K::Function(_)
+                    | K::FunctionInstance { .. } => {
                         nir::copy_budget::charge_substitution(expr, &[], &[], fuel)
                             .map_err(|error| copy_error(error, source))?;
                         emit(

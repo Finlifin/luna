@@ -99,3 +99,36 @@ fn deeply_nested_constant_types_fail_before_recursive_copying() {
         Err(Error::Budget(_))
     ));
 }
+
+#[test]
+fn invocation_code_distinguishes_normal_form_application() {
+    let signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Primitive(Primitive::Type)),
+    };
+    let mut body = Expr {
+        source: SourceRange { start: 1, end: 2 },
+        ty: Term::Primitive(Primitive::Type),
+        kind: K::Call {
+            callee: Box::new(Expr {
+                source: SourceRange { start: 1, end: 2 },
+                ty: Term::ComptimeFunction(Box::new(signature.clone())),
+                kind: K::Local(LocalId { owner: 1, index: 0 }),
+            }),
+            arguments: vec![],
+            parameter_bindings: vec![],
+        },
+    };
+    let dump = compile(&body, &mut 1000).unwrap().to_string();
+    assert!(dump.contains("(begin-call "));
+    assert!(dump.contains("(invoke "));
+    assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+    let K::Call { callee, .. } = &mut body.kind else {
+        unreachable!()
+    };
+    callee.ty = Term::NormalFormFunction(Box::new(signature), None);
+    assert!(matches!(
+        compile(&body, &mut 1000),
+        Err(Error::Unsupported(_))
+    ));
+}

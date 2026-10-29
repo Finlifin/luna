@@ -50,14 +50,73 @@ impl<'a> Interpreter<'a> {
         arguments: Vec<Value>,
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<Value, Error> {
-        let mut activation = self.begin_invocation(function, arguments, context)?;
-        let frame = &mut activation.frame;
-        let result = self.invocation_body(
-            frame.body.expression(),
-            frame.stable_code,
-            &mut frame.environment,
-        );
-        self.complete_invocation(activation, result)
+        let activation = self.begin_invocation(function, arguments, context)?;
+        self.run_invocations(activation)
+    }
+
+    // Native recursion is retained only at migration and contract boundaries.
+    // Compiled caller/callee chains suspend their owned frames in this stack.
+    fn run_invocations(&mut self, mut activation: Box<Activation<'a>>) -> Result<Value, Error> {
+        let mut stack: Vec<(Box<Activation<'a>>, bytecode::Frame)> = Vec::new();
+        loop {
+            let frame = &mut activation.frame;
+            let code = self.invocation_code(frame.body.expression(), frame.stable_code);
+            let mut result = match code {
+                Ok(Some(code)) => match self.start_frame(&code, &mut frame.environment) {
+                    Ok(code_frame) => {
+                        stack.push((activation, code_frame));
+                        None
+                    }
+                    Err(error) => Some(self.complete_invocation(activation, Err(error))),
+                },
+                Ok(None) => {
+                    let result = self.eval(frame.body.expression(), &mut frame.environment);
+                    Some(self.complete_invocation(activation, result))
+                }
+                Err(error) => Some(self.complete_invocation(activation, Err(error))),
+            };
+            loop {
+                if let Some(delivered) = result.take() {
+                    let Some((_, parent)) = stack.last_mut() else {
+                        return delivered;
+                    };
+                    match delivered.and_then(|value| parent.deliver(value)) {
+                        Ok(()) => {}
+                        Err(error) => {
+                            // Every entered activation must restore its caller even
+                            // when preparation, execution or delivery failed.
+                            let (mut parent, code) = stack.pop().unwrap();
+                            parent.frame.environment = code.restore_environment();
+                            result = Some(self.complete_invocation(parent, Err(error)));
+                            continue;
+                        }
+                    }
+                }
+                let (_, code) = stack.last_mut().expect("active invocation");
+                match self.resume_frame(code, 1024) {
+                    Ok(bytecode::Progress::Suspended) => {}
+                    Ok(bytecode::Progress::Call { callee, arguments }) => {
+                        match self.begin_invocation(callee, arguments, None) {
+                            Ok(child) => {
+                                activation = child;
+                                break;
+                            }
+                            Err(error) => result = Some(Err(error)),
+                        }
+                    }
+                    outcome => {
+                        let (mut completed, code) = stack.pop().unwrap();
+                        completed.frame.environment = code.restore_environment();
+                        let flow = match outcome {
+                            Ok(bytecode::Progress::Complete(flow)) => Ok(flow),
+                            Err(error) => Err(error),
+                            _ => unreachable!("handled suspension"),
+                        };
+                        result = Some(self.complete_invocation(completed, flow));
+                    }
+                }
+            }
+        }
     }
 
     fn begin_invocation(
@@ -584,7 +643,7 @@ mod tests {
                 })),
             }))
         };
-        let mut parent = vm
+        let parent = vm
             .begin_invocation(callable(K::Local(captured)), vec![], None)
             .unwrap();
         let parent_identity = vm.effect_state.invocation;
@@ -601,16 +660,7 @@ mod tests {
         );
         assert_eq!(vm.depth, 1);
         assert_eq!(vm.effect_state.invocation, parent_identity);
-        let frame = &mut parent.frame;
-        let flow = vm.invocation_body(
-            frame.body.expression(),
-            frame.stable_code,
-            &mut frame.environment,
-        );
-        assert_eq!(
-            vm.complete_invocation(parent, flow).unwrap(),
-            Value::Bool(true)
-        );
+        assert_eq!(vm.run_invocations(parent).unwrap(), Value::Bool(true));
         assert_eq!(vm.depth, 0);
         assert_eq!(vm.effect_state.invocation, 0);
     }

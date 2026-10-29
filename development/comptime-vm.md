@@ -7,7 +7,7 @@ interpreter. `comptime_compiler` lowers supported closed function bodies before
 execution; `comptime_interpretor::bytecode` runs a program counter, fixed dense
 registers and explicit lexical scope records. Mixed-stage interpretation and
 scheduled runtime cleanup continue to use the existing interpreter. This is not
-yet a complete bytecode VM: calls, general primitives, effect/query suspension,
+yet a complete bytecode VM: default/reference/trait calls, general primitives, effect/query suspension,
 specialized-code caching and the unified value representation remain outstanding.
 
 Compilation traverses control with a bounded heap worklist, including untaken
@@ -23,7 +23,9 @@ local initialization and whole-slot assignment, blocks, boolean short circuit,
 boolean/BitVec negation, branches, loops, break/continue and return. Integer
 arithmetic, exact/machine floating arithmetic, scalar comparisons and admitted
 comptime scalar intrinsics execute linear instructions,
-using the same checked primitive operations as tree interpretation. Temporary
+using the same checked primitive operations as tree interpretation. Ordinary
+by-value calls to named functions, function instances and local callable values
+suspend the caller and run the callee on an explicit activation stack. Temporary
 registers are allocated densely independent of LocalId values. Scope exit and
 loop transfers clear introduced bindings; imported inputs are restored on both
 success and failure so later contract checks retain prior mutations.
@@ -1138,3 +1140,64 @@ Validation from `/home/fin/luna` (final checks exit 0):
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations`: all 73 passed, `/tmp/luna-tools-d9d9nd4p/result.json`. The first run exposed 40 fixture-loading errors because real meta code used `attrs.comptime_phase` but the fixture omitted the attrs package. Commit `20d53dc2` supplies the real package and dependency edges, without changing compiler checks or builder expectations.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test library_meta_math --test comptime_local_types`: `/tmp/luna-tools-y0j2xnnx/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: `/tmp/luna-tools-u3qd42ae/result.json`; `git diff --check` passed.
+
+## Explicit call and return stack (2026-10-30)
+
+Ordinary by-value calls now lower to callee selection, call preparation,
+per-argument validation/storage and invocation instructions. Each argument is
+checked for a valid unfilled destination before its expression executes; argument
+expressions execute in source order, independent of parameter positions. Nested
+argument calls retain separate pending argument slots. Compiler output and live
+frames include these states in their S-expression dumps.
+
+The invocation driver owns a stack of activations and suspended bytecode frames.
+A call suspends after its invocation instruction; only delivery of the callee's
+checked result makes the parent resumable. Returning, failing preparation,
+failing contracts and exhausting budgets all restore the entered activations in
+reverse order. The implementation shares callable parameter resolution and the
+existing invocation admission, specialization, binding and delivery checks with
+the tree carrier. Generic function-instance leaves use their existing checked
+instantiation path. Normal-form application is not reinterpreted as body invocation.
+
+A compiled parent can call a body that still requires tree interpretation, and
+that body can call compiled functions. Carrier selection happens before each
+body starts; no already-executed parent work is replayed. The native recursion
+limit remains because contracts and migration boundaries still use native calls.
+This does not establish unrestricted-depth execution or a performance speedup.
+
+Default and reference arguments, trait-method call plans, effect environments,
+and IIR/scheduled cleanup remain on the migration path. In particular an active
+effect environment selects tree evaluation before body execution: scope-targeted
+control transfer has not yet been implemented for suspended bytecode frames.
+These execution restrictions do not change language-level call semantics.
+
+Regression coverage includes nested source-order argument effects, recursive
+calls, generic instances, contract rejection and recovery, mixed carrier calls,
+invalid slots rejected before argument effects, and the single-delivery frame
+protocol. Deliberately malformed NIR tests check dynamic contract enforcement;
+the source verifier still rejects unproven contracts.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib`:
+  222 interpreter tests, including pending-call delivery and invalid-slot checks;
+  report `/tmp/luna-tools-ealltweb/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  six compiler tests, including normal-form application exclusion and dumps;
+  report `/tmp/luna-tools-kmwvqbph/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test library_meta_math --test comptime_local_types --test execution`:
+  bytecode, meta math, local types and 1,365 execution cases passed;
+  report `/tmp/luna-tools-pnigxly_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test builder_invocations`:
+  six bytecode tests (including the added mixed-carrier and depth-recovery checks)
+  and 73 builder tests passed; report `/tmp/luna-tools-61t9fq9m/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  report `/tmp/luna-tools-nxizh3sv/result.json`.
+
+During test development, source fixtures with deliberately unproven contracts
+were correctly rejected by elaboration. They were replaced with valid source
+followed by explicit NIR corruption, so the VM tests exercise the intended
+boundary without weakening source verification. The deep-recursion comparison
+also exposed the existing tree expression-depth limit; shallow inputs still
+compare both carriers, while deeper inputs check the explicit frame path and
+recovery after its own invocation-depth limit.

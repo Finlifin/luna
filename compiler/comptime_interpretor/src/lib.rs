@@ -7336,6 +7336,22 @@ impl<'a> Interpreter<'a> {
     }
 
     #[inline(never)]
+    fn call_parameters(&self, callee: &Value, source: SourceRange) -> Result<Vec<LocalId>, Error> {
+        match callee {
+            Value::RuntimeFunction { .. } | Value::RuntimeTraitMethod(_) => {
+                Err(self.failure(ErrorKind::PhaseMismatch, Some(source)))
+            }
+            Value::Function(id) => self
+                .functions
+                .get(id)
+                .map(|f| f.parameters.clone())
+                .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source))),
+            Value::Closure(closure) => Ok(closure.parameters.clone()),
+            _ => Err(self.failure(ErrorKind::Type, Some(source))),
+        }
+    }
+
+    #[inline(never)]
     fn prepare_call(
         &mut self,
         expr: &Expr,
@@ -7464,19 +7480,7 @@ impl<'a> Interpreter<'a> {
         if retain_callee {
             this.retain_residual(callee_source, &callee)?;
         }
-        let parameters = match &callee {
-            Value::RuntimeFunction { .. } | Value::RuntimeTraitMethod(_) => {
-                return Err(this.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
-            }
-            Value::Function(id) => this
-                .functions
-                .get(id)
-                .ok_or_else(|| this.failure(ErrorKind::UnknownFunction, Some(expr.source)))?
-                .parameters
-                .clone(),
-            Value::Closure(closure) => closure.parameters.clone(),
-            _ => return Err(this.failure(ErrorKind::Type, Some(expr.source))),
-        };
+        let parameters = this.call_parameters(&callee, expr.source)?;
         let preparation_parameters = interface_parameters.as_ref().unwrap_or(&parameters);
         if !parameter_bindings.is_empty()
             && (parameter_bindings != preparation_parameters

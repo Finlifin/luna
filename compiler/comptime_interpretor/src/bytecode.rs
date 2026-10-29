@@ -3,18 +3,29 @@
 use super::*;
 use comptime_compiler::{Op, Program};
 
-struct Frame {
+pub(super) struct Frame {
     code: Arc<Program>,
     environment: Environment,
     imported: Vec<(LocalId, usize)>,
     terminal: bool,
+    waiting: Option<usize>,
+    calls: BTreeMap<usize, PendingCall>,
     pc: usize,
     slots: Vec<Option<Value>>,
     scopes: Vec<Vec<usize>>,
 }
 
+struct PendingCall {
+    callee: Value,
+    arguments: Vec<Option<Value>>,
+}
+
 #[derive(Debug)]
-enum Progress {
+pub(super) enum Progress {
+    Call {
+        callee: Value,
+        arguments: Vec<Value>,
+    },
     Suspended,
     Complete(Flow),
 }
@@ -43,12 +54,36 @@ impl fmt::Display for Frame {
         for (binding, slot) in &self.imported {
             write!(f, " ({binding} {slot})")?;
         }
+        write!(f, ") (waiting")?;
+        if let Some(destination) = self.waiting {
+            write!(f, " {destination}")?;
+        }
+        write!(f, ") (calls")?;
+        for (id, call) in &self.calls {
+            write!(f, " ({id} (callee {}) (arguments", call.callee)?;
+            for value in &call.arguments {
+                match value {
+                    Some(value) => write!(f, " (ready {value})")?,
+                    None => write!(f, " (pending)")?,
+                }
+            }
+            write!(f, "))")?;
+        }
         write!(f, ") (environment-bindings {}))", self.environment.len())
     }
 }
 
 impl Frame {
-    fn restore_environment(mut self) -> Environment {
+    pub(super) fn deliver(&mut self, value: Value) -> Result<(), Error> {
+        let destination = self.waiting.take().ok_or(Error {
+            kind: ErrorKind::InvalidControlFlow,
+            source: None,
+        })?;
+        self.slots[destination] = Some(value);
+        Ok(())
+    }
+
+    pub(super) fn restore_environment(mut self) -> Environment {
         for (binding, slot) in self.imported {
             if let Some(value) = self.slots[slot].take() {
                 self.environment.insert(binding, value);
@@ -108,43 +143,36 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    pub(super) fn invocation_body(
+    pub(super) fn invocation_code(
         &mut self,
         body: &Expr,
         stable_code: Option<DeclarationId>,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        if !self.comptime_only || self.cleanup_schedule.is_some() {
-            return self.eval(body, environment);
+    ) -> Result<Option<Arc<Program>>, Error> {
+        if !self.comptime_only
+            || self.cleanup_schedule.is_some()
+            || self.graph.is_some()
+            || !self.effect_state.environment.is_empty()
+        {
+            return Ok(None);
         }
-        // Compilation has its own bounded work budget. Unsupported bodies are
-        // selected before executing any instruction, never after partial work.
+        // Decide the execution route before any instruction has run.
         if let Some(id) = stable_code {
-            let program = if let Some(program) = self.bytecode_cache.entries.get(&id) {
-                program.clone()
-            } else {
-                let definition = *self
-                    .functions
-                    .get(&id)
-                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(body.source)))?;
-                let program = self.compile_body(&definition.body)?.map(Arc::new);
-                self.bytecode_cache.insert(id, program.clone());
-                program
-            };
-            return if let Some(program) = program {
-                self.bytecode_invocations += 1;
-                self.execute_code(&program, environment)
-            } else {
-                self.eval(body, environment)
-            };
+            if let Some(program) = self.bytecode_cache.entries.get(&id) {
+                return Ok(program.clone());
+            }
+            let definition = *self
+                .functions
+                .get(&id)
+                .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(body.source)))?;
+            let program = self.compile_body(&definition.body)?.map(Arc::new);
+            self.bytecode_cache.insert(id, program.clone());
+            Ok(program)
+        } else {
+            Ok(self.compile_body(body)?.map(Arc::new))
         }
-        let Some(program) = self.compile_body(body)? else {
-            return self.eval(body, environment);
-        };
-        self.bytecode_invocations += 1;
-        self.execute_code(&Arc::new(program), environment)
     }
 
+    #[cfg(test)]
     fn execute_code(
         &mut self,
         code: &Arc<Program>,
@@ -154,6 +182,16 @@ impl<'a> Interpreter<'a> {
         let result = loop {
             match self.resume_frame(&mut frame, 1024) {
                 Ok(Progress::Suspended) => continue,
+                Ok(Progress::Call { callee, arguments }) => {
+                    match self.invoke_value_scoped(callee, arguments, None) {
+                        Ok(value) => {
+                            if let Err(error) = frame.deliver(value) {
+                                break Err(error);
+                            }
+                        }
+                        Err(error) => break Err(error),
+                    }
+                }
                 Ok(Progress::Complete(flow)) => break Ok(flow),
                 Err(error) => break Err(error),
             }
@@ -163,7 +201,7 @@ impl<'a> Interpreter<'a> {
         result
     }
 
-    fn start_frame(
+    pub(super) fn start_frame(
         &mut self,
         code: &Arc<Program>,
         environment: &mut Environment,
@@ -172,11 +210,14 @@ impl<'a> Interpreter<'a> {
             code.registers(),
             code.instructions().first().map(|i| i.source),
         )?;
+        self.bytecode_invocations += 1;
         let mut frame = Frame {
             code: code.clone(),
             environment: std::mem::take(environment),
             imported: Vec::new(),
             terminal: false,
+            waiting: None,
+            calls: BTreeMap::new(),
             pc: 0,
             scopes: Vec::new(),
             slots: (0..code.registers()).map(|_| None).collect(),
@@ -190,14 +231,18 @@ impl<'a> Interpreter<'a> {
         Ok(frame)
     }
 
-    fn resume_frame(&mut self, frame: &mut Frame, quantum: usize) -> Result<Progress, Error> {
-        if frame.terminal {
+    pub(super) fn resume_frame(
+        &mut self,
+        frame: &mut Frame,
+        quantum: usize,
+    ) -> Result<Progress, Error> {
+        if frame.terminal || frame.waiting.is_some() {
             return Err(self.failure(ErrorKind::InvalidControlFlow, None));
         }
         let result = self.run_frame(frame, quantum);
         // A failed instruction may have consumed operands or changed storage.
         // Such a frame is terminal; resumption must never replay that work.
-        if !matches!(result, Ok(Progress::Suspended)) {
+        if matches!(result, Ok(Progress::Complete(_)) | Err(_)) {
             frame.terminal = true;
         }
         result
@@ -218,6 +263,56 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::BeginCall {
+                    call,
+                    callee,
+                    parameter_bindings,
+                } => {
+                    let callee = frame.slots[*callee].take().ok_or_else(missing)?;
+                    let parameters = self.call_parameters(&callee, source)?;
+                    if !parameter_bindings.is_empty() && *parameter_bindings != parameters {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                    self.effect_charge(parameters.len(), Some(source))?;
+                    frame.calls.insert(
+                        *call,
+                        PendingCall {
+                            callee,
+                            arguments: (0..parameters.len()).map(|_| None).collect(),
+                        },
+                    );
+                }
+                Op::CheckCallArgument { call, parameter } => {
+                    let pending = frame.calls.get(call).ok_or_else(missing)?;
+                    if *parameter >= pending.arguments.len()
+                        || pending.arguments[*parameter].is_some()
+                    {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                }
+                Op::StoreCallArgument {
+                    call,
+                    parameter,
+                    value,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
+                    let slot = pending.arguments.get_mut(*parameter).ok_or_else(missing)?;
+                    *slot = Some(self.prepare_argument(*parameter, source, value)?);
+                }
+                Op::Invoke { call, destination } => {
+                    let pending = frame.calls.remove(call).ok_or_else(missing)?;
+                    let arguments = pending
+                        .arguments
+                        .into_iter()
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(|| self.failure(ErrorKind::Arity, Some(source)))?;
+                    frame.waiting = Some(*destination);
+                    return Ok(Progress::Call {
+                        callee: pending.callee,
+                        arguments,
+                    });
+                }
                 Op::PrepareIntrinsic {
                     tag,
                     binding,
@@ -249,6 +344,10 @@ impl<'a> Interpreter<'a> {
                 }
                 Op::Constant { destination, value } => {
                     let flow = match value.kind {
+                        K::Function(_) => self.eval_leaf(value, &mut frame.environment)?,
+                        K::FunctionInstance { .. } => {
+                            self.eval_function_instance(value, &mut frame.environment)?
+                        }
                         K::Literal(_) => self.eval_literal(value, &mut frame.environment)?,
                         _ => self.eval_type_value(value, &mut frame.environment)?,
                     };
@@ -389,6 +488,103 @@ impl<'a> Interpreter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_call_requires_delivery_and_rejects_bad_slots_before_effects() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let function = LocalId { owner: 1, index: 0 };
+        let trace = LocalId { owner: 1, index: 1 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let signature = Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: vec![],
+            result: Box::new(boolean.clone()),
+        }));
+        let closure = Value::Closure(Arc::new(Closure {
+            definition_source: None,
+            origin: None,
+            instance_arguments: None,
+            parameters: vec![],
+            environment: Environment::new(),
+            capture_order: vec![],
+            body: Arc::new(Expr {
+                source,
+                ty: boolean.clone(),
+                kind: K::Literal(Literal::Bool(true)),
+            }),
+            ty: signature.clone(),
+        }));
+        let body = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: signature,
+                    kind: K::Local(function),
+                }),
+                arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut environment = Environment::new();
+        environment.insert(function, closure);
+        environment.insert(trace, Value::Bool(true));
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+        let mut frame = vm.start_frame(&code, &mut environment).unwrap();
+        let Progress::Call { callee, arguments } = vm.resume_frame(&mut frame, 100).unwrap() else {
+            panic!("expected suspended call");
+        };
+        let stopped = frame.to_string();
+        assert_eq!(
+            vm.resume_frame(&mut frame, 100).unwrap_err().kind,
+            ErrorKind::InvalidControlFlow
+        );
+        assert_eq!(frame.to_string(), stopped);
+        let result = vm.invoke_value_scoped(callee, arguments, None).unwrap();
+        frame.deliver(result).unwrap();
+        assert_eq!(
+            frame.deliver(Value::Bool(false)).unwrap_err().kind,
+            ErrorKind::InvalidControlFlow
+        );
+        assert!(matches!(
+            vm.resume_frame(&mut frame, 100).unwrap(),
+            Progress::Complete(Flow::Value(Value::Bool(true)))
+        ));
+        environment = frame.restore_environment();
+
+        let mut invalid = body;
+        let K::Call { arguments, .. } = &mut invalid.kind else {
+            unreachable!()
+        };
+        arguments.push(nir::program::CallArgument {
+            passing: nir::program::ArgumentPassing::Value,
+            parameter: 0,
+            is_default: false,
+            value: Expr {
+                source,
+                ty: Term::Primitive(Primitive::Void),
+                kind: K::Assign {
+                    place: nir::program::Place {
+                        root: trace,
+                        fields: vec![],
+                    },
+                    value: Box::new(Expr {
+                        source,
+                        ty: boolean,
+                        kind: K::Literal(Literal::Bool(false)),
+                    }),
+                },
+            },
+        });
+        let code = Arc::new(comptime_compiler::compile(&invalid, &mut 1000).unwrap());
+        assert_eq!(
+            vm.execute_code(&code, &mut environment).unwrap_err().kind,
+            ErrorKind::InvalidCallPlan
+        );
+        assert_eq!(environment.get(&trace), Some(&Value::Bool(true)));
+    }
 
     #[test]
     fn suspended_frame_owns_code_after_source_and_cache_are_released() {
@@ -715,7 +911,9 @@ mod tests {
         let failure = loop {
             match vm.resume_frame(&mut frame, 1) {
                 Ok(Progress::Suspended) => continue,
-                Ok(Progress::Complete(_)) => panic!("malformed operation completed"),
+                Ok(Progress::Complete(_) | Progress::Call { .. }) => {
+                    panic!("malformed operation completed")
+                }
                 Err(error) => break error,
             }
         };

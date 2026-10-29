@@ -154,3 +154,113 @@ fn compiled_receiver_updates_storage_without_runtime_copy_evidence() {
     // the impure receiver mutation must still execute on the second call.
     assert_eq!(vm.bytecode_compilations(), 2);
 }
+
+#[test]
+fn calls_suspend_frames_and_preserve_argument_order() {
+    let package = support::compile(
+        "typealias Integer = .Integer'builtin;
+        comptime fn digits(a: Integer, b: Integer) -> Integer { a * 10 + b }
+        comptime fn countdown(n: Integer) -> Integer {
+            if n == 0 { 0 } else { 1 + countdown(n - 1) }
+        }
+        comptime fn pattern(value: bool) -> bool {
+            value match { true => digits(1, 2) == 12, false => false }
+        }
+        comptime fn bridge() -> bool { pattern(true) }
+        comptime fn run(n: Integer) -> bool {
+            var trace: Integer = 0;
+            let result = digits(
+                do { trace = trace * 10 + 1; digits(2, 3) },
+                do { trace = trace * 10 + 2; countdown(n) }
+            );
+            result == 230 + n and trace == 12
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    let id = support::id(&package, "run");
+    let args = |n| vec![Value::Integer(comptime_runtime::Integer::from_i128(n))];
+    assert_eq!(vm.invoke(id, args(3)).unwrap(), Value::Bool(true));
+    assert_eq!(tree.invoke(id, args(3)).unwrap(), Value::Bool(true));
+    let before = vm.bytecode_invocations();
+    assert_eq!(vm.invoke(id, args(20)).unwrap(), Value::Bool(true));
+    assert_eq!(vm.bytecode_invocations() - before, 24);
+    assert_eq!(vm.bytecode_compilations(), 3);
+    // The migration evaluator also charges recursive expression depth. The
+    // compiled path holds these suspended calls on its explicit frame stack.
+    assert_eq!(
+        tree.invoke(id, args(20)).unwrap_err().kind,
+        ErrorKind::DepthExhausted
+    );
+    assert_eq!(
+        vm.invoke(id, args(100)).unwrap_err().kind,
+        ErrorKind::DepthExhausted
+    );
+    assert_eq!(vm.invoke(id, args(3)).unwrap(), Value::Bool(true));
+    let before = vm.bytecode_invocations();
+    assert_eq!(
+        vm.invoke(support::id(&package, "bridge"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    // Match still uses the migration evaluator; the caller and its grandchild
+    // are compiled. Returning across both boundaries must not replay either.
+    assert_eq!(vm.bytecode_invocations() - before, 2);
+}
+
+#[test]
+fn nested_calls_check_contracts_and_recover_after_failure() {
+    let mut package = support::compile(
+        "comptime fn checked(value: bool) -> bool { value }
+        comptime fn bad_exit(value: bool) -> result: bool
+        where ensures result == value
+        { value }
+        comptime fn run(value: bool) -> bool { checked(value) }
+        comptime fn fail_exit(value: bool) -> bool { bad_exit(value) }
+        comptime fn identity(value: T) -> T where T { value }
+        comptime fn generic(value: bool) -> bool { identity<bool>(value) }",
+    );
+    // Source verification rejects these invalid calls/returns. Alter the checked
+    // carrier deliberately to exercise invocation admission and delivery too.
+    let checked = support::id(&package, "checked");
+    let function = package
+        .functions
+        .iter_mut()
+        .find(|f| f.declaration == checked)
+        .unwrap();
+    function.preconditions.push(function.body.clone());
+    let broken = support::id(&package, "bad_exit");
+    let function = package
+        .functions
+        .iter_mut()
+        .find(|f| f.declaration == broken)
+        .unwrap();
+    function.body.kind = nir::program::ExprKind::Not(Box::new(function.body.clone()));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for (entry, input, fails) in [
+        ("run", false, true),
+        ("run", true, false),
+        ("fail_exit", true, true),
+        ("fail_exit", false, true),
+        ("generic", true, false),
+    ] {
+        let id = support::id(&package, entry);
+        let before = vm.bytecode_invocations();
+        let result = vm.invoke(id, vec![Value::Bool(input)]);
+        let reference = tree.invoke(id, vec![Value::Bool(input)]);
+        if fails {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+            assert_eq!(
+                reference.unwrap_err().kind,
+                ErrorKind::ProgramContractRejected
+            );
+        } else {
+            assert_eq!(result.unwrap(), Value::Bool(input));
+            assert_eq!(reference.unwrap(), Value::Bool(input));
+        }
+        assert_eq!(
+            vm.bytecode_invocations() - before,
+            if entry == "run" && fails { 1 } else { 2 }
+        );
+    }
+}
