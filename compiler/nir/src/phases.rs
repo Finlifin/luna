@@ -774,8 +774,7 @@ pub fn machine_arithmetic_functions(
                             parameter_bindings,
                         } => {
                             for argument in arguments {
-                                if argument.passing
-                                    == crate::program::ArgumentPassing::ComptimeReference
+                                if argument.passing != crate::program::ArgumentPassing::Value
                                     && (!ct
                                         || !callee.ty.is_comptime_callable()
                                         || argument.is_default

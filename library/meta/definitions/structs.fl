@@ -35,9 +35,9 @@ impl StructBuilder {
         }
     }
 
-    pub comptime fn add_field(*self, name: Symbol, field_type: Type) {
-        self.field_names.*.append(name);
-        self.field_types.*.append(field_type);
+    pub comptime fn add_field(self, name: Symbol, field_type: Type) {
+        self.field_names.append(name);
+        self.field_types.append(field_type);
     }
 
     {-
@@ -45,32 +45,32 @@ impl StructBuilder {
         unchanged. Names and Types are prepared together before either write;
         Build remains responsible for duplicate names and layout admission.
     -}
-    pub comptime fn insert_field(*self, index: Integer,
+    pub comptime fn insert_field(self, index: Integer,
         name: Symbol, field_type: Type) -> bool {
         self.edit_fields(index, index, [name], [field_type])
     }
 
-    pub comptime fn replace_field(*self, index: Integer,
+    pub comptime fn replace_field(self, index: Integer,
         name: Symbol, field_type: Type) -> bool {
         self.edit_fields(index, index + 1, [name], [field_type])
     }
 
-    pub comptime fn remove_field(*self, index: Integer) -> bool {
+    pub comptime fn remove_field(self, index: Integer) -> bool {
         self.edit_fields(index, index + 1, [], [])
     }
 
-    comptime fn edit_fields(*self, start: Integer, end: Integer,
+    comptime fn edit_fields(self, start: Integer, end: Integer,
         names: List<Symbol>, types: List<Type>) -> bool {
-        let next_names = self.field_names.*.replace_range(start, end, names) match {
+        let next_names = self.field_names.replace_range(start, end, names) match {
             value? => value,
             null => return false,
         };
-        let next_types = self.field_types.*.replace_range(start, end, types) match {
+        let next_types = self.field_types.replace_range(start, end, types) match {
             value? => value,
             null => return false,
         };
-        self.field_names.* = next_names;
-        self.field_types.* = next_types;
+        self.field_names = next_names;
+        self.field_types = next_types;
         true
     }
 

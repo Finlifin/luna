@@ -618,7 +618,18 @@ impl Checker<'_, '_> {
                 .map(|route| route.positions.len())
                 .sum::<usize>();
         let mut statements = vec![None; input_count];
-        let mut stage = |value: &mut n::Expr, position: usize| -> Result<(), Error> {
+        let mut stage = |value: &mut n::Expr,
+                         position: usize,
+                         passing: n::ArgumentPassing|
+         -> Result<(), Error> {
+            let value = if passing != n::ArgumentPassing::Value {
+                reference_base(value)
+            } else {
+                value
+            };
+            if passing != n::ArgumentPassing::Value && matches!(value.kind, K::Local(_)) {
+                return Ok(());
+            }
             let index = self.next_temporary_binding;
             self.next_temporary_binding = index
                 .checked_add(1)
@@ -648,7 +659,7 @@ impl Checker<'_, '_> {
             Ok(())
         };
         for argument in arguments.iter_mut().take(offset) {
-            stage(&mut argument.value, argument.parameter)?;
+            stage(&mut argument.value, argument.parameter, argument.passing)?;
         }
         for route in routes {
             let argument = &mut arguments[argument_slots[offset + route.parameter]];
@@ -662,20 +673,21 @@ impl Checker<'_, '_> {
                 };
                 debug_assert_eq!(items.len(), route.positions.len());
                 for (item, position) in items.iter_mut().zip(&route.positions) {
-                    stage(item, offset + position)?;
+                    stage(item, offset + position, n::ArgumentPassing::Value)?;
                 }
             } else {
-                stage(&mut argument.value, offset + route.positions[0])?;
+                stage(
+                    &mut argument.value,
+                    offset + route.positions[0],
+                    argument.passing,
+                )?;
             }
         }
         Ok(n::Expr {
             ty: call.ty.clone(),
             source: call.source,
             kind: K::CallPreparation {
-                statements: statements
-                    .into_iter()
-                    .map(|statement| statement.expect("every explicit input is staged once"))
-                    .collect(),
+                statements: statements.into_iter().flatten().collect(),
                 result: Some(Box::new(call)),
             },
         })
@@ -697,4 +709,16 @@ pub(super) fn literal_spread_arguments<'hir>(args: &[Arg<'hir>]) -> Option<Vec<A
         }
     }
     Some(flat)
+}
+
+// Keep local receiver places live across argument collection. Computed bases
+// are evaluated into private storage before later explicit arguments.
+fn reference_base(value: &mut n::Expr) -> &mut n::Expr {
+    match value {
+        n::Expr {
+            kind: K::Field { value, .. } | K::AnonymousField { value, .. },
+            ..
+        } => reference_base(value),
+        value => value,
+    }
 }

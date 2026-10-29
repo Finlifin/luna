@@ -5157,6 +5157,36 @@ impl Checker<'_, '_> {
         Ok(arguments)
     }
 
+    /// Receiver transport follows declaration syntax, including explicit UFCS.
+    /// An ordinary first parameter remains a value even when named similarly.
+    fn comptime_receiver_arguments(
+        &self,
+        owner: Option<OwnerId>,
+        arguments: &mut [n::CallArgument],
+    ) {
+        let receiver = owner
+            .and_then(|owner| self.package.item(owner))
+            .is_some_and(|item| {
+                matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head
+                    && sig.params.first().is_some_and(|param|
+                        matches!(param.ty.kind, TyParamKind::Itself { is_ref: false })))
+            });
+        if !receiver {
+            return;
+        }
+        for argument in arguments {
+            if argument.parameter == 0 && !argument.is_default {
+                argument.passing = if matches!(argument.value.kind, K::Local(id) if self.immutable.contains(&id))
+                {
+                    n::ArgumentPassing::ComptimeReferenceNoRebind
+                } else {
+                    n::ArgumentPassing::ComptimeReference
+                };
+            }
+        }
+    }
+
     fn callable_type(&self, owner: OwnerId, signature: Term) -> Term {
         let comptime = self.package.item(owner).is_some_and(|item| {
             matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
@@ -6489,6 +6519,7 @@ impl Checker<'_, '_> {
                 self.adapt_error_argument_layout(&mut argument.value, &target, expr.span, 0)?;
             }
         }
+        self.comptime_receiver_arguments(Some(owner), &mut arguments);
         let actual: Vec<_> = arguments.iter().map(|arg| arg.value.ty.clone()).collect();
         let ty = if actual.iter().any(is_never) {
             p(P::Never)
@@ -6926,6 +6957,7 @@ impl Checker<'_, '_> {
         // Retain the interface-origin signature for phase validation. The
         // selected projection view above checks inputs/results; IIR closure
         // resolves all retained annotations together without losing origin.
+        self.comptime_receiver_arguments(direct, &mut arguments);
         callee.ty = retained_callable;
         let call = n::Expr {
             ty,
@@ -11016,6 +11048,14 @@ impl Checker<'_, '_> {
                 fields.reverse();
                 let binding = match base.kind {
                     H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => local(id),
+                    H::SelfValue => {
+                        let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = self.package.item(base.hir_id.owner).map(|item| &item.kind) else {
+                            return Err(error(base.span, "self requires a method receiver"));
+                        };
+                        let param = sig.params.first().filter(|p| matches!(p.ty.kind, TyParamKind::Itself { .. }))
+                            .ok_or_else(|| error(base.span, "self requires a method receiver"))?;
+                        local(param.hir_id)
+                    }
                     H::TacticParameter(index) => local(self.tactic_parameter(base, index)?),
                     _ => {
                         return Err(error(

@@ -2,9 +2,9 @@
 
 comptime 没有指针。comptime 方法的 `self` 使用值引用语义，接收者更新不通过 `*self`、`.ref` 或 `.*` 表达。解释器的内部存储引用不是源语言指针。
 
-本文下方实现进展中涉及 comptime 指针读写、`*Integer`、`*List<T>` 或通过 runtime Copy 取得 comptime 数据的描述，均属于待纠正的旧实现记录，不是有效语言规则或可仿照的用法。当前 `List.append`、列表范围追加及相关 VM 路径尚需迁移到值引用语义；不能仅删除指针语法而保留按值复制行为。
+本文下方实现进展中涉及 comptime 指针读写、`*Integer`、`*List<T>` 或通过 runtime Copy 取得 comptime 数据的描述，均属于待纠正的旧实现记录，不是有效语言规则或可仿照的用法。`List.append`、列表范围追加和 StructBuilder／EnumBuilder 的修改方法已改用值引用；其他旧式指针接口仍须逐项迁移，不能仅删除指针语法而保留按值复制行为。
 
-VM 的 comptime 存储读写现在使用内部值引用路径：引用共享存储身份，字段赋值在右值求值后重新定位，并在预算、字段路径检查通过后写回，不借助 runtime pointer 或 Copy／Clone 协议。NIR 调用参数现可显式记录 `comptime-reference` 传递，VM 支持局部变量、结构字段的别名和跨调用路径转发，计算得到的接收者只求值一次。活动引用不能冻结为常量、逃逸进闭包快照或进入 runtime Copy 路径。源码 lowering 仍未发出该标记，接收者可写性检查也尚未完成，`List.append` 与 definition builder 的旧指针接收者尚未迁移。
+VM 的 comptime 存储读写现在使用内部值引用路径：引用共享存储身份，字段赋值在右值求值后重新定位，并在预算、字段路径检查通过后写回，不借助 runtime pointer 或 Copy／Clone 协议。NIR 调用参数现可显式记录 `comptime-reference` 传递，VM 支持局部变量、结构字段的别名和跨调用路径转发，计算得到的接收者只求值一次。活动引用不能冻结为常量、逃逸进闭包快照或进入 runtime Copy 路径。源码 lowering 已为已知声明的 comptime `self` 调用发出该标记，覆盖接收者调用、显式类型调用及 trait 方法。参数收集保留局部接收者的位置，计算得到的基值仍先求值一次。`let` 接收者可读及更新字段，但不能通过方法整体重新绑定；此限制在引用转发时保留。`List.append` 与内部范围追加已使用 `self` 写回，带回调的遍历显式保存输入快照。StructBuilder／EnumBuilder 通过同一机制更新字段，保留生成类型的身份与发布检查。旧式 pattern view 指针接口及其他存储操作仍需迁移；这不是所有 comptime 接口已经完成迁移的声明。
 
 ## Intro
 

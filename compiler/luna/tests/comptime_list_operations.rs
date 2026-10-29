@@ -919,17 +919,14 @@ fn list_append_preserves_prior_snapshots_and_effectful_concat_order() {
     let package = compile(
         "
         typealias Integer=.Integer'builtin;
-        comptime fn replace(target:*meta.List<bool>)->meta.List<bool> {
-            target.* = [false]; [true]
-        }
         comptime fn run()->bool {
             var values:meta.List<bool> = [true];
             let snapshot=values;
             values.append(false);
-            let target=values.ref;
-            target.* = .list_concat'builtin(target.*,replace(target));
-            let frozen=target.*;
-            target.*.append(false);
+            let before_concat = values;
+            values = before_concat.concat(do { values = [false]; [true] });
+            let frozen=values;
+            values.append(false);
             var nested:meta.List<meta.List<bool>> = [];
             nested.append(snapshot);
             nested.append(values);
@@ -957,7 +954,7 @@ const LIST_VIEW: &str = "
     }
     impl ListView for meta.List<T> where T {
         assoc Element: Type = T;
-        comptime fn list_pattern_view_get_len(*self) -> Integer { self.*.length() }
+        comptime fn list_pattern_view_get_len(*self) -> Integer { let values = self.*; values.length() }
         comptime fn list_pattern_view_get_element(*self, comptime index: Integer) -> T {
             self.*[index]
         }

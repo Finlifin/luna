@@ -1385,12 +1385,15 @@ pub enum ArgumentPassing {
     #[default]
     Value,
     ComptimeReference,
+    /// Alias a let binding without granting whole-value replacement.
+    ComptimeReferenceNoRebind,
 }
 impl fmt::Display for ArgumentPassing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Value => "value",
             Self::ComptimeReference => "comptime-reference",
+            Self::ComptimeReferenceNoRebind => "comptime-reference-no-rebind",
         })
     }
 }

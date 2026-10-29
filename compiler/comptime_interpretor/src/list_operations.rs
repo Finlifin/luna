@@ -133,7 +133,19 @@ impl Interpreter<'_> {
             } else {
                 None
             };
-            let value = storage.as_deref().unwrap_or(local);
+            let referenced = if let Value::ComptimeReference(reference) = local {
+                Some(
+                    reference
+                        .borrow(&mut self.budget.steps)
+                        .map_err(|kind| self.failure(kind, Some(left.source)))?,
+                )
+            } else {
+                None
+            };
+            let value = referenced
+                .as_ref()
+                .map(|value| value.value())
+                .unwrap_or_else(|| storage.as_deref().unwrap_or(local));
             // Comparing the nominal List<T> identity can itself inspect a
             // large T. Meter that description without walking list elements.
             let work = self

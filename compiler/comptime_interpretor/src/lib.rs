@@ -8684,7 +8684,7 @@ impl<'a> Interpreter<'a> {
         let mut defaults = false;
         let mut last_default = None;
         for argument in arguments {
-            if argument.passing == nir::program::ArgumentPassing::ComptimeReference
+            if argument.passing != nir::program::ArgumentPassing::Value
                 && (!this.comptime_only || argument.is_default || argument.parameter != 0)
             {
                 return Err(this.failure(ErrorKind::InvalidCallPlan, Some(argument.value.source)));
@@ -8729,8 +8729,18 @@ impl<'a> Interpreter<'a> {
                         environment
                     ))
                 }
-            } else if argument.passing == nir::program::ArgumentPassing::ComptimeReference {
-                prepared_value!(this.prepare_value_reference(&argument.value, environment))
+            } else if argument.passing != nir::program::ArgumentPassing::Value {
+                let value =
+                    prepared_value!(this.prepare_value_reference(&argument.value, environment));
+                if argument.passing == nir::program::ArgumentPassing::ComptimeReferenceNoRebind {
+                    let Value::ComptimeReference(mut reference) = value else {
+                        unreachable!()
+                    };
+                    reference.prohibit_rebind();
+                    Value::ComptimeReference(reference)
+                } else {
+                    value
+                }
             } else {
                 prepared_value!(this.eval(&argument.value, environment))
             };

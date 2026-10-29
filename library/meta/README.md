@@ -2,7 +2,7 @@
 
 Object 的查询与编辑定义在固有 `impl Object` 中，可以通过接收者或 `meta.Object` 调用；旧的 `meta.object_*` 自由函数不再导出。编辑方法返回新 Object，保留输入快照。
 
-数据与 definition builder 模块通过 `builtin` 的公开绑定引用 `Type`、`Integer`、`Symbol` 和 `usize`，不在签名或方法体中重复访问原始类型符号。`bindings.fl` 集中定义 Object 类型与操作 intrinsic 的具名绑定；数据及 builder 模块通过调用或再导出复用它们。旧式 comptime 指针接收者迁移仍待完成。
+数据与 definition builder 模块通过 `builtin` 的公开绑定引用 `Type`、`Integer`、`Symbol` 和 `usize`，不在签名或方法体中重复访问原始类型符号。`bindings.fl` 集中定义 Object 类型与操作 intrinsic 的具名绑定；数据及 builder 模块通过调用或再导出复用它们。List、StructBuilder 与 EnumBuilder 接收者已使用值引用；旧式 pattern view 等 comptime 指针接口迁移仍待完成。
 
 源码目录与待实现领域见 [六包结构](../STRUCTURE.md)。
 
@@ -15,8 +15,8 @@ Object 的查询与编辑定义在固有 `impl Object` 中，可以通过接收�
 `definitions/structs.fl`、`definitions/enums.fl`。
 
 列表操作使用接收者调用，例如 `values.length()`、`values.map(transform)`、
-`values.fold(initial, combine)`。`append` 使用 `*self`，通过 `values.append(value)`
-修改列表变量；其他操作观察输入快照。需要显式元素类型时可使用
+`values.fold(initial, combine)`。`append` 使用值引用 `self`，通过 `values.append(value)`
+修改原列表位置，支持结构字段及跨方法转发，不需要取址或解引用。整体更新需要可重新绑定的位置；`let` 列表的查询仍可调用。带回调的遍历显式保存输入快照。需要显式元素类型时可使用
 `meta.List<T>.concat(left, right)`。旧的 `meta.length(values)` 等自由函数不再导出。
 
 `to_usize(value: Integer) -> usize` 与 `from_usize(value: usize) -> Integer`
@@ -157,9 +157,10 @@ comptime fn configured() -> bool {
 这不授予 Object 全局 Copy 实现或 runtime 表示，带活动引用的 Object 也不会
 因此获得复制或常量逃逸权限。真实 sysroot 用例已纳入 `sysroot-meta` 检查。
 
-`*List<T>` 的读取、整体替换和 `List.append` 使用同一套传送检查。元素的声明域
-必须允许复制；空列表、缺失 optional 以及 `List<Object>` 内的条目也不能绕过
-资源权限。纯 Type 描述保持 comptime 数据身份，不因这些检查展开 normal-form 头。
+`List.append` 通过内部值引用更新接收者，不要求 runtime Copy／Clone。
+读取列表值产生独立快照，字段路径在写入时重新检查；预算或路径失败不提交该次写入。
+纯 Type 描述保持 comptime 数据身份，不因这些检查展开 normal-form 头。
+上面的 Object 指针示例仍是待迁移的旧实现记录，不是有效的 comptime 语言用法。
 
 CMTT 生成器也可以保存和查询局部 Object，再据此选择 quoted code。其物化
 保留每个条目的类型、顺序与键，不把对象伪装成 normal term；嵌套 Object

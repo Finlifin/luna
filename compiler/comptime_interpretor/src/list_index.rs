@@ -27,7 +27,19 @@ impl Interpreter<'_> {
         } else {
             None
         };
-        let list = storage.as_deref().unwrap_or(local);
+        let referenced = if let Value::ComptimeReference(reference) = local {
+            Some(
+                reference
+                    .borrow(&mut self.budget.steps)
+                    .map_err(|kind| self.failure(kind, Some(expr.source)))?,
+            )
+        } else {
+            None
+        };
+        let list = referenced
+            .as_ref()
+            .map(|value| value.value())
+            .unwrap_or_else(|| storage.as_deref().unwrap_or(local));
         let length = match list {
             Value::TypeList(elements) => elements.len(),
             Value::List { values, .. } => values.len(),

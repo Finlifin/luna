@@ -9,6 +9,7 @@ use std::{fmt, sync::MutexGuard};
 pub struct ValueReference {
     pub(crate) storage: Storage,
     fields: Vec<(FieldOwner, usize)>,
+    rebind: bool,
 }
 
 impl ValueReference {
@@ -16,6 +17,7 @@ impl ValueReference {
         Self {
             storage,
             fields: Vec::new(),
+            rebind: true,
         }
     }
 
@@ -28,6 +30,7 @@ impl ValueReference {
         Ok(Self {
             storage,
             fields: fields.to_vec(),
+            rebind: true,
         })
     }
 
@@ -49,6 +52,9 @@ impl ValueReference {
     /// path or exhausted budget leaves the entire original value unchanged.
     pub(crate) fn replace(&self, value: Value, fuel: &mut u64) -> Result<(), ErrorKind> {
         charge(&self.fields, fuel)?;
+        if !self.rebind {
+            return Err(ErrorKind::InvalidValueReference);
+        }
         let mut guard = self
             .storage
             .0
@@ -133,7 +139,7 @@ impl fmt::Display for ValueReference {
         for (owner, index) in &self.fields {
             write!(f, " (field {owner} {index})")?;
         }
-        f.write_str("))")
+        write!(f, ") (rebind {}))", self.rebind)
     }
 }
 impl fmt::Debug for ValueReference {
@@ -164,8 +170,13 @@ impl ValueReference {
         Ok(Self {
             storage: self.storage.clone(),
             fields: path,
+            rebind: self.rebind || !fields.is_empty(),
         })
     }
+    pub(crate) fn prohibit_rebind(&mut self) {
+        self.rebind = false;
+    }
+
     pub(crate) fn metadata_work(&self) -> usize {
         self.fields.len() + 1
     }
@@ -287,8 +298,26 @@ mod tests {
         );
         assert_eq!(
             first.to_string(),
-            "(value-reference (fields (field (anonymous-record) 0)))"
+            "(value-reference (fields (field (anonymous-record) 0)) (rebind true))"
         );
+    }
+
+    #[test]
+    fn rebind_permission_survives_forwarding_but_allows_field_updates() {
+        let mut root = ValueReference::root(Storage::new(record()));
+        root.prohibit_rebind();
+        let forwarded = root.project(&[], &mut 100).unwrap();
+        assert_eq!(
+            forwarded.replace(Value::Bool(true), &mut 100),
+            Err(ErrorKind::InvalidValueReference)
+        );
+        assert_eq!(root.borrow(&mut 100).unwrap().value(), &record());
+        let field = forwarded
+            .project(&[(FieldOwner::Anonymous, 0)], &mut 100)
+            .unwrap();
+        field.replace(Value::Bool(true), &mut 100).unwrap();
+        assert_eq!(field.borrow(&mut 100).unwrap().value(), &Value::Bool(true));
+        assert!(root.to_string().contains("(rebind false)"));
     }
 
     #[test]
@@ -733,7 +762,10 @@ mod call_tests {
                 .into_normal_term(&mut comptime_runtime::Budget::default())
                 .is_err()
         );
-        assert_eq!(value.to_string(), "(value-reference (fields))");
+        assert_eq!(
+            value.to_string(),
+            "(value-reference (fields) (rebind true))"
+        );
         let package = Package::default();
         let mut comptime = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert_eq!(
