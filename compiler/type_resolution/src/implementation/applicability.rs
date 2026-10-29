@@ -641,7 +641,10 @@ impl ImplementationHead {
         };
         let non_tuple =
             |ty: &Term| ordinary(ty) && !context.is_tuple_type(ty) && !matches!(ty, Term::Tuple(_));
-        if (context.is_tuple_type(subject) && non_tuple(&self.subject))
+        let non_list = |ty: &Term| ordinary(ty) && !context.is_list_type(ty);
+        if (context.is_list_type(subject) && non_list(&self.subject))
+            || (context.is_list_type(&self.subject) && non_list(subject))
+            || (context.is_tuple_type(subject) && non_tuple(&self.subject))
             || (context.is_tuple_type(&self.subject) && non_tuple(subject))
             || (matches!(&self.subject, Term::ErrorResult { .. }) && ordinary(subject))
             || (matches!(subject, Term::ErrorResult { .. }) && ordinary(&self.subject))

@@ -377,3 +377,47 @@ fn nominal_payload_layouts_govern_selection_replay_and_revision() {
             .is_err()
     );
 }
+
+#[test]
+fn trusted_list_excludes_optional_member_without_solving_its_payload() {
+    let list = Term::NormalForm {
+        head: id(100),
+        sort: Sort::Type,
+        arguments: vec![Term::Primitive(P::Bool)],
+    };
+    let mut index = InherentIndex::for_builtin_packages(None, [0]);
+    index
+        .insert(
+            head(
+                20,
+                Term::Optional(Box::new(var(1))),
+                vec![id(1)],
+                &["zip_with"],
+            ),
+            Budget::default(),
+        )
+        .unwrap();
+    let mut context = Context::default();
+    context.admit_list_inference_head(id(100));
+    let resolution = index
+        .resolve_types("zip_with", &list, &context, Budget::default())
+        .unwrap();
+    assert_eq!(resolution.selection, Selection::NoApplicableCandidate);
+    let optional = Term::Optional(Box::new(Term::Primitive(P::Bool)));
+    assert_eq!(
+        index
+            .resolve_types("zip_with", &optional, &context, Budget::default())
+            .unwrap()
+            .selection,
+        Selection::Selected(id(20))
+    );
+    // Removing trusted family classification must not invent apartness for
+    // opaque factories. The same name remains undecidable in that world.
+    assert!(matches!(
+        index
+            .resolve_types("zip_with", &list, &Context::default(), Budget::default())
+            .unwrap()
+            .selection,
+        Selection::Deferred { .. }
+    ));
+}

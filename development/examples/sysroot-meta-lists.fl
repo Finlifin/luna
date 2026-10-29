@@ -46,7 +46,7 @@ comptime fn run() -> bool {
         and (nested[0] match { null => true, _? => false })
         and unused.length() == 0 and unused_filter.length() == 0
         and reducers_and_searches() and named_metadata() and stable_sorting()
-        and exact_integer_division() and value_receivers()
+        and exact_integer_division() and value_receivers() and indexed_pairing()
 }
 
 comptime fn exact_integer_division() -> bool {
@@ -162,4 +162,19 @@ comptime fn value_receivers() -> bool {
     saved.length() == 1 and values.length() == 2
         and holder.items.length() == 3 and not holder.tag
         and (slice match { items? => items.length() == 2 and items[0] and not items[1], null => false })
+}
+
+{- Code generators can pair declaration inputs and keep their source indices. -}
+comptime fn indexed_pairing() -> bool {
+    let widths: meta.List<Integer> = [8, 16, 32];
+    let flags: meta.List<bool> = [true, false];
+    let indexed = widths.map_indexed(|index, width| index * 100 + width);
+    let paired = widths.zip_with(flags, |width, enabled| if enabled {width} else {0});
+    let found = widths.position(|width| width == 16);
+    let empty: meta.List<Integer> = [];
+    let missing = empty.position(|width| true);
+    indexed.length() == 3 and indexed[0] == 8 and indexed[2] == 232
+        and paired.length() == 2 and paired[0] == 8 and paired[1] == 0
+        and (found match { index? => index == 1, null => false })
+        and (missing match { null => true, _? => false })
 }

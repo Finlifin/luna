@@ -1400,3 +1400,144 @@ fn list_reduction_and_search_abort_failed_callbacks_and_recover() {
         assert_eq!(recovered, expected);
     }
 }
+
+#[test]
+fn indexed_and_paired_maps_preserve_order_domains_and_closure_state() {
+    let package = compile(
+        r#"
+        typealias Integer=.Integer'builtin;
+        typealias Type=.Type'builtin;
+        pure comptime fn Identity<T> -> Type {T}
+        comptime fn run()->bool {
+            let values:meta.List<Integer> = [10,20,30];
+            var calls:Integer=0;
+            let mapped=values.map_indexed(|index,value| {
+                calls = calls + 1; index * 100 + value + calls
+            });
+            let flags:meta.List<bool> = [true,false];
+            let paired=values.zip_with(flags,|value,flag| if flag {value} else { -value });
+            let shorter=flags.zip_with(values,|flag,value| if flag {value} else { -value });
+            let types:meta.List<Type> = [Identity<bool>,bool];
+            let retained=types.map_indexed(|index,value| value);
+            let selected=types.zip_with(flags,|value,flag| value);
+            mapped.length()==3 and mapped[0]==11 and mapped[1]==122 and mapped[2]==233
+                and paired.length()==2 and paired[0]==10 and paired[1]==-20
+                and shorter.length()==2 and shorter[1]==-20
+                and retained[0]==Identity<bool>
+                and selected[0]==Identity<bool> and selected[1]==bool
+                and values.length()==3 and values[0]==10
+        }
+    "#,
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn position_short_circuits_and_empty_mapping_never_calls_callbacks() {
+    let package = compile(
+        r#"
+        typealias Integer=.Integer'builtin;
+        comptime fn crash(value:Integer)->bool {let empty:meta.List<bool> = [];empty[0]}
+        comptime fn run()->bool {
+            let values:meta.List<Integer> = [0,1,2];
+            let empty:meta.List<Integer> = [];
+            let a=empty.map_indexed(|index,value| crash(value));
+            let b=empty.zip_with(values,|left,right| crash(left));
+            let c=values.zip_with(empty,|left,right| crash(right));
+            let zero=values.position(|value| true);
+            let second=values.position(|value| if value==2 {crash(value)} else {value==1});
+            let missing=values.position(|value| false);
+            let absent=empty.position(crash);
+            a.length()==0 and b.length()==0 and c.length()==0
+                and (zero match {index? => index==0,null=>false})
+                and (second match {index? => index==1,null=>false})
+                and (missing match {null=>true,_?=>false})
+                and (absent match {null=>true,_?=>false})
+        }
+    "#,
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn indexed_and_paired_callbacks_reject_wrong_domains_and_runtime_phase() {
+    for source in [
+        "comptime fn bad() {meta.List<bool>.map_indexed([true],|index| index);}",
+        "comptime fn bad() {meta.List<bool>.zip_with([true],[false],|a,b| a + b);}",
+        "comptime fn bad() {meta.List<bool>.position([true],|value| 'x');}",
+        "fn bad() {meta.List<bool>.map_indexed([true],|index,value| value);}",
+        "fn callback(a:bool,b:bool)->bool {a} comptime fn bad() {meta.List<bool>.zip_with([true],[false],callback);}",
+    ] {
+        assert!(compile(source).is_err(), "accepted {source}");
+    }
+}
+
+#[test]
+fn indexed_pairing_and_position_stop_on_failure_and_allow_retry() {
+    for (parameters, call, result) in [
+        (
+            "index:Integer,value:Integer",
+            "values.map_indexed(callback)",
+            "result.length() == 2 and not result[0] and result[1]",
+        ),
+        (
+            "value:Integer,flag:bool",
+            "values.zip_with([true,true,true],callback)",
+            "result.length() == 2 and not result[0] and result[1]",
+        ),
+        (
+            "value:Integer",
+            "values.position(callback)",
+            "result match {index? => index == 1,null => false}",
+        ),
+    ] {
+        let package = compile(&format!(
+            r#"
+            typealias Integer=.Integer'builtin;
+            comptime fn callback({parameters})->bool {{
+                let table:meta.List<bool> = [false,true]; table[value]
+            }}
+            comptime fn fail()->bool {{
+                let values:meta.List<Integer> = [0,2,1];let result={call}; {result}
+            }}
+            comptime fn recover()->bool {{
+                let values:meta.List<Integer> = [0,1];let result={call}; {result}
+            }}
+        "#
+        ))
+        .unwrap();
+        let mut vm = comptime_interpretor::Interpreter::for_comptime(
+            &package,
+            comptime_interpretor::Budget {
+                steps: 1_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, "fail"), vec![])
+                .unwrap_err()
+                .kind,
+            comptime_interpretor::ErrorKind::IndexOutOfBounds
+        );
+        assert_eq!(
+            support::calls(&package, &vm)
+                .iter()
+                .filter(|name| **name == "callback")
+                .count(),
+            2
+        );
+        assert_eq!(
+            vm.invoke(support::id(&package, "recover"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}

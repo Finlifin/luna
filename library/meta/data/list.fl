@@ -88,6 +88,53 @@ impl List<T> where T {
         output
     }
 
+    {- Indices belong to the fixed input snapshot and start at zero. -}
+    pub comptime fn map_indexed(self,
+        transform: %c comptime fn(Integer, T) -> U) -> List<U>
+    where U, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var output: List<U> = [];
+        inline for index in 0..count {
+            output.append(transform(index, input[index]));
+        }
+        output
+    }
+
+    {-
+        Pair fixed snapshots in index order, stopping at the shorter input.
+        The unmatched suffix is not visited. Ordinary call evaluation still
+        evaluates both input expressions and the callback before this body.
+    -}
+    pub comptime fn zip_with(self, other: List<U>,
+        combine: %c comptime fn(T, U) -> V) -> List<V>
+    where U, V, c: Type.vars.Closure
+    {
+        let left = self;
+        let right = other;
+        let left_count = left.length();
+        let right_count = right.length();
+        let count = if left_count < right_count {left_count} else {right_count};
+        var output: List<V> = [];
+        inline for index in 0..count {
+            output.append(combine(left[index], right[index]));
+        }
+        output
+    }
+
+    {- Return the first matching index, including a present zero. -}
+    pub comptime fn position(self, pred: %c comptime fn(T) -> bool) -> ?Integer
+    where c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        inline for index in 0..count {
+            if pred(input[index]) { return index; }
+        }
+        null
+    }
+
     {-
       Transform each input once in order. filter_map discards only the outer null;
       flat_map appends every inner list in order, including empty inner results.

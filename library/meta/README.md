@@ -627,3 +627,31 @@ comptime fn Packet() -> Type {
 该示例通过 builtin.prelude 导出的透明别名 `BitVec<n>` 使用 5 位寄存器字段，
 不需要用户直接调用编译器 builtin。任意宽度整数 `u5` 尚未实现；这里没有将
 BitVec 字段声称为 `u5`，也不改变两者的类型身份或运算规则。
+
+### 带索引映射、配对与位置查找
+
+- `values.map_indexed(transform) -> List<U>` 按输入顺序调用
+  `transform(index: Integer, value: T)`，索引从零开始。
+- `values.zip_with(other, combine) -> List<V>` 将两个快照同位置的元素交给
+  `combine(left: T, right: U)`，结果长度为较短输入的长度，不访问未配对尾部。
+- `values.position(pred) -> ?Integer` 返回第一个匹配位置，找到后立即停止。
+  索引零仍是存在结果；空列表或没有匹配项返回 null。
+
+这些都是 `List` 的固有 comptime 方法。映射回调按索引顺序调用，闭包状态
+在调用之间保留；空的映射范围不执行回调。实参仍按普通调用规则求值一次，
+即使最终没有配对元素也不会跳过实参求值。回调失败终止本次操作。
+
+```flurry
+comptime fn offsets() -> bool {
+    let widths: meta.List<Integer> = [8, 16, 32];
+    let enabled: meta.List<bool> = [true, false];
+    let indexed = widths.map_indexed(|index, width| index * 100 + width);
+    let selected = widths.zip_with(enabled, |width, flag| if flag {width} else {0});
+    let first_wide = widths.position(|width| width >= 16);
+    indexed[2] == 232 and selected.length() == 2 and selected[1] == 0
+        and (first_wide match { index? => index == 1, null => false })
+}
+```
+
+输入及 Type 元素保持原有身份；这些操作不展开 normal-form 头，也不引入
+runtime List 或 comptime 指针。输出构造仍受不可变表示验证的现有成本限制。
