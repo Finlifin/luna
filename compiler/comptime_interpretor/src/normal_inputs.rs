@@ -301,18 +301,12 @@ impl Interpreter<'_> {
                             pending: true,
                         });
                         work.push(Work::Enter(item, depth + 1));
-                    } else if let Some(PreparedNormalInput::TypeTuple(head)) = literals.remove(&key)
-                    {
-                        let types = values
-                            .into_iter()
-                            .map(|value| match value {
-                                Value::Type(ty) => Ok(ty),
-                                _ => Err(self.failure(ErrorKind::Type, Some(source))),
-                            })
-                            .collect::<Result<_, _>>()?;
-                        completed = Some(self.contextual_tuple_type(head, types, source)?);
                     } else {
-                        completed = Some(Value::Tuple(values));
+                        let head = match literals.remove(&key) {
+                            Some(PreparedNormalInput::TypeTuple(head)) => Some(head),
+                            _ => None,
+                        };
+                        completed = Some(self.finish_contextual_tuple(head, values, source)?);
                     }
                 }
             }

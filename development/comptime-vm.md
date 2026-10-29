@@ -2584,3 +2584,39 @@ Validation from `/home/fin/luna`, successful runs exit 0:
 - Initial test compilation failed because the test module needed the qualified
   `normal_types::Bindings` path (`/tmp/luna-tools-9p5czfpp/result.json`);
   corrected before the successful runs above.
+
+## Deferred contextual tuples retain abstract Type authority
+
+While preparing VM input-plan work, a differential regression exposed a mismatch:
+sequential tree/bytecode construction accepted an authorized `TypeParameter`,
+but the staged tuple finisher accepted only `Value::Type`. Consequently a tuple
+input arriving before its contextual Type rejected a valid abstract Type that
+was accepted in declaration order. This contradicted the caller-scope preservation
+in `docs/type/comptime-gradual-dependent-type.md` and the order-independent
+normal-form argument binding contract.
+
+All three paths now share `finish_contextual_tuple`. It observes Type operands
+through `type_description_term`, including its existing authority check, and
+uses the registered opaque tuple constructor with its formation requirements.
+Value tuples retain their ordinary behavior; this does not introduce a new
+Tuple type identity or source syntax. All operands are still evaluated before
+completion, and completion never evaluates an expression again.
+
+Validation from `/home/fin/luna`:
+
+- The new regression initially failed only for the deferred input order,
+  `/tmp/luna-tools-ke9d1yg7/result.json`, exit 101. Sequential tree, bytecode and
+  declaration-order plan cases passed before the failing case.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-ghy7fy0i/result.json`, exit 0. The regression checks exact
+  opaque head and argument identity in all four paths, repeated rejection of
+  foreign Type parameters, recovery and temporary-binding cleanup.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-0bsfi6kj/result.json`, exit 0;
+  `git diff --check` passed.
+
+VM lowering of preparation/reordering plans remains unfinished. The corrected
+finisher is shared groundwork, not a claim that those plans now use bytecode.
+
+Source regression check also passed (exit 0):
+`python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_clause_inputs --test builder_invocations`,
+`/tmp/luna-tools-8lni84lz/result.json`.

@@ -296,18 +296,27 @@ impl Interpreter<'_> {
     ) -> Result<Value, Error> {
         match container {
             Prepared::List { ty, types, values } => self.finish_normal_list(ty, types, values),
-            Prepared::Tuple {
-                head: Some(head),
-                values,
-            } => {
+            Prepared::Tuple { head, values } => self.finish_contextual_tuple(head, values, source),
+            _ => Err(self.failure(ErrorKind::Type, Some(source))),
+        }
+    }
+    /// All operands have already run. Preserve abstract Type authority and
+    /// the registered tuple head regardless of when the input domain arrived.
+    pub(super) fn finish_contextual_tuple(
+        &mut self,
+        type_head: Option<Option<DeclarationId>>,
+        values: Vec<Value>,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        match type_head {
+            Some(head) => {
                 let types = values
                     .into_iter()
                     .map(|value| self.type_description_term(value, source))
                     .collect::<Result<_, _>>()?;
                 self.contextual_tuple_type(head, types, source)
             }
-            Prepared::Tuple { head: None, values } => Ok(Value::Tuple(values)),
-            _ => Err(self.failure(ErrorKind::Type, Some(source))),
+            None => Ok(Value::Tuple(values)),
         }
     }
     pub(super) fn normal_unit_value(

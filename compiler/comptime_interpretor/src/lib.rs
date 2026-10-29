@@ -4147,21 +4147,12 @@ impl<'a> Interpreter<'a> {
                         environment
                     )));
                 }
-                if let Some(PreparedNormalInput::TypeTuple(head)) =
-                    literals.remove(&(input as *const A as usize))
-                {
-                    let types = values
-                        .into_iter()
-                        .map(|value| self.type_description_term(value, input.source()))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok(Flow::Value(self.contextual_tuple_type(
-                        head,
-                        types,
-                        input.source(),
-                    )?))
-                } else {
-                    Ok(Flow::Value(Value::Tuple(values)))
-                }
+                let head = match literals.remove(&(input as *const A as usize)) {
+                    Some(PreparedNormalInput::TypeTuple(head)) => Some(head),
+                    _ => None,
+                };
+                self.finish_contextual_tuple(head, values, input.source())
+                    .map(Flow::Value)
             }
             A::Match {
                 source,

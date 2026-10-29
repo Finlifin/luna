@@ -1206,3 +1206,109 @@ fn planned_contextual_inputs_recover_after_deferred_literal_failure() {
         assert!(locals.iter().all(|local| !environment.contains_key(local)));
     }
 }
+
+#[test]
+fn contextual_type_tuples_accept_scoped_parameters_in_every_input_order() {
+    use nir::program::NormalFormInputPlan;
+    let package = container_package();
+    let authorized = DeclarationId {
+        package: 12,
+        local: 90,
+    };
+    let foreign = DeclarationId {
+        package: 12,
+        local: 91,
+    };
+    let local = LocalId {
+        owner: 90,
+        index: 0,
+    };
+    let plan_locals = vec![
+        LocalId {
+            owner: 90,
+            index: 1,
+        },
+        LocalId {
+            owner: 90,
+            index: 2,
+        },
+    ];
+    let tuple_head = DeclarationId {
+        package: 12,
+        local: 6,
+    };
+    for mode in 0..4 {
+        let mut body = container_body(
+            Term::Primitive(Primitive::Type),
+            A::Tuple {
+                source: SOURCE,
+                type_head: Some(tuple_head),
+                items: vec![
+                    A::Value(expr(Primitive::Type, K::Local(local))),
+                    A::Value(expr(
+                        Primitive::Type,
+                        K::TypeValue(Term::Primitive(Primitive::U8)),
+                    )),
+                ],
+            },
+        );
+        if mode >= 2 {
+            let K::NormalFormType { plan, .. } = &mut body.kind else {
+                unreachable!()
+            };
+            *plan = Some(NormalFormInputPlan {
+                order: if mode == 2 { vec![0, 1] } else { vec![1, 0] },
+                bindings: plan_locals.clone(),
+                preparations: vec![],
+            });
+        }
+        let code =
+            (mode == 1).then(|| Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap()));
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_abstract_type_parameters(&[authorized])
+            .unwrap();
+        for declaration in [foreign, authorized, foreign, authorized] {
+            let mut env = Environment::new();
+            env.insert(local, Value::TypeParameter(declaration));
+            let result = if let Some(code) = &code {
+                vm.execute_code(code, &mut env)
+            } else {
+                vm.eval(&body, &mut env)
+            };
+            if declaration == foreign {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type, "mode {mode}");
+            } else {
+                let Flow::Value(actual) =
+                    result.unwrap_or_else(|error| panic!("mode {mode}: {error:?}"))
+                else {
+                    panic!("transfer")
+                };
+                assert_eq!(
+                    actual,
+                    Value::Type(Term::NormalForm {
+                        head: package.normal_forms[0].declaration,
+                        sort: nir::Sort::Type,
+                        arguments: vec![
+                            Term::Primitive(Primitive::Type),
+                            Term::NormalForm {
+                                head: tuple_head,
+                                sort: nir::Sort::Type,
+                                arguments: vec![Term::TypeListValue(vec![
+                                    Term::Rigid {
+                                        declaration: authorized,
+                                        sort: nir::Sort::Type
+                                    },
+                                    Term::Primitive(Primitive::U8),
+                                ])],
+                            }
+                        ],
+                    }),
+                    "mode {mode}"
+                );
+            }
+            assert!(plan_locals.iter().all(|local| !env.contains_key(local)));
+            assert_eq!(env.get(&local), Some(&Value::TypeParameter(declaration)));
+        }
+    }
+}
