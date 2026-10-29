@@ -410,3 +410,37 @@ test scan_absent_result_retires_rejected_item_and_remainder {
         .as(Iterator).foreach(|value| {assumes false;});
     assumes state_retired and rejected_retired and remainder_retired;
 }
+
+struct ScanFlags {current: bool, previous: bool}
+impl Clone for ScanFlags {
+    fn clone(*self) -> Self {
+        ScanFlags {current: self.current.*, previous: self.previous.*}
+    }
+}
+impl Copy for ScanFlags {}
+struct NestedScanState {watch: Watch, flags: ScanFlags}
+
+fn scan_replace_flags(state: *NestedScanState, value: bool) -> ?bool {
+    let old = state.flags.*;
+    state.flags.* = ScanFlags {current: value, previous: old.current};
+    old.current
+}
+
+test scan_replaces_copy_substructure_of_affine_state {
+    var retired = false;
+    let state = NestedScanState {
+        watch: Watch {seen: retired.ref, value: true},
+        flags: ScanFlags {current: false, previous: false},
+    };
+    let first: ?bool = true;
+    let second: ?bool = false;
+    var count: usize = 0;
+    let output = count.ref;
+    first.as(Iterator).chain(second).as(Iterator).scan(state, scan_replace_flags)
+        .as(Iterator).foreach(|value| {
+            assumes value == (output.* == 1);
+            assumes output.* < 2;
+            output.* += 1;
+        });
+    assumes count == 2 and retired;
+}

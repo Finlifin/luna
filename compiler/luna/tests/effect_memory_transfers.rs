@@ -5093,3 +5093,76 @@ fn handler_borrows_affine_state_fields_without_owning_or_rebinding_pointers() {
         );
     }
 }
+
+#[test]
+fn handler_replaces_pointer_free_copy_fields_of_affine_state() {
+    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        typealias Unit=.void'builtin;
+        struct Flags {left:bool,right:bool}
+        impl Duplicate for Flags {}
+        struct State {seen:*bool,flags:Flags}
+        impl Retire for State {fn drop(*self) {
+            assumes not self.seen.*.*;self.seen.*.* = true;
+        }}
+        inline effect tick();
+        inline fn twice()->#tick Unit {tick()#;tick()#;}
+        fn advance(state:*State) {
+            let old=state.flags.*;
+            state.flags.* = Flags{left:not old.left,right:old.left};
+        }
+        fn run()->bool {
+            var retired=false;
+            {let state=State{seen:retired.ref,flags:Flags{left:false,right:false}};
+                let pointer=state.ref;
+                twice()# {tick()=>advance(pointer),};
+                assumes not state.flags.left and state.flags.right and not retired;
+            };
+            retired
+        }";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn handler_rejects_pointer_rebinding_hidden_in_copy_aggregate() {
+    let package = support::compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        typealias Unit=.void'builtin;
+        struct Link {target:*bool}
+        impl Duplicate for Link {}
+        struct State {link:Link}
+        impl Retire for State {fn drop(*self) {}}
+        inline effect tick();
+        inline fn once()->#tick Unit {tick()#;}
+        fn run() {
+            var alive=false;
+            let state=State{link:Link{target:alive.ref}};
+            let pointer=state.ref;
+            once()# {tick()=>{
+                var local=false;
+                pointer.link.* = Link{target:local.ref};
+            },};
+        }",
+    );
+    let error = luna::execution::interpret_with_protocols(
+        &package,
+        "run",
+        "Duplicate",
+        "Retire",
+        1_000_000,
+    )
+    .unwrap_err();
+    assert!(error.contains("move-error"), "{error}");
+}

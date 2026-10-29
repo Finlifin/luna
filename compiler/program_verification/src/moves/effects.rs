@@ -910,7 +910,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             {
                 return Err(error(
                     source,
-                    "handler pointer requires a live local Copy scalar target",
+                    "handler pointer requires live local storage with a stable field path",
                 ));
             }
             // Import initialized borrowed storage, not ownership or Copy evidence.
@@ -1533,17 +1533,27 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             "aggregate handler pointees require a complete field access summary",
                         )
                     })?;
-                    // This frame imports initialization, not embedded pointer-slot
-                    // provenance. Only scalar field access is admitted; replacing
-                    // pointer fields would require checked environment writeback.
-                    if summary.capture_accesses.iter().any(|(_, access)| {
-                        !matches!(access.ty, Term::Primitive(_))
-                            || !nir::program::intrinsic_pointer_value(&access.ty)
-                    }) {
-                        return Err(error(
-                            installation,
-                            "aggregate handler pointees permit only scalar field accesses",
-                        ));
+                    // The frame imports initialization, not embedded pointer-slot
+                    // provenance. Copying or replacing a pointer-free value cannot
+                    // rebind an alias in the installer's state. This also permits
+                    // aggregate fields without imposing Copy on their owner.
+                    for (_, access) in &summary.capture_accesses {
+                        super::super::memory::require_pointer_free_owned(
+                            self.package,
+                            &access.ty,
+                            &mut self.fuel,
+                            0,
+                        )
+                        .map_err(|reason| error(installation, reason))?;
+                        if (self.delivery)(&access.ty)
+                            .map_err(|reason| error(installation, reason))?
+                            != Delivery::Copy
+                        {
+                            return Err(error(
+                                installation,
+                                "borrowed handler field access requires Copy delivery",
+                            ));
+                        }
                     }
                 }
                 let stable_writes = match &parameter_summary {
