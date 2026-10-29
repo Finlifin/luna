@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+comptime_compiler = { path = "../comptime_compiler" }
 nir = { path = "../nir" }
 comptime_runtime = { path = "../comptime_runtime" }
 iir = { path = "../iir" }

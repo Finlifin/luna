@@ -51,7 +51,9 @@ The following are implementation work, not features completed by this change:
 
 1. Implement the `comptime_compiler` engine-bytecode carrier specified in
    `docs/comptime/purity-and-normal-form.md` and connect actual invocation to
-   it. It is currently a placeholder. Explicit execution frames must retain
+   it. Initial control lowering and invocation execution are now connected;
+   full operation/call coverage and stable code caching remain open. Explicit
+   execution frames must retain
    work across host-query suspension without replaying completed effects;
    runtime IIR simulation and mixed-stage interpretation retain their distinct
    responsibilities. AST-shape peepholes are not a substitute for this work.
@@ -140,3 +142,11 @@ Builtin-binding validation (same working directory):
   final formatting passed; `/tmp/luna-tools-q9iw7jcb/result.json`.
 - `python3 -B development/check.py --timeout 900 -- test -p materialization --lib`:
   passed; `/tmp/luna-tools-cn644dhi/result.json`.
+
+## Invocation control carrier
+
+The next delivered stage replaces the empty `comptime_compiler` crate with
+bounded linear control lowering and connects it to actual comptime invocation.
+Scope, validation and remaining architecture work are recorded in
+[comptime-vm.md](comptime-vm.md#scope-and-current-boundary). No general call-stack
+or query suspension capability is claimed by the first control-carrier stage.

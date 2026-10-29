@@ -93,6 +93,9 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "comptime_compiler"
 version = "0.1.0"
+dependencies = [
+ "nir",
+]
 
 [[package]]
 name = "comptime_executor"
@@ -102,6 +105,7 @@ version = "0.1.0"
 name = "comptime_interpretor"
 version = "0.1.0"
 dependencies = [
+ "comptime_compiler",
  "comptime_runtime",
  "iir",
  "nir",

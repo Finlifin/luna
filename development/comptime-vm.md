@@ -2,13 +2,47 @@
 
 ## Scope and current boundary
 
-The invocation engine executes typed NIR and validated IIR. It still uses an
-expression dispatcher, not a complete bytecode VM. The current optimization
-work targets invocation frames and lexical-scope bookkeeping without changing
-phase admission, contracts, abstract values, storage identity, effect transfer,
-or the step/depth budgets.
+Invocation now has a linear engine-code path alongside the migration tree
+interpreter. `comptime_compiler` lowers supported closed function bodies before
+execution; `comptime_interpretor::bytecode` runs a program counter, fixed dense
+registers and explicit lexical scope records. Mixed-stage interpretation and
+scheduled runtime cleanup continue to use the existing interpreter. This is not
+yet a complete bytecode VM: calls, general primitives, effect/query suspension,
+compiled-code caching and the unified value representation remain outstanding.
 
-Ordinary single-owner locals use directly indexed slots. Mixed-owner captures,
+Compilation traverses control with a bounded heap worklist, including untaken
+branches. Unsupported operations select the old body path before any bytecode
+instruction executes; execution errors never trigger fallback. Constants borrow
+immutable typed NIR leaves for this invocation; they are not frozen query-cache
+artifacts. No opcode delegates a child expression tree back to `eval`.
+
+Supported bodies include existing literal/frozen-value/Type leaves, reads,
+local initialization and whole-slot assignment, blocks, boolean short circuit,
+boolean/BitVec negation, branches, loops, break/continue and return. Temporary
+registers are allocated densely independent of LocalId values. Scope exit and
+loop transfers clear introduced bindings; imported inputs are restored on both
+success and failure so later contract checks retain prior mutations.
+
+Reads reuse the checked invocation value-copy/value-reference mechanism.
+Whole receiver updates use the same comptime value-reference storage writes;
+they do not introduce pointers or require runtime Copy. Phase admission,
+parameter binding, requirements, preconditions and postconditions remain at the
+ordinary invocation boundary. Runtime IIR cleanup is not silently bypassed.
+
+Compilation currently has a separate 100,000-work-item limit. Traversal, worklist
+scheduling, instruction fixups and register allocation are bounded. Execution
+charges frame storage, each opcode and existing scalar/value operations against
+the invocation budget. Cost counts can differ between the two carriers, as
+allowed by docs/comptime/normalization-and-instantiation.md. There is no speedup
+claim: compiling on every invocation is a known temporary cost until stable
+compiled-code/query identities are connected.
+
+`bytecode_invocations()` exposes actual route selection for verification. Tests
+must inspect this counter in addition to result equality, so a successful tree
+fallback cannot masquerade as bytecode delivery. The compiler's S-expression
+Display preserves source ranges, local-slot mapping, jumps and constant dumps.
+
+On the remaining tree path, ordinary single-owner locals use directly indexed slots. Mixed-owner captures,
 out-of-order identities, and sufficiently sparse indices transition to an
 ordered map. The numeric size of a LocalId cannot request an equally large
 allocation. A scope snapshot records binding presence, not a copy of values:
@@ -829,3 +863,36 @@ cases (`/tmp/luna-tools-j401lu05/result.json`). The formerly aborting canonical-
 case is included without a skip. Formatting passed at
 `/tmp/luna-tools-5hn11z7j/result.json`. These checks validate decoding and its
 consumers; they do not establish completion of the entire comptime subsystem.
+
+## Linear invocation validation (2026-10-29)
+
+Working directory: `/home/fin/luna`.
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p luna --test control --test comptime_bytecode`:
+  passed; `/tmp/luna-tools-cnrruz1s/result.json`. Source invocation checks actual
+  bytecode routing, Type values, mutation, loops, early return, receiver storage
+  updates without runtime Copy and resource exhaustion. Compiler tests check
+  unsupported/invalid control admission, deterministic dumps and 2,048 nested
+  blocks without recursive compiler traversal. This is not evidence that all
+  interpreter admission or value walkers now support that nesting depth.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test instance_budget --test function_types --test environment_types --test type_list_inputs --test abstract_values`:
+  passed; `/tmp/luna-tools-bfax1k35/result.json`. Covers existing contract,
+  abstract-value, instance-budget and immutable collection boundaries.
+
+Initial source test failure used an illegal reassignment of `let`; the fixture
+now uses `var`. A second failure showed that short-circuit classification must
+use the boolean operand domain, since an early-returning expression can have a
+bottom result type. Lowering was corrected rather than removing the early-return
+case or counting its fallback as success.
+
+Final stage checks:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  passed; `/tmp/luna-tools-c5etb30j/result.json`. Includes failed bytecode-frame
+  recovery in the same interpreter, preservation of prior writes, lexical local
+  removal and dense allocation for sparse/mixed-owner LocalIds.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p luna --test control --test comptime_bytecode --test comptime_receivers --test comptime_local_types --test library_protocols`:
+  passed; `/tmp/luna-tools-f3zhy1y2/result.json`. Includes real library operations
+  and native tuple affine-field checks alongside source bytecode assertions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  passed; `/tmp/luna-tools-1c0hukc1/result.json`. `git diff --check` passed.

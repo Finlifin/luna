@@ -8,6 +8,7 @@
 //! NIR and validated IIR occurrence environments; scheduled effect cleanup is
 //! not yet admitted. Limits are resource outcomes, not language type errors.
 mod admission;
+mod bytecode;
 mod cleanup;
 mod code_values;
 pub use code_values::CodeValue;
@@ -757,6 +758,7 @@ enum PointerCopyPermission<'a> {
 }
 
 pub struct Interpreter<'a> {
+    bytecode_invocations: usize,
     enum_builder:
         Option<&'a dyn Fn(&EnumBuildRequest, &mut u64) -> Result<PreparedEnumBuild<'a>, Error>>,
     struct_builder:
@@ -1613,6 +1615,7 @@ impl<'a> Interpreter<'a> {
                 source: None,
             })?;
         Ok(Self {
+            bytecode_invocations: 0,
             declaration_world: Some(package),
             effect_declarations,
             effect_state: effects::State::default(),
@@ -2414,7 +2417,7 @@ impl<'a> Interpreter<'a> {
                 }
                 self.events.push(Event::EnterFunction(id));
             }
-            let (value, returned) = match self.eval(body, &mut environment)? {
+            let (value, returned) = match self.invocation_body(body, &mut environment)? {
                 Flow::Value(value) => (value, false),
                 Flow::Return(value) => (value, true),
                 _ => return Err(self.failure(ErrorKind::InvalidControlFlow, Some(body.source))),
@@ -3098,11 +3101,18 @@ impl<'a> Interpreter<'a> {
         id: LocalId,
         source: Option<SourceRange>,
     ) -> Result<Value, Error> {
-        let location = source.unwrap_or(SourceRange { start: 0, end: 0 });
-        match environment
+        let value = environment
             .get(&id)
-            .ok_or_else(|| self.failure(ErrorKind::MissingBinding, source))?
-        {
+            .ok_or_else(|| self.failure(ErrorKind::MissingBinding, source))?;
+        self.invocation_slot_value(value, source)
+    }
+    fn invocation_slot_value(
+        &mut self,
+        value: &Value,
+        source: Option<SourceRange>,
+    ) -> Result<Value, Error> {
+        let location = source.unwrap_or(SourceRange { start: 0, end: 0 });
+        match value {
             Value::ComptimeReference(reference) => self.read_value_reference(reference, location),
             Value::Storage(storage) => {
                 if self.comptime_only {
