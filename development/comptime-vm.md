@@ -21,7 +21,8 @@ package-body code can be reused within one interpreter.
 No opcode delegates a child expression tree back to `eval`.
 
 Supported bodies include existing literal/frozen-value/Type leaves, reads,
-local initialization, whole-slot/record-field assignment and field reads, blocks,
+record construction, local initialization, whole-slot/record-field assignment and
+field reads, blocks,
 boolean short circuit,
 boolean/BitVec negation, branches, loops, break/continue and return. Integer
 arithmetic, exact/machine floating arithmetic, scalar comparisons and admitted
@@ -1290,9 +1291,8 @@ field receivers, forwarding, reading through a let receiver, field updates
 through a no-rebind root, a default reading self, and temporary receivers.
 An internal malformed-NIR test invalidates an acquired path in a later argument
 and verifies rejection before entry while preserving the completed storage write.
-Aggregate construction still requires the migration carrier. Record-field reads
-and writes are covered by the following step; this does not introduce new
-trait-call or effect support.
+Record-field access and record construction are covered by the following steps;
+this does not introduce new trait-call or effect support.
 
 Validation from `/home/fin/luna`, all commands exited 0:
 
@@ -1328,9 +1328,9 @@ Runtime pointer and scheduled cleanup paths retain their existing implementation
 
 Regression cases check compiled field getters/setters, computed bases, writes to
 siblings during RHS evaluation, invalid anonymous names/indices/result types,
-and missing assignment roots rejecting before RHS effects. Aggregate construction
-remains on the migration path; this step does not claim the complete aggregate
-or collection instruction families.
+and missing assignment roots rejecting before RHS effects. The following step
+adds record construction; the complete aggregate and collection instruction
+families are not yet migrated.
 
 Validation from `/home/fin/luna`, all commands exited 0:
 
@@ -1344,3 +1344,50 @@ Validation from `/home/fin/luna`, all commands exited 0:
   cases passed; report `/tmp/luna-tools-8nxkhm_u/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   report `/tmp/luna-tools-yzkbz3eh/result.json`.
+
+## Compiled record construction (2026-10-30)
+
+Named and anonymous records now construct values through bytecode after their
+field computations complete. Their final assembly and validation use the same
+helper as tree evaluation, retaining generic arguments, nominal declaration
+identity, anonymous labels, selected associated types and complete-value checks.
+Fields are ordinary values; no library-specific or tuple normal-form rules were
+added. Runtime interpretation keeps its prepared-value cleanup boundaries.
+
+Struct initialization follows declaration order, as specified by
+`docs/type/user-defined-types/structs.md`, regardless of the spelling order of
+named inputs. Lowering preserves the checked NIR initialization plan. This is
+different from ordinary function argument source order. The first regression
+fixture incorrectly expected source order; checking the formal struct contract
+showed that the existing initialization plan was correct, so its assertion now
+requires the documented declaration order without changing production semantics.
+
+A construction input that exits early skips remaining fields and final assembly.
+A failed complete-value check does not publish a partial record or replay field
+effects. Compiler templates own bounded type metadata, register inputs preserve
+nested computations, and the record instruction has an S-expression dump.
+
+Source tests cover reverse-spelled fields, generic record arguments, nested
+anonymous records collected by a generic callable, and the complete constructor /
+receiver mutation / field-read path. Other aggregate and collection families,
+trait calls, active effects and scheduled cleanup remain separate migration work.
+
+Default-override tests additionally confirm that an explicit field skips the
+default computation, while an omitted field invokes it once. Empty records retain
+their nominal identity and complete-value validation.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  227 tests passed, including constructor rejection after completed effects and
+  early exit before later fields; report `/tmp/luna-tools-izisphp0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  eight tests passed; report `/tmp/luna-tools-810poenn/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_records --test comptime_bytecode --test comptime_bytecode_references --test comptime_bytecode_defaults --test builder_invocations --test execution`:
+  record/call/reference/default groups, 73 builders and 1,365 execution cases
+  passed; report `/tmp/luna-tools-5pn9srb0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_records`:
+  all three final record tests passed, including the added default-override and
+  empty-record cases; report `/tmp/luna-tools-4nq1larg/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-dgyabdvq/result.json`.

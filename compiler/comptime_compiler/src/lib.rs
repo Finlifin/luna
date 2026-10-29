@@ -12,6 +12,13 @@ pub type Register = usize;
 
 #[derive(Debug)]
 pub enum Op {
+    Record {
+        destination: Register,
+        declaration: Option<nir::DeclarationId>,
+        ty: Term,
+        fields: Vec<Register>,
+    },
+
     CheckBinding(Register),
     WritePlace {
         local: Register,
@@ -168,6 +175,23 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::Record {
+                    destination,
+                    declaration,
+                    ty,
+                    fields,
+                } => {
+                    write!(f, "(record {destination} (declaration")?;
+                    if let Some(declaration) = declaration {
+                        write!(f, " {declaration}")?;
+                    }
+                    write!(f, ") (type {ty}) (fields")?;
+                    for field in fields {
+                        write!(f, " {field}")?;
+                    }
+                    write!(f, "))")?;
+                }
+
                 Op::CheckBinding(local) => write!(f, "(check-binding {local})")?,
                 Op::WritePlace {
                     local,
@@ -578,6 +602,28 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         );
                         if !local {
                             work.push(Work::Expression(value, base));
+                        }
+                    }
+                    K::Record { fields, .. } | K::AnonymousRecord { fields } => {
+                        *fuel = fuel
+                            .checked_sub(fields.len())
+                            .ok_or(Error::Budget(source))?;
+                        let slots: Vec<_> = fields.iter().map(|_| fresh()).collect();
+                        let declaration = match expr.kind {
+                            K::Record { declaration, .. } => Some(declaration),
+                            _ => None,
+                        };
+                        emit(
+                            &mut work,
+                            Op::Record {
+                                destination: dst,
+                                declaration,
+                                ty: copy_term(&expr.ty, fuel, source)?,
+                                fields: slots.clone(),
+                            },
+                        );
+                        for (field, slot) in fields.iter().zip(slots).rev() {
+                            work.push(Work::Expression(field, slot));
                         }
                     }
                     K::UnsafeScope(body) => work.push(Work::Expression(body, dst)),

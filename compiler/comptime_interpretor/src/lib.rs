@@ -5410,65 +5410,65 @@ impl<'a> Interpreter<'a> {
     #[inline(never)]
     fn eval_record(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
         self.with_prepared_frame(expr.source, |this| {
-            let result = match &expr.kind {
-                K::AnonymousRecord { fields } => {
-                    let mut values = Vec::new();
-                    for (slot, field) in fields.iter().enumerate() {
-                        let value = value!(this.eval(field, environment));
-                        this.retain_prepared(slot, field.source, &value)?;
-                        values.push(value);
-                    }
-                    let Term::Record(types) = &expr.ty else {
-                        return Err(this.failure(ErrorKind::Type, Some(expr.source)));
-                    };
-                    if types.len() != values.len() {
-                        return Err(this.failure(ErrorKind::Type, Some(expr.source)));
-                    }
-                    let value = Value::AnonymousRecord(
-                        types
-                            .iter()
-                            .map(|(name, _)| name.clone())
-                            .zip(values)
-                            .collect(),
-                    );
-                    if !this.has_type(&value, &expr.ty) {
-                        return Err(this.failure(ErrorKind::Type, Some(expr.source)));
-                    }
-                    value
-                }
+            let (declaration, fields) = match &expr.kind {
+                K::AnonymousRecord { fields } => (None, fields),
                 K::Record {
                     declaration,
                     fields,
-                } => {
-                    let mut values = Vec::new();
-                    for (slot, field) in fields.iter().enumerate() {
-                        let value = value!(this.eval(field, environment));
-                        this.retain_prepared(slot, field.source, &value)?;
-                        values.push(value);
-                    }
-                    let selected = if this.associated_values.is_empty() {
-                        None
-                    } else {
-                        Some(this.selected_type_view(&expr.ty, Some(expr.source))?)
-                    };
-                    let Term::Nominal { arguments, .. } = selected.as_ref().unwrap_or(&expr.ty)
-                    else {
-                        return Err(this.failure(ErrorKind::Type, Some(expr.source)));
-                    };
-                    let value = Value::Record {
-                        arguments: arguments.clone(),
-                        declaration: *declaration,
-                        fields: values,
-                    };
-                    if !this.has_type(&value, &expr.ty) {
-                        return Err(this.failure(ErrorKind::Type, Some(expr.source)));
-                    }
-                    value
-                }
-                _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
+                } => (Some(*declaration), fields),
+                _ => unreachable!("record evaluator"),
             };
-            Ok(Flow::Value(result))
+            let mut values = Vec::new();
+            for (slot, field) in fields.iter().enumerate() {
+                let value = value!(this.eval(field, environment));
+                this.retain_prepared(slot, field.source, &value)?;
+                values.push(value);
+            }
+            this.construct_record(&expr.ty, declaration, values, expr.source)
+                .map(Flow::Value)
         })
+    }
+
+    fn construct_record(
+        &mut self,
+        ty: &Term,
+        declaration: Option<DeclarationId>,
+        values: Vec<Value>,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let value = if let Some(declaration) = declaration {
+            let selected = if self.associated_values.is_empty() {
+                None
+            } else {
+                Some(self.selected_type_view(ty, Some(source))?)
+            };
+            let Term::Nominal { arguments, .. } = selected.as_ref().unwrap_or(ty) else {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            };
+            Value::Record {
+                arguments: arguments.clone(),
+                declaration,
+                fields: values,
+            }
+        } else {
+            let Term::Record(types) = ty else {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            };
+            if types.len() != values.len() {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            }
+            Value::AnonymousRecord(
+                types
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .zip(values)
+                    .collect(),
+            )
+        };
+        if !self.has_type(&value, ty) {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        Ok(value)
     }
 
     #[inline(never)]

@@ -141,16 +141,15 @@ fn compiled_receiver_updates_storage_without_runtime_copy_evidence() {
         vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
         Value::Bool(true)
     );
-    // The caller's aggregate construction still uses the migration path; the
-    // receiver body itself must execute the bytecode read and storage write.
-    assert_eq!(vm.bytecode_invocations(), 1);
+    // Both the aggregate-building caller and its receiver body execute code.
+    assert_eq!(vm.bytecode_invocations(), 2);
     assert_eq!(vm.bytecode_compilations(), 2);
     assert_eq!(
         vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
         Value::Bool(true)
     );
-    assert_eq!(vm.bytecode_invocations(), 2);
-    // Both the unsupported caller and compiled callee reuse lowering decisions;
+    assert_eq!(vm.bytecode_invocations(), 4);
+    // Both the compiled caller and callee reuse lowering decisions;
     // the impure receiver mutation must still execute on the second call.
     assert_eq!(vm.bytecode_compilations(), 2);
 }

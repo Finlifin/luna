@@ -335,6 +335,20 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::Record {
+                    destination,
+                    declaration,
+                    ty,
+                    fields,
+                } => {
+                    let values = fields
+                        .iter()
+                        .map(|field| frame.slots[*field].take().ok_or_else(missing))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    frame.slots[*destination] =
+                        Some(self.construct_record(ty, *declaration, values, source)?);
+                }
+
                 Op::CheckBinding(local) => {
                     frame.slots[*local].as_ref().ok_or_else(missing)?;
                 }
@@ -683,6 +697,82 @@ impl<'a> Interpreter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_validation_follows_effects_but_early_exit_skips_remaining_fields() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let trace = LocalId { owner: 1, index: 0 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let literal = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let field = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Block {
+                statements: vec![Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root: trace,
+                            fields: vec![],
+                        },
+                        value: Box::new(literal.clone()),
+                    },
+                }],
+                result: Some(Box::new(literal.clone())),
+            },
+        };
+        let invalid = Expr {
+            source,
+            ty: Term::Record(vec![("flag".into(), Term::Primitive(Primitive::Str))]),
+            kind: K::AnonymousRecord {
+                fields: vec![field.clone()],
+            },
+        };
+        let early = Expr {
+            source,
+            ty: Term::Record(vec![
+                ("first".into(), boolean.clone()),
+                ("second".into(), boolean),
+            ]),
+            kind: K::AnonymousRecord {
+                fields: vec![
+                    Expr {
+                        source,
+                        ty: Term::Primitive(Primitive::Never),
+                        kind: K::Return(Some(Box::new(literal))),
+                    },
+                    field,
+                ],
+            },
+        };
+        for (body, exits) in [(invalid, false), (early, true)] {
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+            assert!(code.to_string().contains("(record "));
+            for compiled in [false, true] {
+                let mut environment = Environment::new();
+                environment.insert(trace, Value::Bool(false));
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let result = if compiled {
+                    vm.execute_code(&code, &mut environment)
+                } else {
+                    vm.eval(&body, &mut environment)
+                };
+                if exits {
+                    assert!(matches!(result.unwrap(), Flow::Return(Value::Bool(true))));
+                    assert_eq!(environment.get(&trace), Some(&Value::Bool(false)));
+                } else {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                    assert_eq!(environment.get(&trace), Some(&Value::Bool(true)));
+                }
+            }
+        }
+    }
 
     #[test]
     fn anonymous_field_reads_validate_name_index_and_result_type() {
