@@ -639,3 +639,42 @@ All passed: 573 CMTT, 451 source elaboration and 73 builder integration tests
 (`/tmp/luna-tools-3fsftcz4/result.json`). The builder group includes the actual
 sysroot CLI invocation of the extended example and observes `(bool true)`.
 Formatting passed at `/tmp/luna-tools-sg9k2roq/result.json`; whitespace checks passed.
+
+## Contextual data trait invocation
+
+Contextual data calls now use the same trait selection evidence as expr/pattern
+code methods. The public interface supplies clause inputs, defaults and contracts;
+its completed inputs are mapped by position to the selected implementation's
+specialized contextual signature. Shared preparation retains expr/pattern witnesses
+without evaluating quoted runtime programs and transports already evaluated data
+without replaying argument expressions or implementation defaults.
+
+The public precondition and entry snapshots are established before dispatch. The
+selected body runs with its own input frame and contracts; its data result is then
+checked against the public output type and public result-bound postconditions.
+Definition checking can use symbolic trait evidence without running a body, while
+invocation still requires a selected implementation. Default trait bodies and
+inherited members follow the existing selection path.
+
+Seven added source regressions cover public defaults versus implementation defaults,
+public and implementation postconditions, generic captures and symbolic forwarding,
+inherited pattern inputs, missing child evidence, argument evaluation order/count,
+value-indexed implementation selection, default bodies and public preconditions.
+The sysroot example now constructs `BooleanTraitSlot` through
+`CodeSchema<bool>.as(SchemaFactory<bool>).Make` and checks its field names/types.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test elaboration --test builder_invocations
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+All passed: 580 CMTT, 451 source elaboration and 73 builder integration tests
+(`/tmp/luna-tools-k_t_orls/result.json`). The sysroot CLI invocation returned
+`(bool true)`. Formatting passed at `/tmp/luna-tools-c3t7om66/result.json` and
+whitespace checks passed. Receiver value-reference invocation remains explicitly
+unsupported; general ordinary expression scheduling and invocation depth limits
+are unchanged. This stage does not introduce code containers or ordinary VM
+callables for contextual methods, and does not change invocation result caching.

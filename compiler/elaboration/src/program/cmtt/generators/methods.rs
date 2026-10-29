@@ -106,6 +106,23 @@ impl Checker<'_, '_> {
         };
         self.ensure_code_generator(target, span)?;
         let template = self.copy_code_generator(target, span)?;
+        let (definition, arguments) =
+            self.prepare_selected_contextual_method(target, public, &template, span)?;
+        self.generator_frame(target, |this| {
+            this.run_code_generator(&definition, arguments)
+        })
+        .map(Some)
+    }
+
+    pub(super) fn prepare_selected_contextual_method<
+        O: nir::code_interfaces::SignatureOutput + Clone,
+    >(
+        &mut self,
+        target: OwnerId,
+        public: &Generator<O>,
+        template: &Generator<O>,
+        span: Span,
+    ) -> Result<(Generator<O>, Vec<Option<Argument>>), Error> {
         let types = public
             .types
             .iter()
@@ -114,7 +131,7 @@ impl Checker<'_, '_> {
         if template.types.len() != types.len() || template.inputs.len() != public.inputs.len() {
             return Err(error(span, "selected code method signature arity mismatch"));
         }
-        let definition = self.instantiate_code_generator(&template, &types, span)?;
+        let definition = self.instantiate_code_generator(template, &types, span)?;
         let saved = definition
             .captures
             .iter()
@@ -189,10 +206,7 @@ impl Checker<'_, '_> {
             };
             arguments.push(Some(argument));
         }
-        self.generator_frame(target, |this| {
-            this.run_code_generator(&definition, arguments)
-        })
-        .map(Some)
+        Ok((definition, arguments))
     }
 
     // A category hint only. All structurally possible, accessible containers

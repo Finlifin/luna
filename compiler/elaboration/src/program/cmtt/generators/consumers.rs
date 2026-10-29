@@ -413,18 +413,31 @@ impl Checker<'_, '_> {
                 result_binding.map(|binding| (binding, &definition.output)),
             )?;
         }
-        let Some(body) = body else {
-            return if self.checking_code_generator {
-                Ok(None)
-            } else {
-                Err(error(
-                    item.span,
-                    "contextual data consumer has no selected body",
-                ))
+        let control = if !self.checking_code_generator
+            && let Some(target) = self.code_method_targets.get(&owner).copied()
+        {
+            self.ensure_data_consumer(target, sig.span)?;
+            let template = self.copy_data_consumer(target, sig.span)?;
+            let (selected, arguments) =
+                self.prepare_selected_contextual_method(target, definition, &template, sig.span)?;
+            self.require(&selected.output, &definition.output, sig.span)?;
+            let result =
+                self.generator_frame(target, |this| this.run_data_consumer(&selected, arguments))?;
+            Control::DataReturn(result)
+        } else {
+            let Some(body) = body else {
+                return if self.checking_code_generator {
+                    Ok(None)
+                } else {
+                    Err(error(
+                        item.span,
+                        "contextual data consumer has no selected body",
+                    ))
+                };
             };
+            let value = self.package.body(body).unwrap().value;
+            self.consumer_result(value, &definition.output, 0)?
         };
-        let value = self.package.body(body).unwrap().value;
-        let control = self.consumer_result(value, &definition.output, 0)?;
         if self.checking_code_generator {
             let flow = control.flow();
             if flow.next || flow.has_transfer() {

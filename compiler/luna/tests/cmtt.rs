@@ -10754,3 +10754,131 @@ fn contextual_data_methods_preserve_pattern_inputs_at_static_calls() {
     .unwrap_err();
     assert!(!failure.contains("parsing failed"), "{failure}");
 }
+
+#[test]
+fn contextual_data_trait_calls_use_public_defaults_and_selected_bodies() {
+    let source = "trait Inspect {
+            comptime fn inspect(code:<|-bool>, .flag:bool=true)->bool;
+        }
+        struct Reader {}
+        impl Inspect for Reader {
+            comptime fn inspect(code:<|-bool>, .flag:bool=false)->bool {flag}
+        }
+        fn run()->bool {const result=Reader.as(Inspect).inspect('(true));result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_trait_calls_enforce_public_and_implementation_contracts() {
+    let source = "trait Inspect {
+            comptime fn inspect(code:<|-bool>, flag:bool)->result:bool
+            where ensures result == flag'old;
+        }
+        struct Reader {}
+        impl Inspect for Reader {
+            comptime fn inspect(code:<|-bool>, flag:bool)->result:bool
+            where ensures result {flag}
+        }
+        fn run()->bool {const result=Reader.as(Inspect).inspect('(true),true);result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    for wrong in [
+        source.replace("ensures result == flag'old", "ensures result != flag'old"),
+        source.replace("ensures result {flag}", "ensures not result {flag}"),
+    ] {
+        let failure = support::compile_with_protocols(&wrong, &Default::default()).unwrap_err();
+        assert!(failure.contains("postcondition"), "{failure}");
+    }
+}
+
+#[test]
+fn contextual_data_trait_calls_specialize_captures_and_forward_symbolically() {
+    let source = "typealias Type=.Type'builtin;
+        trait Schema where T {comptime fn Inspect(code:<|-T>)->Type;}
+        struct Reader where T {}
+        impl Schema<T> for Reader<T> where T {
+            comptime fn Inspect(code:<|-T>)->Type {T}
+        }
+        comptime fn Forward(code:<|-T>)->Type where T, R:-Schema<T> {
+            R.as(Schema<T>).Inspect(code)
+        }
+        fn run()->bool {
+            const Result=Forward<bool,Reader<bool>>('(true));
+            let result:Result=true;result
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_trait_calls_preserve_inherited_pattern_inputs() {
+    let source = "trait Base {
+            comptime fn inspect(pat:<bool -| found:bool>)->bool;
+        }
+        trait Child :- Base {}
+        struct Reader {}
+        impl Base for Reader {
+            comptime fn inspect(pat:<bool -| found:bool>)->bool {true}
+        }
+        impl Child for Reader {}
+        fn run()->bool {const result=Reader.as(Child).inspect('<found>);result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let missing = source.replace("impl Child for Reader {}", "");
+    let failure = support::compile_with_protocols(&missing, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("interface") || failure.contains("implementation"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn contextual_data_trait_calls_evaluate_public_arguments_once_in_source_order() {
+    let source = "trait Inspect {
+            comptime fn inspect(code:<|-bool>, first:bool, second:bool)->bool;
+        }
+        struct Reader {}
+        impl Inspect for Reader {
+            comptime fn inspect(code:<|-bool>, first:bool, second:bool)->bool {first and not second}
+        }
+        comptime fn forward(code:<|-bool>)->bool {
+            var flag=false;
+            const result=Reader.as(Inspect).inspect(code,
+                do {flag=not flag;flag}, do {flag=not flag;flag});
+            result and not flag
+        }
+        fn run()->bool {const result=forward('(true));result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_trait_calls_select_value_indexed_implementations() {
+    let source = "trait Inspect where enabled:bool {
+            comptime fn inspect(code:<|-bool>)->bool;
+        }
+        struct Reader {}
+        impl Inspect<true> for Reader {
+            comptime fn inspect(code:<|-bool>)->bool {true}
+        }
+        impl Inspect<false> for Reader {
+            comptime fn inspect(code:<|-bool>)->bool {false}
+        }
+        fn run()->bool {
+            const yes=Reader.as(Inspect<true>).inspect('(true));
+            const no=Reader.as(Inspect<false>).inspect('(true));
+            yes and not no
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_trait_calls_execute_default_bodies_and_public_preconditions() {
+    let source = "trait Inspect {
+            comptime fn inspect(code:<|-bool>, flag:bool)->bool
+            where requires flag {flag}
+        }
+        struct Reader {}
+        impl Inspect for Reader {}
+        fn run()->bool {const result=Reader.as(Inspect).inspect('(true),true);result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let wrong = source.replace("inspect('(true),true)", "inspect('(true),false)");
+    let failure = support::compile_with_protocols(&wrong, &Default::default()).unwrap_err();
+    assert!(failure.contains("precondition"), "{failure}");
+}
