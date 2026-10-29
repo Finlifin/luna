@@ -335,6 +335,51 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::PrepareOptional { ty, input } => {
+                    self.prepare_optional(
+                        ty,
+                        input.as_ref().map(|(ty, at)| (ty.as_ref(), *at)),
+                        source,
+                    )?;
+                }
+                Op::Optional {
+                    destination,
+                    ty,
+                    value,
+                    value_source,
+                } => {
+                    let value = value
+                        .map(|slot| frame.slots[slot].take().ok_or_else(missing))
+                        .transpose()?;
+                    frame.slots[*destination] =
+                        Some(self.complete_optional(ty, value, *value_source)?);
+                }
+                Op::PrepareError(conversion) => {
+                    self.prepare_error_conversion(
+                        conversion.conversion,
+                        &conversion.input,
+                        &conversion.output,
+                        source,
+                    )?;
+                }
+                Op::ErrorConvert {
+                    destination,
+                    value,
+                    conversion,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    if !self.has_type(&value, &conversion.input) {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    frame.slots[*destination] = Some(self.complete_error_conversion(
+                        conversion.conversion,
+                        &conversion.input,
+                        &conversion.output,
+                        value,
+                        source,
+                    )?);
+                }
+
                 Op::Variant {
                     destination,
                     declaration,
@@ -712,6 +757,203 @@ impl<'a> Interpreter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualified_construction_checks_plans_before_effects_and_payloads_afterward() {
+        use nir::error_results::Conversion;
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let trace = LocalId { owner: 1, index: 0 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let optional = Term::Optional(Box::new(boolean.clone()));
+        let error = Term::ErrorResult {
+            errors: vec![Term::Primitive(Primitive::Char)],
+            result: Box::new(boolean.clone()),
+        };
+        let operand = |kind| Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Block {
+                statements: vec![Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root: trace,
+                            fields: vec![],
+                        },
+                        value: Box::new(Expr {
+                            source,
+                            ty: boolean.clone(),
+                            kind: K::Literal(Literal::Bool(true)),
+                        }),
+                    },
+                }],
+                result: Some(Box::new(Expr {
+                    source,
+                    ty: boolean.clone(),
+                    kind,
+                })),
+            },
+        };
+        let present = |ty, operand| Expr {
+            source,
+            ty,
+            kind: K::OptionalPresent(Box::new(operand)),
+        };
+        let converted = |ty, conversion, operand| Expr {
+            source,
+            ty,
+            kind: K::ErrorConvert {
+                conversion,
+                value: Box::new(operand),
+            },
+        };
+        for (body, effect) in [
+            (
+                present(
+                    Term::Optional(Box::new(Term::Primitive(Primitive::Char))),
+                    operand(K::Literal(Literal::Bool(true))),
+                ),
+                false,
+            ),
+            (present(optional.clone(), operand(K::Unit)), true),
+            (
+                converted(
+                    optional,
+                    Conversion::Success,
+                    operand(K::Literal(Literal::Bool(true))),
+                ),
+                false,
+            ),
+            (
+                converted(
+                    error.clone(),
+                    Conversion::Failure,
+                    operand(K::Literal(Literal::Bool(true))),
+                ),
+                false,
+            ),
+            (
+                converted(error, Conversion::Success, operand(K::Unit)),
+                true,
+            ),
+        ] {
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+            for compiled in [false, true] {
+                let mut environment = Environment::new();
+                environment.insert(trace, Value::Bool(false));
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let result = if compiled {
+                    vm.execute_code(&code, &mut environment)
+                } else {
+                    vm.eval(&body, &mut environment)
+                };
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                assert_eq!(environment.get(&trace), Some(&Value::Bool(effect)));
+            }
+        }
+    }
+
+    #[test]
+    fn product_error_transport_preserves_labels_and_payloads_inside_records() {
+        use nir::error_results::Conversion;
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let character = Term::Primitive(Primitive::Char);
+        let original = Term::ErrorResult {
+            errors: vec![character.clone(), boolean.clone()],
+            result: Box::new(boolean.clone()),
+        };
+        let reordered = Term::ErrorResult {
+            errors: vec![boolean, character.clone()],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let input = Term::Record(vec![("entry".into(), original.clone())]);
+        let output = Term::Record(vec![("entry".into(), reordered.clone())]);
+        let body = Expr {
+            source,
+            ty: output,
+            kind: K::ErrorConvert {
+                conversion: Conversion::Product,
+                value: Box::new(Expr {
+                    source,
+                    ty: input,
+                    kind: K::AnonymousRecord {
+                        fields: vec![Expr {
+                            source,
+                            ty: original,
+                            kind: K::ErrorConvert {
+                                conversion: Conversion::Failure,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: character,
+                                    kind: K::Literal(Literal::Char('x')),
+                                }),
+                            },
+                        }],
+                    },
+                }),
+            },
+        };
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+        assert!(code.to_string().contains("(error-conversion product"));
+        let expected = Value::AnonymousRecord(vec![(
+            "entry".into(),
+            Value::ErrorResult {
+                ty: reordered,
+                error: Some(1),
+                value: Box::new(Value::Char('x')),
+            },
+        )]);
+        // Product transport preserves the field types; it is not covariance.
+        let mut widening = body.clone();
+        if let K::ErrorConvert { value, .. } = &mut widening.kind {
+            let Term::Record(fields) = &mut value.ty else {
+                unreachable!()
+            };
+            let Term::ErrorResult { errors, .. } = &mut fields[0].1 else {
+                unreachable!()
+            };
+            errors.pop();
+            let narrowed = fields[0].1.clone();
+            let K::AnonymousRecord { fields } = &mut value.kind else {
+                unreachable!()
+            };
+            fields[0].ty = narrowed;
+        }
+        let widening_code = Arc::new(comptime_compiler::compile(&widening, &mut 1000).unwrap());
+        for compiled in [false, true] {
+            let mut environment = Environment::new();
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let K::ErrorConvert { value, .. } = &widening.kind else {
+                unreachable!()
+            };
+            assert!(matches!(
+                vm.eval(value, &mut environment).unwrap(),
+                Flow::Value(_)
+            ));
+            let rejected = if compiled {
+                vm.execute_code(&widening_code, &mut environment)
+            } else {
+                vm.eval(&widening, &mut environment)
+            };
+            assert!(matches!(
+                rejected,
+                Err(Error {
+                    kind: ErrorKind::Type,
+                    ..
+                })
+            ));
+            let result = if compiled {
+                vm.execute_code(&code, &mut environment)
+            } else {
+                vm.eval(&body, &mut environment)
+            };
+            assert!(matches!(result.unwrap(), Flow::Value(value) if value == expected));
+        }
+    }
 
     #[test]
     fn record_validation_follows_effects_but_early_exit_skips_remaining_fields() {

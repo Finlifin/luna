@@ -78,7 +78,6 @@ impl Interpreter<'_> {
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        use nir::error_results::Conversion;
         let K::ErrorConvert {
             conversion,
             value: operand,
@@ -86,12 +85,29 @@ impl Interpreter<'_> {
         else {
             unreachable!()
         };
+        self.prepare_error_conversion(*conversion, &operand.ty, &expr.ty, expr.source)?;
+        let payload = value!(self.eval(operand, environment));
+        if !self.has_type(&payload, &operand.ty) {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        self.retain_prepared(0, operand.source, &payload)?;
+        self.complete_error_conversion(*conversion, &operand.ty, &expr.ty, payload, expr.source)
+            .map(Flow::Value)
+    }
+
+    pub(super) fn prepare_error_conversion(
+        &mut self,
+        conversion: nir::error_results::Conversion,
+        source_ty: &Term,
+        target_ty: &Term,
+        at: SourceRange,
+    ) -> Result<(), Error> {
         let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let before = fuel;
         let plan = nir::error_results::validate_conversion_with_tuple(
-            *conversion,
-            &operand.ty,
-            &expr.ty,
+            conversion,
+            source_ty,
+            target_ty,
             &mut fuel,
             &mut |left, right| left == right,
             &|head| {
@@ -108,21 +124,28 @@ impl Interpreter<'_> {
                 } else {
                     ErrorKind::Type
                 },
-                Some(expr.source),
+                Some(at),
             )
         })?;
-        self.admit_type(&expr.ty, 0)?;
-        let payload = value!(self.eval(operand, environment));
-        if !self.has_type(&payload, &operand.ty) {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        self.retain_prepared(0, operand.source, &payload)?;
-        if *conversion == Conversion::Product {
+        self.admit_type(target_ty, 0)?;
+        Ok(())
+    }
+
+    pub(super) fn complete_error_conversion(
+        &mut self,
+        conversion: nir::error_results::Conversion,
+        source_ty: &Term,
+        target_ty: &Term,
+        payload: Value,
+        at: SourceRange,
+    ) -> Result<Value, Error> {
+        use nir::error_results::Conversion;
+        if conversion == Conversion::Product {
             let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
             let before = fuel;
             let plan = nir::error_results::transport_plan(
-                &operand.ty,
-                &expr.ty,
+                source_ty,
+                target_ty,
                 true,
                 &mut fuel,
                 &mut |a, b| a == b,
@@ -140,16 +163,16 @@ impl Interpreter<'_> {
                     } else {
                         ErrorKind::Type
                     },
-                    Some(expr.source),
+                    Some(at),
                 )
             })?;
-            let result = self.apply_error_transport(&plan, payload, expr.source, 0)?;
-            if !self.has_type(&result, &expr.ty) {
-                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            let result = self.apply_error_transport(&plan, payload, at, 0)?;
+            if !self.has_type(&result, target_ty) {
+                return Err(self.failure(ErrorKind::Type, Some(at)));
             }
-            return Ok(Flow::Value(result));
+            return Ok(result);
         }
-        let Term::ErrorResult { errors, .. } = &expr.ty else {
+        let Term::ErrorResult { errors, .. } = target_ty else {
             unreachable!()
         };
         let (error, value) = match conversion {
@@ -159,29 +182,29 @@ impl Interpreter<'_> {
                 Some(
                     errors
                         .iter()
-                        .position(|label| label == &operand.ty)
-                        .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?,
+                        .position(|label| label == source_ty)
+                        .ok_or_else(|| self.failure(ErrorKind::Type, Some(at)))?,
                 ),
                 Box::new(payload),
             ),
             Conversion::Embed => {
                 let Value::ErrorResult { ty, error, value } = payload else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                    return Err(self.failure(ErrorKind::Type, Some(at)));
                 };
                 let Term::ErrorResult { errors: source, .. } = ty else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                    return Err(self.failure(ErrorKind::Type, Some(at)));
                 };
                 let error = match error {
                     None => None,
                     Some(index) => {
                         let label = source
                             .get(index)
-                            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
+                            .ok_or_else(|| self.failure(ErrorKind::Type, Some(at)))?;
                         Some(
                             errors
                                 .iter()
                                 .position(|target| target == label)
-                                .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?,
+                                .ok_or_else(|| self.failure(ErrorKind::Type, Some(at)))?,
                         )
                     }
                 };
@@ -189,13 +212,13 @@ impl Interpreter<'_> {
             }
         };
         let result = Value::ErrorResult {
-            ty: expr.ty.clone(),
+            ty: target_ty.clone(),
             error,
             value,
         };
-        if !self.has_type(&result, &expr.ty) {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        if !self.has_type(&result, target_ty) {
+            return Err(self.failure(ErrorKind::Type, Some(at)));
         }
-        Ok(Flow::Value(result))
+        Ok(result)
     }
 }

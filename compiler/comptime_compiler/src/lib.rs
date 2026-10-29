@@ -11,7 +11,40 @@ use std::sync::Arc;
 pub type Register = usize;
 
 #[derive(Debug)]
+pub struct ErrorConversion {
+    pub conversion: nir::error_results::Conversion,
+    pub input: Term,
+    pub output: Term,
+}
+impl fmt::Display for ErrorConversion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(error-conversion {} (input {}) (output {}))",
+            self.conversion, self.input, self.output
+        )
+    }
+}
+
+#[derive(Debug)]
 pub enum Op {
+    PrepareOptional {
+        ty: Arc<Term>,
+        input: Option<(Arc<Term>, SourceRange)>,
+    },
+    Optional {
+        destination: Register,
+        ty: Arc<Term>,
+        value: Option<Register>,
+        value_source: SourceRange,
+    },
+    PrepareError(Arc<ErrorConversion>),
+    ErrorConvert {
+        destination: Register,
+        value: Register,
+        conversion: Arc<ErrorConversion>,
+    },
+
     Variant {
         destination: Register,
         declaration: nir::DeclarationId,
@@ -183,6 +216,36 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::PrepareOptional { ty, input } => {
+                    write!(f, "(prepare-optional {ty} (input")?;
+                    if let Some((ty, at)) = input {
+                        write!(f, " {ty} (source {} {})", at.start, at.end)?;
+                    }
+                    write!(f, "))")?;
+                }
+                Op::Optional {
+                    destination,
+                    ty,
+                    value,
+                    value_source,
+                } => {
+                    write!(f, "(optional {destination} {ty} (input")?;
+                    if let Some(value) = value {
+                        write!(f, " {value}")?;
+                    }
+                    write!(
+                        f,
+                        ") (value-source {} {}))",
+                        value_source.start, value_source.end
+                    )?;
+                }
+                Op::PrepareError(conversion) => write!(f, "(prepare-error {conversion})")?,
+                Op::ErrorConvert {
+                    destination,
+                    value,
+                    conversion,
+                } => write!(f, "(error-convert {destination} {value} {conversion})")?,
+
                 Op::Variant {
                     destination,
                     declaration,
@@ -673,6 +736,53 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         for (field, slot) in fields.iter().zip(slots).rev() {
                             work.push(Work::Expression(field, slot));
                         }
+                    }
+                    K::OptionalPresent(_) | K::OptionalAbsent => {
+                        let operand = match &expr.kind {
+                            K::OptionalPresent(v) => Some(v.as_ref()),
+                            _ => None,
+                        };
+                        let ty = Arc::new(copy_term(&expr.ty, fuel, source)?);
+                        let slot = operand.map(|_| fresh());
+                        emit(
+                            &mut work,
+                            Op::Optional {
+                                destination: dst,
+                                ty: ty.clone(),
+                                value: slot,
+                                value_source: operand.map_or(source, |v| v.source),
+                            },
+                        );
+                        if let Some((operand, slot)) = operand.zip(slot) {
+                            work.push(Work::Expression(operand, slot));
+                        }
+                        let input = operand
+                            .map(|v| {
+                                Ok::<_, Error>((
+                                    Arc::new(copy_term(&v.ty, fuel, v.source)?),
+                                    v.source,
+                                ))
+                            })
+                            .transpose()?;
+                        emit(&mut work, Op::PrepareOptional { ty, input });
+                    }
+                    K::ErrorConvert { conversion, value } => {
+                        let conversion = Arc::new(ErrorConversion {
+                            conversion: *conversion,
+                            input: copy_term(&value.ty, fuel, source)?,
+                            output: copy_term(&expr.ty, fuel, source)?,
+                        });
+                        let slot = fresh();
+                        emit(
+                            &mut work,
+                            Op::ErrorConvert {
+                                destination: dst,
+                                value: slot,
+                                conversion: conversion.clone(),
+                            },
+                        );
+                        work.push(Work::Expression(value, slot));
+                        emit(&mut work, Op::PrepareError(conversion));
                     }
                     K::UnsafeScope(body) => work.push(Work::Expression(body, dst)),
                     K::Intrinsic {

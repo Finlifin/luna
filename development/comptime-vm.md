@@ -1434,3 +1434,44 @@ Validation from `/home/fin/luna`, all commands exited 0:
   report `/tmp/luna-tools-l7w0hi25/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   report `/tmp/luna-tools-o3owwu6c/result.json`.
+
+## Compiled optional and error construction (2026-10-30)
+
+Optional absence/presence and error success/failure injection, row embedding and
+product representation transport now have bytecode instructions. Preparation
+checks the conversion plan and admits the target type before evaluating inputs;
+completion validates the actual payload after evaluation. Both carriers share
+these checks. Invalid metadata therefore cannot run operand effects, while a
+wrong actual payload does not undo effects that already occurred.
+
+Optional construction preserves every absence layer. Error transport preserves
+full label identity and payloads even when branch indices change. Product
+transport preserves field types and does not introduce aggregate covariance:
+reordering equivalent error rows inside a record is supported; widening a
+record field's error row through product transport is rejected. The first new
+product test incorrectly requested widening and failed on both carriers; it was
+corrected to test reordering, with widening retained as a rejection case and its
+operand separately checked to be valid.
+
+Preparation and completion appear separately in S-expression dumps. Bytecode
+still excludes scheduled cleanup and active effect environments; the tree path
+keeps its prepared-value scopes. Error propagation and pattern matching remain
+separate migration work. Invocation result-cache eligibility and error ABI are
+unchanged. No performance speedup is claimed without measurement.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_qualified --test execution --test builder_invocations`:
+  exit 0; two source-level routing/identity tests, 1,365 execution cases and 73
+  builder cases passed; report `/tmp/luna-tools-01krofsn/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  exit 0; 229 tests passed, including pre-input rejection, post-input failure and
+  record transport; report `/tmp/luna-tools-2ecpqgn1/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  exit 0; nine compiler/control tests passed;
+  report `/tmp/luna-tools-xtq0ekvp/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::tests::product_error_transport_preserves_labels_and_payloads_inside_records`:
+  exit 0 after strengthening the rejection fixture with a valid-operand check;
+  report `/tmp/luna-tools-apf6xs6e/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; report `/tmp/luna-tools-f6h587sg/result.json`.

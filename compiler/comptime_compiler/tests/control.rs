@@ -25,7 +25,11 @@ fn unsupported_work_and_invalid_transfers_never_publish_partial_code() {
     let body = expr(K::If {
         condition: Box::new(expr(K::Unit)),
         then_branch: Box::new(expr(K::Unit)),
-        else_branch: Some(Box::new(expr(K::OptionalAbsent))),
+        // Optional construction is compiled now; matching remains migration-only.
+        else_branch: Some(Box::new(expr(K::Match {
+            value: Box::new(expr(K::Unit)),
+            arms: vec![],
+        }))),
     });
     assert!(matches!(
         compile(&body, &mut 100),
