@@ -20,7 +20,8 @@ No opcode delegates a child expression tree back to `eval`.
 Supported bodies include existing literal/frozen-value/Type leaves, reads,
 local initialization and whole-slot assignment, blocks, boolean short circuit,
 boolean/BitVec negation, branches, loops, break/continue and return. Integer
-arithmetic, exact/machine floating arithmetic and scalar comparisons execute linear instructions,
+arithmetic, exact/machine floating arithmetic, scalar comparisons and admitted
+comptime scalar intrinsics execute linear instructions,
 using the same checked primitive operations as tree interpretation. Temporary
 registers are allocated densely independent of LocalId values. Scope exit and
 loop transfers clear introduced bindings; imported inputs are restored on both
@@ -978,3 +979,32 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test exact_floats --test comptime_bytecode`: exit 0, `/tmp/luna-tools-jzpt2iy2/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0, `/tmp/luna-tools-15_4nvxi/result.json`; `git diff --check` passed.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli sysroot_half_float_arithmetic_rounds_once_and_preserves_special_values -- --exact`: exit 0, `/tmp/luna-tools-tcpztxaz/result.json`. Real sysroot f16/bf16 computation passed comptime invocation, runtime interpretation, and LLVM O0/O3 native execution.
+
+## Checked scalar intrinsic instructions (2026-10-30)
+
+Linear code now admits the registered comptime scalar intrinsic family through
+one generic path. Signature validation accepts operand types without retaining
+operand expression trees, sharing NIR's existing tag/arity/domain/result checks.
+Execution first checks that a concrete comptime binding exists, then evaluates
+inputs once in source order, then invokes the same scalar operation implementation
+as the tree interpreter. Host bindings remain rejected. An unsafe lexical wrapper
+passes through to its body after source admission; it grants no new VM capability.
+
+Half-format FMA still calls the bounded exact fused implementation with one
+rounding. Target integer widths still come from the consuming package. Execution
+failures never restart in the tree interpreter. Calls to library wrappers still
+use existing call preparation, but their intrinsic bodies can now execute linear
+code; actual bytecode routing is asserted for the shipped meta math wrappers.
+An additional direct intrinsic fixture checks three operand mutations in one
+bytecode frame, across two executions of retained code.
+
+A first dump assertion incorrectly expected a bare `void` type. It now checks
+the existing NIR `(primitive void)` rendering; neither type formatting nor
+intrinsic semantics were changed to satisfy that assertion.
+
+Validation from `/home/fin/luna` (final checks exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_math`: `/tmp/luna-tools-w7hobhv3/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_math intrinsic_operands_execute_in_order_inside_one_bytecode_frame -- --exact`: `/tmp/luna-tools-k2ncikzd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p nir -p comptime_compiler --lib --test control`: `/tmp/luna-tools-i3kjfibs/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: `/tmp/luna-tools-bf4pnhex/result.json`; `git diff --check` passed.

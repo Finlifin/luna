@@ -64,6 +64,7 @@ fn scalar_float_operations_execute_at_both_ieee_widths() {
         let package = compile(&source, 64).unwrap();
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         for (i, (_, expected)) in cases.iter().enumerate() {
+            let before = vm.bytecode_invocations();
             let expected = if ty == "f32" {
                 Value::Float32((*expected as f32).to_bits())
             } else {
@@ -74,6 +75,11 @@ fn scalar_float_operations_execute_at_both_ieee_widths() {
                     .unwrap(),
                 expected,
                 "{ty} {}",
+                cases[i].0
+            );
+            assert!(
+                vm.bytecode_invocations() > before,
+                "{ty} {} must execute its library body in bytecode",
                 cases[i].0
             );
         }
@@ -292,6 +298,33 @@ fn operands_are_evaluated_once_in_source_order_and_early_return_survives() {
         Value::Float64(9.0f64.to_bits())
     );
     assert!(luna::invocation::invoke(&package, "run", 1).is_err());
+}
+
+#[test]
+fn intrinsic_operands_execute_in_order_inside_one_bytecode_frame() {
+    let package = compile(
+        "comptime fn run()->bool {
+            var trace:u8=0;
+            let a:f64=2.0; let b:f64=3.0; let c:f64=1.0;
+            let result = unsafe { math.target.Scalar.fma'intrinsic(
+                do {trace = trace * 10 + 1; a},
+                do {trace = trace * 10 + 2; b},
+                do {trace = trace * 10 + 3; c}
+            ).as(f64) };
+            result == 7.0 and trace == 123
+        }",
+        64,
+    )
+    .unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for count in 1..=2 {
+        assert_eq!(
+            vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(vm.bytecode_invocations(), count);
+    }
+    assert_eq!(vm.bytecode_compilations(), 1);
 }
 
 #[test]

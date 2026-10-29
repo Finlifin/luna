@@ -571,7 +571,16 @@ impl Checked {
         inputs: &[crate::program::Expr],
         output: &Term,
     ) -> Result<(), &'static str> {
-        self.validate_template(tag, inputs, output)?;
+        self.validate_types(tag, inputs.iter().map(|input| &input.ty), output)
+    }
+    /// Revalidate a linear instruction without retaining operand expressions.
+    pub fn validate_types<'t>(
+        &self,
+        tag: Tag,
+        inputs: impl ExactSizeIterator<Item = &'t Term>,
+        output: &Term,
+    ) -> Result<(), &'static str> {
+        self.validate_template_types(tag, inputs, output)?;
         if !matches!(self.signature, Signature::Concrete(_)) {
             return Err("intrinsic binding requires concrete specialization");
         }
@@ -581,6 +590,14 @@ impl Checked {
         &self,
         tag: Tag,
         inputs: &[crate::program::Expr],
+        output: &Term,
+    ) -> Result<(), &'static str> {
+        self.validate_template_types(tag, inputs.iter().map(|input| &input.ty), output)
+    }
+    fn validate_template_types<'t>(
+        &self,
+        tag: Tag,
+        inputs: impl ExactSizeIterator<Item = &'t Term>,
         output: &Term,
     ) -> Result<(), &'static str> {
         if tag != self.tag {
@@ -596,9 +613,8 @@ impl Checked {
         if inputs.len() == self.operation.operand_count()
             && *output == self.operation.result_type(&expected)
             && inputs
-                .iter()
                 .enumerate()
-                .all(|(index, input)| input.ty == self.operation.operand_type(&expected, index))
+                .all(|(index, input)| *input == self.operation.operand_type(&expected, index))
         {
             Ok(())
         } else {

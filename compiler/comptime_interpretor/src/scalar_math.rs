@@ -30,9 +30,19 @@ impl Interpreter<'_> {
                 flow => return Ok(flow),
             }
         }
+        self.scalar_math_values(binding, &values, expr.source)
+            .map(Flow::Value)
+    }
+
+    pub(super) fn scalar_math_values(
+        &mut self,
+        binding: &nir::intrinsics::Checked,
+        values: &[Value],
+        source: SourceRange,
+    ) -> Result<Value, Error> {
         if binding.operation() == Op::FusedMultiplyAdd {
             use comptime_runtime::float16::Float16Format as F;
-            let half = match values.as_slice() {
+            let half = match values {
                 [Value::Float16(a), Value::Float16(b), Value::Float16(c)] => {
                     Some((F::Binary16, *a, *b, *c))
                 }
@@ -42,24 +52,22 @@ impl Interpreter<'_> {
                 _ => None,
             };
             if let Some((format, a, b, c)) = half {
-                let bits = self.integer_operation(Some(expr.source), |budget| {
+                let bits = self.integer_operation(Some(source), |budget| {
                     format.fused_multiply_add(a, b, c, budget)
                 })?;
-                return Ok(Flow::Value(if format == F::Binary16 {
+                return Ok(if format == F::Binary16 {
                     Value::Float16(bits)
                 } else {
                     Value::BFloat16(bits)
-                }));
+                });
             }
         }
         let result = scalar(
             binding.operation(),
-            &values,
+            values,
             binding.width_for_target(self.target),
         );
-        result
-            .map(Flow::Value)
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))
+        result.ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))
     }
 }
 

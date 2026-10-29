@@ -131,6 +131,33 @@ impl<'a> Interpreter<'a> {
                     source: Some(source),
                 };
                 match &instruction.op {
+                    Op::PrepareIntrinsic {
+                        tag,
+                        binding,
+                        inputs,
+                        output,
+                    } => {
+                        let binding = binding
+                            .filter(|binding| binding.is_comptime())
+                            .ok_or_else(|| self.failure(ErrorKind::Unsupported, Some(source)))?;
+                        binding
+                            .validate_types(*tag, inputs.iter().copied(), output)
+                            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                    }
+                    Op::Intrinsic {
+                        destination,
+                        binding,
+                        inputs,
+                    } => {
+                        let binding = binding
+                            .ok_or_else(|| self.failure(ErrorKind::Unsupported, Some(source)))?;
+                        let values: Vec<_> = inputs
+                            .iter()
+                            .map(|slot| frame.slots[*slot].take().ok_or_else(missing))
+                            .collect::<Result<_, _>>()?;
+                        frame.slots[*destination] =
+                            Some(self.scalar_math_values(binding, &values, source)?);
+                    }
                     Op::Constant { destination, value } => {
                         let flow = match value.kind {
                             K::Literal(_) => self.eval_literal(value, environment)?,
@@ -284,6 +311,58 @@ impl<'a> Interpreter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unbound_intrinsic_rejects_before_operand_effects() {
+        let package = Package::default();
+        let trace = LocalId { owner: 1, index: 0 };
+        let source = SourceRange { start: 1, end: 2 };
+        let body = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::Intrinsic {
+                tag: nir::intrinsics::Tag {
+                    family: DeclarationId {
+                        package: 1,
+                        local: 0,
+                    },
+                    variant: 0,
+                },
+                binding: None,
+                inputs: vec![Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root: trace,
+                            fields: vec![],
+                        },
+                        value: Box::new(Expr {
+                            source,
+                            ty: Term::Primitive(Primitive::Bool),
+                            kind: K::Literal(Literal::Bool(true)),
+                        }),
+                    },
+                }],
+            },
+        };
+        let code = comptime_compiler::compile(&body, &mut 100).unwrap();
+        let dump = code.to_string();
+        assert!(dump.contains("(prepare-intrinsic (intrinsic-tag"));
+        assert!(dump.contains("(inputs (primitive void)) (output (primitive void))"));
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut environment = Environment::new();
+            environment.insert(trace, Value::Bool(false));
+            let result = if compiled {
+                vm.execute_code(&code, &mut environment)
+            } else {
+                vm.eval(&body, &mut environment)
+            };
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Unsupported);
+            assert_eq!(environment.get(&trace), Some(&Value::Bool(false)));
+        }
+    }
 
     #[test]
     fn unsupported_code_cache_is_bounded_and_eviction_allows_reinsertion() {

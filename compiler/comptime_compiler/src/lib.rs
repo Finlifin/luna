@@ -11,6 +11,17 @@ pub type Register = usize;
 
 #[derive(Debug)]
 pub enum Op<'a> {
+    PrepareIntrinsic {
+        tag: nir::intrinsics::Tag,
+        binding: Option<&'a nir::intrinsics::Checked>,
+        inputs: Vec<&'a Term>,
+        output: &'a Term,
+    },
+    Intrinsic {
+        destination: Register,
+        binding: Option<&'a nir::intrinsics::Checked>,
+        inputs: Vec<Register>,
+    },
     Constant {
         destination: Register,
         value: &'a Expr,
@@ -98,6 +109,37 @@ impl fmt::Display for Program<'_> {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::PrepareIntrinsic {
+                    tag,
+                    binding,
+                    inputs,
+                    output,
+                } => {
+                    write!(f, "(prepare-intrinsic {tag} (binding")?;
+                    if let Some(binding) = binding {
+                        write!(f, " {binding}")?;
+                    }
+                    write!(f, ") (inputs")?;
+                    for input in inputs {
+                        write!(f, " {input}")?;
+                    }
+                    write!(f, ") (output {output}))")?;
+                }
+                Op::Intrinsic {
+                    destination,
+                    binding,
+                    inputs,
+                } => {
+                    write!(f, "(intrinsic {destination} (binding")?;
+                    if let Some(binding) = binding {
+                        write!(f, " {binding}")?;
+                    }
+                    write!(f, ") (inputs")?;
+                    for input in inputs {
+                        write!(f, " {input}")?;
+                    }
+                    write!(f, "))")?;
+                }
                 Op::Constant { destination, value } => {
                     write!(f, "(constant {destination} {value})")?
                 }
@@ -218,6 +260,37 @@ pub fn compile<'a>(body: &'a Expr, fuel: &mut usize) -> Result<Program<'a>, Erro
                     continue;
                 }
                 match &expr.kind {
+                    K::UnsafeScope(body) => work.push(Work::Expression(body, dst)),
+                    K::Intrinsic {
+                        tag,
+                        binding,
+                        inputs,
+                    } => {
+                        *fuel = fuel
+                            .checked_sub(inputs.len())
+                            .ok_or(Error::Budget(source))?;
+                        let slots: Vec<_> = inputs.iter().map(|_| fresh()).collect();
+                        emit(
+                            &mut work,
+                            Op::Intrinsic {
+                                destination: dst,
+                                binding: binding.as_ref(),
+                                inputs: slots.clone(),
+                            },
+                        );
+                        for (input, slot) in inputs.iter().zip(slots).rev() {
+                            work.push(Work::Expression(input, slot));
+                        }
+                        emit(
+                            &mut work,
+                            Op::PrepareIntrinsic {
+                                tag: *tag,
+                                binding: binding.as_ref(),
+                                inputs: inputs.iter().map(|input| &input.ty).collect(),
+                                output: &expr.ty,
+                            },
+                        );
+                    }
                     K::Unit => emit(&mut work, Op::Unit(dst)),
                     K::Literal(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::TypeListValue(_) => {
                         emit(
