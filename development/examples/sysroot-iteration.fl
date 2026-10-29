@@ -538,3 +538,44 @@ test scan_updates_data_through_stable_state_pointer {
         });
     assumes count == 2 and not target and retired;
 }
+
+struct OptionalScanState {target: ?*bool, watch: Watch}
+
+fn scan_through_optional_state(state: *OptionalScanState, value: bool) -> ?bool {
+    let maybe = state.target.*;
+    maybe match {
+        target? => {
+            let previous = target.*;
+            target.* = value;
+            previous
+        },
+        null => value,
+    }
+}
+
+test scan_uses_present_optional_state_pointer {
+    var target = false;
+    var retired = false;
+    let state = OptionalScanState {
+        target: target.ref,
+        watch: Watch {seen: retired.ref, value: false},
+    };
+    let input: ?bool = true;
+    let output = input.as(Iterator).scan(state, scan_through_optional_state)
+        .as(Iterator).last();
+    let old_was_false = output match {value? => not value, null => false};
+    assumes old_was_false and target and retired;
+}
+
+test scan_skips_absent_optional_state_pointer {
+    var retired = false;
+    let state = OptionalScanState {
+        target: null,
+        watch: Watch {seen: retired.ref, value: false},
+    };
+    let input: ?bool = true;
+    let output = input.as(Iterator).scan(state, scan_through_optional_state)
+        .as(Iterator).last();
+    let kept_input = output match {value? => value, null => false};
+    assumes kept_input and retired;
+}

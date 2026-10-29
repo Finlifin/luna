@@ -1650,8 +1650,13 @@ fn infer_handler_arm_memory_with_captures(
         *fuel = fuel
             .checked_sub(access.target.path_cost())
             .ok_or("handler parameter access budget exhausted")?;
-        if !access.target.conditions.is_empty() {
-            return Err("handler parameter access requires unguarded storage".into());
+        if access
+            .target
+            .conditions
+            .keys()
+            .any(|stage| *stage > access.target.through.len())
+        {
+            return Err("handler access condition has no corresponding load stage".into());
         }
         if access.target.parameter >= parameters.len() {
             let (binding, ty) = pointer_captures
@@ -1665,18 +1670,33 @@ fn infer_handler_arm_memory_with_captures(
             let mut traversal = StorageTraversal::new(Some(package), &leaf.pointee, &[], fuel)?;
             // Each segment selects a pointer slot in the current pointee, then
             // loads it. Validate every owner/type boundary before the final field.
-            for fields in &access.target.through {
-                traversal.then_guarded(Some(package), fields, &[], fuel)?;
+            for (stage, fields) in access.target.through.iter().enumerate() {
+                let guards = access
+                    .target
+                    .conditions
+                    .get(&stage)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                traversal.then_guarded(Some(package), fields, guards, fuel)?;
                 traversal.load(Some(package), &[], fuel)?;
             }
-            traversal.then_guarded(Some(package), &access.target.fields, &[], fuel)?;
+            let guards = access
+                .target
+                .conditions
+                .get(&access.target.through.len())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            traversal.then_guarded(Some(package), &access.target.fields, guards, fuel)?;
             if traversal.target.ty != access.ty {
                 return Err("handler capture access pointee mismatch".into());
             }
             capture_accesses.push((*binding, access.clone()));
             continue;
         }
-        if !access.target.fields.is_empty() || !access.target.through.is_empty() {
+        if !access.target.fields.is_empty()
+            || !access.target.through.is_empty()
+            || !access.target.conditions.is_empty()
+        {
             return Err("handler operation parameter access requires a scalar pointee".into());
         }
         let parameter = &parameters[access.target.parameter];

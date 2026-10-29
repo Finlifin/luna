@@ -5381,3 +5381,105 @@ fn handler_traverses_stable_pointer_fields_without_taking_ownership() {
         assert!(error.contains("move-error"), "{body}: {error}");
     }
 }
+
+#[test]
+fn handler_preserves_optional_pointer_presence_in_borrowed_state() {
+    let seed = support::compile("trait Duplicate {} trait Retire {fn drop(*self);}");
+    let protocols = elaboration::program::Protocols {
+        copy: Some(
+            seed.traits
+                .iter()
+                .find(|t| t.name == "Duplicate")
+                .unwrap()
+                .declaration,
+        ),
+        drop: Some(
+            seed.traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration,
+        ),
+        ..Default::default()
+    };
+    for value in ["target.ref", "null", "if enabled {target.ref} else {null}"] {
+        let source = format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            impl Duplicate for bool {{}} impl Duplicate for *T where T {{}}
+            impl Duplicate for ?*bool {{}}
+            typealias Unit=.void'builtin;
+            struct State {{target:?*bool,seen:*bool}}
+            impl Retire for State {{fn drop(*self) {{
+                assumes not self.seen.*.*;self.seen.*.* = true;
+            }}}}
+            inline effect tick();
+            inline fn once()->#tick Unit {{tick()#;}}
+            fn update(pointer:*State) {{
+                let maybe=pointer.target.*;
+                maybe match {{target?=>{{target.* = true;}},null=>{{}},}};
+            }}
+            fn scenario(enabled:bool)->bool {{
+                var target=false;var retired=false;
+                {{let state=State{{target:{value},seen:retired.ref}};
+                    let pointer=state.ref;
+                    once()# {{tick()=>update(pointer),}};
+                    assumes not retired;
+                }};
+                retired and target == {present}
+            }}
+            fn run()->bool {{scenario(true) and scenario(false)}}",
+            present = if value.starts_with("if ") {
+                "enabled"
+            } else if value == "null" {
+                "false"
+            } else {
+                "true"
+            },
+        );
+        let package = support::compile_with_protocols(&source, &protocols).unwrap();
+        let summary = elaboration::verification::memory::infer_in_package(
+            &package,
+            support::id(&package, "update"),
+            &[],
+            &mut 1_000_000,
+        )
+        .unwrap();
+        assert!(
+            summary
+                .accesses
+                .iter()
+                .any(|access| { access.write && !access.target.conditions.is_empty() }),
+            "{summary}"
+        );
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                1_000_000,
+            )
+            .unwrap_or_else(|error| panic!("{value}: {error}")),
+            Value::Bool(true)
+        );
+        let changed = source
+            .replace("inline fn once()", "inline fn once(input:bool)")
+            .replace(
+                "once()# {tick()",
+                "once(do {pointer.target.* = null;true})# {tick()",
+            );
+        let invalid = support::compile_with_protocols(&changed, &protocols).unwrap();
+        let error = luna::execution::interpret_with_protocols(
+            &invalid,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("stable storage during installation"),
+            "{value}: {error}"
+        );
+    }
+}

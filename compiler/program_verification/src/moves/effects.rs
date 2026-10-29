@@ -1534,11 +1534,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         )
                     })?;
                     // Pointer-free Copy fields can be read or replaced without
-                    // rebinding aliases in the installer's state. Pointer fields
-                    // can only be read, with stable origins imported below; the
+                    // rebinding aliases in the installer's state. Pointer-bearing
+                    // Copy values can only be read, with stable origins below; the
                     // owner itself does not need Copy.
                     for (_, access) in &summary.capture_accesses {
-                        if access.write || !matches!(access.ty, Term::Pointer(_)) {
+                        if access.write {
                             super::super::memory::require_pointer_free_owned(
                                 self.package,
                                 &access.ty,
@@ -1658,12 +1658,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         // Read-only pointer fields retain their installer origins.
                         // Import the reachable storage as borrowed, never owned;
                         // the access summary above still rejects pointer writes.
-                        let reads_pointer_fields = parameter_summary.as_ref().is_some_and(|summary| {
-                            summary.capture_accesses.iter().any(|(_, access)| {
-                                !access.target.through.is_empty()
-                                    || (!access.write && access.read_value && matches!(access.ty, Term::Pointer(_)))
-                            })
-                        });
+                        let mut reads_pointer_fields = false;
+                        if let Some(summary) = &parameter_summary {
+                            for (_, access) in &summary.capture_accesses {
+                                reads_pointer_fields |= !access.target.through.is_empty()
+                                    || !super::super::memory::pointer_input_layout(
+                                        this.package, &access.ty, &mut this.fuel,
+                                    ).map_err(|reason| error(installation, reason))?.is_empty();
+                            }
+                        }
                         let mut pending: Vec<_> = if reads_pointer_fields {
                             frame.effect_borrows.iter().copied().collect()
                         } else {
@@ -1675,6 +1678,32 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             if !imported.insert(owner) {
                                 continue;
                             }
+                            // Only pointer-presence tags are stable. Ordinary data
+                            // variants may still change while this handler is installed.
+                            let layout = super::super::memory::pointer_input_layout(
+                                this.package, &outer.types[&owner], &mut this.fuel,
+                            ).map_err(|reason| error(installation, reason))?;
+                            let mut stable_domains = EnumDomains::new();
+                            for leaf in layout {
+                                imported_slots.insert(Place {root: owner, fields: leaf.storage_fields});
+                                let mut position = 0;
+                                while position + 1 < leaf.input_fields.len() {
+                                    this.fuel = this.fuel.checked_sub(1).ok_or_else(|| error(
+                                        installation, "handler borrowed tag import budget exhausted"))?;
+                                    if leaf.input_fields[position] == VARIANT_PATH {
+                                        let path = &leaf.input_fields[..position];
+                                        if let Some(tags) = outer.enum_domains.get(&owner).and_then(|domains| domains.get(path)) {
+                                            this.fuel = this.fuel.checked_sub(path.len().saturating_add(tags.len()).saturating_add(1))
+                                                .ok_or_else(|| error(installation, "handler borrowed tag copy budget exhausted"))?;
+                                            stable_domains.insert(path.to_vec(), tags.clone());
+                                        }
+                                        position += 2;
+                                    } else {
+                                        position += 1;
+                                    }
+                                }
+                            }
+                            this.install_enum_domains(frame, &Place {root: owner, fields: vec![]}, stable_domains, installation)?;
                             let first = Place {root: owner, fields: vec![]};
                             for (slot, targets) in outer.pointers.range(first..)
                                 .take_while(|(slot, _)| slot.root == owner)
