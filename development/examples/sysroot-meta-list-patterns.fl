@@ -9,16 +9,20 @@ comptime fn values() -> bool {
     let layers = optional match { [null, number?] => number == 3, _ => false };
     let first = input.as(ListPatternView).list_pattern_view_get_element_comptime(0);
     let last = input.as(ListPatternView).list_pattern_view_get_element_comptime(2);
-    var calls: Integer = 0;
-    let produced = produce(calls.ref).as(ListPatternView).list_pattern_view_get_element_comptime(0);
+    let producer = Producer {calls: 0};
+    let produced = producer.produce().as(ListPatternView).list_pattern_view_get_element_comptime(0);
     prefix and exact and empty_match and layers and first == 1 and last == 3
         and input.as(ListPatternView).list_pattern_view_get_len_comptime() == 3
-        and produced == 9 and calls == 1
+        and produced == 9 and producer.calls == 1
 }
 
-comptime fn produce(calls: *Integer) -> meta.List<Integer> {
-    calls.* += 1;
-    [9]
+struct Producer {calls: Integer}
+
+impl Producer {
+    comptime fn produce(self) -> meta.List<Integer> {
+        self.calls = self.calls + 1;
+        [9]
+    }
 }
 
 pure comptime fn Identity<T> -> Type { T }

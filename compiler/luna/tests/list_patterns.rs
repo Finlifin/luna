@@ -182,7 +182,10 @@ fn comptime_list_wildcard_rest_uses_the_same_prefix_rule() {
     let protocol = PROTOCOL
         .replace("fn list_pattern_view", "comptime fn list_pattern_view")
         .replace("length();self.length.*", "self.length.*")
-        .replace("element();self.value.*", "self.value.*");
+        .replace("element();self.value.*", "self.value.*")
+        .replace("(*self", "(self")
+        .replace("self.length.*", "self.length")
+        .replace("self.value.*", "self.value");
     let source = format!(
         "{protocol}
         comptime fn inspect(value:Repeated)->bool {{value match {{[a,b,..._]=>a and b,_=>false}}}}
@@ -1064,7 +1067,10 @@ fn comptime_list_views_execute_and_select_runtime_types() {
     let protocol = PROTOCOL
         .replace("fn list_pattern_view", "comptime fn list_pattern_view")
         .replace("length();self.length.*", "self.length.*")
-        .replace("element();self.value.*", "self.value.*");
+        .replace("element();self.value.*", "self.value.*")
+        .replace("(*self", "(self")
+        .replace("self.length.*", "self.length")
+        .replace("self.value.*", "self.value");
     let package = compile_with_source_bindings(
         &format!(
             "{protocol}
@@ -1107,7 +1113,10 @@ fn comptime_list_views_reject_runtime_use_and_mixed_method_phases() {
     let protocol = PROTOCOL
         .replace("fn list_pattern_view", "comptime fn list_pattern_view")
         .replace("length();self.length.*", "self.length.*")
-        .replace("element();self.value.*", "self.value.*");
+        .replace("element();self.value.*", "self.value.*")
+        .replace("(*self", "(self")
+        .replace("self.length.*", "self.length")
+        .replace("self.value.*", "self.value");
     for source in [
         format!("{protocol}fn bad(value:Repeated)->bool {{value match {{[]=>true,_=>false}}}}"),
         protocol.replace(
@@ -1136,7 +1145,10 @@ fn comptime_list_views_short_circuit_before_failing_extractors() {
         .replace(
             "element();self.value.*",
             "if index == 0 {self.value.*} else {while true {} false}",
-        );
+        )
+        .replace("(*self", "(self")
+        .replace("self.length.*", "self.length")
+        .replace("self.value.*", "self.value");
     let package = compile_with_source_bindings(
         &format!(
             "{protocol}
@@ -1187,7 +1199,10 @@ fn comptime_list_views_can_extract_types_without_runtime_splicing() {
         .replace(
             "element();self.value.*",
             "if self.value.* {bool} else {.u8'builtin}",
-        );
+        )
+        .replace("(*self", "(self")
+        .replace("self.length.*", "self.length")
+        .replace("self.value.*", "self.value");
     let package = compile_with_source_bindings(
         &format!(
             "{protocol}
@@ -1213,14 +1228,17 @@ fn comptime_list_views_can_extract_types_without_runtime_splicing() {
 }
 
 #[test]
-fn comptime_list_views_read_stored_type_elements_with_copy_evidence() {
+fn comptime_list_views_read_stored_type_elements_without_copy_evidence() {
     let protocol = PROTOCOL
         .replace("fn list_pattern_view", "comptime fn list_pattern_view")
         .replace("value:bool", "value:Type")
         .replace("Element:Type=bool", "Element:Type=Type")
         .replace("index:Size)->bool", "index:Size)->Type")
         .replace("length();self.length.*", "self.length.*")
-        .replace("element();self.value.*", "self.value.*");
+        .replace("element();self.value.*", "self.value.*")
+        .replace("(*self", "(self")
+        .replace("self.length.*", "self.length")
+        .replace("self.value.*", "self.value");
     let source = format!(
         "{protocol}
         trait Duplicate {{}}trait Retire {{fn drop(*self);}}
@@ -1246,8 +1264,11 @@ fn comptime_list_views_read_stored_type_elements_with_copy_evidence() {
         luna::execution::interpret(&package, "entry", 100_000).unwrap(),
         Value::Bool(true)
     );
-    let missing = compile(&source.replace("impl Duplicate for Type {}", "")).unwrap_err();
-    assert!(missing.contains("Copy"), "{missing}");
+    let without_copy = compile(&source.replace("impl Duplicate for Type {}", "")).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&without_copy, "entry", 100_000).unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -1277,7 +1298,10 @@ fn quoted_list_patterns_reject_comptime_only_extractors() {
     let protocol = PROTOCOL
         .replace("fn list_pattern_view", "comptime fn list_pattern_view")
         .replace("length();self.length.*", "self.length.*")
-        .replace("element();self.value.*", "self.value.*");
+        .replace("element();self.value.*", "self.value.*")
+        .replace("(*self", "(self")
+        .replace("self.length.*", "self.length")
+        .replace("self.value.*", "self.value");
     let error=compile_with_source_bindings(
         &format!("{protocol}comptime fn pair_code()-><Repeated -| left:bool,right:bool> {{'<[left,right]>}}"),
         &Default::default(),luna::protocols::type_constructors::Selectors {

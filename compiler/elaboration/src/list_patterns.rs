@@ -117,7 +117,7 @@ fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<P
     };
     let receiver = Parameter {
         sort: Sort::Runtime,
-        ty: if staged {
+        ty: if comptime {
             subject.clone()
         } else {
             Term::Pointer(Box::new(subject.clone()))
@@ -163,8 +163,8 @@ fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<P
         };
         if method.signature.is_comptime_callable() != comptime
             || method.signature.callable_signature() != Ok(&expected)
-            || method.by_reference_receiver == staged
-            || method.by_value_receiver != staged
+            || method.by_reference_receiver == comptime
+            || method.by_value_receiver != comptime
             || (staged && method.phase != TraitPhase::Comptime)
             || !method.type_parameters.is_empty()
             || !method.type_arguments.is_empty()
@@ -175,7 +175,7 @@ fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<P
     Ok(Protocol {
         size,
         comptime,
-        by_value: staged,
+        by_value: comptime,
         length: length_name,
         element: get_name,
     })

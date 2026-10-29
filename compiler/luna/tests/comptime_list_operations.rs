@@ -952,14 +952,14 @@ const LIST_VIEW: &str = "
     typealias Integer = .Integer'builtin;
     trait ListView {
         assoc Element: Type;
-        comptime fn list_pattern_view_get_len(*self) -> Integer;
-        comptime fn list_pattern_view_get_element(*self, comptime index: Integer) -> Element;
+        comptime fn list_pattern_view_get_len(self) -> Integer;
+        comptime fn list_pattern_view_get_element(self, comptime index: Integer) -> Element;
     }
     impl ListView for meta.List<T> where T {
         assoc Element: Type = T;
-        comptime fn list_pattern_view_get_len(*self) -> Integer { let values = self.*; values.length() }
-        comptime fn list_pattern_view_get_element(*self, comptime index: Integer) -> T {
-            self.*[index]
+        comptime fn list_pattern_view_get_len(self) -> Integer { let values = self; values.length() }
+        comptime fn list_pattern_view_get_element(self, comptime index: Integer) -> T {
+            self[index]
         }
     }
 ";
@@ -1010,6 +1010,13 @@ fn real_meta_lists_match_through_comptime_observation_protocol() {
         luna::invocation::invoke(&package, "run", 500_000).unwrap(),
         Value::Bool(true)
     );
+}
+
+#[test]
+fn comptime_list_view_rejects_pointer_receivers_before_use() {
+    let source = LIST_VIEW.split("    impl ListView").next().unwrap();
+    let error = compile_list_view(&source.replace("(self", "(*self")).unwrap_err();
+    assert!(error.contains("invalid ListPatternView"), "{error}");
 }
 
 #[test]

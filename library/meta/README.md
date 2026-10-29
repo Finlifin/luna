@@ -78,6 +78,10 @@ comptime fn first() -> Integer {
 不能把省略 `.as(ListPatternView)` 的拼写当作自动搜索所有 trait 的承诺。
 方法查找保留 List 的 normal-form 头，不要求将其展开成底层结构；实现适用性、
 参数及结果域检查仍然执行，接收者生成表达式仍只求值一次。
+comptime 模式协议方法使用 `self` 值引用，不使用 `*self` 或源码指针。
+这同样适用于只声明 comptime 方法的自定义观察协议；编译器按方法阶段检查
+接收者，并在协议绑定时拒绝 comptime 指针签名。runtime 观察方法仍遵循
+自己的指针接收者契约，不因 comptime 路径而改变。
 
 `Object` 是编译期异构对象的公开类型别名，经 `meta.prelude` 导出。
 用户代码无需直接引用编译器内置符号：

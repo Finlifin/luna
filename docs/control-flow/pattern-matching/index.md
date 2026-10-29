@@ -907,22 +907,22 @@ where T :- ListView {
 
 `pure` 不会跳过模式中的隐式调用。纯度分析检查长度与提取器的行为，并只在内部候选作用域安装观察绑定。当前可接受已有独立 P4 依据的提取器；只读指针访问本身并不构成 P4，跨函数传播私有目标来源仍有保守限制。
 
-编译期列表观察也已接通：将协议及实现的两个方法都声明为 `comptime fn`，即可在 comptime 函数中使用列表模式。长度不匹配、前项模式失败时，后续提取器不会执行；前项绑定可用于后项 guard。提取结果也可以是 Type，并用于后续类型计算。读取存储的 Type 元素仍须有 Copy 依据，comptime 不免除资源检查。
+编译期列表观察也已接通：将协议及实现的两个方法都声明为 `comptime fn`，即可在 comptime 函数中使用列表模式。长度不匹配、前项模式失败时，后续提取器不会执行；前项绑定可用于后项 guard。提取结果也可以是 Type，并用于后续类型计算。comptime 接收者使用 `self` 值引用，读取元素不要求 runtime Copy／Clone 依据；输入域与结果域仍须检查。
 
 编译期协议的长度与索引还可使用 `Integer`，与 `List.length` 和列表索引的编译期域一致；编译器生成的长度和索引始终非负。runtime 协议仍要求无符号机器大小类型。下面的协议可显式绑定为列表模式入口，并通过普通泛型实现观察 `meta.List<T>`：
 
 ```flurry
 trait ComptimeListView {
     assoc Element: Type;
-    comptime fn list_pattern_view_get_len(*self) -> Integer;
-    comptime fn list_pattern_view_get_element(*self, comptime index: Integer) -> Element;
+    comptime fn list_pattern_view_get_len(self) -> Integer;
+    comptime fn list_pattern_view_get_element(self, comptime index: Integer) -> Element;
 }
 
 impl ComptimeListView for meta.List<T> where T {
     assoc Element: Type = T;
-    comptime fn list_pattern_view_get_len(*self) -> Integer { self.*.length() }
-    comptime fn list_pattern_view_get_element(*self, comptime index: Integer) -> T {
-        self.*[index]
+    comptime fn list_pattern_view_get_len(self) -> Integer { self.length() }
+    comptime fn list_pattern_view_get_element(self, comptime index: Integer) -> T {
+        self[index]
     }
 }
 
@@ -936,7 +936,7 @@ comptime fn First(types: meta.List<Type>) -> Type {
 
 这里 `Type`、`Integer` 来自默认 prelude；驱动仍需显式绑定上述协议身份。`List<T>` 的用户实现资格来自已绑定的内置 List 契约，不展开其函数体，也不使其他返回 List 的 opaque factory 自动获得该资格。列表元素观察使用不可变快照，不向 runtime 授予 List 的 Copy 能力。嵌套列表继续逐层调用同一协议，各层都先检查长度再提取元素。
 
-两个方法必须属于同一执行阶段。runtime 匹配与 quoted pattern 中的列表模式要求 runtime 协议；在 comptime 中生成 quoted pattern，不会把该模式将来执行的提取器变成 comptime 调用。当前同一显式绑定不能同时提供这两个阶段的协议。
+两个方法必须属于同一执行阶段。runtime 匹配与 quoted pattern 中的列表模式要求 runtime 协议；在 comptime 中生成 quoted pattern，不会把该模式将来执行的提取器变成 comptime 调用。只含上述基础方法的协议属于一个阶段；需要同一绑定服务两个阶段时，使用前述带 `_comptime` 成员和 phase 属性的双阶段协议。
 
 元素也可以是 `Tuple<bool, bool>` 等聚合。此时嵌套模式仍写作 `[(a, b), (c, d)]`；协议的 Element 类型与模式解构的结构视图保持区别。具有 Copy 依据的标量 tuple 可作为提取结果，后项 guard 可以读取前项成功绑定；只有元素为标量，并不自动授予整个 tuple 的 Copy 证据。
 
