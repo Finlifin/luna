@@ -1367,17 +1367,13 @@ fn infer_handler_arm_memory_with_captures(
     for (binding, ty) in captures {
         bound_type(ty, fuel)?;
         let layout = pointer_input_layout(Some(package), ty, fuel)?;
+        // Pointer captures retain their declared pointee layout. Validate each
+        // accessed projection below instead of requiring the entire pointee
+        // to be scalar; unrelated aggregate fields need not be accessed.
         if !capture_bindings.insert(*binding)
-            || if layout.is_empty() {
-                !effect_storage_layout(Some(package), ty, fuel, 0, true)?
-            } else {
-                layout.iter().any(|leaf| !scalar(&leaf.pointee))
-            }
+            || (layout.is_empty() && !effect_storage_layout(Some(package), ty, fuel, 0, true)?)
         {
-            return Err(
-                "handler parameter inference requires data or stable scalar-pointer captures"
-                    .into(),
-            );
+            return Err("handler parameter inference requires data or pointer captures".into());
         }
     }
     if free != capture_bindings {

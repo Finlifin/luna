@@ -907,23 +907,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .ok_or_else(|| error(source, "handler pointer target is not a known local"))?;
             if (!outer.roots.contains(&target.root) && !outer.effect_borrows.contains(&target.root))
                 || target.fields.contains(&VARIANT_PATH)
-                || (self.delivery)(ty).map_err(|reason| error(source, reason))? != Delivery::Copy
             {
                 return Err(error(
                     source,
                     "handler pointer requires a live local Copy scalar target",
                 ));
             }
-            // Borrowed frames import the entire root layout. Establish it fully,
-            // and exclude embedded aliases whose provenance could be changed by
-            // replacing another field while the handler is suspended.
-            super::super::memory::require_pointer_free_owned(self.package, ty, &mut self.fuel, 0)
-                .map_err(|reason| {
-                error(
-                    source,
-                    format!("handler pointer owner needs a pointer-free Copy layout: {reason}"),
-                )
-            })?;
+            // Import initialized borrowed storage, not ownership or Copy evidence.
+            // Field operations still check their own delivery and provenance;
+            // pointer-bearing fields are unavailable until separately tracked.
             outer
                 .state
                 .require_present(&Place {
@@ -933,16 +925,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .map_err(|_| error(source, "handler pointer owner is not fully initialized"))?;
             super::super::memory::bound_type(ty, &mut self.fuel)
                 .map_err(|reason| error(source, reason))?;
-            let leaf = owned_field_type(self.package, ty, &target.fields, &mut self.fuel, source)?;
-            if !matches!(leaf, Term::Primitive(_))
-                || !nir::program::intrinsic_pointer_value(&leaf)
-                || (self.delivery)(&leaf).map_err(|reason| error(source, reason))? != Delivery::Copy
-            {
-                return Err(error(
-                    source,
-                    "handler pointer requires a live local Copy scalar target",
-                ));
-            }
+            owned_field_type(self.package, ty, &target.fields, &mut self.fuel, source)?;
             outer
                 .state
                 .require_present(target)
@@ -1530,6 +1513,39 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     &mut self.fuel,
                 )
                 .map_err(|reason| error(installation, reason))?;
+                let mut aggregate_borrow = false;
+                for targets in pointer_captures.values() {
+                    for target in targets {
+                        let ty = owned_field_type(
+                            self.package,
+                            &outer.types[&target.root],
+                            &target.fields,
+                            &mut self.fuel,
+                            installation,
+                        )?;
+                        aggregate_borrow |= !matches!(ty, Term::Primitive(_));
+                    }
+                }
+                if aggregate_borrow {
+                    let summary = parameter_summary.as_ref().ok_or_else(|| {
+                        error(
+                            installation,
+                            "aggregate handler pointees require a complete field access summary",
+                        )
+                    })?;
+                    // This frame imports initialization, not embedded pointer-slot
+                    // provenance. Only scalar field access is admitted; replacing
+                    // pointer fields would require checked environment writeback.
+                    if summary.capture_accesses.iter().any(|(_, access)| {
+                        !matches!(access.ty, Term::Primitive(_))
+                            || !nir::program::intrinsic_pointer_value(&access.ty)
+                    }) {
+                        return Err(error(
+                            installation,
+                            "aggregate handler pointees permit only scalar field accesses",
+                        ));
+                    }
+                }
                 let stable_writes = match &parameter_summary {
                     Some(summary) => super::super::memory::stationary_handler_write_sites(
                         self.package,
@@ -1791,6 +1807,19 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     .chain(&invocation.failed_exits)
                     .chain(invocation.effect_exits.iter().map(|(_, state)| state))
                 {
+                    for targets in pointer_captures.values() {
+                        for target in targets {
+                            self.fuel = self.fuel.checked_sub(1).ok_or_else(|| {
+                                error(
+                                    installation,
+                                    "handler borrowed storage preservation budget exhausted",
+                                )
+                            })?;
+                            state.require_present(&Place {root: target.root, fields: vec![]})
+                                .map_err(|_| error(installation,
+                                    "borrowed handler pointee must remain complete on every exit"))?;
+                        }
+                    }
                     for binding in &borrowed_owner_roots {
                         self.fuel = self.fuel.checked_sub(1).ok_or_else(|| {
                             error(

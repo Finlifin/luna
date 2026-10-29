@@ -5028,3 +5028,68 @@ fn handler_captured_struct_pointer_memory_preserves_field_paths() {
     )
     .unwrap();
 }
+
+#[test]
+fn handler_borrows_affine_state_fields_without_owning_or_rebinding_pointers() {
+    let prefix = "trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        typealias Unit=.void'builtin;
+        struct State {seen:*bool,value:bool}
+        impl Retire for State {fn drop(*self) {
+            assumes not self.seen.*.*;self.seen.*.* = true;
+        }}
+        inline effect tick();
+        inline fn once()->#tick Unit {tick()#;}
+        fn toggle(state:*State) {state.value.* = not state.value.*;}";
+    let package = support::compile(&format!(
+        "{prefix}
+        fn run()->bool {{
+            var retired=false;
+            {{let state=State{{seen:retired.ref,value:false}};let pointer=state.ref;
+                once()# {{tick()=>toggle(pointer),}};
+                assumes state.value and not retired;
+            }};
+            retired
+        }}"
+    ));
+    elaboration::verification::memory::infer_in_package(
+        &package,
+        support::id(&package, "run"),
+        &[],
+        &mut 1_000_000,
+    )
+    .expect("affine handler memory inference");
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    for body in [
+        "var local=false;pointer.seen.* = local.ref;",
+        "let stolen=pointer.*;",
+    ] {
+        let invalid = support::compile(&format!(
+            "{prefix}
+            fn run() {{var retired=false;let state=State{{seen:retired.ref,value:false}};
+                let pointer=state.ref;once()# {{tick()=>{{{body}}},}};
+            }}"
+        ));
+        assert!(
+            luna::execution::interpret_with_protocols(
+                &invalid,
+                "run",
+                "Duplicate",
+                "Retire",
+                1_000_000
+            )
+            .is_err(),
+            "{body}"
+        );
+    }
+}
