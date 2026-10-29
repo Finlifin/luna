@@ -53,11 +53,11 @@ pub use reflection::{
     CallableReflection, EnumReflection, ReflectedField, ReflectedVariant, StructReflection,
 };
 mod float_operations;
+mod leaf_inputs;
 mod scalar_operations;
 #[cfg(test)]
 mod scoped_work;
 mod selected_types;
-mod type_list_index;
 pub use comptime_runtime::object::{Entry as ObjectEntry, Object};
 pub use memory::{OwnedGraphCheckpoint, PointerValue, Storage};
 
@@ -4853,81 +4853,6 @@ impl<'a> Interpreter<'a> {
             declaration: *declaration,
             arguments: types,
         })))
-    }
-
-    #[inline(never)]
-    fn eval_type_list_index(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        if self.comptime_only
-            && self.cleanup_schedule.is_none()
-            && let K::TypeListIndex(values, index) = &expr.kind
-            && self.is_type_list_input(&values.ty)
-            && let K::Local(binding) = values.kind
-            && matches!(index.kind, K::Literal(Literal::Integer(_)) | K::Local(_))
-        {
-            return self.eval_local_type_list_index(expr, values, binding, index, environment);
-        }
-        let K::TypeListIndex(values, index) = &expr.kind else {
-            unreachable!()
-        };
-        let element_type = self
-            .list_element(&values.ty)
-            .cloned()
-            .or_else(|| {
-                self.is_type_list_input(&values.ty)
-                    .then_some(Term::Primitive(Primitive::Type))
-            })
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-        let result_type = if index.ty == Term::Primitive(Primitive::Never) {
-            Term::Primitive(Primitive::Never)
-        } else {
-            element_type
-        };
-        if expr.ty != result_type
-            || !matches!(
-                index.ty,
-                Term::Primitive(Primitive::Integer | Primitive::Never)
-            )
-        {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        if self.comptime_only
-            && self.cleanup_schedule.is_none()
-            && let K::Local(binding) = values.kind
-            && matches!(index.kind, K::Literal(Literal::Integer(_)) | K::Local(_))
-        {
-            return self.eval_local_list_index(expr, values, binding, index, environment);
-        }
-        let list = value!(self.eval(values, environment));
-        let length = match &list {
-            Value::TypeList(elements) => elements.len(),
-            Value::List { values, .. } => values.len(),
-            _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
-        };
-        let Value::Integer(position) = value!(self.eval(index, environment)) else {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        };
-        let position = position
-            .to_u128()
-            .ok()
-            .and_then(|index| usize::try_from(index).ok())
-            .filter(|index| *index < length)
-            .ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(expr.source)))?;
-        if let Value::List { mut values, .. } = list {
-            return Ok(Flow::Value(values.swap_remove(position)));
-        }
-        let Value::TypeList(mut elements) = list else {
-            unreachable!()
-        };
-        let result = elements.swap_remove(position);
-        let work = self
-            .type_description_work(&result)
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-        self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
-        Ok(Flow::Value(Value::Type(result)))
     }
 
     #[inline(never)]

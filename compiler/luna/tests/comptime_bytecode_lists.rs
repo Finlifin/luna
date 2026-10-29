@@ -68,3 +68,75 @@ fn list_construction_concat_and_length_execute_without_losing_snapshots() {
     );
     assert_eq!(vm.bytecode_invocations() - before, 1);
 }
+
+#[test]
+fn list_indices_preserve_bounds_snapshots_and_type_values() {
+    use comptime_interpretor::ErrorKind;
+    let package = support::compile_with_tuple(
+        "typealias Type = .Type'builtin;
+        typealias Integer = .Integer'builtin;
+        typealias List<T> = TupleElements<T>;
+        comptime fn values() -> List<bool> { [true, false] }
+        comptime fn types() -> List<Type> { [bool, Integer] }
+        comptime fn at(values: List<bool>, index: Integer) -> bool { values[index] }
+        comptime fn Element(values: List<Type>, index: Integer) -> Type { values[index] }
+        comptime fn snapshot() -> bool {
+            var values: List<bool> = [true];
+            let old = values[do { values = [false]; 0 }];
+            old and not values[0]
+        }
+        comptime fn early() -> bool {
+            let values: List<bool> = [true];
+            values[do { return true; 0 }]
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let values = vm.invoke(support::id(&package, "values"), vec![]).unwrap();
+    let types = vm.invoke(support::id(&package, "types"), vec![]).unwrap();
+    for (name, input, expected) in [
+        ("at", values, Value::Bool(false)),
+        (
+            "Element",
+            types,
+            Value::Type(Term::Primitive(Primitive::Integer)),
+        ),
+    ] {
+        for index in [-1, 2, i128::MAX] {
+            let before = vm.bytecode_invocations();
+            assert_eq!(
+                vm.invoke(
+                    support::id(&package, name),
+                    vec![
+                        input.clone(),
+                        Value::Integer(comptime_runtime::Integer::from_i128(index))
+                    ]
+                )
+                .unwrap_err()
+                .kind,
+                ErrorKind::IndexOutOfBounds
+            );
+            assert_eq!(vm.bytecode_invocations() - before, 1);
+        }
+        let before = vm.bytecode_invocations();
+        assert_eq!(
+            vm.invoke(
+                support::id(&package, name),
+                vec![
+                    input,
+                    Value::Integer(comptime_runtime::Integer::from_u128(1))
+                ]
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1);
+    }
+    for name in ["snapshot", "early"] {
+        let before = vm.bytecode_invocations();
+        assert_eq!(
+            vm.invoke(support::id(&package, name), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1);
+    }
+}

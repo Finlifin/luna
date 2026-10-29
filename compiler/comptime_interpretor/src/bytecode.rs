@@ -335,6 +335,66 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::PrepareListIndex(contract) => {
+                    self.prepare_list_index(&contract.ty, &contract.list, &contract.index, source)?
+                }
+                Op::CheckIndexedList { value, contract } => {
+                    self.index_list_length(
+                        frame.slots[*value].as_ref().ok_or_else(missing)?,
+                        &contract.list,
+                        source,
+                    )?;
+                }
+                Op::ListIndex {
+                    destination,
+                    list,
+                    index,
+                } => {
+                    let list = frame.slots[*list].take().ok_or_else(missing)?;
+                    let index = frame.slots[*index].take().ok_or_else(missing)?;
+                    frame.slots[*destination] =
+                        Some(self.complete_list_index(list, index, source)?);
+                }
+                Op::LocalListIndex {
+                    destination,
+                    contract,
+                    list,
+                    list_source,
+                    index,
+                } => {
+                    use comptime_compiler::leaf_inputs::Selector;
+                    use leaf_inputs::LocalSelector;
+                    self.tick(Some(*list_source))?;
+                    let list = frame.slots[*list].as_ref().ok_or_else(|| {
+                        self.failure(ErrorKind::MissingBinding, Some(*list_source))
+                    })?;
+                    let index = match index {
+                        Selector::Local(slot, at) => {
+                            LocalSelector::Value(frame.slots[*slot].as_ref(), *at)
+                        }
+                        Selector::Literal(expr) => LocalSelector::Literal(expr),
+                    };
+                    let independent = matches!(
+                        &index,
+                        LocalSelector::Literal(_)
+                            | LocalSelector::Value(Some(Value::Integer(_)), _)
+                    );
+                    let Flow::Value(value) = self.read_local_list_index(
+                        list,
+                        &contract.list,
+                        independent,
+                        *list_source,
+                        source,
+                        |this| {
+                            this.read_leaf_selector(Some(index))
+                                .map(|value| Flow::Value(value.unwrap()))
+                        },
+                    )?
+                    else {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    };
+                    frame.slots[*destination] = Some(value);
+                }
                 Op::PrepareList(list) => {
                     self.prepare_list_construction(&list.ty, list.inputs.iter(), source)?;
                 }
@@ -408,8 +468,9 @@ impl<'a> Interpreter<'a> {
                     receiver_source,
                     selector,
                 } => {
-                    use comptime_compiler::objects::{ObjectOperation, Selector};
-                    use object_queries::LocalSelector;
+                    use comptime_compiler::leaf_inputs::Selector;
+                    use comptime_compiler::objects::ObjectOperation;
+                    use leaf_inputs::LocalSelector;
                     let ObjectOperation::Query(query) = access.operation else {
                         return Err(self.failure(ErrorKind::Type, Some(source)));
                     };

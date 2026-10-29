@@ -1,5 +1,6 @@
 //! Linear invocation code. Unsupported operations are detected before execution.
 //! Constants and default templates own bounded typed NIR copies; opcodes never evaluate trees.
+pub mod leaf_inputs;
 pub mod lists;
 pub mod objects;
 mod patterns;
@@ -32,6 +33,23 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    PrepareListIndex(Arc<lists::Index>),
+    CheckIndexedList {
+        value: Register,
+        contract: Arc<lists::Index>,
+    },
+    ListIndex {
+        destination: Register,
+        list: Register,
+        index: Register,
+    },
+    LocalListIndex {
+        destination: Register,
+        contract: Arc<lists::Index>,
+        list: Register,
+        list_source: SourceRange,
+        index: leaf_inputs::Selector,
+    },
     PrepareList(Arc<lists::Construction>),
     List {
         destination: Register,
@@ -60,7 +78,7 @@ pub enum Op {
         access: Arc<objects::ObjectAccess>,
         receiver: Register,
         receiver_source: SourceRange,
-        selector: Option<objects::Selector>,
+        selector: Option<leaf_inputs::Selector>,
     },
     PrepareTypeConstructor(Arc<type_constructors::Constructor>),
     CheckTypeConstructorInput {
@@ -302,6 +320,26 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::PrepareListIndex(contract) => write!(f, "(prepare-list-index {contract})")?,
+                Op::CheckIndexedList { value, contract } => {
+                    write!(f, "(check-indexed-list %{value} {contract})")?
+                }
+                Op::ListIndex {
+                    destination,
+                    list,
+                    index,
+                } => write!(f, "(list-index %{destination} %{list} %{index})")?,
+                Op::LocalListIndex {
+                    destination,
+                    contract,
+                    list,
+                    list_source,
+                    index,
+                } => write!(
+                    f,
+                    "(local-list-index %{destination} {contract} (list %{list} (source {} {})) (index {index}))",
+                    list_source.start, list_source.end
+                )?,
                 Op::PrepareList(list) => write!(f, "(prepare-list {list})")?,
                 Op::List {
                     destination,
@@ -1061,6 +1099,63 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         }
                         emit(&mut work, Op::PrepareTypeConstructor(constructor));
                     }
+                    K::TypeListIndex(list, index) => {
+                        let contract = Arc::new(lists::Index {
+                            ty: copy_term(&expr.ty, fuel, source)?,
+                            list: copy_term(&list.ty, fuel, list.source)?,
+                            index: copy_term(&index.ty, fuel, index.source)?,
+                        });
+                        if let K::Local(binding) = list.kind
+                            && matches!(
+                                index.kind,
+                                K::Local(_) | K::Literal(nir::program::Literal::Integer(_))
+                            )
+                        {
+                            let slot = *locals.entry(binding).or_insert_with(&mut fresh);
+                            let index = match index.kind {
+                                K::Local(binding) => leaf_inputs::Selector::Local(
+                                    *locals.entry(binding).or_insert_with(&mut fresh),
+                                    index.source,
+                                ),
+                                _ => {
+                                    nir::copy_budget::charge_substitution(index, &[], &[], fuel)
+                                        .map_err(|error| copy_error(error, index.source))?;
+                                    leaf_inputs::Selector::Literal(Arc::new(index.as_ref().clone()))
+                                }
+                            };
+                            emit(
+                                &mut work,
+                                Op::LocalListIndex {
+                                    destination: dst,
+                                    contract: contract.clone(),
+                                    list: slot,
+                                    list_source: list.source,
+                                    index,
+                                },
+                            );
+                        } else {
+                            let list_slot = fresh();
+                            let index_slot = fresh();
+                            emit(
+                                &mut work,
+                                Op::ListIndex {
+                                    destination: dst,
+                                    list: list_slot,
+                                    index: index_slot,
+                                },
+                            );
+                            work.push(Work::Expression(index, index_slot));
+                            emit(
+                                &mut work,
+                                Op::CheckIndexedList {
+                                    value: list_slot,
+                                    contract: contract.clone(),
+                                },
+                            );
+                            work.push(Work::Expression(list, list_slot));
+                        }
+                        emit(&mut work, Op::PrepareListIndex(contract));
+                    }
                     K::TypeList(fields) => {
                         *fuel = fuel
                             .checked_sub(fields.len())
@@ -1220,7 +1315,7 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                             let selector = fields
                                 .get(1)
                                 .map(|field| match field.kind {
-                                    K::Local(binding) => Ok(objects::Selector::Local(
+                                    K::Local(binding) => Ok(leaf_inputs::Selector::Local(
                                         *locals.entry(binding).or_insert_with(&mut fresh),
                                         field.source,
                                     )),
@@ -1232,7 +1327,7 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                                             fuel,
                                         )
                                         .map_err(|error| copy_error(error, field.source))?;
-                                        Ok(objects::Selector::Literal(Arc::new(field.clone())))
+                                        Ok(leaf_inputs::Selector::Literal(Arc::new(field.clone())))
                                     }
                                     _ => unreachable!(),
                                 })

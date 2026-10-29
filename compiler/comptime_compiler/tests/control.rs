@@ -556,3 +556,56 @@ fn list_code_retains_declared_domains_and_checks_concat_before_right_input() {
     assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
     assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
 }
+
+#[test]
+fn list_index_compilation_distinguishes_leaf_reads_from_computed_indices() {
+    let source = SourceRange { start: 1, end: 5 };
+    let list = Expr {
+        source,
+        ty: Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 3,
+                local: 91,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        },
+        kind: K::Local(LocalId { owner: 1, index: 0 }),
+    };
+    for mode in 0..3 {
+        let literal = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Integer),
+            kind: K::Literal(nir::program::Literal::Integer("0".into())),
+        };
+        let index = match mode {
+            0 => literal,
+            1 => Expr {
+                kind: K::Local(LocalId { owner: 1, index: 1 }),
+                ..literal
+            },
+            _ => Expr {
+                source,
+                ty: literal.ty.clone(),
+                kind: K::Block {
+                    statements: vec![],
+                    result: Some(Box::new(literal)),
+                },
+            },
+        };
+        let body = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Bool),
+            kind: K::TypeListIndex(Box::new(list.clone()), Box::new(index)),
+        };
+        let dump = compile(&body, &mut 1000).unwrap().to_string();
+        assert_eq!(dump.contains("(local-list-index "), mode != 2, "{dump}");
+        assert_eq!(dump.contains("(check-indexed-list "), mode == 2, "{dump}");
+        assert!(
+            dump.contains("(prepare-list-index (list-index-contract"),
+            "{dump}"
+        );
+        assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+        assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
+    }
+}

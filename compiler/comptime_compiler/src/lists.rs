@@ -33,3 +33,19 @@ impl fmt::Display for Operation {
         write!(f, "))")
     }
 }
+
+#[derive(Debug)]
+pub struct Index {
+    pub ty: Term,
+    pub list: Term,
+    pub index: Term,
+}
+impl fmt::Display for Index {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(list-index-contract (type {}) (list {}) (index {}))",
+            self.ty, self.list, self.index
+        )
+    }
+}

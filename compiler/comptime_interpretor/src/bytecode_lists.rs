@@ -184,3 +184,123 @@ fn construction_keeps_type_conversion_and_aggregate_validation_boundaries() {
         }
     }
 }
+
+#[test]
+fn list_indices_read_sibling_references_after_releasing_receiver_locks() {
+    let package = package();
+    let receiver = LocalId { owner: 1, index: 0 };
+    let index = LocalId { owner: 1, index: 1 };
+    for element in [Primitive::Bool, Primitive::Type] {
+        let value = if element == Primitive::Type {
+            Value::TypeList(vec![Term::Primitive(Primitive::Bool)])
+        } else {
+            Value::List {
+                ty: list(element),
+                values: vec![Value::Bool(true)],
+            }
+        };
+        let storage = Storage::new(Value::AnonymousRecord(vec![
+            ("list".into(), value),
+            (
+                "index".into(),
+                Value::Integer(comptime_runtime::Integer::from_u128(0)),
+            ),
+        ]));
+        let mut env = Environment::new();
+        for (binding, field) in [(receiver, 0), (index, 1)] {
+            let reference = value_reference::ValueReference::projected(
+                storage.clone(),
+                &[(nir::program::FieldOwner::Anonymous, field)],
+                &mut 1000,
+            )
+            .unwrap();
+            env.insert(binding, Value::ComptimeReference(reference));
+        }
+        let body = expr(
+            Term::Primitive(element),
+            K::TypeListIndex(
+                Box::new(expr(list(element), K::Local(receiver))),
+                Box::new(expr(Term::Primitive(Primitive::Integer), K::Local(index))),
+            ),
+        );
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let Flow::Value(value) = run(&mut vm, &body, &mut env, compiled).unwrap() else {
+                panic!("flow")
+            };
+            assert_eq!(
+                value,
+                if element == Primitive::Type {
+                    Value::Type(Term::Primitive(Primitive::Bool))
+                } else {
+                    Value::Bool(true)
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn indexed_list_domains_are_checked_before_computed_index_effects() {
+    let package = package();
+    let input = LocalId { owner: 1, index: 0 };
+    let trace = LocalId { owner: 1, index: 1 };
+    let index = expr(
+        Term::Primitive(Primitive::Integer),
+        K::Block {
+            statements: vec![expr(
+                Term::Primitive(Primitive::Void),
+                K::Assign {
+                    place: Place {
+                        root: trace,
+                        fields: vec![],
+                    },
+                    value: Box::new(expr(
+                        Term::Primitive(Primitive::Bool),
+                        K::Literal(Literal::Bool(true)),
+                    )),
+                },
+            )],
+            result: Some(Box::new(expr(
+                Term::Primitive(Primitive::Integer),
+                K::Literal(Literal::Integer("0".into())),
+            ))),
+        },
+    );
+    let body = expr(
+        Term::Primitive(Primitive::Bool),
+        K::TypeListIndex(
+            Box::new(expr(list(Primitive::Bool), K::Local(input))),
+            Box::new(index),
+        ),
+    );
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut env = Environment::new();
+        env.insert(
+            input,
+            Value::List {
+                ty: list(Primitive::Char),
+                values: vec![Value::Char('x')],
+            },
+        );
+        env.insert(trace, Value::Bool(false));
+        assert_eq!(
+            run(&mut vm, &body, &mut env, compiled).unwrap_err().kind,
+            ErrorKind::Type
+        );
+        assert_eq!(env.get(&trace), Some(&Value::Bool(false)));
+        env.insert(
+            input,
+            Value::List {
+                ty: list(Primitive::Bool),
+                values: vec![Value::Bool(true)],
+            },
+        );
+        assert!(matches!(
+            run(&mut vm, &body, &mut env, compiled).unwrap(),
+            Flow::Value(Value::Bool(true))
+        ));
+        assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
+    }
+}

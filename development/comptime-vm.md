@@ -1991,3 +1991,54 @@ fused append optimization; porting that optimization remains necessary for
 allocation-sensitive builders. No general list speedup is claimed by this stage.
 - Final managed `cargo fmt --all -- --check` passed:
   `/tmp/luna-tools-dvnp8igb/result.json`; `git diff --check` passed.
+
+## List indexing in bytecode and shared borrowed reads
+
+TypeListIndex (the existing generic list-index NIR node) now compiles with a
+checked result/list/index contract. Computed receivers and indices evaluate
+through ordinary code, checking the list identity before index effects and
+preserving the receiver snapshot. Local receivers with a literal/local index
+use a borrowed read and copy only the selected value. Negative, oversized and
+out-of-range indices fail without authorizing a different element.
+
+The former separate type-list and value-list local evaluators are consolidated
+in `list_index.rs`. Their old lock order could reject a valid index reference
+into a sibling field of the same storage: it tried reading the index while still
+holding the receiver lock. Both carriers now snapshot and release that receiver
+before reading a storage-backed selector. Owned integer selectors keep the
+borrowed path. Representation kind and declared list domain are checked before
+index evaluation, including deliberately malformed internal carriers; domain
+inspection is metered without scanning unrelated elements.
+
+Read-only local/literal selector metadata and evaluation are now shared with
+Object queries in `leaf_inputs.rs`; no selector opcode evaluates a general NIR
+tree. Metadata and instructions have bounded copying and S-expression Display.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  242 existing tests passed, `/tmp/luna-tools-8d5lu7gy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::list_tests`:
+  4 passed, including the new sibling-reference and domain-before-index-effects
+  tests across both carriers; `/tmp/luna-tools-lrbaq5k0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  18 passed, including literal/local versus computed index routing;
+  `/tmp/luna-tools-ju2m0opw/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists --test comptime_list_operations --test type_lists --test execution`:
+  source bytecode lists 2, real meta.List 54, type lists 28 and execution 1365
+  passed; `/tmp/luna-tools-qyijh35j/result.json`. Source regressions assert actual
+  bytecode invocation counts for bounds errors, recovery, old-snapshot selection,
+  early return and Type-valued elements.
+- `LUNA_BENCH_ITERATIONS=10 python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench type_list_index`:
+  all benchmark results matched; `/tmp/luna-tools-vyklvjr4/result.json`.
+
+For 4096 Type elements and 64 reads per invocation, the allocation-counting
+benchmark requested 1,182,656 bytes with a literal index and 1,395,412 with a local
+index, versus 15,978,432 on its computed-index snapshot control path. Input
+cloning and invocation costs remain included. This is a warmed same-build path
+comparison in the managed development profile, not a historical or release
+speedup result. Existing list-loop cost regressions also passed. Fused append
+and normal-form input-plan bytecode migration remain outstanding.
+
+- Final managed `cargo fmt --all -- --check` passed, exit 0:
+  `/tmp/luna-tools-6ipfkx2u/result.json`; `git diff --check` passed.
