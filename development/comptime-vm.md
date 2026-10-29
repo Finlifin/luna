@@ -21,7 +21,8 @@ package-body code can be reused within one interpreter.
 No opcode delegates a child expression tree back to `eval`.
 
 Supported bodies include existing literal/frozen-value/Type leaves, reads,
-local initialization and whole-slot assignment, blocks, boolean short circuit,
+local initialization, whole-slot/record-field assignment and field reads, blocks,
+boolean short circuit,
 boolean/BitVec negation, branches, loops, break/continue and return. Integer
 arithmetic, exact/machine floating arithmetic, scalar comparisons and admitted
 comptime scalar intrinsics execute linear instructions,
@@ -1289,9 +1290,9 @@ field receivers, forwarding, reading through a let receiver, field updates
 through a no-rebind root, a default reading self, and temporary receivers.
 An internal malformed-NIR test invalidates an acquired path in a later argument
 and verifies rejection before entry while preserving the completed storage write.
-The existing aggregate-construction and field-read/write expression families are
-not all lowered yet; those bodies still choose their migration carrier before
-execution. This change does not introduce new trait-call or effect support.
+Aggregate construction still requires the migration carrier. Record-field reads
+and writes are covered by the following step; this does not introduce new
+trait-call or effect support.
 
 Validation from `/home/fin/luna`, all commands exited 0:
 
@@ -1307,3 +1308,39 @@ Validation from `/home/fin/luna`, all commands exited 0:
   builder cases passed; report `/tmp/luna-tools-21zabtal/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   report `/tmp/luna-tools-41l6stgr/result.json`.
+
+## Compiled record-field access and assignment (2026-10-30)
+
+Nominal and anonymous record fields now have bytecode reads. Direct local reads
+borrow the existing value/storage/reference and copy only the selected field;
+computed bases execute once and their temporary aggregate is released after
+selection. The shared reader retains nominal owner checks, anonymous field name
+and index checks, result-type validation for anonymous fields, and bounded value
+copying. This is the same local-reader mechanism used by builder interpretation,
+without embedding builder-specific rules in the VM.
+
+Assignments now validate root binding presence before evaluating the RHS, then
+resolve their complete field path after RHS evaluation. The tree and bytecode
+paths share comptime writes for plain values, promoted storage and forwarded
+references. This preserves sibling writes and receiver mutations performed by
+the RHS, including promotion of a previously plain root to reference storage.
+Runtime pointer and scheduled cleanup paths retain their existing implementation.
+
+Regression cases check compiled field getters/setters, computed bases, writes to
+siblings during RHS evaluation, invalid anonymous names/indices/result types,
+and missing assignment roots rejecting before RHS effects. Aggregate construction
+remains on the migration path; this step does not claim the complete aggregate
+or collection instruction families.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  226 tests passed, including anonymous-field rejection and pre-RHS binding
+  validation; report `/tmp/luna-tools-t6ced0tn/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  eight tests passed; report `/tmp/luna-tools-fc2tvzts/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_references --test comptime_bytecode --test comptime_bytecode_defaults --test execution --test builder_invocations`:
+  reference/field, call and default groups, 1,365 execution cases and 73 builder
+  cases passed; report `/tmp/luna-tools-8nxkhm_u/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-yzkbz3eh/result.json`.

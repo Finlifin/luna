@@ -10,6 +10,7 @@ fn compile() -> Package {
         "struct Cell { value: bool }
         struct Envelope { left: Cell, right: Cell }
         impl Cell {
+            comptime fn set(self, value: bool) { self.value = value; }
             comptime fn replace(self, other: Cell) { self = other; }
             comptime fn forward(self, other: Cell) { self.replace(other); }
             comptime fn snapshot(self) -> Cell { self }
@@ -22,6 +23,18 @@ fn compile() -> Package {
         comptime fn field_of_let(input: Envelope, other: Cell) -> Envelope {
             let current = input; current.set_left(other); current
         }
+        comptime fn fields(input: Envelope) -> bool {
+            var current = input;
+            current.left.set(true);
+            current.left.value and not current.right.value
+        }
+        comptime fn field_order(input: Envelope) -> bool {
+            var current = input;
+            current.left.value = do { current.right.set(true); false };
+            not current.left.value and current.right.value
+        }
+        comptime fn same_envelope(input: Envelope) -> Envelope { input }
+        comptime fn computed_field(input: Envelope) -> bool { same_envelope(input).left.value }
         comptime fn identity(value: Cell) -> Cell { value }
         comptime fn run(input: Cell, other: Cell) -> Cell {
             var current = input; current.replace(other); current
@@ -164,4 +177,25 @@ fn no_rebind_permission_survives_compiled_forwarding() {
             .unwrap(),
         new
     );
+}
+
+#[test]
+fn compiled_fields_preserve_sibling_writes_and_read_computed_bases() {
+    let package = compile();
+    let cell = record(&package, "Cell", vec![Value::Bool(false)]);
+    let input = record(&package, "Envelope", vec![cell.clone(), cell]);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for (entry, expected) in [
+        ("fields", true),
+        ("field_order", true),
+        ("computed_field", false),
+    ] {
+        let before = vm.bytecode_invocations();
+        assert_eq!(
+            vm.invoke(support::id(&package, entry), vec![input.clone()])
+                .unwrap(),
+            Value::Bool(expected)
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 2);
+    }
 }

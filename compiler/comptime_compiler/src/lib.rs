@@ -12,6 +12,23 @@ pub type Register = usize;
 
 #[derive(Debug)]
 pub enum Op {
+    CheckBinding(Register),
+    WritePlace {
+        local: Register,
+        value: Register,
+        fields: Vec<(FieldOwner, usize)>,
+    },
+    Field {
+        destination: Register,
+        base: Register,
+        local: bool,
+        nominal: Option<nir::DeclarationId>,
+        name: Option<String>,
+        index: usize,
+        ty: Term,
+        base_source: SourceRange,
+    },
+
     BeginCall {
         call: Register,
         callee: Register,
@@ -151,6 +168,43 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::CheckBinding(local) => write!(f, "(check-binding {local})")?,
+                Op::WritePlace {
+                    local,
+                    value,
+                    fields,
+                } => {
+                    write!(f, "(write-place {local} {value} (fields")?;
+                    for (owner, index) in fields {
+                        write!(f, " (field {owner} {index})")?;
+                    }
+                    write!(f, "))")?;
+                }
+                Op::Field {
+                    destination,
+                    base,
+                    local,
+                    nominal,
+                    name,
+                    index,
+                    ty,
+                    base_source,
+                } => {
+                    write!(f, "(field {destination} {base} (local {local}) (owner")?;
+                    if let Some(owner) = nominal {
+                        write!(f, " {owner}")?;
+                    }
+                    write!(f, ") (name")?;
+                    if let Some(name) = name {
+                        write!(f, " {:?}", name)?;
+                    }
+                    write!(
+                        f,
+                        ") (index {index}) (type {ty}) (base-source {} {}))",
+                        base_source.start, base_source.end
+                    )?;
+                }
+
                 Op::BeginCall {
                     call,
                     callee,
@@ -491,6 +545,41 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         );
                         work.push(Work::Expression(callee, target));
                     }
+                    K::Field { value, .. } | K::AnonymousField { value, .. } => {
+                        let (nominal, name, index) = match &expr.kind {
+                            K::Field {
+                                declaration, index, ..
+                            } => (Some(*declaration), None, *index),
+                            K::AnonymousField { name, index, .. } => {
+                                *fuel =
+                                    fuel.checked_sub(name.len()).ok_or(Error::Budget(source))?;
+                                (None, Some(name.clone()), *index)
+                            }
+                            _ => unreachable!(),
+                        };
+                        let (base, local) = match value.kind {
+                            K::Local(binding) => {
+                                (*locals.entry(binding).or_insert_with(&mut fresh), true)
+                            }
+                            _ => (fresh(), false),
+                        };
+                        emit(
+                            &mut work,
+                            Op::Field {
+                                destination: dst,
+                                base,
+                                local,
+                                nominal,
+                                name,
+                                index,
+                                ty: copy_term(&expr.ty, fuel, source)?,
+                                base_source: value.source,
+                            },
+                        );
+                        if !local {
+                            work.push(Work::Expression(value, base));
+                        }
+                    }
                     K::UnsafeScope(body) => work.push(Work::Expression(body, dst)),
                     K::Intrinsic {
                         tag,
@@ -575,19 +664,23 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         );
                         work.push(Work::Expression(value, src));
                     }
-                    K::Assign { place, value } if place.fields.is_empty() => {
+                    K::Assign { place, value } => {
+                        *fuel = fuel
+                            .checked_sub(place.fields.len())
+                            .ok_or(Error::Budget(source))?;
                         let slot = *locals.entry(place.root).or_insert_with(&mut fresh);
                         let src = fresh();
                         emit(&mut work, Op::Unit(dst));
                         emit(
                             &mut work,
-                            Op::Store {
+                            Op::WritePlace {
                                 local: slot,
                                 value: src,
-                                initialize: false,
+                                fields: place.fields.clone(),
                             },
                         );
                         work.push(Work::Expression(value, src));
+                        emit(&mut work, Op::CheckBinding(slot));
                     }
                     K::Block { statements, result } | K::CallPreparation { statements, result } => {
                         scope_depth += 1;

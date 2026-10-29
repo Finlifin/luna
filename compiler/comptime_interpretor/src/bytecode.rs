@@ -335,6 +335,51 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::CheckBinding(local) => {
+                    frame.slots[*local].as_ref().ok_or_else(missing)?;
+                }
+                Op::WritePlace {
+                    local,
+                    value,
+                    fields,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    let target = frame.slots[*local].as_mut().ok_or_else(missing)?;
+                    self.write_comptime_place(target, fields, value, source)?;
+                }
+                Op::Field {
+                    destination,
+                    base,
+                    local,
+                    nominal,
+                    name,
+                    index,
+                    ty,
+                    base_source,
+                } => {
+                    let temporary = if *local {
+                        None
+                    } else {
+                        frame.slots[*base].take()
+                    };
+                    let record = if *local {
+                        frame.slots[*base].as_ref()
+                    } else {
+                        temporary.as_ref()
+                    }
+                    .ok_or_else(missing)?;
+                    let value = self.read_record_field(
+                        record,
+                        *nominal,
+                        name.as_deref(),
+                        *index,
+                        ty,
+                        *base_source,
+                        source,
+                    )?;
+                    frame.slots[*destination] = Some(value);
+                }
+
                 Op::BeginCall {
                     call,
                     callee,
@@ -582,17 +627,7 @@ impl<'a> Interpreter<'a> {
                         frame.slots[*local] = Some(value);
                     } else {
                         let target = frame.slots[*local].as_mut().ok_or_else(missing)?;
-                        match target {
-                            Value::ComptimeReference(reference) => reference
-                                .replace(value, &mut self.budget.steps)
-                                .map_err(|kind| self.failure(kind, Some(source)))?,
-                            Value::Storage(storage) => {
-                                value_reference::ValueReference::root(storage.clone())
-                                    .replace(value, &mut self.budget.steps)
-                                    .map_err(|kind| self.failure(kind, Some(source)))?
-                            }
-                            target => *target = value,
-                        }
+                        self.write_comptime_place(target, &[], value, source)?;
                     }
                 }
                 Op::Not {
@@ -648,6 +683,98 @@ impl<'a> Interpreter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anonymous_field_reads_validate_name_index_and_result_type() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let root = LocalId { owner: 1, index: 0 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        for (name, index, ty, valid) in [
+            ("flag", 0, boolean.clone(), true),
+            ("other", 0, boolean.clone(), false),
+            ("flag", 1, boolean.clone(), false),
+            ("flag", 0, Term::Primitive(Primitive::U8), false),
+        ] {
+            let body = Expr {
+                source,
+                ty,
+                kind: K::AnonymousField {
+                    value: Box::new(Expr {
+                        source,
+                        ty: Term::Record(vec![("flag".into(), boolean.clone())]),
+                        kind: K::Local(root),
+                    }),
+                    name: name.into(),
+                    index,
+                },
+            };
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+            assert!(code.to_string().contains("(field "));
+            let stored = Value::AnonymousRecord(vec![("flag".into(), Value::Bool(true))]);
+            let mut environment = Environment::new();
+            environment.insert(root, stored.clone());
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let result = vm.execute_code(&code, &mut environment);
+            if valid {
+                assert!(matches!(result.unwrap(), Flow::Value(Value::Bool(true))));
+            } else {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+            }
+            assert_eq!(environment.get(&root), Some(&stored));
+        }
+    }
+
+    #[test]
+    fn missing_assignment_root_prevents_rhs_effects() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let trace = LocalId { owner: 1, index: 0 };
+        let missing = LocalId { owner: 1, index: 1 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let void = Term::Primitive(Primitive::Void);
+        let literal = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let write = |root, value| Expr {
+            source,
+            ty: void.clone(),
+            kind: K::Assign {
+                place: nir::program::Place {
+                    root,
+                    fields: vec![],
+                },
+                value: Box::new(value),
+            },
+        };
+        let body = write(
+            missing,
+            Expr {
+                source,
+                ty: boolean,
+                kind: K::Block {
+                    statements: vec![write(trace, literal.clone())],
+                    result: Some(Box::new(literal)),
+                },
+            },
+        );
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+        let mut environment = Environment::new();
+        environment.insert(trace, Value::Bool(false));
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.execute_code(&code, &mut environment).unwrap_err().kind,
+            ErrorKind::MissingBinding
+        );
+        assert_eq!(environment.get(&trace), Some(&Value::Bool(false)));
+        assert_eq!(
+            vm.eval(&body, &mut environment).unwrap_err().kind,
+            ErrorKind::MissingBinding
+        );
+        assert_eq!(environment.get(&trace), Some(&Value::Bool(false)));
+    }
 
     #[test]
     fn receiver_path_is_revalidated_after_later_arguments_change_storage() {

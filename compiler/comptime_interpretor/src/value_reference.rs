@@ -226,6 +226,58 @@ impl ValueReference {
 }
 
 impl crate::Interpreter<'_> {
+    pub(super) fn write_comptime_place(
+        &mut self,
+        target: &mut Value,
+        fields: &[(FieldOwner, usize)],
+        value: Value,
+        source: crate::SourceRange,
+    ) -> Result<(), crate::Error> {
+        let reference = match target {
+            Value::ComptimeReference(reference) => Some(
+                reference
+                    .project(fields, &mut self.budget.steps)
+                    .map_err(|kind| self.failure(kind, Some(source)))?,
+            ),
+            Value::Storage(storage) => Some(
+                ValueReference::projected(storage.clone(), fields, &mut self.budget.steps)
+                    .map_err(|kind| self.failure(kind, Some(source)))?,
+            ),
+            _ => None,
+        };
+        if let Some(reference) = reference {
+            return reference
+                .replace(value, &mut self.budget.steps)
+                .map_err(|kind| self.failure(kind, Some(source)));
+        }
+        let mut target = target;
+        for (owner, index) in fields {
+            target = match (owner, target) {
+                (
+                    FieldOwner::Nominal(expected),
+                    Value::Record {
+                        declaration,
+                        fields,
+                        ..
+                    },
+                ) => {
+                    if declaration == expected {
+                        fields.get_mut(*index)
+                    } else {
+                        None
+                    }
+                }
+                (FieldOwner::Anonymous, Value::AnonymousRecord(fields)) => {
+                    fields.get_mut(*index).map(|(_, value)| value)
+                }
+                _ => None,
+            }
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        }
+        *target = value;
+        Ok(())
+    }
+
     pub(super) fn read_value_reference(
         &mut self,
         reference: &ValueReference,

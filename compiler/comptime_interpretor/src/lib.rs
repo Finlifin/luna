@@ -6673,37 +6673,24 @@ impl<'a> Interpreter<'a> {
                     iir::cleanup::Boundary::Replacement,
                     environment,
                 )?;
+                if self.comptime_only {
+                    let target = environment.get_mut(&place.root).unwrap();
+                    self.write_comptime_place(target, &place.fields, value, expr.source)?;
+                    return Ok(Flow::Value(Value::Unit));
+                }
                 // Resolve again after RHS evaluation: a write performed by the
                 // RHS to a sibling or the root must not be lost to a snapshot.
-                if let Some(Value::ComptimeReference(reference)) = environment.get(&place.root) {
-                    if !self.comptime_only {
-                        return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
-                    }
-                    let reference = reference
-                        .project(&place.fields, &mut self.budget.steps)
-                        .map_err(|kind| self.failure(kind, Some(expr.source)))?;
-                    reference
-                        .replace(value, &mut self.budget.steps)
-                        .map_err(|kind| self.failure(kind, Some(expr.source)))?;
-                    return Ok(Flow::Value(Value::Unit));
+                if matches!(
+                    environment.get(&place.root),
+                    Some(Value::ComptimeReference(_))
+                ) {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
                 }
                 let storage = match environment.get(&place.root) {
                     Some(Value::Storage(storage)) => Some(storage.clone()),
                     _ => None,
                 };
                 if let Some(storage) = storage {
-                    if self.comptime_only {
-                        let reference = value_reference::ValueReference::projected(
-                            storage,
-                            &place.fields,
-                            &mut self.budget.steps,
-                        )
-                        .map_err(|kind| self.failure(kind, Some(expr.source)))?;
-                        reference
-                            .replace(value, &mut self.budget.steps)
-                            .map_err(|kind| self.failure(kind, Some(expr.source)))?;
-                        return Ok(Flow::Value(Value::Unit));
-                    }
                     let pointer = storage
                         .assignment_pointer(expression.ty.clone(), &place.fields)
                         .map_err(|e| self.failure(e, Some(expr.source)))?;
