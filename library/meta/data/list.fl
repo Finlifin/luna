@@ -62,6 +62,43 @@ impl List<T> where T {
     }
 
     {-
+      Prefix accumulation over a fixed input snapshot. scan returns each state
+      after combining its element; scan_exclusive returns the state before it.
+      Both return exactly one value per input and call combine once per element,
+      including the final element of scan_exclusive. Empty input calls nothing.
+      Stored states are independent value snapshots, not aliases of accumulator.
+    -}
+    pub comptime fn scan(self, initial: A, combine: %c comptime fn(A, T) -> A)
+        -> List<A>
+    where A, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var accumulator = initial;
+        var output: List<A> = [];
+        inline for index in 0..count {
+            accumulator = combine(accumulator, input[index]);
+            output.append(accumulator);
+        }
+        output
+    }
+
+    pub comptime fn scan_exclusive(self, initial: A,
+        combine: %c comptime fn(A, T) -> A) -> List<A>
+    where A, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var accumulator = initial;
+        var output: List<A> = [];
+        inline for index in 0..count {
+            output.append(accumulator);
+            accumulator = combine(accumulator, input[index]);
+        }
+        output
+    }
+
+    {-
       Seed from the first element without invoking combine. Later elements visit
       the callback once in order; empty input has no accumulator. An optional
       element remains present even when its payload is null.

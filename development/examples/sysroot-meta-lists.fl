@@ -58,6 +58,15 @@ comptime fn run() -> bool {
         and unused.length() == 0 and unused_filter.length() == 0
         and reducers_and_searches() and named_metadata() and stable_sorting()
         and exact_integer_division() and value_receivers() and indexed_pairing() and bulk_extension()
+        and prefix_layout()
+}
+
+comptime fn prefix_layout() -> bool {
+    let sizes: meta.List<Integer> = [4, 8, 1];
+    let offsets = sizes.scan_exclusive(0, |offset, size| offset + size);
+    let ends = sizes.scan(0, |offset, size| offset + size);
+    offsets.length() == 3 and offsets[0] == 0 and offsets[1] == 4 and offsets[2] == 12
+        and ends.length() == 3 and ends[0] == 4 and ends[1] == 12 and ends[2] == 13
 }
 
 comptime fn exact_integer_division() -> bool {

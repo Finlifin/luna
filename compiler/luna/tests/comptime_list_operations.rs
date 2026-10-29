@@ -1610,3 +1610,148 @@ fn list_append_all_rejects_incompatible_domains_and_readonly_rebinding() {
             .unwrap();
     assert!(luna::invocation::invoke(&package, "run", 100_000).is_err());
 }
+
+#[test]
+fn list_scans_generate_prefix_values_and_field_offsets() {
+    let package = compile(
+        "typealias Integer=.Integer'builtin;
+        comptime fn run()->bool {
+            let sizes:meta.List<Integer> = [4,8,1];
+            let ends=sizes.scan(0,|offset,size|offset + size);
+            let starts=sizes.scan_exclusive(0,|offset,size|offset + size);
+            let digits:meta.List<Integer> = [1,2,3];
+            let prefixes=digits.scan(9,|acc,value|acc * 10 + value);
+            ends.length() == 3 and ends[0] == 4 and ends[1] == 12 and ends[2] == 13
+                and starts.length() == 3 and starts[0] == 0 and starts[1] == 4 and starts[2] == 12
+                and prefixes[0] == 91 and prefixes[1] == 912 and prefixes[2] == 9123
+        }",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_scans_preserve_input_and_accumulator_snapshots() {
+    for (method, lengths) in [("scan", [1, 2, 3]), ("scan_exclusive", [0, 1, 2])] {
+        let package = compile(&format!(
+            "typealias Integer=.Integer'builtin;typealias Type=.Type'builtin;
+            pure comptime fn Identity<T>->Type {{T}}
+            comptime fn run()->bool {{
+                var input:meta.List<Type> = [Identity<bool>,bool,Integer];
+                let slot=input.ref;let original=input;
+                let seed:meta.List<Type> = [];
+                let history=input.{method}(seed,|acc,value| {{slot.* = [];acc.append(value);acc}});
+                history.length() == 3 and input.length() == 0 and seed.length() == 0
+                    and (history[0]).length() == {a} and (history[1]).length() == {b}
+                    and (history[2]).length() == {c} and history[2][0] == Identity<bool>
+                    and original[0] == Identity<bool> and original[1] == bool
+            }}",
+            a = lengths[0],
+            b = lengths[1],
+            c = lengths[2]
+        ))
+        .unwrap();
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+            Value::Bool(true),
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn list_scans_visit_each_element_once_including_the_last_exclusive_step() {
+    for method in ["scan", "scan_exclusive"] {
+        let package = compile(&format!(
+            "typealias Integer=.Integer'builtin;
+            comptime fn run()->bool {{
+                let values:meta.List<Integer> = [1,2,3];
+                let empty:meta.List<Integer> = [];
+                var trace:Integer=0;let record=trace.ref;
+                let result=values.{method}(0,|acc,value|{{record.* = record.* * 10 + value;acc + value}});
+                let absent=empty.{method}(0,|acc,value|{{record.* = 999;acc}});
+                trace == 123 and result.length() == 3 and absent.length() == 0
+            }}"
+        )).unwrap();
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn list_scans_propagate_last_callback_failure_and_allow_vm_recovery() {
+    for method in ["scan", "scan_exclusive"] {
+        let package=compile(&format!(
+            "typealias Integer=.Integer'builtin;
+            comptime fn combine(acc:Integer,index:Integer)->Integer {{let values:meta.List<Integer> = [3];acc + values[index]}}
+            comptime fn fail()->meta.List<Integer> {{let xs:meta.List<Integer> = [0,0,1];xs.{method}(0,combine)}}
+            comptime fn recover()->bool {{let xs:meta.List<Integer> = [0];let result=xs.{method}(0,combine);result.length() == 1}}"
+        )).unwrap();
+        let mut vm = comptime_interpretor::Interpreter::for_comptime(
+            &package,
+            comptime_interpretor::Budget {
+                steps: 1_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, "fail"), vec![])
+                .unwrap_err()
+                .kind,
+            comptime_interpretor::ErrorKind::IndexOutOfBounds
+        );
+        assert_eq!(
+            support::calls(&package, &vm)
+                .iter()
+                .filter(|name| **name == "combine")
+                .count(),
+            3
+        );
+        assert_eq!(
+            vm.invoke(support::id(&package, "recover"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn list_scans_reject_wrong_callback_phases_and_domains_even_when_empty() {
+    for method in ["scan", "scan_exclusive"] {
+        for callback in [
+            "fn combine(acc:bool,value:bool)->bool {acc and value}",
+            "comptime fn combine(acc:bool,value:bool)->.char'builtin {'x'}",
+            "comptime fn combine(acc:bool,value:.char'builtin)->bool {acc}",
+        ] {
+            compile(callback).unwrap();
+            assert!(compile(&format!("{callback} comptime fn run() {{let xs:meta.List<bool> = [];xs.{method}(false,combine);}} ")).is_err());
+        }
+    }
+}
+
+#[test]
+fn list_scans_evaluate_receiver_seed_and_callback_producer_once_in_order() {
+    for method in ["scan", "scan_exclusive"] {
+        let package = compile(&format!(
+            "typealias Integer=.Integer'builtin;
+            comptime fn input(trace:*Integer)->meta.List<Integer> {{trace.* = trace.* * 10 + 1;[2,3]}}
+            comptime fn seed(trace:*Integer)->Integer {{trace.* = trace.* * 10 + 2;10}}
+            comptime fn combine(acc:Integer,value:Integer)->Integer {{acc + value}}
+            comptime fn callback(trace:*Integer)->comptime fn(Integer,Integer)->Integer {{trace.* = trace.* * 10 + 3;combine}}
+            comptime fn run()->bool {{
+                var trace:Integer=0;
+                let values=(input(trace.ref)).{method}(seed(trace.ref),callback(trace.ref));
+                trace == 123 and values.length() == 2 and values[1] == {last}
+            }}", last=if method == "scan" {15} else {12}
+        )).unwrap();
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
