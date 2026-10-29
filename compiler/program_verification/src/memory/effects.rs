@@ -791,11 +791,6 @@ impl<'a> Infer<'a, '_> {
                     captures.push((binding, ty.clone()));
                     let layout = pointer_input_layout(self.package, &ty, self.fuel)?;
                     if !layout.is_empty() {
-                        if layout.iter().any(|leaf| !scalar(&leaf.pointee)) {
-                            return Err(
-                                "handler memory pointer capture needs scalar storage".into()
-                            );
-                        }
                         pointer_captures.insert(binding);
                     } else if !effect_storage_layout(self.package, &ty, self.fuel, 0, true)? {
                         return Err(
@@ -875,7 +870,15 @@ impl<'a> Infer<'a, '_> {
                         .cloned()
                         .flatten()
                         .ok_or("handler capture access requires known pointer provenance")?;
-                        self.record_access(targets, access.write, access.read_value, access.ty)?;
+                        let mut projected = BTreeSet::new();
+                        for mut target in targets {
+                            self.step(
+                                target.path_cost().saturating_add(access.target.path_cost()),
+                            )?;
+                            target.append_resolved_path(&access.target)?;
+                            projected.insert(target);
+                        }
+                        self.record_access(projected, access.write, access.read_value, access.ty)?;
                     }
                     input.parameter_accesses.extend(summary.accesses);
                     continue;
@@ -1651,10 +1654,7 @@ fn infer_handler_arm_memory_with_captures(
         *fuel = fuel
             .checked_sub(access.target.path_cost())
             .ok_or("handler parameter access budget exhausted")?;
-        if !access.target.conditions.is_empty()
-            || !access.target.through.is_empty()
-            || !access.target.fields.is_empty()
-        {
+        if !access.target.conditions.is_empty() || !access.target.through.is_empty() {
             return Err(
                 "handler parameter access requires a scalar pointee without pointer traversal"
                     .into(),
@@ -1664,12 +1664,21 @@ fn infer_handler_arm_memory_with_captures(
             let (binding, ty) = pointer_captures
                 .get(access.target.parameter - parameters.len())
                 .ok_or("handler memory access is not a parameter or capture")?;
-            let pointee = access_pointee(Some(package), ty, &access.target.input_fields, fuel)?;
-            if pointee != access.ty {
+            let layout = pointer_input_layout(Some(package), ty, fuel)?;
+            let leaf = layout
+                .iter()
+                .find(|leaf| leaf.input_fields == access.target.input_fields)
+                .ok_or("handler capture access does not select a pointer input")?;
+            let mut traversal = StorageTraversal::new(Some(package), &leaf.pointee, &[], fuel)?;
+            traversal.then_guarded(Some(package), &access.target.fields, &[], fuel)?;
+            if traversal.target.ty != access.ty {
                 return Err("handler capture access pointee mismatch".into());
             }
             capture_accesses.push((*binding, access.clone()));
             continue;
+        }
+        if !access.target.fields.is_empty() {
+            return Err("handler operation parameter access requires a scalar pointee".into());
         }
         let parameter = &parameters[access.target.parameter];
         let pointee = access_pointee(

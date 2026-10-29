@@ -4988,3 +4988,43 @@ fn stationary_capture_writes_compose_across_handler_arms() {
         assert_capture_writeback_rejected(&support::compile(&changed));
     }
 }
+
+#[test]
+fn handler_captured_struct_pointer_memory_preserves_field_paths() {
+    let package = support::compile(
+        "struct Flags {left:bool,right:bool}
+        typealias Unit = .void'builtin;
+        inline effect tick();
+        inline fn twice()->#tick Unit {tick()#;tick()#;}
+        fn toggle(state:*Flags) {state.left.* = not state.left.*;}
+        fn update(pointer:*Flags) {twice()# {tick()=>toggle(pointer),};}
+        fn run()->bool {
+            let state=Flags{left:false,right:true};
+            update(state.ref);
+            not state.left and state.right
+        }",
+    );
+    let summary = elaboration::verification::memory::infer_in_package(
+        &package,
+        support::id(&package, "update"),
+        &[],
+        &mut 1_000_000,
+    )
+    .unwrap();
+    assert!(summary.accesses.iter().any(|access| access.write));
+    assert!(
+        summary.accesses.iter().all(|access| {
+            access.target.parameter == 0
+                && access.target.fields.len() == 1
+                && access.target.fields[0].1 == 0
+        }),
+        "{summary}"
+    );
+    elaboration::verification::memory::infer_in_package(
+        &package,
+        support::id(&package, "run"),
+        &[],
+        &mut 1_000_000,
+    )
+    .unwrap();
+}
