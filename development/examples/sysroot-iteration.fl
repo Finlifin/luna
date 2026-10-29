@@ -491,3 +491,22 @@ test handler_error_return_retires_state_before_catch {
     };
     assumes caught and retired;
 }
+
+test handler_reads_stable_pointer_field {
+    var retired = false;
+    var touched = false;
+    let expected = touched.ref;
+    {
+        let state = Watch {seen: retired.ref, value: false};
+        let pointer = state.ref;
+        state_tick_twice()# {
+            state_tick() => {
+                var observed = pointer.seen.*;
+                observed = expected;
+                observed.* = true;
+            },
+        };
+        assumes touched and not retired;
+    };
+    assumes retired;
+}

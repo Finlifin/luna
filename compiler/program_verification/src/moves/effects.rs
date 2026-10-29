@@ -1,8 +1,8 @@
 //! Owned effect inputs and the suspended invocation's full-frame exit plan.
-//! Direct handler arms have independent input and cleanup scopes. Copy scalar
-//! products and scalar-payload enums remain owned by the installer. Stable pointers to scalar leaves of
-//! pointer-free Copy storage use borrowed frames and conditional memory premises;
-//! other lexical captures still require request-time ownership/provenance evidence.
+//! Direct handler arms have independent input and cleanup scopes. Lexical state
+//! remains owned by the installer. Borrowed frames retain initialized storage,
+//! pointer-free Copy field accesses, and stable pointer-field origins; transitions
+//! of those origins still require request-time ownership/provenance evidence.
 use super::*;
 
 fn mutated_pointer_slot(node: &Expr, fuel: &mut usize) -> Result<Option<Place>, String> {
@@ -1533,18 +1533,20 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             "aggregate handler pointees require a complete field access summary",
                         )
                     })?;
-                    // The frame imports initialization, not embedded pointer-slot
-                    // provenance. Copying or replacing a pointer-free value cannot
-                    // rebind an alias in the installer's state. This also permits
-                    // aggregate fields without imposing Copy on their owner.
+                    // Pointer-free Copy fields can be read or replaced without
+                    // rebinding aliases in the installer's state. Pointer fields
+                    // can only be read, with stable origins imported below; the
+                    // owner itself does not need Copy.
                     for (_, access) in &summary.capture_accesses {
-                        super::super::memory::require_pointer_free_owned(
-                            self.package,
-                            &access.ty,
-                            &mut self.fuel,
-                            0,
-                        )
-                        .map_err(|reason| error(installation, reason))?;
+                        if access.write || !matches!(access.ty, Term::Pointer(_)) {
+                            super::super::memory::require_pointer_free_owned(
+                                self.package,
+                                &access.ty,
+                                &mut self.fuel,
+                                0,
+                            )
+                            .map_err(|reason| error(installation, reason))?;
+                        }
                         if (self.delivery)(&access.ty)
                             .map_err(|reason| error(installation, reason))?
                             != Delivery::Copy
@@ -1652,6 +1654,92 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 }
                                 if !retained.is_empty() {frame.pointer_guards.insert(place.clone(),retained);}
                             }
+                        }
+                        // Read-only pointer fields retain their installer origins.
+                        // Import the reachable storage as borrowed, never owned;
+                        // the access summary above still rejects pointer writes.
+                        let reads_pointer_fields = parameter_summary.as_ref().is_some_and(|summary| {
+                            summary.capture_accesses.iter().any(|(_, access)| {
+                                !access.write && access.read_value && matches!(access.ty, Term::Pointer(_))
+                            })
+                        });
+                        let mut pending: Vec<_> = if reads_pointer_fields {
+                            frame.effect_borrows.iter().copied().collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let mut imported = BTreeSet::new();
+                        let mut imported_slots = BTreeSet::new();
+                        while let Some(owner) = pending.pop() {
+                            if !imported.insert(owner) {
+                                continue;
+                            }
+                            for (slot, targets) in &outer.pointers {
+                                this.fuel = this.fuel.checked_sub(1).ok_or_else(|| {
+                                    error(
+                                        installation,
+                                        "handler pointer field import budget exhausted",
+                                    )
+                                })?;
+                                if slot.root != owner {
+                                    continue;
+                                }
+                                this.stable_handler_pointees(outer, targets, installation)?;
+                                this.pointer_work(targets, installation)?;
+                                for target in targets {
+                                    if !frame.types.contains_key(&target.root) {
+                                        let ty = &outer.types[&target.root];
+                                        let shape = (this.shape)(ty)
+                                            .map_err(|reason| error(installation, reason))?;
+                                        frame
+                                            .state
+                                            .declare(target.root, &shape, true, &mut this.fuel)
+                                            .map_err(|reason| {
+                                                error(
+                                                    installation,
+                                                    format!(
+                                                        "handler borrowed pointer field: {reason:?}"
+                                                    ),
+                                                )
+                                            })?;
+                                        frame.types.insert(target.root, ty.clone());
+                                    }
+                                    frame.effect_borrows.insert(target.root);
+                                    pending.push(target.root);
+                                }
+                                imported_slots.insert(slot.clone());
+                                frame.pointers.insert(slot.clone(), targets.clone());
+                                if let Some(qualified) = outer.pointer_guards.get(slot) {
+                                    let mut retained = PointerTargetGuards::new();
+                                    for (target, guards) in qualified {
+                                        this.charge_pointer_conditions(guards, installation)?;
+                                        retained.insert(target.clone(), guards.clone());
+                                    }
+                                    frame.pointer_guards.insert(slot.clone(), retained);
+                                }
+                            }
+                        }
+                        if reads_pointer_fields {
+                            nir::visit::expression_in_closure_environment(expression, &mut this.fuel, |node, fuel| {
+                                // Pointer writes through an alias require a request-time
+                                // transition summary; an installation snapshot is insufficient.
+                                if let K::WritePointer { value, .. } = &node.kind {
+                                    if !super::super::memory::pointer_input_layout(this.package, &value.ty, fuel)?.is_empty() {
+                                        return Err("handler borrowed pointer fields require stable storage during installation".into());
+                                    }
+                                }
+                                if let Some(mutation) = mutated_pointer_slot(node, fuel)? {
+                                    for slot in &imported_slots {
+                                        *fuel = fuel.checked_sub(slot.fields.len().saturating_add(mutation.fields.len()).saturating_add(1))
+                                            .ok_or("handler borrowed pointer stability budget exhausted")?;
+                                        if mutation.root == slot.root &&
+                                            (mutation.fields.starts_with(&slot.fields) || slot.fields.starts_with(&mutation.fields)) {
+                                            return Err("handler borrowed pointer fields require stable storage during installation".into());
+                                        }
+                                    }
+                                }
+                                Ok(())
+                            }).map_err(|reason| error(installation, reason))?;
                         }
                         frame.memory_exposed |= !pointer_captures.is_empty();
                         let (pattern, mut guards) = outer_guards(&arm.pattern);

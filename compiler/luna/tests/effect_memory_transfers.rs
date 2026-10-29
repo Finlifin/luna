@@ -5254,3 +5254,58 @@ fn affine_handler_state_is_retired_before_error_catch() {
         }
     }
 }
+
+#[test]
+fn handler_reads_pointer_fields_from_borrowed_affine_state() {
+    let source =
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        typealias Unit=.void'builtin;
+        struct State {target:*bool,seen:*bool}
+        impl Retire for State {fn drop(*self) {
+            assumes not self.seen.*.*;self.seen.*.* = true;
+        }}
+        inline effect tick();
+        inline fn once(input:bool)->#tick Unit {tick()#;}
+        fn run()->bool {
+            var target=false;var retired=false;
+            {let expected=target.ref;
+                var state=State{target:expected,seen:retired.ref};
+                let pointer=state.ref;
+                once(true)# {tick()=>{var observed=pointer.target.*;observed=expected;observed.* = true;},};
+                assumes target and not retired;
+            };
+            retired
+        }";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000,
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    for mutation in ["pointer.target.* = expected;", "state.target = expected;"] {
+        let changed = source.replace(
+            "once(true)# {tick()",
+            &format!("once(do {{{mutation} true}})# {{tick()"),
+        );
+        let package = support::compile(&changed);
+        let error = luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("stable storage during installation"),
+            "{mutation}: {error}"
+        );
+    }
+}
