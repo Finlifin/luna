@@ -45,6 +45,12 @@ pub trait Iterator {
         FilterMapIterator<Self, U, c> {iter: self, f: f}
     }
 
+    inline fn map_while(self, f: %c fn(Item) -> ?U) -> MapWhileIterator<Self, U, c>
+        where U, c: IterationType.vars.Closure
+    {
+        MapWhileIterator<Self, U, c> {iter: self, f: f}
+    }
+
     inline fn inspect(self, f: %c fn(*Item)) -> InspectIterator<Self, c>
         where c: IterationType.vars.Closure
     {
@@ -496,6 +502,33 @@ impl Iterator for IntersperseWithIterator<I, c>
             emit_item<Item>(value) => {
                 if first {first = false;} else {emit_item<Item>(make())#;}
                 emit_item<Item>(value)#;
+            },
+        }
+    }
+}
+
+
+{-
+    Transfer each item into the mapper once. The first absent result ends this
+    adapter, leaving an enclosing chain free to start its next source. A present
+    null payload remains an emitted item when U itself is optional.
+-}
+pub struct MapWhileIterator where I :- Iterator, U, c: IterationType.vars.Closure {
+    iter: I,
+    f: %c fn(I.as(Iterator).Item) -> ?U,
+}
+
+impl Iterator for MapWhileIterator<I, U, c>
+    where I :- Iterator, U, c: IterationType.vars.Closure
+{
+    assoc Item: IterationType = U;
+
+    inline fn iterate(self) -> #emit_item<U> IterationUnit {
+        let f = self.f;
+        self.iter.as(Iterator).iterate()# {
+            emit_item<I.as(Iterator).Item>(value) => f(value) match {
+                mapped? => emit_item<U>(mapped)#,
+                null => {return;},
             },
         }
     }

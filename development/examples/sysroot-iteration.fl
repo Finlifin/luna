@@ -249,3 +249,67 @@ test unused_separator_factory_retires_capture {
     }).as(Iterator).foreach(|value| {assumes false;});
     assumes retired;
 }
+
+
+fn mapped_prefix(value: bool) -> ?bool {
+    if value {true} else {null}
+}
+
+fn present_null(value: bool) -> ??bool {
+    let inner: ?bool = null;
+    if value {inner} else {null}
+}
+
+test map_while_stops_its_source_and_keeps_chain_tail {
+    var calls: usize = 0;
+    var outputs: usize = 0;
+    let counter = calls.ref;
+    let output = outputs.ref;
+    let first: ?bool = true;
+    let stop: ?bool = false;
+    let skipped: ?bool = true;
+    let tail: ?bool = false;
+    first.as(Iterator).chain(stop).as(Iterator).chain(skipped).as(Iterator)
+        .map_while(|value| {
+            assumes counter.* < 2;
+            counter.* = counter.* + 1;
+            mapped_prefix(value)
+        }).as(Iterator).chain(tail).as(Iterator).foreach(|value| {
+            assumes output.* == if value {0} else {1};
+            output.* = output.* + 1;
+        });
+    assumes calls == 2 and outputs == 2;
+    let input: ?bool = true;
+    let nested = input.as(Iterator).map_while(present_null).as(Iterator).last();
+    let kept_null = nested match {value? => value matches null, null => false};
+    assumes kept_null;
+}
+
+fn map_watch(value: Watch) -> ?Watch {
+    if value.value {value} else {null}
+}
+
+test map_while_cleans_rejected_and_unproduced_items {
+    var first_retired = false;
+    var second_retired = false;
+    var third_retired = false;
+    let first: ?Watch = Watch {seen: first_retired.ref, value: true};
+    let second: ?Watch = Watch {seen: second_retired.ref, value: false};
+    let third: ?Watch = Watch {seen: third_retired.ref, value: true};
+    first.as(Iterator).chain(second).as(Iterator).chain(third).as(Iterator)
+        .map_while(map_watch).as(Iterator).foreach(|value| {
+            assumes value.value and not first_retired and not second_retired and not third_retired;
+        });
+    assumes first_retired and second_retired and third_retired;
+}
+
+test empty_map_while_retires_mapper_capture {
+    var retired = false;
+    let captured = Watch {seen: retired.ref, value: true};
+    let input: ?bool = null;
+    input.as(Iterator).map_while(|value| {
+        assumes false;
+        mapped_prefix(value and captured.value)
+    }).as(Iterator).foreach(|value| {assumes false;});
+    assumes retired;
+}

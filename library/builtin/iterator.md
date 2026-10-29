@@ -92,3 +92,26 @@ joint expansion, with no resumable iterator state or buffered stream.
 stage covers order, factory counts, empty/singleton input, early-exit resource
 cleanup, and unused factory captures. The source regression also rejects
 factory result/arity mismatches and checks expansion plus LLVM O0/O3 execution.
+
+## Mapping a prefix
+
+`Iterator.map_while(f)` transfers each input to `f: fn(Item) -> ?U` exactly once.
+A present result emits its payload; the first absent result ends this adapter.
+It differs from `filter_map`, which skips absent results and keeps consuming.
+An enclosing `chain` still starts its next source after this adapter finishes.
+
+```flurry
+fn accept(value: bool) -> ?bool { if value {value} else {null} }
+let first: ?bool = true;
+let stop: ?bool = false;
+let tail: ?bool = false;
+first.as(Iterator).chain(stop).as(Iterator).map_while(accept)
+    .as(Iterator).chain(tail).as(Iterator)
+    .foreach(|value| { {- Receives true, then the chain tail false. -} });
+```
+
+When U is optional, a present null payload is emitted and does not terminate
+the source. Empty input never calls the mapper. Rejected input, the unproduced
+remainder, and mapper captures keep their ordinary cleanup; source and mapped
+items do not require Clone or Copy. `MapWhileIterator` is exported from builtin
+and uses the same joint inline producer/handler expansion as other adapters.

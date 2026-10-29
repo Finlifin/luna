@@ -116,6 +116,7 @@ def main():
                                '--sysroot', str(ROOT / 'library'), '--test-native']),
         ('sysroot-iteration', ['run', '-p', 'luna', '--',
                                str(ROOT / 'development/examples/sysroot-iteration.fl'),
+                                '--dispatch-fuel', '1000000',
                                '--sysroot', str(ROOT / 'library'), '--test-native',
                                '--inline-functions', '--fuel', '1000000']),
         ('sysroot', ['run', '-p', 'luna', '--',
@@ -145,7 +146,7 @@ def main():
     if args.stage:
         stages = [(label, command) for label, command in stages if label in args.stage]
     native_counts = {'native-resources': 4, 'native-comparison': 6, 'native-math': 13,
-                     'sysroot-qualified-methods': 1, 'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 14, 'sysroot-resources': 3, 'sysroot-patterns': 3, 'sysroot-meta-patterns': 3, 'sysroot-hash': 3, 'sysroot-meta': 1, 'sysroot-builders': 4, 'sysroot-enum-builder': 2, 'sysroot-symbol-enum': 2, 'sysroot-fixed-enum': 2, 'sysroot-build-mode': 1, 'sysroot-build-target': 2}
+                     'sysroot-qualified-methods': 1, 'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 17, 'sysroot-resources': 3, 'sysroot-patterns': 3, 'sysroot-meta-patterns': 3, 'sysroot-hash': 3, 'sysroot-meta': 1, 'sysroot-builders': 4, 'sysroot-enum-builder': 2, 'sysroot-symbol-enum': 2, 'sysroot-fixed-enum': 2, 'sysroot-build-mode': 1, 'sysroot-build-target': 2}
     outcomes = []
     for label, command in stages:
         if args.release:

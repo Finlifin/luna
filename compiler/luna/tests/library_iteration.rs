@@ -1699,3 +1699,35 @@ fn intersperse_with_rejects_factory_domain_and_arity_mismatches() {
         assert!(compile_iteration_unbound(&source).is_err(), "{factory}");
     }
 }
+
+#[test]
+fn map_while_stops_mapping_without_stopping_a_following_chain() {
+    let source = format!(
+        "{}\n{}\n
+        fn selected(value: bool) -> ?bool {{if value {{true}} else {{null}}}}
+        fn run() -> bool {{
+            var calls: primitives.usize = 0;
+            var outputs: primitives.usize = 0;
+            let counter = calls.ref;
+            let output = outputs.ref;
+            let first: ?bool = true;
+            let stop: ?bool = false;
+            let skipped: ?bool = true;
+            let tail: ?bool = false;
+            first.as(Iterator).chain(stop).as(Iterator).chain(skipped).as(Iterator)
+                .map_while(|value| {{
+                    assumes counter.* < 2;
+                    counter.* = counter.* + 1;
+                    selected(value)
+                }}).as(Iterator).chain(tail).as(Iterator).foreach(|value| {{
+                    assumes output.* == if value {{0}} else {{1}};
+                    output.* = output.* + 1;
+                }});
+            calls == 2 and outputs == 2
+        }}
+        fn verify() {{let passed = run(); assumes passed;}}",
+        &include!("support/iterator_source.rs"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
+    );
+    check_iteration_with_budget(&source, None, 4_000_000);
+}
