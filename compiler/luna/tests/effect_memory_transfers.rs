@@ -5309,3 +5309,75 @@ fn handler_reads_pointer_fields_from_borrowed_affine_state() {
         );
     }
 }
+
+#[test]
+fn handler_traverses_stable_pointer_fields_without_taking_ownership() {
+    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        typealias Unit=.void'builtin;
+        struct Link {target:*bool}
+        struct State {link:*Link,seen:*bool}
+        impl Retire for State {fn drop(*self) {
+            assumes not self.seen.*.*;self.seen.*.* = true;
+        }}
+        inline effect tick();
+        inline fn once()->#tick Unit {tick()#;}
+        fn update(pointer:*State) {
+            let link=pointer.link.*;let target=link.target.*;target.* = not target.*;
+        }
+        fn run()->bool {
+            var target=false;var retired=false;
+            {let link=Link{target:target.ref};
+                let state=State{link:link.ref,seen:retired.ref};
+                let pointer=state.ref;
+                once()# {tick()=>update(pointer),};
+                assumes target and not retired;
+            };
+            target and retired
+        }";
+    let package = support::compile(source);
+    let summary = elaboration::verification::memory::infer_in_package(
+        &package,
+        support::id(&package, "update"),
+        &[],
+        &mut 1_000_000,
+    )
+    .unwrap();
+    assert!(
+        summary
+            .accesses
+            .iter()
+            .any(|access| { access.write && access.target.through.len() == 2 }),
+        "{summary}"
+    );
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000,
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    for body in [
+        "let link=pointer.link.*;let stolen=link.*;",
+        "let link=pointer.link.*;var local=false;link.target.* = local.ref;",
+    ] {
+        let invalid = source.replace(
+            "let link=pointer.link.*;let target=link.target.*;target.* = not target.*;",
+            body,
+        );
+        let package = support::compile(&invalid);
+        let error = luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            1_000_000,
+        )
+        .unwrap_err();
+        assert!(error.contains("move-error"), "{body}: {error}");
+    }
+}

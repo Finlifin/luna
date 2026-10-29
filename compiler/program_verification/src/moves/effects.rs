@@ -1660,7 +1660,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         // the access summary above still rejects pointer writes.
                         let reads_pointer_fields = parameter_summary.as_ref().is_some_and(|summary| {
                             summary.capture_accesses.iter().any(|(_, access)| {
-                                !access.write && access.read_value && matches!(access.ty, Term::Pointer(_))
+                                !access.target.through.is_empty()
+                                    || (!access.write && access.read_value && matches!(access.ty, Term::Pointer(_)))
                             })
                         });
                         let mut pending: Vec<_> = if reads_pointer_fields {
@@ -1674,16 +1675,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             if !imported.insert(owner) {
                                 continue;
                             }
-                            for (slot, targets) in &outer.pointers {
-                                this.fuel = this.fuel.checked_sub(1).ok_or_else(|| {
+                            let first = Place {root: owner, fields: vec![]};
+                            for (slot, targets) in outer.pointers.range(first..)
+                                .take_while(|(slot, _)| slot.root == owner)
+                            {
+                                this.fuel = this.fuel.checked_sub(slot.fields.len().saturating_add(1)).ok_or_else(|| {
                                     error(
                                         installation,
                                         "handler pointer field import budget exhausted",
                                     )
                                 })?;
-                                if slot.root != owner {
-                                    continue;
-                                }
                                 this.stable_handler_pointees(outer, targets, installation)?;
                                 this.pointer_work(targets, installation)?;
                                 for target in targets {
