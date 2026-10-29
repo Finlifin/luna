@@ -2512,3 +2512,42 @@ or measured performance gain is claimed by this stage.
 
 Final managed `cargo fmt --all -- --check` passed, exit 0,
 `/tmp/luna-tools-cky4cgee/result.json`; `git diff --check` passed.
+
+## Compile contextual normal-form matches
+
+Contextual matches now use the same bounded structural-pattern preparation,
+pattern instruction, guard code and scope machinery as ordinary VM matches.
+Input-shape metadata retains arm domains and explicit guard types; preparation
+checks every arm before the subject executes. The subject is evaluated once,
+failed candidates leave their scope, and only the selected contextual body runs.
+Result transfer preserves Never fallthrough rejection without completing an NF
+after early control transfer. Match shape dumps retain arm/guard/body structure.
+
+Validation from `/home/fin/luna`, successful runs exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-1stgwqyk/result.json`. New differential cases cover outer
+  pattern guards and explicit arm guards, subject/guard effects, rejected-arm
+  binding cleanup, skipped body effects, prechecking unselected overflowing
+  literals, non-exhaustive matches, early guard return, invalid guard types and
+  Never-annotated subjects incorrectly returning ordinary values.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types`:
+  `/tmp/luna-tools-7abip1w3/result.json`. Invocation counters and explicit NF
+  expectations verify dynamic-domain guarded matching, unselected overflow
+  rejection and early arm return in source programs.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_matching --test comptime_clause_inputs --test builder_invocations --test execution`:
+  `/tmp/luna-tools-h6ba15f1/result.json`.
+- Initial integration checks found the new local-register map was not yet
+  passed by the compile_input caller (`/tmp/luna-tools-pyejdh7z/result.json`,
+  `/tmp/luna-tools-azm7of42/result.json`). The caller was connected and the now
+  unreachable NormalFormArgument fallback removed before successful runs.
+
+Explicit preparation/reordering plans still choose tree execution before effects.
+The ordinary pattern compiler's existing exclusions (nested executable pattern
+forms) also apply to contextual matches; they are not silently interpreted by a
+bytecode opcode. This completes lowering for the current contextual argument
+node kinds only when their contained expressions and patterns are compilable,
+not full NF plan support.
+
+Final managed `cargo fmt --all -- --check` passed, exit 0,
+`/tmp/luna-tools-2mvtq7rf/result.json`; `git diff --check` passed.

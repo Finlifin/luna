@@ -872,3 +872,239 @@ fn contextual_blocks_preserve_unit_and_early_return_boundaries() {
         }
     }
 }
+
+#[test]
+fn contextual_matches_preserve_guard_effects_and_binding_rollback() {
+    use nir::program::{NormalMatchArm, Pattern};
+    let package = container_package();
+    let flag = LocalId {
+        owner: 23,
+        index: 0,
+    };
+    let subject_seen = LocalId {
+        owner: 23,
+        index: 1,
+    };
+    let guard_seen = LocalId {
+        owner: 23,
+        index: 2,
+    };
+    let wrong_body_seen = LocalId {
+        owner: 23,
+        index: 3,
+    };
+    let captured = LocalId {
+        owner: 23,
+        index: 4,
+    };
+    let set = |binding| {
+        expr(
+            Primitive::Void,
+            K::Assign {
+                place: Place {
+                    root: binding,
+                    fields: vec![],
+                },
+                value: Box::new(expr(Primitive::Bool, K::Literal(Literal::Bool(true)))),
+            },
+        )
+    };
+    let integer = |number: &str| A::Integer {
+        source: SOURCE,
+        spelling: number.into(),
+        negative: false,
+    };
+    for compiled in [false, true] {
+        for embedded_guard in [false, true] {
+            for invalid in [false, true] {
+                for choice in [false, true] {
+                    let pattern = Pattern::Binding {
+                        binding: captured,
+                        inner: Box::new(Pattern::Wild),
+                    };
+                    let guard = expr(
+                        Primitive::Bool,
+                        K::Block {
+                            statements: vec![set(guard_seen)],
+                            result: Some(Box::new(expr(
+                                Primitive::Bool,
+                                K::Literal(Literal::Bool(false)),
+                            ))),
+                        },
+                    );
+                    let (pattern, guard) = if embedded_guard {
+                        (
+                            Pattern::Guard {
+                                pattern: Box::new(pattern),
+                                condition: Box::new(guard),
+                            },
+                            None,
+                        )
+                    } else {
+                        (pattern, Some(guard))
+                    };
+                    let body = container_body(
+                        Term::Primitive(Primitive::U8),
+                        A::Match {
+                            source: SOURCE,
+                            value: expr(
+                                Primitive::Bool,
+                                K::Block {
+                                    statements: vec![set(subject_seen)],
+                                    result: Some(Box::new(expr(Primitive::Bool, K::Local(flag)))),
+                                },
+                            ),
+                            arms: vec![
+                                NormalMatchArm {
+                                    pattern,
+                                    guard,
+                                    body: A::Block {
+                                        source: SOURCE,
+                                        statements: vec![set(wrong_body_seen)],
+                                        result: Some(Box::new(integer("17"))),
+                                    },
+                                },
+                                NormalMatchArm {
+                                    pattern: Pattern::Literal(Literal::Bool(true)),
+                                    guard: None,
+                                    body: integer("23"),
+                                },
+                                NormalMatchArm {
+                                    pattern: Pattern::Wild,
+                                    guard: None,
+                                    body: integer(if invalid { "256" } else { "31" }),
+                                },
+                            ],
+                        },
+                    );
+                    let mut env = Environment::from([
+                        (flag, Value::Bool(choice)),
+                        (subject_seen, Value::Bool(false)),
+                        (guard_seen, Value::Bool(false)),
+                        (wrong_body_seen, Value::Bool(false)),
+                    ]);
+                    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                    let result = if compiled {
+                        let code =
+                            Arc::new(comptime_compiler::compile(&body, &mut 100000).unwrap());
+                        vm.execute_code(&code, &mut env)
+                    } else {
+                        vm.eval(&body, &mut env)
+                    };
+                    if invalid {
+                        assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                    } else {
+                        let Flow::Value(actual) = result.unwrap() else {
+                            panic!("value")
+                        };
+                        assert_eq!(
+                            actual,
+                            Value::Type(Term::NormalForm {
+                                head: DeclarationId {
+                                    package: 12,
+                                    local: 1
+                                },
+                                sort: nir::Sort::Type,
+                                arguments: vec![
+                                    Term::Primitive(Primitive::U8),
+                                    Term::Integer(comptime_runtime::Integer::from_u128(
+                                        if choice { 23 } else { 31 }
+                                    ))
+                                ]
+                            })
+                        );
+                    }
+                    assert_eq!(env[&subject_seen], Value::Bool(!invalid));
+                    assert_eq!(env[&guard_seen], Value::Bool(!invalid));
+                    assert_eq!(env[&wrong_body_seen], Value::Bool(false));
+                    assert!(!env.contains_key(&captured));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn contextual_match_failure_and_guard_return_clean_bindings() {
+    use nir::program::{NormalMatchArm, Pattern};
+    let package = container_package();
+    let captured = LocalId {
+        owner: 24,
+        index: 0,
+    };
+    for compiled in [false, true] {
+        for case in 0..4 {
+            let mut body = container_body(
+                Term::Primitive(Primitive::U8),
+                A::Match {
+                    source: SOURCE,
+                    value: expr(
+                        if case == 3 {
+                            Primitive::Never
+                        } else {
+                            Primitive::Bool
+                        },
+                        K::Literal(Literal::Bool(true)),
+                    ),
+                    arms: vec![NormalMatchArm {
+                        pattern: Pattern::Binding {
+                            binding: captured,
+                            inner: Box::new(Pattern::Wild),
+                        },
+                        guard: if case == 3 {
+                            None
+                        } else {
+                            Some(if case == 1 {
+                                expr(
+                                    Primitive::Never,
+                                    K::Return(Some(Box::new(expr(
+                                        Primitive::Bool,
+                                        K::Local(captured),
+                                    )))),
+                                )
+                            } else {
+                                expr(
+                                    if case == 2 {
+                                        Primitive::Char
+                                    } else {
+                                        Primitive::Bool
+                                    },
+                                    K::Literal(Literal::Bool(false)),
+                                )
+                            })
+                        },
+                        body: A::Integer {
+                            source: SOURCE,
+                            spelling: "17".into(),
+                            negative: false,
+                        },
+                    }],
+                },
+            );
+            if case == 3 {
+                body.ty = Term::Primitive(Primitive::Never);
+            }
+            let mut env = Environment::new();
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let result = if compiled {
+                let code = Arc::new(comptime_compiler::compile(&body, &mut 100000).unwrap());
+                vm.execute_code(&code, &mut env)
+            } else {
+                vm.eval(&body, &mut env)
+            };
+            if case == 1 {
+                assert!(matches!(result.unwrap(), Flow::Return(Value::Bool(true))));
+            } else {
+                assert_eq!(
+                    result.unwrap_err().kind,
+                    if case == 0 {
+                        ErrorKind::NonExhaustiveMatch
+                    } else {
+                        ErrorKind::Type
+                    }
+                );
+            }
+            assert!(env.is_empty());
+        }
+    }
+}

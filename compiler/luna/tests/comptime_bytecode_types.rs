@@ -413,3 +413,72 @@ fn contextual_normal_control_flow_executes_in_the_vm() {
     );
     assert_eq!(vm.bytecode_invocations() - before, 1);
 }
+
+#[test]
+fn contextual_normal_matches_execute_selected_arms_in_bytecode() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        pure comptime fn Payload<T, value: T> -> Type { T }
+        comptime fn Matched(input: Type, flag: bool) -> Type {
+            Payload<input, flag match { bound if not bound => 17, _ => 23, }>
+        }
+        comptime fn LimitedMatch(input: Type, flag: bool) -> Type {
+            Payload<input, flag match { true => 17, false => 256, }>
+        }
+        comptime fn EarlyMatch(input: Type) -> Type {
+            Payload<input, true match { true => do { return bool; 17 }, false => 23, }>
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for primitive in [Primitive::U8, Primitive::Integer] {
+        for flag in [false, true] {
+            let before = vm.bytecode_invocations();
+            let value = vm
+                .invoke(
+                    support::id(&package, "Matched"),
+                    vec![Value::Type(Term::Primitive(primitive)), Value::Bool(flag)],
+                )
+                .unwrap();
+            assert_eq!(
+                value,
+                Value::Type(Term::NormalForm {
+                    head: support::id(&package, "Payload"),
+                    sort: nir::Sort::Type,
+                    arguments: vec![
+                        Term::Primitive(primitive),
+                        Term::Integer(comptime_runtime::Integer::from_u128(if flag {
+                            23
+                        } else {
+                            17
+                        }))
+                    ],
+                })
+            );
+            assert_eq!(vm.bytecode_invocations() - before, 1);
+        }
+    }
+    let before = vm.bytecode_invocations();
+    assert_eq!(
+        vm.invoke(
+            support::id(&package, "LimitedMatch"),
+            vec![
+                Value::Type(Term::Primitive(Primitive::U8)),
+                Value::Bool(true)
+            ]
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::Type
+    );
+    assert_eq!(vm.bytecode_invocations() - before, 1);
+    let before = vm.bytecode_invocations();
+    assert_eq!(
+        vm.invoke(
+            support::id(&package, "EarlyMatch"),
+            vec![Value::Type(Term::Primitive(Primitive::U8))]
+        )
+        .unwrap(),
+        Value::Type(Term::Primitive(Primitive::Bool))
+    );
+    assert_eq!(vm.bytecode_invocations() - before, 1);
+}

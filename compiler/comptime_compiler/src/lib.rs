@@ -1142,6 +1142,7 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                                 &mut fresh,
                                 fuel,
                                 &mut labels,
+                                &mut locals,
                             )?);
                         }
                         let constructor = Arc::new(normal_types::Constructor {

@@ -119,6 +119,17 @@ impl Interpreter<'_> {
         self.tick(Some(source))?;
         let value =
             match &shape.kind {
+                ShapeKind::Match(arms) => {
+                    for arm in arms {
+                        if let Some((ty, guard_source)) = &arm.guard {
+                            if !matches!(ty, Term::Primitive(Primitive::Bool | Primitive::Never)) {
+                                return Err(self.failure(ErrorKind::Type, Some(*guard_source)));
+                            }
+                        }
+                        self.prepare_normal_shape(&arm.body, expected, prepared, depth + 1)?;
+                    }
+                    return Ok(());
+                }
                 ShapeKind::Choice {
                     condition,
                     condition_source,

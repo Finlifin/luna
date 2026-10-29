@@ -53,6 +53,7 @@ pub struct Shape {
 #[derive(Debug)]
 pub enum ShapeKind {
     Scalar(Input),
+    Match(Vec<ArmShape>),
     Choice {
         condition: Term,
         condition_source: SourceRange,
@@ -68,6 +69,11 @@ pub enum ShapeKind {
         items: Vec<Shape>,
     },
 }
+#[derive(Debug)]
+pub struct ArmShape {
+    pub guard: Option<(Term, SourceRange)>,
+    pub body: Shape,
+}
 impl fmt::Display for Shape {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -77,6 +83,17 @@ impl fmt::Display for Shape {
         )?;
         match &self.kind {
             ShapeKind::Scalar(input) => write!(f, "{input}")?,
+            ShapeKind::Match(arms) => {
+                write!(f, "(match")?;
+                for arm in arms {
+                    write!(f, " (arm (guard")?;
+                    if let Some((ty, source)) = &arm.guard {
+                        write!(f, " {ty} (source {} {})", source.start, source.end)?;
+                    }
+                    write!(f, ") (body {}))", arm.body)?;
+                }
+                write!(f, ")")?;
+            }
             ShapeKind::Choice {
                 condition,
                 condition_source,
@@ -125,6 +142,7 @@ pub(super) fn compile_input<'a>(
     fresh: &mut impl FnMut() -> Register,
     fuel: &mut usize,
     labels: &mut Vec<Option<usize>>,
+    locals: &mut BTreeMap<LocalId, Register>,
 ) -> Result<(Shape, Vec<Work<'a>>), Error> {
     use nir::program::NormalFormArgument as A;
     enum Task<'a> {
@@ -132,6 +150,7 @@ pub(super) fn compile_input<'a>(
         Code(Work<'a>),
         Transfer(Register, bool, SourceRange),
         Choice(&'a A, Register, usize),
+        Match(&'a A, Register, usize),
         Block(&'a A, Register, bool),
         Exit(&'a A, Register, usize),
         Append(Register, bool, SourceRange),
@@ -153,6 +172,39 @@ pub(super) fn compile_input<'a>(
                         diverges: forced || child.diverges,
                     },
                 ));
+            }
+            Task::Match(argument, slot, start) => {
+                let items: Vec<Shape> = shapes.split_off(start);
+                let A::Match { value, arms, .. } = argument else {
+                    unreachable!()
+                };
+                let diverges = value.ty == Term::Primitive(Primitive::Never)
+                    || items.iter().all(|item| item.diverges);
+                let arms = arms
+                    .iter()
+                    .zip(items)
+                    .map(|(arm, body)| {
+                        Ok(ArmShape {
+                            guard: arm
+                                .guard
+                                .as_ref()
+                                .map(|guard| {
+                                    Ok::<_, Error>((
+                                        copy_term(&guard.ty, fuel, guard.source)?,
+                                        guard.source,
+                                    ))
+                                })
+                                .transpose()?,
+                            body,
+                        })
+                    })
+                    .collect::<Result<_, Error>>()?;
+                shapes.push(Shape {
+                    slot,
+                    source: argument.source(),
+                    diverges,
+                    kind: ShapeKind::Match(arms),
+                });
             }
             Task::Choice(argument, slot, start) => {
                 let mut items: Vec<Shape> = shapes.split_off(start);
@@ -280,6 +332,72 @@ pub(super) fn compile_input<'a>(
                             negative: *negative,
                         })
                     }
+                    A::Match {
+                        source,
+                        value,
+                        arms,
+                    } => {
+                        *fuel = fuel.checked_sub(arms.len()).ok_or(Error::Budget(*source))?;
+                        let subject = fresh();
+                        let condition = fresh();
+                        let done = labels.len();
+                        labels.push(None);
+                        code.push(Work::Expression(value, subject));
+                        pending.push(Task::Match(argument, slot, shapes.len()));
+                        pending.push(Task::Code(Work::Label(done)));
+                        pending.push(Task::Code(Work::Emit(*source, Op::NonExhaustiveMatch)));
+                        for arm in arms.iter().rev() {
+                            let candidate = patterns::prepare(&arm.pattern, fuel, *source)?;
+                            let bindings = candidate
+                                .bindings
+                                .into_iter()
+                                .map(|id| (id, *locals.entry(id).or_insert_with(&mut *fresh)))
+                                .collect();
+                            let next = labels.len();
+                            labels.push(None);
+                            pending.push(Task::Code(Work::EndScope(*source)));
+                            pending.push(Task::Code(Work::Label(next)));
+                            pending.push(Task::Code(Work::Emit(*source, Op::Jump(done))));
+                            pending.push(Task::Code(Work::Emit(*source, Op::LeaveScope)));
+                            pending.push(Task::Transfer(
+                                slot,
+                                value.ty == Term::Primitive(Primitive::Never),
+                                arm.body.source(),
+                            ));
+                            pending.push(Task::Enter(&arm.body, depth + 1));
+                            for guard in candidate.guards.into_iter().chain(arm.guard.iter()).rev()
+                            {
+                                pending.push(Task::Code(Work::Emit(
+                                    guard.source,
+                                    Op::Branch {
+                                        condition,
+                                        when: false,
+                                        target: next,
+                                    },
+                                )));
+                                pending.push(Task::Code(Work::Expression(guard, condition)));
+                            }
+                            pending.push(Task::Code(Work::Emit(
+                                *source,
+                                Op::Branch {
+                                    condition,
+                                    when: false,
+                                    target: next,
+                                },
+                            )));
+                            pending.push(Task::Code(Work::Emit(
+                                *source,
+                                Op::MatchPattern {
+                                    destination: condition,
+                                    value: subject,
+                                    pattern: candidate.pattern,
+                                    bindings,
+                                },
+                            )));
+                            pending.push(Task::Code(Work::BeginScope(*source)));
+                        }
+                        None
+                    }
                     A::If {
                         condition,
                         then_input,
@@ -349,7 +467,6 @@ pub(super) fn compile_input<'a>(
                         }
                         None
                     }
-                    _ => return Err(Error::Unsupported(argument.source())),
                 };
                 if let Some(input) = scalar {
                     if argument.expression().is_none() {
@@ -390,7 +507,14 @@ mod tests {
         };
         let mut input = A::Unit { source: SOURCE };
         assert!(matches!(
-            compile_input(&input, 0, &mut fresh, &mut 0, &mut vec![]),
+            compile_input(
+                &input,
+                0,
+                &mut fresh,
+                &mut 0,
+                &mut vec![],
+                &mut BTreeMap::new()
+            ),
             Err(Error::Budget(_))
         ));
         for _ in 0..127 {
@@ -400,7 +524,15 @@ mod tests {
                 items: vec![input],
             };
         }
-        let (shape, code) = compile_input(&input, 0, &mut fresh, &mut 10000, &mut vec![]).unwrap();
+        let (shape, code) = compile_input(
+            &input,
+            0,
+            &mut fresh,
+            &mut 10000,
+            &mut vec![],
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
         assert!(!shape.diverges);
         assert_eq!(code.len(), 1 + 127 * 2);
         input = A::Tuple {
@@ -409,7 +541,14 @@ mod tests {
             items: vec![input],
         };
         assert!(matches!(
-            compile_input(&input, 0, &mut fresh, &mut 10000, &mut vec![]),
+            compile_input(
+                &input,
+                0,
+                &mut fresh,
+                &mut 10000,
+                &mut vec![],
+                &mut BTreeMap::new()
+            ),
             Err(Error::Unsupported(_))
         ));
         let wide = A::TypeList {
@@ -417,7 +556,14 @@ mod tests {
             items: vec![A::Unit { source: SOURCE }; 100],
         };
         assert!(matches!(
-            compile_input(&wide, 0, &mut fresh, &mut 10, &mut vec![]),
+            compile_input(
+                &wide,
+                0,
+                &mut fresh,
+                &mut 10,
+                &mut vec![],
+                &mut BTreeMap::new()
+            ),
             Err(Error::Budget(_))
         ));
         let escaped = Shape {
