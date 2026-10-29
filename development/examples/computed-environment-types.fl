@@ -1,5 +1,4 @@
 typealias Type = .Type'builtin;
-typealias Bool = true'type;
 typealias Int = .Integer'builtin;
 comptime fn IdentityType(value: Type) -> Type { value }
 comptime fn ReaderType(value: Type) -> Type { %{saved: value} fn() -> value }
@@ -14,9 +13,9 @@ typealias ComputedReader<T> = ReaderType(T);
 typealias ComputedComptimeReader<T> = ComptimeReaderType(T);
 typealias ComputedPointer<T> = *IdentityType(T);
 
-fn keep(value: Bool) -> ComputedReader<Bool> { || value }
-fn run() -> Bool {
-    let callback: Reader<Bool> = keep(true);
+fn keep(value: bool) -> ComputedReader<bool> { || value }
+fn run() -> bool {
+    let callback: Reader<bool> = keep(true);
     callback()
 }
 comptime fn run_comptime() -> Int {
@@ -24,6 +23,6 @@ comptime fn run_comptime() -> Int {
     let callback: ComputedComptimeReader<Int> = || saved;
     callback()
 }
-comptime fn PointerBool() -> Type { PointerType(Bool) }
-comptime fn EmptyBool() -> Type { EmptyType(Bool) }
-fn pointer_identity(value: ComputedPointer<Bool>) -> *Bool { value }
+comptime fn PointerBool() -> Type { PointerType(bool) }
+comptime fn EmptyBool() -> Type { EmptyType(bool) }
+fn pointer_identity(value: ComputedPointer<bool>) -> *bool { value }

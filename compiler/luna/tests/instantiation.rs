@@ -235,7 +235,7 @@ fn instances_close_recursive_generic_closure_and_dispatch_dependencies() {
 #[test]
 fn instance_obligations_fail_without_poisoning_other_requests() {
     let source = compile(
-        "typealias Bool=true'type; fn constrained(value:T)->T where T, requires T == Bool { value } fn identity(value:T)->T where T { value } struct Checked where T, requires T == Bool { value:T }",
+        "typealias Bool=bool; fn constrained(value:T)->T where T, requires T == Bool { value } fn identity(value:T)->T where T { value } struct Checked where T, requires T == Bool { value:T }",
     );
     let constrained = source
         .functions
@@ -334,7 +334,7 @@ fn instances_preserve_normal_form_heads_without_invoking_their_bodies() {
 #[test]
 fn instantiation_does_not_demand_unused_conditional_interface_members() {
     let source = compile(
-        "trait Read where T { fn read() -> true'type; fn restricted() -> true'type where requires T == true'type; } struct S {} impl Read<'x''type> for S { fn read() -> true'type { true } fn restricted() -> true'type where requires 'x''type == true'type { false } } fn entry()->true'type { S.as(Read<'x''type>).read() }",
+        "trait Read where T { fn read() -> bool; fn restricted() -> bool where requires T == bool; } struct S {} impl Read<'x''type> for S { fn read() -> bool { true } fn restricted() -> bool where requires 'x''type == bool { false } } fn entry()->bool { S.as(Read<'x''type>).read() }",
     );
     let output = luna::instantiation::instantiate(&source, "entry", 100_000).unwrap();
     assert!(
@@ -350,7 +350,7 @@ fn instantiation_does_not_demand_unused_conditional_interface_members() {
 #[test]
 fn unused_interface_signatures_retain_their_nominal_dependencies() {
     let source = compile(
-        "struct Item {} trait API { fn used()->true'type; fn unused()->Item; } struct S {} impl API for S { fn used()->true'type {true} fn unused()->Item {Item {}} } fn entry()->true'type {S.as(API).used()}",
+        "struct Item {} trait API { fn used()->bool; fn unused()->Item; } struct S {} impl API for S { fn used()->bool {true} fn unused()->Item {Item {}} } fn entry()->bool {S.as(API).used()}",
     );
     let output = luna::instantiation::instantiate(&source, "entry", 100_000).unwrap();
     assert!(!output.functions.iter().any(|f| f.function.name == "unused"));
@@ -653,7 +653,7 @@ fn copy_protocol_selection_uses_identity_and_explicit_declarations() {
         verification::copy::{Classification, classify},
     };
     let package = compile(
-        "trait Reproduce {} trait Copy {} struct Owned {flag:true'type} struct Shared {flag:true'type} struct Pretender {} struct Box where T {value:T} impl Reproduce for Shared {} impl Copy for Pretender {} impl Reproduce for Box<T> where T, requires T == true'type {} fn transfer(value:Owned)->Owned {value} fn duplicate(value:Owned) {let first=value; let second=value;} fn copy_shared(value:Shared)->Shared {value}",
+        "trait Reproduce {} trait Copy {} struct Owned {flag:bool} struct Shared {flag:bool} struct Pretender {} struct Box where T {value:T} impl Reproduce for Shared {} impl Copy for Pretender {} impl Reproduce for Box<T> where T, requires T == bool {} fn transfer(value:Owned)->Owned {value} fn duplicate(value:Owned) {let first=value; let second=value;} fn copy_shared(value:Shared)->Shared {value}",
     );
     let protocol = package
         .traits

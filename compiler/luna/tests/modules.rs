@@ -259,7 +259,7 @@ fn files_directories_and_mod_bodies_share_one_declaration_collection() {
     let project = Project::with_tuple(&[
         (
             "main.fl",
-            "typealias Flag = true'type; fn run() -> Tuple<Flag,Flag,Flag> { (left.value(),nested.deep.read(),nested.value()) }",
+            "typealias Flag = bool; fn run() -> Tuple<Flag,Flag,Flag> { (left.value(),nested.deep.read(),nested.value()) }",
         ),
         ("left.fl", "fn value() -> Flag { true }"),
         ("nested/mod.fl", "fn value() -> Flag { false }"),
@@ -280,10 +280,10 @@ fn forward_imports_and_reexports_keep_function_identity() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use facade.value; fn run() -> true'type { value() and facade.value() and origin.value() }",
+            "use facade.value; fn run() -> bool { value() and facade.value() and origin.value() }",
         ),
         ("facade.fl", "pub use origin.value;"),
-        ("origin.fl", "pub fn value() -> true'type { true }"),
+        ("origin.fl", "pub fn value() -> bool { true }"),
     ]);
     let package = project.compile().unwrap();
     assert_eq!(
@@ -323,15 +323,15 @@ fn unreferenced_source_errors_are_not_hidden() {
 #[test]
 fn nested_main_is_an_ordinary_module_not_another_package_root() {
     let project = Project::new(&[
-        ("main.fl", "fn run() -> true'type { nested.main.value() }"),
-        ("nested/main.fl", "fn value() -> true'type { true }"),
+        ("main.fl", "fn run() -> bool { nested.main.value() }"),
+        ("nested/main.fl", "fn value() -> bool { true }"),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
 }
 
 #[test]
 fn private_declarations_are_available_to_children_but_not_siblings() {
-    assert_eq!(Project::new(&[("main.fl", "mod service { private fn secret() -> true'type { true } mod child { fn read() -> true'type { secret() } } } fn run() -> true'type { service.child.read() }")]).run(), Value::Bool(true));
+    assert_eq!(Project::new(&[("main.fl", "mod service { private fn secret() -> bool { true } mod child { fn read() -> bool { secret() } } } fn run() -> bool { service.child.read() }")]).run(), Value::Bool(true));
     for source in [
         "mod service { private fn secret() {} } fn run() { service.secret(); }",
         "mod service { private mod hidden { pub fn secret() {} } } fn run() { service.hidden.secret(); }",
@@ -350,12 +350,12 @@ fn directory_without_mod_body_and_glob_import_chains_work() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use api.*; fn run() -> true'type { value() and deep.leaf.other() }",
+            "use api.*; fn run() -> bool { value() and deep.leaf.other() }",
         ),
         ("api.fl", "pub use bridge.*;"),
         ("bridge.fl", "pub use origin.value;"),
-        ("origin.fl", "pub fn value() -> true'type { true }"),
-        ("deep/leaf.fl", "fn other() -> true'type { true }"),
+        ("origin.fl", "pub fn value() -> bool { true }"),
+        ("deep/leaf.fl", "fn other() -> bool { true }"),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
 }
@@ -366,9 +366,9 @@ fn repeated_imports_deduplicate_but_distinct_declarations_conflict() {
         Project::new(&[
             (
                 "main.fl",
-                "use left.value; use left.value; fn run() -> true'type { value() }"
+                "use left.value; use left.value; fn run() -> bool { value() }"
             ),
-            ("left.fl", "fn value() -> true'type { true }"),
+            ("left.fl", "fn value() -> bool { true }"),
         ])
         .run(),
         Value::Bool(true)
@@ -418,8 +418,8 @@ fn output_cannot_overwrite_an_automatically_discovered_source() {
 #[test]
 fn glob_ambiguity_is_lazy_and_explicit_names_take_precedence() {
     let origins = [
-        ("left.fl", "fn value() -> true'type { true }"),
-        ("right.fl", "fn value() -> true'type { false }"),
+        ("left.fl", "fn value() -> bool { true }"),
+        ("right.fl", "fn value() -> bool { false }"),
     ];
     for imports in ["use left.*; use right.*;", "use right.*; use left.*;"] {
         let unused = format!("{imports} fn run() {{ }}");
@@ -428,13 +428,13 @@ fn glob_ambiguity_is_lazy_and_explicit_names_take_precedence() {
                 .compile()
                 .is_ok()
         );
-        let used = format!("{imports} fn run() -> true'type {{ value() }}");
+        let used = format!("{imports} fn run() -> bool {{ value() }}");
         assert!(
             Project::new(&[("main.fl", &used), origins[0], origins[1]])
                 .compile()
                 .is_err()
         );
-        let explicit = format!("{imports} use left.value; fn run() -> true'type {{ value() }}");
+        let explicit = format!("{imports} use left.value; fn run() -> bool {{ value() }}");
         assert_eq!(
             Project::new(&[("main.fl", &explicit), origins[0], origins[1]]).run(),
             Value::Bool(true)
@@ -446,14 +446,11 @@ fn glob_ambiguity_is_lazy_and_explicit_names_take_precedence() {
 fn public_globs_filter_internal_names_and_reject_public_ambiguity() {
     assert_eq!(
         Project::new(&[
-            (
-                "main.fl",
-                "use facade.value; fn run() -> true'type { value() }"
-            ),
+            ("main.fl", "use facade.value; fn run() -> bool { value() }"),
             ("facade.fl", "pub use implementation.*;"),
             (
                 "implementation.fl",
-                "fn hidden() {} pub fn value() -> true'type { true }"
+                "fn hidden() {} pub fn value() -> bool { true }"
             ),
         ])
         .run(),
@@ -475,9 +472,9 @@ fn public_globs_filter_internal_names_and_reject_public_ambiguity() {
 fn glob_cycles_converge_only_from_real_declarations() {
     assert_eq!(
         Project::new(&[
-            ("main.fl", "use a.value; fn run() -> true'type { value() }"),
+            ("main.fl", "use a.value; fn run() -> bool { value() }"),
             ("a.fl", "use b.*;"),
-            ("b.fl", "use a.*; fn value() -> true'type { true }"),
+            ("b.fl", "use a.*; fn value() -> bool { true }"),
         ])
         .run(),
         Value::Bool(true)
@@ -496,12 +493,12 @@ fn glob_cycles_converge_only_from_real_declarations() {
 #[test]
 fn a_late_explicit_import_shadows_globs_before_downstream_binding() {
     let project = Project::new(&[
-        ("main.fl", "use a.value; fn run() -> true'type { value() }"),
+        ("main.fl", "use a.value; fn run() -> bool { value() }"),
         ("a.fl", "use fallback.*; use b.value;"),
         ("b.fl", "use c.value;"),
         ("c.fl", "use actual.value;"),
-        ("fallback.fl", "fn value() -> true'type { false }"),
-        ("actual.fl", "fn value() -> true'type { true }"),
+        ("fallback.fl", "fn value() -> bool { false }"),
+        ("actual.fl", "fn value() -> bool { true }"),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
 }
@@ -520,7 +517,7 @@ fn aliases_preserve_identity_through_multiple_modules_and_type_names() {
         ("bridge.fl", "use origin.value as current;"),
         (
             "origin.fl",
-            "pub typealias Flag = true'type; pub fn value() -> Flag { true }",
+            "pub typealias Flag = bool; pub fn value() -> Flag { true }",
         ),
     ]);
     let package = project.compile().unwrap();
@@ -538,21 +535,21 @@ fn aliases_preserve_identity_through_multiple_modules_and_type_names() {
 #[test]
 fn private_import_entries_are_visible_to_descendants_only() {
     let project = Project::new(&[
-        ("main.fl", "fn run() -> true'type { service.child.read() }"),
-        ("source.fl", "pub fn value() -> true'type { true }"),
+        ("main.fl", "fn run() -> bool { service.child.read() }"),
+        ("source.fl", "pub fn value() -> bool { true }"),
         ("service/mod.fl", "private use source.value as internal;"),
-        ("service/child.fl", "fn read() -> true'type { internal() }"),
+        ("service/child.fl", "fn read() -> bool { internal() }"),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
     for main in [
-        "fn run() -> true'type { service.internal() }",
-        "use service.internal; fn run() -> true'type { internal() }",
+        "fn run() -> bool { service.internal() }",
+        "use service.internal; fn run() -> bool { internal() }",
         "pub use service.internal; fn run() {}",
     ] {
         assert!(
             Project::new(&[
                 ("main.fl", main),
-                ("source.fl", "pub fn value() -> true'type { true }"),
+                ("source.fl", "pub fn value() -> bool { true }"),
                 ("service.fl", "private use source.value as internal;")
             ])
             .compile()
@@ -566,9 +563,9 @@ fn accessible_private_alias_can_supply_an_explicit_public_entry() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use facade.exported; fn run() -> true'type { exported() }",
+            "use facade.exported; fn run() -> bool { exported() }",
         ),
-        ("origin.fl", "pub fn value() -> true'type { true }"),
+        ("origin.fl", "pub fn value() -> bool { true }"),
         (
             "facade.fl",
             "private use origin.value as internal; pub use internal as exported;",
@@ -597,10 +594,10 @@ fn aliases_cannot_widen_the_original_declaration_permission() {
 fn private_globs_and_public_filtering_use_entry_permissions() {
     assert_eq!(
         Project::new(&[
-            ("main.fl", "fn run() -> true'type { facade.child.read() }"),
-            ("origin.fl", "pub fn value() -> true'type { true }"),
+            ("main.fl", "fn run() -> bool { facade.child.read() }"),
+            ("origin.fl", "pub fn value() -> bool { true }"),
             ("facade/mod.fl", "private use origin.*;"),
-            ("facade/child.fl", "fn read() -> true'type { value() }"),
+            ("facade/child.fl", "fn read() -> bool { value() }"),
         ])
         .run(),
         Value::Bool(true)
@@ -625,11 +622,8 @@ fn repeated_entries_for_one_identity_merge_permissions_without_duplicates() {
     ] {
         assert_eq!(
             Project::new(&[
-                (
-                    "main.fl",
-                    "use facade.value; fn run() -> true'type { value() }"
-                ),
-                ("origin.fl", "pub fn value() -> true'type { true }"),
+                ("main.fl", "use facade.value; fn run() -> bool { value() }"),
+                ("origin.fl", "pub fn value() -> bool { true }"),
                 ("facade.fl", imports),
             ])
             .run(),
@@ -643,12 +637,12 @@ fn package_and_parent_anchors_apply_to_the_entire_aliased_path() {
     let project = Project::new(&[
         (
             "main.fl",
-            "fn global() -> true'type { true } fn run() -> true'type { layer.child.read() }",
+            "fn global() -> bool { true } fn run() -> bool { layer.child.read() }",
         ),
-        ("layer/mod.fl", "fn local() -> true'type { true }"),
+        ("layer/mod.fl", "fn local() -> bool { true }"),
         (
             "layer/child.fl",
-            "use @global as root_value; use .local as parent_value; fn read() -> true'type { root_value() and parent_value() }",
+            "use @global as root_value; use .local as parent_value; fn read() -> bool { root_value() and parent_value() }",
         ),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
@@ -669,7 +663,7 @@ fn grouped_imports_preserve_shared_prefixes_nested_paths_and_aliases() {
             "main.fl",
             "use @api.{Flag as Boolean, inner.{yes as enabled, no as disabled}}; fn run() -> Boolean { enabled() and not disabled() }",
         ),
-        ("api/mod.fl", "pub typealias Flag = true'type;"),
+        ("api/mod.fl", "pub typealias Flag = bool;"),
         (
             "api/inner.fl",
             "pub fn yes() -> Flag { true } pub fn no() -> Flag { false }",
@@ -708,11 +702,11 @@ fn grouped_globs_alias_containers_and_diamond_imports_share_identity() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use root.{left.*,right.*}; use root.left as selected; fn run() -> true'type { value() and selected.value() }",
+            "use root.{left.*,right.*}; use root.left as selected; fn run() -> bool { value() and selected.value() }",
         ),
         ("root/left.fl", "pub use @origin.value;"),
         ("root/right.fl", "pub use @origin.value;"),
-        ("origin.fl", "pub fn value() -> true'type { true }"),
+        ("origin.fl", "pub fn value() -> bool { true }"),
     ]);
     let package = project.compile().unwrap();
     assert_eq!(
@@ -746,11 +740,11 @@ fn imported_struct_identity_and_default_lookup_are_definition_scoped() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use model.FlagBox as Box; fn default_value() -> true'type { false } fn run() -> true'type { let box = Box {}; box.value }",
+            "use model.FlagBox as Box; fn default_value() -> bool { false } fn run() -> bool { let box = Box {}; box.value }",
         ),
         (
             "model.fl",
-            "fn default_value() -> true'type { true } pub struct FlagBox { value: true'type = default_value(), }",
+            "fn default_value() -> bool { true } pub struct FlagBox { value: bool = default_value(), }",
         ),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
@@ -761,11 +755,11 @@ fn enum_aliases_across_modules_preserve_nominal_variant_identity() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use model.State as Alias; fn run() -> true'type { let state = Alias.ready; model.check(state) }",
+            "use model.State as Alias; fn run() -> bool { let state = Alias.ready; model.check(state) }",
         ),
         (
             "model.fl",
-            "pub fn check(value: State) -> true'type { value match { .waiting => false, .ready => true, } } pub enum State { waiting, ready, }",
+            "pub fn check(value: State) -> bool { value match { .waiting => false, .ready => true, } } pub enum State { waiting, ready, }",
         ),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
@@ -776,11 +770,11 @@ fn enum_payload_aliases_and_field_types_resolve_in_the_defining_module() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use model.Message as Alias; fn run() -> true'type { model.check(Alias.data(true)) and model.check(.data(true)) }",
+            "use model.Message as Alias; fn run() -> bool { model.check(Alias.data(true)) and model.check(.data(true)) }",
         ),
         (
             "model.fl",
-            "typealias Flag = true'type; pub fn check(value: Message) -> Flag { value match { .none => false, .data(flag) => flag, } } pub enum Message { none, data(Flag), }",
+            "typealias Flag = bool; pub fn check(value: Message) -> Flag { value match { .none => false, .data(flag) => flag, } } pub enum Message { none, data(Flag), }",
         ),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
@@ -791,11 +785,11 @@ fn imported_named_payload_defaults_keep_definition_scope() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use model.Message as Alias; fn flag() -> true'type { false } fn run() -> true'type { let message = Alias.data {}; model.check(message) }",
+            "use model.Message as Alias; fn flag() -> bool { false } fn run() -> bool { let message = Alias.data {}; model.check(message) }",
         ),
         (
             "model.fl",
-            "fn flag() -> true'type { true } pub enum Message { data { value: true'type = flag() }, } pub fn check(message: Message) -> true'type { message match { .data { value } => value, } }",
+            "fn flag() -> bool { true } pub enum Message { data { value: bool = flag() }, } pub fn check(message: Message) -> bool { message match { .data { value } => value, } }",
         ),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
@@ -806,11 +800,11 @@ fn qualified_variant_patterns_preserve_identity_through_module_and_type_aliases(
     let project = Project::new(&[
         (
             "main.fl",
-            "use model as m; use model.Message as Alias; fn check(value: Alias) -> true'type { value match { m.Message.none => false, Alias.data { flag } => flag, } } fn run() -> true'type { check(m.Message.data { flag: true }) and not check(Alias.none) }",
+            "use model as m; use model.Message as Alias; fn check(value: Alias) -> bool { value match { m.Message.none => false, Alias.data { flag } => flag, } } fn run() -> bool { check(m.Message.data { flag: true }) and not check(Alias.none) }",
         ),
         (
             "model.fl",
-            "pub enum Message { none, data { flag: true'type }, }",
+            "pub enum Message { none, data { flag: bool }, }",
         ),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
@@ -830,7 +824,7 @@ fn imported_generic_function_keeps_definition_identity_and_infers_payload_type()
     let project = Project::new(&[
         (
             "main.fl",
-            "use helper.keep as copy_value; enum Flag { yes, no, } fn run() -> true'type { copy_value(Flag.yes) match { .yes => true, .no => false, } }",
+            "use helper.keep as copy_value; enum Flag { yes, no, } fn run() -> bool { copy_value(Flag.yes) match { .yes => true, .no => false, } }",
         ),
         ("helper.fl", "pub fn keep(value: T) -> T where T { value }"),
     ]);
@@ -842,7 +836,7 @@ fn explicit_and_contextual_generic_values_work_through_import_aliases() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use helper.keep as identity; typealias Flag = true'type; fn run() -> Flag { let explicit = identity<Flag>; let contextual: fn(Flag) -> Flag = helper.keep; explicit(true) and contextual(true) }",
+            "use helper.keep as identity; typealias Flag = bool; fn run() -> Flag { let explicit = identity<Flag>; let contextual: fn(Flag) -> Flag = helper.keep; explicit(true) and contextual(true) }",
         ),
         ("helper.fl", "pub fn keep(value: T) -> T where T { value }"),
     ]);
@@ -854,11 +848,11 @@ fn imported_generic_optional_defaults_keep_definition_parameter_scope() {
     let project = Project::with_tuple(&[
         (
             "main.fl",
-            "use helper.build as make; fn run() -> Tuple<true'type, true'type> { let first = false; make(true, .first = true) }",
+            "use helper.build as make; fn run() -> Tuple<bool, bool> { let first = false; make(true, .first = true) }",
         ),
         (
             "helper.fl",
-            "pub fn build(value: T, .first: true'type = false, .second: true'type = first) -> Tuple<T, true'type> where T { (value, second) }",
+            "pub fn build(value: T, .first: bool = false, .second: bool = first) -> Tuple<T, bool> where T { (value, second) }",
         ),
     ]);
     assert_eq!(
@@ -872,11 +866,11 @@ fn imported_type_requirements_are_proved_in_the_callers_scope() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use helper.convert as checked; fn run() -> true'type { checked(true) }",
+            "use helper.convert as checked; fn run() -> bool { checked(true) }",
         ),
         (
             "helper.fl",
-            "pub fn convert(value: T) -> true'type where T, requires T == true'type { value }",
+            "pub fn convert(value: T) -> bool where T, requires T == bool { value }",
         ),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
@@ -885,7 +879,7 @@ fn imported_type_requirements_are_proved_in_the_callers_scope() {
             ("main.fl", "use helper.convert; fn run() { convert('x'); }"),
             (
                 "helper.fl",
-                "pub fn convert(value: T) -> true'type where T, requires T == true'type { value }"
+                "pub fn convert(value: T) -> bool where T, requires T == bool { value }"
             ),
         ])
         .compile()
@@ -898,7 +892,7 @@ fn imported_nested_generic_calls_use_outer_type_context() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use helper.factory as make; use helper.apply; fn run() -> true'type { apply(make(), true) }",
+            "use helper.factory as make; use helper.apply; fn run() -> bool { apply(make(), true) }",
         ),
         (
             "helper.fl",
@@ -913,11 +907,11 @@ fn imported_generic_structs_use_declaration_identity_and_specialized_fields() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use helper.Box as Container; fn run() -> true'type { let value = Container<true'type> { value: true }; helper.read(value) }",
+            "use helper.Box as Container; fn run() -> bool { let value = Container<bool> { value: true }; helper.read(value) }",
         ),
         (
             "helper.fl",
-            "pub struct Box where T { value: T, } pub fn read(value: Box<true'type>) -> true'type { value.value }",
+            "pub struct Box where T { value: T, } pub fn read(value: Box<bool>) -> bool { value.value }",
         ),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
@@ -928,11 +922,11 @@ fn imported_generic_enums_construct_and_match_specialized_payloads() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use helper.Choice as Maybe; fn run() -> true'type { helper.read(Maybe<true'type>.value(true)) }",
+            "use helper.Choice as Maybe; fn run() -> bool { helper.read(Maybe<bool>.value(true)) }",
         ),
         (
             "helper.fl",
-            "pub enum Choice where T { none, value(T), } pub fn read(value: Choice<true'type>) -> true'type { value match { .none => false, .value(flag) => flag, } }",
+            "pub enum Choice where T { none, value(T), } pub fn read(value: Choice<bool>) -> bool { value match { .none => false, .value(flag) => flag, } }",
         ),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
@@ -943,7 +937,7 @@ fn imported_nominal_declarations_supply_generic_argument_inference() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use helper.Box as Container; fn run() -> true'type { let result = helper.read(Container<true'type> { value: true }); result }",
+            "use helper.Box as Container; fn run() -> bool { let result = helper.read(Container<bool> { value: true }); result }",
         ),
         (
             "helper.fl",
@@ -958,11 +952,11 @@ fn imported_nominal_contracts_survive_aliases_and_generic_calls() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use helper.Checked as Box; fn run() -> true'type { helper.read(Box<true'type> {}) }",
+            "use helper.Checked as Box; fn run() -> bool { helper.read(Box<bool> {}) }",
         ),
         (
             "helper.fl",
-            "pub struct Checked where T, requires T == true'type { value: T = true, } pub fn read(value: Checked<U>) -> U where U, requires U == true'type { value.value }",
+            "pub struct Checked where T, requires T == bool { value: T = true, } pub fn read(value: Checked<U>) -> U where U, requires U == bool { value.value }",
         ),
     ]);
     assert_eq!(project.run(), Value::Bool(true));
@@ -973,11 +967,11 @@ fn comptime_modifiers_preserve_imports_visibility_and_function_phase() {
     let project = Project::new(&[
         (
             "main.fl",
-            "use helper.choose; comptime fn run() -> true'type { choose(false) }",
+            "use helper.choose; comptime fn run() -> bool { choose(false) }",
         ),
         (
             "helper.fl",
-            "pub pure comptime fn choose(value: true'type) -> true'type { not value }",
+            "pub pure comptime fn choose(value: bool) -> bool { not value }",
         ),
     ]);
     let package = project.compile().unwrap();
@@ -995,14 +989,8 @@ fn comptime_modifiers_preserve_imports_visibility_and_function_phase() {
         Value::Bool(true)
     );
     let hidden = Project::new(&[
-        (
-            "main.fl",
-            "comptime fn run() -> true'type { helper.hidden() }",
-        ),
-        (
-            "helper.fl",
-            "private comptime fn hidden() -> true'type { true }",
-        ),
+        ("main.fl", "comptime fn run() -> bool { helper.hidden() }"),
+        ("helper.fl", "private comptime fn hidden() -> bool { true }"),
     ]);
     assert!(hidden.compile().is_err());
 }
@@ -1017,7 +1005,7 @@ fn required_comptime_type_formation_follows_imports_and_reexports() {
         ("facade.fl", "pub use helper.Select;"),
         (
             "helper.fl",
-            "pub comptime fn Select(flag: true'type) -> .Type'builtin { if flag { .u8'builtin } else { .u16'builtin } }",
+            "pub comptime fn Select(flag: bool) -> .Type'builtin { if flag { .u8'builtin } else { .u16'builtin } }",
         ),
     ]);
     assert_eq!(project.run(), Value::UnsignedInteger(255));
@@ -1085,7 +1073,7 @@ fn generic_alias_parameters_are_private_to_the_definition_through_reexports() {
     let project = Project::with_tuple(&[
         (
             "main.fl",
-            "use facade.Pair; typealias T = 'a''type; fn run() -> Tuple<Pair<true'type>, T> { ((true, false), 'x') }",
+            "use facade.Pair; typealias T = 'a''type; fn run() -> Tuple<Pair<bool>, T> { ((true, false), 'x') }",
         ),
         ("facade.fl", "pub use shapes.Pair;"),
         ("shapes.fl", "pub typealias Pair<T> = Tuple<T, T>;"),

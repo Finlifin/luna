@@ -16,5 +16,5 @@ comptime fn Ordered() -> Type {
     Identity<Bits<do { count = count + 1; count }>>
 }
 typealias NestedFlag = Nested(true);
-typealias SameNestedFlag = Same<Identity<true'type>, Identity<true'type>>;
+typealias SameNestedFlag = Same<Identity<bool>, Identity<bool>>;
 fn same(value: NestedFlag) -> SameNestedFlag { value }

@@ -13,7 +13,7 @@ fn complemented() -> Bits { not high() }
 fn signed_bits() -> Bits { signed()'bitvec }
 fn identity(value: T) -> T where T { value }
 fn contextual() -> Bits { identity(255) }
-fn check_pattern() -> true'type { contextual() match { 255 => true, _ => false } }
+fn check_pattern() -> bool { contextual() match { 255 => true, _ => false } }
 
 -- An explicit slice chooses which bits to discard before a narrower conversion.
 fn low_byte() -> Byte { combined()[0..8].as(Byte) }
@@ -22,9 +22,9 @@ fn swapped() -> .u16'builtin {
     (bits[0..8] ++ bits[8..16]).as(.u16'builtin)
 }
 fn top_bit() -> Byte { high()[7].as(Byte) }
-fn empty_equal() -> true'type {
+fn empty_equal() -> bool {
     let empty = high()[8..8];
     empty == not empty
 }
 fn widened() -> Pair { high().as(Pair) }
-fn comparison() -> true'type { high() == 175 and low() != 175 }
+fn comparison() -> bool { high() == 175 and low() != 175 }

@@ -4,23 +4,23 @@ pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { b
 -- Concrete static methods through explicit trait views.
 -- Runtime receivers, Self substitution and generic interfaces are pending.
 trait Flag {
-    fn read() -> true'type;
-    fn invert(value: true'type) -> true'type { not value }
+    fn read() -> bool;
+    fn invert(value: bool) -> bool { not value }
 }
 
 struct Yes {}
 struct No {}
 
 impl Flag for Yes {
-    fn read() -> true'type { true }
+    fn read() -> bool { true }
 }
 
 impl Flag for No {
-    fn read() -> true'type { false }
-    fn invert(value: true'type) -> true'type { value }
+    fn read() -> bool { false }
+    fn invert(value: bool) -> bool { value }
 }
 
-fn run() -> Tuple<true'type, true'type, true'type> {
+fn run() -> Tuple<bool, bool, bool> {
     let invert = Yes.as(Flag).invert;
     (Yes.as(Flag).read(), No.as(Flag).read(), invert(false))
 }

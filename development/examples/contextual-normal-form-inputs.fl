@@ -4,7 +4,7 @@ pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { b
 typealias Type = .Type'builtin;
 pure comptime fn Tagged<T: Type, value: T> -> Type { T }
 pure comptime fn Pair<A: Type, first: A, B: Type, last: B> -> Type { Tuple<A, B> }
-comptime fn Choice(ty: Type, flag: true'type) -> Type {
+comptime fn Choice(ty: Type, flag: bool) -> Type {
     Tagged<ty, if flag { 1 } else { 2 }>
 }
 comptime fn Ordered(ty: Type) -> Type {
@@ -14,7 +14,7 @@ comptime fn Ordered(ty: Type) -> Type {
 }
 comptime fn diverge() -> .u8'builtin { diverge() }
 comptime fn Skipped(ty: Type) -> Type { Tagged<ty, if true { 1 } else { diverge() }> }
-comptime fn Early(ty: Type, flag: true'type) -> Type {
+comptime fn Early(ty: Type, flag: bool) -> Type {
     Tagged<ty, if flag { return .u16'builtin; } else { 3 }>
 }
 comptime fn Locals(ty: Type) -> Type {
@@ -24,7 +24,7 @@ comptime fn UnselectedOverflow(ty: Type) -> Type { Tagged<ty, if true { 1 } else
 typealias Byte = Choice(.u8'builtin, true);
 typealias OtherByte = Choice(.u8'builtin, false);
 typealias SkippedByte = Skipped(.u8'builtin);
-comptime fn Generic(ty: Type, value: T, flag: true'type) -> Type where T {
+comptime fn Generic(ty: Type, value: T, flag: bool) -> Type where T {
     Tagged<ty, if flag { value } else { value }>
 }
 comptime fn GenericObserved(ty: Type) -> Type { Generic<.u8'builtin>(ty, 7, true) }

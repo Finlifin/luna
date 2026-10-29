@@ -3,7 +3,6 @@ pure comptime fn TupleElements<T> -> .Type'builtin {T}
 pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias F32 = .f32'builtin;
 typealias F64 = .f64'builtin;
-typealias Bool = true'type;
 comptime fn single(a: F32, b: F32) -> Tuple<F32, F32, F32, F32, F32> {
     (-a, a + b, a - b, a * b, a / b)
 }
@@ -25,9 +24,9 @@ comptime fn ordered() -> F32 {
 comptime fn early() -> F32 { (do { return 3.0; }) / 0.0 }
 comptime fn early_right() -> F32 { 1.0 + (do { return 4.0; }) }
 comptime fn Select() -> .Type'builtin {
-    if rounding() == 0.0 { Bool } else { 'x''type }
+    if rounding() == 0.0 { bool } else { 'x''type }
 }
 typealias Chosen = Select();
-comptime fn run() -> Tuple<Chosen, Bool, Bool, Bool> {
+comptime fn run() -> Tuple<Chosen, bool, bool, bool> {
     (rounding() == 0.0, unfused() == 0.0, specialized() == 1.0, ordered() == 1.0)
 }

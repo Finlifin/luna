@@ -1,28 +1,27 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
 pure comptime fn TupleElements<T> -> .Type'builtin {T}
 pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
-typealias Bool = true'type;
 typealias F32 = .f32'builtin;
 typealias F64 = .f64'builtin;
-comptime fn single(a: F32, b: F32) -> Tuple<Bool, Bool, Bool, Bool, Bool, Bool> {
+comptime fn single(a: F32, b: F32) -> Tuple<bool, bool, bool, bool, bool, bool> {
     (a == b, a != b, a < b, a <= b, a > b, a >= b)
 }
-comptime fn double(a: F64, b: F64) -> Tuple<Bool, Bool, Bool, Bool, Bool, Bool> {
+comptime fn double(a: F64, b: F64) -> Tuple<bool, bool, bool, bool, bool, bool> {
     (a == b, a != b, a < b, a <= b, a > b, a >= b)
 }
-comptime fn contextual(value: F32) -> Tuple<Bool, Bool, Bool, Bool> {
+comptime fn contextual(value: F32) -> Tuple<bool, bool, bool, bool> {
     (1.5 == value, -1.5 != value, 1.5 < value, value >= 1.5)
 }
-comptime fn generic(a: T, b: T) -> Bool where T, requires T == F32 { a >= b }
-comptime fn specialized() -> Bool { generic<F32>(2.0, 1.0) }
-comptime fn pattern(value: F32, expected: F32) -> Bool {
+comptime fn generic(a: T, b: T) -> bool where T, requires T == F32 { a >= b }
+comptime fn specialized() -> bool { generic<F32>(2.0, 1.0) }
+comptime fn pattern(value: F32, expected: F32) -> bool {
     value match { 'expected => true, _ => false }
 }
-comptime fn ordered() -> Bool {
+comptime fn ordered() -> bool {
     var seen = false;
     (do { seen = true; 1.0 }) > (do { if seen { 0.0 } else { 2.0 } })
 }
-comptime fn early() -> Bool { (do { return true; }) >= 1.0 }
-comptime fn run() -> Tuple<Bool, Bool, Bool, Bool> {
+comptime fn early() -> bool { (do { return true; }) >= 1.0 }
+comptime fn run() -> Tuple<bool, bool, bool, bool> {
     (specialized(), pattern(-0.0, 0.0), ordered(), early())
 }

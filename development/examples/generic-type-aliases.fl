@@ -1,7 +1,6 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
 pure comptime fn TupleElements<T> -> .Type'builtin {T}
 pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
-typealias Bool = true'type;
 typealias Type = .Type'builtin;
 typealias Int = .Integer'builtin;
 typealias Pair<T> = Tuple<T, T>;
@@ -21,16 +20,16 @@ typealias Preserved<T> = Opaque<T>;
 
 fn keep(value: T) -> Reader<T> where T { || value }
 fn pair(value: T) -> Pair<T> where T { (value, value) }
-fn read_pair() -> Pair<Bool> {
+fn read_pair() -> Pair<bool> {
     let left = keep(true);
     let right = keep(false);
     (left(), right())
 }
-fn boxed(value: Bool) -> Repeated<Bool> {
-    pair(Boxed<Bool> { value: value })
+fn boxed(value: bool) -> Repeated<bool> {
+    pair(Boxed<bool> { value: value })
 }
-fn computed(value: Twice<Bool>) -> Bool { value }
-fn preserve(value: Preserved<Bool>) -> Opaque<Bool> { value }
+fn computed(value: Twice<bool>) -> bool { value }
+fn preserve(value: Preserved<bool>) -> Opaque<bool> { value }
 
 comptime fn run() -> Int {
     let identity: Transformer<Int> = |value| value;

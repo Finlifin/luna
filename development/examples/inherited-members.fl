@@ -2,13 +2,13 @@
 pure comptime fn TupleElements<T> -> .Type'builtin { T }
 pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 trait Read {
-    fn read(self) -> true'type;
+    fn read(self) -> bool;
 }
 trait Left :- Read {}
 trait Right :- Read {}
 trait Child :- Left + Right {
     -- Source is fixed by Child's inherited capability, not by later members.
-    fn inspect(self) -> true'type { self.read() }
+    fn inspect(self) -> bool { self.read() }
 }
 
 struct Flag {}
@@ -16,12 +16,12 @@ impl Child for Flag {}
 impl Left for Flag {}
 impl Right for Flag {}
 impl Read for Flag {
-    fn read(self) -> true'type { true }
+    fn read(self) -> bool { true }
 }
 impl Flag {
-    fn read(self) -> true'type { false }
+    fn read(self) -> bool { false }
 }
 
-fn run() -> Tuple<true'type, true'type, true'type> {
+fn run() -> Tuple<bool, bool, bool> {
     (Flag {}.as(Child).read(), Flag {}.as(Child).inspect(), Flag {}.read())
 }

@@ -2,40 +2,39 @@
 pure comptime fn TupleElements<T> -> .Type'builtin {T}
 pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Int = .Integer'builtin;
-typealias Bool = true'type;
 typealias Byte = .u8'builtin;
 typealias Char = 'a''type;
 comptime fn classify(value: Int) -> Int {
     value match { ..0 => 1, 0..10 => 2, 10..=20 => 3, 21.. => 4, _ => 0 }
 }
-comptime fn byte(value: Byte) -> Bool {
+comptime fn byte(value: Byte) -> bool {
     value match { 0..=255 => true, _ => false }
 }
-comptime fn digit(value: Char) -> Bool {
+comptime fn digit(value: Char) -> bool {
     value match { '0'..='9' => true, _ => false }
 }
-comptime fn bounded(value: Int, lower: Int, upper: Int) -> Bool {
+comptime fn bounded(value: Int, lower: Int, upper: Int) -> bool {
     value match { 'lower..'upper => true, _ => false }
 }
-comptime fn any(value: Bool) -> Bool { value match { .. => true } }
+comptime fn any(value: bool) -> bool { value match { .. => true } }
 comptime fn lower() -> Int { 3 }
 comptime fn upper() -> Int { 9 }
-comptime fn computed(value: Int) -> Bool {
+comptime fn computed(value: Int) -> bool {
     value match { < lower() > ..= < upper() > => true, _ => false }
 }
-comptime fn run() -> Tuple<Int, Int, Int, Int, Bool, Bool, Bool, Bool> {
+comptime fn run() -> Tuple<Int, Int, Int, Int, bool, bool, bool, bool> {
     (classify(-1), classify(9), classify(20), classify(21), byte(255),
      digit('5'), bounded(3, 7, 2), any(false))
 }
-comptime fn to_inclusive(value: Int) -> Bool {
+comptime fn to_inclusive(value: Int) -> bool {
     value match { ..=0 => true, _ => false }
 }
-comptime fn signed(value: .i8'builtin, low: .i8'builtin, high: .i8'builtin) -> Bool {
+comptime fn signed(value: .i8'builtin, low: .i8'builtin, high: .i8'builtin) -> bool {
     value match { 'low..='high => true, _ => false }
 }
-comptime fn early(value: Int) -> Bool {
+comptime fn early(value: Int) -> bool {
     value match { < do { return true; } > ..= < upper() > => false, _ => false }
 }
-comptime fn guarded(value: Int) -> Bool {
+comptime fn guarded(value: Int) -> bool {
     value match { 0..=10 if false => true, _ => false }
 }

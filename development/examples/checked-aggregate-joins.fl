@@ -60,22 +60,22 @@ comptime fn run() -> Byte {
     let (start, end) = pair;
     end - start
 }
-fn literal_pairs(flag: true'type) -> Byte {
+fn literal_pairs(flag: bool) -> Byte {
     let value: Tuple<Byte, Byte> = if flag { (1, 2) } else { (100, 101) };
     let (start, end) = value;
     end - start
 }
-fn literal_match(flag: true'type) -> Byte {
+fn literal_match(flag: bool) -> Byte {
     let value: Tuple<Byte, Byte> = flag match { true => (1, 2), false => (100, 101) };
     let (start, end) = value;
     end - start
 }
-fn scalar_result(a: Byte, b: Byte, flag: true'type) -> Byte {
+fn scalar_result(a: Byte, b: Byte, flag: bool) -> Byte {
     assumes a <= b;
     let selected = if flag { a } else { b };
     b - selected
 }
-fn scalar_match(a: Byte, b: Byte, flag: true'type) -> Byte {
+fn scalar_match(a: Byte, b: Byte, flag: bool) -> Byte {
     assumes a <= b;
     let selected = flag match { true => a, false => b };
     b - selected

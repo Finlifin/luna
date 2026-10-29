@@ -1,12 +1,11 @@
 typealias Byte = .u8'builtin;
-typealias Bool = true'type;
 typealias Int = .Integer'builtin;
 
 fn narrowed(value: Byte) {
     assumes value < 200;
     assumes value >= 5;
 }
-fn branch_ranges(value: Byte, flag: Bool) {
+fn branch_ranges(value: Byte, flag: bool) {
     if flag {
         assumes value < 100;
     } else {

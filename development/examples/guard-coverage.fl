@@ -2,34 +2,33 @@
 pure comptime fn TupleElements<T> -> .Type'builtin {T}
 pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Int = .Integer'builtin;
-typealias Bool = true'type;
 typealias Byte = .u8'builtin;
-comptime fn sign(value: Int) -> Bool {
+comptime fn sign(value: Int) -> bool {
     value match { n if n < 0 => false, n if n >= 0 => true }
 }
-comptime fn zero(value: Int) -> Bool {
+comptime fn zero(value: Int) -> bool {
     value match { n if n == 0 => true, n if n != 0 => false }
 }
-comptime fn middle(value: Byte) -> Bool {
+comptime fn middle(value: Byte) -> bool {
     value match {
         n if n >= 10 and n <= 20 => true,
         n if n < 10 or n > 20 => false,
     }
 }
-comptime fn reverse(value: Byte) -> Bool {
+comptime fn reverse(value: Byte) -> bool {
     value match { n if 128 > n => false, n if 128 <= n => true }
 }
-comptime fn reflexive(value: Int) -> Bool {
+comptime fn reflexive(value: Int) -> bool {
     value match { n if n <= n => true }
 }
-comptime fn run() -> Tuple<Bool, Bool, Bool, Bool, Bool, Bool> {
+comptime fn run() -> Tuple<bool, bool, bool, bool, bool, bool> {
     (sign(-1), zero(0), zero(1), middle(15), reverse(255), reflexive(7))
 }
-comptime fn ordered_or(value: Tuple<Int, Int>) -> Bool {
+comptime fn ordered_or(value: Tuple<Int, Int>) -> bool {
     value match { (a, b) or (b, a) if a < 0 => true, _ => false }
 }
-comptime fn check_ordered_or() -> Bool { ordered_or((1, -1)) }
-comptime fn scoped_bound(value: Byte) -> Bool {
+comptime fn check_ordered_or() -> bool { ordered_or((1, -1)) }
+comptime fn scoped_bound(value: Byte) -> bool {
     value match {
         n if (do { let limit: Byte = 128; n < limit }) => false,
         n if n >= 128 => true,

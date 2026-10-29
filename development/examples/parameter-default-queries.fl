@@ -1,11 +1,10 @@
 typealias Type = .Type'builtin;
-typealias Bool = true'type;
-typealias Chosen = Choose(.kind = Bool);
+typealias Chosen = Choose(.kind = bool);
 comptime fn Choose(.kind: Type = Chosen, .copy: Type = kind) -> Type { copy }
 fn run() -> Chosen { true }
 
 typealias Nested = Compose();
-comptime fn Compose(.first: Type = Compose(.first = Bool), .second: Type = Bool) -> Type { first }
+comptime fn Compose(.first: Type = Compose(.first = bool), .second: Type = bool) -> Type { first }
 fn nested() -> Nested { false }
 
 trait Shape {

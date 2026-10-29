@@ -1,7 +1,7 @@
 -- Generic implementation declarations and compile-time candidate substitution.
 -- Concrete dispatch instances are selected during compilation. The interpreter
 -- only reads the resulting table, including calls in generic forwarding bodies.
-typealias Flag = true'type;
+typealias Flag = bool;
 typealias Letter = 'x''type;
 
 trait Read {

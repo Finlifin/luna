@@ -353,7 +353,7 @@ fn symbol_trait_defaults_use_prior_inputs_and_do_not_become_types() {
 #[test]
 fn calls_branches_locals_and_not_reach_typed_nir() {
     let dump = accepted(
-        "typealias Flag = true'type; fn invert(value: Flag) -> Flag { not value } fn choose(flag: Flag, left: Flag, right: Flag) -> Flag { let selected = if flag { left } else { right } invert(selected) } fn run() -> Flag { choose(true, false, true) }",
+        "typealias Flag = bool; fn invert(value: Flag) -> Flag { not value } fn choose(flag: Flag, left: Flag, right: Flag) -> Flag { let selected = if flag { left } else { right } invert(selected) } fn run() -> Flag { choose(true, false, true) }",
     );
     for tag in [
         "(call ",
@@ -368,14 +368,14 @@ fn calls_branches_locals_and_not_reach_typed_nir() {
 #[test]
 fn forward_functions_and_recursion_use_declared_signatures() {
     let dump = accepted(
-        "typealias Flag = true'type; fn first(value: Flag) -> Flag { second(value) } fn second(value: Flag) -> Flag { if value { first(false) } else { true } }",
+        "typealias Flag = bool; fn first(value: Flag) -> Flag { second(value) } fn second(value: Flag) -> Flag { if value { first(false) } else { true } }",
     );
     assert_eq!(dump.matches("(call ").count(), 2);
 }
 #[test]
 fn parameter_identities_remain_distinct() {
     let dump = accepted(
-        "typealias Flag = true'type; fn choose(flag: Flag, left: Flag, right: Flag) -> Flag { if flag { left } else { right } }",
+        "typealias Flag = bool; fn choose(flag: Flag, left: Flag, right: Flag) -> Flag { if flag { left } else { right } }",
     );
     for id in ["(local 2 1)", "(local 2 3)", "(local 2 5)"] {
         assert_eq!(dump.matches(id).count(), 2, "{dump}");
@@ -384,26 +384,26 @@ fn parameter_identities_remain_distinct() {
 #[test]
 fn tuples_and_explicit_returns_are_checked() {
     accepted_tuple(
-        "typealias Flag = true'type; fn pair(x: Flag, y: Flag) -> Tuple<Flag,Flag> { (x, y) } fn early() -> Flag { return true; }",
+        "typealias Flag = bool; fn pair(x: Flag, y: Flag) -> Tuple<Flag,Flag> { (x, y) } fn early() -> Flag { return true; }",
     );
     rejected_tuple(
-        "typealias Flag = true'type; fn bad() -> Flag { return 'x'; }",
+        "typealias Flag = bool; fn bad() -> Flag { return 'x'; }",
         "type mismatch",
     );
 }
 #[test]
 fn statement_semicolon_discards_but_tail_returns() {
-    accepted("fn okay() -> true'type { true } fn sink() { true; }");
-    rejected("fn bad() -> true'type { true; }", "type mismatch");
+    accepted("fn okay() -> bool { true } fn sink() { true; }");
+    rejected("fn bad() -> bool { true; }", "type mismatch");
 }
 #[test]
 fn call_arity_and_parameter_type_fail_without_output() {
     rejected(
-        "typealias Flag = true'type; fn id(x: Flag) -> Flag { x } fn bad() -> Flag { id() }",
+        "typealias Flag = bool; fn id(x: Flag) -> Flag { x } fn bad() -> Flag { id() }",
         "argument count mismatch",
     );
     rejected(
-        "typealias Flag = true'type; fn id(x: Flag) -> Flag { x } fn bad() -> Flag { id('x') }",
+        "typealias Flag = bool; fn id(x: Flag) -> Flag { x } fn bad() -> Flag { id('x') }",
         "type mismatch",
     );
     rejected("fn bad() { true(); }", "not a function");
@@ -411,22 +411,19 @@ fn call_arity_and_parameter_type_fail_without_output() {
 #[test]
 fn condition_and_branch_types_are_checked() {
     rejected(
-        "fn bad() -> true'type { if 'x' { true } else { false } }",
+        "fn bad() -> bool { if 'x' { true } else { false } }",
         "type mismatch",
     );
     rejected(
-        "fn bad() -> true'type { if true { 'x' } else { false } }",
+        "fn bad() -> bool { if true { 'x' } else { false } }",
         "type mismatch",
     );
-    rejected(
-        "fn bad() -> true'type { if true { true } }",
-        "type mismatch",
-    );
+    rejected("fn bad() -> bool { if true { true } }", "type mismatch");
 }
 #[test]
 fn branch_bindings_and_parameters_do_not_escape() {
     rejected(
-        "fn first(value: true'type) { } fn second() { value; }",
+        "fn first(value: bool) { } fn second() { value; }",
         "Unresolved identifier",
     );
     rejected(
@@ -436,14 +433,12 @@ fn branch_bindings_and_parameters_do_not_escape() {
 }
 #[test]
 fn shadowing_initializer_reads_outer_binding() {
-    accepted("fn shadow(value: true'type) -> true'type { let value = not value; value }");
+    accepted("fn shadow(value: bool) -> bool { let value = not value; value }");
     rejected("fn bad() { let value = value; }", "Unresolved identifier");
 }
 #[test]
 fn type_alias_chains_work_and_cycles_fail() {
-    accepted(
-        "typealias First = Second; typealias Second = true'type; fn id(x: First) -> Second { x }",
-    );
+    accepted("typealias First = Second; typealias Second = bool; fn id(x: First) -> Second { x }");
     rejected(
         "typealias First = Second; typealias Second = First; fn id(x: First) { }",
         "cyclic type alias",
@@ -451,7 +446,7 @@ fn type_alias_chains_work_and_cycles_fail() {
 }
 #[test]
 fn logical_operators_keep_short_circuit_structure() {
-    let dump = accepted("fn logic(x: true'type,y: true'type) -> true'type { x and y or not x }");
+    let dump = accepted("fn logic(x: bool,y: bool) -> bool { x and y or not x }");
     assert!(dump.contains("(and "));
     assert!(dump.contains("(or "));
 }
@@ -478,11 +473,11 @@ fn unprocessed_stage_and_attribute_information_blocks_nir() {
 #[test]
 fn higher_order_function_values_and_returns_keep_signatures() {
     let dump = accepted(
-        "typealias Flag = true'type; typealias Unary = fn(Flag) -> Flag; fn invert(value: Flag) -> Flag { not value } fn select() -> Unary { invert } fn apply(f: Unary, value: Flag) -> Flag { f(value) } fn run() -> Flag { apply(select(), true) }",
+        "typealias Flag = bool; typealias Unary = fn(Flag) -> Flag; fn invert(value: Flag) -> Flag { not value } fn select() -> Unary { invert } fn apply(f: Unary, value: Flag) -> Flag { f(value) } fn run() -> Flag { apply(select(), true) }",
     );
     assert_eq!(dump.matches("(call ").count(), 3);
     rejected(
-        "typealias Flag = true'type; typealias Unary = fn(Flag) -> Flag; fn apply(f: Unary) -> Flag { f(true) } fn run() -> Flag { apply(true) }",
+        "typealias Flag = bool; typealias Unary = fn(Flag) -> Flag; fn apply(f: Unary) -> Flag { f(true) } fn run() -> Flag { apply(true) }",
         "type mismatch",
     );
 }
@@ -490,8 +485,7 @@ fn higher_order_function_values_and_returns_keep_signatures() {
 #[test]
 fn void_unit_and_guarded_return_preserve_control_flow() {
     accepted("fn unit() { () } fn early() { return (); }");
-    let dump =
-        accepted("fn guarded(flag: true'type) -> true'type { return false while flag; true }");
+    let dump = accepted("fn guarded(flag: bool) -> bool { return false while flag; true }");
     assert!(dump.contains("(return "));
     assert!(dump.contains("(if "));
 }
@@ -511,7 +505,7 @@ fn strings_are_escaped_and_nir_dump_is_deterministic() {
 #[test]
 fn lambda_parameters_use_callable_expectations() {
     let dump = accepted(
-        "typealias Flag = true'type; fn apply(f: fn(Flag) -> Flag, x: Flag) -> Flag { f(x) } fn run() -> Flag { apply(|value| not value, true) }",
+        "typealias Flag = bool; fn apply(f: fn(Flag) -> Flag, x: Flag) -> Flag { f(x) } fn run() -> Flag { apply(|value| not value, true) }",
     );
     assert!(dump.contains("(captures)"), "{dump}");
     assert!(dump.contains("(not "), "{dump}");
@@ -520,48 +514,44 @@ fn lambda_parameters_use_callable_expectations() {
         "needs an annotation",
     );
     rejected(
-        "fn bad(f: fn(true'type) -> true'type) { } fn run() { bad(|| true); }",
+        "fn bad(f: fn(bool) -> bool) { } fn run() { bad(|| true); }",
         "lambda parameter count",
     );
 }
 #[test]
 fn typed_lambdas_infer_results_and_support_local_calls() {
-    accepted("fn run() -> true'type { let invert = |x: true'type| not x; invert(true) }");
-    accepted(
-        "fn run() -> true'type { let invert = |x: true'type| { return not x; } invert(true) }",
-    );
+    accepted("fn run() -> bool { let invert = |x: bool| not x; invert(true) }");
+    accepted("fn run() -> bool { let invert = |x: bool| { return not x; } invert(true) }");
     rejected(
-        "fn bad() { let f = |x: true'type| { if x { return true; } 'x' } }",
+        "fn bad() { let f = |x: bool| { if x { return true; } 'x' } }",
         "type mismatch",
     );
 }
 #[test]
 fn captures_are_explicit_and_cannot_erase_into_plain_functions() {
-    let dump = accepted(
-        "fn run(flag: true'type) -> true'type { let captured = || flag and flag; captured() }",
-    );
+    let dump =
+        accepted("fn run(flag: bool) -> bool { let captured = || flag and flag; captured() }");
     assert_eq!(dump.matches("(capture (binding").count(), 1, "{dump}");
     assert!(
         dump.contains("(closure (environment (primitive bool))"),
         "{dump}"
     );
     rejected(
-        "fn bad(flag: true'type) -> fn() -> true'type { || flag }",
+        "fn bad(flag: bool) -> fn() -> bool { || flag }",
         "type mismatch",
     );
 }
 #[test]
 fn nested_capture_and_shadowing_preserve_binding_identity() {
     let dump = accepted(
-        "fn run(flag: true'type) -> true'type { let outer = || { let inner = || flag; inner() } outer() }",
+        "fn run(flag: bool) -> bool { let outer = || { let inner = || flag; inner() } outer() }",
     );
     assert_eq!(dump.matches("(capture (binding").count(), 2, "{dump}");
-    let dump = accepted(
-        "fn run(flag: true'type) -> true'type { let local = |flag: true'type| flag; local(false) }",
-    );
+    let dump =
+        accepted("fn run(flag: bool) -> bool { let local = |flag: bool| flag; local(false) }");
     assert_eq!(dump.matches("(capture (binding").count(), 0, "{dump}");
     rejected(
-        "fn bad() { let f = |hidden: true'type| hidden; hidden; }",
+        "fn bad() { let f = |hidden: bool| hidden; hidden; }",
         "Unresolved identifier",
     );
 }
@@ -569,7 +559,7 @@ fn nested_capture_and_shadowing_preserve_binding_identity() {
 fn lambda_return_does_not_return_from_enclosing_function() {
     accepted("fn run() -> 'x''type { let f = || { return true; } f(); 'x' }");
     rejected(
-        "fn run() -> true'type { let f = || { return 'x'; } f() }",
+        "fn run() -> bool { let f = || { return 'x'; } f() }",
         "type mismatch",
     );
 }
@@ -577,7 +567,7 @@ fn lambda_return_does_not_return_from_enclosing_function() {
 #[test]
 fn parameter_type_queries_do_not_create_runtime_captures() {
     let dump = accepted(
-        "fn run(sample: true'type) -> true'type { let f: fn(true'type) -> true'type = |value: sample'type| value; f(false) }",
+        "fn run(sample: bool) -> bool { let f: fn(bool) -> bool = |value: sample'type| value; f(false) }",
     );
     assert_eq!(dump.matches("(capture (binding").count(), 0, "{dump}");
 }
@@ -585,7 +575,7 @@ fn parameter_type_queries_do_not_create_runtime_captures() {
 #[test]
 fn captures_follow_first_use_order_not_parameter_order() {
     let dump = accepted(
-        "typealias Flag = true'type; fn run(first: Flag, second: Flag) -> Flag { let f = || second and first and second; f() }",
+        "typealias Flag = bool; fn run(first: Flag, second: Flag) -> Flag { let f = || second and first and second; f() }",
     );
     let second = dump.find("(capture (binding (local 2 3))").unwrap();
     let first = dump.find("(capture (binding (local 2 1))").unwrap();
@@ -596,37 +586,37 @@ fn captures_follow_first_use_order_not_parameter_order() {
 #[test]
 fn lambda_annotations_and_nested_returns_are_independently_checked() {
     accepted(
-        "typealias Flag = true'type; fn run() -> Flag { let f = |x: Flag| -> Flag { if x { return false; } true } f(true) }",
+        "typealias Flag = bool; fn run() -> Flag { let f = |x: Flag| -> Flag { if x { return false; } true } f(true) }",
     );
     rejected(
-        "typealias Flag = true'type; fn run() { let f = |x: Flag| -> Flag { 'x' } }",
+        "typealias Flag = bool; fn run() { let f = |x: Flag| -> Flag { 'x' } }",
         "type mismatch",
     );
     rejected(
-        "typealias Flag = true'type; fn apply(f: fn(Flag) -> Flag) { } fn run() { apply(|x: 'a''type| true); }",
+        "typealias Flag = bool; fn apply(f: fn(Flag) -> Flag) { } fn run() { apply(|x: 'a''type| true); }",
         "type mismatch",
     );
     accepted(
-        "typealias Flag = true'type; fn run(x: Flag) -> Flag { let f = || { let g = || { return 'x'; } g(); return x; } f() }",
+        "typealias Flag = bool; fn run(x: Flag) -> Flag { let f = || { let g = || { return 'x'; } g(); return x; } f() }",
     );
 }
 
 #[test]
 fn optional_defaults_resolve_earlier_parameters_in_definition_scope() {
     let dump = accepted(
-        "typealias Flag = true'type; fn select(value: Flag, .fallback: Flag = not value) -> Flag { fallback } fn run() -> Flag { let value = false; select(true) }",
+        "typealias Flag = bool; fn select(value: Flag, .fallback: Flag = not value) -> Flag { fallback } fn run() -> Flag { let value = false; select(true) }",
     );
     assert!(dump.contains("(default true)"), "{dump}");
     assert!(dump.contains("(parameter-bindings"), "{dump}");
     rejected(
-        "typealias Flag = true'type; fn bad(.first: Flag = second, .second: Flag = true) { }",
+        "typealias Flag = bool; fn bad(.first: Flag = second, .second: Flag = true) { }",
         "Unresolved identifier",
     );
 }
 #[test]
 fn explicit_named_values_disable_their_default_and_keep_source_order() {
     let dump = accepted(
-        "typealias Flag = true'type; fn select(value: Flag, .first: Flag = false, .second: Flag = first) -> Flag { second } fn run() -> Flag { select(.second = false, true, .first = true) }",
+        "typealias Flag = bool; fn select(value: Flag, .first: Flag = false, .second: Flag = first) -> Flag { second } fn run() -> Flag { select(.second = false, true, .first = true) }",
     );
     let call = &dump[dump.rfind("(call ").unwrap()..];
     assert!(!call.contains("(default true)"), "{call}");
@@ -638,7 +628,7 @@ fn explicit_named_values_disable_their_default_and_keep_source_order() {
 #[test]
 fn default_chains_follow_declaration_order_after_explicit_arguments() {
     let dump = accepted(
-        "typealias Flag = true'type; fn chain(value: Flag, .first: Flag = value, .second: Flag = not first) -> Flag { second } fn run() -> Flag { chain(false) }",
+        "typealias Flag = bool; fn chain(value: Flag, .first: Flag = value, .second: Flag = not first) -> Flag { second } fn run() -> Flag { chain(false) }",
     );
     let call = &dump[dump.rfind("(call ").unwrap()..];
     assert!(
@@ -653,7 +643,7 @@ fn default_chains_follow_declaration_order_after_explicit_arguments() {
 }
 #[test]
 fn optional_routing_rejects_unknown_duplicate_and_anchored_names() {
-    let prefix = "typealias Flag = true'type; fn select(value: Flag, .fallback: Flag = true) -> Flag { fallback } ";
+    let prefix = "typealias Flag = bool; fn select(value: Flag, .fallback: Flag = true) -> Flag { fallback } ";
     for (call, message) in [
         (
             "select(true, .fallback = false, .fallback = true)",
@@ -670,25 +660,25 @@ fn optional_routing_rejects_unknown_duplicate_and_anchored_names() {
 #[test]
 fn default_purity_and_parameter_types_are_checked_at_definition() {
     rejected(
-        "typealias Flag = true'type; fn bad(.fallback: Flag = 'x') { }",
+        "typealias Flag = bool; fn bad(.fallback: Flag = 'x') { }",
         "type mismatch",
     );
     accepted(
-        "typealias Flag = true'type; fn source() -> Flag { true } fn good(.fallback: Flag = source()) { }",
+        "typealias Flag = bool; fn source() -> Flag { true } fn good(.fallback: Flag = source()) { }",
     );
     rejected(
-        "typealias Flag = true'type; fn source() -> Flag { source() } fn bad(.fallback: Flag = source()) { }",
+        "typealias Flag = bool; fn source() -> Flag { source() } fn bad(.fallback: Flag = source()) { }",
         "P3 stability/termination",
     );
     accepted(
-        "typealias Flag = true'type; fn finite(flag: Flag, .fallback: Flag = if flag { false } else { true }) -> Flag { fallback } fn run() -> Flag { finite(true) }",
+        "typealias Flag = bool; fn finite(flag: Flag, .fallback: Flag = if flag { false } else { true }) -> Flag { fallback } fn run() -> Flag { finite(true) }",
     );
 }
 
 #[test]
 fn optional_entries_do_not_consume_positional_arguments() {
     let dump = accepted(
-        "typealias Flag = true'type; fn select(.first: Flag = false, value: Flag, .last: Flag = value) -> Flag { last } fn run() -> Flag { select(true) }",
+        "typealias Flag = bool; fn select(.first: Flag = false, value: Flag, .last: Flag = value) -> Flag { last } fn run() -> Flag { select(true) }",
     );
     let call = &dump[dump.rfind("(call ").unwrap()..];
     let supplied = call
@@ -701,18 +691,18 @@ fn optional_entries_do_not_consume_positional_arguments() {
 #[test]
 fn defaults_preserve_declaration_bindings_and_reject_duplicate_parameters() {
     let dump = accepted(
-        "typealias Flag = true'type; fn select(value: Flag, .fallback: Flag = value) -> Flag { fallback } fn run(value: Flag) -> Flag { select(false) }",
+        "typealias Flag = bool; fn select(value: Flag, .fallback: Flag = value) -> Flag { fallback } fn run(value: Flag) -> Flag { select(false) }",
     );
     let call = &dump[dump.rfind("(call ").unwrap()..];
     let default = &call[call.find("(argument (parameter 1)").unwrap()..];
     assert!(default.contains("(local 2 1)"), "{default}");
     assert!(!default.contains("(local 3 1)"), "{default}");
     rejected(
-        "typealias Flag = true'type; fn bad(x: Flag, .x: Flag = false) { }",
+        "typealias Flag = bool; fn bad(x: Flag, .x: Flag = false) { }",
         "duplicate function parameter",
     );
     rejected(
-        "typealias Flag = true'type; fn optional(.flag: Flag = true) -> Flag { flag } fn run() { let f = optional; }",
+        "typealias Flag = bool; fn optional(.flag: Flag = true) -> Flag { flag } fn run() { let f = optional; }",
         "parameter protocol metadata",
     );
 }
@@ -721,7 +711,7 @@ fn defaults_preserve_declaration_bindings_and_reject_duplicate_parameters() {
 fn assignments_check_place_type_and_capture_effect_boundary() {
     rejected("fn bad() { var flag = true; flag = 'x'; }", "type mismatch");
     rejected("fn bad() { true = false; }", "assignment place");
-    accepted("fn pending(flag: true'type) { let write = || { flag = false; } }");
+    accepted("fn pending(flag: bool) { let write = || { flag = false; } }");
 }
 #[test]
 fn loop_transfers_cannot_escape_functions_or_lambdas() {
@@ -827,7 +817,7 @@ fn let_else_requires_a_diverging_failure_and_checks_pattern_contracts() {
         "fn bad() { let true as value = false else { value; return; } }",
         "Unresolved identifier",
     );
-    let dump = accepted("fn good() -> true'type { let (a,b) = (true,false); a and not b }");
+    let dump = accepted("fn good() -> bool { let (a,b) = (true,false); a and not b }");
     assert!(dump.contains("(tuple-pattern"));
 }
 
@@ -854,10 +844,10 @@ fn or_binding_correspondence_rejects_missing_extra_and_duplicate_names() {
 #[test]
 fn typed_let_and_const_stage_boundaries_are_preserved() {
     accepted(
-        "typealias Flag = true'type; fn good() { let x: Flag = true; let true as y: Flag = x else { return; } }",
+        "typealias Flag = bool; fn good() { let x: Flag = true; let true as y: Flag = x else { return; } }",
     );
     accepted("fn good() { const x = true; let y = x; }");
-    rejected("fn bad(x: true'type) { const y = x; }", "runtime parameter");
+    rejected("fn bad(x: bool) { const y = x; }", "runtime parameter");
 }
 
 #[test]
@@ -867,23 +857,23 @@ fn when_rejects_invalid_conditions_branches_and_fallback_order() {
         "type mismatch",
     );
     rejected(
-        "typealias Flag = true'type; fn run() -> Flag { when { 'x' => true, else => false, } }",
+        "typealias Flag = bool; fn run() -> Flag { when { 'x' => true, else => false, } }",
         "type mismatch",
     );
     rejected(
-        "typealias Flag = true'type; fn run() -> Flag { when { true => true, else => 'x', } }",
+        "typealias Flag = bool; fn run() -> Flag { when { true => true, else => 'x', } }",
         "type mismatch",
     );
     rejected(
-        "typealias Flag = true'type; fn run() { when { else => (), true => (), } }",
+        "typealias Flag = bool; fn run() { when { else => (), true => (), } }",
         "when fallback must be the final arm",
     );
     rejected(
-        "typealias Flag = true'type; fn run() { when { else => (), else => (), } }",
+        "typealias Flag = bool; fn run() { when { else => (), else => (), } }",
         "when fallback must be the final arm",
     );
     rejected(
-        "typealias Flag = true'type; fn run() -> Flag { when { true => true, } }",
+        "typealias Flag = bool; fn run() -> Flag { when { true => true, } }",
         "type mismatch",
     );
 }
@@ -891,11 +881,11 @@ fn when_rejects_invalid_conditions_branches_and_fallback_order() {
 #[test]
 fn when_without_expected_type_unifies_all_returning_arms() {
     let dump = accepted(
-        "typealias Flag = true'type; fn run() -> Flag { let selected = when { false => { return false; }, true => true, else => false, }; selected }",
+        "typealias Flag = bool; fn run() -> Flag { let selected = when { false => { return false; }, true => true, else => false, }; selected }",
     );
     assert!(dump.contains("(if"));
     rejected(
-        "typealias Flag = true'type; fn run() { let value = when { false => true, else => 'x', }; }",
+        "typealias Flag = bool; fn run() { let value = when { false => true, else => 'x', }; }",
         "type mismatch",
     );
 }
@@ -918,7 +908,7 @@ fn when_arm_declarations_cannot_escape_or_feed_another_arm() {
 
 #[test]
 fn struct_construction_checks_completeness_identity_and_field_types() {
-    let prefix = "typealias Flag = true'type; struct S { flag: Flag, } ";
+    let prefix = "typealias Flag = bool; struct S { flag: Flag, } ";
     rejected(
         &format!("{prefix} fn run() {{ S {{}} }}"),
         "missing required struct field",
@@ -954,11 +944,11 @@ fn struct_construction_checks_completeness_identity_and_field_types() {
 #[test]
 fn struct_definition_checks_defaults_duplicate_fields_and_recursive_storage() {
     rejected(
-        "typealias Flag = true'type; struct S { a: Flag, a: Flag, }",
+        "typealias Flag = bool; struct S { a: Flag, a: Flag, }",
         "duplicate struct field",
     );
     rejected(
-        "typealias Flag = true'type; struct S { a: Flag = 'x', }",
+        "typealias Flag = bool; struct S { a: Flag = 'x', }",
         "type mismatch",
     );
     rejected(
@@ -998,7 +988,7 @@ fn let_reassignment_is_rejected_but_var_and_field_writes_are_distinct() {
         "cannot reassign a let binding",
     );
     accepted("fn run() { var value = true; value = false; }");
-    let prefix = "typealias Flag = true'type; struct S { value: Flag, } ";
+    let prefix = "typealias Flag = bool; struct S { value: Flag, } ";
     rejected(
         &format!("{prefix} fn run() {{ let object = S {{ value: true }}; object.value = 'x'; }}"),
         "type mismatch",
@@ -1045,7 +1035,7 @@ fn enum_domains_are_nominal_closed_and_guards_do_not_prove_coverage() {
 
 #[test]
 fn payload_patterns_require_complete_unguarded_coverage() {
-    let prefix = "typealias Flag = true'type; enum E { pair(Flag, Flag), } ";
+    let prefix = "typealias Flag = bool; enum E { pair(Flag, Flag), } ";
     for arms in [
         ".pair(true, _) => ()",
         ".pair(true, _) => (), .pair(false, _) if true => ()",
@@ -1068,7 +1058,7 @@ fn payload_patterns_require_complete_unguarded_coverage() {
 
 #[test]
 fn enum_payload_constructors_check_shape_types_and_pattern_binding_sets() {
-    let prefix = "typealias Flag = true'type; enum E { unit, empty(), pair(Flag, Flag), } ";
+    let prefix = "typealias Flag = bool; enum E { unit, empty(), pair(Flag, Flag), } ";
     for (body, expected) in [
         ("E.unit()", "unit enum variant does not take arguments"),
         ("E.empty", "requires arguments"),
@@ -1105,7 +1095,7 @@ fn enum_payload_representation_cycles_include_struct_edges() {
 
 #[test]
 fn enum_coverage_budget_does_not_turn_partial_products_into_proofs() {
-    let types = vec!["true'type"; 14].join(", ");
+    let types = vec!["bool"; 14].join(", ");
     let patterns = vec!["true"; 14].join(", ");
     rejected(
         &format!(
@@ -1122,18 +1112,18 @@ fn enum_coverage_budget_does_not_turn_partial_products_into_proofs() {
 #[test]
 fn payload_constant_expression_patterns_cannot_discard_the_payload() {
     rejected(
-        "enum E { flag(true'type), } fn run(value: E) { value match { < E.flag(true) > => (), } }",
+        "enum E { flag(bool), } fn run(value: E) { value match { < E.flag(true) > => (), } }",
         "equality protocol for this type is not implemented",
     );
     rejected(
-        "enum E { pair(true'type, true'type), } fn run(value: E) { value match { .pair(x, x) => (), } }",
+        "enum E { pair(bool, bool), } fn run(value: E) { value match { .pair(x, x) => (), } }",
         "duplicate pattern binding",
     );
 }
 
 #[test]
 fn named_enum_payloads_reject_bad_fields_shapes_and_incomplete_coverage() {
-    let prefix = "enum E { data { flag: true'type }, } ";
+    let prefix = "enum E { data { flag: bool }, } ";
     for (body, diagnostic) in [
         ("E.data {}", "missing required"),
         ("E.data { flag: true, flag: false }", "more than once"),
@@ -1151,12 +1141,9 @@ fn named_enum_payloads_reject_bad_fields_shapes_and_incomplete_coverage() {
         &format!("{prefix} fn run(value: E) {{ value match {{ .data {{ flag: true }} => (), }} }}"),
         "non-exhaustive match",
     );
+    rejected("enum E { data { flag: bool = 'x' }, }", "type mismatch");
     rejected(
-        "enum E { data { flag: true'type = 'x' }, }",
-        "type mismatch",
-    );
-    rejected(
-        "enum E { data { flag: true'type, flag: true'type }, }",
+        "enum E { data { flag: bool, flag: bool }, }",
         "duplicate enum payload field",
     );
     accepted("enum E { empty {}, } fn run() -> E { E.empty {} }");
@@ -1164,7 +1151,7 @@ fn named_enum_payloads_reject_bad_fields_shapes_and_incomplete_coverage() {
 
 #[test]
 fn wide_enum_payload_coverage_is_symbolic_and_preserves_correlations() {
-    let types = vec!["true'type"; 64].join(", ");
+    let types = vec!["bool"; 64].join(", ");
     let total = vec!["(true or false)"; 64].join(", ");
     accepted(&format!(
         "enum E {{ wide({types}), }} fn run(value: E) {{ value match {{ .wide({total}) => (), }} }}"
@@ -1197,15 +1184,15 @@ fn qualified_enum_patterns_check_identity_and_constructor_shape() {
         "type mismatch",
     );
     rejected(
-        "enum E { data(true'type), } enum F { data(true'type), } fn run(value: E) { value match { F.data(_) => (), } }",
+        "enum E { data(bool), } enum F { data(bool), } fn run(value: E) { value match { F.data(_) => (), } }",
         "type mismatch",
     );
     rejected(
-        "enum E { data { x: true'type }, } enum F { data { x: true'type }, } fn run(value: E) { value match { F.data { x } => (), } }",
+        "enum E { data { x: bool }, } enum F { data { x: bool }, } fn run(value: E) { value match { F.data { x } => (), } }",
         "type mismatch",
     );
     rejected(
-        "enum E { data(true'type), } fn run(value: E) { value match { E.data => (), } }",
+        "enum E { data(bool), } fn run(value: E) { value match { E.data => (), } }",
         "requires arguments",
     );
     rejected(
@@ -1222,7 +1209,7 @@ fn generic_bodies_are_checked_abstractly_and_calls_must_infer_consistent_types()
         "type mismatch",
     );
     rejected(
-        "fn invalid(value: T) -> true'type where T { not value }",
+        "fn invalid(value: T) -> bool where T { not value }",
         "type mismatch",
     );
     rejected(
@@ -1247,7 +1234,7 @@ fn generic_bodies_are_checked_abstractly_and_calls_must_infer_consistent_types()
 fn explicit_generic_arguments_and_function_contexts_are_checked() {
     let prefix = "fn keep(value: T) -> T where T { value } ";
     rejected(
-        &format!("{prefix} fn run() {{ keep<true'type, 'x''type>(true); }}"),
+        &format!("{prefix} fn run() {{ keep<bool, 'x''type>(true); }}"),
         "invalid function type arguments",
     );
     rejected(
@@ -1255,11 +1242,11 @@ fn explicit_generic_arguments_and_function_contexts_are_checked() {
         "type mismatch",
     );
     rejected(
-        &format!("{prefix} fn run() {{ let callback: fn(true'type) -> 'x''type = keep; }}"),
+        &format!("{prefix} fn run() {{ let callback: fn(bool) -> 'x''type = keep; }}"),
         "generic function context inference failed",
     );
     rejected(
-        "fn plain(value: true'type) -> true'type { value } fn run() { plain<true'type>(true); }",
+        "fn plain(value: bool) -> bool { value } fn run() { plain<bool>(true); }",
         "explicit instantiation requires a generic function",
     );
     rejected(
@@ -1287,7 +1274,7 @@ fn generic_argument_deferral_requires_evidence_and_preserves_type_errors() {
 #[test]
 fn generic_optional_routing_and_function_value_metadata_are_checked() {
     let prefix =
-        "typealias Flag = true'type; fn keep(value: T, .flag: Flag = true) -> T where T { value } ";
+        "typealias Flag = bool; fn keep(value: T, .flag: Flag = true) -> T where T { value } ";
     for (body, diagnostic) in [
         ("keep(true, false)", "too many positional"),
         ("keep(.flag = true)", "missing anchored"),
@@ -1309,7 +1296,7 @@ fn generic_optional_routing_and_function_value_metadata_are_checked() {
 
 #[test]
 fn calls_cannot_assume_the_requirements_they_need_to_prove() {
-    let prefix = "typealias Flag = true'type; fn require_flag(value: T) -> T where T, requires T == Flag { value } ";
+    let prefix = "typealias Flag = bool; fn require_flag(value: T) -> T where T, requires T == Flag { value } ";
     rejected(
         &format!("{prefix} fn run() {{ require_flag('x'); }}"),
         "type requirement is not satisfied",
@@ -1327,7 +1314,7 @@ fn calls_cannot_assume_the_requirements_they_need_to_prove() {
         "type requirement is not satisfied",
     );
     rejected(
-        "typealias Flag = true'type; fn first(value: T) -> Flag where T, requires T == Flag { value } fn unrelated(value: U) -> Flag where U { value }",
+        "typealias Flag = bool; fn first(value: T) -> Flag where T, requires T == Flag { value } fn unrelated(value: U) -> Flag where U { value }",
         "type mismatch",
     );
 }
@@ -1336,7 +1323,7 @@ fn calls_cannot_assume_the_requirements_they_need_to_prove() {
 fn runtime_specifications_are_not_sent_to_ptc() {
     for condition in ["flag", "flag == true"] {
         let dump = accepted(&format!(
-            "fn run(flag: true'type) where requires {condition} {{}}"
+            "fn run(flag: bool) where requires {condition} {{}}"
         ));
         assert!(
             dump.contains("(requires) (program-requires (expr"),
@@ -1344,7 +1331,7 @@ fn runtime_specifications_are_not_sent_to_ptc() {
         );
     }
     rejected(
-        "fn run(flag: true'type) where ensures flag {}",
+        "fn run(flag: bool) where ensures flag {}",
         "program postcondition is not proven",
     );
 }
@@ -1352,7 +1339,7 @@ fn runtime_specifications_are_not_sent_to_ptc() {
 #[test]
 fn definition_type_assumptions_do_not_leak_into_struct_defaults() {
     rejected(
-        "fn unreachable() where requires false {} struct Box { flag: true'type = 'x', }",
+        "fn unreachable() where requires false {} struct Box { flag: bool = 'x', }",
         "type mismatch",
     );
 }
@@ -1370,7 +1357,7 @@ fn delayed_nested_calls_do_not_suppress_errors_or_invent_types() {
     );
     rejected(
         &format!(
-            "{prefix} fn run() {{ apply(do {{ let invalid: true'type = 'x'; keep(|x| x) }}, true); }}"
+            "{prefix} fn run() {{ apply(do {{ let invalid: bool = 'x'; keep(|x| x) }}, true); }}"
         ),
         "type mismatch",
     );
@@ -1402,7 +1389,7 @@ fn partial_callback_context_keeps_full_signature_and_requirement_checks() {
         "generic call inference failed",
     );
     rejected(
-        "fn map(value: T, callback: fn(T) -> U) -> U where T, U, requires U == true'type { callback(value) } fn run() { map(true, |x| 'y'); }",
+        "fn map(value: T, callback: fn(T) -> U) -> U where T, U, requires U == bool { callback(value) } fn run() { map(true, |x| 'y'); }",
         "type requirement is not satisfied",
     );
 }
@@ -1453,7 +1440,7 @@ fn nested_partial_calls_keep_constraints_and_reject_unresolved_or_bad_callbacks(
 fn generic_structs_check_definition_fields_and_explicit_argument_contracts() {
     let prefix = "struct Box where T { value: T, } ";
     rejected(
-        &format!("{prefix} fn run() {{ Box<true'type> {{ value: 'x' }}; }}"),
+        &format!("{prefix} fn run() {{ Box<bool> {{ value: 'x' }}; }}"),
         "type mismatch",
     );
     rejected(
@@ -1461,18 +1448,18 @@ fn generic_structs_check_definition_fields_and_explicit_argument_contracts() {
         "explicit type arguments",
     );
     rejected(
-        &format!("{prefix} fn run(value: Box<true'type, 'x''type>) {{}}"),
+        &format!("{prefix} fn run(value: Box<bool, 'x''type>) {{}}"),
         "argument count mismatch",
     );
     rejected(
         &format!(
-            "{prefix} fn run() {{ let value = Box<true'type> {{ value: true }}; value.value = 'x'; }}"
+            "{prefix} fn run() {{ let value = Box<bool> {{ value: true }}; value.value = 'x'; }}"
         ),
         "type mismatch",
     );
     rejected("struct Bad where T { value: T = true, }", "type mismatch");
     rejected(
-        "struct Tag where T {} fn run() -> Tag<true'type> { Tag<'x''type> {} }",
+        "struct Tag where T {} fn run() -> Tag<bool> { Tag<'x''type> {} }",
         "type mismatch",
     );
 }
@@ -1480,7 +1467,7 @@ fn generic_structs_check_definition_fields_and_explicit_argument_contracts() {
 #[test]
 fn generic_representation_checks_distinguish_finite_nesting_and_cycles() {
     accepted_tuple(
-        "struct Box where T { value: T, } struct Middle { value: Box<true'type>, } struct Outer { value: Box<Middle>, }",
+        "struct Box where T { value: T, } struct Middle { value: Box<bool>, } struct Outer { value: Box<Middle>, }",
     );
     rejected_tuple(
         "struct Box where T { value: T, } struct Cycle { value: Box<Cycle>, }",
@@ -1507,7 +1494,7 @@ fn generic_struct_type_values_are_not_mistaken_for_runtime_functions() {
     for (expression, diagnostic) in [
         ("Box(true)", "declaration is not a supported callable"),
         (
-            "Box<true'type>",
+            "Box<bool>",
             "comptime-only value cannot inhabit runtime storage",
         ),
         ("Box", "generic type requires explicit type arguments"),
@@ -1523,18 +1510,18 @@ fn generic_struct_type_values_are_not_mistaken_for_runtime_functions() {
 fn generic_enums_check_specialized_fields_patterns_and_defaults() {
     let prefix = "enum Choice where T { none, value(T), } ";
     rejected_tuple(
-        &format!("{prefix} fn run() -> Choice<true'type> {{ .value('x') }}"),
+        &format!("{prefix} fn run() -> Choice<bool> {{ .value('x') }}"),
         "type mismatch",
     );
     rejected_tuple(
         &format!(
-            "{prefix} fn run(value: Choice<true'type>) -> true'type {{ value match {{ .none => false, .value(true) => true, }} }}"
+            "{prefix} fn run(value: Choice<bool>) -> bool {{ value match {{ .none => false, .value(true) => true, }} }}"
         ),
         "non-exhaustive match",
     );
     rejected_tuple(
         &format!(
-            "{prefix} fn run(value: Choice<'x''type>) -> true'type {{ value match {{ .none => false, .value(true) => true, .value(false) => false, }} }}"
+            "{prefix} fn run(value: Choice<'x''type>) -> bool {{ value match {{ .none => false, .value(true) => true, .value(false) => false, }} }}"
         ),
         "type mismatch",
     );
@@ -1559,7 +1546,7 @@ fn generic_enums_check_specialized_fields_patterns_and_defaults() {
 #[test]
 fn qualified_generic_patterns_keep_their_explicit_instance_identity() {
     rejected(
-        "typealias Flag = true'type; typealias Character = 'x''type; enum Choice where T { none, value(T), } fn run(value: Choice<Flag>) -> Flag { value match { Choice<Character>.none => false, Choice<Flag>.value(flag) => flag, } }",
+        "typealias Flag = bool; typealias Character = 'x''type; enum Choice where T { none, value(T), } fn run(value: Choice<Flag>) -> Flag { value match { Choice<Character>.none => false, Choice<Flag>.value(flag) => flag, } }",
         "type mismatch",
     );
 }
@@ -1567,11 +1554,11 @@ fn qualified_generic_patterns_keep_their_explicit_instance_identity() {
 #[test]
 fn qualified_pattern_inline_type_arguments_are_checked_as_expressions() {
     rejected(
-        "enum Choice where T { none, value(T), } fn run(value: Choice<true'type>) -> true'type { value match { Choice<'x''type>.none => false, Choice<true'type>.value(flag) => flag, } }",
+        "enum Choice where T { none, value(T), } fn run(value: Choice<bool>) -> bool { value match { Choice<'x''type>.none => false, Choice<bool>.value(flag) => flag, } }",
         "type mismatch",
     );
     rejected(
-        "enum Choice where T { none, value(T), } fn run(value: Choice<true'type>) -> true'type { value match { Choice<Missing>.none => false, Choice<true'type>.value(flag) => flag, } }",
+        "enum Choice where T { none, value(T), } fn run(value: Choice<bool>) -> bool { value match { Choice<Missing>.none => false, Choice<bool>.value(flag) => flag, } }",
         "Unresolved identifier `Missing`",
     );
 }
@@ -1579,18 +1566,18 @@ fn qualified_pattern_inline_type_arguments_are_checked_as_expressions() {
 #[test]
 fn nominal_argument_inference_still_checks_whole_types_and_requirements() {
     rejected(
-        "struct Box where T { value: T, } fn choose(a: Box<T>, b: Box<T>) -> T where T { a.value } fn run() { choose(Box<true'type> { value: true }, Box<'x''type> { value: 'x' }); }",
+        "struct Box where T { value: T, } fn choose(a: Box<T>, b: Box<T>) -> T where T { a.value } fn run() { choose(Box<bool> { value: true }, Box<'x''type> { value: 'x' }); }",
         "generic call inference failed",
     );
     rejected(
-        "struct Tag where T {} fn checked(value: Tag<T>) where T, requires T == true'type {} fn run() { checked(Tag<'x''type> {}); }",
+        "struct Tag where T {} fn checked(value: Tag<T>) where T, requires T == bool {} fn run() { checked(Tag<'x''type> {}); }",
         "type requirement is not satisfied",
     );
 }
 
 #[test]
 fn nominal_contracts_reject_invalid_types_at_every_formation_site() {
-    let prefix = "struct Checked where T, requires T == true'type { value: T, } ";
+    let prefix = "struct Checked where T, requires T == bool { value: T, } ";
     for body in [
         "typealias Bad = Checked<'x''type>;",
         "fn bad(value: Checked<'x''type>) {}",
@@ -1606,14 +1593,14 @@ fn nominal_contracts_reject_invalid_types_at_every_formation_site() {
         );
     }
     rejected(
-        "enum Checked where T, requires T == true'type { none, } fn run() { Checked<'x''type>.none; }",
+        "enum Checked where T, requires T == bool { none, } fn run() { Checked<'x''type>.none; }",
         "type requirement is not satisfied",
     );
 }
 
 #[test]
 fn nominal_contracts_cannot_be_assumed_by_unconstrained_users() {
-    let prefix = "struct Checked where T, requires T == true'type { value: T, } ";
+    let prefix = "struct Checked where T, requires T == bool { value: T, } ";
     for body in [
         "fn bad(value: Checked<U>) where U {}",
         "struct Outer where U { value: Checked<U>, }",
@@ -1647,7 +1634,7 @@ fn nominal_defaults_use_only_their_own_declaration_contracts() {
 #[test]
 fn nominal_contract_operands_do_not_bootstrap_their_own_validity() {
     rejected(
-        "struct Checked where T, requires T == true'type {} fn bad() where U, requires Checked<U> == Checked<U> {}",
+        "struct Checked where T, requires T == bool {} fn bad() where U, requires Checked<U> == Checked<U> {}",
         "type requirement",
     );
     rejected(
@@ -1659,11 +1646,11 @@ fn nominal_contract_operands_do_not_bootstrap_their_own_validity() {
         "program specifications are not handled by PTC",
     );
     rejected(
-        "enum Checked where T, requires T == true'type { value(T), } fn bad() { Checked<'x''type>.value('x'); }",
+        "enum Checked where T, requires T == bool { value(T), } fn bad() { Checked<'x''type>.value('x'); }",
         "type requirement is not satisfied",
     );
     rejected(
-        "enum Checked where T, requires T == true'type { named { value: T }, } fn bad() { Checked<'x''type>.named { value: 'x' }; }",
+        "enum Checked where T, requires T == bool { named { value: T }, } fn bad() { Checked<'x''type>.named { value: 'x' }; }",
         "type requirement is not satisfied",
     );
 }
@@ -1671,26 +1658,26 @@ fn nominal_contract_operands_do_not_bootstrap_their_own_validity() {
 #[test]
 fn constrained_coverage_does_not_hide_missing_or_guarded_cases() {
     rejected(
-        "fn bad(value: T) -> true'type where T, requires T == true'type { value match { true => true, } }",
+        "fn bad(value: T) -> bool where T, requires T == bool { value match { true => true, } }",
         "non-exhaustive match",
     );
     rejected(
-        "enum Pair where T { pair(T, T), } fn bad(value: Pair<T>) -> true'type where T, requires T == true'type { value match { .pair(true, _) => true, .pair(_, true) => true, } }",
+        "enum Pair where T { pair(T, T), } fn bad(value: Pair<T>) -> bool where T, requires T == bool { value match { .pair(true, _) => true, .pair(_, true) => true, } }",
         "non-exhaustive match",
     );
     accepted(
-        "fn good(value: T) -> true'type where T, requires T == true'type { value match { true if true => true, false => false, } }",
+        "fn good(value: T) -> bool where T, requires T == bool { value match { true if true => true, false => false, } }",
     );
     rejected(
-        "fn bad(value: T) -> true'type where T, requires T == true'type { value match { true if false => true, false => false, } }",
+        "fn bad(value: T) -> bool where T, requires T == bool { value match { true if false => true, false => false, } }",
         "non-exhaustive match",
     );
     rejected(
-        "fn bad(value: T, gate:bool) -> true'type where T, requires T == true'type { value match { true if gate => true, false => false, } }",
+        "fn bad(value: T, gate:bool) -> bool where T, requires T == bool { value match { true if gate => true, false => false, } }",
         "non-exhaustive match",
     );
     rejected(
-        "fn good(value: T) -> true'type where T, requires T == true'type { value match { true => true, false => false, } } fn bad(value: U) -> true'type where U { value match { true => true, false => false, } }",
+        "fn good(value: T) -> bool where T, requires T == bool { value match { true => true, false => false, } } fn bad(value: U) -> bool where U { value match { true => true, false => false, } }",
         "type mismatch",
     );
 }
@@ -1714,11 +1701,11 @@ fn tuple_patterns_check_shape_field_types_and_complete_coverage() {
         "refutable let pattern",
     );
     rejected_tuple(
-        "fn bad(value: Tuple<true'type,true'type>) -> true'type { value match { (true, _) => true, (_, true) => true, } }",
+        "fn bad(value: Tuple<bool,bool>) -> bool { value match { (true, _) => true, (_, true) => true, } }",
         "non-exhaustive match",
     );
     rejected_tuple(
-        "fn bad(value: Tuple<true'type,true'type>) -> true'type { value match { (true, _) if true => true, (false, _) => false, } }",
+        "fn bad(value: Tuple<bool,bool>) -> bool { value match { (true, _) if true => true, (false, _) => false, } }",
         "non-exhaustive match",
     );
 }
@@ -1730,18 +1717,18 @@ fn tuple_binding_scopes_enforce_mutability_and_or_compatibility() {
         "cannot reassign a let binding",
     );
     rejected_tuple(
-        "fn bad(value: Tuple<true'type,true'type>) -> true'type { value match { (x, true) or (false, y) => true, _ => false, } }",
+        "fn bad(value: Tuple<bool,bool>) -> bool { value match { (x, true) or (false, y) => true, _ => false, } }",
         "binding",
     );
     rejected_tuple(
-        "fn bad(value: Tuple<true'type,'x''type>) -> true'type { value match { (x, _) or (_, x) => true, } }",
+        "fn bad(value: Tuple<bool,'x''type>) -> bool { value match { (x, _) or (_, x) => true, } }",
         "type mismatch",
     );
 }
 
 #[test]
 fn record_patterns_check_names_types_and_exhaustiveness() {
-    let prefix = "struct Pair { left: true'type, right: true'type, } ";
+    let prefix = "struct Pair { left: bool, right: bool, } ";
     for (body, message) in [
         (
             "fn bad(value: Pair) { let { missing: x } = value; }",
@@ -1764,7 +1751,7 @@ fn record_patterns_check_names_types_and_exhaustiveness() {
             "refutable let pattern",
         ),
         (
-            "fn bad(value: Pair) -> true'type { value match { { left: true } => true, { right: true } => true, } }",
+            "fn bad(value: Pair) -> bool { value match { { left: true } => true, { right: true } => true, } }",
             "non-exhaustive match",
         ),
         (
@@ -1783,23 +1770,23 @@ fn record_patterns_check_names_types_and_exhaustiveness() {
 #[test]
 fn structural_views_require_proof_and_preserve_complete_pattern_checks() {
     rejected_tuple(
-        "struct Box { value: true'type, } fn bad(value: T) -> true'type where T { value.value }",
+        "struct Box { value: bool, } fn bad(value: T) -> bool where T { value.value }",
         "field projection requires",
     );
     rejected_tuple(
-        "struct A { value: true'type, } struct B { value: true'type, } fn bad(value: T) -> true'type where T, requires T == A or T == B { value.value }",
+        "struct A { value: bool, } struct B { value: bool, } fn bad(value: T) -> bool where T, requires T == A or T == B { value.value }",
         "field projection requires",
     );
     rejected_tuple(
-        "fn bad(value: T) -> true'type where T, requires T == Tuple<true'type,true'type> { value match { (true, _) => true, (_, true) => true, } }",
+        "fn bad(value: T) -> bool where T, requires T == Tuple<bool,bool> { value match { (true, _) => true, (_, true) => true, } }",
         "non-exhaustive match",
     );
     rejected_tuple(
-        "enum E where T { some(T), none, } fn bad(value: T) -> true'type where T, requires T == E<true'type> { value match { .some(true) => true, .none => false, } }",
+        "enum E where T { some(T), none, } fn bad(value: T) -> bool where T, requires T == E<bool> { value match { .some(true) => true, .none => false, } }",
         "non-exhaustive match",
     );
     rejected_tuple(
-        "struct Box { value: true'type, } fn bad(value: T) where T, requires T == Box { value.value = 'x'; }",
+        "struct Box { value: bool, } fn bad(value: T) where T, requires T == Box { value.value = 'x'; }",
         "type mismatch",
     );
 }
@@ -1807,23 +1794,23 @@ fn structural_views_require_proof_and_preserve_complete_pattern_checks() {
 #[test]
 fn constrained_callable_views_preserve_arity_types_and_capture_boundaries() {
     rejected(
-        "fn bad(callback: F) where F, requires F == fn(true'type) -> true'type { callback(); }",
+        "fn bad(callback: F) where F, requires F == fn(bool) -> bool { callback(); }",
         "argument count mismatch",
     );
     rejected(
-        "fn bad(callback: F) where F, requires F == fn(true'type) -> true'type { callback('x'); }",
+        "fn bad(callback: F) where F, requires F == fn(bool) -> bool { callback('x'); }",
         "type mismatch",
     );
     rejected(
-        "fn bad() -> F where F, requires F == fn(true'type) -> true'type { |x| 'x' }",
+        "fn bad() -> F where F, requires F == fn(bool) -> bool { |x| 'x' }",
         "type mismatch",
     );
     rejected(
-        "fn bad(flag: true'type) -> F where F, requires F == fn(true'type) -> true'type { |x| flag }",
+        "fn bad(flag: bool) -> F where F, requires F == fn(bool) -> bool { |x| flag }",
         "type mismatch",
     );
     rejected(
-        "fn bad(callback: F) where F, requires F == fn(true'type) -> true'type or F == fn('x''type) -> 'x''type { callback(true); }",
+        "fn bad(callback: F) where F, requires F == fn(bool) -> bool or F == fn('x''type) -> 'x''type { callback(true); }",
         "called expression is not a function",
     );
 }
@@ -1851,11 +1838,11 @@ fn chained_patterns_check_binding_order_types_and_refutability() {
         "Unresolved identifier",
     );
     rejected(
-        "fn bad(value: true'type) -> true'type { value match { x and x is true => true, } }",
+        "fn bad(value: bool) -> bool { value match { x and x is true => true, } }",
         "non-exhaustive match",
     );
     rejected(
-        "fn bad(value: true'type) -> true'type { value match { (x and x is y) or x => x, } }",
+        "fn bad(value: bool) -> bool { value match { (x and x is y) or x => x, } }",
         "same binding names",
     );
 }
@@ -1863,11 +1850,11 @@ fn chained_patterns_check_binding_order_types_and_refutability() {
 #[test]
 fn chained_pattern_computations_cannot_bypass_default_stability_checks() {
     rejected(
-        "fn recurse() -> true'type { recurse() } fn bad(.value: true'type = true match { x and recurse() is _ => x, }) {}",
+        "fn recurse() -> bool { recurse() } fn bad(.value: bool = true match { x and recurse() is _ => x, }) {}",
         "stability/termination evidence",
     );
     rejected(
-        "fn recurse() -> true'type { recurse() } fn bad(.value: true'type = do { let x and recurse() is y = true; y }) {}",
+        "fn recurse() -> bool { recurse() } fn bad(.value: bool = do { let x and recurse() is y = true; y }) {}",
         "stability/termination evidence",
     );
 }
@@ -1879,7 +1866,7 @@ fn let_pattern_bindings_are_immutable_during_sequential_checks() {
         "fn bad() { let (x if (do { x = false; true })) = true else { return; }; }",
         "fn bad() { let ((x and false is true) or (x and (do { x = false; true }) is true)) = true else { return; }; }",
         "fn bad() { let ((x and (do { x = false; x }) is y), z) = (true, false); }",
-        "struct Box { value: true'type, } fn bad(value: Box) { let { value: (x and (do { x = false; x }) is y) } = value; }",
+        "struct Box { value: bool, } fn bad(value: Box) { let { value: (x and (do { x = false; x }) is y) } = value; }",
     ] {
         rejected(source, "cannot reassign a let binding");
     }
@@ -1888,19 +1875,19 @@ fn let_pattern_bindings_are_immutable_during_sequential_checks() {
 #[test]
 fn trait_implementations_check_required_members_and_signatures() {
     rejected(
-        "trait Flag { fn read() -> true'type; } struct S {} impl Flag for S {}",
+        "trait Flag { fn read() -> bool; } struct S {} impl Flag for S {}",
         "missing required trait method",
     );
     rejected(
-        "trait Flag { fn read() -> true'type; } struct S {} impl Flag for S { fn read() -> 'x''type { 'x' } }",
+        "trait Flag { fn read() -> bool; } struct S {} impl Flag for S { fn read() -> 'x''type { 'x' } }",
         "does not match its trait signature",
     );
     rejected(
-        "trait Flag { fn read(value: true'type) -> true'type; } struct S {} impl Flag for S { fn read() -> true'type { true } }",
+        "trait Flag { fn read(value: bool) -> bool; } struct S {} impl Flag for S { fn read() -> bool { true } }",
         "does not match its trait signature",
     );
     rejected(
-        "fn missing() -> true'type;",
+        "fn missing() -> bool;",
         "bodyless function requires a trait contract",
     );
 }
@@ -1908,14 +1895,14 @@ fn trait_implementations_check_required_members_and_signatures() {
 #[test]
 fn trait_implementation_preconditions_cannot_be_strengthened() {
     rejected(
-        "trait Flag { fn read() -> true'type; } struct S {} impl Flag for S { fn read() -> true'type where requires false { true } }",
+        "trait Flag { fn read() -> bool; } struct S {} impl Flag for S { fn read() -> bool where requires false { true } }",
         "strengthens trait preconditions",
     );
     accepted(
-        "trait Flag { fn read() -> true'type where requires false; } struct S {} impl Flag for S { fn read() -> true'type { true } }",
+        "trait Flag { fn read() -> bool where requires false; } struct S {} impl Flag for S { fn read() -> bool { true } }",
     );
     rejected(
-        "trait Flag { fn read() -> true'type where requires false; } struct S {} impl Flag for S { fn read() -> true'type { true } } fn run() -> true'type { S.as(Flag).read() }",
+        "trait Flag { fn read() -> bool where requires false; } struct S {} impl Flag for S { fn read() -> bool { true } } fn run() -> bool { S.as(Flag).read() }",
         "trait method precondition is not established",
     );
 }
@@ -1931,7 +1918,7 @@ fn implementation_world_rejects_concrete_overlap_including_aliases() {
         "implementation overlap",
     );
     rejected(
-        "impl true'type { fn read() {} }",
+        "impl bool { fn read() {} }",
         "inherent implementation admission failed",
     );
 }
@@ -1939,15 +1926,15 @@ fn implementation_world_rejects_concrete_overlap_including_aliases() {
 #[test]
 fn trait_dispatch_requires_an_implementation_and_does_not_expose_default_bodies() {
     rejected(
-        "trait Flag { fn read() -> true'type { true } } fn run() -> true'type { Flag.read() }",
+        "trait Flag { fn read() -> bool { true } } fn run() -> bool { Flag.read() }",
         "trait method requires a selected implementation",
     );
     rejected(
-        "trait Flag { fn read() -> true'type { true } } fn run() { let f = Flag.read; }",
+        "trait Flag { fn read() -> bool { true } } fn run() { let f = Flag.read; }",
         "trait method requires a selected implementation",
     );
     rejected(
-        "trait Flag { fn read() -> true'type { true } } struct S {} fn run() -> true'type { S.as(Flag).read() }",
+        "trait Flag { fn read() -> bool { true } } struct S {} fn run() -> bool { S.as(Flag).read() }",
         "method implementation is not uniquely established",
     );
 }
@@ -1963,7 +1950,7 @@ fn self_is_lexical_and_trait_defaults_remain_abstract() {
         "Self requires an enclosing nominal type, trait or implementation",
     );
     rejected(
-        "trait Read { fn read(value: Self) -> true'type { value.flag } } struct A { flag: true'type, } impl Read for A {}",
+        "trait Read { fn read(value: Self) -> bool { value.flag } } struct A { flag: bool, } impl Read for A {}",
         "field projection requires a supported struct",
     );
     rejected(
@@ -1986,19 +1973,19 @@ fn self_in_method_requirements_is_substituted_at_interface_calls() {
 #[test]
 fn receiver_contract_is_distinct_from_an_ordinary_self_typed_argument() {
     rejected(
-        "trait Read { fn read(self) -> true'type; } struct S {} impl Read for S { fn read(value: Self) -> true'type { true } }",
+        "trait Read { fn read(self) -> bool; } struct S {} impl Read for S { fn read(value: Self) -> bool { true } }",
         "method receiver does not match",
     );
     rejected(
-        "trait Read { fn read(value: Self) -> true'type; } struct S {} impl Read for S { fn read(self) -> true'type { true } }",
+        "trait Read { fn read(value: Self) -> bool; } struct S {} impl Read for S { fn read(self) -> bool { true } }",
         "method receiver does not match",
     );
     rejected(
-        "struct S {} impl S { fn read() -> true'type { true } } fn run() -> true'type { S {}.read() }",
+        "struct S {} impl S { fn read() -> bool { true } } fn run() -> bool { S {}.read() }",
         "value method call requires a receiver",
     );
     rejected(
-        "struct S {} impl S { fn read(flag: true'type, self) {} }",
+        "struct S {} impl S { fn read(flag: bool, self) {} }",
         "self must be the first parameter",
     );
     rejected("fn run() { self; }", "self requires a method receiver");
@@ -2007,11 +1994,11 @@ fn receiver_contract_is_distinct_from_an_ordinary_self_typed_argument() {
 #[test]
 fn selected_receiver_method_does_not_fall_back_after_argument_errors() {
     rejected(
-        "trait Read { fn read(self, flag: true'type) -> true'type; } struct S {} impl Read for S { fn read(self, flag: true'type) -> true'type { flag } } fn run() -> true'type { S {}.as(Read).read() }",
+        "trait Read { fn read(self, flag: bool) -> bool; } struct S {} impl Read for S { fn read(self, flag: bool) -> bool { flag } } fn run() -> bool { S {}.as(Read).read() }",
         "method argument count mismatch",
     );
     rejected(
-        "struct S {} impl S { fn read(self, flag: true'type) -> true'type { flag } } fn run() -> true'type { S {}.read('x') }",
+        "struct S {} impl S { fn read(self, flag: bool) -> bool { flag } } fn run() -> bool { S {}.read('x') }",
         "type mismatch",
     );
 }
@@ -2019,14 +2006,14 @@ fn selected_receiver_method_does_not_fall_back_after_argument_errors() {
 #[test]
 fn default_member_calls_must_prove_the_called_member_contract() {
     rejected(
-        "trait Read { fn read(self) -> true'type where requires false; fn use_read(self) -> true'type { self.as(Read).read() } }",
+        "trait Read { fn read(self) -> bool where requires false; fn use_read(self) -> bool { self.as(Read).read() } }",
         "trait method precondition is not established",
     );
     accepted(
-        "trait Read { fn read(self) -> true'type where requires false; fn use_read(self) -> true'type where requires false { self.as(Read).read() } }",
+        "trait Read { fn read(self) -> bool where requires false; fn use_read(self) -> bool where requires false { self.as(Read).read() } }",
     );
     rejected(
-        "trait Other { fn read(self) -> true'type; } trait Read { fn use_read(self) -> true'type { self.as(Other).read() } }",
+        "trait Other { fn read(self) -> bool; } trait Read { fn use_read(self) -> bool { self.as(Other).read() } }",
         "method implementation is not uniquely established",
     );
 }
@@ -2034,7 +2021,7 @@ fn default_member_calls_must_prove_the_called_member_contract() {
 #[test]
 fn parent_interfaces_require_independent_implementations_for_the_same_subject() {
     rejected(
-        "trait Parent { fn read() -> true'type; } trait Child :- Parent {} struct S {} impl Child for S { fn read() -> true'type { true } }",
+        "trait Parent { fn read() -> bool; } trait Child :- Parent {} struct S {} impl Child for S { fn read() -> bool { true } }",
         "required parent interface implementation is not established",
     );
     rejected(
@@ -2054,22 +2041,22 @@ fn parent_interfaces_require_independent_implementations_for_the_same_subject() 
 #[test]
 fn parent_capabilities_do_not_discharge_method_specific_preconditions() {
     rejected(
-        "trait Parent { fn read() -> true'type where requires false; } trait Child :- Parent { fn run() -> true'type { Self.as(Parent).read() } }",
+        "trait Parent { fn read() -> bool where requires false; } trait Child :- Parent { fn run() -> bool { Self.as(Parent).read() } }",
         "trait method precondition is not established",
     );
     accepted(
-        "trait Parent { fn read() -> true'type where requires false; } trait Child :- Parent { fn run() -> true'type where requires false { Self.as(Parent).read() } }",
+        "trait Parent { fn read() -> bool where requires false; } trait Child :- Parent { fn run() -> bool where requires false { Self.as(Parent).read() } }",
     );
 }
 
 #[test]
 fn inherited_member_projection_requires_the_requested_child_view() {
     rejected(
-        "trait Parent { fn read(self) -> true'type { true } } trait Child :- Parent {} struct S {} impl Parent for S {} fn run() -> true'type { S {}.as(Child).read() }",
+        "trait Parent { fn read(self) -> bool { true } } trait Child :- Parent {} struct S {} impl Parent for S {} fn run() -> bool { S {}.as(Child).read() }",
         "requested interface view is not established",
     );
     rejected(
-        "trait Parent { fn read() -> true'type { true } } trait Child :- Parent {} struct S {} impl Parent for S {} fn run() -> true'type { S.as(Child).read() }",
+        "trait Parent { fn read() -> bool { true } } trait Child :- Parent {} struct S {} impl Parent for S {} fn run() -> bool { S.as(Child).read() }",
         "requested interface view is not established",
     );
 }
@@ -2079,13 +2066,13 @@ fn inherited_member_ambiguity_is_not_resolved_by_parent_order() {
     for parents in ["First + Second", "Second + First"] {
         rejected(
             &format!(
-                "trait First {{ fn read() -> true'type {{ true }} }} trait Second {{ fn read() -> true'type {{ false }} }} trait Child :- {parents} {{ fn inspect() -> true'type {{ Self.read() }} }}"
+                "trait First {{ fn read() -> bool {{ true }} }} trait Second {{ fn read() -> bool {{ false }} }} trait Child :- {parents} {{ fn inspect() -> bool {{ Self.read() }} }}"
             ),
             "ambiguous inherited member",
         );
     }
     rejected(
-        "trait First { fn read(self) -> true'type { true } } trait Second { fn read(self) -> true'type { false } } trait Child :- First + Second { fn inspect(self) -> true'type { self.read() } }",
+        "trait First { fn read(self) -> bool { true } } trait Second { fn read(self) -> bool { false } } trait Child :- First + Second { fn inspect(self) -> bool { self.read() } }",
         "ambiguous inherited member",
     );
 }
@@ -2113,7 +2100,7 @@ fn generic_trait_bounds_are_obligations_not_assumptions_at_call_sites() {
 #[test]
 fn independent_generic_capabilities_keep_member_sources_ambiguous() {
     rejected(
-        "trait First { fn read(self) -> true'type; } trait Second { fn read(self) -> true'type; } fn read(value: T) -> true'type where T :- First + Second { value.read() }",
+        "trait First { fn read(self) -> bool; } trait Second { fn read(self) -> bool; } fn read(value: T) -> bool where T :- First + Second { value.read() }",
         "ambiguous capability member",
     );
 }
@@ -2147,7 +2134,7 @@ fn nominal_trait_bounds_are_checked_at_all_formation_sites() {
 #[test]
 fn contract_operand_formation_cannot_assume_its_own_requires() {
     rejected(
-        "struct Checked where T, requires T == true'type {} fn bad() where U, requires U == true'type and Checked<U> == Checked<U> {}",
+        "struct Checked where T, requires T == bool {} fn bad() where U, requires U == bool and Checked<U> == Checked<U> {}",
         "type requirement",
     );
     accepted(
@@ -2158,7 +2145,7 @@ fn contract_operand_formation_cannot_assume_its_own_requires() {
 #[test]
 fn nominal_field_defaults_cannot_borrow_a_callers_capabilities() {
     rejected(
-        "trait Value { fn value() -> true'type; } struct Bad where T { value: true'type = read<T>(), } fn read() -> true'type where U :- Value { U.value() } fn make() -> Bad<T> where T :- Value { Bad<T> {} }",
+        "trait Value { fn value() -> bool; } struct Bad where T { value: bool = read<T>(), } fn read() -> bool where U :- Value { U.value() } fn make() -> Bad<T> where T :- Value { Bad<T> {} }",
         "trait bound is not established",
     );
 }
@@ -2166,27 +2153,27 @@ fn nominal_field_defaults_cannot_borrow_a_callers_capabilities() {
 #[test]
 fn generic_implementation_members_inherit_the_head_telescope() {
     accepted(
-        "trait Echo { fn echo(self) -> Self; } struct Box where T { value: T, } impl Echo for Box<T> where T { fn echo(self) -> Self { Box<T> { value: self.value } } } fn run() -> Box<true'type> { Box<true'type> { value: true }.as(Echo).echo() }",
+        "trait Echo { fn echo(self) -> Self; } struct Box where T { value: T, } impl Echo for Box<T> where T { fn echo(self) -> Self { Box<T> { value: self.value } } } fn run() -> Box<bool> { Box<bool> { value: true }.as(Echo).echo() }",
     );
     accepted(
-        "trait Read { fn read(self) -> true'type; } struct Box where T { value: T, } impl Read for Box<T> where T, requires T == true'type { fn read(self) -> true'type { self.value } } fn run() -> true'type { Box<true'type> { value: true }.as(Read).read() }",
+        "trait Read { fn read(self) -> bool; } struct Box where T { value: T, } impl Read for Box<T> where T, requires T == bool { fn read(self) -> bool { self.value } } fn run() -> bool { Box<bool> { value: true }.as(Read).read() }",
     );
 }
 
 #[test]
 fn generic_implementation_selection_uses_requires_and_precision() {
     accepted(
-        "trait Read { fn read() -> true'type; } struct Box where T {} impl Read for Box<T> where T, requires T == true'type { fn read() -> true'type { true } } impl Read for Box<U> where U, requires U == 'x'\'type { fn read() -> true'type { false } } fn run() -> true'type { Box<true'type>.as(Read).read() }",
+        "trait Read { fn read() -> bool; } struct Box where T {} impl Read for Box<T> where T, requires T == bool { fn read() -> bool { true } } impl Read for Box<U> where U, requires U == 'x'\'type { fn read() -> bool { false } } fn run() -> bool { Box<bool>.as(Read).read() }",
     );
     accepted(
-        "trait Read { fn read() -> true'type; } struct Box where T {} impl Read for Box<T> where T { fn read() -> true'type { false } } impl Read for Box<true'type> { fn read() -> true'type { true } } fn run() -> true'type { Box<true'type>.as(Read).read() }",
+        "trait Read { fn read() -> bool; } struct Box where T {} impl Read for Box<T> where T { fn read() -> bool { false } } impl Read for Box<bool> { fn read() -> bool { true } } fn run() -> bool { Box<bool>.as(Read).read() }",
     );
     rejected(
         "trait Read {} struct Box where T {} impl Read for Box<T> where T {} impl Read for Box<U> where U {}",
         "implementation overlap",
     );
     rejected(
-        "trait Read { fn read() -> true'type; } struct Box where T {} impl Read for Box<T> where T, requires T == true'type { fn read() -> true'type { true } } fn run() -> true'type { Box<'x'\'type>.as(Read).read() }",
+        "trait Read { fn read() -> bool; } struct Box where T {} impl Read for Box<T> where T, requires T == bool { fn read() -> bool { true } } fn run() -> bool { Box<'x'\'type>.as(Read).read() }",
         "method implementation is not uniquely established",
     );
 }
@@ -2194,18 +2181,18 @@ fn generic_implementation_selection_uses_requires_and_precision() {
 #[test]
 fn generic_implementation_contracts_do_not_leak_or_strengthen() {
     rejected(
-        "trait Read { fn read(self) -> true'type; } struct Box where T { value: T, } impl Read for Box<T> where T { fn read(self) -> true'type { self.value } }",
+        "trait Read { fn read(self) -> bool; } struct Box where T { value: T, } impl Read for Box<T> where T { fn read(self) -> bool { self.value } }",
         "type",
     );
     rejected(
-        "trait Read { fn read() -> true'type; } struct Box where T {} impl Read for Box<T> where T { fn read() -> true'type where requires T == true'type { true } }",
+        "trait Read { fn read() -> bool; } struct Box where T {} impl Read for Box<T> where T { fn read() -> bool where requires T == bool { true } }",
         "strengthens trait preconditions",
     );
     accepted(
-        "trait Read { fn read() -> true'type; } struct Box where T {} impl Read for Box<T> where T, requires T == true'type { fn read() -> true'type where requires T == true'type { true } } impl Read for Box<U> where U, requires U == 'x'\'type { fn read() -> true'type { false } }",
+        "trait Read { fn read() -> bool; } struct Box where T {} impl Read for Box<T> where T, requires T == bool { fn read() -> bool where requires T == bool { true } } impl Read for Box<U> where U, requires U == 'x'\'type { fn read() -> bool { false } }",
     );
     accepted(
-        "trait Echo { fn echo(self) -> Self { self } } struct Box where T {} impl Echo for Box<T> where T {} fn run() -> Box<true'type> { Box<true'type> {}.as(Echo).echo() }",
+        "trait Echo { fn echo(self) -> Self { self } } struct Box where T {} impl Echo for Box<T> where T {} fn run() -> Box<bool> { Box<bool> {}.as(Echo).echo() }",
     );
 }
 
@@ -2215,33 +2202,33 @@ fn generic_implementation_parent_obligations_are_universal() {
         "trait Parent {} trait Child :- Parent {} struct Box where T {} impl Parent for Box<U> where U {} impl Child for Box<T> where T {}",
     );
     rejected(
-        "trait Parent {} trait Child :- Parent {} struct Box where T {} impl Parent for Box<true'type> {} impl Child for Box<T> where T {}",
+        "trait Parent {} trait Child :- Parent {} struct Box where T {} impl Parent for Box<bool> {} impl Child for Box<T> where T {}",
         "required parent interface implementation is not established",
     );
     accepted(
-        "trait Parent {} trait Child :- Parent {} struct Box where T {} impl Parent for Box<U> where U, requires U == true'type {} impl Child for Box<T> where T, requires T == true'type {}",
+        "trait Parent {} trait Child :- Parent {} struct Box where T {} impl Parent for Box<U> where U, requires U == bool {} impl Child for Box<T> where T, requires T == bool {}",
     );
 }
 
 #[test]
 fn generic_implementation_requires_cannot_justify_contract_formation_circularly() {
     rejected(
-        "trait Marker {} struct Checked where T, requires T == true'type {} impl Marker for T where T, requires T == true'type and Checked<T> == Checked<T> {}",
+        "trait Marker {} struct Checked where T, requires T == bool {} impl Marker for T where T, requires T == bool and Checked<T> == Checked<T> {}",
         "type requirement",
     );
     rejected(
-        "trait Read { fn read() -> true'type; } struct Box where T {} impl Read for Box<T> where T, requires T == true'type { fn read() -> true'type { true } } fn forward() -> true'type where U { Box<U>.as(Read).read() }",
+        "trait Read { fn read() -> bool; } struct Box where T {} impl Read for Box<T> where T, requires T == bool { fn read() -> bool { true } } fn forward() -> bool where U { Box<U>.as(Read).read() }",
         "method implementation is not uniquely established",
     );
     accepted(
-        "trait Read { fn read() -> true'type; } struct Box where T {} impl Read for Box<T> where T, requires T == true'type { fn read() -> true'type { true } } fn forward() -> true'type where U, requires U == true'type { Box<U>.as(Read).read() }",
+        "trait Read { fn read() -> bool; } struct Box where T {} impl Read for Box<T> where T, requires T == bool { fn read() -> bool { true } } fn forward() -> bool where U, requires U == bool { Box<U>.as(Read).read() }",
     );
 }
 
 #[test]
 fn generic_implementation_unused_parameters_do_not_escape_as_instances() {
     rejected(
-        "trait Read { fn read() -> true'type; } struct S {} impl Read for S where T { fn read() -> true'type { true } } fn run() -> true'type { S.as(Read).read() }",
+        "trait Read { fn read() -> bool; } struct S {} impl Read for S where T { fn read() -> bool { true } } fn run() -> bool { S.as(Read).read() }",
         "method implementation is not uniquely established",
     );
     accepted(
@@ -2256,10 +2243,10 @@ fn generic_inherent_overlap_checks_shared_member_domains() {
         "inherent implementation overlap",
     );
     accepted(
-        "struct Box where T {} impl Box<T> where T { fn first() {} } impl Box<U> where U { fn second() {} } fn run() { Box<true'type>.first(); Box<true'type>.second(); }",
+        "struct Box where T {} impl Box<T> where T { fn first() {} } impl Box<U> where U { fn second() {} } fn run() { Box<bool>.first(); Box<bool>.second(); }",
     );
     rejected(
-        "struct Box where T {} impl Box<T> where T { fn get() {} } impl Box<U> where U, requires U == true'type { fn get() {} }",
+        "struct Box where T {} impl Box<T> where T { fn get() {} } impl Box<U> where U, requires U == bool { fn get() {} }",
         "inherent implementation overlap",
     );
 }
@@ -2267,11 +2254,11 @@ fn generic_inherent_overlap_checks_shared_member_domains() {
 #[test]
 fn generic_inherent_pending_specific_candidate_blocks_blanket_selection() {
     rejected(
-        "struct Box where T {} impl Box<T> where T { fn read() -> true'type { false } } impl Box<true'type> { fn read() -> true'type { true } } fn forward() -> true'type where U { Box<U>.read() }",
+        "struct Box where T {} impl Box<T> where T { fn read() -> bool { false } } impl Box<bool> { fn read() -> bool { true } } fn forward() -> bool where U { Box<U>.read() }",
         "inherent method applicability is unresolved",
     );
     accepted(
-        "struct Box where T {} impl Box<T> where T { fn read() -> true'type { false } } impl Box<true'type> { fn read() -> true'type { true } } fn forward() -> true'type where U, requires U == true'type { Box<U>.read() }",
+        "struct Box where T {} impl Box<T> where T { fn read() -> bool { false } } impl Box<bool> { fn read() -> bool { true } } fn forward() -> bool where U, requires U == bool { Box<U>.read() }",
     );
 }
 
@@ -2282,11 +2269,11 @@ fn generic_inherent_cannot_escape_subject_ownership_or_unproved_requires() {
         "inherent implementation admission failed",
     );
     rejected(
-        "struct Box where T {} impl Box<T> where T, requires T == true'type { fn read() {} } fn forward() where U { Box<U>.read(); }",
+        "struct Box where T {} impl Box<T> where T, requires T == bool { fn read() {} } fn forward() where U { Box<U>.read(); }",
         "inherent method applicability is unresolved",
     );
     rejected(
-        "struct Box where T { value: T, } impl Box<T> where T { fn read(self) -> true'type { self.value } }",
+        "struct Box where T { value: T, } impl Box<T> where T { fn read(self) -> bool { self.value } }",
         "type",
     );
 }
@@ -2294,14 +2281,15 @@ fn generic_inherent_cannot_escape_subject_ownership_or_unproved_requires() {
 #[test]
 fn generic_inherent_selected_member_errors_do_not_fall_back() {
     rejected(
-        "struct Box where T {} impl Box<T> where T { fn call(value: true'type) {} } impl Box<true'type> { fn call(value: 'x''type) {} } fn run() { Box<true'type>.call(true); }",
+        "struct Box where T {} impl Box<T> where T { fn call(value: bool) {} } impl Box<bool> { fn call(value: 'x''type) {} } fn run() { Box<bool>.call(true); }",
         "type",
     );
 }
 
 #[test]
 fn inherent_optional_routing_rejects_duplicate_unknown_and_missing_inputs() {
-    let prefix = "struct S {} impl S { fn choose(self, required: true'type, .option: true'type = false) {} } ";
+    let prefix =
+        "struct S {} impl S { fn choose(self, required: bool, .option: bool = false) {} } ";
     rejected(
         &format!("{prefix} fn run() {{ S {{}}.choose(true, .option = true, .option = false); }}"),
         "parameter supplied more than once",
@@ -2323,11 +2311,11 @@ fn inherent_optional_routing_rejects_duplicate_unknown_and_missing_inputs() {
 #[test]
 fn inherent_method_values_do_not_recover_erased_default_entries() {
     rejected(
-        "struct S {} impl S { fn choose(.option: true'type = false) {} } fn run() { let f = S.choose; f(); }",
+        "struct S {} impl S { fn choose(.option: bool = false) {} } fn run() { let f = S.choose; f(); }",
         "argument count mismatch",
     );
     rejected(
-        "struct S {} impl S { fn choose(.first: true'type = later, .later: true'type = false) {} }",
+        "struct S {} impl S { fn choose(.first: bool = later, .later: bool = false) {} }",
         "Unresolved identifier",
     );
 }
@@ -2335,11 +2323,11 @@ fn inherent_method_values_do_not_recover_erased_default_entries() {
 #[test]
 fn implementation_trait_bounds_are_caller_obligations() {
     rejected(
-        "trait Read { fn read() -> true'type; } trait Marker {} struct S {} struct Box where T {} impl Read for Box<T> where T :- Marker { fn read() -> true'type { true } } fn run() -> true'type { Box<S>.as(Read).read() }",
+        "trait Read { fn read() -> bool; } trait Marker {} struct S {} struct Box where T {} impl Read for Box<T> where T :- Marker { fn read() -> bool { true } } fn run() -> bool { Box<S>.as(Read).read() }",
         "method implementation is not uniquely established",
     );
     rejected(
-        "trait Read { fn read() -> true'type; } trait Marker {} struct Box where T {} impl Read for T where T { fn read() -> true'type { false } } impl Read for Box<T> where T :- Marker { fn read() -> true'type { true } } fn forward() -> true'type where U { Box<U>.as(Read).read() }",
+        "trait Read { fn read() -> bool; } trait Marker {} struct Box where T {} impl Read for T where T { fn read() -> bool { false } } impl Read for Box<T> where T :- Marker { fn read() -> bool { true } } fn forward() -> bool where U { Box<U>.as(Read).read() }",
         "method implementation is not uniquely established",
     );
 }
@@ -2347,11 +2335,11 @@ fn implementation_trait_bounds_are_caller_obligations() {
 #[test]
 fn implementation_trait_bounds_do_not_bootstrap_cycles() {
     rejected(
-        "trait Read { fn read() -> true'type { true } } struct S {} impl Read for T where T :- Read {} fn run() -> true'type { S.as(Read).read() }",
+        "trait Read { fn read() -> bool { true } } struct S {} impl Read for T where T :- Read {} fn run() -> bool { S.as(Read).read() }",
         "method implementation is not uniquely established",
     );
     rejected(
-        "trait A { fn read() -> true'type { true } } trait B {} struct S {} impl A for T where T :- B {} impl B for T where T :- A {} fn run() -> true'type { S.as(A).read() }",
+        "trait A { fn read() -> bool { true } } trait B {} struct S {} impl A for T where T :- B {} impl B for T where T :- A {} fn run() -> bool { S.as(A).read() }",
         "method implementation is not uniquely established",
     );
 }
@@ -2376,7 +2364,7 @@ fn implementation_trait_bounds_can_supply_parent_obligations_abstractly() {
 #[test]
 fn parameterized_trait_source_requires_complete_matching_interface_arguments() {
     rejected(
-        "trait Echo where T { fn echo(value: T) -> T { value } } struct S {} impl Echo<true'type> for S {} fn run() -> 'x''type { S.as(Echo<'x''type>).echo('x') }",
+        "trait Echo where T { fn echo(value: T) -> T { value } } struct S {} impl Echo<bool> for S {} fn run() -> 'x''type { S.as(Echo<'x''type>).echo('x') }",
         "method implementation is not uniquely established",
     );
     rejected(
@@ -2384,11 +2372,11 @@ fn parameterized_trait_source_requires_complete_matching_interface_arguments() {
         "interface type argument count mismatch",
     );
     rejected(
-        "trait Echo where T {} struct S {} impl Echo<true'type, 'x''type> for S {}",
+        "trait Echo where T {} struct S {} impl Echo<bool, 'x''type> for S {}",
         "interface type argument count mismatch",
     );
     rejected(
-        "trait Echo where T { fn echo(value: T) -> T; } struct S {} impl Echo<true'type> for S { fn echo(value: 'x''type) -> 'x''type { value } }",
+        "trait Echo where T { fn echo(value: T) -> T; } struct S {} impl Echo<bool> for S { fn echo(value: 'x''type) -> 'x''type { value } }",
         "does not match its trait signature",
     );
 }
@@ -2396,11 +2384,11 @@ fn parameterized_trait_source_requires_complete_matching_interface_arguments() {
 #[test]
 fn parameterized_trait_source_parent_instances_and_member_sources_do_not_collapse() {
     rejected(
-        "trait Parent where T {} trait Child :- Parent<T> where T {} struct S {} impl Parent<'x''type> for S {} impl Child<true'type> for S {}",
+        "trait Parent where T {} trait Child :- Parent<T> where T {} struct S {} impl Parent<'x''type> for S {} impl Child<bool> for S {}",
         "required parent interface implementation is not established",
     );
     rejected(
-        "trait Echo where T { fn echo(self, value: T) -> T; } fn bad(value: U) -> true'type where U :- Echo<true'type> + Echo<'x''type> { value.echo(true) }",
+        "trait Echo where T { fn echo(self, value: T) -> T; } fn bad(value: U) -> bool where U :- Echo<bool> + Echo<'x''type> { value.echo(true) }",
         "ambiguous capability member",
     );
 }
@@ -2408,11 +2396,11 @@ fn parameterized_trait_source_parent_instances_and_member_sources_do_not_collaps
 #[test]
 fn parameterized_trait_source_bounds_cannot_borrow_another_instance() {
     rejected(
-        "trait Echo where T {} struct S {} impl Echo<'x''type> for S {} fn need(value: U) where U :- Echo<true'type> {} fn run() { need(S {}); }",
+        "trait Echo where T {} struct S {} impl Echo<'x''type> for S {} fn need(value: U) where U :- Echo<bool> {} fn run() { need(S {}); }",
         "trait bound is not established",
     );
     rejected(
-        "trait Echo where T {} struct S {} impl Echo<'x''type> for S {} struct Holder where U :- Echo<true'type> { value: U, } fn run() { Holder<S> { value: S {} }; }",
+        "trait Echo where T {} struct S {} impl Echo<'x''type> for S {} struct Holder where U :- Echo<bool> { value: U, } fn run() { Holder<S> { value: S {} }; }",
         "trait bound is not established",
     );
 }
@@ -2420,11 +2408,11 @@ fn parameterized_trait_source_bounds_cannot_borrow_another_instance() {
 #[test]
 fn trait_parameter_contracts_are_checked_at_interface_formation_sites() {
     rejected(
-        "trait Checked where T, requires T == true'type {} struct S {} impl Checked<'x''type> for S {}",
+        "trait Checked where T, requires T == bool {} struct S {} impl Checked<'x''type> for S {}",
         "type requirement",
     );
     rejected(
-        "trait Checked where T, requires T == true'type {} fn use_bound(value: U) where T, U :- Checked<T> {}",
+        "trait Checked where T, requires T == bool {} fn use_bound(value: U) where T, U :- Checked<T> {}",
         "type requirement",
     );
     rejected(
@@ -2432,38 +2420,38 @@ fn trait_parameter_contracts_are_checked_at_interface_formation_sites() {
         "trait bound is not established",
     );
     rejected(
-        "trait Checked where T, requires T == true'type {} trait Child :- Checked<T> where T {}",
+        "trait Checked where T, requires T == bool {} trait Child :- Checked<T> where T {}",
         "type requirement",
     );
     accepted(
-        "trait Checked where T, requires T == true'type {} fn use_bound(value: U) where T, U :- Checked<T>, requires T == true'type {}",
+        "trait Checked where T, requires T == bool {} fn use_bound(value: U) where T, U :- Checked<T>, requires T == bool {}",
     );
 }
 
 #[test]
 fn trait_parameter_requirements_cannot_justify_their_own_operand_formation() {
     rejected(
-        "struct Needs where T, requires T == true'type {} trait Bad where U, requires U == true'type and Needs<U> == Needs<U> {}",
+        "struct Needs where T, requires T == bool {} trait Bad where U, requires U == bool and Needs<U> == Needs<U> {}",
         "type requirement",
     );
-    accepted("trait OnlyBool where requires Self == true'type {}");
+    accepted("trait OnlyBool where requires Self == bool {}");
 }
 
 #[test]
 fn trait_parameter_assumptions_do_not_leak_to_other_traits_or_implementations() {
     rejected(
-        "trait Checked where T, requires T == true'type { fn accept(value: T) -> true'type { value } } trait Unchecked where U { fn accept(value: U) -> true'type { value } }",
+        "trait Checked where T, requires T == bool { fn accept(value: T) -> bool { value } } trait Unchecked where U { fn accept(value: U) -> bool { value } }",
         "type",
     );
     rejected(
-        "trait Checked where T, requires T == true'type { fn accept(value: T) -> true'type { value } } struct S {} impl Checked<U> for S where U {}",
+        "trait Checked where T, requires T == bool { fn accept(value: T) -> bool { value } } struct S {} impl Checked<U> for S where U {}",
         "type requirement",
     );
 }
 
 #[test]
 fn trait_optional_argument_routing_rejects_invalid_supplies() {
-    let prefix = "trait Choose { fn choose(value: true'type, .option: true'type = value) -> true'type; } struct Host {} impl Choose for Host { fn choose(input: true'type, answer: true'type) -> true'type { answer } }";
+    let prefix = "trait Choose { fn choose(value: bool, .option: bool = value) -> bool; } struct Host {} impl Choose for Host { fn choose(input: bool, answer: bool) -> bool { answer } }";
     for (call, message) in [
         (
             "Host.as(Choose).choose(true, .option = true, .option = false)",
@@ -2497,13 +2485,10 @@ fn trait_optional_argument_routing_rejects_invalid_supplies() {
 #[test]
 fn trait_required_method_defaults_are_checked_without_any_implementation() {
     rejected(
-        "trait Bad { fn f(.first: true'type = later, .later: true'type = false); }",
+        "trait Bad { fn f(.first: bool = later, .later: bool = false); }",
         "Unresolved identifier",
     );
-    rejected(
-        "trait Bad { fn f(.flag: true'type = 'x'); }",
-        "type mismatch",
-    );
+    rejected("trait Bad { fn f(.flag: bool = 'x'); }", "type mismatch");
     rejected(
         "trait Bad where T { fn f(value: T, .copy: T = value); }",
         "default expression requires P3 stability",
@@ -2527,7 +2512,7 @@ fn memory_defaults_admit_stable_observation_but_not_pointer_writes() {
 #[test]
 fn trait_subject_requirements_reject_invalid_implementations_and_leaked_guarantees() {
     rejected(
-        "trait Same where T, requires Self == T {} impl Same<true'type> for 'x''type {}",
+        "trait Same where T, requires Self == T {} impl Same<bool> for 'x''type {}",
         "implementation does not establish trait subject requirement",
     );
     rejected(
@@ -2539,11 +2524,11 @@ fn trait_subject_requirements_reject_invalid_implementations_and_leaked_guarante
         "type mismatch",
     );
     rejected(
-        "trait Same where T, requires Self == T {} impl Same<T> for T where T {} fn convert(value: S) -> T where T, S :- Same<T> { value } fn invalid() -> true'type { convert<true'type, 'x''type>('x') }",
+        "trait Same where T, requires Self == T {} impl Same<T> for T where T {} fn convert(value: S) -> T where T, S :- Same<T> { value } fn invalid() -> bool { convert<bool, 'x''type>('x') }",
         "trait bound is not established",
     );
     rejected(
-        "struct Needs where T, requires T == true'type {} trait Bad where requires Self == true'type and Needs<Self> == Needs<Self> {}",
+        "struct Needs where T, requires T == bool {} trait Bad where requires Self == bool and Needs<Self> == Needs<Self> {}",
         "type requirement",
     );
 }
@@ -2551,10 +2536,10 @@ fn trait_subject_requirements_reject_invalid_implementations_and_leaked_guarante
 #[test]
 fn trait_subject_guarantees_form_contract_operands_without_assuming_the_contract() {
     accepted(
-        "trait OnlyBool where requires Self == true'type {} struct Needs where T, requires T == true'type {} fn valid(value: T) where T :- OnlyBool, requires Needs<T> == Needs<T> {}",
+        "trait OnlyBool where requires Self == bool {} struct Needs where T, requires T == bool {} fn valid(value: T) where T :- OnlyBool, requires Needs<T> == Needs<T> {}",
     );
     rejected(
-        "trait OnlyBool where requires Self == true'type {} struct Needs where T, requires T == true'type {} fn invalid(value: T) where T, requires T == true'type and Needs<T> == Needs<T> {}",
+        "trait OnlyBool where requires Self == bool {} struct Needs where T, requires T == bool {} fn invalid(value: T) where T, requires T == bool and Needs<T> == Needs<T> {}",
         "type requirement",
     );
 }
@@ -2589,10 +2574,7 @@ fn integer_runtime_proxies_reject_overflow_instead_of_wrapping_or_widening() {
     ] {
         rejected(source, "integer does not fit");
     }
-    rejected(
-        "fn entry() -> true'type { 1 }",
-        "integer runtime proxy requires",
-    );
+    rejected("fn entry() -> bool { 1 }", "integer runtime proxy requires");
     rejected(
         "fn entry() -> .usize'builtin { 1 }",
         "target pointer-width information",
@@ -2649,7 +2631,7 @@ fn bitvec_source_rejects_invalid_widths_and_unsupported_representations() {
         "type mismatch",
     );
     rejected(
-        "fn bad() -> true'type { true'bitvec }",
+        "fn bad() -> bool { true'bitvec }",
         "bit view requires a supported fixed-width representation",
     );
 }
@@ -2673,7 +2655,7 @@ fn bitvec_slice_boundaries_and_conversion_widths_are_checked_before_nir() {
         "BitVec narrowing requires an explicit slice",
     );
     rejected(
-        &format!("{prefix} fn bad() {{ word()'bitvec.as(true'type); }}"),
+        &format!("{prefix} fn bad() {{ word()'bitvec.as(bool); }}"),
         "other representations need unsafe construction support",
     );
     rejected(
@@ -2726,11 +2708,11 @@ fn bitvec_writeback_rejects_invalid_locations_widths_and_captured_state() {
 #[test]
 fn signature_observation_defers_but_does_not_discard_contract_obligations() {
     rejected(
-        "typealias Bad = constrained()'type; fn constrained() -> true'type where requires true'type == 'x''type { true }",
+        "typealias Bad = constrained()'type; fn constrained() -> bool where requires bool == 'x''type { true }",
         "type requirement is not satisfied",
     );
     rejected(
-        "typealias Bad = identity('x')'type; fn identity(value: T) -> T where T, requires T == true'type { value }",
+        "typealias Bad = identity('x')'type; fn identity(value: T) -> T where T, requires T == bool { value }",
         "type requirement is not satisfied",
     );
     rejected(
@@ -2742,7 +2724,7 @@ fn signature_observation_defers_but_does_not_discard_contract_obligations() {
         "cyclic",
     );
     accepted(
-        "fn first() -> second()'type { true } fn second() -> true'type where requires true'type == true'type { true }",
+        "fn first() -> second()'type { true } fn second() -> bool where requires bool == bool { true }",
     );
 }
 
@@ -2750,16 +2732,16 @@ fn signature_observation_defers_but_does_not_discard_contract_obligations() {
 fn signature_observation_keeps_definition_contracts_out_of_their_own_operands() {
     rejected(
         r#"
-        fn guarded() -> T where T, requires T == true'type { true }
-        fn circular() -> T where T, requires guarded<T>()'type == true'type { true }
+        fn guarded() -> T where T, requires T == bool { true }
+        fn circular() -> T where T, requires guarded<T>()'type == bool { true }
     "#,
         "type requirement is not satisfied",
     );
     accepted(
         r#"
-        fn projected(value: T) -> guarded<T>()'type where T, requires T == true'type { value }
-        fn guarded() -> T where T, requires T == true'type { true }
-        fn entry() -> true'type { projected(true) }
+        fn projected(value: T) -> guarded<T>()'type where T, requires T == bool { value }
+        fn guarded() -> T where T, requires T == bool { true }
+        fn entry() -> bool { projected(true) }
     "#,
     );
     rejected(
@@ -2777,7 +2759,7 @@ fn signature_formation_obligations_survive_abandoned_argument_probes() {
     rejected(
         r#"
         typealias Observed = choose(do { let marker = shape; identity(0) }, target())'type;
-        struct Box where T, requires T == true'type { value: T }
+        struct Box where T, requires T == bool { value: T }
         fn shape() -> Box<'x''type> { true }
         fn identity(value: T) -> T where T { value }
         fn choose(a: T, b: T) -> T where T { a }
@@ -2794,7 +2776,7 @@ fn signature_dependency_depth_is_bounded_and_ordinary_chains_resolve() {
         for i in 0..length {
             source.push_str(&format!("fn f{i}() -> f{}()'type {{ true }} ", i + 1));
         }
-        source.push_str(&format!("fn f{length}() -> true'type {{ true }}"));
+        source.push_str(&format!("fn f{length}() -> bool {{ true }}"));
         source
     }
     accepted(&chain(24));
@@ -2807,23 +2789,23 @@ fn signature_dependency_depth_is_bounded_and_ordinary_chains_resolve() {
 #[test]
 fn bitvec_patterns_reject_non_bit_subjects_bad_digits_widths_and_duplicate_bindings() {
     rejected(
-        "fn bad() -> true'type { 7 matches 0b111 }",
+        "fn bad() -> bool { 7 matches 0b111 }",
         "bit-vector patterns require a BitVec subject",
     );
     rejected(
-        "fn bad() -> true'type { 7'bitvec matches 0b111 }",
+        "fn bad() -> bool { 7'bitvec matches 0b111 }",
         "bit-vector pattern width differs from its subject",
     );
     rejected(
-        "fn bad() -> true'type { 7'bitvec matches 0b0 2 }",
+        "fn bad() -> bool { 7'bitvec matches 0b0 2 }",
         "invalid digit in bit-vector literal segment",
     );
     rejected(
-        "fn bad() -> true'type { 7'bitvec matches 0x(x: .u16'builtin) (x: .u16'builtin) }",
+        "fn bad() -> bool { 7'bitvec matches 0x(x: .u16'builtin) (x: .u16'builtin) }",
         "duplicate pattern binding",
     );
     rejected(
-        "fn bad() -> true'type { 7'bitvec matches 0x(x: true'type) }",
+        "fn bad() -> bool { 7'bitvec matches 0x(x: bool) }",
         "supported unrestricted scalar or BitVec representation",
     );
 }
@@ -2831,15 +2813,15 @@ fn bitvec_patterns_reject_non_bit_subjects_bad_digits_widths_and_duplicate_bindi
 #[test]
 fn bitvec_patterns_keep_phase_exhaustiveness_and_branch_binding_checks() {
     rejected(
-        "fn bad(value: .BitVec'builtin<4>) -> true'type { value matches 0b < value > }",
+        "fn bad(value: .BitVec'builtin<4>) -> bool { value matches 0b < value > }",
         "required comptime",
     );
     rejected(
-        "fn bad() -> true'type { 7'bitvec match { 0x00000007 => true } }",
+        "fn bad() -> bool { 7'bitvec match { 0x00000007 => true } }",
         "exhaustive",
     );
     rejected(
-        "fn bad() -> true'type { 7'bitvec match { 0x(x: .u32'builtin) or 0x(y: .u32'builtin) => true, _ => false } }",
+        "fn bad() -> bool { 7'bitvec match { 0x(x: .u32'builtin) or 0x(y: .u32'builtin) => true, _ => false } }",
         "binding",
     );
 }
@@ -2847,19 +2829,19 @@ fn bitvec_patterns_keep_phase_exhaustiveness_and_branch_binding_checks() {
 #[test]
 fn bitvec_coverage_preserves_holes_guards_and_tuple_correlations() {
     rejected(
-        "fn bad() -> true'type { (0'bitvec[0],true) match { (0b0,false)=>true,(0b1,true)=>false } }",
+        "fn bad() -> bool { (0'bitvec[0],true) match { (0b0,false)=>true,(0b1,true)=>false } }",
         "exhaustive",
     );
     rejected(
-        "fn bad() -> true'type { 0'bitvec[0..2] match { 0b00=>true,0b01=>false,0b10=>true } }",
+        "fn bad() -> bool { 0'bitvec[0..2] match { 0b00=>true,0b01=>false,0b10=>true } }",
         "exhaustive",
     );
     rejected(
-        "fn bad() -> true'type { 0'bitvec[0] match { 0b0=>true,0b1 if false=>false } }",
+        "fn bad() -> bool { 0'bitvec[0] match { 0b0=>true,0b1 if false=>false } }",
         "exhaustive",
     );
     accepted(
-        "typealias Bit=(0'bitvec[0])'type; fn ready() -> true'type { 0'bitvec[0..2] match { 0b00=>true,0b01=>false,0b1(_: Bit)=>true } }",
+        "typealias Bit=(0'bitvec[0])'type; fn ready() -> bool { 0'bitvec[0..2] match { 0b00=>true,0b01=>false,0b1(_: Bit)=>true } }",
     );
 }
 
@@ -2906,7 +2888,7 @@ fn explicit_bitvec_type_construction_checks_arguments_identity_and_literal_range
         rejected(source, message);
     }
     accepted(
-        "struct BitVec where T { value: T } fn normal() -> BitVec<true'type> { BitVec<true'type> { value: true } } fn intrinsic() -> .BitVec'builtin<8> { 255 }",
+        "struct BitVec where T { value: T } fn normal() -> BitVec<bool> { BitVec<bool> { value: true } } fn intrinsic() -> .BitVec'builtin<8> { 255 }",
     );
     accepted(
         "typealias A = .BitVec'builtin<0x08>; typealias B = .BitVec'builtin<8>; fn same(value: A) -> B { value }",
@@ -2917,18 +2899,18 @@ fn explicit_bitvec_type_construction_checks_arguments_identity_and_literal_range
 fn explicit_bitvec_width_identity_participates_in_trait_coherence() {
     rejected(
         r#"
-        trait Read { fn read(self) -> true'type; }
-        impl Read for .BitVec'builtin<8> { fn read(self) -> true'type { true } }
-        impl Read for .BitVec'builtin<0x08> { fn read(self) -> true'type { false } }
+        trait Read { fn read(self) -> bool; }
+        impl Read for .BitVec'builtin<8> { fn read(self) -> bool { true } }
+        impl Read for .BitVec'builtin<0x08> { fn read(self) -> bool { false } }
     "#,
         "overlap",
     );
     rejected(
         r#"
-        trait Read { fn read(self) -> true'type; }
-        impl Read for .BitVec'builtin<8> { fn read(self) -> true'type { true } }
-        fn invoke(value: T) -> true'type where T :- Read { value.read() }
-        fn bad() -> true'type { let value: .BitVec'builtin<9> = 0; invoke(value) }
+        trait Read { fn read(self) -> bool; }
+        impl Read for .BitVec'builtin<8> { fn read(self) -> bool { true } }
+        fn invoke(value: T) -> bool where T :- Read { value.read() }
+        fn bad() -> bool { let value: .BitVec'builtin<9> = 0; invoke(value) }
     "#,
         "trait bound is not established",
     );
@@ -2943,7 +2925,7 @@ fn bitvec_scalar_reinterpretation_requires_exact_width_and_valid_representation(
         );
     }
     rejected(
-        "fn bad(value: .u8'builtin) { value'bitvec.as(true'type); }",
+        "fn bad(value: .u8'builtin) { value'bitvec.as(bool); }",
         "other representations need unsafe construction support",
     );
     rejected(
@@ -2956,7 +2938,7 @@ fn bitvec_scalar_reinterpretation_requires_exact_width_and_valid_representation(
         .collect::<Vec<_>>()
         .join(",");
     accepted(&format!(
-        "fn all(value: .u8'builtin) -> true'type {{ value'bitvec match {{ {arms}, 0b1(_: .BitVec'builtin<7>) => false }} }}"
+        "fn all(value: .u8'builtin) -> bool {{ value'bitvec match {{ {arms}, 0b1(_: .BitVec'builtin<7>) => false }} }}"
     ));
     let missing = (1..=127)
         .map(|v| format!("0x({v}: .i8'builtin) => true"))
@@ -2964,12 +2946,12 @@ fn bitvec_scalar_reinterpretation_requires_exact_width_and_valid_representation(
         .join(",");
     rejected(
         &format!(
-            "fn bad(value: .u8'builtin) -> true'type {{ value'bitvec match {{ {missing}, 0b1(_: .BitVec'builtin<7>) => false }} }}"
+            "fn bad(value: .u8'builtin) -> bool {{ value'bitvec match {{ {missing}, 0b1(_: .BitVec'builtin<7>) => false }} }}"
         ),
         "exhaustive",
     );
     rejected(
-        "fn bad(value: .u32'builtin) -> true'type { value'bitvec match { 0x(0.0: .f32'builtin) => true } }",
+        "fn bad(value: .u32'builtin) -> bool { value'bitvec match { 0x(0.0: .f32'builtin) => true } }",
         "exhaustive",
     );
 }
@@ -2977,42 +2959,42 @@ fn bitvec_scalar_reinterpretation_requires_exact_width_and_valid_representation(
 #[test]
 fn comptime_phase_boundaries_are_checked_without_promoting_constant_runtime_calls() {
     rejected(
-        "fn runtime() -> true'type { true } comptime fn bad() -> true'type { runtime() }",
+        "fn runtime() -> bool { true } comptime fn bad() -> bool { runtime() }",
         "runtime function is unavailable during comptime",
     );
     rejected(
-        "comptime fn compute() -> true'type { true } fn bad() -> true'type { compute() }",
+        "comptime fn compute() -> bool { true } fn bad() -> bool { compute() }",
         "comptime-only value cannot inhabit runtime storage",
     );
     rejected(
-        "fn runtime() -> true'type { true } comptime fn bad() -> true'type { if false { runtime() } else { true } }",
+        "fn runtime() -> bool { true } comptime fn bad() -> bool { if false { runtime() } else { true } }",
         "runtime function is unavailable during comptime",
     );
     rejected(
-        "comptime fn compute() -> true'type { true } fn bad() { let escaped = compute; }",
+        "comptime fn compute() -> bool { true } fn bad() { let escaped = compute; }",
         "comptime-only value cannot inhabit runtime storage",
     );
     accepted(
-        "comptime fn compute() -> true'type { true } comptime fn keep() { let callback = compute; }",
+        "comptime fn compute() -> bool { true } comptime fn keep() { let callback = compute; }",
     );
     rejected(
-        "fn runtime() -> true'type { true } comptime fn bad(.flag: true'type = runtime()) -> true'type { flag }",
+        "fn runtime() -> bool { true } comptime fn bad(.flag: bool = runtime()) -> bool { flag }",
         "runtime function is unavailable during comptime execution",
     );
     accepted(
-        "pure comptime fn compute(flag: true'type) -> true'type { not flag } fn runtime() -> true'type { true }",
+        "pure comptime fn compute(flag: bool) -> bool { not flag } fn runtime() -> bool { true }",
     );
 }
 
 #[test]
 fn comptime_higher_order_boundaries_remain_explicit() {
     rejected(
-        "comptime fn bad(callback: fn() -> true'type) -> true'type { callback() }",
+        "comptime fn bad(callback: fn() -> bool) -> bool { callback() }",
         "callable type is unavailable in this execution phase",
     );
     accepted("comptime fn identity(value: T) -> T where T { value }");
-    accepted("comptime fn run() -> true'type { let callback = || true; callback() }");
-    accepted("trait Read { comptime fn read(self) -> true'type; }");
+    accepted("comptime fn run() -> bool { let callback = || true; callback() }");
+    accepted("trait Read { comptime fn read(self) -> bool; }");
 }
 
 #[test]
@@ -3023,7 +3005,7 @@ fn comptime_integer_values_cannot_escape_into_runtime_storage() {
         "struct Box { value: .Integer'builtin } fn bad(value: Box) -> Box { value }",
         "struct Box where T { value: T } fn bad(value: Box<.Integer'builtin>) -> Box<.Integer'builtin> { value }",
         "enum Choice { empty, some(.Integer'builtin) } fn bad(value: Choice) -> Choice { value }",
-        "fn bad(value: Tuple<.Integer'builtin,true'type>) -> Tuple<.Integer'builtin,true'type> { value }",
+        "fn bad(value: Tuple<.Integer'builtin,bool>) -> Tuple<.Integer'builtin,bool> { value }",
     ] {
         rejected_tuple(source, "comptime-only value cannot inhabit runtime storage");
     }
@@ -3055,7 +3037,7 @@ fn comptime_type_values_keep_formation_and_runtime_stage_boundaries() {
         "exactly one positional comptime width",
     );
     rejected(
-        "struct Box where T, requires T == true'type {} comptime fn Bad() -> .Type'builtin { Box<.u8'builtin> }",
+        "struct Box where T, requires T == bool {} comptime fn Bad() -> .Type'builtin { Box<.u8'builtin> }",
         "type requirement is not satisfied",
     );
     rejected(
@@ -3102,7 +3084,7 @@ fn required_comptime_type_formation_rejects_runtime_calls_cycles_and_execution_f
         "nonnegative comptime integer",
     );
     accepted(
-        "comptime fn Choose(flag: true'type) -> .Type'builtin { if flag { .u8'builtin } else { .u16'builtin } } typealias Alias = Choose(1 == 1); fn value() -> Alias { 255 }",
+        "comptime fn Choose(flag: bool) -> .Type'builtin { if flag { .u8'builtin } else { .u16'builtin } } typealias Alias = Choose(1 == 1); fn value() -> Alias { 255 }",
     );
 }
 
@@ -3124,11 +3106,11 @@ fn generic_comptime_preserves_definition_checks_and_phase_boundaries() {
         "type mismatch",
     );
     rejected(
-        "comptime fn identity(value: T) -> T where T { value } fn bad() -> true'type { identity(true) }",
+        "comptime fn identity(value: T) -> T where T { value } fn bad() -> bool { identity(true) }",
         "comptime-only value cannot inhabit runtime storage",
     );
     rejected(
-        "fn identity(value: T) -> T where T { value } comptime fn bad() -> true'type { identity(true) }",
+        "fn identity(value: T) -> T where T { value } comptime fn bad() -> bool { identity(true) }",
         "runtime function is unavailable",
     );
     rejected(
@@ -3136,14 +3118,14 @@ fn generic_comptime_preserves_definition_checks_and_phase_boundaries() {
         "type requirement is not satisfied",
     );
     accepted(
-        "comptime fn identity(value: T) -> T where T { value } comptime fn keep() { let callback = identity<true'type>; }",
+        "comptime fn identity(value: T) -> T where T { value } comptime fn keep() { let callback = identity<bool>; }",
     );
 }
 
 #[test]
 fn required_comptime_contracts_do_not_prove_themselves_or_leak_between_scopes() {
     rejected(
-        "typealias Bad = Checked(.u8'builtin); comptime fn Checked(value: T) -> .Type'builtin where T, requires T == true'type { T }",
+        "typealias Bad = Checked(.u8'builtin); comptime fn Checked(value: T) -> .Type'builtin where T, requires T == bool { T }",
         "type requirement is not satisfied",
     );
     rejected(
@@ -3151,7 +3133,7 @@ fn required_comptime_contracts_do_not_prove_themselves_or_leak_between_scopes() 
         "type requirement is not satisfied",
     );
     rejected(
-        "struct Restricted where T, requires T == true'type {} comptime fn Bad(value: T) -> .Type'builtin where T, requires Restricted<T> == Restricted<T> { T } typealias Result = Bad(.u8'builtin);",
+        "struct Restricted where T, requires T == bool {} comptime fn Bad(value: T) -> .Type'builtin where T, requires Restricted<T> == Restricted<T> { T } typealias Result = Bad(.u8'builtin);",
         "type requirement is not satisfied",
     );
 }
@@ -3171,23 +3153,23 @@ fn comptime_defaults_reject_dependency_cycles_and_invalid_contracts() {
 #[test]
 fn computed_bit_segments_check_phase_width_contracts_and_coverage() {
     rejected(
-        "comptime fn bit() -> .BitVec'builtin<1> { 1 } fn bad(value: .BitVec'builtin<2>) -> true'type { value matches 0b < bit() > }",
+        "comptime fn bit() -> .BitVec'builtin<1> { 1 } fn bad(value: .BitVec'builtin<2>) -> bool { value matches 0b < bit() > }",
         "bit-vector pattern width differs",
     );
     rejected(
-        "fn bit() -> .BitVec'builtin<1> { 1 } fn bad(value: .BitVec'builtin<1>) -> true'type { value matches 0b < bit() > }",
+        "fn bit() -> .BitVec'builtin<1> { 1 } fn bad(value: .BitVec'builtin<1>) -> bool { value matches 0b < bit() > }",
         "cannot execute a runtime function",
     );
     rejected(
-        "comptime fn bit() -> .BitVec'builtin<1> where requires false { 1 } fn bad(value: .BitVec'builtin<1>) -> true'type { value matches 0b < bit() > }",
+        "comptime fn bit() -> .BitVec'builtin<1> where requires false { 1 } fn bad(value: .BitVec'builtin<1>) -> bool { value matches 0b < bit() > }",
         "type requirement is not satisfied",
     );
     rejected(
-        "fn bad(value: .BitVec'builtin<1>) -> true'type { value matches 0b < 1 > }",
+        "fn bad(value: .BitVec'builtin<1>) -> bool { value matches 0b < 1 > }",
         "requires a concrete BitVec value",
     );
     rejected(
-        "comptime fn bit() -> .BitVec'builtin<1> { 1 } fn bad(value: .BitVec'builtin<1>) -> true'type { value match { 0b < bit() > => true, } }",
+        "comptime fn bit() -> .BitVec'builtin<1> { 1 } fn bad(value: .BitVec'builtin<1>) -> bool { value match { 0b < bit() > => true, } }",
         "exhaustive",
     );
 }
@@ -3195,7 +3177,7 @@ fn computed_bit_segments_check_phase_width_contracts_and_coverage() {
 #[test]
 fn normal_form_source_checks_arguments_body_and_opaque_identity() {
     rejected(
-        "pure comptime fn Checked<T: .Type'builtin> -> .Type'builtin where requires T == true'type { T } typealias Bad = Checked<.u8'builtin>;",
+        "pure comptime fn Checked<T: .Type'builtin> -> .Type'builtin where requires T == bool { T } typealias Bad = Checked<.u8'builtin>;",
         "type requirement is not satisfied",
     );
     accepted(
@@ -3254,20 +3236,20 @@ fn normal_form_integer_arguments_reject_wrong_stage_and_preserve_opacity() {
 #[test]
 fn mixed_normal_form_inputs_reject_wrong_types_stages_and_ranges() {
     rejected(
-        "pure comptime fn Select<B: true'type> -> .Type'builtin { .u8'builtin } fn bad(flag: true'type) -> Select<flag> { while true {} }",
+        "pure comptime fn Select<B: bool> -> .Type'builtin { .u8'builtin } fn bad(flag: bool) -> Select<flag> { while true {} }",
         "normal-form annotation cannot read an ordinary runtime input",
     );
 
     rejected(
-        "pure comptime fn Select<B: true'type> -> .Type'builtin { .u8'builtin } typealias Bad = Select<1>;",
+        "pure comptime fn Select<B: bool> -> .Type'builtin { .u8'builtin } typealias Bad = Select<1>;",
         "requires a supported fixed-width integer target",
     );
     rejected(
-        "pure comptime fn Select<B: true'type> -> .Type'builtin { .u8'builtin } fn bad(value: Select<true>) -> Select<false> { value }",
+        "pure comptime fn Select<B: bool> -> .Type'builtin { .u8'builtin } fn bad(value: Select<true>) -> Select<false> { value }",
         "unresolved type equality",
     );
     rejected(
-        "pure comptime fn Select<B: true'type> -> .Type'builtin { .u8'builtin } pure comptime fn Wrong<N: .Integer'builtin> -> .Type'builtin { Select<N> }",
+        "pure comptime fn Select<B: bool> -> .Type'builtin { .u8'builtin } pure comptime fn Wrong<N: .Integer'builtin> -> .Type'builtin { Select<N> }",
         "normal-form value argument type mismatch",
     );
     rejected(
@@ -3322,7 +3304,7 @@ fn dynamic_normal_form_inputs_keep_phase_and_formation_contracts() {
         "pure comptime fn Tagged<T: .Type'builtin, value: T> -> .Type'builtin { T } comptime fn Bad(ty: .Type'builtin, value: .u8'builtin) -> .Type'builtin { Tagged<ty, value> }",
     );
     rejected(
-        "pure comptime fn Select<B: true'type> -> .Type'builtin { .u8'builtin } fn flag() -> true'type { true } comptime fn Bad() -> .Type'builtin { Select<flag()> }",
+        "pure comptime fn Select<B: bool> -> .Type'builtin { .u8'builtin } fn flag() -> bool { true } comptime fn Bad() -> .Type'builtin { Select<flag()> }",
         "runtime function is unavailable during comptime",
     );
 }
@@ -3436,7 +3418,7 @@ fn dependent_normal_form_inputs_reject_invalid_instantiations_and_ambiguous_expr
     for input in [
         "Number(.i8'builtin)",
         "Negative(.u8'builtin)",
-        "Number(true'type)",
+        "Number(bool)",
     ] {
         rejected_bound_tuple(
             &format!("{prefix} typealias Bad = {input};"),
@@ -3491,25 +3473,25 @@ fn contextual_normal_form_match_keeps_coverage_scope_and_phase_checks() {
     let prefix = include_str!("../../../development/examples/contextual-normal-form-match.fl");
     rejected(
         &format!(
-            "{prefix} comptime fn Bad(ty: Type, flag: true'type) -> Type {{ Tagged<ty, flag match {{ true => 1 }}> }}"
+            "{prefix} comptime fn Bad(ty: Type, flag: bool) -> Type {{ Tagged<ty, flag match {{ true => 1 }}> }}"
         ),
         "non-exhaustive match",
     );
     rejected(
         &format!(
-            "{prefix} comptime fn Bad(ty: Type, flag: true'type) -> Type {{ Tagged<ty, flag match {{ value if true => 1 }}> }}"
+            "{prefix} comptime fn Bad(ty: Type, flag: bool) -> Type {{ Tagged<ty, flag match {{ value if true => 1 }}> }}"
         ),
         "non-exhaustive match",
     );
     rejected(
         &format!(
-            "{prefix} comptime fn Bad(ty: Type, flag: true'type) -> Type {{ Tagged<ty, flag match {{ value if false => 1, _ => value }}> }}"
+            "{prefix} comptime fn Bad(ty: Type, flag: bool) -> Type {{ Tagged<ty, flag match {{ value if false => 1, _ => value }}> }}"
         ),
         "value",
     );
     rejected(
         &format!(
-            "{prefix} fn runtime(flag: true'type) -> true'type {{ flag }} comptime fn Bad(ty: Type, flag: true'type) -> Type {{ Tagged<ty, flag match {{ value and runtime(value) is true => 1, _ => 2 }}> }}"
+            "{prefix} fn runtime(flag: bool) -> bool {{ flag }} comptime fn Bad(ty: Type, flag: bool) -> Type {{ Tagged<ty, flag match {{ value and runtime(value) is true => 1, _ => 2 }}> }}"
         ),
         "runtime function is unavailable during comptime",
     );
@@ -3542,7 +3524,7 @@ fn contextual_normal_form_when_keeps_fallback_scope_and_phase_rules() {
     );
     rejected(
         &format!(
-            "{prefix} fn runtime() -> true'type {{ true }} comptime fn Bad(ty: Type) -> Type {{ Tagged<ty, when {{ true => 1, runtime() => 2, else => 3 }}> }}"
+            "{prefix} fn runtime() -> bool {{ true }} comptime fn Bad(ty: Type) -> Type {{ Tagged<ty, when {{ true => 1, runtime() => 2, else => 3 }}> }}"
         ),
         "runtime function is unavailable during comptime",
     );
@@ -3691,7 +3673,7 @@ fn type_facts_propagate_through_tuple_valued_normal_inputs() {
 
 #[test]
 fn requires_type_operands_preserve_nested_formation_diagnostics() {
-    let prefix = "typealias Type = .Type'builtin; typealias Int = .Integer'builtin; pure comptime fn Pair<v: Tuple<Int,true'type>> -> Type { .u8'builtin } ";
+    let prefix = "typealias Type = .Type'builtin; typealias Int = .Integer'builtin; pure comptime fn Pair<v: Tuple<Int,bool>> -> Type { .u8'builtin } ";
     let invalid_field =
         format!("{prefix} fn bad() where requires Pair<(false, true)> == .u8'builtin {{}}");
     let start = tuple_source(&invalid_field).find("false").unwrap();
@@ -3813,7 +3795,7 @@ fn aggregate_constants_prepare_forward_descriptors_and_enforce_construction() {
         "const VALUE: Entry<.Integer'builtin> = .value(8); enum Entry where T { empty, value(T) } comptime fn read() -> .Integer'builtin { VALUE match { .empty => 0, .value(n) => n } } typealias Bits = .BitVec'builtin<read()>;",
     );
     rejected(
-        "struct Box where T, requires T == true'type { value: T } const VALUE = Box<.u8'builtin> { value: 8 };",
+        "struct Box where T, requires T == bool { value: T } const VALUE = Box<.u8'builtin> { value: 8 };",
         "type requirement",
     );
     rejected(
@@ -3847,20 +3829,20 @@ fn function_constants_preserve_comptime_phase_types() {
 #[test]
 fn comptime_callable_types_cannot_erase_or_forge_execution_phases() {
     for source in [
-        "fn run(callback: comptime fn() -> true'type) -> true'type { callback() }",
-        "struct Box { callback: comptime fn() -> true'type } fn keep(value: Box) -> Box { value }",
-        "comptime fn value() -> true'type { true } fn run() { let callback = value; }",
+        "fn run(callback: comptime fn() -> bool) -> bool { callback() }",
+        "struct Box { callback: comptime fn() -> bool } fn keep(value: Box) -> Box { value }",
+        "comptime fn value() -> bool { true } fn run() { let callback = value; }",
     ] {
         rejected(source, "comptime-only value cannot inhabit runtime storage");
     }
     for source in [
-        "fn value() -> true'type { true } comptime fn run() { let callback: comptime fn() -> true'type = value; }",
-        "comptime fn value() -> true'type { true } comptime fn run() { let callback: fn() -> true'type = value; }",
+        "fn value() -> bool { true } comptime fn run() { let callback: comptime fn() -> bool = value; }",
+        "comptime fn value() -> bool { true } comptime fn run() { let callback: fn() -> bool = value; }",
     ] {
         rejected(source, "type mismatch");
     }
     rejected(
-        "comptime fn run(callback: fn() -> true'type) -> true'type { callback() }",
+        "comptime fn run(callback: fn() -> bool) -> bool { callback() }",
         "callable type is unavailable in this execution phase",
     );
     rejected(
@@ -3876,17 +3858,17 @@ fn comptime_closure_environments_cannot_cross_phase_or_disappear() {
     );
 
     for source in [
-        "fn run() { let callback: comptime fn() -> true'type = || true; }",
-        "comptime fn run() { let callback: fn() -> true'type = || true; }",
+        "fn run() { let callback: comptime fn() -> bool = || true; }",
+        "comptime fn run() { let callback: fn() -> bool = || true; }",
     ] {
         rejected(source, "lambda target requires a different execution phase");
     }
     rejected(
-        "fn runtime() -> true'type { true } comptime fn run() { let callback = || runtime(); }",
+        "fn runtime() -> bool { true } comptime fn run() { let callback = || runtime(); }",
         "runtime function is unavailable during comptime",
     );
     rejected(
-        "comptime fn run(flag: true'type) { let callback: comptime fn() -> true'type = || flag; }",
+        "comptime fn run(flag: bool) { let callback: comptime fn() -> bool = || flag; }",
         "type mismatch",
     );
     rejected(
@@ -3899,7 +3881,7 @@ fn comptime_closure_environments_cannot_cross_phase_or_disappear() {
 fn explicit_closure_contexts_preserve_empty_elimination_and_ordered_type_identity() {
     accepted_tuple(
         r#"
-        typealias Bool = true'type;
+        typealias Bool = bool;
         typealias Char = 'a''type;
         fn proof() where requires
             %{} Bool == Bool and
@@ -3909,29 +3891,29 @@ fn explicit_closure_contexts_preserve_empty_elimination_and_ordered_type_identit
     "#,
     );
     for source in [
-        "fn bad(flag: true'type) -> %{} fn() -> true'type { || flag }",
-        "fn bad() -> %{flag: true'type} fn() -> true'type { || true }",
+        "fn bad(flag: bool) -> %{} fn() -> bool { || flag }",
+        "fn bad() -> %{flag: bool} fn() -> bool { || true }",
     ] {
         rejected_tuple(source, "type mismatch");
     }
     rejected_tuple(
-        "fn bad(a: true'type, b: 'a''type) -> %{b: 'a''type, a: true'type} fn() -> Tuple<true'type,'a''type> { || (a, b) }",
+        "fn bad(a: bool, b: 'a''type) -> %{b: 'a''type, a: bool} fn() -> Tuple<bool,'a''type> { || (a, b) }",
         "unresolved type equality",
     );
     rejected_tuple(
-        "typealias Bad = %{a: true'type, a: true'type} fn();",
+        "typealias Bad = %{a: bool, a: bool} fn();",
         "duplicate closure environment binding",
     );
     rejected_tuple(
-        "typealias Bad = %{a: true'type} %{b: true'type} fn();",
+        "typealias Bad = %{a: bool} %{b: bool} fn();",
         "repeated nonempty closure qualification",
     );
     rejected_tuple(
-        "typealias Bad = %{a: true'type} true'type;",
+        "typealias Bad = %{a: bool} bool;",
         "non-callable closure-qualified bodies",
     );
     rejected_tuple(
-        "fn bad(flag: true'type) -> %{flag: true'type = flag} fn() -> true'type { || flag }",
+        "fn bad(flag: bool) -> %{flag: bool = flag} fn() -> bool { || flag }",
         "dependency/provenance checking",
     );
     rejected_tuple(
@@ -3939,7 +3921,7 @@ fn explicit_closure_contexts_preserve_empty_elimination_and_ordered_type_identit
         "open closure contexts require",
     );
     rejected_tuple(
-        "fn bad() -> %{hidden: true'type} fn() -> true'type { || hidden }",
+        "fn bad() -> %{hidden: bool} fn() -> bool { || hidden }",
         "Unresolved identifier",
     );
 }
@@ -3949,7 +3931,7 @@ fn generic_aliases_check_arity_scope_cycles_and_target_types() {
     for source in [
         "typealias Pair<T> = Tuple<T,T>; fn bad(value: Pair) {}",
         "typealias Pair<T> = Tuple<T,T>; fn bad(value: Pair<>) {}",
-        "typealias Pair<T> = Tuple<T,T>; fn bad(value: Pair<true'type, 'a''type>) {}",
+        "typealias Pair<T> = Tuple<T,T>; fn bad(value: Pair<bool, 'a''type>) {}",
     ] {
         rejected_tuple(source, "type alias");
     }
@@ -3966,14 +3948,14 @@ fn generic_aliases_check_arity_scope_cycles_and_target_types() {
     );
     rejected_tuple("typealias Loop<T> = Loop<Tuple<T,T>>;", "cyclic type alias");
     accepted_tuple(
-        "typealias Sized<N: .Integer'builtin> = true'type; fn keep(value: Sized<7>)->bool {value}",
+        "typealias Sized<N: .Integer'builtin> = bool; fn keep(value: Sized<7>)->bool {value}",
     );
     rejected_tuple(
-        "typealias Sized<N: .Integer'builtin> = true'type; fn bad(value: Sized<true>) {}",
+        "typealias Sized<N: .Integer'builtin> = bool; fn bad(value: Sized<true>) {}",
         "type mismatch",
     );
     rejected_tuple(
-        "typealias Type = .Type'builtin; pure comptime fn Identity<T> -> Type { T } typealias Alias<T> = Identity<T>; fn bad(value: Alias<true'type>) -> true'type { value }",
+        "typealias Type = .Type'builtin; pure comptime fn Identity<T> -> Type { T } typealias Alias<T> = Identity<T>; fn bad(value: Alias<bool>) -> bool { value }",
         "unresolved type equality",
     );
 }
@@ -3981,10 +3963,10 @@ fn generic_aliases_check_arity_scope_cycles_and_target_types() {
 #[test]
 fn generic_alias_bounds_are_checked_even_when_an_expansion_is_cached() {
     accepted(
-        "trait Marker {} impl Marker for true'type {} typealias Checked<T :- Marker> = T; fn keep(value: Checked<true'type>) -> true'type { value }",
+        "trait Marker {} impl Marker for bool {} typealias Checked<T :- Marker> = T; fn keep(value: Checked<bool>) -> bool { value }",
     );
     rejected(
-        "trait Marker {} impl Marker for true'type {} typealias Checked<T :- Marker> = T; fn good(value: Checked<true'type>) {} fn bad(value: Checked<'a''type>) {}",
+        "trait Marker {} impl Marker for bool {} typealias Checked<T :- Marker> = T; fn good(value: Checked<bool>) {} fn bad(value: Checked<'a''type>) {}",
         "trait",
     );
     rejected(
@@ -4018,17 +4000,17 @@ fn generic_alias_expansion_is_bounded_and_recovers_for_a_fresh_package() {
             level - 1
         ));
     }
-    source.push_str("fn bad(value: Level24<true'type>) {}\n");
+    source.push_str("fn bad(value: Level24<bool>) {}\n");
     rejected_tuple(&source, "type alias expression expansion budget exhausted");
     accepted_tuple(
-        "typealias Pair<T> = Tuple<T,T>; typealias Four<T> = Pair<Pair<T>>; fn keep(value: Four<true'type>) -> Tuple<Tuple<true'type,true'type>,Tuple<true'type,true'type>> { value }",
+        "typealias Pair<T> = Tuple<T,T>; typealias Four<T> = Pair<Pair<T>>; fn keep(value: Four<bool>) -> Tuple<Tuple<bool,bool>,Tuple<bool,bool>> { value }",
     );
 }
 
 #[test]
 fn residual_aliases_preserve_bounds_and_reject_computation_cycles() {
     accepted(
-        "typealias Type = .Type'builtin; trait Marker {} impl Marker for true'type {} comptime fn IdentityType(value: Type) -> Type { value } typealias Checked<T :- Marker> = IdentityType(T); typealias Wrapped<T :- Marker> = Checked<T>; fn keep(value: Wrapped<true'type>) -> true'type { value }",
+        "typealias Type = .Type'builtin; trait Marker {} impl Marker for bool {} comptime fn IdentityType(value: Type) -> Type { value } typealias Checked<T :- Marker> = IdentityType(T); typealias Wrapped<T :- Marker> = Checked<T>; fn keep(value: Wrapped<bool>) -> bool { value }",
     );
     rejected(
         "typealias Type = .Type'builtin; trait Marker {} comptime fn IdentityType(value: Type) -> Type { value } typealias Checked<T :- Marker> = IdentityType(T); typealias Wrapped<T> = Checked<T>;",
@@ -4047,7 +4029,7 @@ fn computed_tuple_type_fields_reject_values_and_runtime_calls() {
         "type mismatch",
     );
     rejected_tuple(
-        "typealias Type = .Type'builtin; fn RuntimeType() -> Type { true'type } comptime fn PairType() -> Type { Tuple<RuntimeType(), true'type> } typealias Pair = PairType();",
+        "typealias Type = .Type'builtin; fn RuntimeType() -> Type { bool } comptime fn PairType() -> Type { Tuple<RuntimeType(), bool> } typealias Pair = PairType();",
         "runtime",
     );
 }
@@ -4059,15 +4041,15 @@ fn computed_function_type_fields_preserve_type_and_phase_rejections() {
         "type mismatch",
     );
     rejected(
-        "typealias Type = .Type'builtin; fn RuntimeType() -> Type { true'type } comptime fn Bad() -> Type { (fn(RuntimeType()) -> true'type) } typealias Callback = Bad();",
+        "typealias Type = .Type'builtin; fn RuntimeType() -> Type { bool } comptime fn Bad() -> Type { (fn(RuntimeType()) -> bool) } typealias Callback = Bad();",
         "runtime",
     );
     rejected(
-        "typealias Type = .Type'builtin; fn RuntimeType() -> Type { true'type } comptime fn Bad() -> Type { (fn(true'type) -> RuntimeType()) } typealias Callback = Bad();",
+        "typealias Type = .Type'builtin; fn RuntimeType() -> Type { bool } comptime fn Bad() -> Type { (fn(bool) -> RuntimeType()) } typealias Callback = Bad();",
         "runtime",
     );
     rejected(
-        "typealias Type = .Type'builtin; typealias Bool = true'type; comptime fn CallbackType(value: Type) -> Type { (comptime fn(value) -> value) } typealias Callback = CallbackType(Bool); fn bad(callback: Callback) -> Bool { callback(true) }",
+        "typealias Type = .Type'builtin; typealias Bool = bool; comptime fn CallbackType(value: Type) -> Type { (comptime fn(value) -> value) } typealias Callback = CallbackType(Bool); fn bad(callback: Callback) -> Bool { callback(true) }",
         "comptime",
     );
 }
@@ -4076,12 +4058,12 @@ fn computed_function_type_fields_preserve_type_and_phase_rejections() {
 fn computed_environment_types_keep_phase_and_context_restrictions() {
     for result in [
         "%{saved: RuntimeType()} fn()",
-        "%{saved: true'type} RuntimeType()",
+        "%{saved: bool} RuntimeType()",
         "*RuntimeType()",
     ] {
         rejected(
             &format!(
-                "typealias Type = .Type'builtin; fn RuntimeType() -> Type {{ true'type }} comptime fn Bad() -> Type {{ {result} }} typealias Invalid = Bad();"
+                "typealias Type = .Type'builtin; fn RuntimeType() -> Type {{ bool }} comptime fn Bad() -> Type {{ {result} }} typealias Invalid = Bad();"
             ),
             "runtime",
         );
@@ -4095,18 +4077,18 @@ fn computed_environment_types_keep_phase_and_context_restrictions() {
         "provenance",
     );
     rejected(
-        "typealias Type = .Type'builtin; comptime fn Wrap(value: Type) -> Type { %{saved: true'type} value } typealias Bad = Wrap(true'type);",
+        "typealias Type = .Type'builtin; comptime fn Wrap(value: Type) -> Type { %{saved: bool} value } typealias Bad = Wrap(bool);",
         "required comptime evaluation failed",
     );
     rejected(
-        "typealias Type = .Type'builtin; comptime fn Wrap(value: Type) -> Type { %{saved: true'type} value } typealias Once = %{saved: true'type} fn(); typealias Bad = Wrap(Once);",
+        "typealias Type = .Type'builtin; comptime fn Wrap(value: Type) -> Type { %{saved: bool} value } typealias Once = %{saved: bool} fn(); typealias Bad = Wrap(Once);",
         "required comptime evaluation failed",
     );
 }
 
 #[test]
 fn computed_nominal_arguments_do_not_escape_formation_contracts() {
-    let header = "typealias Type = .Type'builtin; typealias Bool = true'type;";
+    let header = "typealias Type = .Type'builtin; typealias Bool = bool;";
     let declaration = "struct Checked where T, requires T == Bool { value: T }";
     let factory = "comptime fn CheckedType(value: Type) -> Type { Checked<value> }";
     for source in [
@@ -4127,7 +4109,7 @@ fn computed_nominal_arguments_do_not_escape_formation_contracts() {
         "TypeContractUnresolved",
     );
     rejected(
-        "typealias Type = .Type'builtin; struct Box where T { value: T } fn RuntimeType() -> Type { true'type } comptime fn Bad() -> Type { Box<RuntimeType()> } typealias Invalid = Bad();",
+        "typealias Type = .Type'builtin; struct Box where T { value: T } fn RuntimeType() -> Type { bool } comptime fn Bad() -> Type { Box<RuntimeType()> } typealias Invalid = Bad();",
         "runtime",
     );
 }
@@ -4142,7 +4124,7 @@ fn dynamic_alias_arguments_keep_bounds_and_phase_checks() {
         "TypeContractUnresolved",
     );
     rejected_tuple(
-        "typealias Type = .Type'builtin; typealias Pair<T> = Tuple<T,T>; fn RuntimeType() -> Type { true'type } comptime fn Bad() -> Type { Pair<RuntimeType()> } typealias Invalid = Bad();",
+        "typealias Type = .Type'builtin; typealias Pair<T> = Tuple<T,T>; fn RuntimeType() -> Type { bool } comptime fn Bad() -> Type { Pair<RuntimeType()> } typealias Invalid = Bad();",
         "runtime",
     );
     rejected_tuple(
@@ -4170,11 +4152,11 @@ fn dynamic_alias_expression_expansion_has_a_work_limit() {
 #[test]
 fn type_value_equality_rejects_value_operands_and_opaque_required_decisions() {
     rejected(
-        "comptime fn bad() -> true'type { true'type == true }",
+        "comptime fn bad() -> bool { bool == true }",
         "type mismatch",
     );
     rejected(
-        "typealias Type = .Type'builtin; typealias Bool = true'type; pure comptime fn Opaque<T> -> Type { T } comptime fn Choose() -> Type { if Opaque<Bool> == Bool { Bool } else { 'z''type } } typealias Result = Choose();",
+        "typealias Type = .Type'builtin; typealias Bool = bool; pure comptime fn Opaque<T> -> Type { T } comptime fn Choose() -> Type { if Opaque<Bool> == Bool { Bool } else { 'z''type } } typealias Result = Choose();",
         "TypeContractUnresolved",
     );
 }
@@ -4182,19 +4164,19 @@ fn type_value_equality_rejects_value_operands_and_opaque_required_decisions() {
 #[test]
 fn type_reference_patterns_require_outer_bindings_type_operands_and_fallbacks() {
     rejected(
-        "typealias Type = .Type'builtin; comptime fn bad(value: Type) -> true'type { value match { 'Missing => true, _ => false } }",
+        "typealias Type = .Type'builtin; comptime fn bad(value: Type) -> bool { value match { 'Missing => true, _ => false } }",
         "Unresolved identifier",
     );
     rejected(
-        "typealias Type = .Type'builtin; typealias Bool = true'type; comptime fn bad(value: Type) -> Bool { value match { 'Bool => true } }",
+        "typealias Type = .Type'builtin; typealias Bool = bool; comptime fn bad(value: Type) -> Bool { value match { 'Bool => true } }",
         "non-exhaustive match",
     );
     rejected(
-        "typealias Type = .Type'builtin; comptime fn bad(value: Type) -> true'type { value match { < true > => true, _ => false } }",
+        "typealias Type = .Type'builtin; comptime fn bad(value: Type) -> bool { value match { < true > => true, _ => false } }",
         "type mismatch",
     );
     rejected(
-        "typealias Type = .Type'builtin; comptime fn bad(value: Type) -> true'type { value match { 'value => true, _ => Missing } }",
+        "typealias Type = .Type'builtin; comptime fn bad(value: Type) -> bool { value match { 'value => true, _ => Missing } }",
         "Unresolved identifier",
     );
 }
@@ -4255,7 +4237,7 @@ fn normal_form_patterns_reject_wrong_heads_arguments_and_missing_coverage() {
 
 #[test]
 fn normal_form_dependent_pattern_types_are_checked_per_candidate() {
-    let prefix = "typealias Type = .Type'builtin; typealias Bool = true'type; typealias Int = .Integer'builtin; pure comptime fn Box<T, value: T> -> Type { T } ";
+    let prefix = "typealias Type = .Type'builtin; typealias Bool = bool; typealias Int = .Integer'builtin; pure comptime fn Box<T, value: T> -> Type { T } ";
     rejected(
         &format!(
             "{prefix}comptime fn Bad(value: Type) -> Bool {{ value match {{ Box<(_ if Bool == Bool), item> => item, _ => false }} }}"
@@ -4285,19 +4267,19 @@ fn normal_form_dependent_pattern_types_are_checked_per_candidate() {
 #[test]
 fn computed_value_patterns_require_compatible_equality_and_coverage() {
     rejected_tuple(
-        "comptime fn bad(x: true'type, expected: .Integer'builtin) -> true'type { x match { 'expected => true, _ => false } }",
+        "comptime fn bad(x: bool, expected: .Integer'builtin) -> bool { x match { 'expected => true, _ => false } }",
         "type mismatch",
     );
     rejected_tuple(
-        "comptime fn bad(x: true'type, expected: true'type) -> true'type { x match { 'expected => true } }",
+        "comptime fn bad(x: bool, expected: bool) -> bool { x match { 'expected => true } }",
         "non-exhaustive match",
     );
     rejected_tuple(
-        "comptime fn bad(x: Tuple<true'type,true'type>, expected: Tuple<true'type,true'type>) -> true'type { x match { 'expected => true, _ => false } }",
+        "comptime fn bad(x: Tuple<bool,bool>, expected: Tuple<bool,bool>) -> bool { x match { 'expected => true, _ => false } }",
         "equality protocol for this type is not implemented",
     );
     rejected_tuple(
-        "comptime fn bad(x: .u8'builtin, y: .u16'builtin) -> true'type { x == y }",
+        "comptime fn bad(x: .u8'builtin, y: .u16'builtin) -> bool { x == y }",
         "type mismatch",
     );
 }
@@ -4305,26 +4287,26 @@ fn computed_value_patterns_require_compatible_equality_and_coverage() {
 #[test]
 fn range_patterns_check_endpoint_types_and_do_not_assume_coverage() {
     rejected(
-        "comptime fn bad(x: .u8'builtin) -> true'type { x match { 0..=256 => true, _ => false } }",
+        "comptime fn bad(x: .u8'builtin) -> bool { x match { 0..=256 => true, _ => false } }",
         "integer does not fit",
     );
     rejected(
-        "comptime fn bad(x: .Integer'builtin) -> true'type { x match { 0..10 => true } }",
+        "comptime fn bad(x: .Integer'builtin) -> bool { x match { 0..10 => true } }",
         "non-exhaustive match",
     );
     rejected(
-        "comptime fn bad(x: .Integer'builtin) -> true'type { x match { 'a'..='z' => true, _ => false } }",
+        "comptime fn bad(x: .Integer'builtin) -> bool { x match { 'a'..='z' => true, _ => false } }",
         "type mismatch",
     );
     rejected(
-        "comptime fn bad(x: true'type) -> true'type { x match { false..=true => true, _ => false } }",
+        "comptime fn bad(x: bool) -> bool { x match { false..=true => true, _ => false } }",
         "range pattern ordering protocol",
     );
 }
 
 #[test]
 fn interval_coverage_rejects_gaps_dynamic_bounds_and_uncorrelated_products() {
-    let prefix = "typealias Byte = .u8'builtin; typealias Bool = true'type; ";
+    let prefix = "typealias Byte = .u8'builtin; typealias Bool = bool; ";
     for body in [
         "comptime fn bad(x: Byte) -> Bool { x match { 0..127 => true, 128..=255 => false } }",
         "comptime fn bad(x: Byte) -> Bool { x match { 0..128 => true, 128..255 => false } }",
@@ -4339,23 +4321,23 @@ fn interval_coverage_rejects_gaps_dynamic_bounds_and_uncorrelated_products() {
 #[test]
 fn scalar_ordering_rejects_mixed_types_and_unsupported_protocols() {
     for source in [
-        "comptime fn bad(a: .u8'builtin, b: .u16'builtin) -> true'type { a < b }",
-        "comptime fn bad(a: .i8'builtin, b: .u8'builtin) -> true'type { a >= b }",
+        "comptime fn bad(a: .u8'builtin, b: .u16'builtin) -> bool { a < b }",
+        "comptime fn bad(a: .i8'builtin, b: .u8'builtin) -> bool { a >= b }",
     ] {
         rejected(source, "type mismatch");
     }
     rejected(
-        "comptime fn bad(a: .u8'builtin) -> true'type { 256 < a }",
+        "comptime fn bad(a: .u8'builtin) -> bool { 256 < a }",
         "integer does not fit",
     );
-    for source in ["comptime fn bad(a: true'type, b: true'type) -> true'type { a < b }"] {
+    for source in ["comptime fn bad(a: bool, b: bool) -> bool { a < b }"] {
         rejected(source, "ordering protocol for this type is not implemented");
     }
 }
 
 #[test]
 fn guard_coverage_does_not_invent_missing_points_or_execute_functions() {
-    let prefix = "typealias Int = .Integer'builtin; typealias Bool = true'type; ";
+    let prefix = "typealias Int = .Integer'builtin; typealias Bool = bool; ";
     for body in [
         "comptime fn bad(x: Int) -> Bool { x match { n if n < 0 => true, n if n > 0 => false } }",
         "comptime fn bad(x: Int) -> Bool { x match { n if n != n => true } }",
@@ -4370,17 +4352,17 @@ fn guard_coverage_does_not_invent_missing_points_or_execute_functions() {
 #[test]
 fn interface_methods_require_matching_execution_phases() {
     for source in [
-        "trait Read { comptime fn read(self) -> true'type; } struct S {} impl Read for S { fn read(self) -> true'type { true } }",
-        "trait Read { fn read(self) -> true'type; } struct S {} impl Read for S { comptime fn read(self) -> true'type { true } }",
+        "trait Read { comptime fn read(self) -> bool; } struct S {} impl Read for S { fn read(self) -> bool { true } }",
+        "trait Read { fn read(self) -> bool; } struct S {} impl Read for S { comptime fn read(self) -> bool { true } }",
     ] {
         rejected(source, "does not match its trait signature");
     }
     rejected(
-        "trait Read { fn read(self) -> true'type; } struct S {} impl Read for S { fn read(self) -> true'type { true } } comptime fn bad(value: S) -> true'type { value.as(Read).read() }",
+        "trait Read { fn read(self) -> bool; } struct S {} impl Read for S { fn read(self) -> bool { true } } comptime fn bad(value: S) -> bool { value.as(Read).read() }",
         "callable type is unavailable in this execution phase",
     );
     rejected(
-        "trait Read { comptime fn read(self) -> true'type; } struct S {} impl Read for S { comptime fn read(self) -> true'type { true } } fn bad(value: S) -> true'type { value.as(Read).read() }",
+        "trait Read { comptime fn read(self) -> bool; } struct S {} impl Read for S { comptime fn read(self) -> bool { true } } fn bad(value: S) -> bool { value.as(Read).read() }",
         "value-reference transport requires an explicit comptime receiver",
     );
 }
@@ -4388,14 +4370,14 @@ fn interface_methods_require_matching_execution_phases() {
 #[test]
 fn required_methods_wait_for_a_complete_world_and_preserve_phase_failures() {
     accepted(
-        "typealias Type = .Type'builtin; trait Shape { comptime fn Output(self) -> Type; } struct S {} impl Shape for S { comptime fn Output(self) -> Type { true'type } } comptime fn ChooseType() -> Type { S {}.as(Shape).Output() } typealias Early = ChooseType();",
+        "typealias Type = .Type'builtin; trait Shape { comptime fn Output(self) -> Type; } struct S {} impl Shape for S { comptime fn Output(self) -> Type { bool } } comptime fn ChooseType() -> Type { S {}.as(Shape).Output() } typealias Early = ChooseType();",
     );
     rejected(
-        "typealias Type = .Type'builtin; typealias Chosen = ChooseType(); trait Shape { comptime fn Output(self) -> Type; comptime fn consume(self, value: Chosen) -> true'type; } struct S {} impl Shape for S { comptime fn Output(self) -> Type { true'type } comptime fn consume(self, value: Chosen) -> true'type { true } } comptime fn ChooseType() -> Type { S {}.as(Shape).Output() }",
+        "typealias Type = .Type'builtin; typealias Chosen = ChooseType(); trait Shape { comptime fn Output(self) -> Type; comptime fn consume(self, value: Chosen) -> bool; } struct S {} impl Shape for S { comptime fn Output(self) -> Type { bool } comptime fn consume(self, value: Chosen) -> bool { true } } comptime fn ChooseType() -> Type { S {}.as(Shape).Output() }",
         "waiting for the trait implementation world",
     );
     rejected(
-        "typealias Int = .Integer'builtin; trait Size { fn size(self) -> .u8'builtin; } struct S {} impl Size for S { fn size(self) -> .u8'builtin { 8 } } comptime fn ChooseType() -> .Type'builtin { let source = S {}; if source.as(Size).size() == 0 { true'type } else { 'a''type } } fn bad() { let value: ChooseType() = 'a'; }",
+        "typealias Int = .Integer'builtin; trait Size { fn size(self) -> .u8'builtin; } struct S {} impl Size for S { fn size(self) -> .u8'builtin { 8 } } comptime fn ChooseType() -> .Type'builtin { let source = S {}; if source.as(Size).size() == 0 { bool } else { 'a''type } } fn bad() { let value: ChooseType() = 'a'; }",
         "callable type is unavailable in this execution phase",
     );
 }
@@ -4405,7 +4387,7 @@ fn required_default_projection_preserves_cycles_and_final_body_checks() {
     let source = include_str!("../../../development/examples/overridden-comptime-default.fl");
     rejected(
         &source.replace(
-            "impl Shape for Selector { comptime fn Output(self) -> Type { true'type } }",
+            "impl Shape for Selector { comptime fn Output(self) -> Type { bool } }",
             "impl Shape for Selector {}",
         ),
         "cyclic type alias",
@@ -4420,7 +4402,7 @@ fn required_default_projection_preserves_cycles_and_final_body_checks() {
 fn required_parameter_defaults_preserve_cycles_and_final_validation() {
     let source = include_str!("../../../development/examples/explicit-comptime-defaults.fl");
     rejected(
-        &source.replace("Choose(.kind = true'type)", "Choose()"),
+        &source.replace("Choose(.kind = bool)", "Choose()"),
         "cyclic type alias",
     );
     rejected(
@@ -4432,7 +4414,7 @@ fn required_parameter_defaults_preserve_cycles_and_final_validation() {
 #[test]
 fn parameter_default_queries_reject_real_cycles_and_invalid_remaining_defaults() {
     rejected(
-        "typealias Type = .Type'builtin; typealias Bool = true'type; typealias Cyclic = Choose(); comptime fn Choose(.first: Type = Choose(.first = Bool), .second: Type = Choose(.second = Bool)) -> Type { first }",
+        "typealias Type = .Type'builtin; typealias Bool = bool; typealias Cyclic = Choose(); comptime fn Choose(.first: Type = Choose(.first = Bool), .second: Type = Choose(.second = Bool)) -> Type { first }",
         "cyclic or excessively deep function default dependency",
     );
     let source = include_str!("../../../development/examples/parameter-default-queries.fl");
@@ -4445,14 +4427,14 @@ fn parameter_default_queries_reject_real_cycles_and_invalid_remaining_defaults()
 #[test]
 fn float_comparisons_require_matching_precision_and_keep_coverage_conservative() {
     for source in [
-        "comptime fn bad(a: .f32'builtin, b: .f64'builtin) -> true'type { a < b }",
-        "comptime fn bad(a: .f32'builtin, b: .f64'builtin) -> true'type { a == b }",
-        "comptime fn bad(a: .f32'builtin, b: .u32'builtin) -> true'type { a >= b }",
+        "comptime fn bad(a: .f32'builtin, b: .f64'builtin) -> bool { a < b }",
+        "comptime fn bad(a: .f32'builtin, b: .f64'builtin) -> bool { a == b }",
+        "comptime fn bad(a: .f32'builtin, b: .u32'builtin) -> bool { a >= b }",
     ] {
         rejected(source, "type mismatch");
     }
     rejected(
-        "comptime fn bad(a: .f32'builtin, b: .f32'builtin) -> true'type { a match { 'b => true } }",
+        "comptime fn bad(a: .f32'builtin, b: .f32'builtin) -> bool { a match { 'b => true } }",
         "exhaustive",
     );
 }
@@ -4462,8 +4444,8 @@ fn float_arithmetic_rejects_mixed_precision_and_non_numeric_operands() {
     for source in [
         "fn bad(a: .f32'builtin, b: .f64'builtin) -> .f32'builtin { a + b }",
         "comptime fn bad(a: .f32'builtin, b: .f64'builtin) -> .f32'builtin { a / b }",
-        "fn bad(a: .f32'builtin, b: true'type) -> .f32'builtin { a * b }",
-        "fn bad(a: true'type) -> .f32'builtin { -a }",
+        "fn bad(a: .f32'builtin, b: bool) -> .f32'builtin { a * b }",
+        "fn bad(a: bool) -> .f32'builtin { -a }",
     ] {
         rejected(source, "type mismatch");
     }
@@ -4476,9 +4458,9 @@ fn float_arithmetic_rejects_mixed_precision_and_non_numeric_operands() {
 #[test]
 fn numeric_peer_context_does_not_coerce_fixed_operand_types() {
     for source in [
-        "comptime fn fixed() -> .f64'builtin { 1.0 } comptime fn bad(value: .f32'builtin) -> true'type { fixed() == value }",
+        "comptime fn fixed() -> .f64'builtin { 1.0 } comptime fn bad(value: .f32'builtin) -> bool { fixed() == value }",
         "comptime fn bad(a: .f64'builtin, b: .f32'builtin) -> .f32'builtin { (a + 1.0) + b }",
-        "comptime fn bad(value: .f32'builtin) -> true'type { let fixed: .f64'builtin = 1.0; fixed < value }",
+        "comptime fn bad(value: .f32'builtin) -> bool { let fixed: .f64'builtin = 1.0; fixed < value }",
     ] {
         rejected(source, "type mismatch");
     }
@@ -4518,7 +4500,7 @@ fn program_assumes_rejects_non_boolean_unchecked_calls_and_type_propositions() {
         "integer runtime proxy requires a supported fixed-width integer target",
     );
     for source in [
-        "fn condition() -> true'type { true } fn bad() { assumes condition(); }",
+        "fn condition() -> bool { true } fn bad() { assumes condition(); }",
         "fn bad() { var flag = true; assumes do { flag = false; true }; }",
         "fn bad() { assumes do { assumes true; true }; }",
         "fn bad() { assumes .i32'builtin == .u32'builtin; }",
@@ -4533,7 +4515,7 @@ fn program_assumes_rejects_non_boolean_unchecked_calls_and_type_propositions() {
 #[test]
 fn program_assumes_failure_aborts_required_type_invocation() {
     rejected(
-        "comptime fn Select() -> .Type'builtin { assumes false; true'type } typealias Chosen = Select();",
+        "comptime fn Select() -> .Type'builtin { assumes false; bool } typealias Chosen = Select();",
         "ProgramContractRejected",
     );
 }
@@ -4544,12 +4526,12 @@ fn checked_machine_arithmetic_requires_proof_before_each_operation() {
         "fn bad(value: .u8'builtin) -> .u8'builtin { value + 1 }",
         "fn bad(value: .u8'builtin) -> .u8'builtin { let result = value + 1; assumes value < 255; result }",
         "fn bad(value: .u8'builtin) -> .u8'builtin { var x = value; assumes x < 255; x = 255; x + 1 }",
-        "fn bad(value: .u8'builtin, flag: true'type) -> .u8'builtin { if flag { assumes value < 255; } value + 1 }",
-        "fn bad(flag: true'type) { var x: .u8'builtin = 0; while flag { x = x + 1; } }",
+        "fn bad(value: .u8'builtin, flag: bool) -> .u8'builtin { if flag { assumes value < 255; } value + 1 }",
+        "fn bad(flag: bool) { var x: .u8'builtin = 0; while flag { x = x + 1; } }",
         "comptime fn bad() -> .u8'builtin { (250 + 10) - 10 }",
         "fn bad(value: .i8'builtin) -> .i8'builtin { -value }",
         "fn bad(value: .u8'builtin) -> .u8'builtin { assumes value + 1 < 255; value }",
-        "comptime fn Select() -> .Type'builtin { let x: .u8'builtin = 255 + 1; true'type } typealias Chosen = Select();",
+        "comptime fn Select() -> .Type'builtin { let x: .u8'builtin = 255 + 1; bool } typealias Chosen = Select();",
         "fn unused(.value: .u8'builtin = 255 + 1) {}",
     ] {
         rejected(source, "machine arithmetic range is not proven");
@@ -4601,7 +4583,7 @@ fn checked_machine_tuples_do_not_alias_source_variables_or_ignore_bad_branches()
     for source in [
         "fn bad() { var x: .u8'builtin = 255; let pair: Tuple<.u8'builtin,.u8'builtin> = (x, 1); x = 0; let callback = || { x; let (a, b) = pair; a + b }; }",
         "fn bad() -> .u8'builtin { var x: .u8'builtin = 255; let pair: Tuple<.u8'builtin,.u8'builtin> = (x, 1); x = 0; let (a, b) = pair; a + b }",
-        "fn bad(flag: true'type) -> .u8'builtin { let pair: Tuple<.u8'builtin,.u8'builtin> = if flag { (255, 1) } else { (0, 0) }; let (a, b) = pair; a + b }",
+        "fn bad(flag: bool) -> .u8'builtin { let pair: Tuple<.u8'builtin,.u8'builtin> = if flag { (255, 1) } else { (0, 0) }; let (a, b) = pair; a + b }",
         "fn bad(pair: Tuple<.u8'builtin,.u8'builtin>) -> .u8'builtin { let (a, b) = pair; a + b }",
         "fn bad() { let pair: Tuple<.u8'builtin,.u8'builtin> = (255, 1); let callback = || { let (a, b) = pair; a + b }; }",
     ] {
@@ -4614,7 +4596,7 @@ fn checked_machine_nominals_forget_stale_fields_and_do_not_confuse_enum_payloads
     for source in [
         "struct Box { value: .u8'builtin } fn bad() -> .u8'builtin { var box = Box { value: 4 }; box.value = 255; box.value + 1 }",
         "struct Box { value: .u8'builtin } fn bad(box: Box) -> .u8'builtin { box.value + 1 }",
-        "enum E { small(.u8'builtin), large(.u8'builtin) } fn bad(flag: true'type) -> .u8'builtin { let value = if flag { E.small(4) } else { E.large(255) }; value match { .small(n) => n + 1, .large(n) => n + 1 } }",
+        "enum E { small(.u8'builtin), large(.u8'builtin) } fn bad(flag: bool) -> .u8'builtin { let value = if flag { E.small(4) } else { E.large(255) }; value match { .small(n) => n + 1, .large(n) => n + 1 } }",
         "enum E { none, byte(.u8'builtin) } fn bad() -> .u8'builtin { let value = E.byte(255); value match { .none => 0, .byte(n) => n + 1 } }",
     ] {
         rejected(source, "machine arithmetic range is not proven");
@@ -4652,7 +4634,7 @@ fn checked_field_predicates_expire_on_overlapping_writes_and_calls() {
     ] {
         rejected(
             &format!(
-                "typealias Byte = .u8'builtin; struct Pair {{ left: Byte, right: Byte }} struct Outer {{ inner: Pair, tail: Byte }} fn unknown() {{}} fn bad(pair: Pair, flag: true'type) -> Byte {{ {body} }}"
+                "typealias Byte = .u8'builtin; struct Pair {{ left: Byte, right: Byte }} struct Outer {{ inner: Pair, tail: Byte }} fn unknown() {{}} fn bad(pair: Pair, flag: bool) -> Byte {{ {body} }}"
             ),
             "machine arithmetic range is not proven",
         );
@@ -4679,7 +4661,7 @@ fn checked_relational_arithmetic_rejects_stale_partial_and_retroactive_proofs() 
     ] {
         rejected(
             &format!(
-                "typealias Byte = .u8'builtin; struct Pair {{ start:Byte,end:Byte }} fn unknown() {{}} fn bad(start: Byte,end:Byte,flag:true'type) -> Byte {{ {body} }}"
+                "typealias Byte = .u8'builtin; struct Pair {{ start:Byte,end:Byte }} fn unknown() {{}} fn bad(start: Byte,end:Byte,flag:bool) -> Byte {{ {body} }}"
             ),
             "machine arithmetic range is not proven",
         );
@@ -4696,7 +4678,7 @@ fn checked_transitive_arithmetic_rejects_missing_and_invalidated_links() {
     ] {
         rejected(
             &format!(
-                "typealias Byte=.u8'builtin; struct Triple {{ first:Byte,middle:Byte,last:Byte }} fn unknown() {{}} fn bad(a:Byte,b:Byte,c:Byte,flag:true'type) -> Byte {{ {body} }}"
+                "typealias Byte=.u8'builtin; struct Triple {{ first:Byte,middle:Byte,last:Byte }} fn unknown() {{}} fn bad(a:Byte,b:Byte,c:Byte,flag:bool) -> Byte {{ {body} }}"
             ),
             "machine arithmetic range is not proven",
         );
@@ -4751,7 +4733,7 @@ fn checked_aggregate_joins_do_not_import_one_branch_or_wrong_variant_payloads() 
     ] {
         rejected_tuple(
             &format!(
-                "typealias Byte = .u8'builtin; struct Pair {{ start:Byte,end:Byte }} enum Choice {{ empty,pair(Byte,Byte),tuple(Tuple<Byte,Byte>) }} fn bad(a:Byte,b:Byte,flag:true'type) -> Byte {{ {body} }}"
+                "typealias Byte = .u8'builtin; struct Pair {{ start:Byte,end:Byte }} enum Choice {{ empty,pair(Byte,Byte),tuple(Tuple<Byte,Byte>) }} fn bad(a:Byte,b:Byte,flag:bool) -> Byte {{ {body} }}"
             ),
             "machine arithmetic range is not proven",
         );
@@ -4803,19 +4785,19 @@ fn program_preconditions_reject_unproved_calls_and_contract_erasure() {
         "machine arithmetic range is not proven",
     );
     rejected(
-        "fn enabled(flag:true'type) where requires flag {} fn bad(flag:true'type) { enabled(flag); }",
+        "fn enabled(flag:bool) where requires flag {} fn bad(flag:bool) { enabled(flag); }",
         "program precondition is not proven",
     );
     rejected(
-        "fn enabled(flag:true'type) where requires flag {} fn bad() { enabled(false); }",
+        "fn enabled(flag:bool) where requires flag {} fn bad() { enabled(false); }",
         "program precondition is not proven",
     );
     rejected(
-        "comptime fn Selected(flag:true'type) -> .Type'builtin where requires flag { true'type } typealias Bad=Selected(false);",
+        "comptime fn Selected(flag:bool) -> .Type'builtin where requires flag { bool } typealias Bad=Selected(false);",
         "program precondition is not proven",
     );
     rejected(
-        "fn mixed(value:T,flag:true'type) -> T where T, requires T == true'type, requires flag { value } fn bad() { mixed('x',true); }",
+        "fn mixed(value:T,flag:bool) -> T where T, requires T == bool, requires flag { value } fn bad() { mixed('x',true); }",
         "type requirement is not satisfied",
     );
 }
@@ -4829,7 +4811,7 @@ fn program_postconditions_reject_bad_exits_and_result_scope_leaks() {
     ] {
         rejected(
             &format!(
-                "typealias Byte=.u8'builtin; fn bad(flag:true'type) -> result:Byte where ensures result < 100 {{ {body} }}"
+                "typealias Byte=.u8'builtin; fn bad(flag:bool) -> result:Byte where ensures result < 100 {{ {body} }}"
             ),
             "program postcondition is not proven",
         );
@@ -4949,15 +4931,15 @@ fn trait_program_contracts_reject_strengthening_and_broken_guarantees() {
 #[test]
 fn pointer_operations_reject_unsupported_accesses() {
     rejected(
-        "fn run() -> true'type { true.* }",
+        "fn run() -> bool { true.* }",
         "dereference requires a pointer",
     );
-    rejected("fn run() -> *true'type { true.ref }", "address");
+    rejected("fn run() -> *bool { true.ref }", "address");
     // Formation preserves the operation; resource preparation separately
     // requires whole-value Copy and valid pointer provenance.
     accepted("struct Cell { value:*bool } fn run(p:*Cell)->Cell {p.*}");
     accepted("struct Cell { value:*bool } fn run(p:*Cell,value:Cell) {p.* = value;}");
-    accepted("comptime fn run() -> true'type { let value = true; value.ref.* }");
+    accepted("comptime fn run() -> bool { let value = true; value.ref.* }");
 }
 
 #[test]
@@ -4979,13 +4961,13 @@ fn nested_nominal_methods_share_inherent_coherence_and_parent_contracts() {
         "inherent implementation overlap",
     );
     accepted(
-        "struct Box where T { fn first() {} } impl Box<U> where U { fn second() {} } fn run() { Box<true'type>.first(); Box<true'type>.second(); }",
+        "struct Box where T { fn first() {} } impl Box<U> where U { fn second() {} } fn run() { Box<bool>.first(); Box<bool>.second(); }",
     );
     accepted(
-        "struct Box where T, requires T == true'type { value: T, fn read(self) -> true'type { self.value } } fn run() -> true'type { Box<true'type>.read(Box<true'type> { value: true }) }",
+        "struct Box where T, requires T == bool { value: T, fn read(self) -> bool { self.value } } fn run() -> bool { Box<bool>.read(Box<bool> { value: true }) }",
     );
     rejected(
-        "struct Box where T, requires T == true'type { fn read() {} } fn run() { Box<'x''type>.read(); }",
+        "struct Box where T, requires T == bool { fn read() {} } fn run() { Box<'x''type>.read(); }",
         "type requirement is not satisfied",
     );
 }
@@ -5020,7 +5002,7 @@ fn dereferenced_field_places_reject_invalid_and_owned_deliveries() {
         "by-value pointer receiver requires memory transfer contracts",
     );
     accepted(
-        "struct Cell { value: true'type, } comptime fn run() -> true'type { let cell = Cell { value: true }; cell.ref.*.value }",
+        "struct Cell { value: bool, } comptime fn run() -> bool { let cell = Cell { value: true }; cell.ref.*.value }",
     );
 }
 

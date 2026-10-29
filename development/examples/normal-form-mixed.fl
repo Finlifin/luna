@@ -1,6 +1,6 @@
 typealias Type = .Type'builtin;
 typealias Int = .Integer'builtin;
-typealias Flag = true'type;
+typealias Flag = bool;
 pure comptime fn Select<flag: Flag> -> Type {
     if flag { .u8'builtin } else { .u16'builtin }
 }

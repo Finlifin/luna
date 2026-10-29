@@ -3,7 +3,7 @@ pure comptime fn TupleElements<T> -> .Type'builtin { T }
 pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
 typealias Int = .Integer'builtin;
-typealias Flag = true'type;
+typealias Flag = bool;
 pure comptime fn Config<value: Tuple<Int, Flag>> -> Type { .u8'builtin }
 pure comptime fn Tagged<T: Type, value: T> -> Type { T }
 pure comptime fn Dependent<T: Type, value: Tuple<T, Flag>> -> Type { T }

@@ -1,7 +1,7 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
 pure comptime fn TupleElements<T> -> .Type'builtin {T}
 pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
-typealias Flag = true'type;
+typealias Flag = bool;
 typealias Unary = fn(Flag) -> Flag;
 typealias Captured = (do { let flag = true; || flag })'type;
 

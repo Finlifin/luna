@@ -2,7 +2,6 @@
 pure comptime fn TupleElements<T> -> .Type'builtin {T}
 pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Type = .Type'builtin;
-typealias Bool = true'type;
 typealias Chosen = Select(Selector {});
 const StoredType = Select(Selector {});
 struct Holder { value: Chosen }
@@ -14,11 +13,11 @@ fn pair() -> Pair { (true, false) }
 fn character() -> Character { let .value(value) = Choice.value('z'); value }
 trait Shape {
     comptime fn Output(self) -> Type;
-    comptime fn Pair(self) -> Type { Tuple<self.Output(), Bool> }
+    comptime fn Pair(self) -> Type { Tuple<self.Output(), bool> }
 }
 struct Box where T { value: T }
 impl Shape for Box<T> where T { comptime fn Output(self) -> Type { T } }
 struct Selector {}
-impl Shape for Selector { comptime fn Output(self) -> Type { Bool } }
+impl Shape for Selector { comptime fn Output(self) -> Type { bool } }
 comptime fn Select(value: T) -> Type where T :- Shape { value.Output() }
-fn run() -> Bool { preserve(Holder { value: true }.value) }
+fn run() -> bool { preserve(Holder { value: true }.value) }

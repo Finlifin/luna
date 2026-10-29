@@ -1,4 +1,4 @@
-typealias Flag = true'type;
+typealias Flag = bool;
 
 trait Read {
     fn read(self) -> Flag;

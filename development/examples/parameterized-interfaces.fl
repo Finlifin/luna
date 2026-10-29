@@ -21,7 +21,7 @@ fn forward(value: U, item: T) -> T where T, U :- Child<T> {
     value.indirect(item)
 }
 
-fn flag() -> true'type {
+fn flag() -> bool {
     forward(Identity {}, true)
 }
 

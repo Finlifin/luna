@@ -2,7 +2,6 @@
 pure comptime fn TupleElements<T> -> .Type'builtin { T }
 pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
-typealias Bool = true'type;
 typealias Char = 'a''type;
 
 comptime fn IdentityType(value: Type) -> Type { value }
@@ -15,8 +14,8 @@ typealias Pair<T> = Tuple<Computed<T>, Computed<T>>;
 typealias Nested<T> = Tuple<Pair<T>, Computed<T>>;
 typealias FromFunction<T> = PairType(T, Char);
 
-fn first(value: Nested<Bool>) -> Tuple<Tuple<Bool, Bool>, Bool> { value }
-fn second(value: FromFunction<Bool>) -> Tuple<Bool, Tuple<Char, Bool>> { value }
-fn run() -> Tuple<Tuple<Tuple<Bool, Bool>, Bool>, Tuple<Bool, Tuple<Char, Bool>>> {
+fn first(value: Nested<bool>) -> Tuple<Tuple<bool, bool>, bool> { value }
+fn second(value: FromFunction<bool>) -> Tuple<bool, Tuple<Char, bool>> { value }
+fn run() -> Tuple<Tuple<Tuple<bool, bool>, bool>, Tuple<bool, Tuple<Char, bool>>> {
     (first(((true, false), true)), second((false, ('z', true))))
 }

@@ -20,7 +20,7 @@ comptime fn square(value: Int) -> Int { value * value }
 comptime fn sign(value: Int) -> Int {
     if value < 0 { -1 } else if value == 0 { 0 } else { 1 }
 }
-comptime fn compare(a: Int, b: Int) -> Tuple<true'type, true'type, true'type, true'type, true'type, true'type> {
+comptime fn compare(a: Int, b: Int) -> Tuple<bool, bool, bool, bool, bool, bool> {
     (a == b, a != b, a < b, a <= b, a > b, a >= b)
 }
 comptime fn classify(value: Int) -> Int {
@@ -38,4 +38,4 @@ comptime fn inferred() -> Int {
     let base = 0x100000000000000000000000000000000;
     base * base
 }
-comptime fn literal_first(value: Int) -> true'type { 0 == value }
+comptime fn literal_first(value: Int) -> bool { 0 == value }

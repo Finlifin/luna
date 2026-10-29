@@ -1,4 +1,4 @@
-typealias Flag = true'type;
+typealias Flag = bool;
 typealias Int = .Integer'builtin;
 struct Box where T { value: T, ready: Flag = true }
 enum Entry where T { empty, value(T), tagged { value: T, ready: Flag = true } }

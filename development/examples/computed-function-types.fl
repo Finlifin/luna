@@ -1,5 +1,4 @@
 typealias Type = .Type'builtin;
-typealias Bool = true'type;
 typealias Int = .Integer'builtin;
 comptime fn IdentityType(value: Type) -> Type { value }
 comptime fn MapperType(input: Type, output: Type) -> Type { (fn(input) -> output) }
@@ -9,9 +8,9 @@ comptime fn ComptimeMapperType(input: Type, output: Type) -> Type {
 typealias Mapper<T> = fn(IdentityType(T)) -> IdentityType(T);
 typealias ComputedMapper<T> = MapperType(T, T);
 typealias ComputedComptimeMapper<T> = ComptimeMapperType(T, T);
-fn apply(callback: ComputedMapper<Bool>, value: Bool) -> Bool { callback(value) }
-fn run() -> Bool {
-    let callback: Mapper<Bool> = |value| not value;
+fn apply(callback: ComputedMapper<bool>, value: bool) -> bool { callback(value) }
+fn run() -> bool {
+    let callback: Mapper<bool> = |value| not value;
     apply(callback, false)
 }
 comptime fn run_comptime() -> Int {

@@ -1,9 +1,9 @@
 typealias Type = .Type'builtin;
 typealias Int = .Integer'builtin;
 pure comptime fn Bits<N: Int> -> Type { .BitVec'builtin<N> }
-pure comptime fn Select<B: true'type> -> Type { .u8'builtin }
+pure comptime fn Select<B: bool> -> Type { .u8'builtin }
 pure comptime fn Checked<T: Type, N: Int> -> Type where requires T == Bits<N> { T }
-pure comptime fn Flag<T: Type, B: true'type> -> Type where requires T == Select<B> { T }
+pure comptime fn Flag<T: Type, B: bool> -> Type where requires T == Select<B> { T }
 pure comptime fn Forward<N: Int> -> Type { Checked<Bits<N>, N> }
 pure comptime fn Independent<T: Type, N: Int> -> Type where requires T == .u8'builtin { T }
 comptime fn Observed() -> Type { Checked<Bits<8>, 8> }

@@ -1,6 +1,5 @@
 typealias Byte = .u8'builtin;
 typealias Signed = .i8'builtin;
-typealias Bool = true'type;
 struct Triple { first: Byte, middle: Byte, last: Byte }
 fn transitive(a: Byte, b: Byte, c: Byte) -> Byte {
     assumes a <= b and b <= c;
@@ -14,7 +13,7 @@ fn field_chain(value: Triple) -> Byte {
     assumes value.first <= value.middle and value.middle <= value.last;
     value.last - value.first
 }
-fn branches(a: Byte, b: Byte, c: Byte, d: Byte, flag: Bool) -> Byte {
+fn branches(a: Byte, b: Byte, c: Byte, d: Byte, flag: bool) -> Byte {
     if flag { assumes a <= b and b <= c; }
     else { assumes a <= d and d <= c; }
     c - a

@@ -1,4 +1,4 @@
-typealias Flag = true'type;
+typealias Flag = bool;
 
 enum Entry where T {
     empty,
@@ -13,7 +13,7 @@ fn build(value: T) -> Entry<T> where T {
 fn check(value: Entry<Flag>) -> Flag {
     value match {
         .empty => false,
-        Entry<true'type>.value(flag) => flag,
+        Entry<bool>.value(flag) => flag,
         .tagged { value: flag, ready } => flag and ready,
     }
 }

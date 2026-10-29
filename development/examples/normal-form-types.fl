@@ -12,6 +12,6 @@ comptime fn diverge() -> Type { diverge() }
 pure comptime fn NeverRun<T: Type> -> Type { diverge() }
 typealias Opaque = NeverRun<.u8'builtin>;
 fn keep_opaque(value: Opaque) -> Opaque { value }
-pure comptime fn Checked<T: Type> -> Type where requires T == true'type { T }
-typealias CheckedFlag = Checked<true'type>;
+pure comptime fn Checked<T: Type> -> Type where requires T == bool { T }
+typealias CheckedFlag = Checked<bool>;
 fn checked(value: CheckedFlag) -> CheckedFlag { value }

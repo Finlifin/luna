@@ -2,37 +2,36 @@
 pure comptime fn TupleElements<T> -> .Type'builtin {T}
 pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Type = .Type'builtin;
-typealias Bool = true'type;
 typealias Char = 'a''type;
 comptime fn SwapType(value: Type) -> Type {
     value match { (Left, Right) => Tuple<Right, Left>, _ => value }
 }
 comptime fn NestedType(value: Type) -> Type {
-    value match { ((First, Second), 'Bool) => Tuple<Second, First>, _ => value }
+    value match { ((First, Second), 'bool) => Tuple<Second, First>, _ => value }
 }
-comptime fn HasBool(value: Type) -> Bool {
-    value match { (_, 'Bool) or ('Bool, _) => true, _ => false }
+comptime fn HasBool(value: Type) -> bool {
+    value match { (_, 'bool) or ('bool, _) => true, _ => false }
 }
-comptime fn run() -> Tuple<Bool, Bool, Bool, Bool> {
-    (SwapType(Tuple<Bool, Char>) == Tuple<Char, Bool>,
-     SwapType(Bool) == Bool,
-     NestedType(Tuple<Tuple<Bool, Char>, Bool>) == Tuple<Char, Bool>,
-     HasBool(Tuple<Bool, Char>))
+comptime fn run() -> Tuple<bool, bool, bool, bool> {
+    (SwapType(Tuple<bool, Char>) == Tuple<Char, bool>,
+     SwapType(bool) == bool,
+     NestedType(Tuple<Tuple<bool, Char>, bool>) == Tuple<Char, bool>,
+     HasBool(Tuple<bool, Char>))
 }
-typealias Swapped = SwapType(Tuple<Bool, Char>);
-fn keep(value: Swapped) -> Tuple<Char, Bool> { value }
+typealias Swapped = SwapType(Tuple<bool, Char>);
+fn keep(value: Swapped) -> Tuple<Char, bool> { value }
 pure comptime fn Opaque<T> -> Type { Tuple<T, T> }
-comptime fn unresolved() -> Type { SwapType(Opaque<Bool>) }
+comptime fn unresolved() -> Type { SwapType(Opaque<bool>) }
 
 comptime fn Pick(value: Type) -> Type where T {
     value match { (Item, 'T) => Item, _ => T }
 }
-comptime fn specialized() -> Bool { Pick<Bool>(Tuple<Char, Bool>) == Char }
+comptime fn specialized() -> bool { Pick<bool>(Tuple<Char, bool>) == Char }
 comptime fn OtherType(value: Type) -> Type {
-    value match { (Item, 'Bool) or ('Bool, Item) => Item, _ => value }
+    value match { (Item, 'bool) or ('bool, Item) => Item, _ => value }
 }
-comptime fn boundaries() -> Tuple<Bool, Bool, Bool> {
-    (SwapType(Tuple<Bool, Char, Bool>) == Tuple<Bool, Char, Bool>,
-     OtherType(Tuple<Bool, Char>) == Char,
-     OtherType(Tuple<Char, Bool>) == Char)
+comptime fn boundaries() -> Tuple<bool, bool, bool> {
+    (SwapType(Tuple<bool, Char, bool>) == Tuple<bool, Char, bool>,
+     OtherType(Tuple<bool, Char>) == Char,
+     OtherType(Tuple<Char, bool>) == Char)
 }

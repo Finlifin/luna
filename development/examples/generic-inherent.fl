@@ -1,5 +1,5 @@
 -- Member names restrict the implementation domain before precision selection.
-typealias Flag = true'type;
+typealias Flag = bool;
 
 struct Box where T {
     value: T,

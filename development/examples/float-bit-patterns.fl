@@ -17,7 +17,7 @@ fn decode_double(value: Double) -> Tuple<Byte, .u16'builtin, .u64'builtin> {
     let 0b(sign: Sign) (exponent: Exponent64) (mantissa: Mantissa64) = value'bitvec;
     (sign.as(Byte), exponent.as(.u16'builtin), mantissa.as(.u64'builtin))
 }
-fn is_nan(value: Single) -> true'type {
+fn is_nan(value: Single) -> bool {
     value'bitvec match {
         0b(_: Sign) 11111111 (mantissa: Mantissa) if mantissa != 0 => true,
         _ => false,

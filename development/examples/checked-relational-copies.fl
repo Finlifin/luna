@@ -92,7 +92,7 @@ fn pattern_copy(pair: Pair) -> Byte {
     assumes pair.start <= pair.end;
     pair match { copy => copy.end - copy.start }
 }
-fn remapped_copy(pair: Pair, flag: true'type) -> Byte {
+fn remapped_copy(pair: Pair, flag: bool) -> Byte {
     assumes pair.start <= pair.end;
     pair match { ((copy if flag) or copy) => copy.end - copy.start }
 }
@@ -102,7 +102,7 @@ fn generic_copy(span: Span<Byte>) -> Byte {
     let copy = span;
     copy.end - copy.start
 }
-fn branch_copy(pair: Pair, flag: true'type) -> Byte {
+fn branch_copy(pair: Pair, flag: bool) -> Byte {
     assumes pair.start <= pair.end;
     var copy = Pair { start: 255, end: 0 };
     if flag { copy = pair; } else { copy = pair; }

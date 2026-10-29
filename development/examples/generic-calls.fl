@@ -8,7 +8,7 @@ fn apply(value: T, transform: fn(T) -> T) -> T where T {
     transform(value)
 }
 
-fn recur(value: T, again: true'type) -> T where T {
+fn recur(value: T, again: bool) -> T where T {
     if again {
         recur(value, false)
     } else {
@@ -17,27 +17,27 @@ fn recur(value: T, again: true'type) -> T where T {
     }
 }
 
-fn negate(value: true'type) -> true'type { not value }
+fn negate(value: bool) -> bool { not value }
 
-fn run() -> Tuple<true'type, 'x''type> {
+fn run() -> Tuple<bool, 'x''type> {
     (apply(keep(false), negate), recur('x', true))
 }
 
-fn explicit_and_contextual() -> true'type {
-    let explicit = keep<true'type>;
-    let contextual: fn(true'type) -> true'type = keep;
-    explicit(true) and contextual(true) and apply<true'type>(true, |value| value)
+fn explicit_and_contextual() -> bool {
+    let explicit = keep<bool>;
+    let contextual: fn(bool) -> bool = keep;
+    explicit(true) and contextual(true) and apply<bool>(true, |value| value)
 }
 
-fn inferred_callbacks() -> true'type {
+fn inferred_callbacks() -> bool {
     apply(true, |value| value) and apply(true, keep)
 }
 
-fn configured(value: T, .first: true'type = false, .second: true'type = first)
-    -> Tuple<T, true'type> where T {
+fn configured(value: T, .first: bool = false, .second: bool = first)
+    -> Tuple<T, bool> where T {
     (value, second)
 }
 
-fn configured_example() -> Tuple<'x''type, true'type> {
+fn configured_example() -> Tuple<'x''type, bool> {
     configured('x', .first = true)
 }

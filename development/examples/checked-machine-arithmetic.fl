@@ -1,6 +1,5 @@
 typealias Byte = .u8'builtin;
 typealias Signed = .i8'builtin;
-typealias Bool = true'type;
 
 fn increment(value: Byte) -> Byte {
     assumes value < 255;
@@ -24,7 +23,7 @@ fn guarded(value: Byte) -> Byte {
 comptime fn folded() -> Byte { (10 + 2) * 3 }
 comptime fn Select() -> .Type'builtin {
     let value: Byte = 10 + 2;
-    if value == 12 { Bool } else { Byte }
+    if value == 12 { bool } else { Byte }
 }
 typealias Chosen = Select();
 comptime fn run() -> Chosen { folded() == 36 }
@@ -36,7 +35,7 @@ fn operand_snapshots() -> Byte {
     var value: Byte = 250;
     value + (do { value = 0; value })
 }
-fn checked_iteration(flag: Bool) -> Byte {
+fn checked_iteration(flag: bool) -> Byte {
     var value: Byte = 0;
     while flag {
         assumes value < 255;

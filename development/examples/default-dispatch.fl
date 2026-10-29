@@ -2,20 +2,20 @@
 pure comptime fn TupleElements<T> -> .Type'builtin { T }
 pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 trait Read {
-    fn read(self) -> true'type;
-    fn invert(self) -> true'type { not self.as(Read).read() }
+    fn read(self) -> bool;
+    fn invert(self) -> bool { not self.as(Read).read() }
 }
 
 struct Yes {}
 struct No {}
 
 impl Read for Yes {
-    fn read(self) -> true'type { true }
+    fn read(self) -> bool { true }
 }
 impl Read for No {
-    fn read(self) -> true'type { false }
+    fn read(self) -> bool { false }
 }
 
-fn run() -> Tuple<true'type, true'type> {
+fn run() -> Tuple<bool, bool> {
     (Yes {}.as(Read).invert(), No {}.as(Read).invert())
 }

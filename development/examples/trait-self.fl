@@ -7,17 +7,17 @@ trait Keep {
     fn apply(value: Self, f: fn(Self) -> Self) -> Self { f(value) }
 }
 
-struct Flag { value: true'type, }
-struct Other { value: true'type, }
+struct Flag { value: bool, }
+struct Other { value: bool, }
 
 impl Keep for Flag {}
 impl Keep for Other {}
 
 impl Flag {
-    fn create(value: true'type) -> Self { Self { value: value } }
+    fn create(value: bool) -> Self { Self { value: value } }
 }
 
-fn run() -> Tuple<true'type, true'type> {
+fn run() -> Tuple<bool, bool> {
     let keep = Other.as(Keep).keep;
     let first = Flag.as(Keep).apply(Flag.create(false), |flag| Flag { value: not flag.value });
     let second = keep(Other { value: false });

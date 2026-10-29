@@ -13,7 +13,7 @@ fn contextual() -> Word { identity(65535) }
 fn wide() -> Wide { 340282366920938463463374607431768211455 }
 fn minimum() -> Signed { -170141183460469231731687303715884105728 }
 
-fn later_context() -> true'type {
+fn later_context() -> bool {
     -- The nested integer waits for word() to establish T = Word.
     choose(identity(300), word()) match {
         300 => true,

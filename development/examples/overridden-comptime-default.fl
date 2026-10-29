@@ -2,5 +2,5 @@ typealias Type = .Type'builtin;
 typealias Chosen = (Selector {}).as(Shape).Output();
 trait Shape { comptime fn Output(self) -> Type { Chosen } }
 struct Selector {}
-impl Shape for Selector { comptime fn Output(self) -> Type { true'type } }
+impl Shape for Selector { comptime fn Output(self) -> Type { bool } }
 fn run() -> Chosen { true }

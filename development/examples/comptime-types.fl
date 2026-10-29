@@ -8,7 +8,7 @@ struct Packet { tag: Byte }
 struct Box where T { value: T }
 
 pure comptime fn Identity(value: Type) -> Type { value }
-comptime fn Select(flag: true'type) -> Type {
+comptime fn Select(flag: bool) -> Type {
     if flag { Byte } else { Packet }
 }
 comptime fn Selected() -> Type { Identity(Select(true)) }

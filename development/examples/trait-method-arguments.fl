@@ -1,4 +1,4 @@
-typealias Flag = true'type;
+typealias Flag = bool;
 
 trait Choose {
     -- The interface owns names, defaults and their preceding-input bindings.

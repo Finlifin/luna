@@ -2,7 +2,6 @@
 pure comptime fn TupleElements<T> -> .Type'builtin {T}
 pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Byte = .u8'builtin;
-typealias Bool = true'type;
 struct Pair { left: Byte, right: Byte }
 struct Outer { inner: Pair, tail: Byte }
 struct Box where T { value: T }
@@ -56,7 +55,7 @@ comptime fn run() -> Byte {
     pair.left = 50;
     pair.left + pair.right
 }
-fn branches(flag: Bool) -> Byte {
+fn branches(flag: bool) -> Byte {
     var pair = Pair { left: 4, right: 5 };
     if flag { pair.left = 100; } else { pair.left = 200; }
     pair.left + pair.right

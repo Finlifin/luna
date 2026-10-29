@@ -8,7 +8,7 @@ comptime fn Build(ty: Type) -> Type { Checked<ty> }
 comptime fn Width(width: Int) -> Type { Eight<width> }
 comptime fn Correlated(width: Int) -> Type { Pair<Bits<width>, width> }
 comptime fn Early() -> Type { Checked<do { return .u16'builtin; }> }
-comptime fn Selected(good: true'type) -> Type {
+comptime fn Selected(good: bool) -> Type {
     if good { Build(.u8'builtin) } else { Build(.u16'builtin) }
 }
 comptime fn Ordered() -> Type {

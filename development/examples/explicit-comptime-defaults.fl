@@ -1,5 +1,5 @@
 typealias Type = .Type'builtin;
-typealias Chosen = Choose(.kind = true'type);
+typealias Chosen = Choose(.kind = bool);
 comptime fn Choose(.kind: Type = Chosen) -> Type { kind }
 fn run() -> Chosen { true }
 comptime fn Later() -> Type { Choose() }

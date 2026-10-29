@@ -2,30 +2,29 @@
 pure comptime fn TupleElements<T> -> .Type'builtin {T}
 pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias F32 = .f32'builtin;
-typealias Bool = true'type;
 comptime fn identity(value: T) -> T where T { value }
-comptime fn compare(value: F32) -> Tuple<Bool, Bool, Bool, Bool, Bool, Bool> {
+comptime fn compare(value: F32) -> Tuple<bool, bool, bool, bool, bool, bool> {
     ((1.0 + 2.0) == value, (1.0 + 2.0) < value,
      value >= (1.0 + 2.0), identity(3.0) == value,
      (if true { 3.0 } else { 4.0 }) == value,
      (do { 1.0 + 2.0 }) == value)
 }
-comptime fn inferred(value: F32) -> Bool {
+comptime fn inferred(value: F32) -> bool {
     let left = (1.0 + 2.0) + value;
     let right = value + (1.0 + 2.0);
     left == right and left == 7.0
 }
 comptime fn contextual() -> F32 { identity((1.0 + 2.0) * (3.0 + 4.0)) }
-comptime fn captured(value: F32) -> Bool {
+comptime fn captured(value: F32) -> bool {
     let compute = || (1.0 + 2.0) == value;
     compute()
 }
-comptime fn ordered(value: F32) -> Bool {
+comptime fn ordered(value: F32) -> bool {
     var seen = false;
     let result = (do { seen = not seen; 1.0 + 2.0 }) + (do { if seen { value } else { 0.0 } });
     seen and result == 7.0
 }
-comptime fn early(value: F32) -> Bool { (do { return true; 1.0 + 2.0 }) == value }
-comptime fn run() -> Tuple<Bool, Bool, Bool, Bool, Bool> {
+comptime fn early(value: F32) -> bool { (do { return true; 1.0 + 2.0 }) == value }
+comptime fn run() -> Tuple<bool, bool, bool, bool, bool> {
     (inferred(4.0), contextual() == 21.0, captured(3.0), ordered(4.0), early(3.0))
 }

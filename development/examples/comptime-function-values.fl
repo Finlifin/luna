@@ -6,7 +6,7 @@ comptime fn increment(value: Int) -> Int { value + 1 }
 comptime fn twice(callback: Callback, value: Int) -> Int {
     callback(callback(value))
 }
-comptime fn choose(flag: true'type) -> Callback {
+comptime fn choose(flag: bool) -> Callback {
     if flag { increment } else { identity }
 }
 comptime fn forward(callback: comptime fn(T) -> T, value: T) -> T where T {

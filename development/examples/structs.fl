@@ -1,5 +1,5 @@
 -- Initializers execute in field declaration order; defaults execute per use.
-typealias Flag = true'type;
+typealias Flag = bool;
 
 fn fallback() -> Flag { true }
 

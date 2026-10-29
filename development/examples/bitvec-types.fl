@@ -11,11 +11,11 @@ fn wide() -> Wide {
 fn empty() -> Empty { 0 }
 fn default_value(.value: Nine = 511) -> Nine { value }
 fn defaulted() -> Nine { default_value() }
-fn literal_pattern() -> true'type {
+fn literal_pattern() -> bool {
     nine() match { 0o777 => true, _ => false }
 }
-fn singleton() -> true'type { empty() match { 0 => true } }
-fn branch(value: Bit) -> true'type { value match { 0b0 => false, 0b1 => true } }
+fn singleton() -> bool { empty() match { 0 => true } }
+fn branch(value: Bit) -> bool { value match { 0b0 => false, 0b1 => true } }
 
 trait Read { fn read(self) -> .u16'builtin; }
 impl Read for .BitVec'builtin<8> {

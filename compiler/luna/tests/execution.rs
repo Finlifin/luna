@@ -7782,7 +7782,7 @@ fn direct_passing_noncopy_results_transfer_only_once() {
             .contains("EffectValueConsumed")
     );
 }
-const FLAG: &str = "typealias Flag = true'type; ";
+const FLAG: &str = "typealias Flag = bool; ";
 
 #[test]
 fn parameter_bindings_and_branches_produce_real_results() {
@@ -8319,7 +8319,7 @@ fn finite_match_defaults_bind_the_current_calls_parameter() {
 #[test]
 fn nested_modules_resolve_qualified_calls_and_lexical_type_aliases() {
     let package = execution_support::compile_with_tuple(
-        "mod left { typealias Flag = true'type; fn value() -> Flag { true } mod nested { fn read() -> Flag { value() } } } mod right { fn value() -> true'type { false } } fn run() -> Tuple<true'type,true'type> { (left.nested.read(),right.value()) }",
+        "mod left { typealias Flag = bool; fn value() -> Flag { true } mod nested { fn read() -> Flag { value() } } } mod right { fn value() -> bool { false } } fn run() -> Tuple<bool,bool> { (left.nested.read(),right.value()) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8331,7 +8331,7 @@ fn nested_modules_resolve_qualified_calls_and_lexical_type_aliases() {
 #[test]
 fn when_conditions_and_bodies_execute_in_order_once() {
     let package = compile(
-        "typealias Flag = true'type; fn first() -> Flag { false } fn second() -> Flag { true } fn skipped() -> Flag { true } fn chosen() -> Flag { false } fn run() -> Flag { when { first() => true, second() => chosen(), skipped() => true, else => true, } }",
+        "typealias Flag = bool; fn first() -> Flag { false } fn second() -> Flag { true } fn skipped() -> Flag { true } fn chosen() -> Flag { false } fn run() -> Flag { when { first() => true, second() => chosen(), skipped() => true, else => true, } }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8347,7 +8347,7 @@ fn when_conditions_and_bodies_execute_in_order_once() {
 #[test]
 fn when_fallback_and_void_forms_preserve_side_effects() {
     let package = compile(
-        "typealias Flag = true'type; fn choose(flag: Flag) -> Flag { when { flag => true, else => false, } } fn run() -> Flag { var value = false; when { true => { value = true; 'x' }, false => 'z', }; if true { value = not value; 'y' }; value } fn empty() { when {} }",
+        "typealias Flag = bool; fn choose(flag: Flag) -> Flag { when { flag => true, else => false, } } fn run() -> Flag { var value = false; when { true => { value = true; 'x' }, false => 'z', }; if true { value = not value; 'y' }; value } fn empty() { when {} }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     for flag in [false, true] {
@@ -8371,7 +8371,7 @@ fn when_fallback_and_void_forms_preserve_side_effects() {
 #[test]
 fn when_preserves_return_and_loop_control_and_default_computation() {
     let package = compile(
-        "typealias Flag = true'type; fn exit(flag: Flag) -> Flag { when { flag => return true, else => return false, } } fn take(.value: Flag = when { false => false, else => true, }) -> Flag { value } fn run() -> Flag { var value = false; while true { when { value => break, else => { value = true; continue; }, }; } take() }",
+        "typealias Flag = bool; fn exit(flag: Flag) -> Flag { when { flag => return true, else => return false, } } fn take(.value: Flag = when { false => false, else => true, }) -> Flag { value } fn run() -> Flag { var value = false; while true { when { value => break, else => { value = true; continue; }, }; } take() }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     for flag in [false, true] {
@@ -8391,7 +8391,7 @@ fn when_preserves_return_and_loop_control_and_default_computation() {
 #[test]
 fn when_statement_arms_shadow_without_leaking_and_keep_outer_writes() {
     let package = compile(
-        "typealias Flag = true'type; fn run(flag: Flag) -> Flag { var value = false; when { flag => var value = true, else => var value = false, }; when { flag => { let temporary = true; value = temporary; }, else => { let temporary = false; value = temporary; }, }; value }",
+        "typealias Flag = bool; fn run(flag: Flag) -> Flag { var value = false; when { flag => var value = true, else => var value = false, }; when { flag => { let temporary = true; value = temporary; }, else => { let temporary = false; value = temporary; }, }; value }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     for flag in [false, true] {
@@ -8407,7 +8407,7 @@ fn when_statement_arms_shadow_without_leaking_and_keep_outer_writes() {
 #[test]
 fn struct_fields_initialize_in_declaration_order_and_defaults_run_per_instance() {
     let package = compile(
-        "typealias Flag = true'type; fn first() -> Flag { true } fn second() -> Flag { false } fn default_second() -> Flag { true } struct Pair { first: Flag, second: Flag = default_second(), } fn run() -> Flag { let a = Pair { second: second(), first: first(), }; let b = Pair { first: first(), }; let c = Pair { first: false, }; a.first and not a.second and b.second and c.second }",
+        "typealias Flag = bool; fn first() -> Flag { true } fn second() -> Flag { false } fn default_second() -> Flag { true } struct Pair { first: Flag, second: Flag = default_second(), } fn run() -> Flag { let a = Pair { second: second(), first: first(), }; let b = Pair { first: first(), }; let c = Pair { first: false, }; a.first and not a.second and b.second and c.second }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8432,7 +8432,7 @@ fn struct_fields_initialize_in_declaration_order_and_defaults_run_per_instance()
 #[test]
 fn nested_structs_aliases_empty_records_and_closure_captures_execute() {
     let package = compile(
-        "typealias Flag = true'type; struct Empty {} struct Inner { flag: Flag, } struct Outer { inner: Inner, empty: Empty, } typealias Alias = Outer; fn make() -> Outer { Alias { empty: Empty {}, inner: Inner { flag: true, }, } } fn run() -> Flag { let object = make(); let closure = || object.inner.flag; closure() }",
+        "typealias Flag = bool; struct Empty {} struct Inner { flag: Flag, } struct Outer { inner: Inner, empty: Empty, } typealias Alias = Outer; fn make() -> Outer { Alias { empty: Empty {}, inner: Inner { flag: true, }, } } fn run() -> Flag { let object = make(); let closure = || object.inner.flag; closure() }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8444,7 +8444,7 @@ fn nested_structs_aliases_empty_records_and_closure_captures_execute() {
 #[test]
 fn early_return_during_struct_initialization_skips_later_fields() {
     let package = compile(
-        "typealias Flag = true'type; fn later() -> Flag { false } struct Pair { first: Flag, second: Flag, } fn run() -> Flag { let value: Pair = Pair { second: later(), first: do { return true; }, }; value.first }",
+        "typealias Flag = bool; fn later() -> Flag { false } struct Pair { first: Flag, second: Flag, } fn run() -> Flag { let value: Pair = Pair { second: later(), first: do { return true; }, }; value.first }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8457,7 +8457,7 @@ fn early_return_during_struct_initialization_skips_later_fields() {
 #[test]
 fn struct_host_values_require_matching_identity_arity_and_field_types() {
     let package = compile(
-        "typealias Flag = true'type; struct S { value: Flag, } struct T { value: Flag, } fn read(value: S) -> Flag { value.value }",
+        "typealias Flag = bool; struct S { value: Flag, } struct T { value: Flag, } fn read(value: S) -> Flag { value.value }",
     );
     let struct_id = |name: &str| {
         package
@@ -8508,7 +8508,7 @@ fn struct_host_values_require_matching_identity_arity_and_field_types() {
 #[test]
 fn let_struct_fields_are_writable_and_rhs_sibling_updates_are_preserved() {
     let package = compile(
-        "typealias Flag = true'type; struct Inner { flag: Flag, } struct Outer { inner: Inner, sibling: Flag, } fn run() -> Flag { let object = Outer { inner: Inner { flag: false }, sibling: false }; object.inner.flag = do { object.sibling = true; true }; object.inner.flag and object.sibling }",
+        "typealias Flag = bool; struct Inner { flag: Flag, } struct Outer { inner: Inner, sibling: Flag, } fn run() -> Flag { let object = Outer { inner: Inner { flag: false }, sibling: false }; object.inner.flag = do { object.sibling = true; true }; object.inner.flag and object.sibling }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8523,7 +8523,7 @@ fn let_struct_fields_are_writable_and_rhs_sibling_updates_are_preserved() {
 #[test]
 fn field_write_targets_current_root_after_rhs_replaces_it() {
     let package = compile(
-        "typealias Flag = true'type; struct S { first: Flag, second: Flag, } fn run() -> Flag { var object = S { first: false, second: false }; object.first = do { object = S { first: false, second: true }; true }; object.first and object.second }",
+        "typealias Flag = bool; struct S { first: Flag, second: Flag, } fn run() -> Flag { var object = S { first: false, second: false }; object.first = do { object = S { first: false, second: true }; true }; object.first and object.second }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8535,7 +8535,7 @@ fn field_write_targets_current_root_after_rhs_replaces_it() {
 #[test]
 fn var_pattern_bindings_can_be_reassigned_after_success() {
     let package = compile(
-        "typealias Flag = true'type; fn run() -> Flag { var true as found = true else { return false; }; found = false; not found }",
+        "typealias Flag = bool; fn run() -> Flag { var true as found = true else { return false; }; found = false; not found }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8547,7 +8547,7 @@ fn var_pattern_bindings_can_be_reassigned_after_success() {
 #[test]
 fn unit_enum_variants_construct_and_match_exhaustively() {
     let package = compile(
-        "typealias Flag = true'type; enum State { idle, ready, done, } fn accepts(value: State) -> Flag { value match { .idle => false, .ready or .done => true, } } fn run() -> Flag { not accepts(State.idle) and accepts(.ready) and accepts(State.done) }",
+        "typealias Flag = bool; enum State { idle, ready, done, } fn accepts(value: State) -> Flag { value match { .idle => false, .ready or .done => true, } } fn run() -> Flag { not accepts(State.idle) and accepts(.ready) and accepts(State.done) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8561,7 +8561,7 @@ fn unit_enum_variants_construct_and_match_exhaustively() {
 #[test]
 fn enum_guards_let_else_and_struct_fields_preserve_identity() {
     let package = compile(
-        "typealias Flag = true'type; enum State { no, yes, } struct Box { state: State = .yes, } fn run() -> Flag { let box = Box {}; let .yes as selected = box.state else { return false; }; selected match { .yes if false => false, .yes => true, .no => false, } }",
+        "typealias Flag = bool; enum State { no, yes, } struct Box { state: State = .yes, } fn run() -> Flag { let box = Box {}; let .yes as selected = box.state else { return false; }; selected match { .yes if false => false, .yes => true, .no => false, } }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8608,7 +8608,7 @@ fn singleton_enum_pattern_is_irrefutable_and_host_discriminants_are_checked() {
 #[test]
 fn enum_payload_construction_and_binding_preserve_argument_order() {
     let package = compile(
-        "typealias Flag = true'type; enum E { pair(Flag, Flag), } fn first() -> Flag { true } fn second() -> Flag { false } fn check(value: E) -> Flag { let .pair(left, right) = value; left and not right } fn run() -> Flag { check(.pair(first(), second())) }",
+        "typealias Flag = bool; enum E { pair(Flag, Flag), } fn first() -> Flag { true } fn second() -> Flag { false } fn check(value: E) -> Flag { let .pair(left, right) = value; left and not right } fn run() -> Flag { check(.pair(first(), second())) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8624,7 +8624,7 @@ fn enum_payload_construction_and_binding_preserve_argument_order() {
 #[test]
 fn nested_enum_boolean_products_are_exhaustive_and_execute_every_case() {
     let package = compile(
-        "typealias Flag = true'type; enum Inner { flag(Flag), } enum Outer { empty, pair(Inner, Flag), } fn check(value: Outer) -> Flag { value match { .empty => false, .pair(.flag(true), true) => true, .pair(.flag(true), false) => false, .pair(.flag(false), _) => false, } } fn run() -> Flag { check(.pair(.flag(true), true)) and not check(.pair(.flag(true), false)) and not check(.pair(.flag(false), true)) and not check(.pair(.flag(false), false)) and not check(.empty) }",
+        "typealias Flag = bool; enum Inner { flag(Flag), } enum Outer { empty, pair(Inner, Flag), } fn check(value: Outer) -> Flag { value match { .empty => false, .pair(.flag(true), true) => true, .pair(.flag(true), false) => false, .pair(.flag(false), _) => false, } } fn run() -> Flag { check(.pair(.flag(true), true)) and not check(.pair(.flag(true), false)) and not check(.pair(.flag(false), true)) and not check(.pair(.flag(false), false)) and not check(.empty) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8636,7 +8636,7 @@ fn nested_enum_boolean_products_are_exhaustive_and_execute_every_case() {
 #[test]
 fn payload_or_patterns_remap_bindings_and_failed_guards_fall_through() {
     let package = compile(
-        "typealias Flag = true'type; enum E { a(Flag, Flag), b(Flag, Flag), } fn check(value: E) -> Flag { value match { .a(x, true) or .b(true, x) if x => false, .a(x, _) or .b(_, x) => not x, } } fn run() -> Flag { check(.a(false, true)) and check(.b(true, false)) }",
+        "typealias Flag = bool; enum E { a(Flag, Flag), b(Flag, Flag), } fn check(value: E) -> Flag { value match { .a(x, true) or .b(true, x) if x => false, .a(x, _) or .b(_, x) => not x, } } fn run() -> Flag { check(.a(false, true)) and check(.b(true, false)) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8648,7 +8648,7 @@ fn payload_or_patterns_remap_bindings_and_failed_guards_fall_through() {
 #[test]
 fn enum_payload_let_else_and_early_return_skip_later_work() {
     let package = compile(
-        "typealias Flag = true'type; enum E { none, pair(Flag, Flag), } fn later() -> Flag { false } fn early() -> Flag { let value = E.pair(do { return true; }, later()); false } fn check(value: E) -> Flag { let .pair(x, true) = value else { return false; }; x } fn run() -> Flag { early() and check(.pair(true, true)) and not check(.none) }",
+        "typealias Flag = bool; enum E { none, pair(Flag, Flag), } fn later() -> Flag { false } fn early() -> Flag { let value = E.pair(do { return true; }, later()); false } fn check(value: E) -> Flag { let .pair(x, true) = value else { return false; }; x } fn run() -> Flag { early() and check(.pair(true, true)) and not check(.none) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8661,7 +8661,7 @@ fn enum_payload_let_else_and_early_return_skip_later_work() {
 #[test]
 fn empty_tuple_variant_and_host_payload_validation() {
     let package = compile(
-        "typealias Flag = true'type; enum E { empty(), flag(Flag), } fn identity(value: E) -> E { value } fn run() -> E { E.empty() }",
+        "typealias Flag = bool; enum E { empty(), flag(Flag), } fn identity(value: E) -> E { value } fn run() -> E { E.empty() }",
     );
     let declaration = package.enums[0].declaration;
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -8712,7 +8712,7 @@ fn empty_tuple_variant_and_host_payload_validation() {
 #[test]
 fn named_enum_payload_fields_use_names_and_declaration_order() {
     let package = compile(
-        "typealias Flag = true'type; enum E { data { left: Flag, right: Flag }, } fn first() -> Flag { true } fn second() -> Flag { false } fn check(value: E) -> Flag { value match { .data { right: r, left: l } => l and not r, } } fn run() -> Flag { check(.data { right: second(), left: first() }) }",
+        "typealias Flag = bool; enum E { data { left: Flag, right: Flag }, } fn first() -> Flag { true } fn second() -> Flag { false } fn check(value: E) -> Flag { value match { .data { right: r, left: l } => l and not r, } } fn run() -> Flag { check(.data { right: second(), left: first() }) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8728,7 +8728,7 @@ fn named_enum_payload_fields_use_names_and_declaration_order() {
 #[test]
 fn named_enum_defaults_run_per_construction_and_explicit_fields_override() {
     let package = compile(
-        "typealias Flag = true'type; fn default_value() -> Flag { true } enum E { data { flag: Flag = default_value(), unused: Flag = false }, } fn check(value: E) -> Flag { let .data { flag } = value; flag } fn run() -> Flag { check(E.data {}) and check(.data {}) and not check(.data { flag: false }) }",
+        "typealias Flag = bool; fn default_value() -> Flag { true } enum E { data { flag: Flag = default_value(), unused: Flag = false }, } fn check(value: E) -> Flag { let .data { flag } = value; flag } fn run() -> Flag { check(E.data {}) and check(.data {}) and not check(.data { flag: false }) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8747,7 +8747,7 @@ fn named_enum_defaults_run_per_construction_and_explicit_fields_override() {
 #[test]
 fn named_enum_patterns_nest_and_combine_coverage_across_arms() {
     let package = compile(
-        "typealias Flag = true'type; enum Inner { flag(Flag), } enum E { a { inner: Inner, spare: Flag }, b { inner: Inner }, } fn check(value: E) -> Flag { value match { .a { inner: .flag(true) } => true, .a { inner: .flag(false) } => false, .b { inner: .flag(x) } => x, } } fn run() -> Flag { check(E.a { spare: false, inner: .flag(true) }) and not check(E.a { inner: .flag(false), spare: true }) and check(E.b { inner: .flag(true) }) }",
+        "typealias Flag = bool; enum Inner { flag(Flag), } enum E { a { inner: Inner, spare: Flag }, b { inner: Inner }, } fn check(value: E) -> Flag { value match { .a { inner: .flag(true) } => true, .a { inner: .flag(false) } => false, .b { inner: .flag(x) } => x, } } fn run() -> Flag { check(E.a { spare: false, inner: .flag(true) }) and not check(E.a { inner: .flag(false), spare: true }) and check(E.b { inner: .flag(true) }) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8759,7 +8759,7 @@ fn named_enum_patterns_nest_and_combine_coverage_across_arms() {
 #[test]
 fn named_payload_or_binders_and_guard_failure_preserve_values() {
     let package = compile(
-        "typealias Flag = true'type; enum E { a { x: Flag, spare: Flag }, b { y: Flag }, } fn check(value: E) -> Flag { value match { .a { x: found } or .b { y: found } if not found => false, .a { x: found } or .b { y: found } => found, } } fn run() -> Flag { check(E.a { spare: false, x: true }) and check(E.b { y: true }) and not check(E.b { y: false }) }",
+        "typealias Flag = bool; enum E { a { x: Flag, spare: Flag }, b { y: Flag }, } fn check(value: E) -> Flag { value match { .a { x: found } or .b { y: found } if not found => false, .a { x: found } or .b { y: found } => found, } } fn run() -> Flag { check(E.a { spare: false, x: true }) and check(E.b { y: true }) and not check(E.b { y: false }) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8771,7 +8771,7 @@ fn named_payload_or_binders_and_guard_failure_preserve_values() {
 #[test]
 fn qualified_enum_patterns_support_all_payload_shapes_and_nested_bindings() {
     let package = compile(
-        "typealias Flag = true'type; enum Inner { yes, no, } enum E { unit, tuple(Inner, Flag), named { inner: Inner, flag: Flag }, } fn check(value: E) -> Flag { value match { E.unit => false, E.tuple(Inner.yes, flag) or E.named { inner: Inner.yes, flag } => flag, E.tuple(Inner.no, _) or E.named { inner: Inner.no } => false, } } fn run() -> Flag { check(E.tuple(Inner.yes, true)) and check(E.named { flag: true, inner: Inner.yes }) and not check(E.named { flag: true, inner: Inner.no }) and not check(E.unit) }",
+        "typealias Flag = bool; enum Inner { yes, no, } enum E { unit, tuple(Inner, Flag), named { inner: Inner, flag: Flag }, } fn check(value: E) -> Flag { value match { E.unit => false, E.tuple(Inner.yes, flag) or E.named { inner: Inner.yes, flag } => flag, E.tuple(Inner.no, _) or E.named { inner: Inner.no } => false, } } fn run() -> Flag { check(E.tuple(Inner.yes, true)) and check(E.named { flag: true, inner: Inner.yes }) and not check(E.named { flag: true, inner: Inner.no }) and not check(E.unit) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8783,7 +8783,7 @@ fn qualified_enum_patterns_support_all_payload_shapes_and_nested_bindings() {
 #[test]
 fn qualified_pattern_heads_are_resolved_before_payload_names_shadow_them() {
     let package = compile(
-        "typealias Flag = true'type; enum E { data(Flag), empty, } typealias Alias = E; fn check(value: Alias) -> Flag { let Alias.data(Alias) = value else { return false; }; Alias } fn run() -> Flag { check(E.data(true)) and not check(E.empty) }",
+        "typealias Flag = bool; enum E { data(Flag), empty, } typealias Alias = E; fn check(value: Alias) -> Flag { let Alias.data(Alias) = value else { return false; }; Alias } fn run() -> Flag { check(E.data(true)) and not check(E.empty) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8795,7 +8795,7 @@ fn qualified_pattern_heads_are_resolved_before_payload_names_shadow_them() {
 #[test]
 fn qualified_patterns_work_in_condition_and_loop_bindings() {
     let package = compile(
-        "typealias Flag = true'type; enum E { empty, data(Flag), } fn run() -> Flag { var value = E.data(true); var found = false; while value is E.data(flag) do { found = flag; value = E.empty; } if value is E.empty do { found } else { false } }",
+        "typealias Flag = bool; enum E { empty, data(Flag), } fn run() -> Flag { var value = E.data(true); var found = false; while value is E.data(flag) do { found = flag; value = E.empty; } if value is E.empty do { found } else { false } }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8807,7 +8807,7 @@ fn qualified_patterns_work_in_condition_and_loop_bindings() {
 #[test]
 fn generic_identity_and_nested_calls_infer_distinct_instances() {
     let package = execution_support::compile_with_tuple(
-        "fn keep(value: T) -> T where T { value } fn twice(value: T) -> T where T { keep(keep(value)) } fn run() -> Tuple<true'type, 'x''type> { (twice(true), twice('x')) }",
+        "fn keep(value: T) -> T where T { value } fn twice(value: T) -> T where T { keep(keep(value)) } fn run() -> Tuple<bool, 'x''type> { (twice(true), twice('x')) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8824,7 +8824,7 @@ fn generic_identity_and_nested_calls_infer_distinct_instances() {
 #[test]
 fn generic_recursion_and_closure_capture_types_are_specialized() {
     let package = compile(
-        "fn recur(value: T, again: true'type) -> T where T { if again { recur(value, false) } else { let capture = || value; capture() } } fn run() -> true'type { recur(true, true) }",
+        "fn recur(value: T, again: bool) -> T where T { if again { recur(value, false) } else { let capture = || value; capture() } } fn run() -> bool { recur(true, true) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8846,7 +8846,7 @@ fn generic_recursion_and_closure_capture_types_are_specialized() {
 #[test]
 fn generic_instances_reuse_types_without_reusing_runtime_values() {
     let package = compile(
-        "fn keep(value: T) -> T where T { value } fn first() -> true'type { true } fn second() -> true'type { false } fn run() -> true'type { keep(first()) and not keep(second()) }",
+        "fn keep(value: T) -> T where T { value } fn first() -> bool { true } fn second() -> bool { false } fn run() -> bool { keep(first()) and not keep(second()) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8870,7 +8870,7 @@ fn generic_instances_reuse_types_without_reusing_runtime_values() {
 #[test]
 fn generic_higher_order_parameters_and_multiple_types_execute() {
     let package = execution_support::compile_with_tuple(
-        "fn apply(value: T, transform: fn(T) -> T) -> T where T { transform(value) } fn pair(a: A, b: B) -> Tuple<A, B> where A, B { (a, b) } fn negate(value: true'type) -> true'type { not value } fn run() -> Tuple<true'type, 'x''type> { pair(apply(false, negate), 'x') }",
+        "fn apply(value: T, transform: fn(T) -> T) -> T where T { transform(value) } fn pair(a: A, b: B) -> Tuple<A, B> where A, B { (a, b) } fn negate(value: bool) -> bool { not value } fn run() -> Tuple<bool, 'x''type> { pair(apply(false, negate), 'x') }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8882,7 +8882,7 @@ fn generic_higher_order_parameters_and_multiple_types_execute() {
 #[test]
 fn explicit_generic_instances_are_callable_and_first_class() {
     let package = compile(
-        "typealias Flag = true'type; fn keep(value: T) -> T where T { value } fn take(callback: fn(Flag) -> Flag) -> Flag { callback(true) } fn run() -> Flag { let callback = keep<Flag>; callback(true) and take(keep<Flag>) and keep<Flag>(true) }",
+        "typealias Flag = bool; fn keep(value: T) -> T where T { value } fn take(callback: fn(Flag) -> Flag) -> Flag { callback(true) } fn run() -> Flag { let callback = keep<Flag>; callback(true) and take(keep<Flag>) and keep<Flag>(true) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8902,7 +8902,7 @@ fn explicit_generic_instances_are_callable_and_first_class() {
 #[test]
 fn generic_function_values_can_be_inferred_from_function_context() {
     let package = compile(
-        "typealias Flag = true'type; fn keep(value: T) -> T where T { value } fn take(callback: fn(Flag) -> Flag) -> Flag { callback(true) } fn make() -> fn(Flag) -> Flag { keep } fn run() -> Flag { let callback: fn(Flag) -> Flag = keep; callback(true) and take(keep) and make()(true) }",
+        "typealias Flag = bool; fn keep(value: T) -> T where T { value } fn take(callback: fn(Flag) -> Flag) -> Flag { callback(true) } fn make() -> fn(Flag) -> Flag { keep } fn run() -> Flag { let callback: fn(Flag) -> Flag = keep; callback(true) and take(keep) and make()(true) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8914,7 +8914,7 @@ fn generic_function_values_can_be_inferred_from_function_context() {
 #[test]
 fn explicit_instances_provide_context_for_lambdas_and_enum_symbols() {
     let package = compile(
-        "typealias Flag = true'type; enum State { no, yes, } fn keep(value: T) -> T where T { value } fn apply(value: T, transform: fn(T) -> T) -> T where T { transform(value) } fn run() -> Flag { apply<Flag>(true, |x| x) and (keep<State>(.yes) match { .yes => true, .no => false, }) }",
+        "typealias Flag = bool; enum State { no, yes, } fn keep(value: T) -> T where T { value } fn apply(value: T, transform: fn(T) -> T) -> T where T { transform(value) } fn run() -> Flag { apply<Flag>(true, |x| x) and (keep<State>(.yes) match { .yes => true, .no => false, }) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8926,7 +8926,7 @@ fn explicit_instances_provide_context_for_lambdas_and_enum_symbols() {
 #[test]
 fn explicit_instances_inside_generic_bodies_specialize_outer_parameters() {
     let package = execution_support::compile_with_tuple(
-        "fn keep(value: T) -> T where T { value } fn wrap(value: U) -> U where U { let callback = keep<U>; callback(value) } fn phantom() -> true'type where T { true } fn run() -> Tuple<true'type, 'x''type> { (wrap(true) and phantom<true'type>(), wrap('x')) }",
+        "fn keep(value: T) -> T where T { value } fn wrap(value: U) -> U where U { let callback = keep<U>; callback(value) } fn phantom() -> bool where T { true } fn run() -> Tuple<bool, 'x''type> { (wrap(true) and phantom<bool>(), wrap('x')) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8938,7 +8938,7 @@ fn explicit_instances_inside_generic_bodies_specialize_outer_parameters() {
 #[test]
 fn runtime_selection_of_instantiated_functions_keeps_definition_identity() {
     let package = compile(
-        "typealias Flag = true'type; fn first(a: T, b: T) -> T where T { a } fn second(a: T, b: T) -> T where T { b } fn select(flag: Flag) -> Flag { let callback = if flag { first<Flag> } else { second<Flag> }; callback(true, false) } fn run() -> Flag { select(true) and not select(false) }",
+        "typealias Flag = bool; fn first(a: T, b: T) -> T where T { a } fn second(a: T, b: T) -> T where T { b } fn select(flag: Flag) -> Flag { let callback = if flag { first<Flag> } else { second<Flag> }; callback(true, false) } fn run() -> Flag { select(true) and not select(false) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8958,7 +8958,7 @@ fn runtime_selection_of_instantiated_functions_keeps_definition_identity() {
 #[test]
 fn generic_calls_supply_context_to_lambdas_and_generic_function_names() {
     let package = compile(
-        "typealias Flag = true'type; fn keep(value: T) -> T where T { value } fn apply(value: T, transform: fn(T) -> T) -> T where T { transform(value) } fn run() -> Flag { apply(true, |x| x) and apply(true, keep) }",
+        "typealias Flag = bool; fn keep(value: T) -> T where T { value } fn apply(value: T, transform: fn(T) -> T) -> T where T { transform(value) } fn run() -> Flag { apply(true, |x| x) and apply(true, keep) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8970,7 +8970,7 @@ fn generic_calls_supply_context_to_lambdas_and_generic_function_names() {
 #[test]
 fn deferred_generic_arguments_keep_runtime_source_order() {
     let package = compile(
-        "typealias Flag = true'type; fn first() {} fn second() -> Flag { true } fn apply(transform: fn(T) -> T, value: T) -> T where T { transform(value) } fn run() -> Flag { apply(do { first(); |x| x }, second()) }",
+        "typealias Flag = bool; fn first() {} fn second() -> Flag { true } fn apply(transform: fn(T) -> T, value: T) -> T where T { transform(value) } fn run() -> Flag { apply(do { first(); |x| x }, second()) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8986,7 +8986,7 @@ fn deferred_generic_arguments_keep_runtime_source_order() {
 #[test]
 fn generic_enum_inputs_get_context_from_later_arguments_and_expected_results() {
     let package = compile(
-        "enum E { no, yes, data(true'type), } fn first(a: T, b: T) -> T where T { a } fn keep(value: T) -> T where T { value } fn make() -> E { keep(.yes) } fn run() -> true'type { let selected = first(.data(true), E.no); selected match { .data(flag) => flag and (make() match { .yes => true, _ => false, }), _ => false, } }",
+        "enum E { no, yes, data(bool), } fn first(a: T, b: T) -> T where T { a } fn keep(value: T) -> T where T { value } fn make() -> E { keep(.yes) } fn run() -> bool { let selected = first(.data(true), E.no); selected match { .data(flag) => flag and (make() match { .yes => true, _ => false, }), _ => false, } }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -8998,7 +8998,7 @@ fn generic_enum_inputs_get_context_from_later_arguments_and_expected_results() {
 #[test]
 fn generic_optional_defaults_read_current_call_parameters() {
     let package = execution_support::compile_with_tuple(
-        "typealias Flag = true'type; fn build(value: T, .first: Flag = false, .second: Flag = first) -> Tuple<T, Flag> where T { (value, second) } fn run() -> Tuple<Tuple<'x''type, Flag>, Tuple<Flag, Flag>> { let first = true; (build('x'), build<Flag>(true, .first = true)) }",
+        "typealias Flag = bool; fn build(value: T, .first: Flag = false, .second: Flag = first) -> Tuple<T, Flag> where T { (value, second) } fn run() -> Tuple<Tuple<'x''type, Flag>, Tuple<Flag, Flag>> { let first = true; (build('x'), build<Flag>(true, .first = true)) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9013,7 +9013,7 @@ fn generic_optional_defaults_read_current_call_parameters() {
 #[test]
 fn generic_named_inputs_preserve_source_order_and_skip_overridden_defaults() {
     let package = execution_support::compile_with_tuple(
-        "typealias Flag = true'type; fn first() -> Flag { true } fn second() -> Flag { false } fn build(value: T, .left: Flag = false, .right: Flag = left) -> Tuple<T, Flag, Flag> where T { (value, left, right) } fn run() -> Tuple<'x''type, Flag, Flag> { build(.right = second(), 'x', .left = first()) }",
+        "typealias Flag = bool; fn first() -> Flag { true } fn second() -> Flag { false } fn build(value: T, .left: Flag = false, .right: Flag = left) -> Tuple<T, Flag, Flag> where T { (value, left, right) } fn run() -> Tuple<'x''type, Flag, Flag> { build(.right = second(), 'x', .left = first()) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9033,7 +9033,7 @@ fn generic_named_inputs_preserve_source_order_and_skip_overridden_defaults() {
 #[test]
 fn generic_default_plans_specialize_inside_other_generic_definitions() {
     let package = compile(
-        "typealias Flag = true'type; fn keep(value: T, .flag: Flag = true) -> T where T { value } fn wrap(value: U) -> U where U { keep<U>(keep(value)) } fn run() -> 'x''type { wrap('x') }",
+        "typealias Flag = bool; fn keep(value: T, .flag: Flag = true) -> T where T { value } fn wrap(value: U) -> U where U { keep<U>(keep(value)) } fn run() -> 'x''type { wrap('x') }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9045,7 +9045,7 @@ fn generic_default_plans_specialize_inside_other_generic_definitions() {
 #[test]
 fn return_during_generic_inputs_skips_later_inputs_defaults_and_callee() {
     let package = compile(
-        "typealias Flag = true'type; fn later() -> Flag { false } fn keep(value: T, .flag: Flag = true) -> T where T { value } fn run() -> Flag { keep(do { return true; }, .flag = later()) }",
+        "typealias Flag = bool; fn later() -> Flag { false } fn keep(value: T, .flag: Flag = true) -> T where T { value } fn run() -> Flag { keep(do { return true; }, .flag = later()) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9058,7 +9058,7 @@ fn return_during_generic_inputs_skips_later_inputs_defaults_and_callee() {
 #[test]
 fn type_requirements_are_assumed_in_definitions_and_proved_at_calls() {
     let package = compile(
-        "typealias Flag = true'type; fn convert(value: T) -> Flag where T, requires T == Flag { value } fn forward(value: U) -> Flag where U, requires U == Flag { convert(value) } fn run() -> Flag { forward(true) }",
+        "typealias Flag = bool; fn convert(value: T) -> Flag where T, requires T == Flag { value } fn forward(value: U) -> Flag where U, requires U == Flag { convert(value) } fn run() -> Flag { forward(true) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9071,7 +9071,7 @@ fn type_requirements_are_assumed_in_definitions_and_proved_at_calls() {
 #[test]
 fn caller_type_facts_flow_into_generic_inference_and_function_values() {
     let package = compile(
-        "typealias Flag = true'type; fn keep(value: T) -> T where T { value } fn convert(value: T) -> Flag where T, requires T == Flag { let callback: fn(T) -> Flag = keep; callback(value) } fn run() -> Flag { convert<Flag>(true) }",
+        "typealias Flag = bool; fn keep(value: T) -> T where T { value } fn convert(value: T) -> Flag where T, requires T == Flag { let callback: fn(T) -> Flag = keep; callback(value) } fn run() -> Flag { convert<Flag>(true) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9083,7 +9083,7 @@ fn caller_type_facts_flow_into_generic_inference_and_function_values() {
 #[test]
 fn type_boolean_requirements_and_non_generic_function_references_execute() {
     let package = execution_support::compile_with_tuple(
-        "typealias Flag = true'type; typealias Character = 'x''type; fn keep(value: T) -> T where T, requires T == Flag or T == Character { value } fn ready() -> Flag where requires not (Flag == Character) { true } fn run() -> Tuple<Flag, Character> { let callback = ready; (keep(callback()), keep('x')) }",
+        "typealias Flag = bool; typealias Character = 'x''type; fn keep(value: T) -> T where T, requires T == Flag or T == Character { value } fn ready() -> Flag where requires not (Flag == Character) { true } fn run() -> Tuple<Flag, Character> { let callback = ready; (keep(callback()), keep('x')) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9108,7 +9108,7 @@ fn nested_generic_calls_receive_outer_argument_context() {
         "if true { factory() } else { keep(|x| x) }",
     ] {
         let package = compile(&format!(
-            "fn keep(value: T) -> T where T {{ value }} fn factory() -> fn(T) -> T where T {{ keep<T> }} fn apply(callback: fn(T) -> T, value: T) -> T where T {{ callback(value) }} fn run() -> true'type {{ apply({callback}, true) }}"
+            "fn keep(value: T) -> T where T {{ value }} fn factory() -> fn(T) -> T where T {{ keep<T> }} fn apply(callback: fn(T) -> T, value: T) -> T where T {{ callback(value) }} fn run() -> bool {{ apply({callback}, true) }}"
         ));
         let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
@@ -9122,7 +9122,7 @@ fn nested_generic_calls_receive_outer_argument_context() {
 #[test]
 fn deferred_nested_calls_preserve_runtime_order_and_once_only_evaluation() {
     let package = compile(
-        "fn keep(value: T) -> T where T { value } fn factory() -> fn(T) -> T where T { keep<T> } fn first() {} fn second() -> true'type { true } fn apply(callback: fn(T) -> T, value: T) -> T where T { callback(value) } fn run() -> true'type { apply(do { first(); keep(factory()) }, second()) }",
+        "fn keep(value: T) -> T where T { value } fn factory() -> fn(T) -> T where T { keep<T> } fn first() {} fn second() -> bool { true } fn apply(callback: fn(T) -> T, value: T) -> T where T { callback(value) } fn run() -> bool { apply(do { first(); keep(factory()) }, second()) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9138,7 +9138,7 @@ fn deferred_nested_calls_preserve_runtime_order_and_once_only_evaluation() {
 #[test]
 fn deferred_inputs_roll_back_capture_and_return_observations() {
     let package = compile(
-        "fn keep(value: T) -> T where T { value } fn apply(callback: fn(T) -> T, value: T) -> T where T { callback(value) } fn run() -> true'type { let flag = false; let outer = || apply(do { if flag { return true; } keep(|x| x) }, flag); outer() }",
+        "fn keep(value: T) -> T where T { value } fn apply(callback: fn(T) -> T, value: T) -> T where T { callback(value) } fn run() -> bool { let flag = false; let outer = || apply(do { if flag { return true; } keep(|x| x) }, flag); outer() }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9168,7 +9168,7 @@ fn result_context_propagates_through_deep_generic_call_chains() {
                 callback = format!("keep({callback})");
             }
             let package = compile(&format!(
-                "fn keep(value: T) -> T where T {{ value }} fn apply(callback: fn(T) -> T, value: T) -> T where T {{ callback(value) }} fn run() -> true'type {{ apply({callback}, true) }}"
+                "fn keep(value: T) -> T where T {{ value }} fn apply(callback: fn(T) -> T, value: T) -> T where T {{ callback(value) }} fn run() -> bool {{ apply({callback}, true) }}"
             ));
             let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
             assert_eq!(
@@ -9215,7 +9215,7 @@ fn callback_annotations_fill_unknown_inputs_alongside_contextual_inputs() {
 #[test]
 fn partial_callback_context_supports_returns_and_following_callbacks() {
     let package = compile(
-        "fn chain(value: T, first: fn(T) -> U, second: fn(U) -> V) -> V where T, U, V { second(first(value)) } fn run() -> true'type { let result = chain(true, |flag| { if flag { return 'y'; } 'n' }, |character| true); result }",
+        "fn chain(value: T, first: fn(T) -> U, second: fn(U) -> V) -> V where T, U, V { second(first(value)) } fn run() -> bool { let result = chain(true, |flag| { if flag { return 'y'; } 'n' }, |character| true); result }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9227,7 +9227,7 @@ fn partial_callback_context_supports_returns_and_following_callbacks() {
 #[test]
 fn partial_callback_context_instantiates_generic_function_values() {
     let package = compile(
-        "fn keep(value: T) -> T where T { value } fn map(value: T, callback: fn(T) -> U) -> U where T, U { callback(value) } fn run() -> true'type { let result = map(true, keep); result }",
+        "fn keep(value: T) -> T where T { value } fn map(value: T, callback: fn(T) -> U) -> U where T, U { callback(value) } fn run() -> bool { let result = map(true, keep); result }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9249,7 +9249,7 @@ fn partial_callback_context_flows_through_blocks_and_branch_expressions() {
         "when { false => keep, else => |x| not x, }",
     ] {
         let package = compile(&format!(
-            "fn keep(value: T) -> T where T {{ value }} fn map(value: T, callback: fn(T) -> U) -> U where T, U {{ callback(value) }} fn run() -> true'type {{ let result = map(true, {callback}); result }}"
+            "fn keep(value: T) -> T where T {{ value }} fn map(value: T, callback: fn(T) -> U) -> U where T, U {{ callback(value) }} fn run() -> bool {{ let result = map(true, {callback}); result }}"
         ));
         let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
         let expected = !callback.contains("not x");
@@ -9264,7 +9264,7 @@ fn partial_callback_context_flows_through_blocks_and_branch_expressions() {
 #[test]
 fn partial_callback_branches_infer_outputs_and_execute_only_selected_paths() {
     let package = compile(
-        "fn condition() -> true'type { false } fn chosen() {} fn skipped() {} fn argument() -> true'type { true } fn map(callback: fn(T) -> U, value: T) -> U where T, U { callback(value) } fn run() -> 'x''type { let result = map(if condition() { skipped(); |flag| if flag { 'a' } else { 'b' } } else { chosen(); |flag| if flag { 'y' } else { 'n' } }, argument()); result }",
+        "fn condition() -> bool { false } fn chosen() {} fn skipped() {} fn argument() -> bool { true } fn map(callback: fn(T) -> U, value: T) -> U where T, U { callback(value) } fn run() -> 'x''type { let result = map(if condition() { skipped(); |flag| if flag { 'a' } else { 'b' } } else { chosen(); |flag| if flag { 'y' } else { 'n' } }, argument()); result }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9301,7 +9301,7 @@ fn partial_context_crosses_nested_generic_calls_and_branches() {
 fn partial_context_crosses_generic_factory_and_generic_function_values() {
     for callback in ["keep(keep)", "keep(factory())"] {
         let package = compile(&format!(
-            "fn keep(value: T) -> T where T {{ value }} fn factory() -> fn(T) -> T where T {{ keep<T> }} fn map(value: T, callback: fn(T) -> U) -> U where T, U {{ callback(value) }} fn run() -> true'type {{ let result = map(true, {callback}); result }}"
+            "fn keep(value: T) -> T where T {{ value }} fn factory() -> fn(T) -> T where T {{ keep<T> }} fn map(value: T, callback: fn(T) -> U) -> U where T, U {{ callback(value) }} fn run() -> bool {{ let result = map(true, {callback}); result }}"
         ));
         let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
@@ -9314,7 +9314,7 @@ fn partial_context_crosses_generic_factory_and_generic_function_values() {
 #[test]
 fn nested_partial_context_retains_runtime_evaluation_order() {
     let package = compile(
-        "fn keep(value: T) -> T where T { value } fn first() {} fn second() -> true'type { true } fn map(callback: fn(T) -> U, value: T) -> U where T, U { callback(value) } fn run() -> 'x''type { let result = map(keep(do { first(); |flag| if flag { 'y' } else { 'n' } }), second()); result }",
+        "fn keep(value: T) -> T where T { value } fn first() {} fn second() -> bool { true } fn map(callback: fn(T) -> U, value: T) -> U where T, U { callback(value) } fn run() -> 'x''type { let result = map(keep(do { first(); |flag| if flag { 'y' } else { 'n' } }), second()); result }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9347,7 +9347,7 @@ fn generic_structs_execute_construction_defaults_projection_and_assignment() {
 #[test]
 fn generic_struct_nested_instances_aliases_and_generic_field_defaults_execute() {
     let package = compile(
-        "typealias Flag = true'type; struct Box where T { value: T, } struct Tag where T {} struct Tagged where T { value: T, tag: Tag<T> = Tag<T> {}, } typealias FlagBox = Box<Flag>; fn run() -> Flag { let nested = Box<Box<Flag>> { value: FlagBox { value: false } }; nested.value.value = true; let tagged = Tagged<Box<Flag>> { value: nested.value }; tagged.value.value }",
+        "typealias Flag = bool; struct Box where T { value: T, } struct Tag where T {} struct Tagged where T { value: T, tag: Tag<T> = Tag<T> {}, } typealias FlagBox = Box<Flag>; fn run() -> Flag { let nested = Box<Box<Flag>> { value: FlagBox { value: false } }; nested.value.value = true; let tagged = Tagged<Box<Flag>> { value: nested.value }; tagged.value.value }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9359,7 +9359,7 @@ fn generic_struct_nested_instances_aliases_and_generic_field_defaults_execute() 
 #[test]
 fn generic_struct_fields_keep_declaration_order_and_default_scope() {
     let package = compile(
-        "fn first() -> true'type { true } fn second() -> 'x''type { 'y' } fn default_value() -> true'type { false } struct Pair where T, U { left: T, right: U, ready: true'type = default_value(), } fn run() -> true'type { let value = Pair<true'type, 'x''type> { right: second(), left: first() }; value.left }",
+        "fn first() -> bool { true } fn second() -> 'x''type { 'y' } fn default_value() -> bool { false } struct Pair where T, U { left: T, right: U, ready: bool = default_value(), } fn run() -> bool { let value = Pair<bool, 'x''type> { right: second(), left: first() }; value.left }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9375,7 +9375,7 @@ fn generic_struct_fields_keep_declaration_order_and_default_scope() {
 #[test]
 fn phantom_generic_struct_arguments_remain_part_of_host_value_identity() {
     let package = compile(
-        "struct Tag where T {} fn make() -> Tag<'x''type> { Tag<'x''type> {} } fn take(value: Tag<true'type>) -> true'type { true }",
+        "struct Tag where T {} fn make() -> Tag<'x''type> { Tag<'x''type> {} } fn take(value: Tag<bool>) -> bool { true }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     let value = interpreter.invoke(id(&package, "make"), vec![]).unwrap();
@@ -9413,7 +9413,7 @@ fn generic_enum_all_payload_shapes_and_defaults_execute() {
 #[test]
 fn nested_generic_enum_patterns_and_generic_function_bodies_execute() {
     let package = compile(
-        "enum Maybe where T { none, some(T), } fn unwrap(value: Maybe<T>, fallback: T) -> T where T { value match { .none => fallback, .some(value) => value, } } fn nested(value: Maybe<Maybe<true'type>>) -> true'type { value match { .none => false, .some(.none) => false, .some(.some(flag)) => flag, } } fn run() -> true'type { nested(.some(.some(true))) and unwrap(Maybe<true'type>.some(true), false) }",
+        "enum Maybe where T { none, some(T), } fn unwrap(value: Maybe<T>, fallback: T) -> T where T { value match { .none => fallback, .some(value) => value, } } fn nested(value: Maybe<Maybe<bool>>) -> bool { value match { .none => false, .some(.none) => false, .some(.some(flag)) => flag, } } fn run() -> bool { nested(.some(.some(true))) and unwrap(Maybe<bool>.some(true), false) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9425,7 +9425,7 @@ fn nested_generic_enum_patterns_and_generic_function_bodies_execute() {
 #[test]
 fn generic_enum_default_templates_specialize_nested_generic_values() {
     let package = compile(
-        "struct Tag where T {} enum Entry where T { data { value: T, tag: Tag<T> = Tag<T> {} }, } fn read(value: Entry<true'type>) -> true'type { let .data { value: flag } = value; flag } fn run() -> true'type { read(.data { value: true }) }",
+        "struct Tag where T {} enum Entry where T { data { value: T, tag: Tag<T> = Tag<T> {} }, } fn read(value: Entry<bool>) -> bool { let .data { value: flag } = value; flag } fn run() -> bool { read(.data { value: true }) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9437,7 +9437,7 @@ fn generic_enum_default_templates_specialize_nested_generic_values() {
 #[test]
 fn generic_enum_coverage_uses_specialized_empty_and_boolean_domains() {
     let package = compile(
-        "enum Empty {} enum Choice where T { none, value(T), } fn empty(value: Choice<Empty>) -> true'type { value match { .none => true, } } fn boolean(value: Choice<true'type>) -> true'type { value match { .none => false, .value(true) => true, .value(false) => false, } } fn run() -> true'type { empty(.none) and boolean(.value(true)) }",
+        "enum Empty {} enum Choice where T { none, value(T), } fn empty(value: Choice<Empty>) -> bool { value match { .none => true, } } fn boolean(value: Choice<bool>) -> bool { value match { .none => false, .value(true) => true, .value(false) => false, } } fn run() -> bool { empty(.none) and boolean(.value(true)) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9449,7 +9449,7 @@ fn generic_enum_coverage_uses_specialized_empty_and_boolean_domains() {
 #[test]
 fn unit_generic_enum_values_keep_phantom_type_arguments() {
     let package = compile(
-        "enum Tag where T { mark, } fn make() -> Tag<'x''type> { .mark } fn take(value: Tag<true'type>) -> true'type { value match { .mark => true, } }",
+        "enum Tag where T { mark, } fn make() -> Tag<'x''type> { .mark } fn take(value: Tag<bool>) -> bool { value match { .mark => true, } }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     let value = interpreter.invoke(id(&package, "make"), vec![]).unwrap();
@@ -9470,7 +9470,7 @@ fn unit_generic_enum_values_keep_phantom_type_arguments() {
 #[test]
 fn explicitly_qualified_generic_enum_patterns_execute() {
     let package = compile(
-        "typealias Flag = true'type; enum Choice where T { none, value(T), } fn read(value: Choice<Flag>) -> Flag { value match { Choice<Flag>.none => false, Choice<Flag>.value(flag) => flag, } } fn run() -> Flag { read(Choice<Flag>.value(true)) }",
+        "typealias Flag = bool; enum Choice where T { none, value(T), } fn read(value: Choice<Flag>) -> Flag { value match { Choice<Flag>.none => false, Choice<Flag>.value(flag) => flag, } } fn run() -> Flag { read(Choice<Flag>.value(true)) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9482,7 +9482,7 @@ fn explicitly_qualified_generic_enum_patterns_execute() {
 #[test]
 fn generic_enum_defaults_run_per_construction_after_declared_fields() {
     let package = compile(
-        "fn first() -> true'type { true } fn second() -> 'x''type { 'y' } fn ready() -> true'type { true } enum Entry where T { data { value: T, ready: true'type = ready() }, } fn run() -> true'type { let left = Entry<true'type>.data { value: first() }; let right = Entry<'x''type>.data { value: second() }; left match { .data { ready } => ready, } }",
+        "fn first() -> bool { true } fn second() -> 'x''type { 'y' } fn ready() -> bool { true } enum Entry where T { data { value: T, ready: bool = ready() }, } fn run() -> bool { let left = Entry<bool>.data { value: first() }; let right = Entry<'x''type>.data { value: second() }; left match { .data { ready } => ready, } }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9498,7 +9498,7 @@ fn generic_enum_defaults_run_per_construction_after_declared_fields() {
 #[test]
 fn qualified_enum_patterns_accept_inline_and_nested_type_expressions() {
     let package = compile(
-        "struct Box where T { value: T, } enum Choice where T { none, value(T), } fn read(value: Choice<Box<true'type>>) -> true'type { value match { Choice<Box<true'type>>.none => false, Choice<Box<true'type>>.value(boxed) => boxed.value, } } fn run() -> true'type { read(.value(Box<true'type> { value: true })) }",
+        "struct Box where T { value: T, } enum Choice where T { none, value(T), } fn read(value: Choice<Box<bool>>) -> bool { value match { Choice<Box<bool>>.none => false, Choice<Box<bool>>.value(boxed) => boxed.value, } } fn run() -> bool { read(.value(Box<bool> { value: true })) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9510,7 +9510,7 @@ fn qualified_enum_patterns_accept_inline_and_nested_type_expressions() {
 #[test]
 fn declared_generic_struct_parameters_are_inferred_from_nominal_arguments() {
     let package = compile(
-        "struct Box where T { value: T, } fn transform(value: Box<T>, callback: fn(T) -> U) -> Box<U> where T, U { Box<U> { value: callback(value.value) } } fn run() -> 'x''type { let result = transform(Box<true'type> { value: true }, |flag| if flag { 'y' } else { 'n' }); result.value }",
+        "struct Box where T { value: T, } fn transform(value: Box<T>, callback: fn(T) -> U) -> Box<U> where T, U { Box<U> { value: callback(value.value) } } fn run() -> 'x''type { let result = transform(Box<bool> { value: true }, |flag| if flag { 'y' } else { 'n' }); result.value }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9522,7 +9522,7 @@ fn declared_generic_struct_parameters_are_inferred_from_nominal_arguments() {
 #[test]
 fn declared_generic_enum_and_phantom_parameters_are_inferred() {
     let package = compile(
-        "enum Wrapped where T { value(T), } struct Tag where T {} fn read(value: Wrapped<T>) -> T where T { let .value(inner) = value; inner } fn checked(value: Tag<T>) -> true'type where T, requires T == true'type { true } fn run() -> true'type { read(Wrapped<true'type>.value(true)) and checked(Tag<true'type> {}) }",
+        "enum Wrapped where T { value(T), } struct Tag where T {} fn read(value: Wrapped<T>) -> T where T { let .value(inner) = value; inner } fn checked(value: Tag<T>) -> bool where T, requires T == bool { true } fn run() -> bool { read(Wrapped<bool>.value(true)) and checked(Tag<bool> {}) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9534,7 +9534,7 @@ fn declared_generic_enum_and_phantom_parameters_are_inferred() {
 #[test]
 fn declared_nominal_type_requirements_expose_parameter_equalities_in_bodies() {
     let package = compile(
-        "struct Box where T { value: T, } fn convert(value: T) -> true'type where T, requires Box<T> == Box<true'type> { value } fn run() -> true'type { convert(true) }",
+        "struct Box where T { value: T, } fn convert(value: T) -> bool where T, requires Box<T> == Box<bool> { value } fn run() -> bool { convert(true) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9546,7 +9546,7 @@ fn declared_nominal_type_requirements_expose_parameter_equalities_in_bodies() {
 #[test]
 fn nominal_contracts_support_defaults_nested_fields_and_generic_forwarding() {
     let package = compile(
-        "typealias Flag = true'type;
+        "typealias Flag = bool;
          struct Outer where U, requires U == Flag { inner: Checked<U>, }
          struct Checked where T, requires T == Flag { value: T = true, }
          fn build() -> Outer<V> where V, requires V == Flag {
@@ -9574,7 +9574,7 @@ fn nominal_contracts_support_defaults_nested_fields_and_generic_forwarding() {
 #[test]
 fn enum_contracts_support_all_payload_shapes_and_qualified_matching() {
     let package = execution_support::compile_with_tuple(
-        "typealias Flag = true'type;
+        "typealias Flag = bool;
          enum Checked where T, requires T == Flag { none, value(T), named { value: T = true }, }
          fn read(value: Checked<U>) -> Flag where U, requires U == Flag {
              value match { Checked<U>.none => false, .value(x) => x, .named { value: x } => x, }
@@ -9605,7 +9605,7 @@ fn enum_contracts_support_all_payload_shapes_and_qualified_matching() {
 #[test]
 fn nominal_contracts_propagate_boolean_obligations_and_aliases() {
     let package = execution_support::compile_with_tuple(
-        "typealias Flag = true'type; typealias Character = 'x''type;
+        "typealias Flag = bool; typealias Character = 'x''type;
          struct Scalar where T, requires T == Flag or T == Character { value: T, }
          typealias BooleanScalar = Scalar<Flag>;
          fn keep(value: Scalar<U>) -> U where U, requires U == Flag or U == Character { value.value }
@@ -9637,10 +9637,10 @@ fn nominal_contract_example_executes_through_the_shared_frontend() {
 #[test]
 fn generic_boolean_matches_use_definition_side_type_equality() {
     let package = execution_support::compile_with_tuple(
-        "fn invert(value: T) -> T where T, requires T == true'type {
+        "fn invert(value: T) -> T where T, requires T == bool {
              value match { true => false, false => true, }
          }
-         fn run() -> Tuple<true'type, true'type> { (invert(true), invert(false)) }",
+         fn run() -> Tuple<bool, bool> { (invert(true), invert(false)) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9656,7 +9656,7 @@ fn nested_generic_enum_coverage_uses_type_contracts_for_each_payload() {
     let package = execution_support::compile_with_tuple(
         "enum Pair where T { pair(T, T), }
          enum Wrapper where T { empty, wrap(Pair<T>), }
-         fn read(value: Wrapper<U>) -> true'type where U, requires Pair<U> == Pair<true'type> {
+         fn read(value: Wrapper<U>) -> bool where U, requires Pair<U> == Pair<bool> {
              value match {
                  .empty => false,
                  .wrap(.pair(true, _)) => true,
@@ -9664,8 +9664,8 @@ fn nested_generic_enum_coverage_uses_type_contracts_for_each_payload() {
                  .wrap(.pair(false, false)) => false,
              }
          }
-         fn run() -> Tuple<true'type, true'type> {
-             (read(Wrapper<true'type>.wrap(.pair(false, true))), read(Wrapper<true'type>.wrap(.pair(false, false))))
+         fn run() -> Tuple<bool, bool> {
+             (read(Wrapper<bool>.wrap(.pair(false, true))), read(Wrapper<bool>.wrap(.pair(false, false))))
          }",
     );
     assert_eq!(
@@ -9681,10 +9681,10 @@ fn nested_generic_enum_coverage_uses_type_contracts_for_each_payload() {
 fn constrained_empty_payloads_remove_uninhabited_variants_from_coverage() {
     let package = compile(
         "enum Empty {} enum Choice where T { none, some(T), }
-         fn read(value: Choice<T>) -> true'type where T, requires T == Empty {
+         fn read(value: Choice<T>) -> bool where T, requires T == Empty {
              value match { .none => true, }
          }
-         fn run() -> true'type { read(Choice<Empty>.none) }",
+         fn run() -> bool { read(Choice<Empty>.none) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9698,7 +9698,7 @@ fn constrained_empty_payloads_remove_uninhabited_variants_from_coverage() {
 #[test]
 fn tuple_destructuring_is_heterogeneous_nested_and_evaluates_input_once() {
     let package = execution_support::compile_with_tuple(
-        "fn first() -> true'type { true } fn second() -> 'x''type { 'x' } fn input() -> Tuple<true'type, Tuple<'x''type>> { (first(), (second(),)) } fn run() -> Tuple<true'type, 'x''type> { let (flag, (letter,)) = input(); let read = || letter; (flag, read()) }",
+        "fn first() -> bool { true } fn second() -> 'x''type { 'x' } fn input() -> Tuple<bool, Tuple<'x''type>> { (first(), (second(),)) } fn run() -> Tuple<bool, 'x''type> { let (flag, (letter,)) = input(); let read = || letter; (flag, read()) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9720,7 +9720,7 @@ fn tuple_destructuring_is_heterogeneous_nested_and_evaluates_input_once() {
 #[test]
 fn tuple_patterns_support_generic_fields_and_enum_composition() {
     let package = execution_support::compile_with_tuple(
-        "enum Result where T { pair(Tuple<T, true'type>), } fn read(value: Result<T>) -> T where T { let .pair((answer, _)) = value; answer } fn swap(value: Tuple<T, U>) -> Tuple<U, T> where T, U { let (left, right) = value; (right, left) } fn run() -> Tuple<'x''type,true'type> { swap((read(Result<true'type>.pair((true, false))), 'x')) }",
+        "enum Result where T { pair(Tuple<T, bool>), } fn read(value: Result<T>) -> T where T { let .pair((answer, _)) = value; answer } fn swap(value: Tuple<T, U>) -> Tuple<U, T> where T, U { let (left, right) = value; (right, left) } fn run() -> Tuple<'x''type,bool> { swap((read(Result<bool>.pair((true, false))), 'x')) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9734,7 +9734,7 @@ fn tuple_patterns_support_generic_fields_and_enum_composition() {
 #[test]
 fn tuple_match_matrix_preserves_correlations_and_arm_order() {
     let package = execution_support::compile_with_tuple(
-        "fn read(value: Tuple<true'type, true'type>) -> 'x''type { value match { (true, _) => 'a', (_, true) => 'b', (false, false) => 'c', } }",
+        "fn read(value: Tuple<bool, bool>) -> 'x''type { value match { (true, _) => 'a', (_, true) => 'b', (false, false) => 'c', } }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     for (left, right, expected) in [
@@ -9758,7 +9758,7 @@ fn tuple_match_matrix_preserves_correlations_and_arm_order() {
 #[test]
 fn tuple_or_patterns_remap_bindings_and_rollback_failed_candidates() {
     let package = execution_support::compile_with_tuple(
-        "fn read(value: Tuple<true'type, true'type>) -> true'type { value match { (x, true) or (true, x) => x, (false, false) => true, } } fn run() -> Tuple<true'type, true'type, true'type> { (read((false, true)), read((true, false)), read((false, false))) }",
+        "fn read(value: Tuple<bool, bool>) -> bool { value match { (x, true) or (true, x) => x, (false, false) => true, } } fn run() -> Tuple<bool, bool, bool> { (read((false, true)), read((true, false)), read((false, false))) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9776,7 +9776,7 @@ fn tuple_or_patterns_remap_bindings_and_rollback_failed_candidates() {
 #[test]
 fn tuple_let_else_preserves_outer_bindings_on_partial_failure() {
     let package = execution_support::compile_with_tuple(
-        "fn read(value: Tuple<true'type, true'type>) -> true'type { let outer = true; let (outer, true) = value else { return outer; }; outer } fn run() -> Tuple<true'type, true'type> { (read((false, false)), read((false, true))) }",
+        "fn read(value: Tuple<bool, bool>) -> bool { let outer = true; let (outer, true) = value else { return outer; }; outer } fn run() -> Tuple<bool, bool> { (read((false, false)), read((false, true))) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9790,7 +9790,7 @@ fn tuple_let_else_preserves_outer_bindings_on_partial_failure() {
 #[test]
 fn tuple_var_bindings_and_grouped_singletons_are_distinct() {
     let package = execution_support::compile_with_tuple(
-        "fn run() -> Tuple<true'type, true'type> { var (a, b) = (true, false); a = false; b = true; let (c,) = (b,); let (d) = a; (c, d) }",
+        "fn run() -> Tuple<bool, bool> { var (a, b) = (true, false); a = false; b = true; let (c,) = (b,); let (d) = a; (c, d) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9804,7 +9804,7 @@ fn tuple_var_bindings_and_grouped_singletons_are_distinct() {
 #[test]
 fn tuple_patterns_in_conditions_loops_and_guards_use_successful_bindings() {
     let package = compile(
-        "fn run() -> true'type { var active = true; var output = false; if (true, false) is (left, right) if left do { output = not right; }; while (active, output) is (true, current) do { active = false; output = current; }; output and not active }",
+        "fn run() -> bool { var active = true; var output = false; if (true, false) is (left, right) if left do { output = not right; }; while (active, output) is (true, current) do { active = false; output = current; }; output and not active }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9818,7 +9818,7 @@ fn tuple_patterns_in_conditions_loops_and_guards_use_successful_bindings() {
 #[test]
 fn tuple_pattern_coverage_uses_generic_constraints_for_individual_elements() {
     let package = execution_support::compile_with_tuple(
-        "fn read(pair: Tuple<T, T>) -> true'type where T, requires T == true'type { pair match { (true, _) => true, (false, true) => true, (false, false) => false, } } fn run() -> Tuple<true'type, true'type> { (read((false, true)), read((false, false))) }",
+        "fn read(pair: Tuple<T, T>) -> bool where T, requires T == bool { pair match { (true, _) => true, (false, true) => true, (false, false) => false, } } fn run() -> Tuple<bool, bool> { (read((false, true)), read((false, false))) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9846,7 +9846,7 @@ fn tuple_pattern_example_runs_through_the_shared_frontend() {
 #[test]
 fn record_patterns_bind_names_specialize_generics_and_omit_fields() {
     let package = compile(
-        "struct Pair where T { first: T, second: true'type, } fn read(pair: Pair<T>) -> T where T { let { first } = pair; first } fn run() -> 'x''type { read(Pair<'x''type> { first: 'x', second: false }) }",
+        "struct Pair where T { first: T, second: bool, } fn read(pair: Pair<T>) -> T where T { let { first } = pair; first } fn run() -> 'x''type { read(Pair<'x''type> { first: 'x', second: false }) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9861,7 +9861,7 @@ fn record_patterns_bind_names_specialize_generics_and_omit_fields() {
 #[test]
 fn record_patterns_compose_with_tuple_enum_and_closure_bindings() {
     let package = execution_support::compile_with_tuple(
-        "struct Box where T { value: T, } enum Entry where T { empty, data(Box<Tuple<T, true'type>>), } fn read(entry: Entry<T>, fallback: T) -> T where T { entry match { .data({ value: (item, true) }) => { let get = || item; get() }, _ => fallback, } } fn run() -> 'x''type { read(Entry<'x''type>.data(Box<Tuple<'x''type, true'type>> { value: ('y', true) }), 'n') }",
+        "struct Box where T { value: T, } enum Entry where T { empty, data(Box<Tuple<T, bool>>), } fn read(entry: Entry<T>, fallback: T) -> T where T { entry match { .data({ value: (item, true) }) => { let get = || item; get() }, _ => fallback, } } fn run() -> 'x''type { read(Entry<'x''type>.data(Box<Tuple<'x''type, bool>> { value: ('y', true) }), 'n') }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9875,7 +9875,7 @@ fn record_patterns_compose_with_tuple_enum_and_closure_bindings() {
 #[test]
 fn record_matrix_preserves_field_names_and_correlations() {
     let package = execution_support::compile_with_tuple(
-        "struct Pair { left: true'type, right: true'type, } fn read(pair: Pair) -> 'x''type { pair match { { right: true, left: true } => 'a', { left: true, right: false } => 'b', { left: false } => 'c', } } fn run() -> Tuple<'x''type, 'x''type, 'x''type> { (read(Pair { left: true, right: true }), read(Pair { left: true, right: false }), read(Pair { left: false, right: true })) }",
+        "struct Pair { left: bool, right: bool, } fn read(pair: Pair) -> 'x''type { pair match { { right: true, left: true } => 'a', { left: true, right: false } => 'b', { left: false } => 'c', } } fn run() -> Tuple<'x''type, 'x''type, 'x''type> { (read(Pair { left: true, right: true }), read(Pair { left: true, right: false }), read(Pair { left: false, right: true })) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9889,7 +9889,7 @@ fn record_matrix_preserves_field_names_and_correlations() {
 #[test]
 fn record_or_patterns_rollback_and_remap_bindings() {
     let package = execution_support::compile_with_tuple(
-        "struct Pair { left: true'type, right: true'type, } fn read(pair: Pair) -> true'type { pair match { { left: x, right: true } or { left: true, right: x } => x, { left: false, right: false } => true, } } fn run() -> Tuple<true'type, true'type> { (read(Pair { left: true, right: false }), read(Pair { left: false, right: true })) }",
+        "struct Pair { left: bool, right: bool, } fn read(pair: Pair) -> bool { pair match { { left: x, right: true } or { left: true, right: x } => x, { left: false, right: false } => true, } } fn run() -> Tuple<bool, bool> { (read(Pair { left: true, right: false }), read(Pair { left: false, right: true })) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9903,7 +9903,7 @@ fn record_or_patterns_rollback_and_remap_bindings() {
 #[test]
 fn record_let_else_var_and_condition_bindings_keep_lexical_scope() {
     let package = compile(
-        "struct Pair { left: true'type, right: true'type, } fn read(pair: Pair) -> true'type { let outer = true; let { left: outer, right: true } = pair else { return outer; }; outer } fn run() -> true'type { var { left, right } = Pair { left: false, right: true }; left = true; right = false; var output = false; if (Pair { left: left, right: right }) is { left: true, right: x } do { output = not x; }; output and read(Pair { left: false, right: false }) }",
+        "struct Pair { left: bool, right: bool, } fn read(pair: Pair) -> bool { let outer = true; let { left: outer, right: true } = pair else { return outer; }; outer } fn run() -> bool { var { left, right } = Pair { left: false, right: true }; left = true; right = false; var output = false; if (Pair { left: left, right: right }) is { left: true, right: x } do { output = not x; }; output and read(Pair { left: false, right: false }) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9917,7 +9917,7 @@ fn record_let_else_var_and_condition_bindings_keep_lexical_scope() {
 #[test]
 fn record_coverage_tracks_empty_fields_and_empty_struct_products() {
     let package = compile(
-        "enum Empty {} struct Impossible { value: Empty, } struct Unit {} enum Choice { none, some(Impossible), } fn read(value: Choice) -> true'type { value match { .none => true, } } fn unit(value: Unit) -> true'type { value match { {} => true, } } fn run() -> true'type { read(.none) and unit(Unit {}) }",
+        "enum Empty {} struct Impossible { value: Empty, } struct Unit {} enum Choice { none, some(Impossible), } fn read(value: Choice) -> bool { value match { .none => true, } } fn unit(value: Unit) -> bool { value match { {} => true, } } fn run() -> bool { read(.none) and unit(Unit {}) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9931,7 +9931,7 @@ fn record_coverage_tracks_empty_fields_and_empty_struct_products() {
 #[test]
 fn record_patterns_preserve_input_evaluation_once_and_default_order() {
     let package = compile(
-        "struct Pair { left: true'type = first(), right: true'type = second(), } fn first() -> true'type { true } fn second() -> true'type { false } fn input() -> Pair { Pair {} } fn run() -> true'type { let { right, left } = input(); left and not right }",
+        "struct Pair { left: bool = first(), right: bool = second(), } fn first() -> bool { true } fn second() -> bool { false } fn input() -> Pair { Pair {} } fn run() -> bool { let { right, left } = input(); left and not right }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -9961,7 +9961,7 @@ fn record_pattern_example_runs_through_the_shared_frontend() {
 #[test]
 fn structural_views_enable_tuple_destructuring_under_type_equations() {
     let package = execution_support::compile_with_tuple(
-        "fn read(value: T) -> true'type where T, requires T == Tuple<true'type, 'x''type> { let (flag, letter) = value; flag } fn run() -> true'type { read((true, 'x')) }",
+        "fn read(value: T) -> bool where T, requires T == Tuple<bool, 'x''type> { let (flag, letter) = value; flag } fn run() -> bool { read((true, 'x')) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9975,7 +9975,7 @@ fn structural_views_enable_tuple_destructuring_under_type_equations() {
 #[test]
 fn structural_views_enable_generic_record_reads_writes_and_patterns() {
     let package = compile(
-        "struct Box where T { value: T, } fn read(value: T, replacement: U) -> U where T, U, requires T == Box<U> { value.value = replacement; let { value: result } = value; result } fn run() -> true'type { read<Box<true'type>, true'type>(Box<true'type> { value: false }, true) }",
+        "struct Box where T { value: T, } fn read(value: T, replacement: U) -> U where T, U, requires T == Box<U> { value.value = replacement; let { value: result } = value; result } fn run() -> bool { read<Box<bool>, bool>(Box<bool> { value: false }, true) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -9989,7 +9989,7 @@ fn structural_views_enable_generic_record_reads_writes_and_patterns() {
 #[test]
 fn structural_views_recover_parameterized_enum_domains_and_payloads() {
     let package = compile(
-        "enum Choice where T { none, some(T), } fn read(value: T) -> true'type where T, requires T == Choice<true'type> { value match { .none => false, .some(true) => true, .some(false) => false, } } fn make() -> T where T, requires T == Choice<true'type> { .some(true) } fn run() -> true'type { read(make<Choice<true'type>>()) }",
+        "enum Choice where T { none, some(T), } fn read(value: T) -> bool where T, requires T == Choice<bool> { value match { .none => false, .some(true) => true, .some(false) => false, } } fn make() -> T where T, requires T == Choice<bool> { .some(true) } fn run() -> bool { read(make<Choice<bool>>()) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10003,7 +10003,7 @@ fn structural_views_recover_parameterized_enum_domains_and_payloads() {
 #[test]
 fn structural_views_follow_transitive_equations_for_nested_field_places() {
     let package = compile(
-        "struct Inner { flag: true'type, } struct Outer { inner: Inner, } fn change(value: T) -> true'type where T, U, requires T == U, requires U == Outer { value.inner.flag = true; value.inner.flag } fn run() -> true'type { change<Outer, Outer>(Outer { inner: Inner { flag: false } }) }",
+        "struct Inner { flag: bool, } struct Outer { inner: Inner, } fn change(value: T) -> bool where T, U, requires T == U, requires U == Outer { value.inner.flag = true; value.inner.flag } fn run() -> bool { change<Outer, Outer>(Outer { inner: Inner { flag: false } }) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10037,7 +10037,7 @@ fn structural_view_example_preserves_generic_signatures_and_executes() {
 #[test]
 fn constrained_callable_types_support_invocation_and_contextual_lambdas() {
     let package = compile(
-        "typealias Unary = fn(true'type) -> true'type; fn apply(callback: F, value: true'type) -> true'type where F, requires F == Unary { callback(value) } fn make() -> F where F, requires F == Unary { |x| not x } fn run() -> true'type { apply<Unary>(make<Unary>(), false) }",
+        "typealias Unary = fn(bool) -> bool; fn apply(callback: F, value: bool) -> bool where F, requires F == Unary { callback(value) } fn make() -> F where F, requires F == Unary { |x| not x } fn run() -> bool { apply<Unary>(make<Unary>(), false) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10051,7 +10051,7 @@ fn constrained_callable_types_support_invocation_and_contextual_lambdas() {
 #[test]
 fn constrained_callable_context_instantiates_generic_function_values() {
     let package = compile(
-        "typealias Unary = fn(true'type) -> true'type; fn keep(value: T) -> T where T { value } fn make() -> F where F, requires F == Unary { keep } fn run() -> true'type { make<Unary>()(true) }",
+        "typealias Unary = fn(bool) -> bool; fn keep(value: T) -> T where T { value } fn make() -> F where F, requires F == Unary { keep } fn run() -> bool { make<Unary>()(true) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10065,7 +10065,7 @@ fn constrained_callable_context_instantiates_generic_function_values() {
 #[test]
 fn constrained_callable_parameters_supply_lambda_context_inside_generic_definitions() {
     let package = compile(
-        "typealias Unary = fn(true'type) -> true'type; fn apply(callback: F) -> true'type where F, requires F == Unary { callback(false) } fn forward() -> true'type where F, requires F == Unary { apply<F>(|value| not value) } fn run() -> true'type { forward<Unary>() }",
+        "typealias Unary = fn(bool) -> bool; fn apply(callback: F) -> bool where F, requires F == Unary { callback(false) } fn forward() -> bool where F, requires F == Unary { apply<F>(|value| not value) } fn run() -> bool { forward<Unary>() }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10079,7 +10079,7 @@ fn constrained_callable_parameters_supply_lambda_context_inside_generic_definiti
 #[test]
 fn constrained_callable_evaluation_runs_callee_and_arguments_once_in_order() {
     let package = compile(
-        "typealias Unary = fn(true'type) -> true'type; fn target(value: true'type) -> true'type { value } fn factory() -> Unary { target } fn argument() -> true'type { true } fn invoke(create: F) -> true'type where F, requires F == fn() -> Unary { create()(argument()) } fn run() -> true'type { invoke(factory) }",
+        "typealias Unary = fn(bool) -> bool; fn target(value: bool) -> bool { value } fn factory() -> Unary { target } fn argument() -> bool { true } fn invoke(create: F) -> bool where F, requires F == fn() -> Unary { create()(argument()) } fn run() -> bool { invoke(factory) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -10095,7 +10095,7 @@ fn constrained_callable_evaluation_runs_callee_and_arguments_once_in_order() {
 #[test]
 fn constrained_closure_types_preserve_captured_environments() {
     let package = execution_support::compile_with_tuple(
-        "typealias Captured = (do { let flag = true; || flag })'type; fn invoke(callback: F) -> true'type where F, requires F == Captured { callback() } fn make(flag: true'type) -> F where F, requires F == Captured { || flag } fn run() -> Tuple<true'type, true'type> { (invoke(make<Captured>(true)), invoke(make<Captured>(false))) }",
+        "typealias Captured = (do { let flag = true; || flag })'type; fn invoke(callback: F) -> bool where F, requires F == Captured { callback() } fn make(flag: bool) -> F where F, requires F == Captured { || flag } fn run() -> Tuple<bool, bool> { (invoke(make<Captured>(true)), invoke(make<Captured>(false))) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10128,7 +10128,7 @@ fn constrained_callable_example_runs_with_distinct_capture_values() {
 #[test]
 fn chained_patterns_use_earlier_bindings_and_export_all_successful_names() {
     let package = compile(
-        "fn flip(value: true'type) -> true'type { not value } fn run() -> true'type { let first and flip(first) is second and flip(second) is third = true; first and not second and third }",
+        "fn flip(value: bool) -> bool { not value } fn run() -> bool { let first and flip(first) is second and flip(second) is third = true; first and not second and third }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -10141,7 +10141,7 @@ fn chained_patterns_use_earlier_bindings_and_export_all_successful_names() {
 #[test]
 fn chained_patterns_short_circuit_and_keep_input_evaluation_once() {
     let package = compile(
-        "fn input() -> true'type { false } fn skipped() -> true'type { true } fn run() -> true'type { input() match { true and skipped() is true => false, _ => true, } }",
+        "fn input() -> bool { false } fn skipped() -> bool { true } fn run() -> bool { input() match { true and skipped() is true => false, _ => true, } }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -10154,7 +10154,7 @@ fn chained_patterns_short_circuit_and_keep_input_evaluation_once() {
 #[test]
 fn chained_patterns_preserve_outer_effects_but_rollback_candidate_bindings() {
     let package = compile(
-        "fn run() -> true'type { var changed = false; let outer = true; false match { outer and (do { changed = true; false }) is true => false, _ => outer and changed, } }",
+        "fn run() -> bool { var changed = false; let outer = true; false match { outer and (do { changed = true; false }) is true => false, _ => outer and changed, } }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10168,7 +10168,7 @@ fn chained_patterns_preserve_outer_effects_but_rollback_candidate_bindings() {
 #[test]
 fn chained_or_patterns_publish_corresponding_names_after_local_expressions() {
     let package = compile(
-        "fn run() -> true'type { true match { (x and not x is true) or (x and x is true) => x, _ => false, } }",
+        "fn run() -> bool { true match { (x and not x is true) or (x and x is true) => x, _ => false, } }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10196,7 +10196,7 @@ fn chained_patterns_specialize_embedded_generic_calls() {
 #[test]
 fn chained_patterns_support_nested_products_and_nested_guards() {
     let package = compile(
-        "struct Box { value: true'type, } fn run() -> true'type { let ((x and not x is y), { value: (z and not z is w) }) = (true, Box { value: false }); true match { ((answer if answer) and not answer is false) => x and not y and not z and w, _ => false, } }",
+        "struct Box { value: bool, } fn run() -> bool { let ((x and not x is y), { value: (z and not z is w) }) = (true, Box { value: false }); true match { ((answer if answer) and not answer is false) => x and not y and not z and w, _ => false, } }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10210,7 +10210,7 @@ fn chained_patterns_support_nested_products_and_nested_guards() {
 #[test]
 fn chained_pattern_control_transfers_skip_remaining_matching_work() {
     let package = compile(
-        "fn skipped() -> true'type { false } fn returning() -> true'type { true match { x and (do { return x; }) is _ => skipped(), _ => false, } } fn run() -> true'type { var active = true; while active { true match { x and (do { active = false; continue; }) is _ => skipped(), _ => false, }; }; returning() }",
+        "fn skipped() -> bool { false } fn returning() -> bool { true match { x and (do { return x; }) is _ => skipped(), _ => false, } } fn run() -> bool { var active = true; while active { true match { x and (do { active = false; continue; }) is _ => skipped(), _ => false, }; }; returning() }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -10227,7 +10227,7 @@ fn chained_pattern_control_transfers_skip_remaining_matching_work() {
 #[test]
 fn chained_let_else_and_conditional_patterns_preserve_success_scopes() {
     let package = compile(
-        "fn check(value: true'type) -> true'type { let x and not x is true = value else { return false; }; not x } fn run() -> true'type { var result = false; if false is x and not x is y if y do { result = y; }; result and check(false) and not check(true) }",
+        "fn check(value: bool) -> bool { let x and not x is true = value else { return false; }; not x } fn run() -> bool { var result = false; if false is x and not x is y if y do { result = y; }; result and check(false) and not check(true) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10241,7 +10241,7 @@ fn chained_let_else_and_conditional_patterns_preserve_success_scopes() {
 #[test]
 fn chained_patterns_allow_finite_stable_default_computations() {
     let package = compile(
-        "fn choose(.value: true'type = true match { x and not x is y => y, }) -> true'type { value } fn run() -> true'type { not choose() }",
+        "fn choose(.value: bool = true match { x and not x is y => y, }) -> bool { value } fn run() -> bool { not choose() }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10269,7 +10269,7 @@ fn chained_pattern_example_executes_ordered_lookup_and_generic_forwarding() {
 #[test]
 fn var_pattern_bindings_can_change_before_the_successful_candidate_is_exported() {
     let package = execution_support::compile_with_tuple(
-        "fn run() -> Tuple<true'type, true'type> { var x and (do { x = false; x }) is y = true; (x, y) }",
+        "fn run() -> Tuple<bool, bool> { var x and (do { x = false; x }) is y = true; (x, y) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10283,7 +10283,7 @@ fn var_pattern_bindings_can_change_before_the_successful_candidate_is_exported()
 #[test]
 fn var_or_patterns_publish_updated_values_and_discard_failed_candidate_bindings() {
     let package = compile(
-        "fn run() -> true'type { var ((x and (do { x = false; false }) is true) or (x and (do { x = not x; true }) is true)) = true else { return true; }; x }",
+        "fn run() -> bool { var ((x and (do { x = false; false }) is true) or (x and (do { x = not x; true }) is true)) = true else { return true; }; x }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10297,7 +10297,7 @@ fn var_or_patterns_publish_updated_values_and_discard_failed_candidate_bindings(
 #[test]
 fn let_pattern_binding_restrictions_do_not_forbid_field_writes_or_outer_var_effects() {
     let package = execution_support::compile_with_tuple(
-        "struct Box { value: true'type, } fn run() -> Tuple<true'type, true'type> { var changed = false; let box and (do { box.value = false; changed = true; box.value }) is result = Box { value: true }; (result, changed) }",
+        "struct Box { value: bool, } fn run() -> Tuple<bool, bool> { var changed = false; let box and (do { box.value = false; changed = true; box.value }) is result = Box { value: true }; (result, changed) }",
     );
     assert_eq!(
         Interpreter::new(&package, Budget::default())
@@ -10313,17 +10313,17 @@ fn concrete_trait_methods_dispatch_and_inherit_default_bodies() {
     let package = execution_support::compile_with_tuple(
         r#"
         trait Flag {
-            fn read() -> true'type;
-            fn invert(value: true'type) -> true'type { not value }
+            fn read() -> bool;
+            fn invert(value: bool) -> bool { not value }
         }
         struct Yes {}
         struct No {}
-        impl Flag for Yes { fn read() -> true'type { true } }
+        impl Flag for Yes { fn read() -> bool { true } }
         impl Flag for No {
-            fn read() -> true'type { false }
-            fn invert(value: true'type) -> true'type { value }
+            fn read() -> bool { false }
+            fn invert(value: bool) -> bool { value }
         }
-        fn run() -> Tuple<true'type, true'type, true'type, true'type> {
+        fn run() -> Tuple<bool, bool, bool, bool> {
             (Yes.as(Flag).read(), No.as(Flag).read(), Yes.as(Flag).invert(false), No.as(Flag).invert(false))
         }
     "#,
@@ -10347,8 +10347,8 @@ fn concrete_inherent_methods_are_callable_and_can_be_function_values() {
     let package = compile(
         r#"
         struct Flag {}
-        impl Flag { fn invert(value: true'type) -> true'type { not value } }
-        fn run() -> true'type { let f = Flag.invert; f(false) and Flag.invert(false) }
+        impl Flag { fn invert(value: bool) -> bool { not value } }
+        fn run() -> bool { let f = Flag.invert; f(false) and Flag.invert(false) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10362,14 +10362,14 @@ fn concrete_inherent_methods_are_callable_and_can_be_function_values() {
 fn concrete_trait_views_preserve_interface_identity_and_argument_order() {
     let package = execution_support::compile_with_tuple(
         r#"
-        trait First { fn choose(a: true'type, b: true'type) -> true'type; }
-        trait Second { fn choose(a: true'type, b: true'type) -> true'type; }
+        trait First { fn choose(a: bool, b: bool) -> bool; }
+        trait Second { fn choose(a: bool, b: bool) -> bool; }
         struct S {}
-        impl First for S { fn choose(a: true'type, b: true'type) -> true'type { a } }
-        impl Second for S { fn choose(a: true'type, b: true'type) -> true'type { b } }
-        fn left() -> true'type { true }
-        fn right() -> true'type { false }
-        fn run() -> Tuple<true'type, true'type> {
+        impl First for S { fn choose(a: bool, b: bool) -> bool { a } }
+        impl Second for S { fn choose(a: bool, b: bool) -> bool { b } }
+        fn left() -> bool { true }
+        fn right() -> bool { false }
+        fn run() -> Tuple<bool, bool> {
             let second = S.as(Second).choose;
             (S.as(First).choose(left(), right()), second(left(), right()))
         }
@@ -10391,11 +10391,11 @@ fn trait_self_specializes_default_bodies_without_conflating_subjects() {
     let package = execution_support::compile_with_tuple(
         r#"
         trait Keep { fn keep(value: Self) -> Self { value } }
-        struct A { flag: true'type, }
-        struct B { flag: true'type, }
+        struct A { flag: bool, }
+        struct B { flag: bool, }
         impl Keep for A {}
         impl Keep for B {}
-        fn run() -> Tuple<true'type, true'type> {
+        fn run() -> Tuple<bool, bool> {
             let a = A.as(Keep).keep(A { flag: true });
             let keep_b = B.as(Keep).keep;
             let b = keep_b(B { flag: false });
@@ -10417,10 +10417,10 @@ fn implementation_self_checks_overrides_and_constructs_the_concrete_subject() {
     let package = compile(
         r#"
         trait Keep { fn keep(value: Self) -> Self; }
-        struct A { flag: true'type, }
+        struct A { flag: bool, }
         impl Keep for A { fn keep(value: Self) -> Self { value } }
-        impl A { fn create(flag: true'type) -> Self { Self { flag: flag } } }
-        fn run() -> true'type { A.as(Keep).keep(A.create(true)).flag }
+        impl A { fn create(flag: bool) -> Self { Self { flag: flag } } }
+        fn run() -> bool { A.as(Keep).keep(A.create(true)).flag }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10437,9 +10437,9 @@ fn default_method_self_substitution_reaches_higher_order_signatures() {
         trait Apply {
             fn apply(value: Self, f: fn(Self) -> Self) -> Self { f(value) }
         }
-        struct Flag { value: true'type, }
+        struct Flag { value: bool, }
         impl Apply for Flag {}
-        fn run() -> true'type {
+        fn run() -> bool {
             Flag.as(Apply).apply(Flag { value: false }, |flag| Flag { value: not flag.value }).value
         }
     "#,
@@ -10455,12 +10455,12 @@ fn default_method_self_substitution_reaches_higher_order_signatures() {
 fn default_method_self_requirements_are_instantiated_with_the_body() {
     let package = compile(
         r#"
-        struct Flag { value: true'type, }
+        struct Flag { value: bool, }
         trait Keep {
             fn keep(value: Self) -> Self where requires Self == Flag { value }
         }
         impl Keep for Flag {}
-        fn run() -> true'type { Flag.as(Keep).keep(Flag { value: true }).value }
+        fn run() -> bool { Flag.as(Keep).keep(Flag { value: true }).value }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10475,13 +10475,13 @@ fn by_value_receivers_dispatch_defaults_overrides_and_inherent_methods() {
     let package = compile(
         r#"
         trait Keep { fn keep(self) -> Self { self } }
-        struct Flag { value: true'type, }
+        struct Flag { value: bool, }
         impl Keep for Flag {}
         impl Flag {
-            fn read(self) -> true'type { self.value }
+            fn read(self) -> bool { self.value }
             fn invert(self) -> Self { Self { value: not self.value } }
         }
-        fn run() -> true'type { Flag { value: false }.as(Keep).keep().invert().read() }
+        fn run() -> bool { Flag { value: false }.as(Keep).keep().invert().read() }
     "#,
     );
     assert!(package.traits[0].methods[0].by_value_receiver);
@@ -10496,12 +10496,12 @@ fn by_value_receivers_dispatch_defaults_overrides_and_inherent_methods() {
 fn receiver_is_evaluated_once_before_ordinary_method_arguments() {
     let package = compile(
         r#"
-        trait Read { fn read(self, flag: true'type) -> true'type; }
-        struct Flag { value: true'type, }
-        impl Read for Flag { fn read(self, flag: true'type) -> true'type { self.value and flag } }
+        trait Read { fn read(self, flag: bool) -> bool; }
+        struct Flag { value: bool, }
+        impl Read for Flag { fn read(self, flag: bool) -> bool { self.value and flag } }
         fn make() -> Flag { Flag { value: true } }
-        fn argument() -> true'type { true }
-        fn run() -> true'type { make().as(Read).read(argument()) }
+        fn argument() -> bool { true }
+        fn run() -> bool { make().as(Read).read(argument()) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10519,9 +10519,9 @@ fn receiver_is_evaluated_once_before_ordinary_method_arguments() {
 fn receiver_can_be_captured_by_a_nested_closure() {
     let package = compile(
         r#"
-        struct Flag { value: true'type, }
-        impl Flag { fn read(self) -> true'type { let f = || self.value; f() } }
-        fn run() -> true'type { Flag { value: true }.read() }
+        struct Flag { value: bool, }
+        impl Flag { fn read(self) -> bool { let f = || self.value; f() } }
+        fn run() -> bool { Flag { value: true }.read() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10535,10 +10535,10 @@ fn receiver_can_be_captured_by_a_nested_closure() {
 fn callable_fields_are_not_misidentified_as_inherent_methods() {
     let package = compile(
         r#"
-        struct Container { read: fn() -> true'type, }
+        struct Container { read: fn() -> bool, }
         struct Other {}
-        impl Other { fn read(self) -> true'type { false } }
-        fn run() -> true'type { Container { read: || true }.read() }
+        impl Other { fn read(self) -> bool { false } }
+        fn run() -> bool { Container { read: || true }.read() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10553,14 +10553,14 @@ fn default_methods_call_required_members_and_observe_overrides() {
     let package = execution_support::compile_with_tuple(
         r#"
         trait Read {
-            fn read(self) -> true'type;
-            fn invert(self) -> true'type { not self.as(Read).read() }
+            fn read(self) -> bool;
+            fn invert(self) -> bool { not self.as(Read).read() }
         }
         struct Yes {}
         struct No {}
-        impl Read for Yes { fn read(self) -> true'type { true } }
-        impl Read for No { fn read(self) -> true'type { false } }
-        fn run() -> Tuple<true'type, true'type> {
+        impl Read for Yes { fn read(self) -> bool { true } }
+        impl Read for No { fn read(self) -> bool { false } }
+        fn run() -> Tuple<bool, bool> {
             (Yes {}.as(Read).invert(), No {}.as(Read).invert())
         }
     "#,
@@ -10578,14 +10578,14 @@ fn default_static_members_and_function_values_keep_the_original_trait_source() {
     let package = compile(
         r#"
         trait Read {
-            fn read() -> true'type { false }
-            fn indirect() -> true'type { let f = Self.as(Read).read; f() }
+            fn read() -> bool { false }
+            fn indirect() -> bool { let f = Self.as(Read).read; f() }
         }
-        trait Other { fn read() -> true'type { false } }
+        trait Other { fn read() -> bool { false } }
         struct Flag {}
-        impl Read for Flag { fn read() -> true'type { true } }
+        impl Read for Flag { fn read() -> bool { true } }
         impl Other for Flag {}
-        fn run() -> true'type { Flag.as(Read).indirect() }
+        fn run() -> bool { Flag.as(Read).indirect() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10600,11 +10600,11 @@ fn default_to_default_dispatch_preserves_instantiation_and_terminates_with_budge
     let package = compile(
         r#"
         trait Loop {
-            fn recurse(self) -> true'type { self.as(Loop).recurse() }
+            fn recurse(self) -> bool { self.as(Loop).recurse() }
         }
         struct Flag {}
         impl Loop for Flag {}
-        fn run() -> true'type { Flag {}.as(Loop).recurse() }
+        fn run() -> bool { Flag {}.as(Loop).recurse() }
     "#,
     );
     let mut interpreter = Interpreter::new(
@@ -10624,12 +10624,12 @@ fn default_members_inside_closures_are_specialized_with_the_enclosing_body() {
     let package = compile(
         r#"
         trait Read {
-            fn read() -> true'type { true }
-            fn indirect() -> true'type { let f = || Self.as(Read).read(); f() }
+            fn read() -> bool { true }
+            fn indirect() -> bool { let f = || Self.as(Read).read(); f() }
         }
         struct Flag {}
         impl Read for Flag {}
-        fn run() -> true'type { Flag.as(Read).indirect() }
+        fn run() -> bool { Flag.as(Read).indirect() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10644,12 +10644,12 @@ fn interpreter_rejects_malformed_default_dispatch_worlds_before_execution() {
     let original = compile(
         r#"
         trait Read {
-            fn read() -> true'type { true }
-            fn indirect() -> true'type { Self.as(Read).read() }
+            fn read() -> bool { true }
+            fn indirect() -> bool { Self.as(Read).read() }
         }
         struct Flag {}
         impl Read for Flag {}
-        fn run() -> true'type { Flag.as(Read).indirect() }
+        fn run() -> bool { Flag.as(Read).indirect() }
     "#,
     );
     for corruption in 0..4 {
@@ -10677,18 +10677,18 @@ fn interpreter_rejects_malformed_default_dispatch_worlds_before_execution() {
 fn parent_interface_evidence_is_transitive_and_diamond_paths_preserve_identity() {
     let package = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         trait Left :- Read {}
         trait Right :- Read {}
         trait Summary :- Left + Right {
-            fn summary(self) -> true'type { self.as(Read).read() }
+            fn summary(self) -> bool { self.as(Read).read() }
         }
-        struct Flag { value: true'type, }
+        struct Flag { value: bool, }
         impl Summary for Flag {}
         impl Right for Flag {}
         impl Left for Flag {}
-        impl Read for Flag { fn read(self) -> true'type { self.value } }
-        fn run() -> true'type { Flag { value: true }.as(Summary).summary() }
+        impl Read for Flag { fn read(self) -> bool { self.value } }
+        fn run() -> bool { Flag { value: true }.as(Summary).summary() }
     "#,
     );
     assert_eq!(
@@ -10712,16 +10712,16 @@ fn parent_interface_evidence_is_transitive_and_diamond_paths_preserve_identity()
 fn parent_interfaces_do_not_merge_same_named_members() {
     let package = execution_support::compile_with_tuple(
         r#"
-        trait First { fn value() -> true'type { true } }
-        trait Second { fn value() -> true'type { false } }
+        trait First { fn value() -> bool { true } }
+        trait Second { fn value() -> bool { false } }
         trait Both :- First + Second {
-            fn values() -> Tuple<true'type, true'type> { (Self.as(First).value(), Self.as(Second).value()) }
+            fn values() -> Tuple<bool, bool> { (Self.as(First).value(), Self.as(Second).value()) }
         }
         struct Flag {}
         impl Both for Flag {}
         impl First for Flag {}
         impl Second for Flag {}
-        fn run() -> Tuple<true'type, true'type> { Flag.as(Both).values() }
+        fn run() -> Tuple<bool, bool> { Flag.as(Both).values() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10759,7 +10759,7 @@ fn interpreter_rejects_missing_parent_evidence_in_a_damaged_world() {
 fn child_views_project_unique_inherited_members_through_diamond_paths() {
     let package = compile(
         r#"
-        trait Root { fn read(self) -> true'type { true } }
+        trait Root { fn read(self) -> bool { true } }
         trait Left :- Root {}
         trait Right :- Root {}
         trait Child :- Left + Right {}
@@ -10768,7 +10768,7 @@ fn child_views_project_unique_inherited_members_through_diamond_paths() {
         impl Right for S {}
         impl Left for S {}
         impl Root for S {}
-        fn run() -> true'type { S {}.as(Child).read() }
+        fn run() -> bool { S {}.as(Child).read() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10782,16 +10782,16 @@ fn child_views_project_unique_inherited_members_through_diamond_paths() {
 fn default_unqualified_members_use_the_definition_side_interface_evidence() {
     let package = compile(
         r#"
-        trait Parent { fn read(self) -> true'type; fn static_read() -> true'type { true } }
+        trait Parent { fn read(self) -> bool; fn static_read() -> bool { true } }
         trait Child :- Parent {
-            fn inspect(self) -> true'type { self.read() }
-            fn inspect_static() -> true'type { Self.static_read() }
+            fn inspect(self) -> bool { self.read() }
+            fn inspect_static() -> bool { Self.static_read() }
         }
         struct S {}
         impl Child for S {}
-        impl Parent for S { fn read(self) -> true'type { true } }
-        impl S { fn read(self) -> true'type { false } }
-        fn run() -> true'type { S {}.as(Child).inspect() and S.as(Child).inspect_static() }
+        impl Parent for S { fn read(self) -> bool { true } }
+        impl S { fn read(self) -> bool { false } }
+        fn run() -> bool { S {}.as(Child).inspect() and S.as(Child).inspect_static() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10805,16 +10805,16 @@ fn default_unqualified_members_use_the_definition_side_interface_evidence() {
 fn an_explicit_parent_view_disambiguates_same_named_capabilities() {
     let package = compile(
         r#"
-        trait First { fn read() -> true'type { true } }
-        trait Second { fn read() -> true'type { false } }
+        trait First { fn read() -> bool { true } }
+        trait Second { fn read() -> bool { false } }
         trait Child :- First + Second {
-            fn inspect() -> true'type { Self.as(First).read() }
+            fn inspect() -> bool { Self.as(First).read() }
         }
         struct S {}
         impl Child for S {}
         impl First for S {}
         impl Second for S {}
-        fn run() -> true'type { S.as(Child).inspect() }
+        fn run() -> bool { S.as(Child).inspect() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10828,14 +10828,14 @@ fn an_explicit_parent_view_disambiguates_same_named_capabilities() {
 fn generic_trait_bounds_check_callers_and_dispatch_definition_fixed_members() {
     let package = execution_support::compile_with_tuple(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         struct Yes {}
         struct No {}
-        impl Read for Yes { fn read(self) -> true'type { true } }
-        impl Read for No { fn read(self) -> true'type { false } }
-        fn read(value: T) -> true'type where T :- Read { value.read() }
-        fn forward(value: U) -> true'type where U :- Read { read(value) }
-        fn run() -> Tuple<true'type, true'type> { (forward(Yes {}), read(No {})) }
+        impl Read for Yes { fn read(self) -> bool { true } }
+        impl Read for No { fn read(self) -> bool { false } }
+        fn read(value: T) -> bool where T :- Read { value.read() }
+        fn forward(value: U) -> bool where U :- Read { read(value) }
+        fn run() -> Tuple<bool, bool> { (forward(Yes {}), read(No {})) }
     "#,
     );
     assert_eq!(
@@ -10859,16 +10859,16 @@ fn generic_trait_bounds_check_callers_and_dispatch_definition_fixed_members() {
 fn generic_bounds_support_conjunction_parent_evidence_and_function_values() {
     let package = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         trait Child :- Read {}
         trait Marker {}
         struct Flag {}
-        impl Read for Flag { fn read(self) -> true'type { true } }
+        impl Read for Flag { fn read(self) -> bool { true } }
         impl Child for Flag {}
         impl Marker for Flag {}
-        fn read(value: T) -> true'type where T :- Read { value.read() }
-        fn use_child(value: U) -> true'type where U :- Child + Marker { read(value) }
-        fn run() -> true'type { let f: fn(Flag) -> true'type = use_child; f(Flag {}) }
+        fn read(value: T) -> bool where T :- Read { value.read() }
+        fn use_child(value: U) -> bool where U :- Child + Marker { read(value) }
+        fn run() -> bool { let f: fn(Flag) -> bool = use_child; f(Flag {}) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10882,14 +10882,14 @@ fn generic_bounds_support_conjunction_parent_evidence_and_function_values() {
 fn generic_static_members_and_explicit_views_keep_bound_interface_identity() {
     let package = execution_support::compile_with_tuple(
         r#"
-        trait First { fn read() -> true'type { true } }
-        trait Second { fn read() -> true'type { false } }
+        trait First { fn read() -> bool { true } }
+        trait Second { fn read() -> bool { false } }
         struct Flag {}
         impl First for Flag {}
         impl Second for Flag {}
-        fn first() -> true'type where T :- First { T.read() }
-        fn second() -> true'type where T :- First + Second { T.as(Second).read() }
-        fn run() -> Tuple<true'type, true'type> { (first<Flag>(), second<Flag>()) }
+        fn first() -> bool where T :- First { T.read() }
+        fn second() -> bool where T :- First + Second { T.as(Second).read() }
+        fn run() -> Tuple<bool, bool> { (first<Flag>(), second<Flag>()) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10906,8 +10906,8 @@ fn interpreter_checks_retained_generic_capabilities_even_without_method_calls() 
         trait Marker {}
         struct Flag {}
         impl Marker for Flag {}
-        fn consume(value: T) -> true'type where T :- Marker { true }
-        fn run() -> true'type { consume(Flag {}) }
+        fn consume(value: T) -> bool where T :- Marker { true }
+        fn run() -> bool { consume(Flag {}) }
     "#,
     );
     package.implementations.clear();
@@ -10920,18 +10920,18 @@ fn interpreter_checks_retained_generic_capabilities_even_without_method_calls() 
 fn default_capabilities_forward_through_generic_calls_and_nested_closures() {
     let package = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
-        fn consume(value: T) -> true'type where T :- Read {
+        trait Read { fn read(self) -> bool; }
+        fn consume(value: T) -> bool where T :- Read {
             let f = |item: T| item.read();
             f(value)
         }
         trait Child :- Read {
-            fn inspect(self) -> true'type { consume(self) }
+            fn inspect(self) -> bool { consume(self) }
         }
         struct Flag {}
         impl Child for Flag {}
-        impl Read for Flag { fn read(self) -> true'type { true } }
-        fn run() -> true'type { Flag {}.as(Child).inspect() }
+        impl Read for Flag { fn read(self) -> bool { true } }
+        fn run() -> bool { Flag {}.as(Child).inspect() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -10945,18 +10945,18 @@ fn default_capabilities_forward_through_generic_calls_and_nested_closures() {
 fn constrained_nominal_types_form_and_execute_with_their_parameter_capabilities() {
     let package = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         struct Box where T :- Read { value: T, }
         enum Maybe where T :- Read { none, some(T), }
         struct Flag {}
-        fn unwrap(value: Maybe<T>) -> true'type where T :- Read {
+        fn unwrap(value: Maybe<T>) -> bool where T :- Read {
             value match { Maybe<T>.none => false, Maybe<T>.some(item) => item.read(), }
         }
-        fn run() -> true'type {
+        fn run() -> bool {
             let boxed = Box<Flag> { value: Flag {} };
             unwrap(Maybe<Flag>.some(boxed.value))
         }
-        impl Read for Flag { fn read(self) -> true'type { true } }
+        impl Read for Flag { fn read(self) -> bool { true } }
     "#,
     );
     assert_eq!(
@@ -10984,9 +10984,9 @@ fn constrained_nested_fields_use_the_enclosing_type_capabilities() {
         trait Marker {}
         struct Inner where T :- Marker { value: T, }
         struct Outer where U :- Marker { inner: Inner<U>, }
-        struct Flag { value: true'type, }
+        struct Flag { value: bool, }
         impl Marker for Flag {}
-        fn run() -> true'type {
+        fn run() -> bool {
             Outer<Flag> { inner: Inner<Flag> { value: Flag { value: true } } }.inner.value.value
         }
     "#,
@@ -11002,11 +11002,11 @@ fn constrained_nested_fields_use_the_enclosing_type_capabilities() {
 fn nominal_field_defaults_use_and_specialize_their_own_capability_environment() {
     let package = compile(
         r#"
-        trait Value { fn value() -> true'type; }
-        struct Box where T :- Value { value: true'type = T.value(), }
+        trait Value { fn value() -> bool; }
+        struct Box where T :- Value { value: bool = T.value(), }
         struct Flag {}
-        impl Value for Flag { fn value() -> true'type { true } }
-        fn run() -> true'type { Box<Flag> {}.value }
+        impl Value for Flag { fn value() -> bool { true } }
+        fn run() -> bool { Box<Flag> {}.value }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11039,7 +11039,7 @@ fn interpreter_rechecks_nominal_capabilities_for_constructed_values() {
 #[test]
 fn generic_implementation_nir_preserves_selected_substitution_and_contract() {
     let package = compile(
-        "trait Read { fn read(self) -> true'type; } struct Box where T { value: T, } impl Read for Box<T> where T, requires T == true'type { fn read(self) -> true'type { self.value } } fn run() -> true'type { Box<true'type> { value: true }.as(Read).read() }",
+        "trait Read { fn read(self) -> bool; } struct Box where T { value: T, } impl Read for Box<T> where T, requires T == bool { fn read(self) -> bool { self.value } } fn run() -> bool { Box<bool> { value: true }.as(Read).read() }",
     );
     let implementation = &package.implementations[0];
     assert_eq!(implementation.type_parameters.len(), 1);
@@ -11073,15 +11073,15 @@ fn generic_dispatch_materializes_forwarding_defaults_and_closures() {
     let package = compile(
         r#"
         trait Read {
-            fn read(self) -> true'type;
-            fn indirect(self) -> true'type { let f = || self.as(Read).read(); f() }
+            fn read(self) -> bool;
+            fn indirect(self) -> bool { let f = || self.as(Read).read(); f() }
         }
         struct Box where T { value: T, }
-        impl Read for Box<T> where T, requires T == true'type {
-            fn read(self) -> true'type { self.value }
+        impl Read for Box<T> where T, requires T == bool {
+            fn read(self) -> bool { self.value }
         }
-        fn forward(value: U) -> true'type where U :- Read { value.indirect() }
-        fn run() -> true'type { forward(Box<true'type> { value: true }) }
+        fn forward(value: U) -> bool where U :- Read { value.indirect() }
+        fn run() -> bool { forward(Box<bool> { value: true }) }
     "#,
     );
     assert_eq!(package.dispatch_instances.len(), 1);
@@ -11096,13 +11096,13 @@ fn generic_dispatch_materializes_forwarding_defaults_and_closures() {
 fn generic_dispatch_selects_specialization_and_disjoint_requirements() {
     let package = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         struct Box where T { value: T, }
-        impl Read for Box<T> where T { fn read(self) -> true'type { false } }
-        impl Read for Box<true'type> { fn read(self) -> true'type { self.value } }
-        fn read(value: U) -> true'type where U :- Read { value.read() }
-        fn flag() -> true'type { read(Box<true'type> { value: true }) }
-        fn letter() -> true'type { read(Box<'x''type> { value: 'x' }) }
+        impl Read for Box<T> where T { fn read(self) -> bool { false } }
+        impl Read for Box<bool> { fn read(self) -> bool { self.value } }
+        fn read(value: U) -> bool where U :- Read { value.read() }
+        fn flag() -> bool { read(Box<bool> { value: true }) }
+        fn letter() -> bool { read(Box<'x''type> { value: 'x' }) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11116,13 +11116,13 @@ fn generic_dispatch_selects_specialization_and_disjoint_requirements() {
     );
     let package = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         struct Box where T { value: T, }
-        impl Read for Box<T> where T, requires T == true'type { fn read(self) -> true'type { self.value } }
-        impl Read for Box<U> where U, requires U == 'x''type { fn read(self) -> true'type { false } }
-        fn read(value: V) -> true'type where V :- Read { value.read() }
-        fn flag() -> true'type { read(Box<true'type> { value: true }) }
-        fn letter() -> true'type { read(Box<'x''type> { value: 'x' }) }
+        impl Read for Box<T> where T, requires T == bool { fn read(self) -> bool { self.value } }
+        impl Read for Box<U> where U, requires U == 'x''type { fn read(self) -> bool { false } }
+        fn read(value: V) -> bool where V :- Read { value.read() }
+        fn flag() -> bool { read(Box<bool> { value: true }) }
+        fn letter() -> bool { read(Box<'x''type> { value: 'x' }) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11140,15 +11140,15 @@ fn generic_dispatch_selects_specialization_and_disjoint_requirements() {
 fn generic_dispatch_collects_parent_and_nominal_capability_instances() {
     let package = compile(
         r#"
-        trait Parent { fn read(self) -> true'type; }
+        trait Parent { fn read(self) -> bool; }
         trait Child :- Parent {}
         struct Box where T { value: T, }
-        impl Parent for Box<T> where T { fn read(self) -> true'type { true } }
+        impl Parent for Box<T> where T { fn read(self) -> bool { true } }
         impl Child for Box<U> where U {}
         struct Held where T :- Child { value: T, }
-        fn forward(value: V) -> true'type where V :- Child { value.read() }
-        fn run() -> true'type {
-            let held = Held<Box<true'type>> { value: Box<true'type> { value: true } };
+        fn forward(value: V) -> bool where V :- Child { value.read() }
+        fn run() -> bool {
+            let held = Held<Box<bool>> { value: Box<bool> { value: true } };
             forward(held.value)
         }
     "#,
@@ -11165,10 +11165,10 @@ fn generic_dispatch_collects_parent_and_nominal_capability_instances() {
 fn generic_dispatch_recursive_defaults_materialize_once() {
     let package = compile(
         r#"
-        trait Loop { fn recurse(self) -> true'type { self.as(Loop).recurse() } }
+        trait Loop { fn recurse(self) -> bool { self.as(Loop).recurse() } }
         struct Box where T {}
         impl Loop for Box<T> where T {}
-        fn run() -> true'type { Box<true'type> {}.as(Loop).recurse() }
+        fn run() -> bool { Box<bool> {}.as(Loop).recurse() }
     "#,
     );
     assert_eq!(package.dispatch_instances.len(), 1);
@@ -11193,11 +11193,11 @@ fn generic_dispatch_recursive_defaults_materialize_once() {
 fn generic_dispatch_checks_materialized_member_identity_and_substitution() {
     let original = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         struct Box where T { value: T, }
-        impl Read for Box<T> where T, requires T == true'type { fn read(self) -> true'type { self.value } }
-        fn forward(value: U) -> true'type where U :- Read { value.read() }
-        fn run() -> true'type { forward(Box<true'type> { value: true }) }
+        impl Read for Box<T> where T, requires T == bool { fn read(self) -> bool { self.value } }
+        fn forward(value: U) -> bool where U :- Read { value.read() }
+        fn run() -> bool { forward(Box<bool> { value: true }) }
     "#,
     );
     for mutation in 0..5 {
@@ -11250,11 +11250,11 @@ fn generic_dispatch_checks_materialized_member_identity_and_substitution() {
 fn generic_dispatch_discovers_embedded_pattern_calls() {
     let package = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         struct Box where T { value: T, }
-        impl Read for Box<T> where T { fn read(self) -> true'type { true } }
-        fn read(value: U) -> true'type where U :- Read { value.read() }
-        fn run() -> true'type {
+        impl Read for Box<T> where T { fn read(self) -> bool { true } }
+        fn read(value: U) -> bool where U :- Read { value.read() }
+        fn run() -> bool {
             true match {
                 (flag if read(Box<'x''type> { value: 'x' })) => flag,
                 _ => false,
@@ -11273,14 +11273,14 @@ fn generic_dispatch_discovers_embedded_pattern_calls() {
 fn generic_dispatch_preserves_receiver_and_argument_evaluation_once() {
     let package = compile(
         r#"
-        trait Choose { fn choose(self, other: true'type) -> true'type; }
+        trait Choose { fn choose(self, other: bool) -> bool; }
         struct Box where T { value: T, }
-        impl Choose for Box<T> where T, requires T == true'type {
-            fn choose(self, other: true'type) -> true'type { self.value and other }
+        impl Choose for Box<T> where T, requires T == bool {
+            fn choose(self, other: bool) -> bool { self.value and other }
         }
-        fn receiver() -> Box<true'type> { Box<true'type> { value: true } }
-        fn argument() -> true'type { true }
-        fn run() -> true'type { receiver().as(Choose).choose(argument()) }
+        fn receiver() -> Box<bool> { Box<bool> { value: true } }
+        fn argument() -> bool { true }
+        fn run() -> bool { receiver().as(Choose).choose(argument()) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11298,11 +11298,11 @@ fn generic_dispatch_preserves_receiver_and_argument_evaluation_once() {
 fn generic_dispatch_materialization_is_repeatable_and_budgeted() {
     let package = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         struct Box where T { value: T, }
-        impl Read for Box<T> where T { fn read(self) -> true'type { true } }
-        fn forward(value: U) -> true'type where U :- Read { value.read() }
-        fn run() -> true'type { forward(Box<true'type> { value: true }) }
+        impl Read for Box<T> where T { fn read(self) -> bool { true } }
+        fn forward(value: U) -> bool where U :- Read { value.read() }
+        fn run() -> bool { forward(Box<bool> { value: true }) }
     "#,
     );
     let budget = elaboration::ptc::Budget::default();
@@ -11327,12 +11327,12 @@ fn generic_dispatch_materialization_is_repeatable_and_budgeted() {
 fn generic_dispatch_handles_conditioned_concrete_methods() {
     let package = compile(
         r#"
-        trait Read { fn read() -> true'type; }
+        trait Read { fn read() -> bool; }
         struct S {}
-        impl Read for S where requires true { fn read() -> true'type { true } }
-        fn direct() -> true'type { S.as(Read).read() }
-        fn forward() -> true'type where U :- Read { U.read() }
-        fn indirect() -> true'type { forward<S>() }
+        impl Read for S where requires true { fn read() -> bool { true } }
+        fn direct() -> bool { S.as(Read).read() }
+        fn forward() -> bool where U :- Read { U.read() }
+        fn indirect() -> bool { forward<S>() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11376,7 +11376,7 @@ fn generic_inherent_methods_support_construction_projection_and_forwarding() {
             fn relay(self) -> T { self.get() }
         }
         fn forward(value: U) -> U where U { Box<U>.make(value).relay() }
-        fn run() -> true'type { forward(true) }
+        fn run() -> bool { forward(true) }
         fn letter() -> 'x''type { forward('x') }
     "#,
     );
@@ -11397,13 +11397,13 @@ fn generic_inherent_specialization_is_per_member() {
         r#"
         struct Box where T { value: T, }
         impl Box<T> where T {
-            fn read(self) -> true'type { false }
+            fn read(self) -> bool { false }
             fn get(self) -> T { self.value }
         }
-        impl Box<true'type> { fn read(self) -> true'type { self.value } }
-        fn flag() -> true'type { Box<true'type> { value: true }.read() }
-        fn letter() -> true'type { Box<'x''type> { value: 'x' }.read() }
-        fn extracted() -> true'type { Box<true'type> { value: true }.get() }
+        impl Box<bool> { fn read(self) -> bool { self.value } }
+        fn flag() -> bool { Box<bool> { value: true }.read() }
+        fn letter() -> bool { Box<'x''type> { value: 'x' }.read() }
+        fn extracted() -> bool { Box<bool> { value: true }.get() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11420,14 +11420,14 @@ fn generic_inherent_requires_disambiguate_and_apply_inside_members() {
     let package = compile(
         r#"
         struct Box where T { value: T, }
-        impl Box<T> where T, requires T == true'type {
-            fn read(self) -> true'type { self.value }
+        impl Box<T> where T, requires T == bool {
+            fn read(self) -> bool { self.value }
         }
         impl Box<U> where U, requires U == 'x''type {
-            fn read(self) -> true'type { false }
+            fn read(self) -> bool { false }
         }
         impl Box<V> where V { fn identity(self) -> Self { self } }
-        fn run() -> true'type { Box<true'type> { value: true }.identity().read() }
+        fn run() -> bool { Box<bool> { value: true }.identity().read() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11448,7 +11448,7 @@ fn generic_inherent_static_function_values_keep_substitutions_in_closures() {
             let factory = || make(value);
             factory()
         }
-        fn run() -> true'type { forward(true).value }
+        fn run() -> bool { forward(true).value }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11462,13 +11462,13 @@ fn generic_inherent_static_function_values_keep_substitutions_in_closures() {
 fn generic_inherent_does_not_replace_definition_fixed_trait_members() {
     let package = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         struct Box where T { value: T, }
-        impl Box<T> where T { fn read(self) -> true'type { false } }
-        impl Read for Box<T> where T { fn read(self) -> true'type { true } }
-        fn forward(value: U) -> true'type where U :- Read { value.read() }
-        fn run() -> true'type { forward(Box<true'type> { value: true }) }
-        fn direct() -> true'type { Box<true'type> { value: true }.read() }
+        impl Box<T> where T { fn read(self) -> bool { false } }
+        impl Read for Box<T> where T { fn read(self) -> bool { true } }
+        fn forward(value: U) -> bool where U :- Read { value.read() }
+        fn run() -> bool { forward(Box<bool> { value: true }) }
+        fn direct() -> bool { Box<bool> { value: true }.read() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11488,9 +11488,9 @@ fn inherent_optional_methods_use_previous_parameters_and_per_call_defaults() {
         r#"
         struct S {}
         impl S {
-            fn choose(self, value: true'type, .flip: true'type = not value, .last: true'type = flip) -> true'type { last }
+            fn choose(self, value: bool, .flip: bool = not value, .last: bool = flip) -> bool { last }
         }
-        fn run() -> Tuple<true'type, true'type, true'type> {
+        fn run() -> Tuple<bool, bool, bool> {
             (S {}.choose(true), S {}.choose(false), S {}.choose(true, .flip = true))
         }
     "#,
@@ -11511,11 +11511,11 @@ fn inherent_named_inputs_follow_receiver_in_source_order() {
     let package = compile(
         r#"
         struct S {}
-        impl S { fn choose(self, .first: true'type = false, .second: true'type = first) -> true'type { first and second } }
+        impl S { fn choose(self, .first: bool = false, .second: bool = first) -> bool { first and second } }
         fn receiver() -> S { S {} }
-        fn first() -> true'type { true }
-        fn second() -> true'type { false }
-        fn run() -> true'type { receiver().choose(.second = second(), .first = first()) }
+        fn first() -> bool { true }
+        fn second() -> bool { false }
+        fn run() -> bool { receiver().choose(.second = second(), .first = first()) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11535,11 +11535,11 @@ fn generic_inherent_optional_static_and_receiver_methods_instantiate_defaults() 
         r#"
         struct Box where T { value: T, }
         impl Box<T> where T {
-            fn make(value: T, .flag: true'type = true) -> Self { Box<T> { value: value } }
-            fn choose(self, .left: true'type = true, .right: true'type = not left) -> true'type { right }
+            fn make(value: T, .flag: bool = true) -> Self { Box<T> { value: value } }
+            fn choose(self, .left: bool = true, .right: bool = not left) -> bool { right }
         }
-        fn forward(value: U) -> true'type where U { Box<U>.make(value).choose(.left = false) }
-        fn run() -> true'type { forward('x') }
+        fn forward(value: U) -> bool where U { Box<U>.make(value).choose(.left = false) }
+        fn run() -> bool { forward('x') }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11554,8 +11554,8 @@ fn inherent_static_optional_defaults_keep_definition_bindings() {
     let package = compile(
         r#"
         struct S {}
-        impl S { fn choose(value: true'type, .fallback: true'type = not value) -> true'type { fallback } }
-        fn run() -> true'type { let value = true; S.choose(false) }
+        impl S { fn choose(value: bool, .fallback: bool = not value) -> bool { fallback } }
+        fn run() -> bool { let value = true; S.choose(false) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11570,10 +11570,10 @@ fn inherent_optional_calls_preserve_early_return_before_remaining_inputs() {
     let package = compile(
         r#"
         struct S {}
-        impl S { fn choose(self, .first: true'type = false, .second: true'type = first) -> true'type { second } }
+        impl S { fn choose(self, .first: bool = false, .second: bool = first) -> bool { second } }
         fn receiver() -> S { S {} }
-        fn later() -> true'type { false }
-        fn run() -> true'type { receiver().choose(.first = (do { return true; }), .second = later()) }
+        fn later() -> bool { false }
+        fn run() -> bool { receiver().choose(.first = (do { return true; }), .second = later()) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11588,13 +11588,13 @@ fn inherent_optional_calls_preserve_early_return_before_remaining_inputs() {
 fn implementation_trait_bounds_support_recursive_wrappers_and_forwarding() {
     let package = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         struct Leaf {}
-        impl Read for Leaf { fn read(self) -> true'type { true } }
+        impl Read for Leaf { fn read(self) -> bool { true } }
         struct Box where T { value: T, }
-        impl Read for Box<T> where T :- Read { fn read(self) -> true'type { self.value.read() } }
-        fn forward(value: U) -> true'type where U :- Read { Box<U> { value: value }.as(Read).read() }
-        fn run() -> true'type { forward(Box<Leaf> { value: Leaf {} }) }
+        impl Read for Box<T> where T :- Read { fn read(self) -> bool { self.value.read() } }
+        fn forward(value: U) -> bool where U :- Read { Box<U> { value: value }.as(Read).read() }
+        fn run() -> bool { forward(Box<Leaf> { value: Leaf {} }) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11608,17 +11608,17 @@ fn implementation_trait_bounds_support_recursive_wrappers_and_forwarding() {
 fn implementation_trait_bounds_use_parent_evidence_and_conjunctions() {
     let package = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         trait Child :- Read {}
         trait Marker {}
         struct Leaf {}
-        impl Read for Leaf { fn read(self) -> true'type { true } }
+        impl Read for Leaf { fn read(self) -> bool { true } }
         impl Child for Leaf {}
         impl Marker for Leaf {}
         struct Box where T { value: T, }
-        impl Box<T> where T :- Read + Marker { fn read(self) -> true'type { self.value.read() } }
-        fn forward(value: U) -> true'type where U :- Child + Marker { Box<U> { value: value }.read() }
-        fn run() -> true'type { forward(Leaf {}) }
+        impl Box<T> where T :- Read + Marker { fn read(self) -> bool { self.value.read() } }
+        fn forward(value: U) -> bool where U :- Child + Marker { Box<U> { value: value }.read() }
+        fn run() -> bool { forward(Leaf {}) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11632,16 +11632,16 @@ fn implementation_trait_bounds_use_parent_evidence_and_conjunctions() {
 fn implementation_trait_bounds_qualify_before_structural_selection() {
     let package = compile(
         r#"
-        trait Read { fn read() -> true'type; }
+        trait Read { fn read() -> bool; }
         trait Marker {}
         struct Leaf {}
         struct Other {}
         impl Marker for Leaf {}
         struct Box where T {}
-        impl Read for T where T { fn read() -> true'type { false } }
-        impl Read for Box<T> where T :- Marker { fn read() -> true'type { true } }
-        fn marked() -> true'type { Box<Leaf>.as(Read).read() }
-        fn ordinary() -> true'type { Box<Other>.as(Read).read() }
+        impl Read for T where T { fn read() -> bool { false } }
+        impl Read for Box<T> where T :- Marker { fn read() -> bool { true } }
+        fn marked() -> bool { Box<Leaf>.as(Read).read() }
+        fn ordinary() -> bool { Box<Other>.as(Read).read() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -11662,13 +11662,13 @@ fn implementation_trait_bounds_materialize_dependencies_of_default_members() {
     let package = compile(
         r#"
         trait Marker {}
-        trait Read { fn read() -> true'type { true } }
+        trait Read { fn read() -> bool { true } }
         struct Leaf {}
         impl Marker for Leaf {}
         struct Box where T {}
         impl Read for Box<T> where T :- Marker {}
-        fn forward() -> true'type where U :- Read { U.read() }
-        fn run() -> true'type { forward<Box<Leaf>>() }
+        fn forward() -> bool where U :- Read { U.read() }
+        fn run() -> bool { forward<Box<Leaf>>() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12067,9 +12067,9 @@ fn parameterized_trait_source_defaults_distinguish_instances_on_one_subject() {
         r#"
         trait Echo where T { fn echo(value: T) -> T { value } }
         struct S {}
-        impl Echo<true'type> for S {}
+        impl Echo<bool> for S {}
         impl Echo<'x''type> for S {}
-        fn bool_entry() -> true'type { S.as(Echo<true'type>).echo(true) }
+        fn bool_entry() -> bool { S.as(Echo<bool>).echo(true) }
         fn char_entry() -> 'x''type { S.as(Echo<'x''type>).echo('x') }
     "#,
     );
@@ -12096,7 +12096,7 @@ fn parameterized_trait_source_bounds_and_generic_implementations_execute() {
         struct Box where T { value: T, }
         impl Echo<U> for Box<U> where U { fn echo(self, value: U) -> U { self.value } }
         fn forward(value: V, item: T) -> T where T, V :- Echo<T> { value.echo(item) }
-        fn run() -> true'type { forward(Box<true'type> { value: true }, false) }
+        fn run() -> bool { forward(Box<bool> { value: true }, false) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12115,9 +12115,9 @@ fn parameterized_trait_source_default_calls_and_closures_keep_interface_argument
             fn indirect(self, value: T) -> T { let f = || self.as(Echo<T>).echo(value); f() }
         }
         struct S {}
-        impl Echo<true'type> for S { fn echo(self, value: true'type) -> true'type { not value } }
+        impl Echo<bool> for S { fn echo(self, value: bool) -> bool { not value } }
         impl Echo<'x''type> for S { fn echo(self, value: 'x''type) -> 'x''type { value } }
-        fn run() -> true'type { S {}.as(Echo<true'type>).indirect(false) }
+        fn run() -> bool { S {}.as(Echo<bool>).indirect(false) }
         fn letter() -> 'x''type { S {}.as(Echo<'x''type>).indirect('x') }
     "#,
     );
@@ -12139,10 +12139,10 @@ fn parameterized_trait_source_parent_projection_preserves_substitution() {
         trait Parent where T { fn echo(self, value: T) -> T; }
         trait Child :- Parent<T> where T {}
         struct S {}
-        impl Parent<true'type> for S { fn echo(self, value: true'type) -> true'type { value } }
-        impl Child<true'type> for S {}
-        fn forward(value: U) -> true'type where U :- Child<true'type> { value.echo(true) }
-        fn run() -> true'type { forward(S {}) }
+        impl Parent<bool> for S { fn echo(self, value: bool) -> bool { value } }
+        impl Child<bool> for S {}
+        fn forward(value: U) -> bool where U :- Child<bool> { value.echo(true) }
+        fn run() -> bool { forward(S {}) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12160,7 +12160,7 @@ fn parameterized_trait_source_symbolic_rigid_arguments_select_proved_generic_hea
         struct Box where T { value: T, }
         impl Echo<T> for Box<T> where T { fn echo(self, value: T) -> T { self.value } }
         fn forward(value: U) -> U where U { Box<U> { value: value }.as(Echo<U>).echo(value) }
-        fn run() -> true'type { forward(true) }
+        fn run() -> bool { forward(true) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12198,7 +12198,7 @@ fn parameterized_trait_source_interface_arguments_solve_phantom_implementation_p
         impl Echo<T> for Identity where T { fn echo(self, value: T) -> T { value } }
         impl Child<T> for Identity where T {}
         fn forward(value: U) -> U where U { Identity {}.as(Child<U>).echo(value) }
-        fn run() -> true'type { forward(true) }
+        fn run() -> bool { forward(true) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12212,13 +12212,13 @@ fn parameterized_trait_source_interface_arguments_solve_phantom_implementation_p
 fn trait_parameter_contracts_are_available_in_default_bodies() {
     let package = compile(
         r#"
-        trait Read { fn read(self) -> true'type; }
+        trait Read { fn read(self) -> bool; }
         struct Leaf {}
-        impl Read for Leaf { fn read(self) -> true'type { true } }
-        trait Adapter where T :- Read { fn run(value: T) -> true'type { value.read() } }
+        impl Read for Leaf { fn read(self) -> bool { true } }
+        trait Adapter where T :- Read { fn run(value: T) -> bool { value.read() } }
         struct Host {}
         impl Adapter<Leaf> for Host {}
-        fn entry() -> true'type { Host.as(Adapter<Leaf>).run(Leaf {}) }
+        fn entry() -> bool { Host.as(Adapter<Leaf>).run(Leaf {}) }
     "#,
     );
     let adapter = package.traits.iter().find(|t| t.name == "Adapter").unwrap();
@@ -12234,15 +12234,15 @@ fn trait_parameter_contracts_are_available_in_default_bodies() {
 fn trait_parameter_requires_propagate_through_generic_defaults_and_implementations() {
     let package = compile(
         r#"
-        trait Checked where T, requires T == true'type {
-            fn accept(value: T) -> true'type { value }
+        trait Checked where T, requires T == bool {
+            fn accept(value: T) -> bool { value }
         }
         struct Host {}
-        impl Checked<U> for Host where U, requires U == true'type {}
-        fn forward(value: V) -> true'type where V, requires V == true'type {
+        impl Checked<U> for Host where U, requires U == bool {}
+        fn forward(value: V) -> bool where V, requires V == bool {
             Host.as(Checked<V>).accept(value)
         }
-        fn entry() -> true'type { forward(true) }
+        fn entry() -> bool { forward(true) }
     "#,
     );
     assert_eq!(package.traits[0].requirements.len(), 1);
@@ -12257,14 +12257,14 @@ fn trait_parameter_requires_propagate_through_generic_defaults_and_implementatio
 fn trait_parameter_contracts_form_parent_interfaces_in_definition_scope() {
     let package = compile(
         r#"
-        trait Parent where T, requires T == true'type {
-            fn accept(value: T) -> true'type { value }
+        trait Parent where T, requires T == bool {
+            fn accept(value: T) -> bool { value }
         }
-        trait Child :- Parent<T> where T, requires T == true'type {}
+        trait Child :- Parent<T> where T, requires T == bool {}
         struct Host {}
-        impl Parent<true'type> for Host {}
-        impl Child<true'type> for Host {}
-        fn entry() -> true'type { Host.as(Child<true'type>).accept(true) }
+        impl Parent<bool> for Host {}
+        impl Child<bool> for Host {}
+        fn entry() -> bool { Host.as(Child<bool>).accept(true) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12281,10 +12281,10 @@ fn trait_parameter_capabilities_are_required_even_when_members_do_not_use_them()
         trait Marker {}
         struct Leaf {}
         impl Marker for Leaf {}
-        trait Adapter where T :- Marker { fn read() -> true'type { true } }
+        trait Adapter where T :- Marker { fn read() -> bool { true } }
         struct Host {}
         impl Adapter<Leaf> for Host {}
-        fn entry() -> true'type { Host.as(Adapter<Leaf>).read() }
+        fn entry() -> bool { Host.as(Adapter<Leaf>).read() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12338,19 +12338,19 @@ fn trait_optional_arguments_use_interface_defaults_and_binding_identities() {
     let package = compile(
         r#"
         trait Choose {
-            fn choose(self, value: true'type, .first: true'type = not value,
-                .last: true'type = first) -> true'type;
+            fn choose(self, value: bool, .first: bool = not value,
+                .last: bool = first) -> bool;
         }
         struct Host {}
         impl Choose for Host {
-            fn choose(self, input: true'type, a: true'type, b: true'type) -> true'type { b }
+            fn choose(self, input: bool, a: bool, b: bool) -> bool { b }
         }
-        fn forward(host: T, value: true'type) -> true'type where T :- Choose {
+        fn forward(host: T, value: bool) -> bool where T :- Choose {
             host.choose(value)
         }
-        fn direct() -> true'type { Host {}.as(Choose).choose(true) }
-        fn generic() -> true'type { forward(Host {}, true) }
-        fn overridden() -> true'type { Host {}.as(Choose).choose(true, .first = true) }
+        fn direct() -> bool { Host {}.as(Choose).choose(true) }
+        fn generic() -> bool { forward(Host {}, true) }
+        fn overridden() -> bool { Host {}.as(Choose).choose(true, .first = true) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12367,14 +12367,14 @@ fn trait_optional_arguments_substitute_interface_types_and_inherited_defaults() 
     let package = compile(
         r#"
         trait Choose where T {
-            fn choose(value: T, .flag: true'type = true) -> T { value }
+            fn choose(value: T, .flag: bool = true) -> T { value }
         }
         trait Child :- Choose<T> where T {}
         struct Host {}
         impl Choose<T> for Host where T {}
         impl Child<T> for Host where T {}
         fn forward(value: U) -> U where U { Host.as(Child<U>).choose(value) }
-        fn flag() -> true'type { forward(true) }
+        fn flag() -> bool { forward(true) }
         fn letter() -> 'x''type { forward('x') }
     "#,
     );
@@ -12394,16 +12394,16 @@ fn trait_optional_arguments_evaluate_receiver_then_explicit_inputs_then_defaults
     let package = compile(
         r#"
         trait Choose {
-            fn choose(self, .first: true'type = true, .second: true'type = first) -> true'type;
+            fn choose(self, .first: bool = true, .second: bool = first) -> bool;
         }
         struct Host {}
         impl Choose for Host {
-            fn choose(self, a: true'type, b: true'type) -> true'type { a and b }
+            fn choose(self, a: bool, b: bool) -> bool { a and b }
         }
         fn receiver() -> Host { Host {} }
-        fn first() -> true'type { true }
-        fn second() -> true'type { false }
-        fn entry() -> true'type {
+        fn first() -> bool { true }
+        fn second() -> bool { false }
+        fn entry() -> bool {
             receiver().as(Choose).choose(.second = second(), .first = first())
         }
     "#,
@@ -12423,12 +12423,12 @@ fn trait_optional_arguments_evaluate_receiver_then_explicit_inputs_then_defaults
 fn trait_default_entry_is_independent_of_implementation_optional_entry() {
     let package = compile(
         r#"
-        trait Choose { fn choose(.option: true'type = true) -> true'type; }
+        trait Choose { fn choose(.option: bool = true) -> bool; }
         struct Host {}
         impl Choose for Host {
-            fn choose(.internal: true'type = false) -> true'type { internal }
+            fn choose(.internal: bool = false) -> bool { internal }
         }
-        fn entry() -> true'type { Host.as(Choose).choose() }
+        fn entry() -> bool { Host.as(Choose).choose() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12485,7 +12485,7 @@ fn trait_subject_requirements_check_defaults_and_export_generic_type_evidence() 
         }
         impl Same<T> for T where T {}
         fn convert(value: S) -> T where T, S :- Same<T> { value }
-        fn generic() -> true'type { convert<true'type, true'type>(true) }
+        fn generic() -> bool { convert<bool, bool>(true) }
         fn default_body() -> 'x''type { 'x'.as(Same<'x''type>).convert() }
     "#,
     );
@@ -12513,7 +12513,7 @@ fn trait_subject_requirements_follow_parameterized_parent_guarantees() {
         impl Same<T> for T where T {}
         impl Child<T> for T where T :- Same<T> {}
         fn convert(value: S) -> T where T, S :- Child<T> { value }
-        fn entry() -> true'type { convert<true'type, true'type>(true) and true.as(Child<true'type>).convert() }
+        fn entry() -> bool { convert<bool, bool>(true) and true.as(Child<bool>).convert() }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12559,14 +12559,14 @@ fn subject_dependent_trait_capabilities_reach_generic_member_lookup_and_dispatch
 fn subject_dependent_trait_capabilities_validate_concrete_worlds_without_materialization() {
     let package = compile(
         r#"
-        trait Read where S { fn read(self, owner: S) -> true'type; }
+        trait Read where S { fn read(self, owner: S) -> bool; }
         trait Adapter where T :- Read<Self> {}
         struct Host {}
         struct Leaf {}
-        impl Read<Host> for Leaf { fn read(self, owner: Host) -> true'type { true } }
+        impl Read<Host> for Leaf { fn read(self, owner: Host) -> bool { true } }
         impl Adapter<Leaf> for Host {}
-        fn forward(owner: S, value: T) -> true'type where T, S :- Adapter<T> { value.read(owner) }
-        fn entry() -> true'type { forward(Host {}, Leaf {}) }
+        fn forward(owner: S, value: T) -> bool where T, S :- Adapter<T> { value.read(owner) }
+        fn entry() -> bool { forward(Host {}, Leaf {}) }
     "#,
     );
     assert!(package.dispatch_instances.is_empty());
@@ -12581,19 +12581,19 @@ fn subject_dependent_trait_capabilities_validate_concrete_worlds_without_materia
 fn subject_dependent_trait_capabilities_follow_parents_without_unshadowing_methods() {
     let package = compile(
         r#"
-        trait Read where S { fn read(self, owner: S) -> true'type; }
-        trait Parent where T :- Read<Self> { fn choose(self) -> true'type { false } }
-        trait Child :- Parent<T> where T { fn choose(self) -> true'type { true } }
+        trait Read where S { fn read(self, owner: S) -> bool; }
+        trait Parent where T :- Read<Self> { fn choose(self) -> bool { false } }
+        trait Child :- Parent<T> where T { fn choose(self) -> bool { true } }
         struct Host {}
         struct Leaf {}
-        impl Read<Host> for Leaf { fn read(self, owner: Host) -> true'type { true } }
+        impl Read<Host> for Leaf { fn read(self, owner: Host) -> bool { true } }
         impl Parent<T> for Host where T :- Read<Host> {}
         impl Child<T> for Host where T :- Read<Host> {}
-        fn read(owner: S, value: T) -> true'type where S, T :- Read<S> { value.read(owner) }
-        fn forward(owner: S, value: T) -> true'type where T, S :- Child<T> {
+        fn read(owner: S, value: T) -> bool where S, T :- Read<S> { value.read(owner) }
+        fn forward(owner: S, value: T) -> bool where T, S :- Child<T> {
             owner.choose() and read(owner, value)
         }
-        fn entry() -> true'type { forward(Host {}, Leaf {}) }
+        fn entry() -> bool { forward(Host {}, Leaf {}) }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12640,11 +12640,11 @@ fn integer_runtime_proxies_defer_defaulting_until_other_arguments_supply_context
         fn identity(value: T) -> T where T { value }
         fn choose(left: T, right: T) -> T where T { left }
         fn word() -> U16 { 0 }
-        fn contextual() -> true'type { choose(identity(300), word()) match { 300 => true, _ => false } }
-        fn reversed() -> true'type { choose(word(), identity(300)) match { 0 => true, _ => false } }
+        fn contextual() -> bool { choose(identity(300), word()) match { 300 => true, _ => false } }
+        fn reversed() -> bool { choose(word(), identity(300)) match { 0 => true, _ => false } }
         fn defaulted() -> I32 { let value = identity(42); value }
         fn outer() -> U16 { identity(identity(65535)) }
-        fn branch() -> true'type { choose(if true { 300 } else { 400 }, word()) match { 300 => true, _ => false } }
+        fn branch() -> bool { choose(if true { 300 } else { 400 }, word()) match { 300 => true, _ => false } }
     "#,
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
@@ -12674,7 +12674,7 @@ fn integer_runtime_proxies_work_in_patterns_records_defaults_and_callbacks() {
         struct Pair { first: I32, second: I32 = 7 }
         fn apply(callback: fn(T) -> T, value: T) -> T where T { callback(value) }
         fn supply(value: I32, .other: I32 = value) -> I32 { other }
-        fn entry() -> true'type {
+        fn entry() -> bool {
             let pair = Pair { first: apply(|x| x, 42) };
             ((pair.first, pair.second) match { (42, 7) => true, _ => false }) and (supply(9) match { 9 => true, _ => false })
         }
@@ -12737,7 +12737,7 @@ fn float_runtime_proxies_delay_f64_default_until_generic_context_settles() {
         fn identity(value: T) -> T where T { value }
         fn choose(left: T, right: T) -> T where T { left }
         fn single() -> F32 { 0.0 }
-        fn inferred() -> true'type {
+        fn inferred() -> bool {
             choose(identity(0.1), single()) match { 0.1 => true, _ => false }
         }
         fn defaulted() -> F64 { let number = identity(0.1); number }
@@ -12764,7 +12764,7 @@ fn float_runtime_proxies_preserve_ieee_zero_matching_and_definition_defaults() {
         typealias F32 = .f32'builtin;
         struct Sample { value: F32 = -0.0 }
         fn supply(value: F32, .copy: F32 = value) -> F32 { copy }
-        fn entry() -> true'type {
+        fn entry() -> bool {
             supply(Sample {}.value) match { 0.0 => true, _ => false }
         }
     "#,
@@ -12851,7 +12851,7 @@ fn bitvec_or_keeps_rhs_effects_and_views_are_value_snapshots() {
     let package = execution_support::compile_with_tuple(
         r#"
         typealias Bits = do { let v: .u8'builtin = 0; v'bitvec }'type;
-        fn entry() -> Tuple<Bits, Bits, true'type> {
+        fn entry() -> Tuple<Bits, Bits, bool> {
             var byte: .u8'builtin = 1;
             let saved = byte'bitvec;
             byte = 2;
@@ -13678,9 +13678,8 @@ fn explicit_comptime_functions_preserve_phase_and_execute_through_checked_entry(
 
 #[test]
 fn comptime_entry_rechecks_stage_after_nir_mutation() {
-    let mut package = compile(
-        "comptime fn helper() -> true'type { true } comptime fn entry() -> true'type { helper() }",
-    );
+    let mut package =
+        compile("comptime fn helper() -> bool { true } comptime fn entry() -> bool { helper() }");
     package
         .functions
         .iter_mut()
@@ -13899,7 +13898,7 @@ fn comptime_integer_size_limit_is_distinct_from_fuel_and_allows_recovery() {
 #[test]
 fn comptime_integer_operands_propagate_returns_without_evaluating_later_operands() {
     let package = compile(
-        "comptime fn later() -> .Integer'builtin { 7 } comptime fn binary() -> .Integer'builtin { (do { return 23; }) + later() } comptime fn unary() -> .Integer'builtin { -(do { return 23; }) } comptime fn compare() -> true'type { (do { return true; }) < later() } comptime fn equality() -> true'type { 0 == (do { return true; }) }",
+        "comptime fn later() -> .Integer'builtin { 7 } comptime fn binary() -> .Integer'builtin { (do { return 23; }) + later() } comptime fn unary() -> .Integer'builtin { -(do { return 23; }) } comptime fn compare() -> bool { (do { return true; }) < later() } comptime fn equality() -> bool { 0 == (do { return true; }) }",
     );
     for name in ["binary", "unary", "compare", "equality"] {
         let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -14263,7 +14262,7 @@ fn comptime_defaults_use_definition_scope_prior_parameters_and_missing_only_exec
 fn interpreter_depth_budget_fires_on_a_two_mebibyte_host_stack_and_recovers() {
     use nir::program::{Expr, ExprKind, Pattern};
     let mut package = compile(
-        "comptime fn recurse() -> true'type { recurse() } comptime fn deep() -> true'type { true } comptime fn good() -> true'type { true } comptime fn pattern() -> true'type { true match { _ => true, } }",
+        "comptime fn recurse() -> bool { recurse() } comptime fn deep() -> bool { true } comptime fn good() -> bool { true } comptime fn pattern() -> bool { true match { _ => true, } }",
     );
     let deep = package
         .functions
@@ -16223,10 +16222,10 @@ fn comptime_callback_producers_use_partial_generic_context_and_evaluate_argument
 fn comptime_callback_admission_rejects_runtime_values_and_recovers() {
     let mut package = compile(
         r#"
-        fn runtime_flag() -> true'type { true }
-        comptime fn flag() -> true'type { true }
-        comptime fn apply(callback: comptime fn() -> true'type) -> true'type { callback() }
-        comptime fn produce() -> comptime fn() -> true'type = flag;
+        fn runtime_flag() -> bool { true }
+        comptime fn flag() -> bool { true }
+        comptime fn apply(callback: comptime fn() -> bool) -> bool { callback() }
+        comptime fn produce() -> comptime fn() -> bool = flag;
     "#,
     );
     {
@@ -16340,9 +16339,9 @@ fn comptime_constant_closures_restore_nested_environments_and_named_instances() 
 fn comptime_lambda_creation_does_not_execute_its_body() {
     let package = compile(
         r#"
-        comptime fn loop_forever() -> true'type { loop_forever() }
+        comptime fn loop_forever() -> bool { loop_forever() }
         const UNUSED = || loop_forever();
-        comptime fn run() -> true'type { let callback = UNUSED; true }
+        comptime fn run() -> bool { let callback = UNUSED; true }
     "#,
     );
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -16388,7 +16387,7 @@ fn comptime_nested_closure_factories_keep_distinct_invocation_environments() {
 fn restored_closure_environment_neither_reads_nor_overwrites_colliding_caller_binding() {
     use nir::program::ExprKind as K;
     let package = execution_support::compile_with_tuple(
-        "const CALLBACK = do { let flag = true; || flag }; comptime fn run(flag: true'type) -> Tuple<true'type, true'type> { (CALLBACK(), flag) }",
+        "const CALLBACK = do { let flag = true; || flag }; comptime fn run(flag: bool) -> Tuple<bool, bool> { (CALLBACK(), flag) }",
     );
     let function = package.functions.iter().find(|f| f.name == "run").unwrap();
     let K::Block {
@@ -16493,7 +16492,7 @@ fn explicit_closure_environment_types_execute_runtime_and_comptime_callbacks() {
 fn explicit_nested_environments_preserve_each_callback_value() {
     let package = execution_support::compile_with_tuple(
         r#"
-        typealias Bool = true'type;
+        typealias Bool = bool;
         typealias Reader = %{flag: Bool} comptime fn() -> Bool;
         typealias Both = %{left: Reader, right: Reader} comptime fn() -> Tuple<Bool, Bool>;
         comptime fn make(flag: Bool) -> Reader { || flag }
@@ -16551,7 +16550,7 @@ fn generic_alias_instances_do_not_share_the_first_argument_or_caller_scope() {
     let package = execution_support::compile_with_tuple(
         r#"
         typealias Type = .Type'builtin;
-        typealias Bool = true'type;
+        typealias Bool = bool;
         typealias T = 'a''type;
         typealias First<T, U> = T;
         typealias Second<T, U> = U;
@@ -16582,7 +16581,7 @@ fn nested_computed_aliases_remain_residual_until_arguments_are_available() {
     let package = execution_support::compile_with_tuple(
         r#"
         typealias Type = .Type'builtin;
-        typealias Bool = true'type;
+        typealias Bool = bool;
         typealias Char = 'a''type;
         comptime fn IdentityType(value: Type) -> Type { value }
         typealias Computed<T> = IdentityType(T);
@@ -16607,7 +16606,7 @@ fn computed_tuple_types_support_alias_fields_and_comptime_function_inputs() {
     let package = execution_support::compile_with_tuple(
         r#"
         typealias Type = .Type'builtin;
-        typealias Bool = true'type;
+        typealias Bool = bool;
         typealias Char = 'a''type;
         comptime fn IdentityType(value: Type) -> Type { value }
         comptime fn PairType(left: Type, right: Type) -> Type { Tuple<left, Tuple<right, left>> }
@@ -16835,7 +16834,7 @@ fn alias_argument_order_failures_and_invocation_isolation_are_preserved() {
         typealias Type = .Type'builtin;
         typealias First<A, B> = A;
         typealias Pair<T> = Tuple<T, T>;
-        comptime fn LeftType() -> Type { true'type }
+        comptime fn LeftType() -> Type { bool }
         comptime fn RightType() -> Type { 'z''type }
         comptime fn BadType() -> Type { .BitVec'builtin<-1> }
         comptime fn Ordered() -> Type { First<LeftType(), RightType()> }
@@ -16966,7 +16965,7 @@ fn computed_type_patterns_evaluate_only_attempted_candidates_in_order() {
     let package = compile(
         r#"
         typealias Type = .Type'builtin;
-        typealias Bool = true'type;
+        typealias Bool = bool;
         comptime fn FirstType() -> Type { Bool }
         comptime fn SecondType() -> Type { 'z''type }
         comptime fn choose(value: Type) -> Bool {
@@ -17559,7 +17558,7 @@ fn declaration_types_can_invoke_methods_after_world_preparation() {
         Value::Char('z')
     );
     // The same semantic dependencies must work with the world declarations first.
-    let reordered = "typealias Type = .Type'builtin; typealias Bool = true'type; trait Shape { comptime fn Output(self) -> Type; } struct Selector {} impl Shape for Selector { comptime fn Output(self) -> Type { Bool } } comptime fn Select(value: T) -> Type where T :- Shape { value.Output() } typealias Chosen = Select(Selector {}); fn run() -> Chosen { true }";
+    let reordered = "typealias Type = .Type'builtin; typealias Bool = bool; trait Shape { comptime fn Output(self) -> Type; } struct Selector {} impl Shape for Selector { comptime fn Output(self) -> Type { Bool } } comptime fn Select(value: T) -> Type where T :- Shape { value.Output() } typealias Chosen = Select(Selector {}); fn run() -> Chosen { true }";
     let package = compile(reordered);
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -18007,7 +18006,7 @@ fn numeric_peer_context_flows_through_computations_without_duplicating_effects()
         expression = format!("({expression} + 1.0)");
     }
     let source = format!(
-        "comptime fn check(value: .f32'builtin) -> true'type {{ {expression} == value }} comptime fn run() -> true'type {{ check(41.0) }}"
+        "comptime fn check(value: .f32'builtin) -> bool {{ {expression} == value }} comptime fn run() -> bool {{ check(41.0) }}"
     );
     let package = compile(&source);
     let mut interpreter = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -18060,7 +18059,7 @@ fn float_associated_constants_preserve_precision_aliases_and_generic_type_eviden
         Value::Bool(false)
     );
     let package = compile(
-        "struct F32 { NaN: true'type } enum State { NaN, Infinity } fn run() -> true'type { let state = State.Infinity; F32 { NaN: true }.NaN and (state match { .Infinity => true, .NaN => false }) }",
+        "struct F32 { NaN: bool } enum State { NaN, Infinity } fn run() -> bool { let state = State.Infinity; F32 { NaN: true }.NaN and (state match { .Infinity => true, .NaN => false }) }",
     );
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -18179,7 +18178,7 @@ fn program_assumes_rejects_forged_nir_check_shapes() {
         Primitive, Term,
         program::{ExprKind as K, Literal},
     };
-    let original = compile("fn check(flag: true'type) -> true'type { assumes flag; true }");
+    let original = compile("fn check(flag: bool) -> bool { assumes flag; true }");
     for corrupt_result in [false, true] {
         let mut package = original.clone();
         let K::Block { statements, .. } = &mut package.functions[0].body.kind else {
@@ -20605,7 +20604,7 @@ fn trait_program_contracts_compose_declarations_defaults_and_implementations() {
 #[test]
 fn pointer_aliases_observe_writes_and_root_replacement() {
     let package = compile(
-        "typealias Flag = true'type; fn change(p: *Flag, q: *Flag) -> Flag { p.* = true; q.* } fn run() -> Flag { var value = false; let p = value.ref; let q = do { let intermediate = p; intermediate }; let changed = change(p, q); value = false; changed and not q.* }",
+        "typealias Flag = bool; fn change(p: *Flag, q: *Flag) -> Flag { p.* = true; q.* } fn run() -> Flag { var value = false; let p = value.ref; let q = do { let intermediate = p; intermediate }; let changed = change(p, q); value = false; changed and not q.* }",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -20617,7 +20616,7 @@ fn pointer_aliases_observe_writes_and_root_replacement() {
 #[test]
 fn pointer_projection_keeps_field_identity() {
     let package = compile(
-        "struct Cell { value: true'type, } fn run() -> true'type { let cell = Cell { value: false }; let p = cell.ref; let field = p.value; field.* = true; cell.value }",
+        "struct Cell { value: bool, } fn run() -> bool { let cell = Cell { value: false }; let p = cell.ref; let field = p.value; field.* = true; cell.value }",
     );
     assert!(package.to_string().contains("pointer-field"));
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
@@ -20630,7 +20629,7 @@ fn pointer_projection_keeps_field_identity() {
 #[test]
 fn expired_pointer_representation_can_return_but_cannot_be_read() {
     let package = compile(
-        "typealias Flag = true'type; fn dead() -> *Flag { let value = true; value.ref } fn run() -> Flag { let p = dead(); p.* }",
+        "typealias Flag = bool; fn dead() -> *Flag { let value = true; value.ref } fn run() -> Flag { let p = dead(); p.* }",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     let value = vm.invoke(id(&package, "dead"), vec![]).unwrap();
@@ -20644,7 +20643,7 @@ fn expired_pointer_representation_can_return_but_cannot_be_read() {
 #[test]
 fn pointer_assignment_evaluates_target_before_rhs_once() {
     let package = execution_support::compile_with_tuple(
-        "typealias Flag = true'type; fn select(flag: *Flag, first: *Flag, second: *Flag) -> *Flag { if flag.* { first } else { second } } fn rhs(flag: *Flag) -> Flag { flag.* = false; true } fn run() -> Tuple<Flag, Flag> { let flag = true; let first = false; let second = false; select(flag.ref, first.ref, second.ref).* = rhs(flag.ref); (first, second) }",
+        "typealias Flag = bool; fn select(flag: *Flag, first: *Flag, second: *Flag) -> *Flag { if flag.* { first } else { second } } fn rhs(flag: *Flag) -> Flag { flag.* = false; true } fn run() -> Tuple<Flag, Flag> { let flag = true; let first = false; let second = false; select(flag.ref, first.ref, second.ref).* = rhs(flag.ref); (first, second) }",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -20661,7 +20660,7 @@ fn pointer_assignment_evaluates_target_before_rhs_once() {
 #[test]
 fn pointer_to_field_survives_compatible_whole_value_replacement() {
     let package = compile(
-        "struct Cell { value: true'type, } fn run() -> true'type { var cell = Cell { value: false }; let pointer = cell.value.ref; cell = Cell { value: true }; pointer.* }",
+        "struct Cell { value: bool, } fn run() -> bool { var cell = Cell { value: false }; let pointer = cell.value.ref; cell = Cell { value: true }; pointer.* }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -20672,7 +20671,7 @@ fn pointer_to_field_survives_compatible_whole_value_replacement() {
 #[test]
 fn pointer_target_generation_does_not_revive_on_new_local() {
     let package = compile(
-        "typealias Flag = true'type; fn run() -> Flag { let dead = do { let value = true; value.ref }; let value = false; let live = value.ref; dead.* }",
+        "typealias Flag = bool; fn run() -> Flag { let dead = do { let value = true; value.ref }; let value = false; let live = value.ref; dead.* }",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -20684,7 +20683,7 @@ fn pointer_target_generation_does_not_revive_on_new_local() {
 #[test]
 fn pointer_generic_forwarding_specializes_through_iir() {
     let package = compile(
-        "fn forward(value: *T) -> *T where T { value } fn run() -> true'type { let value = true; forward(value.ref).* }",
+        "fn forward(value: *T) -> *T where T { value } fn run() -> bool { let value = true; forward(value.ref).* }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -20695,7 +20694,7 @@ fn pointer_generic_forwarding_specializes_through_iir() {
 #[test]
 fn pointer_field_expected_value_reads_without_changing_inferred_projection() {
     let package = compile(
-        "typealias Flag = true'type; struct Cell { value: Flag, } fn read(cell: *Cell) -> Flag { cell.value } fn run() -> Flag { let cell = Cell { value: false }; let pointer = cell.ref; let before: Flag = pointer.value; let field = pointer.value; field.* = true; not before and read(pointer) }",
+        "typealias Flag = bool; struct Cell { value: Flag, } fn read(cell: *Cell) -> Flag { cell.value } fn run() -> Flag { let cell = Cell { value: false }; let pointer = cell.ref; let before: Flag = pointer.value; let field = pointer.value; field.* = true; not before and read(pointer) }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -20706,7 +20705,7 @@ fn pointer_field_expected_value_reads_without_changing_inferred_projection() {
 #[test]
 fn pointer_reference_receiver_body_reads_and_writes_fields() {
     let package = compile(
-        "struct Cell { value: true'type, } impl Cell { fn read(*self) -> true'type { self.value } fn set(*self) { self.value.* = true; } } fn run() -> true'type { let cell = Cell { value: false }; Cell.set(cell.ref); Cell.read(cell.ref) }",
+        "struct Cell { value: bool, } impl Cell { fn read(*self) -> bool { self.value } fn set(*self) { self.value.* = true; } } fn run() -> bool { let cell = Cell { value: false }; Cell.set(cell.ref); Cell.read(cell.ref) }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -20717,7 +20716,7 @@ fn pointer_reference_receiver_body_reads_and_writes_fields() {
 #[test]
 fn pointer_normalized_types_and_fields_are_checked() {
     let mut package = compile(
-        "struct Cell { value: true'type, } fn run() -> true'type { let cell = Cell { value: true }; cell.ref.value.* }",
+        "struct Cell { value: bool, } fn run() -> bool { let cell = Cell { value: true }; cell.ref.value.* }",
     );
     let nir::program::ExprKind::Block {
         result: Some(result),
@@ -20758,7 +20757,7 @@ fn pointer_normalized_types_and_fields_are_checked() {
 #[test]
 fn nested_nominal_methods_bind_self_and_parent_type_parameters() {
     let package = compile(
-        "struct Cell where T { value: T, fn forward(*self) -> *T { self.value } fn identity(self) -> Self { self } } fn run() -> true'type { let cell = Cell<true'type> { value: true }; let copy = Cell<true'type>.identity(cell); Cell<true'type>.forward(copy.ref).* }",
+        "struct Cell where T { value: T, fn forward(*self) -> *T { self.value } fn identity(self) -> Self { self } } fn run() -> bool { let cell = Cell<bool> { value: true }; let copy = Cell<bool>.identity(cell); Cell<bool>.forward(copy.ref).* }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -20769,7 +20768,7 @@ fn nested_nominal_methods_bind_self_and_parent_type_parameters() {
 #[test]
 fn nested_nominal_reference_method_reads_target_guided_field() {
     let package = compile(
-        "struct Cell { value: true'type, fn read(*self) -> true'type { self.value } fn set(*self) { self.value.* = true; } } fn run() -> true'type { let cell = Cell { value: false }; Cell.set(cell.ref); Cell.read(cell.ref) }",
+        "struct Cell { value: bool, fn read(*self) -> bool { self.value } fn set(*self) { self.value.* = true; } } fn run() -> bool { let cell = Cell { value: false }; Cell.set(cell.ref); Cell.read(cell.ref) }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -20780,7 +20779,7 @@ fn nested_nominal_reference_method_reads_target_guided_field() {
 #[test]
 fn nested_nominal_enum_methods_bind_generic_self() {
     let package = compile(
-        "enum Choice where T { empty, value(T), fn identity(self) -> Self { self } } fn run() -> true'type { let choice = Choice<true'type>.identity(Choice<true'type>.value(true)); choice match { .empty => false, .value(value) => value, } }",
+        "enum Choice where T { empty, value(T), fn identity(self) -> Self { self } } fn run() -> bool { let choice = Choice<bool>.identity(Choice<bool>.value(true)); choice match { .empty => false, .value(value) => value, } }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -20791,7 +20790,7 @@ fn nested_nominal_enum_methods_bind_generic_self() {
 #[test]
 fn pointer_receiver_adaptation_reuses_storage_and_evaluates_once() {
     let package = compile(
-        "struct Cell { value: true'type, fn read(*self) -> true'type { self.value } fn set(*self) { self.value.* = true; } } fn select(cell: *Cell) -> *Cell { cell } fn run() -> true'type { let cell = Cell { value: false }; cell.set(); let pointer = cell.ref; let outer = pointer.ref; select(pointer).set(); outer.read() }",
+        "struct Cell { value: bool, fn read(*self) -> bool { self.value } fn set(*self) { self.value.* = true; } } fn select(cell: *Cell) -> *Cell { cell } fn run() -> bool { let cell = Cell { value: false }; cell.set(); let pointer = cell.ref; let outer = pointer.ref; select(pointer).set(); outer.read() }",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -20814,7 +20813,7 @@ fn pointer_receiver_adaptation_reuses_storage_and_evaluates_once() {
 #[test]
 fn pointer_receiver_explicit_trait_view_follows_builtin_dereference() {
     let package = compile(
-        "trait Read { fn read(*self) -> true'type; } struct Cell { value: true'type, } impl Read for Cell { fn read(*self) -> true'type { self.value } } fn run() -> true'type { let cell = Cell { value: true }; let pointer = cell.ref; cell.as(Read).read() and pointer.as(Read).read() }",
+        "trait Read { fn read(*self) -> bool; } struct Cell { value: bool, } impl Read for Cell { fn read(*self) -> bool { self.value } } fn run() -> bool { let cell = Cell { value: true }; let pointer = cell.ref; cell.as(Read).read() and pointer.as(Read).read() }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -20825,7 +20824,7 @@ fn pointer_receiver_explicit_trait_view_follows_builtin_dereference() {
 #[test]
 fn pointer_receiver_shallow_implementation_precedes_pointee_method() {
     let package = compile(
-        "trait Read { fn read(self) -> true'type; } struct Cell {} impl Read for Cell { fn read(self) -> true'type { false } } impl Read for *Cell { fn read(self) -> true'type { true } } fn run() -> true'type { let cell = Cell {}; cell.ref.as(Read).read() }",
+        "trait Read { fn read(self) -> bool; } struct Cell {} impl Read for Cell { fn read(self) -> bool { false } } impl Read for *Cell { fn read(self) -> bool { true } } fn run() -> bool { let cell = Cell {}; cell.ref.as(Read).read() }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -20836,7 +20835,7 @@ fn pointer_receiver_shallow_implementation_precedes_pointee_method() {
 #[test]
 fn pointer_receiver_generic_capability_follows_subject_without_copying_it() {
     let package = compile(
-        "trait Read { fn read(*self) -> true'type; } struct Cell { value: true'type, } impl Read for Cell { fn read(*self) -> true'type { self.value } } fn inspect(cell: *T) -> true'type where T :- Read { cell.read() } fn run() -> true'type { let cell = Cell { value: true }; inspect(cell.ref) }",
+        "trait Read { fn read(*self) -> bool; } struct Cell { value: bool, } impl Read for Cell { fn read(*self) -> bool { self.value } } fn inspect(cell: *T) -> bool where T :- Read { cell.read() } fn run() -> bool { let cell = Cell { value: true }; inspect(cell.ref) }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -20847,7 +20846,7 @@ fn pointer_receiver_generic_capability_follows_subject_without_copying_it() {
 #[test]
 fn dereferenced_field_places_read_write_and_reference_without_copying_parent() {
     let package = compile(
-        "struct Inner { value: true'type, } struct Outer { inner: Inner, } fn run() -> true'type { let outer = Outer { inner: Inner { value: false } }; let pointer = outer.ref; let alias = pointer.*.inner.value.ref; pointer.*.inner.value = true; alias.* and pointer.*.inner.value }",
+        "struct Inner { value: bool, } struct Outer { inner: Inner, } fn run() -> bool { let outer = Outer { inner: Inner { value: false } }; let pointer = outer.ref; let alias = pointer.*.inner.value.ref; pointer.*.inner.value = true; alias.* and pointer.*.inner.value }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -20858,7 +20857,7 @@ fn dereferenced_field_places_read_write_and_reference_without_copying_parent() {
 #[test]
 fn dereferenced_field_place_evaluates_base_before_value_once() {
     let package = compile(
-        "struct Cell { value: true'type, } fn target(cell: *Cell) -> *Cell { cell } fn rhs() -> true'type { true } fn run() -> true'type { let cell = Cell { value: false }; target(cell.ref).*.value = rhs(); cell.value }",
+        "struct Cell { value: bool, } fn target(cell: *Cell) -> *Cell { cell } fn rhs() -> bool { true } fn run() -> bool { let cell = Cell { value: false }; target(cell.ref).*.value = rhs(); cell.value }",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -20871,7 +20870,7 @@ fn dereferenced_field_place_evaluates_base_before_value_once() {
 #[test]
 fn dereferenced_field_receiver_reuses_original_place() {
     let package = compile(
-        "struct Cell { value: true'type, fn set(*self) { self.value.* = true; } } struct Outer { cell: Cell, } fn run() -> true'type { let outer = Outer { cell: Cell { value: false } }; let pointer = outer.ref; pointer.*.cell.set(); pointer.*.cell.value }",
+        "struct Cell { value: bool, fn set(*self) { self.value.* = true; } } struct Outer { cell: Cell, } fn run() -> bool { let outer = Outer { cell: Cell { value: false } }; let pointer = outer.ref; pointer.*.cell.set(); pointer.*.cell.value }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -20882,7 +20881,7 @@ fn dereferenced_field_receiver_reuses_original_place() {
 #[test]
 fn dereferenced_field_access_rejects_expired_parent() {
     let package = compile(
-        "struct Cell { value: true'type, } fn dead() -> *Cell { let cell = Cell { value: true }; cell.ref } fn run() -> true'type { dead().*.value }",
+        "struct Cell { value: bool, } fn dead() -> *Cell { let cell = Cell { value: true }; cell.ref } fn run() -> bool { dead().*.value }",
     );
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -20894,7 +20893,7 @@ fn dereferenced_field_access_rejects_expired_parent() {
 #[test]
 fn dereferenced_field_explicit_pointer_hops_and_generic_fields() {
     let package = compile(
-        "struct Box where T { value: T, } struct Link { next: *Box<true'type>, } fn run() -> true'type { let target = Box<true'type> { value: false }; let link = Link { next: target.ref }; let pointer = link.ref; pointer.*.next.*.value = true; pointer.*.next.*.value }",
+        "struct Box where T { value: T, } struct Link { next: *Box<bool>, } fn run() -> bool { let target = Box<bool> { value: false }; let link = Link { next: target.ref }; let pointer = link.ref; pointer.*.next.*.value = true; pointer.*.next.*.value }",
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -29972,7 +29971,7 @@ fn source_comptime_forwarding_combines_comparisons_choices_and_arithmetic() {
 #[test]
 fn source_comptime_forwarding_folds_local_blocks() {
     let package = execution_support::compile_with_tuple(
-        "typealias Flag=true'type; fn choose(comptime flag:Flag)->Flag {flag} fn forward(comptime flag:Flag)->Flag {choose(do {let opposite=not flag; let original=do {let inner=not opposite; inner}; original and not opposite})} fn run()->Tuple<Flag, Flag> {(forward(true),forward(false))}",
+        "typealias Flag=bool; fn choose(comptime flag:Flag)->Flag {flag} fn forward(comptime flag:Flag)->Flag {choose(do {let opposite=not flag; let original=do {let inner=not opposite; inner}; original and not opposite})} fn run()->Tuple<Flag, Flag> {(forward(true),forward(false))}",
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     for instance in graph

@@ -1529,7 +1529,7 @@ fn repeated_dumps_preserve_nested_bodies_and_escaped_text() {
 #[test]
 fn function_clause_parameters_resolve_and_preserve_defaults_and_quote_shape() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", "fn keep(value: T) -> T where T { value } fn options(value: T) -> T where T, .flag: true'type = false, quote ...code: T { value }");
+    sandbox.write("input.fl", "fn keep(value: T) -> T where T { value } fn options(value: T) -> T where T, .flag: bool = false, quote ...code: T { value }");
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     let dump = success(&output);
     assert!(dump.contains("resolved-clause-param"));
@@ -1585,7 +1585,7 @@ fn labeled_contracts_keep_labels_and_runtime_parameter_references_in_hir() {
     let sandbox = Sandbox::new();
     sandbox.write(
         "input.fl",
-        "fn check(flag: true'type) where requires:input flag, ensures:output flag {} ",
+        "fn check(flag: bool) where requires:input flag, ensures:output flag {} ",
     );
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     let dump = success(&output);
@@ -1614,7 +1614,7 @@ fn implementation_heads_and_members_share_their_scanned_generic_scope() {
             fn keep(value: T) -> T { helper(value) }
             fn helper(value: T) -> T { value }
         }
-        fn keep(value: true'type) -> true'type { value }
+        fn keep(value: bool) -> bool { value }
     "#,
     );
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
@@ -1660,7 +1660,7 @@ fn implementation_scopes_are_file_qualified() {
 #[test]
 fn required_trait_functions_preserve_signatures_without_inventing_bodies() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", "trait Transform where T { fn apply(value: T) -> T; fn identity(value: T) -> T { value } } trait Other { fn apply(value: true'type) -> true'type; }");
+    sandbox.write("input.fl", "trait Transform where T { fn apply(value: T) -> T; fn identity(value: T) -> T { value } } trait Other { fn apply(value: bool) -> bool; }");
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     let dump = hir_dump(&output);
     assert_eq!(dump.matches("(fn-declaration ").count(), 2, "{dump}");
@@ -1686,14 +1686,14 @@ fn associated_values_keep_identity_types_defaults_and_parameter_scopes() {
         r#"
         trait Source where T {
             assoc Element: T;
-            assoc enabled: true'type = true;
-            assoc choose<flag: true'type>: true'type = flag;
+            assoc enabled: bool = true;
+            assoc choose<flag: bool>: bool = flag;
             fn read(value: Element) -> Element;
         }
         struct Box {}
-        impl Source<true'type> for Box {
-            assoc Element: true'type = false;
-            assoc enabled: true'type = true;
+        impl Source<bool> for Box {
+            assoc Element: bool = false;
+            assoc enabled: bool = true;
         }
     "#,
     );
@@ -1709,9 +1709,9 @@ fn associated_values_keep_identity_types_defaults_and_parameter_scopes() {
 fn associated_declarations_reject_duplicate_members_and_parameter_leaks() {
     let sandbox = Sandbox::new();
     for source in [
-        "trait Source { assoc enabled: true'type; assoc enabled: true'type; }",
-        "trait Source { assoc choose<flag: true'type, flag: true'type>: true'type = flag; }",
-        "trait Source { assoc choose<flag: true'type>: true'type = flag; assoc bad: true'type = flag; }",
+        "trait Source { assoc enabled: bool; assoc enabled: bool; }",
+        "trait Source { assoc choose<flag: bool, flag: bool>: bool = flag; }",
+        "trait Source { assoc choose<flag: bool>: bool = flag; assoc bad: bool = flag; }",
     ] {
         sandbox.write("input.fl", source);
         let output = sandbox.run(&["input.fl", "--emit", "hir"]);
@@ -1725,7 +1725,7 @@ fn closure_environment_hir_preserves_binding_sources_and_quoted_names() {
     let sandbox = Sandbox::new();
     sandbox.write(
         "input.fl",
-        "fn make(flag: true'type) -> %{saved: true'type = flag} fn() -> true'type { || flag }",
+        "fn make(flag: bool) -> %{saved: bool = flag} fn() -> bool { || flag }",
     );
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     let dump = hir_dump(&output);
@@ -1838,7 +1838,7 @@ fn comptime_invocation_rejects_wrong_entries_and_preserves_output_on_failure() {
         ("fn run() {}", "run", "not a comptime function"),
         ("comptime fn run() {}", "missing", "no function named"),
         (
-            "comptime fn run(value: true'type) {}",
+            "comptime fn run(value: bool) {}",
             "run",
             "requires arguments",
         ),
@@ -1910,7 +1910,7 @@ fn comptime_invocation_fuel_bounds_nontermination_and_does_not_execute_runtime_c
 #[test]
 fn comptime_invocation_uses_type_solver_and_preserves_outputs_on_contract_failure() {
     let sandbox = Sandbox::new();
-    fs::write(sandbox.0.join("input.fl"), "typealias Type = .Type'builtin; struct Checked where T, requires T == true'type { value: T } comptime fn CheckedType(value: Type) -> Type { Checked<value> } comptime fn run() -> Type { CheckedType('z''type) }").unwrap();
+    fs::write(sandbox.0.join("input.fl"), "typealias Type = .Type'builtin; struct Checked where T, requires T == bool { value: T } comptime fn CheckedType(value: Type) -> Type { Checked<value> } comptime fn run() -> Type { CheckedType('z''type) }").unwrap();
     fs::write(sandbox.0.join("value.lisp"), OLD_OUTPUT).unwrap();
     let output = sandbox.run(&[
         "input.fl",
@@ -2048,7 +2048,7 @@ fn runtime_reference_cli_executes_instances_and_ordered_defaults() {
     );
     sandbox.write(
         "defaults.fl",
-        "fn entry(.first: true'type = true, .second: true'type = first)->true'type { second }",
+        "fn entry(.first: bool = true, .second: bool = first)->bool { second }",
     );
     let result = sandbox.run(&[
         "defaults.fl",
@@ -2077,15 +2077,9 @@ fn runtime_reference_cli_failures_preserve_existing_artifact() {
     let sandbox = Sandbox::new();
     sandbox.write("output.lisp", OLD_OUTPUT);
     let cases = [
-        (
-            "fn entry(value:true'type)->true'type {value}",
-            "requires arguments",
-        ),
+        ("fn entry(value:bool)->bool {value}", "requires arguments"),
         ("fn entry(value:T)->T where T {value}", "generic arguments"),
-        (
-            "comptime fn entry()->true'type {true}",
-            "not a runtime function",
-        ),
+        ("comptime fn entry()->bool {true}", "not a runtime function"),
         ("fn other() {}", "no function named"),
         ("fn entry() { entry() }", "exhausted"),
     ];
@@ -2126,7 +2120,7 @@ fn runtime_reference_cli_failures_preserve_existing_artifact() {
 #[test]
 fn resource_cli_emits_obligations_with_explicit_protocol_identity() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", "trait Duplicate {} struct Holder {ptr:*true'type,} fn entry() {let value=true; let holder=Holder {ptr:value.ref}; let {ptr:p}=holder; let seen=p.*;}");
+    sandbox.write("input.fl", "trait Duplicate {} struct Holder {ptr:*bool,} fn entry() {let value=true; let holder=Holder {ptr:value.ref}; let {ptr:p}=holder; let seen=p.*;}");
     let arguments = [
         "input.fl",
         "--analyze-resources",

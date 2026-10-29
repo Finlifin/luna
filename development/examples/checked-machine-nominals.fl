@@ -1,5 +1,4 @@
 typealias Byte = .u8'builtin;
-typealias Bool = true'type;
 struct Pair { left: Byte, right: Byte }
 struct Box where T { value: T }
 enum Choice { none, byte(Byte), pair(Byte, Byte) }

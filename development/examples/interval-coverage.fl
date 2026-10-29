@@ -2,15 +2,14 @@
 pure comptime fn TupleElements<T> -> .Type'builtin {T}
 pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
 typealias Int = .Integer'builtin;
-typealias Bool = true'type;
 typealias Byte = .u8'builtin;
 comptime fn classify(value: Int) -> Int {
     value match { ..0 => 1, 0..10 => 2, 10..=20 => 3, 21.. => 4 }
 }
-comptime fn byte(value: Byte) -> Bool {
+comptime fn byte(value: Byte) -> bool {
     value match { 0..128 => false, 128..=255 => true }
 }
-comptime fn grid(value: Tuple<Byte, Bool>) -> Int {
+comptime fn grid(value: Tuple<Byte, bool>) -> Int {
     value match {
         (0..128, false) => 1,
         (0..128, true) => 2,
@@ -18,12 +17,12 @@ comptime fn grid(value: Tuple<Byte, Bool>) -> Int {
         (128..=255, true) => 4,
     }
 }
-comptime fn split(value: Byte) -> Bool {
+comptime fn split(value: Byte) -> bool {
     value match { 0..128 or 128..=255 => true }
 }
-comptime fn single(value: Byte) -> Bool {
+comptime fn single(value: Byte) -> bool {
     value match { 0 => false, 1..=255 => true }
 }
-comptime fn run() -> Tuple<Int, Bool, Bool, Int, Bool, Bool> {
+comptime fn run() -> Tuple<Int, bool, bool, Int, bool, bool> {
     (classify(21), byte(127), byte(255), grid((255, true)), split(13), single(0))
 }

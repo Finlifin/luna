@@ -1,5 +1,5 @@
 -- Constraints belong to the declaration and are proved at every type use.
-typealias Flag = true'type;
+typealias Flag = bool;
 
 -- Forward reference: collecting a signature does not assume Checked's contract.
 struct Envelope where T, requires T == Flag {

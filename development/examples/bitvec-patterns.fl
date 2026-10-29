@@ -14,20 +14,20 @@ fn split() -> Tuple<Byte, Byte> {
         0x(high: Byte) (low: Byte) => (high, low),
     }
 }
-fn nested() -> true'type {
+fn nested() -> bool {
     packet()'bitvec match {
         0x(_: Byte) ((59 or 60): Byte) => true,
         _ => false,
     }
 }
-fn zeros() -> true'type {
+fn zeros() -> bool {
     let byte: Byte = 42;
     byte'bitvec match {
         0b0010 1010 => true,
         _ => false,
     }
 }
-fn letters() -> true'type {
+fn letters() -> bool {
     packet()'bitvec match {
         0x AF 3 C => true,
         _ => false,

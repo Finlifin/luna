@@ -1,5 +1,4 @@
 typealias Byte = .u8'builtin;
-typealias Bool = true'type;
 struct Pair { start: Byte, end: Byte }
 fn distance(start: Byte, end: Byte) -> Byte
 where requires start <= end {
@@ -22,9 +21,9 @@ where requires start <= end {
     end - start
 }
 fn default_call(start: Byte) -> Byte { defaults(start) }
-fn enabled(flag: Bool) -> Byte
+fn enabled(flag: bool) -> Byte
 where requires flag { 1 }
-fn checked_flag(flag: Bool) -> Byte {
+fn checked_flag(flag: bool) -> Byte {
     assumes flag;
     enabled(flag)
 }
@@ -46,9 +45,9 @@ where requires start <= end { end - start }
 comptime fn run() -> Byte {
     ct_distance(100, 255)
 }
-fn preserve(value: T, flag: Bool) -> T
+fn preserve(value: T, flag: bool) -> T
 where T, requires flag { value }
-fn generic_call(value: Byte, flag: Bool) -> Byte {
+fn generic_call(value: Byte, flag: bool) -> Byte {
     assumes flag;
     preserve(value, flag)
 }
@@ -59,11 +58,11 @@ fn limited_call(start: Byte, end: Byte) -> Byte {
     assumes start <= end and end <= 100;
     limited(start, end)
 }
-comptime fn Selected(flag: Bool) -> .Type'builtin
+comptime fn Selected(flag: bool) -> .Type'builtin
 where requires flag { Byte }
 typealias SelectedByte = Selected(true);
 comptime fn required_type() -> SelectedByte { 7 }
-fn negated_flag(flag: Bool) -> Byte {
+fn negated_flag(flag: bool) -> Byte {
     assumes not flag;
     enabled(not flag)
 }
@@ -71,14 +70,14 @@ fn compared_flag(a: Byte, b: Byte) -> Byte {
     assumes a <= b;
     enabled(a <= b)
 }
-fn short_circuit(flag: Bool) -> Byte
+fn short_circuit(flag: bool) -> Byte
 where requires true or flag {
     enabled(true or flag)
 }
-fn mixed(value: T, flag: Bool) -> Bool
-where T, requires T == Bool,
+fn mixed(value: T, flag: bool) -> bool
+where T, requires T == bool,
     requires flag { value }
-fn mixed_call(flag: Bool) -> Bool {
+fn mixed_call(flag: bool) -> bool {
     assumes flag;
     mixed(true, flag)
 }

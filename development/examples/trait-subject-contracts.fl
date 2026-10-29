@@ -18,8 +18,8 @@ fn forward(value: S) -> T where T, S :- Child<T> {
     value
 }
 
-fn flag() -> true'type { forward<true'type, true'type>(true) }
+fn flag() -> bool { forward<bool, bool>(true) }
 fn letter() -> 'x''type { 'x'.as(Child<'x''type>).inherited() }
 
 -- This implementation would be rejected: char does not establish Self == bool.
--- impl Same<true'type> for 'x''type {}
+-- impl Same<bool> for 'x''type {}

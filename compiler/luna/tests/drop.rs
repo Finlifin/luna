@@ -16730,7 +16730,7 @@ fn cmtt_let_else_selects_resources_without_executing_quotes() {
     let package = compile(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {} impl Retire for Held {fn drop(*self) {}}
-        enum Input {none,some(true'type)}
+        enum Input {none,some(bool)}
         fn make()->Held {Held {}}
         pure comptime fn build(input:Input)-><|-.void'builtin> {
             let .some(enabled)=input else {return '(do {});};
@@ -16763,7 +16763,7 @@ fn inline_return_boundary_cleans_early_and_tail_scopes_once() {
     let source = "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {} impl Retire for Held {fn drop(*self) {}}
         fn make()->Held {Held {}}
-        fn run(flag:true'type)->true'type {
+        fn run(flag:bool)->bool {
             let outer=make();
             while true {
                 let inner=make();
@@ -16799,13 +16799,13 @@ fn inline_return_boundary_transfers_owned_results_without_retiring_them() {
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {} impl Retire for Held {fn drop(*self) {}}
         fn make()->Held {Held {}}
-        fn choose(flag:true'type)->Held {
+        fn choose(flag:bool)->Held {
             let first=make();
             let second=make();
             if flag {return first;}
             second
         }
-        fn run(flag:true'type){let returned=choose(flag);}",
+        fn run(flag:bool){let returned=choose(flag);}",
     );
     inline_return_boundary::wrap(&mut package, "choose");
     let executable = source_executable(&package, "run").unwrap();
@@ -16833,12 +16833,12 @@ fn quote_function_arguments_and_owned_returns_keep_cleanup_obligations() {
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {} impl Retire for Held {fn drop(*self) {}}
         fn make()->Held {Held {}}
-        quote fn choose(first:Held,second:Held,flag:true'type)->Held {
+        quote fn choose(first:Held,second:Held,flag:bool)->Held {
             if flag {return first;}
             second
         }
         quote fn ignore(unused:Held) {}
-        fn run(flag:true'type) {let returned=choose(make(),make(),flag);ignore(make());}",
+        fn run(flag:bool) {let returned=choose(make(),make(),flag);ignore(make());}",
     );
     assert!(
         !package
@@ -16887,9 +16887,9 @@ fn quote_defaults_observe_owned_arguments_without_copying_responsibility() {
     use comptime_interpretor::{Interpreter, Value};
     let package = compile(
         "trait Duplicate {} trait Retire {fn drop(*self);}
-        struct Held {flag:true'type} impl Retire for Held {fn drop(*self) {}}
-        fn make(flag:true'type)->Held {Held {flag:flag}}
-        quote fn choose(item:Held,.flag:true'type=item.flag)->Held {
+        struct Held {flag:bool} impl Retire for Held {fn drop(*self) {}}
+        fn make(flag:bool)->Held {Held {flag:flag}}
+        quote fn choose(item:Held,.flag:bool=item.flag)->Held {
             if flag {return item;}
             item
         }
@@ -17022,8 +17022,8 @@ fn cmtt_spread_configuration_emits_runtime_resource_scope_once() {
         "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {} impl Retire for Held {fn drop(*self) {}}
         fn make()->Held {Held {}}
-        pure comptime fn packet()->Tuple<true'type,true'type> {(true,false)}
-        pure comptime fn build(first:true'type,second:true'type)->< |- .void'builtin> {
+        pure comptime fn packet()->Tuple<bool,bool> {(true,false)}
+        pure comptime fn build(first:bool,second:bool)->< |- .void'builtin> {
             if first and not second {'(do {let held=make();})} else {'(do {})}
         }
         fn run(){~<build(...packet())>;}",
@@ -17179,9 +17179,9 @@ fn late_quote_cleanup_rebuilds_layouts_when_destructors_add_generic_roots() {
     let package = compile(
         "trait Duplicate {} trait Retire {fn drop(*self);}
         trait Keep {quote fn keep(self)->Self;}
-        trait Observe {quote fn observe(*self)->true'type {true}}
+        trait Observe {quote fn observe(*self)->bool {true}}
         struct Held {} impl Observe for Held {}
-        fn observe(value:*T)->true'type where T :- Observe {value.as(Observe).observe()}
+        fn observe(value:*T)->bool where T :- Observe {value.as(Observe).observe()}
         impl Retire for Held {fn drop(*self) {observe(self);}}
         impl Keep for Held {quote fn keep(self)->Self {return self;}}
         fn keep(value:T)->T where T :- Keep {value.as(Keep).keep()}

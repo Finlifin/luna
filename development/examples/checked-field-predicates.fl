@@ -1,5 +1,4 @@
 typealias Byte = .u8'builtin;
-typealias Bool = true'type;
 struct Pair { left: Byte, right: Byte }
 struct Outer { inner: Pair, tail: Byte }
 struct Box where T { value: T }
@@ -15,7 +14,7 @@ fn generic(box: Box<Byte>) -> Byte {
     assumes box.value < 255;
     box.value + 1
 }
-fn sibling(pair: Pair, flag: Bool) -> Byte {
+fn sibling(pair: Pair, flag: bool) -> Byte {
     var copy = pair;
     assumes copy.left < 255;
     if flag { copy.right = 100; } else { copy.right = 200; }
@@ -62,11 +61,11 @@ comptime fn run() -> Byte {
     assumes pair.left < 255;
     pair.left + 1
 }
-fn both_branches(pair: Pair, flag: Bool) -> Byte {
+fn both_branches(pair: Pair, flag: bool) -> Byte {
     if flag { assumes pair.left < 100; } else { assumes pair.left < 200; }
     pair.left + 1
 }
-fn both_replaced(pair: Pair, flag: Bool) -> Byte {
+fn both_replaced(pair: Pair, flag: bool) -> Byte {
     var copy = pair;
     if flag { copy.left = 100; assumes copy.left < 200; }
     else { copy.left = 200; assumes copy.left < 255; }
@@ -76,7 +75,7 @@ fn block_condition(pair: Pair) -> Byte {
     assumes pair.left < 100 and do { pair.right < 100 };
     pair.left + pair.right
 }
-fn match_scope(pair: Pair, flag: Bool) -> Byte {
+fn match_scope(pair: Pair, flag: bool) -> Byte {
     assumes pair.left < 255;
     flag match {
         true => { let value = pair; assumes value.left < 255; },

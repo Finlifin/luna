@@ -6,22 +6,22 @@ typealias Bits8 = .BitVec'builtin<8>;
 comptime fn high() -> Bits4 { 10 }
 comptime fn low() -> Bits4 { 5 }
 comptime fn zero() -> .BitVec'builtin<0> { 0 }
-fn matched(value: Bits8) -> true'type { value matches 0x < high() > < low() > }
+fn matched(value: Bits8) -> bool { value matches 0x < high() > < low() > }
 fn captured(value: Bits8) -> Bits4 {
     value match {
         0x < high() > (tail: Bits4) => tail,
         _ => 0,
     }
 }
-fn empty(value: Bits4) -> true'type { value matches 0b < zero() > < high() > }
+fn empty(value: Bits4) -> bool { value matches 0b < zero() > < high() > }
 comptime fn one() -> .BitVec'builtin<1> { 1 }
 comptime fn none() -> .BitVec'builtin<1> { 0 }
-fn complete(value: .BitVec'builtin<1>) -> true'type {
+fn complete(value: .BitVec'builtin<1>) -> bool {
     value match {
         0b < one() > => true,
         0b < none() > => false,
     }
 }
-fn run() -> Tuple<true'type, true'type, Bits4, true'type, true'type, true'type> {
+fn run() -> Tuple<bool, bool, Bits4, bool, bool, bool> {
     (matched(165), matched(164), captured(171), empty(10), complete(1), complete(0))
 }

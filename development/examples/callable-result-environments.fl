@@ -1,7 +1,6 @@
 typealias Type = .Type'builtin;
-typealias Bool = true'type;
 typealias Char = 'a''type;
-typealias Reader = %{flag: Bool} comptime fn(Bool) -> Bool;
+typealias Reader = %{flag: bool} comptime fn(bool) -> bool;
 typealias ChangedReader = Reader -> Char;
 comptime fn ResultType(input: Type) -> Type { input -> Char }
 typealias ComputedReader = ResultType(Reader);

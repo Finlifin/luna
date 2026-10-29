@@ -2,7 +2,7 @@
 pure comptime fn TupleElements<T> -> .Type'builtin { T }
 pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 -- This fixture uses an explicit type alias until builtin.prelude is wired in.
-typealias Flag = true'type;
+typealias Flag = bool;
 typealias Unary = fn(Flag) -> Flag;
 
 fn invert(value: Flag) -> Flag {

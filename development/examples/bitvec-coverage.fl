@@ -1,17 +1,17 @@
 typealias Tail = .BitVec'builtin<7>;
-fn high_bit(value: .u8'builtin) -> true'type {
+fn high_bit(value: .u8'builtin) -> bool {
     value'bitvec match {
         0b0(_: Tail) => false,
         0b1(_: Tail) => true,
     }
 }
-fn low_bit(value: .u8'builtin) -> true'type {
+fn low_bit(value: .u8'builtin) -> bool {
     value'bitvec[0] match { 0b0 => false, 0b1 => true }
 }
-fn empty() -> true'type {
+fn empty() -> bool {
     0'bitvec[0..0] match { 0 => true }
 }
-fn correlated(value: .u8'builtin, flag: true'type) -> true'type {
+fn correlated(value: .u8'builtin, flag: bool) -> bool {
     (value'bitvec[0], flag) match {
         (0b0, false) => true,
         (0b0, true) => false,

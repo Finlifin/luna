@@ -7,7 +7,7 @@ trait Described :- Readable + Named {}
 fn keep(value: T) -> T where T { value }
 fn constrained(value: T) -> T where T:- Readable + Named { value }
 fn configured(value: T) -> T
-where T, .enabled: true'type = true, quote ...code: T {
+where T, .enabled: bool = true, quote ...code: T {
     value
 }
 

@@ -46,7 +46,7 @@ impl Step for Box<T> where T {
     fn next(input: Byte) -> Byte { input + 1 }
 }
 fn generic_implementation(value: Byte) -> Byte
-where requires value < 255 { Box<true'type>.as(Step).next(value) }
+where requires value < 255 { Box<bool>.as(Step).next(value) }
 trait Receiver {
     fn next(self, value: Byte) -> result: Byte
     where requires value < 255, ensures result == value'old + 1;
@@ -74,9 +74,9 @@ impl CtStep for Counter {
     comptime fn next(input: Byte) -> Byte { input + 1 }
 }
 comptime fn run() -> Byte { Counter.as(CtStep).next(41) }
-comptime fn Selected(flag: true'type) -> .Type'builtin {
+comptime fn Selected(flag: bool) -> .Type'builtin {
     let value = Counter.as(CtStep).next(1);
-    if value == 2 { Byte } else { true'type }
+    if value == 2 { Byte } else { bool }
 }
 typealias SelectedByte = Selected(true);
 comptime fn selected() -> SelectedByte { 7 }
@@ -123,11 +123,11 @@ impl Bounded for Counter {
 fn strengthened_result(value: Byte) -> Byte
 where requires value < 100 { Counter.as(Bounded).limit(value) + 156 }
 trait Echo where T {
-    fn echo(value: T, enabled: true'type) -> result: T
+    fn echo(value: T, enabled: bool) -> result: T
     where requires enabled, ensures enabled == enabled'old;
 }
 impl Echo<Byte> for Counter {
-    fn echo(input: Byte, enabled: true'type) -> Byte { input }
+    fn echo(input: Byte, enabled: bool) -> Byte { input }
 }
 fn interface_argument(value: Byte) -> Byte {
     Counter.as(Echo<Byte>).echo(value, true)

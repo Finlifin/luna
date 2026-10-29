@@ -1,5 +1,4 @@
 typealias Byte = .u8'builtin;
-typealias Bool = true'type;
 struct Pair { start: Byte, end: Byte }
 fn next(index: Byte, length: Byte) -> Byte {
     assumes index < length;
@@ -26,7 +25,7 @@ fn triangle(a: Byte, b: Byte, c: Byte) -> Byte {
     assumes c < 100;
     a + 157
 }
-fn branches(start: Byte, end: Byte, flag: Bool) -> Byte {
+fn branches(start: Byte, end: Byte, flag: bool) -> Byte {
     if flag { assumes start <= end; } else { assumes start <= end; }
     end - start
 }

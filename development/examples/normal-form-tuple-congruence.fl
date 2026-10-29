@@ -2,7 +2,7 @@
 pure comptime fn TupleElements<T> -> .Type'builtin { T }
 pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
 typealias Type = .Type'builtin;
-pure comptime fn Pair<value: Tuple<Type, true'type>> -> Type { .u8'builtin }
+pure comptime fn Pair<value: Tuple<Type, bool>> -> Type { .u8'builtin }
 pure comptime fn Same<A: Type, B: Type> -> Type where requires A == B { A }
 pure comptime fn Forward<A: Type, B: Type> -> Type where requires A == B {
     Same<Pair<(A, true)>, Pair<(B, true)>>

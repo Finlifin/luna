@@ -2,7 +2,7 @@ typealias Type = .Type'builtin;
 typealias Int = .Integer'builtin;
 pure comptime fn Tagged<T: Type, value: T> -> Type { T }
 pure comptime fn Pair<T: Type, first: T, count: Int> -> Type { T }
-comptime fn Select(ty: Type, flag: true'type) -> Type {
+comptime fn Select(ty: Type, flag: bool) -> Type {
     Tagged<ty, flag match { true => 1, false => 2 }>
 }
 comptime fn Guarded(ty: Type) -> Type {
@@ -13,8 +13,8 @@ comptime fn Guarded(ty: Type) -> Type {
         _ => 9,
     }, count>
 }
-comptime fn flip(flag: true'type) -> true'type { not flag }
-comptime fn Chained(ty: Type, flag: true'type) -> Type {
+comptime fn flip(flag: bool) -> bool { not flag }
+comptime fn Chained(ty: Type, flag: bool) -> Type {
     Tagged<ty, flag match { first and flip(first) is true => 1, _ => 2 }>
 }
 comptime fn keep(value: T) -> T where T { value }
@@ -22,7 +22,7 @@ comptime fn Generic(ty: Type, value: T) -> Type where T {
     Tagged<ty, value match { first and keep(first) is second => second, _ => value }>
 }
 comptime fn GenericObserved(ty: Type) -> Type { Generic<.u8'builtin>(ty, 7) }
-comptime fn Early(ty: Type, flag: true'type) -> Type {
+comptime fn Early(ty: Type, flag: bool) -> Type {
     Tagged<ty, flag match { true => do { return .u16'builtin; }, false => 3 }>
 }
 comptime fn UnselectedOverflow(ty: Type) -> Type { Tagged<ty, true match { true => 1, false => 256 }> }

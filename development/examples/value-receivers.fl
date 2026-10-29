@@ -4,14 +4,14 @@ trait Keep {
 }
 
 trait Read {
-    fn read(self, enabled: true'type) -> true'type;
+    fn read(self, enabled: bool) -> bool;
 }
 
-struct Flag { value: true'type, }
+struct Flag { value: bool, }
 
 impl Keep for Flag {}
 impl Read for Flag {
-    fn read(self, enabled: true'type) -> true'type {
+    fn read(self, enabled: bool) -> bool {
         self.value and enabled
     }
 }
@@ -20,8 +20,8 @@ impl Flag {
 }
 
 fn make() -> Flag { Flag { value: false } }
-fn enabled() -> true'type { true }
+fn enabled() -> bool { true }
 
-fn run() -> true'type {
+fn run() -> bool {
     make().as(Keep).keep().invert().as(Read).read(enabled())
 }

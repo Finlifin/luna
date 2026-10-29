@@ -552,7 +552,7 @@ fn imported_generic_function_executes_from_its_provider_package() {
     let app = input.package(
         7,
         "app",
-        "use support.identity; fn entry()->true'type {identity(true)}",
+        "use support.identity; fn entry()->bool {identity(true)}",
     );
     let library = input.package(9, "library", "pub fn identity(value:T)->T where T {value}");
     let Artifact::Nir(program) =
@@ -665,8 +665,8 @@ fn imported_trait_contracts_are_inherited_by_local_implementations() {
 #[test]
 fn entry_selection_is_scoped_to_the_requested_package() {
     let inputs = Inputs::new();
-    let app = inputs.package(1, "app", "fn entry()->true'type {true}");
-    let lib = inputs.package(2, "library", "fn entry()->true'type {false}");
+    let app = inputs.package(1, "app", "fn entry()->bool {true}");
+    let lib = inputs.package(2, "library", "fn entry()->bool {false}");
     let Artifact::Nir(program) = packages::compile(&[app, lib], &[], 1).unwrap() else {
         panic!("NIR")
     };
@@ -689,7 +689,8 @@ fn entry_selection_is_scoped_to_the_requested_package() {
 #[test]
 fn builtin_prelude_uses_ordinary_glob_precedence_and_identity() {
     let inputs = Inputs::new();
-    let foundation = "pub mod prelude {pub typealias Flag=true'type; pub fn identity(value:T)->T where T {value}}";
+    let foundation =
+        "pub mod prelude {pub typealias Flag=bool; pub fn identity(value:T)->T where T {value}}";
     for (source, expected) in [
         (
             "mod child {fn get()->Flag {identity(true)}} fn entry()->Flag {child.get()}",
@@ -726,7 +727,7 @@ fn builtin_prelude_can_be_reexported_but_does_not_reexport_from_consumers() {
     let builtin = inputs.package(
         2,
         "foundation",
-        "pub mod base {pub typealias Flag=true'type;} pub use base as prelude;",
+        "pub mod base {pub typealias Flag=bool;} pub use base as prelude;",
     );
     let Artifact::Nir(program) =
         packages::compile_with_builtin(&[app, builtin], &[], 1, Some(2)).unwrap()
@@ -741,7 +742,7 @@ fn builtin_prelude_can_be_reexported_but_does_not_reexport_from_consumers() {
     let builtin = inputs.package(
         2,
         "foundation",
-        "pub mod prelude {pub typealias Flag=true'type;}",
+        "pub mod prelude {pub typealias Flag=bool;}",
     );
     let consumer = inputs.package(3, "consumer", "use facade.Flag;");
     assert!(
@@ -759,10 +760,10 @@ fn builtin_prelude_can_be_reexported_but_does_not_reexport_from_consumers() {
 fn prelude_conflicts_and_private_sources_are_rejected() {
     let inputs = Inputs::new();
     for foundation in [
-        "mod prelude {pub typealias Flag=true'type;}",
-        "pub mod prelude {typealias Flag=true'type;}",
+        "mod prelude {pub typealias Flag=bool;}",
+        "pub mod prelude {typealias Flag=bool;}",
         "fn hidden(){}",
-        "pub mod prelude {pub typealias Flag=true'type;} fn probe()->Flag {true}",
+        "pub mod prelude {pub typealias Flag=bool;} fn probe()->Flag {true}",
     ] {
         let app = inputs.package(1, "app", "fn entry()->Flag {true}");
         let builtin = inputs.package(2, "foundation", foundation);
@@ -775,13 +776,9 @@ fn prelude_conflicts_and_private_sources_are_rejected() {
     let builtin = inputs.package(
         2,
         "foundation",
-        "pub mod prelude {pub typealias Flag=true'type;}",
+        "pub mod prelude {pub typealias Flag=bool;}",
     );
-    let other = inputs.package(
-        3,
-        "extra",
-        "pub mod prelude {pub typealias Flag=true'type;}",
-    );
+    let other = inputs.package(3, "extra", "pub mod prelude {pub typealias Flag=bool;}");
     assert!(
         packages::compile_with_builtin(
             &[app, builtin, other],
@@ -842,7 +839,7 @@ fn bool_remains_reserved_in_binding_positions() {
     let inputs = Inputs::new();
     for source in [
         "fn bool() {}",
-        "typealias bool=true'type;",
+        "typealias bool=bool;",
         "fn entry(){let bool=true;}",
     ] {
         let app = inputs.package(1, "app", source);

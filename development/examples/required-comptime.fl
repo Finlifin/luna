@@ -13,7 +13,7 @@ fn forwarded() -> AlsoNine { same(bits()) }
 pure comptime fn Identity(value: Type) -> Type { value }
 comptime fn Width() -> Int { 3 * 3 }
 comptime fn Bits(width: Int) -> Type { .BitVec'builtin<width> }
-comptime fn Choose(flag: true'type) -> Type {
+comptime fn Choose(flag: bool) -> Type {
     if flag { .u8'builtin } else { .u16'builtin }
 }
 typealias Chosen = Choose(false);
