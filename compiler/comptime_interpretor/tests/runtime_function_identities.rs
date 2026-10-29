@@ -330,6 +330,16 @@ fn generator_method_contract_cannot_enter_ordinary_interpreter_dispatch() {
     assert!(
         matches!(Interpreter::new(&package,Budget::default()),Err(error) if error.kind == ErrorKind::InvalidCallPlan)
     );
+    package.traits[0].methods[0].signature = nir::code_interfaces::MethodSignature::DataConsumer(
+        nir::code_interfaces::DataFunctionSignature {
+            clause_domains: vec![],
+            inputs: vec![],
+            output: Term::Primitive(Primitive::Type),
+        },
+    );
+    assert!(
+        matches!(Interpreter::new(&package,Budget::default()),Err(error) if error.kind == ErrorKind::InvalidCallPlan)
+    );
     package.traits.clear();
     Interpreter::new(&package, Budget::default()).unwrap();
 }

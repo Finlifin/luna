@@ -61,6 +61,40 @@ pub(super) fn equivalent_code(
     )
 }
 
+/// Data results retain contextual input correspondence and ordinary output Types.
+pub(super) fn equivalent_data(
+    context: &Context,
+    expected: &nir::code_interfaces::DataFunctionSignature,
+    actual: &nir::code_interfaces::DataFunctionSignature,
+    budget: Budget,
+) -> bool {
+    let mut fuel = budget.steps;
+    if expected.charge(&mut fuel).is_err()
+        || actual.charge(&mut fuel).is_err()
+        || expected.inputs.len() != actual.inputs.len()
+        || expected.clause_domains.len() != actual.clause_domains.len()
+    {
+        return false;
+    }
+    let mut pairs = expected
+        .clause_domains
+        .iter()
+        .zip(&actual.clause_domains)
+        .collect::<Vec<_>>();
+    pairs.push((&expected.output, &actual.output));
+    equivalent_code_inputs(
+        context,
+        &expected.inputs,
+        &actual.inputs,
+        pairs,
+        Vec::new(),
+        Budget {
+            steps: fuel,
+            ..budget
+        },
+    )
+}
+
 fn equivalent_code_inputs<'a>(
     context: &Context,
     expected_inputs: &'a [(nir::program::LocalId, nir::code_interfaces::CodeInput)],
@@ -457,6 +491,59 @@ mod tests {
             &context,
             &changed,
             &changed,
+            Budget::default()
+        ));
+    }
+
+    #[test]
+    fn data_method_signatures_preserve_code_inputs_and_result_identity() {
+        use nir::code_interfaces::{CodeInput, DataFunctionSignature};
+        let make = |owner| {
+            let signature = code_signature(owner, boolean());
+            DataFunctionSignature {
+                clause_domains: signature.clause_domains,
+                inputs: signature.inputs,
+                output: boolean(),
+            }
+        };
+        let expected = make(1);
+        let actual = make(2);
+        let context = Context::with_scope(vec![]);
+        assert!(equivalent_data(
+            &context,
+            &expected,
+            &actual,
+            Budget::default()
+        ));
+        let mut changed = actual.clone();
+        changed.output = Term::Primitive(nir::Primitive::Char);
+        assert!(!equivalent_data(
+            &context,
+            &expected,
+            &changed,
+            Budget::default()
+        ));
+        changed = actual.clone();
+        changed.inputs[1].1 = CodeInput::Data(boolean());
+        assert!(!equivalent_data(
+            &context,
+            &expected,
+            &changed,
+            Budget::default()
+        ));
+        assert!(!equivalent_data(
+            &context,
+            &expected,
+            &actual,
+            Budget {
+                steps: 0,
+                ..Budget::default()
+            }
+        ));
+        assert!(equivalent_data(
+            &context,
+            &expected,
+            &actual,
             Budget::default()
         ));
     }

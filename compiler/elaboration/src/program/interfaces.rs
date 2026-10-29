@@ -936,6 +936,21 @@ impl Checker<'_, '_> {
                                     Formula::False
                                 }
                             }
+                            (
+                                MethodSignature::DataConsumer(expected),
+                                MethodSignature::DataConsumer(actual),
+                            ) => {
+                                if signatures::equivalent_data(
+                                    &context,
+                                    expected,
+                                    actual,
+                                    Budget::default(),
+                                ) {
+                                    Formula::True
+                                } else {
+                                    Formula::False
+                                }
+                            }
                             _ => Formula::False,
                         };
                         if !matches!(context.prove(goal, Budget::default()), Outcome::Entailed(_)) {

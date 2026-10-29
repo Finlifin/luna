@@ -1214,6 +1214,7 @@ fn elaborate_candidate<'a, 'h>(
         .code_generators
         .keys()
         .chain(checker.pattern_generators.keys())
+        .chain(checker.data_consumers.keys())
         .map(|owner| declaration(package, package_identities, *owner))
         .collect();
     for interface in &mut output.traits {
@@ -1222,6 +1223,7 @@ fn elaborate_candidate<'a, 'h>(
                 method.signature,
                 nir::code_interfaces::MethodSignature::Generator(_)
                     | nir::code_interfaces::MethodSignature::PatternGenerator(_)
+                    | nir::code_interfaces::MethodSignature::DataConsumer(_)
             )
         });
     }

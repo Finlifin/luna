@@ -305,13 +305,14 @@ pub type PatternFunctionSignature = CodeFunctionSignature<PatternCodeInterface>;
 /// carry contextual interfaces and require code-aware call admission.
 pub type DataFunctionSignature = CodeFunctionSignature<Term>;
 
-/// Interface members with code results retain their contextual signature;
+/// Interface members with code inputs or results retain their contextual signature;
 /// ordinary callable consumers must request an ordinary type explicitly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MethodSignature {
     Callable(Term),
     Generator(CodeFunctionSignature),
     PatternGenerator(PatternFunctionSignature),
+    DataConsumer(DataFunctionSignature),
 }
 impl From<Term> for MethodSignature {
     fn from(ty: Term) -> Self {
@@ -324,6 +325,7 @@ impl fmt::Display for MethodSignature {
             Self::Callable(ty) => ty.fmt(f),
             Self::Generator(signature) => signature.fmt(f),
             Self::PatternGenerator(signature) => signature.fmt(f),
+            Self::DataConsumer(signature) => signature.fmt(f),
         }
     }
 }
@@ -338,13 +340,14 @@ impl MethodSignature {
             Self::Callable(_) => None,
             Self::Generator(signature) => Some(&signature.clause_domains),
             Self::PatternGenerator(signature) => Some(&signature.clause_domains),
+            Self::DataConsumer(signature) => Some(&signature.clause_domains),
         }
     }
 
     pub fn ordinary(&self) -> Result<&Term, crate::TypeError> {
         match self {
             Self::Callable(ty) => Ok(ty),
-            Self::Generator(_) | Self::PatternGenerator(_) => {
+            Self::Generator(_) | Self::PatternGenerator(_) | Self::DataConsumer(_) => {
                 Err(crate::TypeError::ContextualCodeNotCallable)
             }
         }
@@ -352,7 +355,7 @@ impl MethodSignature {
     pub fn is_comptime_callable(&self) -> bool {
         match self {
             Self::Callable(ty) => ty.is_comptime_callable(),
-            Self::Generator(_) | Self::PatternGenerator(_) => true,
+            Self::Generator(_) | Self::PatternGenerator(_) | Self::DataConsumer(_) => true,
         }
     }
     pub fn callable_signature(&self) -> Result<&Term, crate::TypeError> {
@@ -367,6 +370,9 @@ impl MethodSignature {
             Self::Generator(signature) => Self::Generator(signature.try_map_types(transform)?),
             Self::PatternGenerator(signature) => {
                 Self::PatternGenerator(signature.try_map_types(transform)?)
+            }
+            Self::DataConsumer(signature) => {
+                Self::DataConsumer(signature.try_map_types(transform)?)
             }
         })
     }
@@ -416,10 +422,11 @@ impl CodeInput {
 impl MethodSignature {
     /// Visit semantic type dependencies without erasing signature categories.
     pub fn type_terms(&self) -> impl Iterator<Item = &Term> {
-        let (ordinary, code, pattern) = match self {
-            Self::Callable(ty) => (Some(ty), None, None),
-            Self::Generator(signature) => (None, Some(signature), None),
-            Self::PatternGenerator(signature) => (None, None, Some(signature)),
+        let (ordinary, code, pattern, data) = match self {
+            Self::Callable(ty) => (Some(ty), None, None, None),
+            Self::Generator(signature) => (None, Some(signature), None, None),
+            Self::PatternGenerator(signature) => (None, None, Some(signature), None),
+            Self::DataConsumer(signature) => (None, None, None, Some(signature)),
         };
         ordinary
             .into_iter()
@@ -430,6 +437,10 @@ impl MethodSignature {
             .chain(
                 pattern
                     .into_iter()
+                    .flat_map(|signature| signature.type_terms()),
+            )
+            .chain(
+                data.into_iter()
                     .flat_map(|signature| signature.type_terms()),
             )
     }

@@ -555,3 +555,44 @@ This repairs live Type-input transport with known result identity. Arbitrary
 input-dependent Type results still require a deferred elaboration representation;
 contextual data methods, code containers and general expression call scheduling
 remain unfinished.
+
+
+## Contextual data method contracts in NIR
+
+`MethodSignature::DataConsumer` now carries `DataFunctionSignature` without
+converting contextual inputs into ordinary callable Terms. It participates in
+clause-domain access, type dependency walking and all signature substitution
+entrypoints. Its S-expression dump retains the `data-consumer-signature` category,
+including quoted expr/pattern interfaces and ordinary result Type.
+
+Trait signature comparison has a data-consumer branch. It checks clause domains,
+input categories/context correspondence and output Type through the existing
+budgeted contextual comparison, preserving normal-form identity boundaries.
+Ordinary program summaries, runtime interpreter dispatch and IIR validation still
+reject this signature category. Elaboration's executable-world filter also removes
+data-consumer method slots and implementation entries alongside other contextual
+members.
+
+This is the representation/validation stage, not source method support. Source
+contract formation, method selection, receiver value-reference transport and
+invocation dispatch remain to be connected; `ensure_data_consumer` still rejects
+methods rather than publishing an incomplete ordinary callable contract.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p elaboration --lib program::interfaces::signatures
+python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p comptime_interpretor --test code_interfaces --test types --test runtime_function_identities
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test elaboration
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+All passed: 10 signature comparison tests (`/tmp/luna-tools-331jczy5/result.json`),
+36 interpreter identity, nine IIR type, 17 code-interface and 63 NIR type tests
+(`/tmp/luna-tools-5xdnsmw6/result.json`), plus 566 CMTT and 451 source elaboration
+tests (`/tmp/luna-tools-a1wjfvzz/result.json`). Coverage includes specialization
+of the data output, retained code input dependencies, atomic failed transforms,
+output/category mismatch, budget failure followed by successful comparison, dump
+category preservation and runtime-boundary rejection. Formatting completed at
+`/tmp/luna-tools-9wpnnma8/result.json`; whitespace checks passed.

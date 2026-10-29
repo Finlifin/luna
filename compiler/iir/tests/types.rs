@@ -527,6 +527,18 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
         failure.contains("not callable") || failure.contains("contextual code"),
         "{failure}"
     );
+    forged.interfaces[0].methods[0].signature = nir::code_interfaces::MethodSignature::DataConsumer(
+        nir::code_interfaces::DataFunctionSignature {
+            clause_domains: vec![],
+            inputs: vec![],
+            output: primitive(Primitive::Bool),
+        },
+    );
+    let failure = forged.validate(&mut 10_000).unwrap_err();
+    assert!(
+        failure.contains("not callable") || failure.contains("contextual code"),
+        "{failure}"
+    );
     contract_package.validate(&mut 10_000).unwrap();
     let predicate = &mut contract_package.interfaces[0].methods[0]
         .program

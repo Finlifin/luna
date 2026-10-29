@@ -284,7 +284,7 @@ fn method_signature_preserves_category_through_specialization() {
 
 #[test]
 fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
-    let method = nir::program::MethodContract {
+    let mut method = nir::program::MethodContract {
         phase: Default::default(),
         is_quote: false,
         pure: true,
@@ -347,6 +347,18 @@ fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
     );
     assert!(ordinary.to_string().contains("(unsafe true)"));
     assert!(method.program_summary(&[], &[]).is_err());
+    let consumer = consumer_signature();
+    method.parameter_bindings = consumer.inputs.iter().map(|(id, _)| *id).collect();
+    method.signature = nir::code_interfaces::MethodSignature::DataConsumer(consumer);
+    assert!(matches!(
+        method.program_summary(&[], &[]),
+        Err(nir::TypeError::ContextualCodeNotCallable)
+    ));
+    assert!(
+        method
+            .to_string()
+            .contains("(signature (data-consumer-signature")
+    );
 }
 
 #[test]
@@ -597,4 +609,67 @@ fn data_consumer_budgets_and_dependency_walk_include_code_interfaces() {
             .count(),
         3
     );
+}
+
+#[test]
+fn data_method_signatures_preserve_categories_and_dependencies() {
+    use nir::code_interfaces::MethodSignature;
+    let mut signature = consumer_signature();
+    signature.output = Term::Rigid {
+        declaration: DeclarationId {
+            package: 1,
+            local: 3,
+        },
+        sort: Sort::Type,
+    };
+    let original = MethodSignature::DataConsumer(signature.clone());
+    assert!(original.is_comptime_callable());
+    assert_eq!(
+        original.ordinary(),
+        Err(nir::TypeError::ContextualCodeNotCallable)
+    );
+    assert_eq!(
+        original.callable_signature(),
+        Err(nir::TypeError::ContextualCodeNotCallable)
+    );
+    assert_eq!(
+        original.clause_domains(),
+        Some(signature.clause_domains.as_slice())
+    );
+    assert_eq!(
+        original.type_terms().collect::<Vec<_>>(),
+        signature.type_terms().collect::<Vec<_>>()
+    );
+    let concrete = Term::Primitive(Primitive::Char);
+    let mapped = original
+        .instantiate_types(
+            &[DeclarationId {
+                package: 1,
+                local: 3,
+            }],
+            &[concrete.clone()],
+        )
+        .unwrap();
+    let MethodSignature::DataConsumer(mapped) = mapped else {
+        panic!("lost data method category")
+    };
+    assert!(
+        !mapped
+            .type_terms()
+            .any(|ty| ty.mentions_rigid(DeclarationId {
+                package: 1,
+                local: 3
+            }))
+    );
+    assert!(mapped.type_terms().any(|ty| ty == &concrete));
+    assert_eq!(mapped.output, concrete);
+    assert_eq!(original.to_string(), signature.to_string());
+    assert!(original.to_string().starts_with("(data-consumer-signature"));
+    let before = original.clone();
+    assert!(
+        original
+            .try_map_types(|_| Err::<Term, _>("rejected"))
+            .is_err()
+    );
+    assert_eq!(original, before);
 }
