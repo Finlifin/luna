@@ -69,3 +69,63 @@ fn object_construction_preserves_duplicates_and_nested_values() {
     );
     assert_eq!(vm.bytecode_invocations() - before, 1);
 }
+
+#[test]
+fn object_queries_and_edits_stay_in_bytecode_and_preserve_snapshots() {
+    // Bootstrap bindings are explicit here so the invocation counter verifies
+    // this body, without library wrapper invocations obscuring the route.
+    let package = support::compile(
+        "typealias Object = .Object'builtin;
+        typealias Symbol = .Symbol'builtin;
+        typealias Type = .Type'builtin;
+        const length = .object_length'builtin;
+        const key = .object_key'builtin;
+        const EntryType = .object_entry_type'builtin;
+        const value = .object_value'builtin;
+        const get = .object_get'builtin;
+        const append = .object_append'builtin;
+        const replace = .object_replace'builtin;
+        const remove = .object_remove'builtin;
+        const concat = .object_concat'builtin;
+        comptime fn Reflected() -> Type {
+            let object = {flag: true};
+            EntryType(object, 0)
+        }
+        comptime fn run() -> bool {
+            var original = {flag: true, flag: false};
+            let saved = original;
+            let snapshot = get(bool, original, do {
+                original = replace(original, 1, true);
+                let name: Symbol = .flag;
+                name
+            });
+            let absent: ?Symbol = null;
+            let appended = append(original, absent, 'x');
+            let replaced = replace(appended, 0, 'z');
+            let removed = remove(replaced, 1);
+            let joined = concat(removed, saved);
+            length(joined) == 4
+                and (key(joined, 0) matches .flag?)
+                and (key(joined, 1) matches null)
+                and (value(bool, joined, 2) matches true?)
+                and (get(bool, joined, .flag) matches false?)
+                and (value(bool, joined, 0) matches null)
+                and (snapshot matches false?)
+                and (get(bool, original, .flag) matches true?)
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let before = vm.bytecode_invocations();
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(vm.bytecode_invocations() - before, 1);
+    let before = vm.bytecode_invocations();
+    assert_eq!(
+        vm.invoke(support::id(&package, "Reflected"), vec![])
+            .unwrap(),
+        Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
+    );
+    assert_eq!(vm.bytecode_invocations() - before, 1);
+}

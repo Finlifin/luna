@@ -7,24 +7,36 @@ impl Interpreter<'_> {
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        use nir::program::ObjectEditKind as O;
         let K::ObjectEdit { subject, operation } = &expr.kind else {
             unreachable!()
         };
+        self.prepare_object_edit(*operation, &expr.ty, &subject.ty, expr.source)?;
+        let packet = match self.eval(subject, environment)? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+        self.complete_object_edit(*operation, &expr.ty, &subject.ty, packet, expr.source)
+    }
+
+    pub(super) fn prepare_object_edit(
+        &mut self,
+        operation: nir::program::ObjectEditKind,
+        ty: &Term,
+        input: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        use nir::program::ObjectEditKind as O;
         if !self.comptime_only {
-            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
         }
         let failure = || Error {
             kind: ErrorKind::Type,
-            source: Some(expr.source),
+            source: Some(source),
         };
-        if !matches!(
-            expr.ty,
-            Term::Primitive(Primitive::Object | Primitive::Never)
-        ) {
+        if !matches!(*ty, Term::Primitive(Primitive::Object | Primitive::Never)) {
             return Err(failure());
         }
-        let Term::Tuple(domains) = &subject.ty else {
+        let Term::Tuple(domains) = input else {
             return Err(failure());
         };
         let count = if matches!(operation, O::Append | O::Replace) {
@@ -48,11 +60,32 @@ impl Interpreter<'_> {
         if domains[1] != second && domains[1] != Term::Primitive(Primitive::Never) {
             return Err(failure());
         }
-        let packet = match self.eval(subject, environment)? {
-            Flow::Value(value) => value,
-            flow => return Ok(flow),
+        Ok(())
+    }
+
+    pub(super) fn complete_object_edit(
+        &mut self,
+        operation: nir::program::ObjectEditKind,
+        ty: &Term,
+        input: &Term,
+        packet: Value,
+        source: SourceRange,
+    ) -> Result<Flow, Error> {
+        use nir::program::ObjectEditKind as O;
+        let failure = || Error {
+            kind: ErrorKind::Type,
+            source: Some(source),
         };
-        if expr.ty == Term::Primitive(Primitive::Never) {
+        let Term::Tuple(domains) = input else {
+            return Err(failure());
+        };
+        let count = if matches!(operation, O::Append | O::Replace) {
+            3
+        } else {
+            2
+        };
+        let second = Term::Optional(Box::new(Term::Primitive(Primitive::Symbol)));
+        if *ty == Term::Primitive(Primitive::Never) {
             return Err(failure());
         }
         let Value::Tuple(packet) = packet else {
@@ -76,14 +109,14 @@ impl Interpreter<'_> {
                     .len()
                     .saturating_add(right.entries().len())
                     .saturating_add(1);
-                self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
+                self.integer_operation(Some(source), |budget| budget.consume(work))?;
                 entries.extend(right.into_entries());
             }
             O::Append | O::Replace => {
                 let value = packet.next().ok_or_else(failure)?;
                 let ty = &domains[2];
                 let work = self.type_description_work(ty).ok_or_else(failure)?;
-                self.integer_operation(Some(expr.source), |budget| {
+                self.integer_operation(Some(source), |budget| {
                     budget.consume(work.saturating_add(entries.len()).saturating_add(1))
                 })?;
                 if !self.has_type(&value, ty) {
@@ -93,7 +126,7 @@ impl Interpreter<'_> {
                     ty: ty.clone(),
                     value,
                 };
-                if *operation == O::Append {
+                if operation == O::Append {
                     let Value::Optional { ty, value: key } = operand else {
                         return Err(failure());
                     };
@@ -106,7 +139,7 @@ impl Interpreter<'_> {
                             let Value::Symbol(key) = *key else {
                                 return Err(failure());
                             };
-                            self.integer_operation(Some(expr.source), |budget| {
+                            self.integer_operation(Some(source), |budget| {
                                 budget.consume(key.len().saturating_add(1))
                             })?;
                             ObjectEntry::Property {
@@ -116,7 +149,7 @@ impl Interpreter<'_> {
                         }
                     });
                 } else {
-                    let index = self.object_edit_index(operand, entries.len(), expr.source)?;
+                    let index = self.object_edit_index(operand, entries.len(), source)?;
                     match &mut entries[index] {
                         ObjectEntry::Value(old) | ObjectEntry::Property { value: old, .. } => {
                             *old = value
@@ -125,8 +158,8 @@ impl Interpreter<'_> {
                 }
             }
             O::Remove => {
-                let index = self.object_edit_index(operand, entries.len(), expr.source)?;
-                self.integer_operation(Some(expr.source), |budget| {
+                let index = self.object_edit_index(operand, entries.len(), source)?;
+                self.integer_operation(Some(source), |budget| {
                     budget.consume(entries.len().saturating_add(1))
                 })?;
                 entries.remove(index);

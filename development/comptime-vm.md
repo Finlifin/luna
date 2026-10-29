@@ -1712,3 +1712,54 @@ Together with the preceding nine-case run, every failure from the recorded
 12-case frontend list has now passed its focused regression. The entire 252-case
 suite has not been rerun after these fixture corrections; no new full-suite
 result is claimed.
+
+## Object query and edit bytecode
+
+Object Length, Key, EntryType, Value, NamedValue and Concat, Append, Replace,
+Remove now compile into checked operation metadata plus ordinary operand code.
+The prepare instruction validates phase and result/input contracts before any
+operand runs. Completion consumes the evaluated packet through the same helpers
+as the tree interpreter; no instruction evaluates a NIR expression tree.
+Metadata has bounded copying and an S-expression Display.
+
+Ordered duplicate keys, last-key domain mismatch, nested optionals, checked
+indices, replacement domains and functional snapshots retain their existing
+rules. Computed selectors run after taking the receiver snapshot. Failed edits
+cannot publish a partially modified receiver; receiver writeback remains the
+ordinary assignment path used by meta.Object.set.
+
+A source regression asserts actual bytecode invocation counts for all operation
+families and for EntryType. Its initial combined body exposed the existing
+TypeEqual fallback: the correct result alone did not prove bytecode execution.
+The final regression observes EntryType separately and checks its exact Type
+value in the harness; the library integration tests still cover type comparison.
+TypeEqual compilation remains unimplemented. The VM currently uses evaluated
+packets, not the tree interpreter's borrowed local-query optimization; migration
+of that optimization and wall-clock performance measurements remain outstanding.
+No speedup is claimed from instruction coverage alone.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  233 passed, including a tree/bytecode matrix for every operation, wrong payloads,
+  missing keys, bounds, duplicate domains, recovery, phase and pre-input checks.
+  Exit 0, `/tmp/luna-tools-ynmardig/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  13 passed, exit 0, `/tmp/luna-tools-nnztdibu/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects --test comptime_object_storage --test comptime_bytecode_aggregates --test execution --test builder_invocations`:
+  builder_invocations passed all 73 cases; the initial aggregate regression failed
+  its bytecode-count assertion on TypeEqual, stopping the remaining suites.
+  Exit 101, `/tmp/luna-tools-kjew2mvt/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_aggregates --test library_meta_objects --test comptime_object_storage --test execution`:
+  final source aggregates 3, storage 4, execution 1365 and real-library Object 25
+  passed. Exit 0, `/tmp/luna-tools-a16iqp4s/result.json`.
+
+An earlier command named a nonexistent `comptime_builders` target and ran no
+tests (`/tmp/luna-tools-tmm7ub7x/result.json`); the correct target above is
+`builder_invocations`. These checks do not establish full language completion.
+
+- Final `cargo fmt --all -- --check` through `development/command.py`: exit 0,
+  `/tmp/luna-tools-36yph1kc/result.json`.
+- Final `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_aggregates`
+  after binding Type explicitly in the bootstrap fixture: 3 passed, exit 0,
+  `/tmp/luna-tools-ymi01ja5/result.json`.

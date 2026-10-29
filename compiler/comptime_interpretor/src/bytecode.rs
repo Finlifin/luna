@@ -335,6 +335,41 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::PrepareObjectAccess(access) => {
+                    use comptime_compiler::objects::ObjectOperation;
+                    match access.operation {
+                        ObjectOperation::Query(query) => {
+                            self.prepare_object_query(query, &access.ty, source)?
+                        }
+                        ObjectOperation::Edit(edit) => {
+                            self.prepare_object_edit(edit, &access.ty, &access.input, source)?
+                        }
+                    }
+                }
+                Op::ObjectAccess {
+                    destination,
+                    access,
+                    packet,
+                } => {
+                    use comptime_compiler::objects::ObjectOperation;
+                    let packet = frame.slots[*packet].take().ok_or_else(missing)?;
+                    let result = match access.operation {
+                        ObjectOperation::Query(query) => {
+                            self.complete_object_query(query, &access.ty, packet, source)?
+                        }
+                        ObjectOperation::Edit(edit) => self.complete_object_edit(
+                            edit,
+                            &access.ty,
+                            &access.input,
+                            packet,
+                            source,
+                        )?,
+                    };
+                    let Flow::Value(value) = result else {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    };
+                    frame.slots[*destination] = Some(value);
+                }
                 Op::PrepareObject(object) => self.prepare_object(
                     &object.ty,
                     object.names.len(),
@@ -858,6 +893,154 @@ impl<'a> Interpreter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_access_bytecode_preserves_domains_errors_and_recovery() {
+        use nir::program::{ObjectEditKind as O, ObjectQueryKind as Q};
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let object_ty = Term::Primitive(Primitive::Object);
+        let integer = Term::Primitive(Primitive::Integer);
+        let symbol = Term::Primitive(Primitive::Symbol);
+        let local = |index, ty| Expr {
+            source,
+            ty,
+            kind: K::Local(LocalId { owner: 1, index }),
+        };
+        let original = Value::Object(Object::from_entries(vec![
+            ObjectEntry::Property {
+                key: "flag".into(),
+                value: ObjectValue {
+                    ty: boolean.clone(),
+                    value: Value::Bool(true),
+                },
+            },
+            ObjectEntry::Property {
+                key: "flag".into(),
+                value: ObjectValue {
+                    ty: Term::Primitive(Primitive::Char),
+                    value: Value::Char('x'),
+                },
+            },
+        ]));
+        let mut bodies = Vec::new();
+        for query in [Q::Length, Q::Key, Q::EntryType, Q::Value, Q::NamedValue] {
+            let mut fields = vec![local(0, object_ty.clone())];
+            if query != Q::Length {
+                fields.push(local(
+                    1,
+                    if query == Q::NamedValue {
+                        symbol.clone()
+                    } else {
+                        integer.clone()
+                    },
+                ));
+            }
+            let ty = match query {
+                Q::Length => integer.clone(),
+                Q::Key => Term::Optional(Box::new(symbol.clone())),
+                Q::EntryType => Term::Primitive(Primitive::Type),
+                _ => Term::Optional(Box::new(boolean.clone())),
+            };
+            let subject = Box::new(Expr {
+                source,
+                ty: Term::Tuple(fields.iter().map(|v| v.ty.clone()).collect()),
+                kind: K::Tuple(fields),
+            });
+            bodies.push(Expr {
+                source,
+                ty,
+                kind: K::ObjectQuery { query, subject },
+            });
+        }
+        for operation in [O::Concat, O::Append, O::Replace, O::Remove] {
+            let mut fields = vec![
+                local(0, object_ty.clone()),
+                local(
+                    1,
+                    match operation {
+                        O::Concat => object_ty.clone(),
+                        O::Append => Term::Optional(Box::new(symbol.clone())),
+                        _ => integer.clone(),
+                    },
+                ),
+            ];
+            if matches!(operation, O::Append | O::Replace) {
+                fields.push(local(2, boolean.clone()));
+            }
+            let subject = Box::new(Expr {
+                source,
+                ty: Term::Tuple(fields.iter().map(|v| v.ty.clone()).collect()),
+                kind: K::Tuple(fields),
+            });
+            bodies.push(Expr {
+                source,
+                ty: object_ty.clone(),
+                kind: K::ObjectEdit { operation, subject },
+            });
+        }
+        for body in bodies {
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+            assert!(code.to_string().contains("(object-access "));
+            let mut tree = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            // Invalid payloads, bounds, keys, and absence followed by valid inputs
+            // exercise recovery with the same interpreter and compiled program.
+            for selector in [
+                Value::Char('!'),
+                Value::Integer(comptime_runtime::Integer::from_u128(99)),
+                Value::Symbol("missing".into()),
+                Value::Symbol("flag".into()),
+                original.clone(),
+                Value::Optional {
+                    ty: Term::Optional(Box::new(symbol.clone())),
+                    value: None,
+                },
+                Value::Integer(comptime_runtime::Integer::from_u128(0)),
+                Value::Integer(comptime_runtime::Integer::from_u128(1)),
+            ] {
+                for payload in [Value::Char('!'), Value::Bool(false)] {
+                    let mut environment = Environment::new();
+                    environment.insert(LocalId { owner: 1, index: 0 }, original.clone());
+                    environment.insert(LocalId { owner: 1, index: 1 }, selector.clone());
+                    environment.insert(LocalId { owner: 1, index: 2 }, payload);
+                    let mut expected_environment = environment.clone();
+                    let value = |result: Result<Flow, Error>| {
+                        result.map(|flow| match flow {
+                            Flow::Value(value) => value,
+                            _ => panic!("unexpected flow"),
+                        })
+                    };
+                    assert_eq!(
+                        value(vm.execute_code(&code, &mut environment)),
+                        value(tree.eval(&body, &mut expected_environment)),
+                        "{body:?}"
+                    );
+                    assert_eq!(
+                        environment.get(&LocalId { owner: 1, index: 0 }),
+                        Some(&original)
+                    );
+                }
+            }
+            let mut invalid = body.clone();
+            invalid.ty = boolean.clone();
+            let code = Arc::new(comptime_compiler::compile(&invalid, &mut 10000).unwrap());
+            assert_eq!(
+                vm.execute_code(&code, &mut Environment::new())
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::Type
+            );
+            vm.comptime_only = false;
+            assert_eq!(
+                vm.execute_code(&code, &mut Environment::new())
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::PhaseMismatch
+            );
+        }
+    }
 
     #[test]
     fn object_validation_orders_effects_and_stops_before_later_entries() {

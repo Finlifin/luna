@@ -7,38 +7,45 @@ impl Interpreter<'_> {
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        use nir::program::ObjectQueryKind as Q;
         let K::ObjectQuery { subject, query } = &expr.kind else {
             unreachable!()
         };
+        self.prepare_object_query(*query, &expr.ty, expr.source)?;
+        if let Some(result) = self.eval_borrowed_object_query(expr, subject, environment) {
+            return result;
+        }
+        self.eval_object_query_packet(expr, subject, environment)
+    }
+
+    pub(super) fn prepare_object_query(
+        &mut self,
+        query: nir::program::ObjectQueryKind,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        use nir::program::ObjectQueryKind as Q;
         if !self.comptime_only {
-            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
         }
         let failure = || Error {
             kind: ErrorKind::Type,
-            source: Some(expr.source),
+            source: Some(source),
         };
         let expected = match query {
             Q::Length => Term::Primitive(Primitive::Integer),
             Q::Key => Term::Optional(Box::new(Term::Primitive(Primitive::Symbol))),
             Q::EntryType => Term::Primitive(Primitive::Type),
             Q::Value | Q::NamedValue => {
-                if !matches!(
-                    expr.ty,
-                    Term::Optional(_) | Term::Primitive(Primitive::Never)
-                ) {
+                if !matches!(*ty, Term::Optional(_) | Term::Primitive(Primitive::Never)) {
                     return Err(failure());
                 }
-                expr.ty.clone()
+                ty.clone()
             }
         };
-        if expr.ty != expected && expr.ty != Term::Primitive(Primitive::Never) {
+        if *ty != expected && *ty != Term::Primitive(Primitive::Never) {
             return Err(failure());
         }
-        if let Some(result) = self.eval_borrowed_object_query(expr, subject, environment) {
-            return result;
-        }
-        self.eval_object_query_packet(expr, subject, environment)
+        Ok(())
     }
 
     // Leaf selectors cannot mutate an Object while it is observed. Under a
@@ -140,7 +147,7 @@ impl Interpreter<'_> {
             let Value::Object(object) = value else {
                 return Err(self.failure(ErrorKind::Type, Some(expr.source)));
             };
-            self.query_object(expr, object, selector)
+            self.query_object(*query, &expr.ty, object, selector, expr.source)
         })();
         self.depth = depth;
         Some(result)
@@ -152,15 +159,28 @@ impl Interpreter<'_> {
         subject: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        let failure = || Error {
-            kind: ErrorKind::Type,
-            source: Some(expr.source),
-        };
         let packet = match self.eval(subject, environment)? {
             Flow::Value(value) => value,
             flow => return Ok(flow),
         };
-        if expr.ty == Term::Primitive(Primitive::Never) {
+        let K::ObjectQuery { query, .. } = &expr.kind else {
+            unreachable!()
+        };
+        self.complete_object_query(*query, &expr.ty, packet, expr.source)
+    }
+
+    pub(super) fn complete_object_query(
+        &mut self,
+        query: nir::program::ObjectQueryKind,
+        ty: &Term,
+        packet: Value,
+        source: SourceRange,
+    ) -> Result<Flow, Error> {
+        let failure = || Error {
+            kind: ErrorKind::Type,
+            source: Some(source),
+        };
+        if *ty == Term::Primitive(Primitive::Never) {
             return Err(failure());
         }
         let Value::Tuple(packet) = packet else {
@@ -174,24 +194,23 @@ impl Interpreter<'_> {
         if packet.next().is_some() {
             return Err(failure());
         }
-        self.query_object(expr, &object, selector)
+        self.query_object(query, ty, &object, selector, source)
     }
 
     fn query_object(
         &mut self,
-        expr: &Expr,
+        query: nir::program::ObjectQueryKind,
+        ty: &Term,
         object: &Object<ObjectValue>,
         selector: Option<Value>,
+        source: SourceRange,
     ) -> Result<Flow, Error> {
         use nir::program::ObjectQueryKind as Q;
-        let K::ObjectQuery { query, .. } = &expr.kind else {
-            unreachable!()
-        };
         let failure = || Error {
             kind: ErrorKind::Type,
-            source: Some(expr.source),
+            source: Some(source),
         };
-        if *query == Q::Length {
+        if query == Q::Length {
             if selector.is_some() {
                 return Err(failure());
             }
@@ -199,29 +218,29 @@ impl Interpreter<'_> {
                 comptime_runtime::Integer::from_u128(object.entries().len() as u128),
             )));
         }
-        if *query == Q::NamedValue {
+        if query == Q::NamedValue {
             let Some(Value::Symbol(key)) = selector else {
                 return Err(failure());
             };
-            let Term::Optional(target) = &expr.ty else {
+            let Term::Optional(target) = ty else {
                 return Err(failure());
             };
             let property =
                 self.lookup_object_property(object, &key, target)
                     .map_err(|mut error| {
                         if error.source.is_none() {
-                            error.source = Some(expr.source);
+                            error.source = Some(source);
                         }
                         error
                     })?;
             let value = match property {
                 ObjectProperty::Found(entry) => Some(Box::new(
-                    self.checkpoint_representation(&entry.value, expr.source)?,
+                    self.checkpoint_representation(&entry.value, source)?,
                 )),
                 ObjectProperty::Missing | ObjectProperty::TypeMismatch(_) => None,
             };
             return Ok(Flow::Value(Value::Optional {
-                ty: expr.ty.clone(),
+                ty: ty.clone(),
                 value,
             }));
         }
@@ -233,18 +252,18 @@ impl Interpreter<'_> {
             .ok()
             .and_then(|value| usize::try_from(value).ok())
             .filter(|index| *index < object.entries().len())
-            .ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(expr.source)))?;
+            .ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(source)))?;
         let entry = &object.entries()[index];
         let value = match query {
             Q::Length | Q::NamedValue => unreachable!(),
             Q::Key => {
                 if let Some(key) = entry.key() {
-                    self.integer_operation(Some(expr.source), |budget| {
+                    self.integer_operation(Some(source), |budget| {
                         budget.consume(key.len().saturating_add(1))
                     })?;
                 }
                 Value::Optional {
-                    ty: expr.ty.clone(),
+                    ty: ty.clone(),
                     value: entry.key().map(|key| Box::new(Value::Symbol(key.into()))),
                 }
             }
@@ -252,11 +271,11 @@ impl Interpreter<'_> {
                 let work = self
                     .type_description_work(&entry.value().ty)
                     .ok_or_else(failure)?;
-                self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
+                self.integer_operation(Some(source), |budget| budget.consume(work))?;
                 Value::Type(entry.value().ty.clone())
             }
             Q::Value => {
-                let Term::Optional(target) = &expr.ty else {
+                let Term::Optional(target) = ty else {
                     return Err(failure());
                 };
                 let work = self
@@ -266,20 +285,19 @@ impl Interpreter<'_> {
                             .and_then(|right| left.checked_add(right))
                     })
                     .ok_or_else(failure)?;
-                self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
+                self.integer_operation(Some(source), |budget| budget.consume(work))?;
                 let value = if entry.value().ty == **target {
                     if !self.has_type(&entry.value().value, target) {
                         return Err(failure());
                     }
-                    Some(Box::new(self.checkpoint_representation(
-                        &entry.value().value,
-                        expr.source,
-                    )?))
+                    Some(Box::new(
+                        self.checkpoint_representation(&entry.value().value, source)?,
+                    ))
                 } else {
                     None
                 };
                 Value::Optional {
-                    ty: expr.ty.clone(),
+                    ty: ty.clone(),
                     value,
                 }
             }

@@ -30,6 +30,12 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    PrepareObjectAccess(Arc<objects::ObjectAccess>),
+    ObjectAccess {
+        destination: Register,
+        access: Arc<objects::ObjectAccess>,
+        packet: Register,
+    },
     PrepareObject(Arc<objects::ObjectConstructor>),
     CheckObjectEntry {
         object: Arc<objects::ObjectConstructor>,
@@ -243,6 +249,14 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::PrepareObjectAccess(access) => write!(f, "(prepare-object-access {access})")?,
+                Op::ObjectAccess {
+                    destination,
+                    access,
+                    packet,
+                } => {
+                    write!(f, "(object-access %{destination} {access} %{packet})")?;
+                }
                 Op::PrepareObject(object) => write!(f, "(prepare-object {object})")?,
                 Op::CheckObjectEntry {
                     object,
@@ -832,6 +846,31 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         for (field, slot) in fields.iter().zip(slots).rev() {
                             work.push(Work::Expression(field, slot));
                         }
+                    }
+                    K::ObjectQuery { subject, .. } | K::ObjectEdit { subject, .. } => {
+                        let operation = match &expr.kind {
+                            K::ObjectQuery { query, .. } => objects::ObjectOperation::Query(*query),
+                            K::ObjectEdit { operation, .. } => {
+                                objects::ObjectOperation::Edit(*operation)
+                            }
+                            _ => unreachable!(),
+                        };
+                        let access = Arc::new(objects::ObjectAccess {
+                            operation,
+                            ty: copy_term(&expr.ty, fuel, source)?,
+                            input: copy_term(&subject.ty, fuel, subject.source)?,
+                        });
+                        let packet = fresh();
+                        emit(
+                            &mut work,
+                            Op::ObjectAccess {
+                                destination: dst,
+                                access: access.clone(),
+                                packet,
+                            },
+                        );
+                        work.push(Work::Expression(subject, packet));
+                        emit(&mut work, Op::PrepareObjectAccess(access));
                     }
                     K::Object { names, fields } => {
                         let mut weight = names.len().saturating_add(fields.len());
