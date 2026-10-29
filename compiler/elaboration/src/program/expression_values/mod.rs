@@ -23,6 +23,12 @@ impl Checker<'_, '_> {
             return Ok(value);
         }
         match &expr.kind {
+            H::UnresolvedIdent(name) => Err(error(
+                expr.span,
+                format!(
+                    "unresolved expression name `{name}`; check lexical imports and package dependencies"
+                ),
+            )),
             H::LiteralConversion { .. } | H::Lit(_) | H::Null | H::Unit => {
                 self.literals_value_expression(expr, expected, partial)
             }

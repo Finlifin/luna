@@ -325,6 +325,10 @@ fn repository_package_exports_object_for_user_attribute_constructors() {
                 .join("../../library/builtin/primitives.fl"),
         )
         .args(["--dependency", "2", "builtin", "3"])
+        .args(["--package", "4", "404", "attrs"])
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl"))
+        .args(["--dependency", "2", "attrs", "4"])
+        .args(["--dependency", "4", "builtin", "3"])
         .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
             [
                 "--comptime-intrinsic".to_owned(),
@@ -356,7 +360,15 @@ fn repository_package_exports_object_for_user_attribute_constructors() {
         String::from_utf8_lossy(&output.stderr)
     );
     let dump = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(dump.matches("(evaluated-attribute ").count(), 1, "{dump}");
+    let user_attributes = dump.matches("(property \"enabled\")").count();
+    let phase_attributes = dump.matches("(property \"comptime_phase\")").count();
+    assert_eq!(user_attributes, 1, "{dump}");
+    assert!(phase_attributes > 0, "{dump}");
+    assert_eq!(
+        dump.matches("(evaluated-attribute ").count(),
+        user_attributes + phase_attributes,
+        "{dump}"
+    );
     assert!(dump.contains("(property \"enabled\")"), "{dump}");
     assert!(dump.contains("(bool true)"), "{dump}");
 }

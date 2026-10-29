@@ -5270,9 +5270,7 @@ fn deferred_definition_attributes_keep_target_scope_and_application_order() {
     let rejected = sandbox.run(&["input.fl", "--emit", "nir"]);
     assert!(!rejected.status.success());
     assert!(
-        String::from_utf8_lossy(&rejected.stderr).contains(
-            "expression elaboration requires a protocol or construct not yet implemented"
-        ),
+        String::from_utf8_lossy(&rejected.stderr).contains("unresolved expression name `attrs`"),
         "{}",
         String::from_utf8_lossy(&rejected.stderr)
     );
@@ -5469,9 +5467,7 @@ fn configurations_belong_to_the_enclosing_definition_before_prefix_attributes() 
     let result = sandbox.run(&["input.fl", "--emit", "nir"]);
     assert!(!result.status.success());
     assert!(
-        String::from_utf8_lossy(&result.stderr).contains(
-            "expression elaboration requires a protocol or construct not yet implemented"
-        ),
+        String::from_utf8_lossy(&result.stderr).contains("unresolved expression name `options`"),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );

@@ -1607,3 +1607,42 @@ Validation from `/home/fin/luna`:
   report `/tmp/luna-tools-u088sq4_/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   exit 0; report `/tmp/luna-tools-rkm6its8/result.json`.
+
+## Resolve the meta.Object package integration baseline (2026-10-30)
+
+The previously recorded attribute-inspection failure was an incomplete explicit
+package fixture, not an Object invocation failure. Its unresolved HIR expression
+was `attrs`: the real meta optional/error protocols use `attrs.comptime_phase`,
+but this fixture supplied only meta and builtin. It now supplies the real attrs
+package and both dependency edges (meta to attrs, attrs to builtin). The user
+attribute still must appear exactly once; library phase attributes are checked
+separately rather than suppressed to preserve the old total count.
+
+Elaboration now reports an unresolved expression's name and points to lexical
+imports/package dependencies instead of treating it as an unimplemented
+construct. Existing negative attribute/configuration tests check the actual
+missing names. Deferred HIR inspection continues to retain unresolved names;
+executable elaboration still rejects them. No implicit package injection or
+name-based dependency inference was added.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects repository_package_exports_object_for_user_attribute_constructors`:
+  exit 0; the previously failing explicit-package integration now succeeds;
+  report `/tmp/luna-tools-r8yr0vpw/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects --test frontend_cli`:
+  exit 101; frontend CLI had 240 passes and 12 failures. Both updated missing-name
+  diagnostic tests passed. The remaining failures expose fixture issues outside
+  this change: three direct-written sources lack bool bindings, six assertions
+  compare source bytes without the fixture-added bool alias, two copied library
+  paths no longer exist, and one sysroot fixture defines bool twice. Their
+  diagnostics occur in source resolution, filesystem reads or source-byte
+  assertions, not the changed unresolved-expression branch. Full failure names
+  and output: `/tmp/luna-tools-hj397x34/stdout.log`. They remain open; no full
+  frontend-suite pass is claimed. Cargo stopped before the Object suite, so that
+  suite was scheduled separately.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects`:
+  exit 0; all 25 public Object tests passed;
+  report `/tmp/luna-tools-cjbsa1zf/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; report `/tmp/luna-tools-5wy2bw2_/result.json`.
