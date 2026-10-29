@@ -89,7 +89,7 @@ fn inline_suppliers_in_defaults_are_checked_before_inputs_are_available() {
     execution_support::compile_with_protocols(&unused, &Default::default()).unwrap();
     let with_resources = format!(
         "mod resources {{ {} }}\n{unused}",
-        include_str!("../../../library/builtin/protocols/resources.fl")
+        include!("support/resources_source.rs")
     );
     execution_support::compile_with_source_bindings(
         &with_resources,

@@ -1,3 +1,8 @@
+typealias Object = .Object'builtin;
+typealias Symbol = .Symbol'builtin;
+typealias Type = .Type'builtin;
+typealias str = .str'builtin;
+
 const metadata_object_get = .object_get'builtin;
 
 pub struct PackageMetadata {
@@ -5,12 +10,12 @@ pub struct PackageMetadata {
 }
 
 pub struct MetadataFeatures {
-    entries: .Object'builtin,
+    entries: Object,
 }
 
 impl MetadataFeatures {
     -- Missing fields and mismatched domains return null.
-    pub pure comptime fn get(self, name: .Symbol'builtin, comptime T: .Type'builtin) -> ?T {
+    pub pure comptime fn get(self, name: Symbol, comptime T: Type) -> ?T {
         metadata_object_get(T, self.entries, name)
     }
 }
@@ -19,5 +24,5 @@ impl MetadataFeatures {
     The callable captures its source definition's direct dependency mapping.
     Saving or forwarding it does not change the package that owns the lookup.
 -}
-pub const package_metadata: comptime fn(.str'builtin) -> PackageMetadata =
+pub const package_metadata: comptime fn(str) -> PackageMetadata =
     .build_package_metadata'builtin;

@@ -1,3 +1,7 @@
+typealias Symbol = .Symbol'builtin;
+typealias Integer = .Integer'builtin;
+typealias Object = .Object'builtin;
+
 const target_object_get = .object_get'builtin;
 
 {-
@@ -5,19 +9,19 @@ const target_object_get = .object_get'builtin;
     values describe compilation, not the machine running the compiler.
 -}
 pub struct Target {
-    arch: .Symbol'builtin,
-    os: .Symbol'builtin,
-    pointer_bits: .Integer'builtin,
+    arch: Symbol,
+    os: Symbol,
+    pointer_bits: Integer,
     features: TargetFeatures,
 }
 
 pub struct TargetFeatures {
-    entries: .Object'builtin,
+    entries: Object,
 }
 
 impl TargetFeatures {
     -- Missing is null; an explicitly disabled feature is false?.
-    pub pure comptime fn get(self, name: .Symbol'builtin) -> ?bool {
+    pub pure comptime fn get(self, name: Symbol) -> ?bool {
         target_object_get(bool, self.entries, name)
     }
 }

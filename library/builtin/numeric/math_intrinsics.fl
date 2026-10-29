@@ -1,3 +1,5 @@
+use primitives.*;
+
 {-
   builtin.math provides generic wrappers for host scalar intrinsics.
   The sysroot manifest binds every Scalar operation, including operations in

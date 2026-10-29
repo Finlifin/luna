@@ -1,9 +1,12 @@
+typealias Symbol = .Symbol'builtin;
+typealias Object = .Object'builtin;
+
 {-
     Attribute constructors produce ordinary comptime Objects. Consumers check
     the target and supported values before applying metadata to generated code.
 -}
 
-pub pure comptime fn abi(name: .Symbol'builtin) -> .Object'builtin {
+pub pure comptime fn abi(name: Symbol) -> Object {
     let metadata = {abi: name};
     metadata
 }

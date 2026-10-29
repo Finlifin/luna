@@ -3963,11 +3963,11 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     sandbox.write("library/builtin/lib.fl","use protocols.ops; use types.tuple; use numeric.{comparison,math_intrinsics}; pub use primitives.*;pub use tuple.Tuple;pub use ops.*;pub use comparison.*;pub mod math {pub use math_intrinsics.*;} pub mod prelude {pub use tuple.Tuple;}");
     sandbox.write(
         "library/builtin/protocols/resources.fl",
-        include_str!("../../../library/builtin/protocols/resources.fl"),
+        include!("support/resources_source.rs"),
     );
     sandbox.write(
         "library/builtin/types/tuple.fl",
-        include_str!("../../../library/builtin/types/tuple.fl"),
+        include!("support/tuple_source.rs"),
     );
     fs::create_dir_all(sandbox.path("library/attrs")).unwrap();
     sandbox.write("library/attrs/lib.fl", include!("support/attrs_source.rs"));
@@ -3977,7 +3977,7 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     );
     sandbox.write(
         "library/builtin/protocols/ops.fl",
-        include_str!("../../../library/builtin/protocols/ops.fl"),
+        include!("support/operators_source.rs"),
     );
     sandbox.write("library/meta/lib.fl", include!("support/meta_source.rs"));
     sandbox.write("library/std/lib.fl", "pub mod prelude {}");
@@ -4419,7 +4419,7 @@ fn index_protocol_sysroot_defaults_preserve_explicit_pointer_access() {
     );
     sandbox.write(
         "library/builtin/ops.fl",
-        include_str!("../../../library/builtin/protocols/ops.fl"),
+        include!("support/operators_source.rs"),
     );
     sandbox.write("library/std/lib.fl", "pub mod prelude {}");
     sandbox.write(
@@ -7862,6 +7862,18 @@ fn repository_math_package_runs_generic_fma_and_rejects_nonfloat_inputs() {
         "202",
         "math",
         math,
+        "--package",
+        "3",
+        "303",
+        "primitives",
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../library/builtin/primitives.fl"
+        ),
+        "--dependency",
+        "2",
+        "primitives",
+        "3",
         "--dependency",
         "1",
         "math",
@@ -8070,6 +8082,18 @@ fn native_tests_bind_host_fma_for_single_source_and_real_math_package() {
         "202",
         "math",
         math.to_str().unwrap(),
+        "--package",
+        "3",
+        "303",
+        "primitives",
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../library/builtin/primitives.fl"
+        ),
+        "--dependency",
+        "2",
+        "primitives",
+        "3",
         "--dependency",
         "1",
         "math",
@@ -8222,6 +8246,18 @@ fn repository_resource_package_executes_native_clone_and_cleanup() {
                 "202",
                 "resources",
                 resources.to_str().unwrap(),
+                "--package",
+                "3",
+                "303",
+                "primitives",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../library/builtin/primitives.fl"
+                ),
+                "--dependency",
+                "2",
+                "primitives",
+                "3",
                 "--dependency",
                 "1",
                 "resources",
@@ -8629,7 +8665,7 @@ fn sysroot_repository_resource_defaults_execute_cleanup_and_reject_double_move()
     sandbox.write("library/std/lib.fl", "pub mod prelude {}");
     sandbox.write(
         "library/builtin/protocols/resources.fl",
-        include_str!("../../../library/builtin/protocols/resources.fl"),
+        include!("support/resources_source.rs"),
     );
     // Isolate the real resource module and manifest bindings from unfinished
     // String/panic modules. This is not the full-library smoke test.
@@ -8801,7 +8837,7 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
     );
     sandbox.write(
         "library/builtin/protocols/resources.fl",
-        include_str!("../../../library/builtin/protocols/resources.fl"),
+        include!("support/resources_source.rs"),
     );
     sandbox.write(
         "library/builtin/primitives.fl",

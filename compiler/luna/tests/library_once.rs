@@ -7,7 +7,7 @@ fn compile(body: &str) -> Result<nir::program::Package, String> {
     support::compile_with_source_bindings(
         &format!(
             "mod resources {{ {} }} use resources.*; {body}",
-            include_str!("../../../library/builtin/protocols/resources.fl")
+            include!("support/resources_source.rs")
         ),
         &Default::default(),
         luna::protocols::type_constructors::Selectors {

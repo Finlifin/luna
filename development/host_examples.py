@@ -34,7 +34,12 @@ class Example:
                                if path in ('library/meta/lib.fl',
                                            'library/builtin/types/option.fl',
                                            'library/builtin/types/result.fl',
-                                           'library/builtin/protocols/iterator.fl')]
+                                           'library/builtin/protocols/iterator.fl',
+                                           'library/builtin/protocols/resources.fl',
+                                           'library/builtin/protocols/ops.fl',
+                                           'library/builtin/numeric/math_intrinsics.fl',
+                                           'library/builtin/numeric/comparison.fl',
+                                           'library/builtin/types/tuple.fl')]
         if primitive_consumers:
             primitives = next((identities[name] for name, path in self.dependencies
                                if path == 'library/builtin/primitives.fl'), None)

@@ -34,7 +34,7 @@ fn real_ord_defaults_drive_nominal_and_generic_operators() {
         }} fn numeric(a:.f64'builtin,b:.f64'builtin)->bool {{a < b}} fn verify() {{let valid=run();assumes valid;}}",support::with_attrs(include!("support/comparison_source.rs")));
     let source = format!(
         "mod resources {{\n{}\n}}\n{source}",
-        include_str!("../../../library/builtin/protocols/resources.fl")
+        include!("support/resources_source.rs")
     );
     assert!(compile(&source, None).is_err());
     let package = compile(&source, Some("input.comparison.Ord")).unwrap();

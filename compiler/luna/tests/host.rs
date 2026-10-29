@@ -20204,7 +20204,7 @@ fn generic_native_negation_survives_protocol_binding() {
         fn bits(value:Bits)->Bits {{not value}}
         ",
         include_str!("../../../library/builtin/primitives.fl"),
-        include_str!("../../../library/builtin/protocols/ops.fl")
+        include!("support/operators_source.rs")
     );
     for primitive in ["i8", "i16", "i32", "i64", "i128"] {
         let work = Work::new(&format!(
@@ -20305,7 +20305,7 @@ fn generic_float_operators_preserve_ieee_values_and_evaluation() {
         pure fn early(a:T)->T where T, requires T == f32 or T == f64 {{a * do {{return a;}}}}
         ",
         include_str!("../../../library/builtin/primitives.fl"),
-        include_str!("../../../library/builtin/protocols/ops.fl")
+        include!("support/operators_source.rs")
     );
     let bindings = [
         "--add-protocol",
@@ -23444,15 +23444,11 @@ fn quoted_tuple_contract_requires_explicit_copy_and_preserves_caller() {
             source.replace("impl Duplicate for Tuple<bool, bool> {}", "")
         };
         let w = Work::new(&source);
-        fs::write(
-            w.0.join("tuple.fl"),
-            include_str!("../../../library/builtin/types/tuple.fl"),
-        )
-        .unwrap();
+        fs::write(w.0.join("tuple.fl"), include!("support/tuple_source.rs")).unwrap();
         fs::write(w.0.join("meta.fl"), include!("support/meta_source.rs")).unwrap();
         fs::write(
             w.0.join("resources.fl"),
-            include_str!("../../../library/builtin/protocols/resources.fl"),
+            include!("support/resources_source.rs"),
         )
         .unwrap();
         for level in ["0", "3"] {

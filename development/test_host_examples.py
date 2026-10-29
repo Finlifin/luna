@@ -16,10 +16,19 @@ class NativeExampleOutputTests(unittest.TestCase):
         edges = [tuple(arguments[index + 1:index + 4])
                  for index, value in enumerate(arguments) if value == '--dependency']
         self.assertEqual(edges, [('1', 'tuples', '2'), ('1', 'meta', '3'),
-                                 ('1', 'resources', '4'), ('2', 'meta', '3'), ('3', 'builtin', '5')])
+                                 ('1', 'resources', '4'), ('2', 'meta', '3'), ('2', 'primitives', '5'),
+                                 ('3', 'builtin', '5'), ('4', 'primitives', '5')])
         self.assertEqual(arguments[-2:], ['--primary', '1'])
         self.assertIn(str(host_examples.ROOT / 'library/builtin/types/tuple.fl'), arguments)
         self.assertIn(str(host_examples.ROOT / 'library/meta/lib.fl'), arguments)
+
+    def test_standalone_math_resolves_the_shared_primitive_package(self):
+        arguments = host_examples.EXAMPLES['math-fma'].inputs(Path('entry.fl'))
+        edges = [tuple(arguments[index + 1:index + 4])
+                 for index, value in enumerate(arguments) if value == '--dependency']
+        self.assertIn(('2', 'primitives', '3'), edges)
+        self.assertEqual(arguments.count(str(host_examples.ROOT /
+                                             'library/builtin/primitives.fl')), 1)
 
     def test_private_driver_is_released_but_artifacts_survive(self):
         for outcome in (0, 1, RuntimeError('report failed'), KeyboardInterrupt()):

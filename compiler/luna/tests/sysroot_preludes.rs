@@ -66,7 +66,7 @@ fn source_configured_iterator_runs_ordinary_for_from_prelude() {
     );
     input.write(
         "library/builtin/resources.fl",
-        include_str!("../../../library/builtin/protocols/resources.fl"),
+        include!("support/resources_source.rs"),
     );
     input.write("library/language-items.conf", "version = 1\niterator-protocol = builtin.iterator.Iterator\ncopy-protocol = builtin.resources.Copy\ndrop-protocol = builtin.resources.Drop\n");
     for package in ["meta", "build", "attrs", "verification", "std"] {

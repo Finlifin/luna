@@ -7,9 +7,9 @@ use elaboration::arithmetic::Operator;
 use support::compile_with_source_bindings;
 
 const PRIMITIVES: &str = include_str!("../../../library/builtin/primitives.fl");
-const OPERATORS: &str = include_str!("../../../library/builtin/protocols/ops.fl");
-const TUPLE: &str = include_str!("../../../library/builtin/types/tuple.fl");
-const RESOURCES: &str = include_str!("../../../library/builtin/protocols/resources.fl");
+const OPERATORS: &str = include!("support/operators_source.rs");
+const TUPLE: &str = include!("support/tuple_source.rs");
+const RESOURCES: &str = include!("support/resources_source.rs");
 
 #[test]
 fn repository_list_pattern_protocol_retains_observation_write_checks() {
@@ -472,8 +472,9 @@ fn native_wrapper_once_preserves_affine_payloads_without_granting_copy() {
 
 #[test]
 fn native_wrapper_copy_requires_every_payload_and_preserves_pointer_lifetime() {
+    let resources_source = include_str!("../../../library/builtin/protocols/resources.fl");
     let resources = format!(
-        "mod primitives {{ {} }} use primitives.*;\nmod resources {{ {RESOURCES} }}\nmod native_resources {{ {} }}\nuse resources.*;",
+        "mod primitives {{ {} }} use primitives.*;\nmod resources {{ {resources_source} }}\nmod native_resources {{ {} }}\nuse resources.*;",
         include_str!("../../../library/builtin/primitives.fl"),
         include_str!("../../../library/builtin/protocols/native_resources.fl")
     );
@@ -598,7 +599,7 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
         "mod meta {{ {meta} }}\nmod resources {{ {} }}\n{TUPLE}\ntrait TupleMarker {{}} impl TupleMarker for Tuple<.Es = Es> where Es:meta.List<.Type'builtin> {{}}\n
         fn forward(value:T)->T where T:-TupleMarker {{value}}
         fn run()->bool {{let (a,(b,),())=forward((true,(false,),()));a and not b}}",
-        include_str!("../../../library/builtin/protocols/resources.fl"),
+        include!("support/resources_source.rs"),
     );
     let selectors = luna::protocols::type_constructors::Selectors {
         meta_list: Some("input.meta.List"),
@@ -796,7 +797,7 @@ fn repository_conversion_protocols_select_full_interfaces_and_transfer_ownership
     let source = format!(
         "mod conversion {{ {} }}\nmod resources {{ {} }}\n{}",
         include_str!("../../../library/builtin/protocols/conversion.fl"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
+        include!("support/resources_source.rs"),
         include_str!("../../../development/examples/host-library-conversion.fl"),
     );
     let compile = |source: &str| {
@@ -1045,7 +1046,7 @@ fn repository_tuple_head_preserves_type_identity_and_value_layout() {
         }}
         comptime fn PairType()->Type {{Tuple<bool,bool>}}",
         include!("support/meta_source.rs"),
-        include_str!("../../../library/builtin/types/tuple.fl"),
+        include!("support/tuple_source.rs"),
     );
     let package = compile_with_source_bindings(
         &source,
@@ -1220,7 +1221,7 @@ fn repository_resource_protocols_clone_scalars_and_preserve_pointer_targets() {
             assumes flag and copy and integer == duplicate and same == float and target;
         }}",
         PRIMITIVES,
-        include_str!("../../../library/builtin/protocols/resources.fl")
+        include!("support/resources_source.rs")
     );
     let package = compile_with_source_bindings(
         &source,
@@ -1758,7 +1759,7 @@ fn repository_value_combinators_own_callback_environments_on_both_branches() {
                     }}",
                     format!("mod primitives {{\n{}\n}}\n{}", include_str!("../../../library/builtin/primitives.fl"), include_str!("../../../library/builtin/types/option.fl")),
                     format!("mod primitives {{\n{}\n}}\n{}", include_str!("../../../library/builtin/primitives.fl"), include_str!("../../../library/builtin/types/result.fl")),
-                    include_str!("../../../library/builtin/protocols/resources.fl"));
+                    include!("support/resources_source.rs"));
                 let package = compile_with_source_bindings(
                     &source,
                     &support::meta_fixture_protocols(),

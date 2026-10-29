@@ -34,47 +34,47 @@ impl Hash for bool {
         if self { 1 } else { 0 }
     }
 }
-impl Hash for .u8'builtin {
+impl Hash for u8 {
     fn hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-impl Hash for .u16'builtin {
+impl Hash for u16 {
     fn hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-impl Hash for .u32'builtin {
+impl Hash for u32 {
     fn hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-impl Hash for .u64'builtin {
+impl Hash for u64 {
     fn hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-impl Hash for .i8'builtin {
+impl Hash for i8 {
     fn hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-impl Hash for .i16'builtin {
+impl Hash for i16 {
     fn hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-impl Hash for .i32'builtin {
+impl Hash for i32 {
     fn hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-impl Hash for .i64'builtin {
+impl Hash for i64 {
     fn hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-impl Hash for .u128'builtin {
+impl Hash for u128 {
     fn hash(self) -> u64 {
         let bits = self'bitvec;
         let low = bits[0..64];
@@ -82,7 +82,7 @@ impl Hash for .u128'builtin {
         ((low and not high) or (not low and high)).as(u64)
     }
 }
-impl Hash for .i128'builtin {
+impl Hash for i128 {
     fn hash(self) -> u64 {
         let bits = self'bitvec;
         let low = bits[0..64];
@@ -95,47 +95,47 @@ comptime impl Hash for bool {
         if self { 1 } else { 0 }
     }
 }
-comptime impl Hash for .u8'builtin {
+comptime impl Hash for u8 {
     comptime fn comptime_hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-comptime impl Hash for .u16'builtin {
+comptime impl Hash for u16 {
     comptime fn comptime_hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-comptime impl Hash for .u32'builtin {
+comptime impl Hash for u32 {
     comptime fn comptime_hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-comptime impl Hash for .u64'builtin {
+comptime impl Hash for u64 {
     comptime fn comptime_hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-comptime impl Hash for .i8'builtin {
+comptime impl Hash for i8 {
     comptime fn comptime_hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-comptime impl Hash for .i16'builtin {
+comptime impl Hash for i16 {
     comptime fn comptime_hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-comptime impl Hash for .i32'builtin {
+comptime impl Hash for i32 {
     comptime fn comptime_hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-comptime impl Hash for .i64'builtin {
+comptime impl Hash for i64 {
     comptime fn comptime_hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
-comptime impl Hash for .u128'builtin {
+comptime impl Hash for u128 {
     comptime fn comptime_hash(self) -> u64 {
         let bits = self'bitvec;
         let low = bits[0..64];
@@ -143,7 +143,7 @@ comptime impl Hash for .u128'builtin {
         ((low and not high) or (not low and high)).as(u64)
     }
 }
-comptime impl Hash for .i128'builtin {
+comptime impl Hash for i128 {
     comptime fn comptime_hash(self) -> u64 {
         let bits = self'bitvec;
         let low = bits[0..64];
@@ -152,13 +152,13 @@ comptime impl Hash for .i128'builtin {
     }
 }
 
-impl Hash for .char'builtin {
+impl Hash for char {
     fn hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
 
-comptime impl Hash for .char'builtin {
+comptime impl Hash for char {
     comptime fn comptime_hash(self) -> u64 {
         self'bitvec.as(u64)
     }
@@ -170,7 +170,7 @@ comptime impl Hash for .char'builtin {
     explicitly. This deterministic hash is not collision-resistant; Eq must
     still decide equality. Runtime and comptime use the same recurrence.
 -}
-impl Hash for .str'builtin {
+impl Hash for str {
     fn hash(self) -> u64 {
         let name = self;
         let length = hash_str_byte_length(name);
@@ -194,7 +194,7 @@ impl Hash for .str'builtin {
     }
 }
 
-comptime impl Hash for .str'builtin {
+comptime impl Hash for str {
     comptime fn comptime_hash(self) -> u64 {
         let name = self;
         let length = hash_str_byte_length(name);
@@ -222,7 +222,7 @@ comptime impl Hash for .str'builtin {
     Symbol names have immutable storage independent of their local carrier.
     Observe bytes directly, without creating a borrowed str descriptor.
 -}
-impl Hash for .Symbol'builtin {
+impl Hash for Symbol {
     fn hash(self) -> u64 {
         let name = self;
         let length = hash_symbol_byte_length(name);
@@ -246,7 +246,7 @@ impl Hash for .Symbol'builtin {
     }
 }
 
-comptime impl Hash for .Symbol'builtin {
+comptime impl Hash for Symbol {
     comptime fn comptime_hash(self) -> u64 {
         let name = self;
         let length = hash_symbol_byte_length(name);
@@ -275,7 +275,7 @@ comptime impl Hash for .Symbol'builtin {
     to u128 zero-extends those bits; folding handles every supported width,
     including targets wider than 64 bits, without assuming host pointer size.
 -}
-impl Hash for .usize'builtin {
+impl Hash for usize {
     fn hash(self) -> u64 {
         let widened = hash_integer_representation(self);
         let bits = widened'bitvec;
@@ -285,7 +285,7 @@ impl Hash for .usize'builtin {
     }
 }
 
-comptime impl Hash for .usize'builtin {
+comptime impl Hash for usize {
     comptime fn comptime_hash(self) -> u64 {
         let widened = hash_integer_representation(self);
         let bits = widened'bitvec;
@@ -295,7 +295,7 @@ comptime impl Hash for .usize'builtin {
     }
 }
 
-impl Hash for .isize'builtin {
+impl Hash for isize {
     fn hash(self) -> u64 {
         let widened = hash_integer_representation(self);
         let bits = widened'bitvec;
@@ -305,7 +305,7 @@ impl Hash for .isize'builtin {
     }
 }
 
-comptime impl Hash for .isize'builtin {
+comptime impl Hash for isize {
     comptime fn comptime_hash(self) -> u64 {
         let widened = hash_integer_representation(self);
         let bits = widened'bitvec;

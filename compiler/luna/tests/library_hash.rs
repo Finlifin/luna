@@ -11,7 +11,7 @@ fn source(body: &str) -> String {
         support::with_attrs(include_str!(
             "../../../library/builtin/numeric/comparison.fl"
         )),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
+        include!("support/resources_source.rs"),
         include_str!("../../../library/builtin/protocols/conversion.fl"),
         support::with_attrs(include_str!("../../../library/builtin/protocols/traits.fl")),
     )
