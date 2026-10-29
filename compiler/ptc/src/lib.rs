@@ -690,6 +690,7 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                 Term::Optional(inner)
                 | Term::Pointer(inner)
                 | Term::ComptimeFunction(inner)
+                | Term::NormalFormFunction(inner, _)
                 | Term::UnsafeFunction(inner) => pending.push((Input::Term(inner), depth + 1)),
                 Term::OptionalValue { ty, value } => {
                     pending.push((Input::Term(ty), depth + 1));
@@ -843,6 +844,7 @@ fn subterms(term: &Term) -> Vec<&Term> {
         Term::Optional(inner)
         | Term::Pointer(inner)
         | Term::ComptimeFunction(inner)
+        | Term::NormalFormFunction(inner, _)
         | Term::UnsafeFunction(inner) => {
             vec![inner]
         }
@@ -913,6 +915,7 @@ fn has_bound(term: &Term) -> bool {
         Term::Optional(inner)
         | Term::Pointer(inner)
         | Term::ComptimeFunction(inner)
+        | Term::NormalFormFunction(inner, _)
         | Term::UnsafeFunction(inner) => has_bound(inner),
         _ => false,
     }
@@ -1069,6 +1072,7 @@ enum Head {
     Optional,
     Pointer,
     ComptimeFunction,
+    NormalFormFunction(Option<usize>),
     UnsafeFunction,
     Tuple(usize),
     Function(Vec<Sort>),
@@ -1081,6 +1085,7 @@ fn constructor(term: &Term) -> Option<Head> {
         Term::Optional(_) => Some(Head::Optional),
         Term::Pointer(_) => Some(Head::Pointer),
         Term::ComptimeFunction(_) => Some(Head::ComptimeFunction),
+        Term::NormalFormFunction(_, collector) => Some(Head::NormalFormFunction(*collector)),
         Term::UnsafeFunction(_) => Some(Head::UnsafeFunction),
         Term::Tuple(items) => Some(Head::Tuple(items.len())),
         Term::Function { parameters, .. } if !has_bound(term) => {
@@ -1107,6 +1112,7 @@ pub fn distinct_outer_type_heads(left: &Term, right: &Term) -> bool {
         | Term::Optional(_)
         | Term::Pointer(_)
         | Term::ComptimeFunction(_)
+        | Term::NormalFormFunction(..)
         | Term::UnsafeFunction(_)
         | Term::Tuple(_)
         | Term::Nominal { .. } => constructor(term),
@@ -1834,6 +1840,9 @@ fn rebuild(
         Term::Optional(t) => Some(Term::Optional(Box::new(child(t)?))),
         Term::Pointer(t) => Some(Term::Pointer(Box::new(child(t)?))),
         Term::ComptimeFunction(t) => Some(Term::ComptimeFunction(Box::new(child(t)?))),
+        Term::NormalFormFunction(t, collector) => {
+            Some(Term::NormalFormFunction(Box::new(child(t)?), *collector))
+        }
         Term::UnsafeFunction(t) => Some(Term::UnsafeFunction(Box::new(child(t)?))),
         Term::Tuple(items) => Some(Term::Tuple(
             items.iter().map(&mut *child).collect::<Option<_>>()?,

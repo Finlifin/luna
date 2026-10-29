@@ -33,8 +33,11 @@ pub const Tuple: pure comptime fn<...Es: meta.List<Type>> -> Type = .Tuple'built
 ```
 
 命名输入按顺序进入作用域，后续输入及结果类型可引用前面的绑定；嵌套函数
-类型建立自己的参数作用域。当前实现已接通该语法、AST 与 HIR，NIR callable
-值表示和上述 builtin 绑定的执行路径仍待接通；不能据此宣称 Tuple 已迁移。
+类型建立自己的参数作用域。当前实现已接通语法、HIR 与 NIR 类型表示，支持
+依赖参数替换、类型身份比较，以及将该类型作为 comptime Type 值返回和传输。
+范式 callable 类型不能作为 runtime 参数或 quote 上下文中的 runtime 绑定。
+callable 值本身的取得、应用和上述 builtin 绑定的执行路径仍待接通；Tuple
+尚未迁移到该绑定。
 
 ## 正式定义
 

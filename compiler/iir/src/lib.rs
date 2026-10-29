@@ -705,6 +705,7 @@ impl Package {
                 Term::Optional(inner)
                 | Term::Pointer(inner)
                 | Term::ComptimeFunction(inner)
+                | Term::NormalFormFunction(inner, _)
                 | Term::UnsafeFunction(inner) => pending.push(inner),
                 Term::Function { parameters, result } => {
                     pending.extend(parameters.iter().map(|p| &p.ty));
@@ -865,6 +866,7 @@ pub fn completed_dependencies(
             Term::Optional(inner)
             | Term::Pointer(inner)
             | Term::ComptimeFunction(inner)
+            | Term::NormalFormFunction(inner, _)
             | Term::UnsafeFunction(inner) => pending.push(inner),
             Term::Function { parameters, result } => {
                 pending.extend(parameters.iter().map(|p| &p.ty));

@@ -12,6 +12,28 @@ fn packet(fields: Vec<(String, Entry)>) -> Vec<Input> {
         fields,
     }]
 }
+
+#[test]
+fn wire_preserves_normal_form_callable_type_and_collector() {
+    for collector in [None, Some(0)] {
+        let signature = T::NormalFormFunction(
+            Box::new(T::Function {
+                parameters: vec![nir::Parameter {
+                    sort: Sort::ComptimeValue,
+                    ty: T::Primitive(P::Bool),
+                }],
+                result: Box::new(T::Primitive(P::Type)),
+            }),
+            collector,
+        );
+        let inputs = packet(vec![(
+            "signature".into(),
+            entry(T::Primitive(P::Type), signature),
+        )]);
+        let encoded = encode_hex(&inputs).unwrap();
+        assert_eq!(decode_hex(&encoded).unwrap(), inputs);
+    }
+}
 #[test]
 fn wire_preserves_nominal_normal_form_optional_and_numeric_identity() {
     let id = DeclarationId {

@@ -287,7 +287,9 @@ impl Checker<'_, '_> {
         let mut defaults = BTreeMap::new();
         for entry in bindings {
             let ty = self.type_expr(entry.ty)?;
-            if ty == p(P::Type) || matches!(ty, Term::ComptimeFunction(_)) {
+            if ty == p(P::Type)
+                || matches!(ty, Term::ComptimeFunction(_) | Term::NormalFormFunction(..))
+            {
                 return Err(error(
                     entry.name.span,
                     "quote contexts contain only runtime bindings",
@@ -304,7 +306,12 @@ impl Checker<'_, '_> {
             self.locals.insert(id, ty);
         }
         let result = self.type_expr(result)?;
-        if result == p(P::Type) || matches!(result, Term::ComptimeFunction(_)) {
+        if result == p(P::Type)
+            || matches!(
+                result,
+                Term::ComptimeFunction(_) | Term::NormalFormFunction(..)
+            )
+        {
             return Err(error(
                 annotation.span,
                 "expression code must deliver a runtime result",
@@ -547,7 +554,7 @@ impl Checker<'_, '_> {
                 )
             })?;
             if *ty == p(P::Type)
-                || matches!(ty, Term::ComptimeFunction(_))
+                || matches!(ty, Term::ComptimeFunction(_) | Term::NormalFormFunction(..))
                 || self.type_input_bindings.contains_key(&id)
                 || self.value_input_bindings.contains_key(&id)
             {

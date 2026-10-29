@@ -4171,11 +4171,14 @@ impl Checker<'_, '_> {
                 })
             }
             H::TyModifiedFn(modifiers, params) => self.form_modified_callable_type(*modifiers, params, None, expr.span),
-            H::TyNFFn(_) => Err(error(expr.span, "normal-form callable value types are not implemented")),
+            H::TyNFFn(params) => self.form_normal_form_callable_type(params, None, expr.span),
             H::TyFn(params) | H::TyComptimeFn(params) => {
                 self.form_callable_type(params, None, matches!(expr.kind, H::TyComptimeFn(_)), expr.span)
             }
             H::TyFnArrow(input, output) => {
+                if let H::TyNFFn(params) = &input.kind {
+                    return self.form_normal_form_callable_type(params, Some(output), expr.span);
+                }
                 if let H::TyModifiedFn(modifiers, params) = &input.kind {
                     return self.form_modified_callable_type(*modifiers, params, Some(output), expr.span);
                 }

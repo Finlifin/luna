@@ -2274,6 +2274,7 @@ pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budge
             Term::Optional(inner)
             | Term::Pointer(inner)
             | Term::ComptimeFunction(inner)
+            | Term::NormalFormFunction(inner, _)
             | Term::UnsafeFunction(inner) => pending.push((inner, depth + 1)),
             Term::Function { parameters, result } => {
                 if parameters.len() > budget.steps {

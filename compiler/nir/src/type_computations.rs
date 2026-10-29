@@ -634,6 +634,7 @@ fn visit_expanded_term(
             Term::Optional(ty)
             | Term::Pointer(ty)
             | Term::ComptimeFunction(ty)
+            | Term::NormalFormFunction(ty, _)
             | Term::UnsafeFunction(ty) => push(ty.as_ref())?,
             Term::Function { parameters, result } => {
                 push(result.as_ref())?;

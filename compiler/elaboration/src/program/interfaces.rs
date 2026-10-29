@@ -478,6 +478,7 @@ impl Checker<'_, '_> {
                         | Term::Pointer(_)
                         | Term::Function { .. }
                         | Term::ComptimeFunction(_)
+                        | Term::NormalFormFunction(..)
                         | Term::UnsafeFunction(_)
                         | Term::Rigid {
                             sort: Sort::Type,

@@ -924,6 +924,7 @@ pub fn machine_arithmetic_functions(
                                 expr.ty,
                                 Term::Function { .. }
                                     | Term::ComptimeFunction(_)
+                                    | Term::NormalFormFunction(..)
                                     | Term::UnsafeFunction(_)
                             ) && !captures.is_empty()
                             {
@@ -1743,7 +1744,9 @@ fn comptime_storage_resolved(
             }
             vec![(**signature).clone()]
         }
-        T::Primitive(P::Integer | P::Float | P::Type | P::Object) | T::ComptimeFunction(_) => {
+        T::Primitive(P::Integer | P::Float | P::Type | P::Object)
+        | T::ComptimeFunction(_)
+        | T::NormalFormFunction(..) => {
             return Ok(true);
         }
         T::NormalForm { head, .. } => {

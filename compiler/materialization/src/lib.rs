@@ -2582,6 +2582,7 @@ impl Builder<'_> {
             Term::Optional(t)
             | Term::Pointer(t)
             | Term::ComptimeFunction(t)
+            | Term::NormalFormFunction(t, _)
             | Term::UnsafeFunction(t) => children.push((**t).clone()),
             Term::Function { parameters, result } => {
                 children.extend(parameters.iter().map(|p| p.ty.clone()));

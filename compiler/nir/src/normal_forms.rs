@@ -1207,6 +1207,7 @@ fn nominal_domain_scope(
             Term::Optional(inner)
             | Term::Pointer(inner)
             | Term::ComptimeFunction(inner)
+            | Term::NormalFormFunction(inner, _)
             | Term::UnsafeFunction(inner) => pending.push(inner),
             Term::Function { parameters, result } => {
                 pending.push(result);

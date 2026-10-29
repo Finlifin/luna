@@ -181,12 +181,7 @@ fn normal_form_callable_bindings_preserve_scoped_inputs_in_hir() {
         "typealias F = pure comptime fn<T: .Type'builtin> -> T;",
     );
     let output = sandbox.run(&["input.fl", "--emit", "nir"]);
-    failure(&output, 1);
-    assert!(
-        details(&output).contains("normal-form callable value types"),
-        "{}",
-        details(&output)
-    );
+    success(&output);
     for source in [
         "typealias F = pure comptime fn<T: .Type'builtin> -> T; typealias Leaked = T;",
         "typealias F = pure comptime fn<value: T, T: .Type'builtin> -> T;",
@@ -195,6 +190,71 @@ fn normal_form_callable_bindings_preserve_scoped_inputs_in_hir() {
         sandbox.write("input.fl", source);
         let output = sandbox.run(&["input.fl", "--emit", "hir"]);
         failure(&output, 1);
+        assert!(
+            !details(&output).contains("panicked"),
+            "{}",
+            details(&output)
+        );
+    }
+}
+
+#[test]
+fn normal_form_callable_types_are_comptime_type_values() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "
+        typealias Type = .Type'builtin;
+        pure comptime fn Sequence<T> -> Type { T }
+        typealias Factory = pure comptime fn<T: Type, ...values: Sequence<T>> -> T;
+        comptime fn Describe() -> Type { Factory }
+    ",
+    );
+    let output = sandbox.run(&["input.fl", "--invoke-comptime", "Describe"]);
+    let dump = success(&output);
+    assert!(
+        dump.contains("(normal-form-function (collector 1)"),
+        "{dump}"
+    );
+    assert!(dump.contains("comptime-value"), "{dump}");
+    for signature in [
+        "pure comptime fn<...values: Type, last: Type> -> Type",
+        "pure comptime fn<...first: Type, ...last: Type> -> Type",
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!("typealias Type = .Type'builtin; typealias Bad = {signature};"),
+        );
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        failure(&output, 1);
+        assert!(
+            details(&output).contains("collector must be the final input"),
+            "{}",
+            details(&output)
+        );
+    }
+}
+
+#[test]
+fn normal_form_callable_types_cannot_enter_runtime_or_quote_contexts() {
+    let sandbox = Sandbox::new();
+    for body in [
+        "fn bad(value: Factory) {}",
+        "fn bad() -> bool { const code: <f: Factory |- bool> = '(true); false }",
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!(
+                "
+            typealias Type = .Type'builtin;
+            typealias Factory = pure comptime fn<Type> -> Type;
+            {body}
+        "
+            ),
+        );
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        failure(&output, 1);
+        assert!(details(&output).contains("runtime"), "{}", details(&output));
         assert!(
             !details(&output).contains("panicked"),
             "{}",

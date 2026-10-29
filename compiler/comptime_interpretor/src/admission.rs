@@ -400,6 +400,7 @@ impl Interpreter<'_> {
             Term::Optional(ty)
             | Term::Pointer(ty)
             | Term::ComptimeFunction(ty)
+            | Term::NormalFormFunction(ty, _)
             | Term::UnsafeFunction(ty) => self.admit_type(ty, depth + 1)?,
             Term::Function { parameters, result } => {
                 for p in parameters {

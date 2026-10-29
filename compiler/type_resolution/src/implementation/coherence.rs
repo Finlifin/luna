@@ -258,6 +258,7 @@ fn separation_goal(
                 }
                 Term::Pointer(inner)
                 | Term::ComptimeFunction(inner)
+                | Term::NormalFormFunction(inner, _)
                 | Term::UnsafeFunction(inner) => terms.push(inner),
                 Term::Function { parameters, result } => {
                     terms.extend(parameters.iter().map(|p| &p.ty));

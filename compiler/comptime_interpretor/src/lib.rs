@@ -9561,7 +9561,10 @@ fn scoped_term_value_work_with_evidence_in(
             }
             Term::Closure { environment, .. } => environment.len().saturating_add(1),
             Term::Function { parameters, .. } => parameters.len().saturating_add(1),
-            Term::Optional(_) | Term::Pointer(_) | Term::ComptimeFunction(_) => 1,
+            Term::Optional(_)
+            | Term::Pointer(_)
+            | Term::ComptimeFunction(_)
+            | Term::NormalFormFunction(..) => 1,
             _ => 0,
         };
         if work.saturating_add(pending.len()).saturating_add(children) > 100_000 {
@@ -9716,6 +9719,7 @@ fn scoped_term_value_work_with_evidence_in(
             Term::Optional(inner)
             | Term::Pointer(inner)
             | Term::ComptimeFunction(inner)
+            | Term::NormalFormFunction(inner, _)
             | Term::UnsafeFunction(inner) => pending.push((inner, depth + 1, frames.clone())),
             Term::Function { parameters, result } => {
                 work = work.checked_add(frame_slice.len().saturating_add(1))?;

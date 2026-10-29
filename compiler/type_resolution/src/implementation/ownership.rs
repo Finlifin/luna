@@ -145,6 +145,7 @@ fn local_identity(
             Term::Optional(inner)
             | Term::Pointer(inner)
             | Term::ComptimeFunction(inner)
+            | Term::NormalFormFunction(inner, _)
             | Term::UnsafeFunction(inner) => {
                 work.push((inner, depth + 1));
                 continue;
@@ -221,6 +222,7 @@ pub(super) fn builtin_subject(subject: &Term) -> bool {
             | Term::ErrorResult { .. }
             | Term::Function { .. }
             | Term::ComptimeFunction(_)
+            | Term::NormalFormFunction(..)
             | Term::UnsafeFunction(_)
     )
 }

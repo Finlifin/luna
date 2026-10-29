@@ -168,6 +168,7 @@ fn data_type(package: &Package, ty: &Term, fuel: &mut usize, depth: usize) -> Re
         }
         Term::Optional(inner)
         | Term::ComptimeFunction(inner)
+        | Term::NormalFormFunction(inner, _)
         | Term::UnsafeFunction(inner)
         | Term::Pointer(inner) => data_type(package, inner, fuel, depth + 1)?,
         Term::Tuple(_) | Term::Record(_) => {

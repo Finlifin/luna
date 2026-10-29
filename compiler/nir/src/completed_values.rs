@@ -47,6 +47,7 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             Term::Optional(_)
             | Term::Pointer(_)
             | Term::ComptimeFunction(_)
+            | Term::NormalFormFunction(..)
             | Term::UnsafeFunction(_) => 1,
             _ => 0,
         };
@@ -92,6 +93,7 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             Term::Optional(inner)
             | Term::Pointer(inner)
             | Term::ComptimeFunction(inner)
+            | Term::NormalFormFunction(inner, _)
             | Term::UnsafeFunction(inner) => children.push(inner),
             Term::Function { parameters, result } => {
                 children.extend(parameters.iter().map(|p| &p.ty));

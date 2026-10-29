@@ -191,6 +191,7 @@ where
                         | Term::Pointer(_)
                         | Term::Function { .. }
                         | Term::ComptimeFunction(_)
+                        | Term::NormalFormFunction(..)
                         | Term::UnsafeFunction(_),
                     ) => return Some(false),
                     _ => return None,
@@ -285,6 +286,7 @@ where
                     | Term::Pointer(_)
                     | Term::Function { .. }
                     | Term::ComptimeFunction(_)
+                    | Term::NormalFormFunction(..)
                     | Term::UnsafeFunction(_)
                     | Term::Closure { .. } => return Some(false),
                     // Bound/hole/rigid/associated subjects do not yet establish

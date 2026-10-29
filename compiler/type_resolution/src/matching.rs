@@ -274,6 +274,7 @@ fn decompose(
             Term::Closure { .. }
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)
+                | Term::NormalFormFunction(..)
                 | Term::UnsafeFunction(_)
         ) =>
         {
@@ -326,6 +327,7 @@ fn decompose(
             Term::Closure { .. }
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)
+                | Term::NormalFormFunction(..)
                 | Term::UnsafeFunction(_)
         ) =>
         {
@@ -455,6 +457,21 @@ fn decompose(
             // Infer the successful component; row compatibility remains an
             // obligation on the original complete types. Never zip unordered
             // labels or infer their identity from layout positions.
+            decompose(
+                a,
+                b,
+                arguments,
+                actual_arguments,
+                nesting,
+                depth + 1,
+                fuel,
+                limit,
+                context,
+                scope,
+                work,
+            )?;
+        }
+        (Term::NormalFormFunction(a, ac), Term::NormalFormFunction(b, bc)) if ac == bc => {
             decompose(
                 a,
                 b,

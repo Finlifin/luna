@@ -95,29 +95,40 @@ impl FunctionInputBinding {
             parameters: retained,
             result: Box::new(replace_scope(result, &replacements, &type_slots, false)?),
         };
-        fn wrap(original: &Term, specialized: Term) -> Term {
+        fn wrap(original: &Term, specialized: Term, inputs: &[Option<Term>]) -> Term {
             match original {
                 Term::ContextualClosure { context, signature } => Term::ContextualClosure {
                     context: context.clone(),
-                    signature: Box::new(wrap(signature, specialized)),
+                    signature: Box::new(wrap(signature, specialized, inputs)),
                 },
                 Term::Closure {
                     environment,
                     signature,
                 } => Term::Closure {
                     environment: environment.clone(),
-                    signature: Box::new(wrap(signature, specialized)),
+                    signature: Box::new(wrap(signature, specialized, inputs)),
                 },
                 Term::ComptimeFunction(inner) => {
-                    Term::ComptimeFunction(Box::new(wrap(inner, specialized)))
+                    Term::ComptimeFunction(Box::new(wrap(inner, specialized, inputs)))
                 }
+                Term::NormalFormFunction(inner, variadic) => Term::NormalFormFunction(
+                    Box::new(wrap(inner, specialized, inputs)),
+                    variadic.and_then(|index| {
+                        inputs[index].is_none().then(|| {
+                            inputs[..index]
+                                .iter()
+                                .filter(|input| input.is_none())
+                                .count()
+                        })
+                    }),
+                ),
                 Term::UnsafeFunction(inner) => {
-                    Term::UnsafeFunction(Box::new(wrap(inner, specialized)))
+                    Term::UnsafeFunction(Box::new(wrap(inner, specialized, inputs)))
                 }
                 _ => specialized,
             }
         }
-        let signature = wrap(signature, specialized);
+        let signature = wrap(signature, specialized, inputs);
         signature.check_scope(&[])?;
         Ok(Self {
             signature,

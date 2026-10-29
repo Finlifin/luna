@@ -29,6 +29,7 @@ pub enum Head {
     Optional,
     Pointer,
     ComptimeFunction,
+    NormalFormFunction(Option<usize>),
     UnsafeFunction,
     Function(Vec<Sort>),
 }
@@ -114,6 +115,9 @@ impl Key {
                     )
                 }
                 Term::ComptimeFunction(inner) => (Head::ComptimeFunction, vec![inner]),
+                Term::NormalFormFunction(inner, collector) => {
+                    (Head::NormalFormFunction(*collector), vec![inner])
+                }
                 Term::UnsafeFunction(inner) => (Head::UnsafeFunction, vec![inner]),
                 Term::Function { parameters, result } => (
                     Head::Function(parameters.iter().map(|p| p.sort).collect()),
@@ -209,6 +213,7 @@ impl Key {
                             Term::Optional(t)
                             | Term::Pointer(t)
                             | Term::ComptimeFunction(t)
+                            | Term::NormalFormFunction(t, _)
                             | Term::UnsafeFunction(t) => work.push((t, d + 1)),
                             // Dependent function/closure structure is not an
                             // implementation index contract yet. Do not prune it.
@@ -775,6 +780,14 @@ impl fmt::Display for Key {
                     Head::Optional => f.write_str("optional")?,
                     Head::Pointer => f.write_str("pointer")?,
                     Head::ComptimeFunction => f.write_str("comptime-function")?,
+                    Head::NormalFormFunction(collector) => {
+                        f.write_str("normal-form-function (collector ")?;
+                        match collector {
+                            Some(index) => write!(f, "{index}")?,
+                            None => f.write_str("none")?,
+                        }
+                        f.write_str(")")?
+                    }
                     Head::UnsafeFunction => f.write_str("unsafe-function")?,
                     Head::Function(sorts) => {
                         f.write_str("(function")?;

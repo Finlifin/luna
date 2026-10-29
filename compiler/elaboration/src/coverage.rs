@@ -159,6 +159,7 @@ impl Engine<'_> {
                 | Term::Record(_)
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)
+                | Term::NormalFormFunction(..)
                 | Term::UnsafeFunction(_)
                 | Term::Closure { .. }
                 | Term::Pointer { .. }

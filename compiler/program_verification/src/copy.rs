@@ -102,6 +102,7 @@ pub fn acquire(
                     | Term::Function { .. }
                     | Term::UnsafeFunction(_)
                     | Term::ComptimeFunction(_)
+                    | Term::NormalFormFunction(..)
                     | Term::Closure { .. }
             )
         {

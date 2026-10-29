@@ -42,6 +42,7 @@ pub fn charge_structure(ty: &Term, fuel: &mut usize) -> Result<(), &'static str>
             Term::Optional(inner)
             | Term::Pointer(inner)
             | Term::ComptimeFunction(inner)
+            | Term::NormalFormFunction(inner, _)
             | Term::UnsafeFunction(inner) => pending.push((inner, depth + 1)),
             Term::OptionalValue { ty, value } => {
                 pending.push((ty, depth + 1));

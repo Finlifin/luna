@@ -25,6 +25,7 @@ fn eligible_shape(context: &Context, ty: &Term) -> bool {
             | Term::Pointer(_)
             | Term::Function { .. }
             | Term::ComptimeFunction(_)
+            | Term::NormalFormFunction(..)
             | Term::UnsafeFunction(_)
     ) || context.is_tuple_type(ty)
         || context.is_list_type(ty)
@@ -380,6 +381,7 @@ pub(super) fn validate(
                 Term::Optional(t)
                 | Term::Pointer(t)
                 | Term::ComptimeFunction(t)
+                | Term::NormalFormFunction(t, _)
                 | Term::UnsafeFunction(t),
             ) => pending.push((Work::Term(t), depth + 1)),
             Work::Term(Term::Symbol(name) | Term::String(name)) => {
@@ -636,6 +638,7 @@ impl ImplementationHead {
                         | Term::Pointer(_)
                         | Term::Function { .. }
                         | Term::ComptimeFunction(_)
+                        | Term::NormalFormFunction(..)
                         | Term::UnsafeFunction(_)
                 )
         };

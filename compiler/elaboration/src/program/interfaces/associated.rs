@@ -979,6 +979,7 @@ impl Checker<'_, '_> {
                 }
                 Term::Pointer(inner)
                 | Term::ComptimeFunction(inner)
+                | Term::NormalFormFunction(inner, _)
                 | Term::UnsafeFunction(inner) => pending.push(Work::Visit(*inner, depth + 1)),
                 Term::Function { parameters, result } => {
                     pending.push(Work::Visit(*result, depth + 1));

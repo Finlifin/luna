@@ -20,6 +20,56 @@ fn finish(engine: &mut Engine) {
 }
 
 #[test]
+fn normal_form_callable_inference_preserves_collector_and_transaction_scope() {
+    let callable = |result, collector| {
+        Term::NormalFormFunction(
+            Box::new(Term::Function {
+                parameters: vec![nir::Parameter {
+                    sort: Sort::ComptimeValue,
+                    ty: Term::Primitive(P::Bool),
+                }],
+                result: Box::new(result),
+            }),
+            collector,
+        )
+    };
+    let mut engine = Engine::default();
+    let output = engine.fresh(Sort::Type);
+    let template = I::Instantiate {
+        template: callable(
+            Term::Bound {
+                depth: 1,
+                index: 0,
+                sort: Sort::Type,
+            },
+            Some(0),
+        ),
+        arguments: vec![I::Meta(output)],
+    };
+    let wrong = callable(Term::Primitive(P::Bool), None);
+    if let Ok((mut candidate, obligation)) =
+        engine.match_types(template.clone(), I::Stable(wrong), Budget::default())
+    {
+        finish(&mut candidate);
+        assert!(!candidate.state(obligation).unwrap().is_proven());
+    }
+    assert!(engine.freeze(&I::Meta(output)).is_err());
+    let expected = callable(Term::Primitive(P::Bool), Some(0));
+    let (mut candidate, obligation) = engine
+        .match_types(
+            template.clone(),
+            I::Stable(expected.clone()),
+            Budget::default(),
+        )
+        .unwrap();
+    finish(&mut candidate);
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    assert!(engine.freeze(&I::Meta(output)).is_err());
+    engine.commit(candidate).unwrap();
+    assert_eq!(engine.freeze(&template), Ok(expected));
+}
+
+#[test]
 fn tuple_pack_inference_preserves_head_proofs_and_transaction_isolation() {
     use nir::normal_forms::{Head, Kind, Parameter, Role};
     let head = nir::DeclarationId {

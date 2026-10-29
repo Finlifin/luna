@@ -19,6 +19,34 @@ pub(super) fn has_named_inputs(expr: &Expr<'_>) -> bool {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn form_normal_form_callable_type<'hir>(
+        &mut self,
+        inputs: &[hir::common::TyParam<'hir>],
+        output: Option<&Expr<'hir>>,
+        span: Span,
+    ) -> Result<Term, Error> {
+        let mut collector = None;
+        let mut staged = inputs.to_vec();
+        for (index, input) in staged.iter_mut().enumerate() {
+            input.flags |= hir::common::TPARAM_COMPTIME;
+            if let TyParamKind::Varadic(name, ty) = input.kind {
+                if collector.is_some() || index + 1 != inputs.len() {
+                    return Err(error(
+                        input.span,
+                        "normal-form callable collector must be the final input",
+                    ));
+                }
+                collector = Some(index);
+                input.kind = TyParamKind::PositionalDependencyCatched(name, ty);
+            }
+        }
+        let signature = self.form_callable_type(&staged, output, false, span)?;
+        let ty = Term::NormalFormFunction(Box::new(signature), collector);
+        ty.check_scope(&[])
+            .map_err(|reason| error(span, reason.to_string()))?;
+        Ok(ty)
+    }
+
     pub(super) fn form_modified_callable_type<'hir>(
         &mut self,
         modifiers: hir::expr::FnTypeModifiers,

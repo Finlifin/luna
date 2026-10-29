@@ -49,3 +49,34 @@ nodes still exist. Tuple's source-function registration and its requested
 builtin callable constant binding also remain to be migrated. Removing the
 parameter category does not complete those changes, nor establish unrestricted
 comptime value support throughout the compiler.
+
+## Normal-form callable type descriptors
+
+`NormalFormFunction(signature, collector)` now represents the calling form
+independently of ordinary `ComptimeFunction`. The inner signature owns the
+dependent binder frame; the optional collector index carries no assumption
+about Tuple, list element types, or a particular collection declaration.
+Specializing earlier inputs renumbers the collector; supplying the collector
+removes that slot. Rewriting, scoped validation, type matching, PTC identity,
+associated-type normalization, budget walks, and dumps retain this wrapper.
+
+Source annotations lower through the general callable telescope. The resulting
+type can be returned as a comptime Type value and transported by metadata wire
+tag 35. Runtime storage and quoted runtime contexts reject it. Acquiring and
+applying callable values, and registering Tuple's builtin binding, are still
+pending; a type descriptor alone does not implement those operations.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- check -p luna
+python3 -B development/check.py --timeout 900 -- test -p nir -p ptc -p type_resolution --no-fail-fast
+python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli --test metadata_wire normal_form_callable
+python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution --test normal_form_callables --test matching normal_form_
+```
+
+All exited 0. The broad core test command passed 797 tests. After the final
+phase-preservation and inference checks were added, the source/metadata group
+passed 4 tests and the specialization/matching group passed 4 tests. These
+include collector mismatch isolation, dependent input specialization, runtime
+and quote-context rejection, and metadata round trips.

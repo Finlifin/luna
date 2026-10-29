@@ -314,6 +314,17 @@ impl Writer {
                 self.optional(label.as_deref(), d)?;
                 self.term(value, d)?;
             }
+            T::NormalFormFunction(value, collector) => {
+                self.byte(35)?;
+                self.term(value, d)?;
+                match collector {
+                    Some(index) => {
+                        self.byte(1)?;
+                        self.number(*index as u64)?;
+                    }
+                    None => self.byte(0)?,
+                }
+            }
             T::ComptimeFunction(value) => {
                 self.byte(24)?;
                 self.term(value, d)?;
@@ -582,6 +593,15 @@ impl<'a> Reader<'a> {
                 label: self.optional(d)?,
                 value: Box::new(self.term(d)?),
             },
+            35 => {
+                let signature = Box::new(self.term(d)?);
+                let collector = match self.byte()? {
+                    0 => None,
+                    1 => Some(self.count()?),
+                    _ => return Err(failure("invalid normal-form collector tag")),
+                };
+                T::NormalFormFunction(signature, collector)
+            }
             24 => T::ComptimeFunction(Box::new(self.term(d)?)),
             25 => T::UnsafeFunction(Box::new(self.term(d)?)),
             26 => {

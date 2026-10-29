@@ -750,6 +750,9 @@ impl Normalizer<'_, '_, '_> {
             }
             Term::Optional(inner) => Term::Optional(Box::new(self.normalize(inner, depth + 1)?)),
             Term::Pointer(inner) => Term::Pointer(Box::new(self.normalize(inner, depth + 1)?)),
+            Term::NormalFormFunction(inner, collector) => {
+                Term::NormalFormFunction(Box::new(self.normalize(inner, depth + 1)?), *collector)
+            }
             Term::ComptimeFunction(inner) => {
                 Term::ComptimeFunction(Box::new(self.normalize(inner, depth + 1)?))
             }
@@ -918,6 +921,7 @@ pub fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<(), Strin
             Term::Optional(inner)
             | Term::Pointer(inner)
             | Term::ComptimeFunction(inner)
+            | Term::NormalFormFunction(inner, _)
             | Term::UnsafeFunction(inner) => {
                 pending.push(inner);
                 0

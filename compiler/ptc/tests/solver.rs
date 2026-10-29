@@ -33,6 +33,32 @@ fn proved(context: &Context, goal: F) {
     }
 }
 
+#[test]
+fn normal_form_callable_heads_preserve_mode_and_collector_identity() {
+    let signature = |result| Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::ComptimeValue,
+            ty: ty(P::Bool),
+        }],
+        result: Box::new(result),
+    };
+    let fixed = Term::NormalFormFunction(Box::new(signature(ty(P::Bool))), None);
+    let collected = Term::NormalFormFunction(Box::new(signature(ty(P::Bool))), Some(0));
+    let ordinary = signature(ty(P::Bool)).with_comptime_phase(true);
+    let context = Context::default();
+    proved(&context, eq(fixed.clone(), collected).negate());
+    proved(&context, eq(fixed.clone(), ordinary).negate());
+    let mut context = Context::default();
+    context.assume(eq(variable(41), ty(P::Bool)));
+    proved(
+        &context,
+        eq(
+            fixed,
+            Term::NormalFormFunction(Box::new(signature(variable(41))), None),
+        ),
+    );
+}
+
 fn associated(subject: Term, arguments: Vec<Term>, member: u32) -> Term {
     Term::AssociatedType {
         origin: Box::new(nir::AssociatedTypeOrigin {

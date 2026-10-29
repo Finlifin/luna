@@ -4433,6 +4433,7 @@ impl Term {
                 Term::Optional(t)
                 | Term::Pointer(t)
                 | Term::ComptimeFunction(t)
+                | Term::NormalFormFunction(t, _)
                 | Term::UnsafeFunction(t) => terms.push(t),
                 Term::Function { parameters, result } => {
                     terms.extend(parameters.iter().map(|p| &p.ty));

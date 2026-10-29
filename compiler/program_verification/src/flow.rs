@@ -409,7 +409,8 @@ fn mutable_capture_paths(
             Term::Primitive(_)
             | Term::Function { .. }
             | Term::UnsafeFunction(_)
-            | Term::ComptimeFunction(_) => Ok(false),
+            | Term::ComptimeFunction(_)
+            | Term::NormalFormFunction(..) => Ok(false),
             Term::Record(fields) => {
                 for (_, ty) in fields {
                     if may_alias(ty, limits, depth + 1)? {
