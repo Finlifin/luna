@@ -3047,15 +3047,23 @@ impl<'a> Interpreter<'a> {
         {
             if self.comptime_only
                 && parameter.sort == nir::Sort::Runtime
-                && let Value::ComptimeReference(reference) = &argument
+                && !matches!(argument, Value::Storage(_))
             {
-                // Ordinary receiver domains do not materialize dependent input
-                // terms. Validate under a short borrow, then retain the handle
-                // for the body; no invocation result is reused.
-                let contents = reference
-                    .borrow(&mut self.budget.steps)
-                    .map_err(|kind| self.failure(kind, Some(source)))?;
-                let representation = contents.value();
+                // Ordinary inputs do not materialize dependent terms. Inspect
+                // owned values directly or hold a short receiver borrow, then
+                // retain the original argument for the body. Owned storage
+                // still uses its checked read below; no result is cached here.
+                let contents = match &argument {
+                    Value::ComptimeReference(reference) => Some(
+                        reference
+                            .borrow(&mut self.budget.steps)
+                            .map_err(|kind| self.failure(kind, Some(source)))?,
+                    ),
+                    _ => None,
+                };
+                let representation = contents
+                    .as_ref()
+                    .map_or(&argument, |contents| contents.value());
                 self.check_borrowed_representation(representation, source, 0)?;
                 let expected = match &type_scope {
                     Some(scope) => scope.rebind(&parameter.ty),

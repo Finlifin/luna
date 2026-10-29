@@ -633,3 +633,62 @@ python3 -B development/check.py --timeout 900 -- test --release -p luna --test c
 
 Report: `/tmp/luna-tools-sq896ebw/result.json` (exit 0). Workspace format check
 and `git diff --check` passed; no full workspace test run was performed.
+
+## Ordinary value input admission (2026-10-29)
+
+The borrowed representation walker now also checks ordinary by-value arguments
+in place before binding the original argument into the invocation environment.
+Previously this path constructed and immediately discarded a full checkpoint.
+The value is already owned by the invocation; it does not need another snapshot
+solely for representation and domain checks. Dependent comptime inputs still
+materialize their terms, and owned Storage still uses its checked read path.
+No invocation result or admission result is cached.
+
+A domain regression supplies a Type input followed by an ordinary bool/char
+input, through both value and reference transport. Correct domains bind;
+incorrect domains fail without binding the rejected value. The checkpoint
+failure/fuel differential tests and malformed list/object admission tests remain
+active. All 197 VM unit tests passed:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+```
+
+Report: `/tmp/luna-tools-ansixmss/result.json`, exit 0.
+
+The aggregate benchmark now measures both ordinary value and reference calls,
+with the same 16 calls per invocation, five warmups and 100 measured invocations
+per process. Baseline is `fdc1bf4f` plus the extended benchmark. Before and after
+use three processes each:
+
+```sh
+python3 -B development/comptime_bench.py --bench borrowed_aggregate --repeat 3 --iterations 100
+```
+
+| Transport / width | Before median ms | After median ms | Before allocations | After allocations | Steps, unchanged |
+|---|---:|---:|---:|---:|---:|
+| Value / 1 | 0.01347 | 0.01255 | 235.04 | 201.04 | 549 |
+| Value / 64 | 0.40948 | 0.34678 | 4656.04 | 3483.04 | 26694 |
+| Value / 1024 | 7.93760 | 5.74580 | 69176.04 | 51615.04 | 425094 |
+| Reference / 1024 | 2.85387 | 2.79485 | 19738.04 | 18705.04 | 261286 |
+
+Reference calls also benefit from eliminating the outer caller's by-value input
+checkpoint. Input production, argument transfer and type rebinding still allocate;
+full validation remains per call. These samples show about 28% less elapsed time
+and 25% fewer allocations for the largest by-value workload, not an end-to-end
+compiler performance claim.
+
+Before reports: `/tmp/luna-tools-0hb4lbon/result.json`,
+`/tmp/luna-tools-1c7csmcq/result.json`, `/tmp/luna-tools-ufzob628/result.json`.
+After reports: `/tmp/luna-tools-wloeys6o/result.json`,
+`/tmp/luna-tools-x1a9sbn8/result.json`, `/tmp/luna-tools-2oq58xql/result.json`.
+All six exited 0. Work directory: `/home/fin/luna`.
+
+Source integration passed with the current library and builder implementations:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_receivers --test comptime_list_operations --test comptime_clause_inputs --test builder_invocations
+```
+
+Report: `/tmp/luna-tools-958d_d5e/result.json` (exit 0). Formatting check report:
+`/tmp/luna-tools-iic5b8mz/result.json` (exit 0); `git diff --check` passed.

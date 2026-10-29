@@ -2498,6 +2498,66 @@ mod borrowed_checkpoint_tests {
     }
 
     #[test]
+    fn ordinary_value_admission_rebinds_the_domain_after_type_inputs() {
+        let package = Package::default();
+        let source = SourceRange { start: 3, end: 5 };
+        let parameters = [
+            LocalId { owner: 1, index: 0 },
+            LocalId { owner: 1, index: 1 },
+        ];
+        let signature = Term::Function {
+            parameters: vec![
+                nir::Parameter {
+                    sort: nir::Sort::Type,
+                    ty: Term::Primitive(Primitive::Type),
+                },
+                nir::Parameter {
+                    sort: nir::Sort::Runtime,
+                    ty: Term::Bound {
+                        depth: 0,
+                        index: 0,
+                        sort: nir::Sort::Type,
+                    },
+                },
+            ],
+            result: Box::new(Term::Primitive(Primitive::Void)),
+        };
+        for domain in [Primitive::Bool, Primitive::Char] {
+            for value in [Value::Bool(true), Value::Char('x')] {
+                let valid = matches!(
+                    (domain, &value),
+                    (Primitive::Bool, Value::Bool(_)) | (Primitive::Char, Value::Char(_))
+                );
+                for referenced in [false, true] {
+                    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                    let argument = if referenced {
+                        Value::ComptimeReference(value_reference::ValueReference::root(
+                            Storage::new(value.clone()),
+                        ))
+                    } else {
+                        value.clone()
+                    };
+                    let mut environment = Environment::new();
+                    let result = vm.bind_invocation_inputs(
+                        &parameters,
+                        vec![Value::Type(Term::Primitive(domain)), argument],
+                        &signature,
+                        &mut environment,
+                        source,
+                    );
+                    if valid {
+                        assert!(result.unwrap().is_some());
+                        assert!(environment.contains_key(&parameters[1]));
+                    } else {
+                        assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                        assert!(!environment.contains_key(&parameters[1]));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn borrowed_object_admission_rejects_forged_payloads_without_mutation() {
         let package = Package::default();
         let source = SourceRange { start: 2, end: 4 };
