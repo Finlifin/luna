@@ -167,11 +167,15 @@ fn repeated_leaf_reads_do_not_recopy_unrelated_types() {
                     arguments.push(Value::Integer(comptime_runtime::Integer::from_u128(4095)));
                 }
                 let before = vm.remaining_steps();
+                let compilation_before = vm.bytecode_compilation_steps();
                 assert_eq!(
                     vm.invoke(id(3), arguments).unwrap(),
                     Value::Type(ty(P::Bool))
                 );
-                before - vm.remaining_steps()
+                let compilation = vm.bytecode_compilation_steps() - compilation_before;
+                assert!(compilation > 0);
+                assert_eq!(vm.bytecode_invocations(), 1);
+                before - vm.remaining_steps() - compilation
             };
             let single = run(1);
             let repeated = run(64);

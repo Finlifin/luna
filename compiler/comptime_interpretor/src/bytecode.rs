@@ -191,9 +191,25 @@ impl<'a> Interpreter<'a> {
         self.bytecode_compilations
     }
 
+    /// Actual compilation work charged to invocation budgets, including failures.
+    pub fn bytecode_compilation_steps(&self) -> u64 {
+        self.bytecode_compilation_steps
+    }
+
     fn compile_body(&mut self, body: &Expr) -> Result<Option<Program>, Error> {
         self.bytecode_compilations += 1;
-        match comptime_compiler::compile(body, &mut 100_000) {
+        // Compilation is actual invocation work, including unsuccessful probes.
+        // Use the caller's remaining budget rather than an unrelated fixed cap;
+        // cache hits bypass this function and do not pay this work again.
+        let before = self.budget.steps;
+        let available = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut remaining = available;
+        let result = comptime_compiler::compile(body, &mut remaining);
+        self.budget.steps -= (available - remaining) as u64;
+        self.bytecode_compilation_steps = self
+            .bytecode_compilation_steps
+            .saturating_add(before - self.budget.steps);
+        match result {
             Ok(program) => Ok(Some(program)),
             Err(comptime_compiler::Error::Unsupported(_)) => Ok(None),
             Err(comptime_compiler::Error::Budget(source)) => {
@@ -2507,3 +2523,7 @@ mod object_borrow_tests;
 #[cfg(test)]
 #[path = "bytecode_lists.rs"]
 mod list_tests;
+
+#[cfg(test)]
+#[path = "bytecode_compilation.rs"]
+mod compilation_tests;

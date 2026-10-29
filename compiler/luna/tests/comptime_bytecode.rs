@@ -100,21 +100,19 @@ fn bytecode_budget_exhaustion_and_fresh_invocation_are_reported() {
         "comptime fn forever() -> bool { while true {} false }
         comptime fn ready() -> bool { true }",
     );
-    let mut vm = Interpreter::for_comptime(
-        &package,
-        Budget {
-            steps: 80,
-            depth: 128,
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        vm.invoke(support::id(&package, "forever"), vec![])
-            .unwrap_err()
-            .kind,
-        ErrorKind::StepsExhausted
-    );
-    assert_eq!(vm.bytecode_invocations(), 1);
+    // Keep the small-budget rejection and also exercise exhaustion after code
+    // has started. Cold compilation now consumes the same invocation budget.
+    for (steps, executed) in [(80, 0), (Budget::default().steps, 1)] {
+        let mut vm = Interpreter::for_comptime(&package, Budget { steps, depth: 128 }).unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, "forever"), vec![])
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+        assert_eq!(vm.bytecode_invocations(), executed);
+        assert!(vm.bytecode_compilation_steps() > 0);
+    }
     let mut recovered = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         recovered
@@ -201,9 +199,9 @@ fn calls_suspend_frames_and_preserve_argument_order() {
         vm.invoke(support::id(&package, "bridge"), vec![]).unwrap(),
         Value::Bool(true)
     );
-    // Match still uses the migration evaluator; the caller and its grandchild
-    // are compiled. Returning across both boundaries must not replay either.
-    assert_eq!(vm.bytecode_invocations() - before, 2);
+    // Structural bool matching is compiled too: bridge, pattern and digits
+    // each execute once without replaying their callers.
+    assert_eq!(vm.bytecode_invocations() - before, 3);
 }
 
 #[test]

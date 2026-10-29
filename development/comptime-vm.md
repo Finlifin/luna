@@ -40,10 +40,15 @@ they do not introduce pointers or require runtime Copy. Phase admission,
 parameter binding, requirements, preconditions and postconditions remain at the
 ordinary invocation boundary. Runtime IIR cleanup is not silently bypassed.
 
-Compilation currently has a separate 100,000-work-item limit. Traversal, worklist
-scheduling, instruction fixups and register allocation are bounded. Execution
-charges frame storage, each opcode and existing scalar/value operations against
-the invocation budget. Cost counts can differ between the two carriers, as
+Compilation uses the caller's remaining invocation budget. Traversal, worklist
+scheduling, metadata copying, instruction fixups and register allocation consume
+that budget, including work before unsupported or failed compilation. Stable-code
+cache hits do not repeat compilation charges; cache storage remains independently
+bounded at 100,000 weight units. Execution charges frame storage, each opcode and
+existing scalar/value operations against the same invocation budget.
+`bytecode_compilation_steps()` reports cumulative compilation charges separately
+from total work so observation-cost measurements do not hide code generation.
+Cost counts can differ between the two carriers, as
 allowed by docs/comptime/normalization-and-instantiation.md. There is no speedup
 claim: temporary specialized bodies and closure bodies still compile per call;
 package-body reuse does not establish a persistent cross-query code identity.
@@ -2095,3 +2100,54 @@ Validation from `/home/fin/luna`:
 Remaining priorities include repeated-metadata compilation costs, normal-form
 plan bytecode, and eliminating redundant admission walks through sound reusable
 validation evidence rather than bypassing checks.
+
+## Charge bytecode compilation to the invocation budget
+
+The large-element ListLength failure above exposed an unrelated fixed compiler
+ceiling: a caller with ten million remaining steps still received StepsExhausted
+at 100,000 compilation units. Meanwhile every successful or unsupported
+compilation probe was free to the caller. Compilation now uses the remaining
+invocation budget and deducts the compiler's consumed work on all outcomes.
+Resource failure does not select another carrier or publish code. Stable-code
+cache hits avoid repeated compilation; the independent cache storage bound is
+unchanged. `bytecode_compilation_steps()` exposes cumulative charged work for
+profiling (saturating at u64::MAX).
+
+The original 4096-wide, 64-read length test retains its budget and bounds and now
+also requires actual bytecode execution. Three observation-cost tests retain
+their original read-cost thresholds but subtract the separately measured compile
+work; compilation itself has budget-sweep, failure/recovery and cache-hit tests.
+These functions have comptime inputs and currently specialize/recompile per call,
+so warming them does not establish a reusable compiled body. An initial warmed
+measurement assumption was rejected by the compilation counters and removed.
+The next optimization must address redundant specialization and metadata copies,
+not pretend those costs disappeared.
+
+The source infinite-loop test retains the 80-step rejection (now before execution)
+and additionally verifies execution exhaustion with the default budget. A separate
+stale source assertion expected bool matching to use the tree carrier; structural
+matching was already compiled, so it now requires bridge, pattern and digits to
+execute exactly once each.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --tests`:
+  all 22 groups passed (455 tests including 250 library tests), exit 0,
+  `/tmp/luna-tools-9xqg0x4b/result.json`. Includes the formerly failing large-element
+  test, index/length costs, instance budgets, representation admission and recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_bytecode_lists --test comptime_list_operations --test execution`:
+  6, 3, 54 and 1365 passed, exit 0, `/tmp/luna-tools-h3qxjibz/result.json`.
+- Initial targeted budget runs exposed compile cost in the observation metrics;
+  `/tmp/luna-tools-gve8hysx/result.json` and `/tmp/luna-tools-k45oomt9/result.json`
+  exited 101. A missing telemetry-field initialization in the IIR constructor
+  was fixed after `/tmp/luna-tools-e7usqlwq/result.json`. The AddressOf carrier
+  expectation was corrected after `/tmp/luna-tools-7isbjnoo/result.json`.
+- The first source run exposed the two test boundaries described above, exit 101,
+  `/tmp/luna-tools-mm5r1l_d/result.json`; the successful source rerun is listed above.
+- Managed `cargo fmt --all -- --check`: `/tmp/luna-tools-_w8knakq/result.json`;
+  `git diff --check` passed. No test budget or observation threshold was increased.
+
+This fixes caller-controlled resource accounting; it does not reduce metadata
+copy work. Cold calls can now exhaust their supplied budget earlier because
+compilation is no longer uncharged. Specialization/normal-form bytecode work
+remains outstanding; this is not a completed VM claim.

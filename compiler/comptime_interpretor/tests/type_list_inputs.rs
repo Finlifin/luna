@@ -590,6 +590,7 @@ fn check_list_read_cost(local_index: bool) {
             };
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
             let before = vm.remaining_steps();
+            let compilation_before = vm.bytecode_compilation_steps();
             let mut arguments = vec![argument];
             if local_index {
                 arguments.push(Value::Integer(comptime_runtime::Integer::from_u128(511)));
@@ -603,7 +604,11 @@ fn check_list_read_cost(local_index: bool) {
                     Value::Bool(true)
                 }
             );
-            before - vm.remaining_steps()
+            // This assertion measures reads, separately from code generation.
+            let compilation = vm.bytecode_compilation_steps() - compilation_before;
+            assert!(compilation > 0);
+            assert_eq!(vm.bytecode_invocations(), 1);
+            before - vm.remaining_steps() - compilation
         };
         let single = run(1);
         let repeated = run(64);
@@ -920,11 +925,17 @@ fn repeated_list_lengths_charge_the_observation_not_every_element() {
                 )
                 .unwrap();
                 let before = vm.remaining_steps();
+                let compilation_before = vm.bytecode_compilation_steps();
                 assert_eq!(
                     vm.invoke(id(3), vec![argument]).unwrap(),
                     Value::Integer(comptime_runtime::Integer::from_u128(length as u128))
                 );
-                before - vm.remaining_steps()
+                // This assertion measures reads, separately from code generation.
+                let compilation = vm.bytecode_compilation_steps() - compilation_before;
+                assert!(compilation > 0);
+                // AddressOf still selects the tree carrier; its probe is charged too.
+                assert_eq!(vm.bytecode_invocations(), usize::from(!storage));
+                before - vm.remaining_steps() - compilation
             };
             let small = run(1, 64, false) - run(1, 1, false);
             let large = run(4096, 64, false) - run(4096, 1, false);
@@ -1107,6 +1118,11 @@ fn local_list_length_still_charges_large_element_type_descriptions() {
             )
             .unwrap(),
             Value::Integer(comptime_runtime::Integer::from_u128(0))
+        );
+        assert_eq!(
+            vm.bytecode_invocations(),
+            1,
+            "large metadata must compile, not fall back"
         );
         before - vm.remaining_steps()
     };

@@ -766,6 +766,7 @@ pub struct Interpreter<'a> {
     bytecode_invocations: usize,
     bytecode_default_evaluations: usize,
     bytecode_compilations: usize,
+    bytecode_compilation_steps: u64,
     bytecode_cache: bytecode::CodeCache,
     enum_builder:
         Option<&'a dyn Fn(&EnumBuildRequest, &mut u64) -> Result<PreparedEnumBuild<'a>, Error>>,
@@ -1626,6 +1627,7 @@ impl<'a> Interpreter<'a> {
             bytecode_invocations: 0,
             bytecode_default_evaluations: 0,
             bytecode_compilations: 0,
+            bytecode_compilation_steps: 0,
             bytecode_cache: Default::default(),
             declaration_world: Some(package),
             effect_declarations,
