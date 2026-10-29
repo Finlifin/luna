@@ -37,7 +37,7 @@ fn primitive(ty: Primitive) -> Term {
     Term::Primitive(ty)
 }
 
-fn package(reads: usize, mode: &str, query: ObjectQueryKind) -> Package {
+fn package(reads: usize, mode: &str, query: ObjectQueryKind, reference: bool) -> Package {
     let source = SourceRange { start: 1, end: 2 };
     let binding = LocalId { owner: 1, index: 0 };
     let object_type = primitive(Primitive::Object);
@@ -85,7 +85,7 @@ fn package(reads: usize, mode: &str, query: ObjectQueryKind) -> Package {
             }),
         },
     };
-    Package {
+    let mut package = Package {
         functions: vec![Function {
             declaration: id(1),
             name: "observe".into(),
@@ -119,7 +119,40 @@ fn package(reads: usize, mode: &str, query: ObjectQueryKind) -> Package {
             },
         }],
         ..Default::default()
+    };
+    if reference {
+        use nir::program::{ArgumentPassing, CallArgument};
+        let callee = &package.functions[0];
+        let mut caller = callee.clone();
+        let binding = LocalId { owner: 2, index: 0 };
+        caller.declaration = id(2);
+        caller.name = "run".into();
+        caller.parameters = vec![binding];
+        caller.body = Expr {
+            source,
+            ty: callee.body.ty.clone(),
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: callee.callable_type(),
+                    kind: K::Function(id(1)),
+                }),
+                arguments: vec![CallArgument {
+                    parameter: 0,
+                    is_default: false,
+                    passing: ArgumentPassing::ComptimeReference,
+                    value: Expr {
+                        source,
+                        ty: primitive(Primitive::Object),
+                        kind: K::Local(binding),
+                    },
+                }],
+                parameter_bindings: callee.parameters.clone(),
+            },
+        };
+        package.functions.push(caller);
     }
+    package
 }
 
 fn main() {
@@ -129,61 +162,64 @@ fn main() {
         .map(|value| value.parse().unwrap())
         .unwrap_or(100);
     assert!(iterations > 0);
-    for width in [1, 64, 1024] {
-        for query in [ObjectQueryKind::Length, ObjectQueryKind::Value] {
-            for mode in ["borrowed", "general"] {
-                let reads = 32;
-                let package = package(reads, mode, query);
-                let mut vm = Interpreter::for_comptime(
-                    &package,
-                    Budget {
-                        steps: u64::MAX,
-                        depth: 128,
-                    },
-                )
-                .unwrap();
-                let payload = Value::Object(Object::from_entries(
-                    (0..width)
-                        .map(|index| Entry::Property {
-                            key: format!("field_{index}").into(),
-                            value: ObjectValue {
-                                ty: primitive(Primitive::Bool),
-                                value: Value::Bool(true),
-                            },
-                        })
-                        .collect(),
-                ));
-                let expected = if query == ObjectQueryKind::Length {
-                    Value::Integer(comptime_runtime::Integer::from_u128(width as u128))
-                } else {
-                    Value::Optional {
-                        ty: Term::Optional(Box::new(primitive(Primitive::Bool))),
-                        value: Some(Box::new(Value::Bool(true))),
+    for reference in [false, true] {
+        let entry = id(if reference { 2 } else { 1 });
+        for width in [1, 64, 1024] {
+            for query in [ObjectQueryKind::Length, ObjectQueryKind::Value] {
+                for mode in ["borrowed", "general"] {
+                    let reads = 32;
+                    let package = package(reads, mode, query, reference);
+                    let mut vm = Interpreter::for_comptime(
+                        &package,
+                        Budget {
+                            steps: u64::MAX,
+                            depth: 128,
+                        },
+                    )
+                    .unwrap();
+                    let payload = Value::Object(Object::from_entries(
+                        (0..width)
+                            .map(|index| Entry::Property {
+                                key: format!("field_{index}").into(),
+                                value: ObjectValue {
+                                    ty: primitive(Primitive::Bool),
+                                    value: Value::Bool(true),
+                                },
+                            })
+                            .collect(),
+                    ));
+                    let expected = if query == ObjectQueryKind::Length {
+                        Value::Integer(comptime_runtime::Integer::from_u128(width as u128))
+                    } else {
+                        Value::Optional {
+                            ty: Term::Optional(Box::new(primitive(Primitive::Bool))),
+                            value: Some(Box::new(Value::Bool(true))),
+                        }
+                    };
+                    for _ in 0..5 {
+                        assert_eq!(vm.invoke(entry, vec![payload.clone()]).unwrap(), expected);
                     }
-                };
-                for _ in 0..5 {
-                    assert_eq!(vm.invoke(id(1), vec![payload.clone()]).unwrap(), expected);
-                }
-                let steps = vm.remaining_steps();
-                let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-                let bytes = BYTES.load(Ordering::Relaxed);
-                let start = Instant::now();
-                for _ in 0..iterations {
-                    assert_eq!(
-                        std::hint::black_box(vm.invoke(id(1), vec![payload.clone()]).unwrap()),
-                        expected
+                    let steps = vm.remaining_steps();
+                    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+                    let bytes = BYTES.load(Ordering::Relaxed);
+                    let start = Instant::now();
+                    for _ in 0..iterations {
+                        assert_eq!(
+                            std::hint::black_box(vm.invoke(entry, vec![payload.clone()]).unwrap()),
+                            expected
+                        );
+                    }
+                    let elapsed = start.elapsed();
+                    let allocations = ALLOCATIONS.load(Ordering::Relaxed) - allocations;
+                    let bytes = BYTES.load(Ordering::Relaxed) - bytes;
+                    println!(
+                        "reference={reference} query={query:?} mode={mode} width={width} reads={reads} ns/invoke={} allocations/invoke={:.2} allocated-bytes/invoke={:.2} steps/invoke={}",
+                        elapsed.as_nanos() / iterations as u128,
+                        allocations as f64 / iterations as f64,
+                        bytes as f64 / iterations as f64,
+                        (steps - vm.remaining_steps()) / iterations
                     );
                 }
-                let elapsed = start.elapsed();
-                let allocations = ALLOCATIONS.load(Ordering::Relaxed) - allocations;
-                let bytes = BYTES.load(Ordering::Relaxed) - bytes;
-                println!(
-                    "query={query:?} mode={mode} width={width} reads={reads} ns/invoke={} allocations/invoke={:.2} allocated-bytes/invoke={:.2} steps/invoke={}",
-                    elapsed.as_nanos() / iterations as u128,
-                    allocations as f64 / iterations as f64,
-                    bytes as f64 / iterations as f64,
-                    (steps - vm.remaining_steps()) / iterations
-                );
             }
         }
     }

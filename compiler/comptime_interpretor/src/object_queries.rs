@@ -41,9 +41,9 @@ impl Interpreter<'_> {
         self.eval_object_query_packet(expr, subject, environment)
     }
 
-    // Leaf selectors cannot mutate an owned Object while it is observed. For
-    // references, only length is eligible: no selector or payload read runs
-    // under the storage lock. Other cases retain ordinary snapshot evaluation.
+    // Leaf selectors cannot mutate an Object while it is observed. Under a
+    // receiver lock, local selectors must be owned scalars so reading one
+    // cannot borrow the same storage again. Other cases retain snapshots.
     fn eval_borrowed_object_query(
         &mut self,
         expr: &Expr,
@@ -68,13 +68,25 @@ impl Interpreter<'_> {
             return None;
         };
         let local = environment.get(&binding)?;
-        if !matches!(local, Value::Object(_))
-            && !(length && matches!(local, Value::Storage(_) | Value::ComptimeReference(_)))
-        {
+        let referenced = matches!(local, Value::Storage(_) | Value::ComptimeReference(_));
+        if !matches!(local, Value::Object(_)) && !referenced {
             return None;
         }
         if !length && !matches!(fields[1].kind, K::Local(_) | K::Literal(_)) {
             return None;
+        }
+        if referenced && !length {
+            let independent = match fields[1].kind {
+                K::Literal(_) => true,
+                K::Local(selector) => matches!(
+                    environment.get(&selector),
+                    Some(Value::Integer(_) | Value::Symbol(_))
+                ),
+                _ => false,
+            };
+            if !independent {
+                return None;
+            }
         }
         let depth = self.depth;
         let result = (|| {
@@ -360,39 +372,50 @@ mod tests {
     #[test]
     fn borrowed_queries_preserve_fuel_depth_errors_and_recovery() {
         let package = Package::default();
-        for query in [Q::Length, Q::Key, Q::EntryType, Q::Value, Q::NamedValue] {
-            let expr = observation(query);
-            let K::ObjectQuery { subject, .. } = &expr.kind else {
-                unreachable!()
-            };
-            for depth in [1, 2, 3, 4, 8, 128] {
-                for steps in 0..180 {
-                    let mut fast = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-                    let mut slow = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-                    fast.budget = Budget { steps, depth };
-                    slow.budget = fast.budget;
-                    let mut env = Environment::new();
-                    env.insert(LocalId { owner: 1, index: 0 }, object());
-                    let result = fast
-                        .eval_borrowed_object_query(&expr, subject, &env)
-                        .unwrap();
-                    let expected = slow.eval_object_query_packet(&expr, subject, &mut env);
-                    assert_eq!(
-                        value(result),
-                        value(expected),
-                        "{query:?} depth={depth} steps={steps}"
-                    );
-                    assert_eq!(fast.budget.steps, slow.budget.steps);
-                    assert_eq!(fast.depth, 0);
-                    fast.budget = Budget {
-                        steps: 1000,
-                        depth: 128,
-                    };
-                    slow.budget = fast.budget;
-                    assert_eq!(
-                        value(fast.eval_object_query(&expr, &mut env)),
-                        value(slow.eval_object_query_packet(&expr, subject, &mut env))
-                    );
+        for mode in 0..3 {
+            for query in [Q::Length, Q::Key, Q::EntryType, Q::Value, Q::NamedValue] {
+                let expr = observation(query);
+                let K::ObjectQuery { subject, .. } = &expr.kind else {
+                    unreachable!()
+                };
+                for depth in [1, 2, 3, 4, 8, 128] {
+                    for steps in 0..180 {
+                        let mut fast =
+                            Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                        let mut slow =
+                            Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                        fast.budget = Budget { steps, depth };
+                        slow.budget = fast.budget;
+                        let mut env = Environment::new();
+                        let receiver = match mode {
+                            0 => object(),
+                            1 => Value::Storage(Storage::new(object())),
+                            _ => Value::ComptimeReference(value_reference::ValueReference::root(
+                                Storage::new(object()),
+                            )),
+                        };
+                        env.insert(LocalId { owner: 1, index: 0 }, receiver);
+                        let result = fast
+                            .eval_borrowed_object_query(&expr, subject, &env)
+                            .unwrap();
+                        let expected = slow.eval_object_query_packet(&expr, subject, &mut env);
+                        assert_eq!(
+                            value(result),
+                            value(expected),
+                            "{query:?} depth={depth} steps={steps}"
+                        );
+                        assert_eq!(fast.budget.steps, slow.budget.steps);
+                        assert_eq!(fast.depth, 0);
+                        fast.budget = Budget {
+                            steps: 1000,
+                            depth: 128,
+                        };
+                        slow.budget = fast.budget;
+                        assert_eq!(
+                            value(fast.eval_object_query(&expr, &mut env)),
+                            value(slow.eval_object_query_packet(&expr, subject, &mut env))
+                        );
+                    }
                 }
             }
         }
@@ -486,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn computed_selectors_and_reference_payload_queries_retain_snapshot_evaluation() {
+    fn computed_selectors_retain_snapshots_and_reference_payloads_can_borrow() {
         let package = Package::default();
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let mut env = Environment::new();
@@ -522,13 +545,68 @@ mod tests {
             LocalId { owner: 1, index: 0 },
             Value::Storage(Storage::new(object())),
         );
+        assert_eq!(
+            value(
+                vm.eval_borrowed_object_query(&expr, subject, &env)
+                    .expect("borrowed receiver")
+            )
+            .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn sibling_reference_selector_is_read_outside_the_object_lock() {
+        let package = Package::default();
+        let storage = Storage::new(Value::AnonymousRecord(vec![
+            ("object".into(), object()),
+            (
+                "index".into(),
+                Value::Integer(comptime_runtime::Integer::from_u128(0)),
+            ),
+        ]));
+        let mut env = Environment::new();
+        for index in 0..2 {
+            let reference = value_reference::ValueReference::projected(
+                storage.clone(),
+                &[(nir::program::FieldOwner::Anonymous, index)],
+                &mut 1000,
+            )
+            .unwrap();
+            env.insert(
+                LocalId {
+                    owner: 1,
+                    index: index as u32,
+                },
+                Value::ComptimeReference(reference),
+            );
+        }
+        let mut expr = observation(Q::Value);
+        let K::ObjectQuery { subject, .. } = &mut expr.kind else {
+            unreachable!()
+        };
+        let K::Tuple(fields) = &mut subject.kind else {
+            unreachable!()
+        };
+        fields[1].kind = K::Local(LocalId { owner: 1, index: 1 });
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert!(
-            vm.eval_borrowed_object_query(&expr, subject, &env)
-                .is_none()
+            vm.eval_borrowed_object_query(
+                &expr,
+                match &expr.kind {
+                    K::ObjectQuery { subject, .. } => subject,
+                    _ => unreachable!(),
+                },
+                &env
+            )
+            .is_none()
         );
         assert_eq!(
             value(vm.eval_object_query(&expr, &mut env)).unwrap(),
-            expected
+            Value::Optional {
+                ty: expr.ty.clone(),
+                value: Some(Box::new(Value::Bool(true))),
+            }
         );
     }
 

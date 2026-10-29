@@ -10,19 +10,19 @@ impl Object {
         has no key. Typed reads return null only for a domain mismatch.
     -}
     pub pure comptime fn length(self) -> Integer {
-        bindings.object_length(self)
+        bindings.compiler_object_length(self)
     }
 
     pub pure comptime fn key(self, index: Integer) -> ?Symbol {
-        bindings.object_key(self, index)
+        bindings.compiler_object_key(self, index)
     }
 
     pub pure comptime fn EntryType(self, index: Integer) -> Type {
-        bindings.ObjectEntryType(self, index)
+        bindings.CompilerObjectEntryType(self, index)
     }
 
     pub pure comptime fn value(self, index: Integer) -> ?T where T {
-        bindings.object_value<T>(self, index)
+        bindings.compiler_object_value(T, self, index)
     }
 
     {-
@@ -30,7 +30,7 @@ impl Object {
         returns null; a mismatched last entry never reveals an earlier duplicate.
     -}
     pub pure comptime fn get(self, key: Symbol) -> ?T where T {
-        bindings.object_get<T>(self, key)
+        bindings.compiler_object_get(T, self, key)
     }
 
     {-

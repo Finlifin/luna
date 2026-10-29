@@ -51,3 +51,7 @@ comptime fn nominal_storage() -> bool {
         and (object.get<Item>(.item) match {v? => not v.flag, null => false})
         and old_items.length() == 1 and items.length() == 2
 }
+{- Checked comptime observations can feed a native program through staging. -}
+test object_observation {
+    inline if run() { assumes true; } else { assumes false; };
+}
