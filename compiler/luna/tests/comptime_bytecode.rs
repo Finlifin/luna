@@ -38,6 +38,7 @@ fn arithmetic_loop_executes_bytecode_with_ordered_operand_effects() {
         assert_eq!(vm.bytecode_invocations(), before + 1);
         assert_eq!(tree.invoke(id, args).unwrap(), expected);
     }
+    assert_eq!(vm.bytecode_compilations(), 2);
 }
 
 #[test]
@@ -142,4 +143,13 @@ fn compiled_receiver_updates_storage_without_runtime_copy_evidence() {
     // The caller's aggregate construction still uses the migration path; the
     // receiver body itself must execute the bytecode read and storage write.
     assert_eq!(vm.bytecode_invocations(), 1);
+    assert_eq!(vm.bytecode_compilations(), 2);
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(vm.bytecode_invocations(), 2);
+    // Both the unsupported caller and compiled callee reuse lowering decisions;
+    // the impure receiver mutation must still execute on the second call.
+    assert_eq!(vm.bytecode_compilations(), 2);
 }

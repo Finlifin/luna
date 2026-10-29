@@ -112,6 +112,8 @@ impl<'a> Interpreter<'a> {
         })?;
         Ok(Self {
             bytecode_invocations: 0,
+            bytecode_compilations: 0,
+            bytecode_cache: Default::default(),
             declaration_world: None,
             // IIR retains occurrence environments, not the source effect world.
             effect_declarations: BTreeMap::new(),

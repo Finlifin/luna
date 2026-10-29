@@ -9,14 +9,60 @@ struct Frame {
     scopes: Vec<Vec<usize>>,
 }
 
-impl Interpreter<'_> {
+/// Only immutable package bodies are admitted. Neither invocation results nor
+/// captured environments are stored here. A missing program records unsupported
+/// lowering, so repeated calls do not repeatedly traverse a migration body.
+#[derive(Default)]
+pub(super) struct CodeCache<'a> {
+    entries: BTreeMap<DeclarationId, Option<Arc<Program<'a>>>>,
+    weight: usize,
+}
+
+impl<'a> CodeCache<'a> {
+    fn insert(&mut self, id: DeclarationId, program: Option<Arc<Program<'a>>>) {
+        const LIMIT: usize = 100_000;
+        let weight = program.as_ref().map_or(1, |code| {
+            1 + code.instructions().len() + code.locals().len() + code.registers()
+        });
+        if weight > LIMIT {
+            return;
+        }
+        if self.weight + weight > LIMIT {
+            self.entries.clear();
+            self.weight = 0;
+        }
+        self.weight += weight;
+        self.entries.insert(id, program);
+    }
+}
+
+impl<'a> Interpreter<'a> {
     pub fn bytecode_invocations(&self) -> usize {
         self.bytecode_invocations
+    }
+
+    pub fn bytecode_compilations(&self) -> usize {
+        self.bytecode_compilations
+    }
+
+    fn compile_body<'b>(&mut self, body: &'b Expr) -> Result<Option<Program<'b>>, Error> {
+        self.bytecode_compilations += 1;
+        match comptime_compiler::compile(body, &mut 100_000) {
+            Ok(program) => Ok(Some(program)),
+            Err(comptime_compiler::Error::Unsupported(_)) => Ok(None),
+            Err(comptime_compiler::Error::Budget(source)) => {
+                Err(self.failure(ErrorKind::StepsExhausted, Some(source)))
+            }
+            Err(comptime_compiler::Error::InvalidControl(source)) => {
+                Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)))
+            }
+        }
     }
 
     pub(super) fn invocation_body(
         &mut self,
         body: &Expr,
+        stable_code: Option<DeclarationId>,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
         if !self.comptime_only || self.cleanup_schedule.is_some() {
@@ -24,16 +70,27 @@ impl Interpreter<'_> {
         }
         // Compilation has its own bounded work budget. Unsupported bodies are
         // selected before executing any instruction, never after partial work.
-        let mut fuel = 100_000;
-        let program = match comptime_compiler::compile(body, &mut fuel) {
-            Ok(program) => program,
-            Err(comptime_compiler::Error::Unsupported(_)) => return self.eval(body, environment),
-            Err(comptime_compiler::Error::Budget(source)) => {
-                return Err(self.failure(ErrorKind::StepsExhausted, Some(source)));
-            }
-            Err(comptime_compiler::Error::InvalidControl(source)) => {
-                return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
-            }
+        if let Some(id) = stable_code {
+            let program = if let Some(program) = self.bytecode_cache.entries.get(&id) {
+                program.clone()
+            } else {
+                let definition = *self
+                    .functions
+                    .get(&id)
+                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(body.source)))?;
+                let program = self.compile_body(&definition.body)?.map(Arc::new);
+                self.bytecode_cache.insert(id, program.clone());
+                program
+            };
+            return if let Some(program) = program {
+                self.bytecode_invocations += 1;
+                self.execute_code(&program, environment)
+            } else {
+                self.eval(body, environment)
+            };
+        }
+        let Some(program) = self.compile_body(body)? else {
+            return self.eval(body, environment);
         };
         self.bytecode_invocations += 1;
         self.execute_code(&program, environment)
@@ -227,6 +284,24 @@ impl Interpreter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_code_cache_is_bounded_and_eviction_allows_reinsertion() {
+        let mut cache = CodeCache::default();
+        for local in 0..=100_000 {
+            cache.insert(DeclarationId { package: 1, local }, None);
+        }
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.weight, 1);
+        let first = DeclarationId {
+            package: 1,
+            local: 0,
+        };
+        assert!(!cache.entries.contains_key(&first));
+        cache.insert(first, None);
+        assert!(cache.entries.contains_key(&first));
+        assert_eq!(cache.weight, 2);
+    }
 
     #[test]
     fn scalar_failures_preserve_signature_and_operand_check_order() {

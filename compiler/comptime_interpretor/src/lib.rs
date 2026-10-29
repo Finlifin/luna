@@ -760,6 +760,8 @@ enum PointerCopyPermission<'a> {
 
 pub struct Interpreter<'a> {
     bytecode_invocations: usize,
+    bytecode_compilations: usize,
+    bytecode_cache: bytecode::CodeCache<'a>,
     enum_builder:
         Option<&'a dyn Fn(&EnumBuildRequest, &mut u64) -> Result<PreparedEnumBuild<'a>, Error>>,
     struct_builder:
@@ -1617,6 +1619,8 @@ impl<'a> Interpreter<'a> {
             })?;
         Ok(Self {
             bytecode_invocations: 0,
+            bytecode_compilations: 0,
+            bytecode_cache: Default::default(),
             declaration_world: Some(package),
             effect_declarations,
             effect_state: effects::State::default(),
@@ -2418,11 +2422,16 @@ impl<'a> Interpreter<'a> {
                 }
                 self.events.push(Event::EnterFunction(id));
             }
-            let (value, returned) = match self.invocation_body(body, &mut environment)? {
-                Flow::Value(value) => (value, false),
-                Flow::Return(value) => (value, true),
-                _ => return Err(self.failure(ErrorKind::InvalidControlFlow, Some(body.source))),
+            let stable_code = match &function {
+                Value::Function(id) if specialized_body.is_none() => Some(*id),
+                _ => None,
             };
+            let (value, returned) =
+                match self.invocation_body(body, stable_code, &mut environment)? {
+                    Flow::Value(value) => (value, false),
+                    Flow::Return(value) => (value, true),
+                    _ => return Err(self.failure(ErrorKind::InvalidControlFlow, Some(body.source))),
+                };
             let delivered_type = if let Term::Computation { result, .. } = &result_type {
                 result.as_ref()
             } else {

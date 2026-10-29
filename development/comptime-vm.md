@@ -8,13 +8,14 @@ execution; `comptime_interpretor::bytecode` runs a program counter, fixed dense
 registers and explicit lexical scope records. Mixed-stage interpretation and
 scheduled runtime cleanup continue to use the existing interpreter. This is not
 yet a complete bytecode VM: calls, general primitives, effect/query suspension,
-compiled-code caching and the unified value representation remain outstanding.
+specialized-code caching and the unified value representation remain outstanding.
 
 Compilation traverses control with a bounded heap worklist, including untaken
 branches. Unsupported operations select the old body path before any bytecode
 instruction executes; execution errors never trigger fallback. Constants borrow
 immutable typed NIR leaves for this invocation; they are not frozen query-cache
-artifacts. No opcode delegates a child expression tree back to `eval`.
+artifacts. Immutable package-body code can be reused within one interpreter.
+No opcode delegates a child expression tree back to `eval`.
 
 Supported bodies include existing literal/frozen-value/Type leaves, reads,
 local initialization and whole-slot assignment, blocks, boolean short circuit,
@@ -36,8 +37,8 @@ scheduling, instruction fixups and register allocation are bounded. Execution
 charges frame storage, each opcode and existing scalar/value operations against
 the invocation budget. Cost counts can differ between the two carriers, as
 allowed by docs/comptime/normalization-and-instantiation.md. There is no speedup
-claim: compiling on every invocation is a known temporary cost until stable
-compiled-code/query identities are connected.
+claim: temporary specialized bodies and closure bodies still compile per call;
+package-body reuse does not establish a persistent cross-query code identity.
 
 `bytecode_invocations()` exposes actual route selection for verification. Tests
 must inspect this counter in addition to result equality, so a successful tree
@@ -922,3 +923,34 @@ Validation from `/home/fin/luna` (all exit 0):
 - `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p luna --test control --test comptime_bytecode --test comptime_integer_division --test comptime_integer_conversion`: `/tmp/luna-tools-918yvt4x/result.json`.
 - After adding explicit failure-order coverage: `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::tests`: `/tmp/luna-tools-ldgagel8/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: `/tmp/luna-tools-e8wc5f09/result.json`. `git diff --check` passed.
+
+## Immutable package-code reuse (2026-10-30)
+
+The interpreter now retains lowered code for immutable, unspecialized package
+functions, identified by declaration within that interpreter's fixed function
+table. This cache borrows NIR for the interpreter lifetime and stores neither
+results nor environments. Impure calls and cheap operations may reuse code,
+but execute on every invocation; the Type-only result-cache policy is unchanged.
+Input binding, phase admission, requirements, pre/postconditions and execution
+budgets remain outside the code-cache decision.
+
+Temporary input-specialized bodies and closures are deliberately excluded until
+their code ownership and stable identity are represented. A closure's origin is
+not sufficient identity for its specialized body. Unsupported lowering decisions
+are retained for stable package bodies; invalid control and compile-budget errors
+are not. The cache admits at most 100,000 combined entries, instructions, local
+mappings and register slots. It clears when the next admission exceeds that
+limit, and declines to retain an oversized program. This bounds retained code
+without making any cache hit a semantic requirement.
+
+`bytecode_compilations()` reports lowering attempts independently of executed
+bodies. Tests verify reuse across different arguments, repeated impure receiver
+writes, unsupported callers, repeatable arithmetic failures and bounded eviction.
+This is interpreter-local reuse, not persistent query caching or a replacement
+for the forthcoming VM call stack.
+
+Validation from `/home/fin/luna` (all exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_receivers --test comptime_local_types`: `/tmp/luna-tools-2o3slpkb/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test target_integers --test function_types --test instance_budget`: `/tmp/luna-tools-0rtl3w_7/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: `/tmp/luna-tools-lh5szs5h/result.json`; `git diff --check` passed.
