@@ -441,3 +441,81 @@ test saturating_integer_boundaries {
         and unsigned_low == 0 and exact == -100 and minimum == -128
         and maximum == 127 and wrapped == -128;
 }
+
+{- Exercise the public half-format wrappers through LLVM native execution. -}
+test f16_math {
+    let fused = math.fma<f16>(2.0, 3.0, 1.0);
+    let recovered = math.fma<f16>(256.0, 256.0, -65280.0);
+    let tiny = math.ldexp<f16>(1.0, -24);
+    let tiny_class = math.issubnormal(tiny);
+    let overflow = math.ldexp<f16>(1.0, 10000);
+    let overflow_class = math.isinf(overflow);
+    let invalid = math.sqrt<f16>(-1.0);
+    let invalid_class = math.isnan(invalid);
+    let root = math.sqrt<f16>(4.0);
+    let signed = math.copysign<f16>(2.0, -1.0);
+    let floor = math.floor<f16>(-1.5);
+    let ceil = math.ceil<f16>(-1.5);
+    let truncated = math.trunc<f16>(-1.5);
+    let even = math.roundeven<f16>(2.5);
+    let away = math.round<f16>(-2.5);
+    let magnitude = math.abs<f16>(-2.0);
+    let scaled = math.ldexp<f16>(1.5, 3);
+    let lower = math.minimumnum<f16>(2.0, -1.0);
+    let upper = math.maximumnum<f16>(2.0, -1.0);
+    let minus_zero = math.minimum<f16>(0.0, -0.0);
+    let plus_zero = math.maximum<f16>(-0.0, 0.0);
+    let negative = math.signbit(minus_zero);
+    let positive = not math.signbit(plus_zero);
+    let normal = math.isnormal(root);
+    let finite = math.isfinite(root);
+    let nan = math.isnan(root);
+    let infinite = math.isinf(root);
+    let subnormal = math.issubnormal(root);
+    assumes recovered == 256.0 and tiny_class and overflow_class and invalid_class;
+    assumes fused == 7.0 and root == 2.0 and signed == -2.0;
+    assumes floor == -2.0 and ceil == -1.0 and truncated == -1.0;
+    assumes even == 2.0 and away == -3.0 and magnitude == 2.0;
+    assumes scaled == 12.0 and lower == -1.0 and upper == 2.0;
+    assumes negative and positive and normal and finite;
+    assumes not nan and not infinite and not subnormal;
+}
+
+{- Exercise the public half-format wrappers through LLVM native execution. -}
+test bf16_math {
+    let fused = math.fma<bf16>(2.0, 3.0, 1.0);
+    let recovered = math.fma<bf16>(256.0, 256.0, -65280.0);
+    let tiny = math.ldexp<bf16>(1.0, -133);
+    let tiny_class = math.issubnormal(tiny);
+    let overflow = math.ldexp<bf16>(1.0, 10000);
+    let overflow_class = math.isinf(overflow);
+    let invalid = math.sqrt<bf16>(-1.0);
+    let invalid_class = math.isnan(invalid);
+    let root = math.sqrt<bf16>(4.0);
+    let signed = math.copysign<bf16>(2.0, -1.0);
+    let floor = math.floor<bf16>(-1.5);
+    let ceil = math.ceil<bf16>(-1.5);
+    let truncated = math.trunc<bf16>(-1.5);
+    let even = math.roundeven<bf16>(2.5);
+    let away = math.round<bf16>(-2.5);
+    let magnitude = math.abs<bf16>(-2.0);
+    let scaled = math.ldexp<bf16>(1.5, 3);
+    let lower = math.minimumnum<bf16>(2.0, -1.0);
+    let upper = math.maximumnum<bf16>(2.0, -1.0);
+    let minus_zero = math.minimum<bf16>(0.0, -0.0);
+    let plus_zero = math.maximum<bf16>(-0.0, 0.0);
+    let negative = math.signbit(minus_zero);
+    let positive = not math.signbit(plus_zero);
+    let normal = math.isnormal(root);
+    let finite = math.isfinite(root);
+    let nan = math.isnan(root);
+    let infinite = math.isinf(root);
+    let subnormal = math.issubnormal(root);
+    assumes recovered == 256.0 and tiny_class and overflow_class and invalid_class;
+    assumes fused == 7.0 and root == 2.0 and signed == -2.0;
+    assumes floor == -2.0 and ceil == -1.0 and truncated == -1.0;
+    assumes even == 2.0 and away == -3.0 and magnitude == 2.0;
+    assumes scaled == 12.0 and lower == -1.0 and upper == 2.0;
+    assumes negative and positive and normal and finite;
+    assumes not nan and not infinite and not subnormal;
+}

@@ -96,3 +96,12 @@ result is finite. Opposite infinite terms and zero times infinity produce
 NaN. Signed zeros follow nearest-even fused arithmetic; NaN payloads are
 not an interface promise. Other floating math wrappers do not yet admit
 half precision.
+
+Public half-format coverage is exercised through both `sysroot-meta-math`
+and `native-math` in `development/library_check.py`. These paths cover the
+supported arithmetic, rounding, selection and classification wrappers,
+including signed zeros, smallest subnormals, overflow, invalid square roots,
+and a binary16 fused result whose unfused product would overflow. The
+`library_meta_math` source tests additionally check exact result-format bits;
+this coverage does not extend the admitted domain of transcendental or
+`powi` wrappers to half formats.

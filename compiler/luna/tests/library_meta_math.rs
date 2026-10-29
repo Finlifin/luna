@@ -348,3 +348,49 @@ fn invocation_retains_generic_parent_witnesses_for_the_loaded_world() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn half_precision_public_math_preserves_result_formats() {
+    let cases = [
+        ("fma(2.0, 3.0, 1.0)", 0x4700, 0x40e0),
+        ("fma(256.0, 256.0, -65280.0)", 0x5c00, 0x4380),
+        ("sqrt(4.0)", 0x4000, 0x4000),
+        ("copysign(2.0, -1.0)", 0xc000, 0xc000),
+        ("floor(-1.5)", 0xc000, 0xc000),
+        ("ceil(-1.5)", 0xbc00, 0xbf80),
+        ("trunc(-1.5)", 0xbc00, 0xbf80),
+        ("roundeven(2.5)", 0x4000, 0x4000),
+        ("round(-2.5)", 0xc200, 0xc040),
+        ("abs(-2.0)", 0x4000, 0x4000),
+        ("ldexp(1.5, 3)", 0x4a00, 0x4140),
+        ("minimum(0.0, -0.0)", 0x8000, 0x8000),
+        ("maximum(-0.0, 0.0)", 0x0000, 0x0000),
+        ("minimumnum(2.0, -1.0)", 0xbc00, 0xbf80),
+        ("maximumnum(2.0, -1.0)", 0x4000, 0x4000),
+    ];
+    for ty in ["f16", "bf16"] {
+        let source: String = cases
+            .iter()
+            .enumerate()
+            .map(|(i, (call, _, _))| {
+                let (name, args) = call.split_once('(').unwrap();
+                format!("comptime fn case_{i}() -> {ty} {{ math.{name}<{ty}>({args} }}\n")
+            })
+            .collect();
+        let package = compile(&source, 64).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        for (i, (call, binary, bfloat)) in cases.iter().enumerate() {
+            let expected = if ty == "f16" {
+                Value::Float16(*binary)
+            } else {
+                Value::BFloat16(*bfloat)
+            };
+            assert_eq!(
+                vm.invoke(support::id(&package, &format!("case_{i}")), vec![])
+                    .unwrap(),
+                expected,
+                "{ty}: {call}"
+            );
+        }
+    }
+}
